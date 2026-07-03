@@ -5877,22 +5877,22 @@ fn test_parse_transaction_control() {
     // BEGIN (bare)
     assert!(matches!(
         parse("BEGIN").unwrap(),
-        QueryExpr::TransactionControl(TxnControl::Begin)
+        QueryExpr::TransactionControl(TxnControl::Begin(None))
     ));
     // BEGIN WORK
     assert!(matches!(
         parse("BEGIN WORK").unwrap(),
-        QueryExpr::TransactionControl(TxnControl::Begin)
+        QueryExpr::TransactionControl(TxnControl::Begin(None))
     ));
     // BEGIN TRANSACTION
     assert!(matches!(
         parse("BEGIN TRANSACTION").unwrap(),
-        QueryExpr::TransactionControl(TxnControl::Begin)
+        QueryExpr::TransactionControl(TxnControl::Begin(None))
     ));
     // START TRANSACTION
     assert!(matches!(
         parse("START TRANSACTION").unwrap(),
-        QueryExpr::TransactionControl(TxnControl::Begin)
+        QueryExpr::TransactionControl(TxnControl::Begin(None))
     ));
 
     // COMMIT + COMMIT WORK + COMMIT TRANSACTION

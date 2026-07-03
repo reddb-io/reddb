@@ -28,7 +28,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::coordinator::IsolationLevel;
+use super::IsolationLevel;
 
 /// Default autocommit-xid pool batch size. Each refill reserves this
 /// many xids in a single `fetch_add` so back-to-back autocommit inserts

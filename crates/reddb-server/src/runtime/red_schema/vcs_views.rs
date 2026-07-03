@@ -7,6 +7,15 @@
 use super::helpers::*;
 use super::*;
 
+fn isolation_level_name(level: crate::storage::transaction::IsolationLevel) -> &'static str {
+    match level {
+        crate::storage::transaction::IsolationLevel::ReadUncommitted => "read_uncommitted",
+        crate::storage::transaction::IsolationLevel::ReadCommitted => "read_committed",
+        crate::storage::transaction::IsolationLevel::SnapshotIsolation => "snapshot_isolation",
+        crate::storage::transaction::IsolationLevel::Serializable => "serializable",
+    }
+}
+
 pub(super) fn commits_snapshot(
     runtime: &RedDBRuntime,
     query: &TableQuery,
@@ -107,9 +116,14 @@ pub(super) fn status_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<Unified
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
-    let status = runtime.vcs_status(crate::application::vcs::StatusInput {
-        connection_id: current_connection_id(),
-    })?;
+    let connection_id = current_connection_id();
+    let status = runtime.vcs_status(crate::application::vcs::StatusInput { connection_id })?;
+    let isolation = runtime
+        .inner
+        .tx_contexts
+        .read()
+        .get(&connection_id)
+        .map(|ctx| ctx.isolation);
     Ok(vec![UnifiedRecord::with_schema(
         schema,
         vec![
@@ -123,6 +137,13 @@ pub(super) fn status_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<Unified
             status
                 .merge_state_id
                 .map(Value::text)
+                .unwrap_or(Value::Null),
+            isolation
+                .map(isolation_level_name)
+                .map(Value::text)
+                .unwrap_or(Value::Null),
+            isolation
+                .map(|_| Value::text("snapshot_isolation"))
                 .unwrap_or(Value::Null),
         ],
     )])

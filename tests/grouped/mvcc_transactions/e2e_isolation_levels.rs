@@ -87,6 +87,50 @@ fn select_count(rt: &RedDBRuntime, sql: &str) -> usize {
     rt.execute_query(sql).expect("select").result.records.len()
 }
 
+fn text_cell(row: &reddb::storage::query::unified::UnifiedRecord, column: &str) -> String {
+    match row.get(column) {
+        Some(Value::Text(value)) => value.to_string(),
+        other => panic!("expected text in {column}, got {other:?}"),
+    }
+}
+
+#[test]
+fn begin_isolation_level_round_trips_to_transaction_status() {
+    let rt = rt();
+
+    for (offset, (sql, requested)) in [
+        ("BEGIN ISOLATION LEVEL READ UNCOMMITTED", "read_uncommitted"),
+        ("BEGIN ISOLATION LEVEL READ COMMITTED", "read_committed"),
+        (
+            "BEGIN ISOLATION LEVEL REPEATABLE READ",
+            "snapshot_isolation",
+        ),
+        ("BEGIN ISOLATION LEVEL SNAPSHOT", "snapshot_isolation"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        set_current_connection_id(9960 + offset as u64);
+        try_exec(&rt, sql).expect("BEGIN with isolation level should be accepted");
+
+        let status = rt
+            .execute_query("SELECT isolation_level, effective_isolation_level FROM red.status")
+            .expect("red.status should expose transaction isolation");
+        assert_eq!(status.result.records.len(), 1, "one red.status row");
+        let row = &status.result.records[0];
+        assert_eq!(text_cell(row, "isolation_level"), requested, "{sql}");
+        assert_eq!(
+            text_cell(row, "effective_isolation_level"),
+            "snapshot_isolation",
+            "{sql}"
+        );
+
+        try_exec(&rt, "COMMIT").expect("COMMIT should close the tx");
+    }
+
+    clear_current_connection_id();
+}
+
 #[test]
 fn writer_sees_own_uncommitted_row() {
     // Read-your-own-writes inside a single transaction. The writer's
