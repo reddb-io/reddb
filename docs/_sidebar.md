@@ -6,6 +6,17 @@
   - [Modes and Transports](/getting-started/modes-and-transports.md)
   - [Configuration](/getting-started/configuration.md)
   - [Docker (Quickstart + Production)](/getting-started/docker.md)
+  - [Quickstarts by Model](/getting-started/quickstarts.md)
+    - [Relational SQL](/getting-started/quickstart-relational.md)
+    - [Documents](/getting-started/quickstart-document.md)
+    - [Key-Value, Config & Vault](/getting-started/quickstart-key-value.md)
+    - [Graphs](/getting-started/quickstart-graph.md)
+    - [Vector Search](/getting-started/quickstart-vector.md)
+    - [Time-Series](/getting-started/quickstart-timeseries.md)
+    - [Queues](/getting-started/quickstart-queue.md)
+    - [Spatial Search](/getting-started/quickstart-spatial.md)
+    - [Version Control (Time-Travel)](/getting-started/quickstart-vcs.md)
+    - [ASK / RAG](/getting-started/quickstart-ask-rag.md)
 
 - **AI & LLM**
   - [ASK Command](/query/search-commands.md#ask)

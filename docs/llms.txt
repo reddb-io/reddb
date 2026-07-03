@@ -4,6 +4,8 @@
 
 This file is generated from the engine's own authorities — do not edit by hand. See `AGENTS.md` for the human/agent overview. Each section below is emitted from source so it cannot drift from the engine.
 
+New to RedDB? Every data model has a runnable, five-minute quickstart under `docs/getting-started/` — one per model (relational, document, key-value, graph, vector, time-series, queue, spatial, VCS/time-travel, and ASK/RAG), indexed at `docs/getting-started/quickstarts.md`. Each quickstart's RQL is executed by the docs CI lane, so its examples stay runnable.
+
 <!-- BEGIN GENERATED: rql -->
 # RedDB RQL Reference
 
