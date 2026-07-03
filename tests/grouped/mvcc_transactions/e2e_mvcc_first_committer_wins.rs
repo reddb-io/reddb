@@ -241,3 +241,35 @@ fn stale_transaction_conflicts_with_autocommit_update() {
     );
     clear_current_connection_id();
 }
+
+#[test]
+fn read_committed_stale_update_conflicts_with_concurrent_commit() {
+    let rt = rt();
+    set_current_connection_id(43951);
+    exec(&rt, "CREATE TABLE fcw_rc (id INT, label TEXT)");
+    exec(&rt, "INSERT INTO fcw_rc (id, label) VALUES (1, 'base')");
+    let eid = rid(&rt, "fcw_rc", 1);
+
+    set_current_connection_id(43952);
+    exec(&rt, "BEGIN ISOLATION LEVEL READ COMMITTED");
+    assert_eq!(label_for(&rt, "fcw_rc", eid).as_deref(), Some("base"));
+
+    set_current_connection_id(43953);
+    exec(&rt, "BEGIN");
+    exec(
+        &rt,
+        &format!("UPDATE fcw_rc SET label = 'first' WHERE rid = {eid}"),
+    );
+    exec(&rt, "COMMIT");
+
+    set_current_connection_id(43952);
+    exec(
+        &rt,
+        &format!("UPDATE fcw_rc SET label = 'stale' WHERE rid = {eid}"),
+    );
+    assert_conflict(&exec_err(&rt, "COMMIT"));
+
+    set_current_connection_id(43954);
+    assert_eq!(label_for(&rt, "fcw_rc", eid).as_deref(), Some("first"));
+    clear_current_connection_id();
+}

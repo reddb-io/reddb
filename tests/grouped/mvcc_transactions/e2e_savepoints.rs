@@ -5,6 +5,7 @@
 //! each test pins a deterministic connection id for the duration.
 
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn rt() -> RedDBRuntime {
@@ -18,6 +19,22 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
 
 fn try_exec(rt: &RedDBRuntime, sql: &str) -> Result<(), String> {
     rt.execute_query(sql).map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn ids(rt: &RedDBRuntime, sql: &str) -> Vec<i64> {
+    let result = rt.execute_query(sql).expect("select ids");
+    let mut ids: Vec<i64> = result
+        .result
+        .records
+        .iter()
+        .map(|row| match row.get("id") {
+            Some(Value::Integer(value)) => *value,
+            Some(Value::UnsignedInteger(value)) => *value as i64,
+            other => panic!("expected id integer, got {other:?}"),
+        })
+        .collect();
+    ids.sort_unstable();
+    ids
 }
 
 #[test]
@@ -78,6 +95,40 @@ fn rollback_to_savepoint_discards_inner_writes() {
         1,
         "ROLLBACK TO must discard the inner insert"
     );
+
+    clear_current_connection_id();
+}
+
+#[test]
+fn read_committed_resnapshot_preserves_savepoint_visibility() {
+    let rt = rt();
+    set_current_connection_id(1007);
+
+    exec(&rt, "CREATE TABLE sp_rc (id INT, label TEXT)");
+    exec(&rt, "INSERT INTO sp_rc (id, label) VALUES (1, 'base')");
+    exec(&rt, "BEGIN ISOLATION LEVEL READ COMMITTED");
+    exec(&rt, "SAVEPOINT sp1");
+    exec(&rt, "INSERT INTO sp_rc (id, label) VALUES (2, 'inner')");
+    assert_eq!(ids(&rt, "SELECT id FROM sp_rc"), vec![1, 2]);
+
+    set_current_connection_id(1008);
+    exec(&rt, "BEGIN");
+    exec(&rt, "INSERT INTO sp_rc (id, label) VALUES (3, 'other')");
+    exec(&rt, "COMMIT");
+
+    set_current_connection_id(1007);
+    assert_eq!(
+        ids(&rt, "SELECT id FROM sp_rc"),
+        vec![1, 2, 3],
+        "RC must see its savepoint write plus concurrent committed rows"
+    );
+    exec(&rt, "ROLLBACK TO SAVEPOINT sp1");
+    assert_eq!(
+        ids(&rt, "SELECT id FROM sp_rc"),
+        vec![1, 3],
+        "rolled-back savepoint xid stays hidden after RC re-snapshot"
+    );
+    exec(&rt, "COMMIT");
 
     clear_current_connection_id();
 }

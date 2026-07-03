@@ -573,14 +573,21 @@ impl RedDBRuntime {
     /// Return the snapshot the current connection should use for visibility
     /// checks (Phase 2.3 PG parity).
     ///
-    /// * If the connection is inside a BEGIN-wrapped transaction, reuse
-    ///   the snapshot stored in its `TxnContext`.
+    /// * If the connection is inside a READ COMMITTED transaction, capture
+    ///   a fresh statement snapshot while preserving the transaction's xid
+    ///   and write-set lifecycle.
+    /// * If the connection is inside a SNAPSHOT transaction, reuse the
+    ///   snapshot stored in its `TxnContext`.
     /// * Otherwise (autocommit), capture a fresh snapshot tied to an
     ///   implicit xid=0 — the read path treats pre-MVCC rows as always
     ///   visible so this degrades to "see everything committed".
     pub fn current_snapshot(&self) -> crate::storage::transaction::snapshot::Snapshot {
         let conn_id = current_connection_id();
         if let Some(ctx) = self.inner.tx_contexts.read().get(&conn_id).cloned() {
+            if ctx.isolation == crate::storage::transaction::IsolationLevel::ReadCommitted {
+                let high_water = self.inner.snapshot_manager.peek_next_xid();
+                return self.inner.snapshot_manager.snapshot(high_water);
+            }
             return ctx.snapshot;
         }
         // Autocommit: take a fresh snapshot bounded by `peek_next_xid` so
