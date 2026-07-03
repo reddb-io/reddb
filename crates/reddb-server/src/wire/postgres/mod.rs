@@ -10,12 +10,15 @@
 //! * Authentication: `trust` only (no password). Clients that send an
 //!   actual password are accepted — the password is ignored.
 //! * Simple query protocol (`Q` frames): parse → execute → stream rows.
-//! * Extended query protocol (`Parse` / `Bind` / `Describe` / `Execute`).
+//! * Extended query protocol (`Parse` / `Bind` / `Describe` / `Execute` /
+//!   `Close` / `Sync`), including prepared statements, portals,
+//!   `ParameterDescription`, and row-limited `Execute` with
+//!   `PortalSuspended`.
 //! * Minimal row description using a small OID mapping table.
 //! * ReadyForQuery + Command­Complete + ErrorResponse framing.
 //!
 //! Not in this phase (future 3.1.x):
-//! * SASL / SCRAM auth, TLS.
+//! * SASL / SCRAM auth, TLS, GSSAPI encryption.
 //! * Function-call protocol.
 //! * COPY protocol.
 //! * NOTIFY / LISTEN.
