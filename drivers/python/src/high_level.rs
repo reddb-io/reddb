@@ -657,7 +657,7 @@ impl DocumentClient {
             ));
         }
         let sql = format!(
-            "UPDATE {collection} DOCUMENTS SET {} WHERE rid = {rid_sql} RETURNING *",
+            "UPDATE {collection} SET {} WHERE rid = {rid_sql} RETURNING *",
             assignments.join(", ")
         );
         let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
