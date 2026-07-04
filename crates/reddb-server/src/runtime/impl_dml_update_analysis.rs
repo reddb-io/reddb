@@ -91,7 +91,41 @@ pub(super) fn resolve_update_entity_by_logical_id(
     logical_id: EntityId,
 ) -> Option<UnifiedEntity> {
     let store = runtime.inner.db.store();
-    if let Some(entity) = store.get_table_row_by_logical_id(table, logical_id) {
+
+    // Read-modify-write pre-image resolution.
+    //
+    // A compound assignment (`n = n + 1`) folds the pre-image value into the
+    // written row, so the pre-image MUST be the LATEST COMMITTED version,
+    // re-evaluated *now* — this call runs while we hold the per-row RMW lock,
+    // so every earlier same-row writer has already committed. Two failure
+    // modes must both be avoided:
+    //   * `get_table_row_by_logical_id` returns whichever physical version
+    //     currently carries `xmax == 0`, which under concurrent same-row
+    //     writes can be another transaction's still-uncommitted version —
+    //     folding a later-aborted write into committed state (dirty read).
+    //   * the pinned *statement* snapshot was captured before this statement
+    //     acquired the RMW lock, so it can miss a value a peer committed in
+    //     the meantime — every concurrent increment then reads the same stale
+    //     pre-image and overwrites its predecessor (lost update).
+    // A snapshot taken at this instant, paired with this connection's own
+    // in-flight xids, threads both: it sees the freshest committed version
+    // (no lost update) and this transaction's own writes, while hiding every
+    // other transaction's uncommitted version (no dirty read).
+    if let Some(base) = crate::runtime::impl_core::capture_current_snapshot() {
+        let snapshot = base.manager.fresh_read_snapshot();
+        let ctx = crate::runtime::impl_core::SnapshotContext {
+            snapshot,
+            manager: Arc::clone(&base.manager),
+            own_xids: base.own_xids.clone(),
+            requires_index_fallback: true,
+            serializable_reader: base.serializable_reader,
+        };
+        let resolver =
+            crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::captured(Some(ctx));
+        if let Some(entity) = resolver.resolve_logical_id(&store, table, logical_id) {
+            return Some(entity);
+        }
+    } else if let Some(entity) = store.get_table_row_by_logical_id(table, logical_id) {
         return Some(entity);
     }
     // Fallback for non-table-row entities (graph nodes/edges, etc.) where

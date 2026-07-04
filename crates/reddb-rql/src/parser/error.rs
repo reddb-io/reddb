@@ -173,6 +173,53 @@ impl ParseError {
             kind: ParseErrorKind::ValueOutOfRange { field, constraint },
         }
     }
+
+    /// Didactic (#1704): a document-model newcomer wrote the Postgres
+    /// `CREATE TABLE <name> DOCUMENT (…)` form. Documents are schemaless
+    /// and have no column list — the native form is `CREATE DOCUMENT`.
+    pub fn document_create_table(position: Position) -> Self {
+        Self {
+            message: "documents are schemaless: write `CREATE DOCUMENT <name>` \
+                      (no column list) instead of `CREATE TABLE <name> DOCUMENT (…)` — \
+                      top-level body fields auto-flatten into queryable columns"
+                .to_string(),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::Syntax,
+        }
+    }
+
+    /// Didactic (#1704): a document-model newcomer reached for a Postgres
+    /// `GENERATED ALWAYS AS (…) STORED` column. In the document model,
+    /// top-level body fields already auto-flatten into queryable columns.
+    pub fn generated_column_unneeded(position: Position) -> Self {
+        Self {
+            message: "top-level document body fields auto-flatten into queryable \
+                      columns, so no generated column is needed: drop the \
+                      `GENERATED ALWAYS AS (…) STORED` clause and query the field by \
+                      its dotted path (e.g. `body.details.ip`)"
+                .to_string(),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::Syntax,
+        }
+    }
+
+    /// Didactic (#1704): a document-model newcomer used the Postgres JSON
+    /// operators `->` / `->>` in a query. The native idiom is the dotted
+    /// path. (Graph-mode `->` / `<-` traversal is parsed elsewhere and is
+    /// unaffected.)
+    pub fn json_arrow_operator(position: Position) -> Self {
+        Self {
+            message: "the `->` / `->>` JSON operators are not supported: use the \
+                      dotted-path idiom instead (e.g. `body.details.ip` rather than \
+                      `body->'details'->>'ip'`)"
+                .to_string(),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::Syntax,
+        }
+    }
 }
 
 fn recognized_keyword_name(token: &Token) -> Option<String> {

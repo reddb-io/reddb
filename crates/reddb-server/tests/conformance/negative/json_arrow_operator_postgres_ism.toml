@@ -1,0 +1,5 @@
+input = "SELECT body->'details'->>'ip' FROM events"
+expected_error_substring = "the `->` / `->>` JSON operators are not supported"
+expected_error_kind = "Syntax"
+source = "crates/reddb-rql/src/parser/error.rs:212"
+kind = "negative"
