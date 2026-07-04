@@ -3,8 +3,9 @@
 Each `*.slt` file here is a [sqllogictest][slt]-format script covering a
 **RedDB-only query surface** — one with no standard-SQL counterpart and no
 external oracle: vector search, the native `GRAPH` command family, the four
-graph DSL modes (Gremlin / Cypher / SPARQL / Path), natural-language, and
-vector extensions. The harness (`tests/reddb_conformance.rs`) discovers every
+graph DSL modes (Gremlin / Cypher / SPARQL / Path), natural-language, vector
+extensions, and RedDB-specific scalar builtins. The harness
+(`tests/reddb_conformance.rs`) discovers every
 `.slt` file here automatically and runs it end-to-end against the in-server
 engine (`reddb-server`'s `RedDBRuntime::in_memory()`), one fresh runtime per
 file so state never leaks between scripts.
@@ -17,10 +18,11 @@ is the public SQLite oracle (ADR 0053).
 These surfaces are RedDB inventions, so no third-party engine can adjudicate
 them. Every expected value in a `query` block is authored from the **semantics**
 of the surface — cosine ranking, neighbourhood reachability, shortest-path hop
-counts, downstream PageRank flow — and never copied from whatever the engine
-happens to emit. The fixtures are kept deliberately small and tie-free so the
-correct answer is unambiguous (e.g. a vector fixture whose cosine similarities
-are 1.00 / 0.60 / 0.00 gives one strict ranking).
+counts, downstream PageRank flow, or explicit scalar builtin contracts — and
+never copied from whatever the engine happens to emit. The fixtures are kept
+deliberately small and tie-free so the correct answer is unambiguous (e.g. a
+vector fixture whose cosine similarities are 1.00 / 0.60 / 0.00 gives one
+strict ranking).
 
 ## Volatile columns are projected away, not pinned
 
@@ -31,9 +33,10 @@ numbers, `red_*` capability metadata, and raw distance/score floats whose exact
 value is engine-defined rather than oracle-defined. The harness projects every
 result down to a fixed allowlist of **semantic, deterministic** columns
 (`label`, `name`, `content`, `depth`, `path_found`, `hop_count`,
-`total_weight`, `nodes_visited`, `negative_cycle_detected`) in a canonical
-order. A golden therefore asserts the *meaning* of a result and stays silent
-about engine bookkeeping, so it never freezes non-determinism.
+`total_weight`, `nodes_visited`, `negative_cycle_detected`, and focused scalar
+test aliases) in a canonical order. A golden therefore asserts the *meaning* of
+a result and stays silent about engine bookkeeping, so it never freezes
+non-determinism.
 
 ## Characterization is clearly marked regression-only
 
@@ -53,6 +56,7 @@ semantic columns for it.
   `THRESHOLD`, and the `inner_product` metric extension.
 - `graph_commands.slt` — TRUTH: `GRAPH NEIGHBORHOOD` / `TRAVERSE` /
   `PROPERTIES` / `SHORTEST_PATH` / `CENTRALITY` over a directed chain.
+- `json_builtins.slt` — TRUTH: RedDB-specific JSON scalar builtin semantics.
 - `characterization_unprojected_surfaces.slt` — REGRESSION-ONLY: Gremlin,
   Cypher, SPARQL, Path, natural-language, and the `SEARCH SIMILAR … COLLECTION`
   form, each pinned with `statement ok`.
