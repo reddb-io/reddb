@@ -157,23 +157,15 @@ fn explicit_targets_are_authorized_as_ordinary_updates() {
 
     as_user("alice", Role::Write, || {
         assert_eq!(
-            exec(&rt, "UPDATE auth_rows ROWS SET score += 1 WHERE id = 1").affected_rows,
+            exec(&rt, "UPDATE auth_rows SET score += 1 WHERE id = 1").affected_rows,
             1
         );
         assert_eq!(
-            exec(
-                &rt,
-                "UPDATE auth_docs DOCUMENTS SET score += 1 WHERE name = 'doc'"
-            )
-            .affected_rows,
+            exec(&rt, "UPDATE auth_docs SET score += 1 WHERE name = 'doc'").affected_rows,
             1
         );
         assert_eq!(
-            exec(
-                &rt,
-                "UPDATE auth_kv KV SET value += 1 WHERE key = 'counter'"
-            )
-            .affected_rows,
+            exec(&rt, "UPDATE auth_kv SET value += 1 WHERE key = 'counter'").affected_rows,
             1
         );
         assert_eq!(
@@ -195,7 +187,7 @@ fn explicit_targets_are_authorized_as_ordinary_updates() {
     });
 
     let denied = as_user("alice", Role::Write, || {
-        err_string(&rt, "UPDATE auth_denied ROWS SET score = 1 WHERE id = 1")
+        err_string(&rt, "UPDATE auth_denied SET score = 1 WHERE id = 1")
     });
     assert!(denied.contains("table:auth_denied"), "{denied}");
 }
@@ -225,7 +217,7 @@ fn update_returning_obeys_rls_and_column_policy() {
         set_current_tenant("acme".to_string());
         let result = exec(
             &rt,
-            "UPDATE tenant_accounts ROWS SET score += 1 RETURNING id, tenant_id, score",
+            "UPDATE tenant_accounts SET score += 1 RETURNING id, tenant_id, score",
         );
         clear_current_tenant();
         result
@@ -259,7 +251,7 @@ fn update_returning_obeys_rls_and_column_policy() {
     let denied = as_user("alice", Role::Write, || {
         err_string(
             &rt,
-            "UPDATE masked_accounts ROWS SET status = 'active' WHERE id = 1 RETURNING secret",
+            "UPDATE masked_accounts SET status = 'active' WHERE id = 1 RETURNING secret",
         )
     });
     assert!(denied.contains("column:masked_accounts.secret"), "{denied}");
@@ -446,7 +438,7 @@ fn explicit_document_update_emits_event_and_cdc_identity() {
 
     exec(
         &rt,
-        "UPDATE conformance_docs DOCUMENTS SET score += 5 WHERE name = 'doc'",
+        "UPDATE conformance_docs SET score += 5 WHERE name = 'doc'",
     );
 
     let payload = read_event_payload(&rt, "conformance_doc_events");
@@ -488,7 +480,7 @@ fn document_update_keeps_body_json_in_sync_with_promoted_column() {
 
     exec(
         &rt,
-        "UPDATE body_sync_docs DOCUMENTS SET score = 42 WHERE name = 'doc'",
+        "UPDATE body_sync_docs SET score = 42 WHERE name = 'doc'",
     );
 
     // The promoted top-level column reflects the new value.
@@ -524,7 +516,7 @@ fn document_path_update_keeps_nested_sibling_fields() {
 
     let updated = exec(
         &rt,
-        "UPDATE body_path_docs DOCUMENTS SET profile.address.city = 'Lisbon' WHERE name = 'doc'",
+        "UPDATE body_path_docs SET profile.address.city = 'Lisbon' WHERE name = 'doc'",
     );
     assert_eq!(updated.affected_rows, 1);
 
@@ -547,7 +539,7 @@ fn document_compound_update_keeps_body_json_in_sync() {
 
     exec(
         &rt,
-        "UPDATE body_compound_docs DOCUMENTS SET score += 5 WHERE name = 'doc'",
+        "UPDATE body_compound_docs SET score += 5 WHERE name = 'doc'",
     );
 
     let promoted = exec(
@@ -578,7 +570,7 @@ fn explicit_updates_recheck_changed_indexed_fields() {
         &rt,
         "CREATE INDEX idx_indexed_rows_score ON indexed_rows (score) USING HASH",
     );
-    exec(&rt, "UPDATE indexed_rows ROWS SET score = 15 WHERE id = 1");
+    exec(&rt, "UPDATE indexed_rows SET score = 15 WHERE id = 1");
     let row = exec(&rt, "SELECT id, score FROM indexed_rows WHERE score = 15");
     assert_eq!(int_field(only_record(&row), "id"), 1);
 
@@ -591,10 +583,7 @@ fn explicit_updates_recheck_changed_indexed_fields() {
         &rt,
         "CREATE INDEX idx_indexed_docs_score ON indexed_docs (score) USING HASH",
     );
-    exec(
-        &rt,
-        "UPDATE indexed_docs DOCUMENTS SET score = 15 WHERE name = 'doc'",
-    );
+    exec(&rt, "UPDATE indexed_docs SET score = 15 WHERE name = 'doc'");
     let doc = exec(&rt, "SELECT name, score FROM indexed_docs WHERE score = 15");
     assert_eq!(text_field(only_record(&doc), "name"), "doc");
 }
@@ -622,11 +611,11 @@ fn explicit_multimodel_compound_updates_survive_reopen_as_post_images() {
 
         exec(
             &rt,
-            "UPDATE recovery_docs DOCUMENTS SET score += 5 WHERE name = 'doc'",
+            "UPDATE recovery_docs SET score += 5 WHERE name = 'doc'",
         );
         exec(
             &rt,
-            "UPDATE recovery_kv KV SET value += 7 WHERE key = 'counter'",
+            "UPDATE recovery_kv SET value += 7 WHERE key = 'counter'",
         );
         exec(
             &rt,
