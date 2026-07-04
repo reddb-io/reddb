@@ -199,7 +199,7 @@ fn ctx_insert_values() {
 
 #[test]
 fn ctx_insert_document_form() {
-    let q = parse(r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"info"})"#)
+    let q = parse(r#"INSERT INTO logs DOCUMENT VALUES ({"level":"info"})"#)
         .unwrap()
         .query;
     assert!(matches!(q, QueryExpr::Insert(_)));
@@ -381,16 +381,15 @@ fn err_lone_open_brace_in_where_position() {
 // ============================================================================
 
 #[test]
-fn quoted_form_still_parses() {
-    let q = parse(r#"INSERT INTO logs DOCUMENT (body) VALUES ('{"a":1}')"#)
-        .unwrap()
-        .query;
-    let QueryExpr::Insert(ins) = q else {
-        panic!("expected Insert");
-    };
-    // Quoted form lands as Value::Text and is converted to Json by the
-    // executor; here we just confirm the parser still accepts it.
-    assert!(matches!(ins.values[0][0], Value::Text(_)));
+fn quoted_document_body_is_rejected() {
+    // ADR 0067 (#1709): the quoted-string body coercion is a clean break —
+    // the parser rejects it with a didactic error naming the inline literal
+    // and JSON_PARSE, and the bare inline form is the only accepted shape.
+    let err = parse(r#"INSERT INTO logs DOCUMENT VALUES ('{"a":1}')"#)
+        .expect_err("quoted document body should be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("inline JSON literal"), "{msg}");
+    assert!(msg.contains("JSON_PARSE"), "{msg}");
 }
 
 #[test]
