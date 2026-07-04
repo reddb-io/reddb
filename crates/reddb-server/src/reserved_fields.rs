@@ -12,6 +12,9 @@ pub(crate) const RESERVED_PUBLIC_ITEM_FIELDS: &[&str] = &[
     crate::runtime::ai::moderation::MODERATION_STATUS_FIELD,
 ];
 
+const RESERVED_PUBLIC_ENVELOPE_FIELDS_MESSAGE: &str =
+    "rid, collection, kind, tenant, created_at, updated_at";
+
 pub(crate) fn is_reserved_public_item_field(field: &str) -> bool {
     RESERVED_PUBLIC_ITEM_FIELDS
         .iter()
@@ -20,7 +23,9 @@ pub(crate) fn is_reserved_public_item_field(field: &str) -> bool {
 
 pub(crate) fn reserved_field_error(field: &str, context: &str) -> crate::RedDBError {
     crate::RedDBError::Query(format!(
-        "reserved system field '{field}' cannot be used as a top-level user field in {context}"
+        "reserved system field '{field}' cannot be used as a top-level user field in {context}. \
+         Reserved envelope fields are: {RESERVED_PUBLIC_ENVELOPE_FIELDS_MESSAGE}. \
+         Rename the field in the payload before insert or patch."
     ))
 }
 
