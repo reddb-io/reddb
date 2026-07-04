@@ -81,6 +81,59 @@ pub(super) struct MaterializedUpdateAssignments {
 }
 
 impl RedDBRuntime {
+    /// ADR 0067 (#1710): resolve the model of an unmarked bare-VALUES
+    /// INSERT from the catalog, making the marker rule real — *a model
+    /// marker exists only where it disambiguates what the catalog cannot
+    /// know.*
+    ///
+    /// `INSERT INTO c VALUES ({…})` has no column list and no model marker,
+    /// so the parser leaves `entity_type = Row` with an empty column list.
+    /// Only that exact shape is a candidate for inference — every other
+    /// INSERT (an explicit column list, or an explicit `DOCUMENT` / `NODE`
+    /// / `VECTOR` / … marker) is returned untouched.
+    ///
+    /// * existing **document** collection → rewritten to a `DOCUMENT`
+    ///   insert so the body routes through document creation, exactly the
+    ///   path the explicit marker takes;
+    /// * existing **non-document** collection → the bare form does not
+    ///   apply; reported with a model-oriented error;
+    /// * unknown collection → didactic error naming both recourses (the
+    ///   `DOCUMENT` assertion form or `CREATE DOCUMENT` first).
+    fn infer_unmarked_document_insert(
+        &self,
+        query: &InsertQuery,
+    ) -> RedDBResult<Option<InsertQuery>> {
+        if !matches!(query.entity_type, InsertEntityType::Row) || !query.columns.is_empty() {
+            return Ok(None);
+        }
+        match self
+            .db()
+            .collection_contract_arc(&query.table)
+            .map(|contract| contract.declared_model)
+        {
+            Some(crate::catalog::CollectionModel::Document) => {
+                let mut rewritten = query.clone();
+                rewritten.entity_type = InsertEntityType::Document;
+                rewritten.columns = vec!["body".to_string()];
+                Ok(Some(rewritten))
+            }
+            Some(other) => Err(RedDBError::InvalidOperation(format!(
+                "collection '{table}' is declared as '{model}'; the bare \
+                 `INSERT INTO {table} VALUES (…)` form is the document body shorthand — \
+                 write an explicit column list (`INSERT INTO {table} (col, …) VALUES (…)`) \
+                 to insert into a {model} collection",
+                table = query.table,
+                model = crate::runtime::ddl::polymorphic_resolver::model_name(other),
+            ))),
+            None => Err(RedDBError::InvalidOperation(format!(
+                "collection '{table}' does not exist and the INSERT carries no model marker; \
+                 write `INSERT INTO {table} DOCUMENT VALUES ({{…}})` to create it as a document \
+                 (idempotent), or run `CREATE DOCUMENT {table}` first",
+                table = query.table,
+            ))),
+        }
+    }
+
     /// Execute INSERT INTO table [entity_type] (cols) VALUES (vals), ...
     ///
     /// Each row in `query.values` is zipped with `query.columns` to produce a
@@ -101,6 +154,22 @@ impl RedDBRuntime {
             &query.table,
             crate::runtime::collection_contract::MutationKind::Insert,
         )?;
+        // ADR 0067 (#1710): catalog model inference for the unmarked
+        // bare-VALUES INSERT. `INSERT INTO c VALUES ({…})` carries no
+        // column list and no model marker (parsed as a Row insert with an
+        // empty column list); resolve the model from the catalog so an
+        // existing document collection routes to document creation and an
+        // unknown collection surfaces a didactic error. Runs before tenant
+        // injection so a rewritten document insert is tenant-scoped like
+        // the explicit `DOCUMENT` marker path.
+        let inferred_owned;
+        let query = match self.infer_unmarked_document_insert(query)? {
+            Some(rewritten) => {
+                inferred_owned = rewritten;
+                &inferred_owned
+            }
+            None => query,
+        };
         // Phase 2.5.4 table-scoped tenancy: if the target table is
         // tenant-scoped and the user didn't name the tenant column,
         // auto-inject it with the thread-local `CURRENT_TENANT()`
