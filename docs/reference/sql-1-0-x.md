@@ -17,7 +17,7 @@ Lexer keywords:
 Top-level SQL dispatch:
 
 <!-- generated:top-level-sql begin -->
-`SELECT`, `FROM`, `INSERT`, `UPDATE`, `DELETE`, `EXPLAIN`, `CREATE`, `DROP`, `ALTER`, `SET`, `SHOW`, `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `START`, `VACUUM`, `ANALYZE`, `COPY`, `REFRESH`, `DESCRIBE`, `DESC`
+`CHECKPOINT`, `AUTHOR`, `CHECKOUT`, `RESET`, `HARD`, `SOFT`, `MIXED`, `MERGE`, `CHERRY`, `PICK`, `PICK`, `REVERT`, `RESOLVE`, `CONFLICT`, `CONFLICT`, `USING`, `OURS`, `THEIRS`, `OURS`, `THEIRS`, `CHECKPOINT`, `CHECKOUT`, `RESET`, `MERGE`, `CHERRY`, `REVERT`, `RESOLVE`, `OR`, `REPLACE`, `RETENTION`, `RETENTION`, `AS`, `AS`, `EVERY`, `EVERY`, `VIEW`, `USER`, `BRANCH`, `TAG`, `CONFIG`, `VAULT`, `METRICS`, `SLO`, `HYPERTABLE`, `HLL`, `SKETCH`, `FILTER`, `NODES`, `EDGES`, `VECTORS`, `MESSAGES`, `POINTS`, `DOCUMENTS`, `NOT`, `NULL`, `WITH`, `BY`, `MIGRATION`, `TABLE`, `GRAPH`, `VECTOR`, `DOCUMENT`, `KV`, `COLLECTION`, `INDEX`, `UNIQUE`, `METRIC`, `TIMESERIES`, `QUEUE`, `TREE`, `HLL`, `SKETCH`, `FILTER`, `SCHEMA`, `SEQUENCE`, `USER`, `BRANCH`, `TAG`, `MIGRATION`, `BRANCH`, `TAG`, `BRANCH`, `TAG`, `SECRET`, `METRICS`, `TABLE`, `GRAPH`, `VECTOR`, `DOCUMENT`, `TIMESERIES`, `METRICS`, `KV`, `QUEUE`, `COLLECTION`, `MIGRATION`, `VIEW`, `BRANCH`, `TAG`, `CONFIG`, `VAULT`, `METRICS`, `HYPERTABLE`, `HLL`, `SKETCH`, `FILTER`, `TABLE`, `INDEX`, `TIMESERIES`, `QUEUE`, `TREE`, `HLL`, `SKETCH`, `FILTER`, `SCHEMA`, `SEQUENCE`, `BRANCH`, `TAG`, `USER`, `COLLECTION`, `GRANT`, `REVOKE`, `EVENTS`, `BACKFILL`, `STATUS`, `STATUS`, `SIMULATE`, `LINT`, `MIGRATE`, `POLICY`, `POLICY`, `RESOLVE`, `CONFIG`, `SECRET`, `TENANT`, `NULL`, `CONFIG`, `SECRET`, `KV`, `TENANT`, `APPLY`, `RESET`, `TENANT`, `DESCRIBE`, `DESC`, `SHOW`, `CREATE`, `TABLE`, `TABLE`, `CONFIG`, `JSON`, `COLLECTIONS`, `INCLUDING`, `INTERNAL`, `INTERNAL`, `TABLES`, `QUEUES`, `INCLUDING`, `INTERNAL`, `INTERNAL`, `BRANCHES`, `TAGS`, `VECTORS`, `DOCUMENTS`, `TIMESERIES`, `GRAPHS`, `CONFIGS`, `VAULTS`, `KV`, `KVS`, `SCHEMA`, `INDICES`, `INDEXES`, `POLICIES`, `FOR`, `ON`, `STATS`, `SAMPLE`, `SECRET`, `SECRETS`, `TENANT`, `CONFIG`, `SECRET`, `SECRETS`, `COLLECTIONS`, `TABLES`, `QUEUES`, `VECTORS`, `DOCUMENTS`, `TIMESERIES`, `GRAPHS`, `KV`, `SCHEMA`, `INDICES`, `INDEXES`, `SAMPLE`, `POLICIES`, `STATS`, `TENANT`, `EFFECTIVE`, `ISOLATION`, `READ`, `UNCOMMITTED`, `COMMITTED`, `UNCOMMITTED`, `COMMITTED`, `REPEATABLE`, `READ`, `READ`, `SNAPSHOT`, `SERIALIZABLE`, `READ`, `REPEATABLE`, `SNAPSHOT`, `SERIALIZABLE`, `MIGRATION`, `WITH`, `FORMAT`, `SELECT`, `FROM`, `INSERT`, `UPDATE`, `DELETE`, `EXPLAIN`, `CREATE`, `DROP`, `ALTER`, `SET`, `SHOW`, `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `START`, `VACUUM`, `ANALYZE`, `COPY`, `REFRESH`, `DESCRIBE`, `DESC`
 <!-- generated:top-level-sql end -->
 
 ## Query Mode Detection
@@ -86,10 +86,10 @@ columns or top-level document, KV, node, or edge properties named `rid`,
 | `INSERT ... RETURNING *` | `INSERT INTO users (name) VALUES ('Ada') RETURNING *` | supported |
 | `INSERT ... RETURNING col, ...` | `INSERT INTO users (name) VALUES ('Ada') RETURNING rid, name` | supported |
 | `UPDATE ... SET ... WHERE ...` | `UPDATE users SET active = true WHERE rid = $1` | supported |
-| Explicit update targets | `UPDATE users ROWS SET active = true WHERE rid = $1` | supported |
-| Multi-model update targets | `UPDATE docs DOCUMENTS SET score += 1`; `UPDATE settings KV SET value += 1`; `UPDATE social NODES SET score += 1`; `UPDATE social EDGES SET weight += 0.5` | supported |
+| Model inferred from catalog | `UPDATE docs SET score += 1`; `UPDATE settings SET value += 1` | supported; `ROWS`/`DOCUMENTS`/`KV` markers removed (ADR 0067) |
+| Graph update markers | `UPDATE social NODES SET score += 1`; `UPDATE social EDGES SET weight += 0.5` | supported; only `NODES`/`EDGES` remain — a graph holds both record kinds |
 | Compound assignment | `UPDATE users SET score += 5, attempts %= 3 WHERE rid = $1` | supported |
-| Ordered update batches | `UPDATE users ROWS SET touched = true ORDER BY priority DESC LIMIT 10` | supported; `ORDER BY` requires `LIMIT` |
+| Ordered update batches | `UPDATE users SET touched = true ORDER BY priority DESC LIMIT 10` | supported; `ORDER BY` requires `LIMIT` |
 | `UPDATE ... RETURNING * / cols` | `UPDATE users SET name = 'Ada' WHERE rid = $1 RETURNING rid, name` | supported |
 | `DELETE FROM ... WHERE ...` | `DELETE FROM users WHERE rid = $1` | supported |
 | `DELETE ... RETURNING * / cols` | `DELETE FROM users WHERE rid = $1 RETURNING *` | supported |
