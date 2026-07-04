@@ -1741,6 +1741,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         "JSON_EXTRACT_TEXT" => {
             json_extract_impl(args.first()?, args.get(1)?, /*as_text=*/ true)
         }
+        "JSON_PARSE" => json_parse_impl(args.first()?),
         "JSON_SET" => json_set_impl(args.first()?, args.get(1)?, args.get(2)?),
         "JSON_ARRAY_LENGTH" => {
             let v = value_to_json(args.first()?)?;
@@ -1818,6 +1819,16 @@ fn value_to_json(value: &Value) -> Option<crate::serde_json::Value> {
         Value::Text(s) => crate::serde_json::from_str(s).ok(),
         _ => None,
     }
+}
+
+fn json_parse_impl(input: &Value) -> Option<Value> {
+    let Value::Text(text) = input else {
+        return Some(Value::Null);
+    };
+    crate::serde_json::from_str::<crate::serde_json::Value>(text)
+        .ok()
+        .map(|json| Value::Json(json.to_string_compact().into_bytes()))
+        .or(Some(Value::Null))
 }
 
 fn value_contains(value: &Value, needle: &str) -> bool {

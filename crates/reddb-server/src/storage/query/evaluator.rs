@@ -140,6 +140,8 @@ pub enum EvalError {
     /// Numeric scalar evaluation produced an undefined or non-finite
     /// float result (domain error, overflow, NaN, or infinity).
     InvalidNumericResult { function: String, reason: String },
+    /// JSON_PARSE input was not valid JSON text.
+    JsonParseFailed { reason: String },
     /// `IN (...)` against an empty value list — preserves the legacy
     /// "always false" semantic but recorded explicitly so the
     /// optimiser can fold it.
@@ -174,6 +176,9 @@ impl std::fmt::Display for EvalError {
             EvalError::DivisionByZero => write!(f, "division by zero"),
             EvalError::InvalidNumericResult { function, reason } => {
                 write!(f, "invalid numeric result in {function}: {reason}")
+            }
+            EvalError::JsonParseFailed { reason } => {
+                write!(f, "JSON_PARSE failed to parse JSON: {reason}")
             }
             EvalError::EmptyInList => write!(f, "IN list is empty"),
         }
@@ -711,6 +716,20 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
                 args: vec![other.data_type()],
             }),
         },
+        "CONCAT" => {
+            let mut out = String::new();
+            for arg in args {
+                let Value::Text(value) = arg else {
+                    return Err(EvalError::UnknownFunction {
+                        name: name.to_string(),
+                        args: args.iter().map(Value::data_type).collect(),
+                    });
+                };
+                out.push_str(value);
+            }
+            Ok(Value::Text(Arc::from(out)))
+        }
+        "JSON_PARSE" => json_parse_value(&args[0]),
         "JSON_EXTRACT" => Ok(json_extract_value(&args[0], &args[1], false)),
         "JSON_EXTRACT_TEXT" => Ok(json_extract_value(&args[0], &args[1], true)),
         "CONTAINS" => Ok(contains_value(&args[0], &args[1])),
@@ -911,6 +930,20 @@ fn json_extract_value(input: &Value, path: &Value, as_text: bool) -> Value {
     } else {
         Value::text(target.to_string_compact())
     }
+}
+
+fn json_parse_value(input: &Value) -> Result<Value, EvalError> {
+    let Value::Text(text) = input else {
+        return Err(EvalError::UnknownFunction {
+            name: "JSON_PARSE".to_string(),
+            args: vec![input.data_type()],
+        });
+    };
+    crate::serde_json::from_str::<crate::serde_json::Value>(text)
+        .map(|json| Value::Json(json.to_string_compact().into_bytes()))
+        .map_err(|err| EvalError::JsonParseFailed {
+            reason: err.to_string(),
+        })
 }
 
 fn contains_value(input: &Value, needle: &Value) -> Value {
