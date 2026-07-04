@@ -241,3 +241,88 @@ fn readme_documents_example_runs_end_to_end() {
     assert_eq!(text_field(&selected.result.records[0], "level"), "info");
     assert_eq!(text_field(&selected.result.records[0], "msg"), "login");
 }
+
+#[test]
+fn issue_1706_documents_docs_do_not_teach_reserved_body_field_names() {
+    let docs = [
+        (
+            "docs/data-models/documents.md",
+            include_str!("../../../docs/data-models/documents.md"),
+        ),
+        (
+            "docs/getting-started/quickstart-document.md",
+            include_str!("../../../docs/getting-started/quickstart-document.md"),
+        ),
+        (
+            "docs/data-models/overview.md",
+            include_str!("../../../docs/data-models/overview.md"),
+        ),
+    ];
+
+    for (path, content) in docs {
+        assert!(
+            !content.contains(r#"{"kind":"signup""#),
+            "{path} must not use reserved `kind` as a top-level document body field",
+        );
+        assert!(
+            !content.contains("body->>'kind'"),
+            "{path} must not teach generated columns over reserved `kind`",
+        );
+        assert!(
+            !content.contains("SELECT kind FROM events"),
+            "{path} must not teach collection-scoped projection of reserved `kind` as user data",
+        );
+    }
+
+    let documents_walkthrough = docs[0].1;
+    assert!(
+        documents_walkthrough.contains("## Reserved field names"),
+        "Documents walkthrough must have a reserved field names section",
+    );
+    assert!(
+        documents_walkthrough
+            .contains("`rid`, `collection`, `kind`, `tenant`, `created_at`, and `updated_at`"),
+        "Documents walkthrough must name the reserved envelope set",
+    );
+    assert!(
+        documents_walkthrough.contains("rejected at write time"),
+        "Documents walkthrough must document write-time rejection",
+    );
+    assert!(
+        documents_walkthrough.contains("ADR 0066"),
+        "Documents walkthrough must point to ADR 0066",
+    );
+}
+
+#[test]
+fn issue_1706_corrected_signup_example_runs_over_http_query() {
+    let (_db, _rt, addr) = spawn_http_server();
+    let statements = [
+        "CREATE DOCUMENT issue1706_events",
+        r#"INSERT INTO issue1706_events DOCUMENT (body)
+           VALUES ('{"event_type":"signup","user_id":"u_abc123"}')"#,
+        "SELECT event_type, user_id FROM issue1706_events WHERE event_type = 'signup'",
+    ];
+
+    let mut last = json!(null);
+    for statement in statements {
+        let (status, body) =
+            http_request(&addr, "POST", "/query", Some(json!({ "query": statement })));
+        assert_eq!(status, 200, "statement failed: {statement}; body={body}");
+        last = body;
+    }
+
+    let records = last["data"]["records"]
+        .as_array()
+        .or_else(|| last["result"]["records"].as_array())
+        .expect("query response should contain records");
+    assert_eq!(records.len(), 1, "last={last}");
+    let values = records[0].get("values").unwrap_or_else(|| {
+        panic!(
+            "query response record should contain values: {}",
+            records[0]
+        )
+    });
+    assert_eq!(values["event_type"], json!("signup"));
+    assert_eq!(values["user_id"], json!("u_abc123"));
+}
