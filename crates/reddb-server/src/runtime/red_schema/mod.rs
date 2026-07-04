@@ -985,7 +985,7 @@ pub(super) fn red_query(
                     false,
                 )
             })
-            .collect();
+            .collect::<crate::RedDBResult<Vec<_>>>()?;
     }
 
     let columns = if projections.is_empty()
