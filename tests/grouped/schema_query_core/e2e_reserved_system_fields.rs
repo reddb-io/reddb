@@ -4,7 +4,10 @@ mod support;
 
 use std::path::Path;
 
-use reddb::application::{CreateDocumentInput, EntityUseCases};
+use reddb::application::{
+    CreateDocumentInput, EntityUseCases, PatchEntityInput, PatchEntityOperation,
+    PatchEntityOperationType,
+};
 use reddb::json::json;
 use reddb::{PhysicalMetadataFile, RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
@@ -29,6 +32,14 @@ fn assert_reserved_error(message: &str, field: &str, context: &str) {
     );
     assert!(message.contains(field), "unexpected error: {message}");
     assert!(message.contains(context), "unexpected error: {message}");
+    assert!(
+        message.contains("rid, collection, kind, tenant, created_at, updated_at"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("Rename the field in the payload before insert or patch"),
+        "unexpected error: {message}"
+    );
 }
 
 #[test]
@@ -59,6 +70,56 @@ fn create_document_rejects_reserved_top_level_body_fields() {
         .expect_err("reserved document field should fail");
 
     assert_reserved_error(&err.to_string(), "tenant", "document 'reserved_docs'");
+}
+
+#[test]
+fn sql_document_insert_reserved_error_names_full_envelope_and_recourse() {
+    let rt = runtime();
+    rt.execute_query("CREATE DOCUMENT sql_reserved_docs")
+        .expect("document collection should be created");
+
+    let err = rt
+        .execute_query(
+            r#"INSERT INTO sql_reserved_docs DOCUMENT (body) VALUES ('{"kind":"runbook"}')"#,
+        )
+        .expect_err("reserved document field should fail");
+
+    assert_eq!(
+        err.to_string(),
+        "query error: reserved system field 'kind' cannot be used as a top-level user field in document 'sql_reserved_docs'. Reserved envelope fields are: rid, collection, kind, tenant, created_at, updated_at. Rename the field in the payload before insert or patch."
+    );
+}
+
+#[test]
+fn document_patch_rejects_reserved_top_level_body_fields() {
+    let rt = runtime();
+    rt.execute_query("CREATE DOCUMENT patch_reserved_docs")
+        .expect("document collection should be created");
+
+    let created = EntityUseCases::new(&rt)
+        .create_document(CreateDocumentInput {
+            collection: "patch_reserved_docs".to_string(),
+            body: json!({"title": "runbook"}),
+            metadata: Vec::new(),
+            node_links: Vec::new(),
+            vector_links: Vec::new(),
+        })
+        .expect("document should be created");
+
+    let err = EntityUseCases::new(&rt)
+        .patch(PatchEntityInput {
+            collection: "patch_reserved_docs".to_string(),
+            id: created.id,
+            payload: json!(null),
+            operations: vec![PatchEntityOperation {
+                op: PatchEntityOperationType::Set,
+                path: vec!["body".to_string(), "tenant".to_string()],
+                value: Some(json!("acme")),
+            }],
+        })
+        .expect_err("reserved document patch field should fail");
+
+    assert_reserved_error(&err.to_string(), "tenant", "document 'patch_reserved_docs'");
 }
 
 #[test]
