@@ -77,3 +77,25 @@ test('db.from validates identifiers before query dispatch', async () => {
   )
   assert.equal(calls.length, 0)
 })
+
+test('documents.insert emits the inline JSON literal form (ADR 0067 #1709)', async () => {
+  const { db, calls } = fakeDb((_, params) => {
+    if (params.sql.startsWith('INSERT')) {
+      return { rows: [{ rid: 'doc-1', body: { level: 'info' } }], affected: 1 }
+    }
+    return { rows: [] }
+  })
+
+  await db.documents.insert('events', { level: 'info' })
+
+  const insertSql = calls
+    .map((call) => call.params.sql)
+    .find((sql) => sql.startsWith('INSERT'))
+  assert.equal(
+    insertSql,
+    'INSERT INTO events DOCUMENT VALUES ({"level":"info"}) RETURNING *',
+  )
+  // Clean break: no (body) column list and no quoted-string body coercion.
+  assert.ok(!insertSql.includes('(body)'))
+  assert.ok(!insertSql.includes("('{"))
+})
