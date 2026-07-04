@@ -18,6 +18,7 @@ pub(in crate::runtime) fn project_runtime_record(
         document_projection,
         entity_projection,
     )
+    .unwrap_or_else(|_| UnifiedRecord::new())
 }
 
 pub(in crate::runtime) fn project_runtime_record_with_db(
@@ -28,7 +29,7 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
     table_alias: Option<&str>,
     document_projection: bool,
     entity_projection: bool,
-) -> UnifiedRecord {
+) -> crate::RedDBResult<UnifiedRecord> {
     let select_all = projections.is_empty()
         || projections
             .iter()
@@ -77,39 +78,59 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
             Projection::Expression(filter, _) => {
                 // Route through typed evaluator; fall back to filter-boolean path for
                 // shapes the evaluator doesn't cover (CONFIG / KV / ML_* references).
-                crate::storage::query::sql_lowering::projection_to_expr(projection)
-                    .and_then(|(expr, _)| {
-                        let row = RecordRow {
-                            record: source,
-                            table_name,
-                            table_alias,
-                        };
-                        crate::storage::query::evaluator::evaluate(&expr, &row).ok()
-                    })
-                    .or_else(|| {
-                        Some(Value::Boolean(evaluate_runtime_filter_with_db(
+                if let Some((expr, _)) =
+                    crate::storage::query::sql_lowering::projection_to_expr(projection)
+                {
+                    let row = RecordRow {
+                        record: source,
+                        table_name,
+                        table_alias,
+                    };
+                    match crate::storage::query::evaluator::evaluate(&expr, &row) {
+                        Ok(value) => Some(value),
+                        Err(crate::storage::query::evaluator::EvalError::UnknownFunction {
+                            ..
+                        }) => Some(Value::Boolean(evaluate_runtime_filter_with_db(
                             db,
                             source,
                             filter,
                             table_name,
                             table_alias,
-                        )))
-                    })
+                        ))),
+                        Err(err) => return Err(crate::RedDBError::Query(err.to_string())),
+                    }
+                } else {
+                    Some(Value::Boolean(evaluate_runtime_filter_with_db(
+                        db,
+                        source,
+                        filter,
+                        table_name,
+                        table_alias,
+                    )))
+                }
             }
             Projection::Function(ref name, ref args) => {
                 // Route catalog-resolvable functions through the typed evaluator.
                 // Falls back to the legacy dispatcher for CONFIG/KV/ML_*/geo/time
                 // and any shape where argument resolution fails via evaluator.
-                crate::storage::query::sql_lowering::projection_to_expr(projection)
-                    .and_then(|(expr, _)| {
-                        let row = RecordRow {
-                            record: source,
-                            table_name,
-                            table_alias,
-                        };
-                        crate::storage::query::evaluator::evaluate(&expr, &row).ok()
-                    })
-                    .or_else(|| evaluate_scalar_function_with_db(db, name, args, source))
+                if let Some((expr, _)) =
+                    crate::storage::query::sql_lowering::projection_to_expr(projection)
+                {
+                    let row = RecordRow {
+                        record: source,
+                        table_name,
+                        table_alias,
+                    };
+                    match crate::storage::query::evaluator::evaluate(&expr, &row) {
+                        Ok(value) => Some(value),
+                        Err(crate::storage::query::evaluator::EvalError::UnknownFunction {
+                            ..
+                        }) => evaluate_scalar_function_with_db(db, name, args, source),
+                        Err(err) => return Err(crate::RedDBError::Query(err.to_string())),
+                    }
+                } else {
+                    evaluate_scalar_function_with_db(db, name, args, source)
+                }
             }
             Projection::All => None,
             // Slice 7b (#590): the window phase has already
@@ -124,7 +145,7 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
         record.set_arc(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
     }
 
-    record
+    Ok(record)
 }
 
 pub(in crate::runtime) fn resolve_runtime_projection_value(
