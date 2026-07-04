@@ -1,74 +1,79 @@
-<p align="center">
-  <h1 align="center">RedDB</h1>
-  <p align="center"><strong>The AI-first multi-model database.</strong></p>
-  <p align="center">Tables. Documents. Graphs. Vectors. KV. One engine. Ask it anything.</p>
+<div align="center">
+
+<h1>🚀 RedDB</h1>
+
+<p>
+  <strong>The AI-first multi-model database.</strong><br>
+  Tables · Documents · Graphs · Vectors · KV · Time-series · Queues · All in one engine. Ask it anything.
 </p>
 
-<p align="center">
-  <a href="https://github.com/reddb-io/reddb/releases"><img src="https://img.shields.io/github/v/release/reddb-io/reddb?style=flat-square" alt="Release"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-BSL%201.1-blue?style=flat-square" alt="License"></a>
-  <a href="https://www.npmjs.com/package/@reddb-io/cli"><img src="https://img.shields.io/npm/v/@reddb-io/cli?style=flat-square&label=npm" alt="npm"></a>
+<p>
+  <a href="https://github.com/reddb-io/reddb/releases"><img src="https://img.shields.io/github/v/release/reddb-io/reddb?style=for-the-badge&color=ff2056&labelColor=0b0b0d" alt="Release"></a>
+  <a href="https://github.com/reddb-io/reddb/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/reddb-io/reddb/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=0b0b0d" alt="CI"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-BSL%201.1-blue?style=for-the-badge&labelColor=0b0b0d" alt="License"></a>
+  <img src="https://img.shields.io/badge/rust%20·%20sql%20·%20typescript-555?style=for-the-badge&labelColor=0b0b0d&label=built%20with" alt="Built with">
 </p>
 
-> [!IMPORTANT]
-> In RedDB, a `collection` is the named logical container for data. Tables, documents, key-value, graphs,
-> vectors, time-series, and queues are the user-facing models or semantics you use on top of collections.
-> A collection is not a separate hierarchy layer that contains multiple tables and documents beneath it.
-> Instead, `users` can be a collection used as a table, `events` can be a collection used for documents,
-> and `config` can be a collection used as KV. Some models can also coexist in the same collection.
+</div>
 
 ---
 
-## The Killer Feature: `ASK`
+## 🎯 Why RedDB?
+
+Stop running Postgres + Neo4j + Pinecone + Redis + Mongo + InfluxDB + RabbitMQ. One file. One engine. One query language. All seven models work together seamlessly.
+
+> [!IMPORTANT]
+> **Collections:** In RedDB, a `collection` is the named logical container for data. Tables, documents, key-value, graphs, vectors, time-series, and queues are the models you layer on top. `users` can be a table, `events` can be documents, `config` can be KV — in the same collection or spread across many. Choose your model; collections unite them.
+
+---
+
+## ✨ The Killer Feature: `ASK`
 
 ```sql
 ASK 'who owns passport AB1234567 and what services do they use?'
 ```
 
-One command. RedDB searches across tables, graphs, vectors, documents, and key-value stores -- builds context -- calls an LLM -- returns a natural-language answer. No pipelines. No glue code. No other database does this.
+One command. RedDB searches across tables, graphs, vectors, documents, and key-value stores — builds context — calls an LLM — returns a natural-language answer. No pipelines. No glue code. No other database does this.
 
 ---
 
-## 7 Data Models, 1 Engine
+## 📊 7 Data Models, 1 Engine
 
-Stop running Postgres + Neo4j + Pinecone + Redis + Mongo + InfluxDB + RabbitMQ. RedDB unifies them.
-
-The key mental model is simple: the model is how you work with the data, and the collection is where
-that data lives.
+The mental model: your **model** is how you query (table, graph, vector, etc.), your **collection** is where the data lives. Mix and match freely.
 
 ```sql
--- Relational rows
+-- 📋 Relational rows
 INSERT INTO users (name, email) VALUES ('Alice', 'alice@co.com')
 
--- JSON documents
-INSERT INTO logs DOCUMENT VALUES ({"level":"info","msg":"login"})
+-- 📄 JSON documents — inline JSON syntax
+INSERT INTO logs DOCUMENT VALUES ({"level": "info", "msg": "login"})
 
--- Graph edges
+-- 🔗 Graph edges  
 INSERT INTO network EDGE (label, from_rid, to_rid) VALUES ('CONNECTS', 102, 103)
 
--- Vector similarity search
+-- 🎯 Vector similarity search
 SEARCH SIMILAR TEXT 'anomaly detected' COLLECTION events
 
--- Key-value
+-- 🔑 Key-value
 KV PUT config.theme = 'dark'
 
--- Time-series metrics (with retention & downsampling)
+-- ⏱️  Time-series (retention & downsampling)
 CREATE TIMESERIES cpu_metrics RETENTION 90 d
-INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, {"host":"srv1"})
+INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, {"host": "srv1"})
 
--- Hypertables + partition TTL + continuous aggregates (logs / events / telemetry)
+-- 📦 Hypertables (logs, events, telemetry)
 CREATE HYPERTABLE access_log TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '90d'
 
--- Append-only tables (audit, ledger, immutable events)
+-- 📑 Append-only (audit, ledger, immutable)
 CREATE TABLE audit_log (id BIGINT, action TEXT) APPEND ONLY
 
--- Message queues (FIFO, priority, consumer groups)
+-- 📨 Message queues (FIFO, priority, consumer groups)
 CREATE QUEUE tasks MAX_SIZE 10000
-QUEUE PUSH tasks {"job":"process","id":123}
+QUEUE PUSH tasks {"job": "process", "id": 123}
 QUEUE POP tasks
 ```
 
-Same file. Same engine. Same query language.
+Same file. Same engine. Same query language — everything lives in one `.rdb` file.
 
 Want to use RedDB as your log store? Start with the
 [Logs Quickstart](./docs/guides/logs-quickstart.md) or the full
@@ -76,44 +81,46 @@ Want to use RedDB as your log store? Start with the
 
 ---
 
-## AI-Native From Day One
+## 🧠 AI-Native From Day One
 
 ```sql
 -- Semantic search without managing vectors yourself
 SEARCH SIMILAR TEXT 'suspicious login' COLLECTION logs USING groq
 
--- Auto-embed on insert -- vectors are created for you
+-- Auto-embed on insert — vectors are created automatically
 INSERT INTO articles (title, body) VALUES ('AI Safety', 'Alignment research...')
   WITH AUTO EMBED (body) USING openai
 
--- Context search: find everything related to an entity across all models
+-- Context search across all data models
 SEARCH CONTEXT '192.168.1.1' FIELD ip DEPTH 2
 
--- Ask questions in plain English
+-- Ask questions in plain English, get grounded answers
 ASK 'what vulnerabilities affect host 10.0.0.1?' USING anthropic
 ```
 
-RedDB retrieves context from every data model, feeds it to the LLM, and gives you a grounded answer. RAG built into the database layer.
+RAG built into the database layer. RedDB retrieves context from every data model and feeds it to the LLM.
 
 ---
 
-## 11 AI Providers
+## 🤖 11 AI Providers
 
-Swap providers with a keyword. No code changes.
+Swap providers with a keyword. No code changes. Full parity across ASK, embeddings, and model selection.
 
-| Provider    | Keyword        | API Key | ASK / Prompt | Embeddings |
-|:------------|:---------------|:-------:|:------------:|:----------:|
-| OpenAI      | `openai`       | Yes     | ✅           | ✅         |
-| Anthropic   | `anthropic`    | Yes     | ✅           | rejected   |
-| Groq        | `groq`         | Yes     | ✅           | ✅         |
-| OpenRouter  | `openrouter`   | Yes     | ✅           | ✅         |
-| Together    | `together`     | Yes     | ✅           | ✅         |
-| Venice      | `venice`       | Yes     | ✅           | ✅         |
-| DeepSeek    | `deepseek`     | Yes     | ✅           | ✅         |
-| HuggingFace | `huggingface`  | Yes     | ✅           | ✅         |
-| Ollama      | `ollama`       | No      | ✅           | ✅         |
-| Local       | `local`        | No      | feature-gated | feature-gated |
-| Custom URL  | `https://...`  | depends | ✅           | ✅         |
+| Provider | Keyword | API Key | ASK / Prompt | Embeddings |
+|:---------|:--------|:-------:|:------------:|:----------:|
+| **OpenAI** | `openai` | ✅ | ✅ | ✅ |
+| **Anthropic** | `anthropic` | ✅ | ✅ | —* |
+| **Groq** | `groq` | ✅ | ✅ | ✅ |
+| **OpenRouter** | `openrouter` | ✅ | ✅ | ✅ |
+| **Together** | `together` | ✅ | ✅ | ✅ |
+| **Venice** | `venice` | ✅ | ✅ | ✅ |
+| **DeepSeek** | `deepseek` | ✅ | ✅ | ✅ |
+| **HuggingFace** | `huggingface` | ✅ | ✅ | ✅ |
+| **Ollama** | `ollama` | — | ✅ | ✅ |
+| **Local** | `local` | — | feature-gated | feature-gated |
+| **Custom URL** | `https://...` | varies | ✅ | ✅ |
+
+*Anthropic does not offer embeddings; RedDB rejects embedding calls explicitly rather than re-routing to another provider.
 
 Most providers speak the OpenAI-compatible `POST /embeddings` shape;
 HuggingFace has its own (`POST /pipeline/feature-extraction/{model}`)
@@ -152,12 +159,12 @@ curl http://127.0.0.1:5000/config
 
 ---
 
-## Probabilistic Data Structures
+## 🎲 Probabilistic Data Structures
 
-Built-in approximate data structures for real-time analytics at scale.
+Built-in approximate data structures for real-time analytics at scale. Cardinality estimation, frequency analysis, and set membership all in one engine.
 
 ```sql
--- HyperLogLog: count unique visitors (~0.8% error, ~16KB memory)
+-- HyperLogLog: unique visitor count (~0.8% error, 16KB memory)
 CREATE HLL visitors
 HLL ADD visitors 'user1' 'user2' 'user3'
 HLL COUNT visitors
@@ -167,7 +174,7 @@ CREATE SKETCH click_counter WIDTH 2000 DEPTH 7
 SKETCH ADD click_counter 'button_a' 5
 SKETCH COUNT click_counter 'button_a'
 
--- Cuckoo Filter: membership testing with deletion (unlike Bloom filters)
+-- Cuckoo Filter: membership + deletion (unlike Bloom)
 CREATE FILTER active_sessions CAPACITY 500000
 FILTER ADD active_sessions 'session_abc'
 FILTER CHECK active_sessions 'session_abc'
@@ -176,18 +183,18 @@ FILTER DELETE active_sessions 'session_abc'
 
 ---
 
-## Advanced Indexes
+## 🗂️ Advanced Indexes
 
-Beyond B-tree. Create the right index for your workload.
+Beyond B-tree. Pick the right index for your access pattern.
 
 ```sql
--- Hash index: O(1) exact-match lookups
+-- Hash: O(1) exact-match lookups
 CREATE INDEX idx_email ON users (email) USING HASH
 
--- Bitmap index: fast analytical queries on low-cardinality columns
+-- Bitmap: analytical queries on low-cardinality columns
 CREATE INDEX idx_status ON orders (status) USING BITMAP
 
--- R-Tree: spatial queries on geo data
+-- R-Tree: spatial & geographic queries
 CREATE INDEX idx_loc ON sites (location) USING RTREE
 SEARCH SPATIAL RADIUS 48.8566 2.3522 10.0 COLLECTION sites COLUMN location LIMIT 50
 SEARCH SPATIAL NEAREST 48.8566 2.3522 K 5 COLLECTION sites COLUMN location
@@ -195,7 +202,7 @@ SEARCH SPATIAL NEAREST 48.8566 2.3522 K 5 COLLECTION sites COLUMN location
 
 ---
 
-## SQL Extensions
+## 🔧 SQL Extensions
 
 RedDB extends SQL with `WITH` clauses for operational semantics:
 
@@ -218,7 +225,7 @@ INSERT INTO events (name) VALUES ('launch') WITH EXPIRES AT 1735689600000
 
 ---
 
-## 6 Query Languages
+## 🔤 6 Query Languages
 
 Write in whatever you think in. The engine auto-detects the language.
 
@@ -235,9 +242,9 @@ All six hit the same engine, same data, same indexes.
 
 ---
 
-## Native Migrations — No External Tools
+## 🔄 Native Migrations — No External Tools
 
-Stop reaching for Flyway, Liquibase, Drizzle Migrate, or Sequelize migrations. RedDB handles schema and data migrations as first-class SQL commands.
+Stop reaching for Flyway, Liquibase, Drizzle Migrate, or Sequelize. RedDB handles schema and data migrations as first-class SQL commands — all in one transaction log.
 
 ```sql
 -- Register a migration
@@ -268,26 +275,26 @@ Every applied migration creates a **VCS commit** (RedDB's "Git for Data"). Rollb
 
 ---
 
-## 48 Built-in Types
+## 📦 48 Built-in Types
 
-Not just `TEXT` and `INTEGER`. RedDB understands your domain.
+Not just `TEXT` and `INTEGER`. RedDB understands your domain — validation on write, no parsing in your app.
 
-**Network:** `IpAddr`, `Ipv4`, `Ipv6`, `MacAddr`, `Cidr`, `Subnet`, `Port`
-**Geo:** `Latitude`, `Longitude`, `GeoPoint`
-**Locale:** `Country2`, `Country3`, `Lang2`, `Lang5`, `Currency`
-**Identity:** `Uuid`, `Email`, `Url`, `Phone`, `Semver`
-**Visual:** `Color`, `ColorAlpha`
-**Cross-model refs:** `NodeRef`, `EdgeRef`, `VectorRef`, `RowRef`, `KeyRef`, `DocRef`, `TableRef`, `PageRef`
-**Primitives:** `Integer`, `UnsignedInteger`, `Float`, `Decimal`, `BigInt`, `Text`, `Blob`, `Boolean`, `Json`, `Array`, `Enum`
-**Temporal:** `Timestamp`, `TimestampMs`, `Date`, `Time`, `Duration`
-
-Validation on write. No parsing in your app.
+| Category | Types |
+|:---------|:------|
+| **Network** | `IpAddr`, `Ipv4`, `Ipv6`, `MacAddr`, `Cidr`, `Subnet`, `Port` |
+| **Geographic** | `Latitude`, `Longitude`, `GeoPoint` |
+| **Locale** | `Country2`, `Country3`, `Lang2`, `Lang5`, `Currency` |
+| **Identity** | `Uuid`, `Email`, `Url`, `Phone`, `Semver` |
+| **Visual** | `Color`, `ColorAlpha` |
+| **Cross-model Refs** | `NodeRef`, `EdgeRef`, `VectorRef`, `RowRef`, `KeyRef`, `DocRef`, `TableRef`, `PageRef` |
+| **Primitives** | `Integer`, `UnsignedInteger`, `Float`, `Decimal`, `BigInt`, `Text`, `Blob`, `Boolean`, `Json`, `Array`, `Enum` |
+| **Temporal** | `Timestamp`, `TimestampMs`, `Date`, `Time`, `Duration` |
 
 ---
 
-## Backup & Recovery
+## 💾 Backup & Recovery
 
-Built-in backup scheduler, WAL archiving, Change Data Capture (CDC), and Point-in-Time Recovery framework:
+Built-in backup scheduler, WAL archiving, CDC, and Point-in-Time Recovery — no sidecars required:
 
 ```bash
 # Poll real-time changes
@@ -308,7 +315,7 @@ PITR rollback, replica promotion), see
 
 ---
 
-## KV REST API
+## 🔌 KV REST API
 
 Every collection doubles as a key-value store with dedicated REST endpoints:
 
@@ -341,32 +348,26 @@ SHOW CONFIG red.ai
 
 ---
 
-## 3 Deployment Modes
+## 🌍 3 Deployment Modes
 
-| Mode | Think of it as... | Access via |
-|:-----|:-------------------|:-----------|
-| **Embedded** | SQLite | Rust API -- `RedDB::open("data.rdb")` |
-| **Server** | Postgres | RedWire + gRPC + HTTP listeners |
-| **Agent** | MCP tool | `red mcp` -- AI agent integration |
+| Mode | Like | Access | Use Case |
+|:-----|:-----|:-------|:---------|
+| **Embedded** | SQLite | Rust API (`RedDB::open("data.rdb")`) | In-process, single machine |
+| **Server** | Postgres | RedWire + gRPC + HTTP | Multi-client, networked |
+| **Agent** | MCP Server | `red mcp` | Claude Code / AI agents |
 
-Same storage format across all three. Start embedded, scale to server, expose to agents -- no migration.
+Same storage format. Start embedded, scale to server, expose to agents — zero migration.
 
 ---
 
-## Performance
+## ⚡ Performance
 
-> **Where RedDB wins.** Two scenarios in the canonical `duel-official`
-> benchmark show measurable wins over Postgres and Mongo today:
+> **Where RedDB wins:** benchmarks show measurable wins over Postgres and Mongo today:
 >
-> - `typed_insert` — RedDB ≈ **16× faster** than PostgreSQL on typed
->   single-row inserts.
-> - `disk_usage` — RedDB ≈ **1.5× faster** than MongoDB on the
->   compact-write path.
+> - `typed_insert` — **16× faster** than PostgreSQL on typed single-row inserts
+> - `disk_usage` — **1.5× faster** than MongoDB on compact-write workloads
 >
-> See [`docs/perf/wins.md`](docs/perf/wins.md) for the cited sessions
-> and reproducible commands. The honest counterpart — gaps where RedDB
-> is still behind — lives at
-> [`docs/perf/when-not-reddb.md`](docs/perf/when-not-reddb.md).
+> See [`docs/perf/wins.md`](docs/perf/wins.md) for reproducible benchmarks and [`docs/perf/when-not-reddb.md`](docs/perf/when-not-reddb.md) for the honest gaps where we're still behind.
 
 RedDB uses multiple optimization techniques for fast queries at scale:
 
@@ -386,25 +387,23 @@ RedDB uses multiple optimization techniques for fast queries at scale:
 
 ---
 
-## Durability & Corruption Defense
+## 🛡️ Durability & Corruption Defense
 
-RedDB uses 7 layers of protection to keep your data safe:
+Seven layers of protection — tested and proven against power loss, torn writes, and crashes:
 
-| Layer | What it does |
-|:------|:-------------|
-| **File Lock** | Exclusive `flock` prevents two processes from writing the same `.rdb` file |
-| **Double-Write Buffer** | Pages written to `.rdb-dwb` first; survives torn writes on power loss |
-| **Header Shadow** | Copy of page 0 in `.rdb-hdr`; auto-recovers if header corrupts |
-| **Metadata Shadow** | Copy of page 1 in `.rdb-meta`; auto-recovers collection registry |
-| **fsync Discipline** | All critical writes followed by `sync_all()` (not just flush) |
-| **Two-Phase Checkpoint** | Crash-safe WAL→DB transfer with `checkpoint_in_progress` flag |
-| **Binary Store CRC32** | V3 files have CRC32 footer + atomic write-to-temp-then-rename |
-
-Every page has a CRC32 checksum (verified on read). Every WAL record has a CRC32 checksum. The binary store format (V3) includes a full-file CRC32 footer.
+| Layer | Defense |
+|:------|:---------|
+| **File Lock** | Exclusive `flock` — prevents concurrent writes to `.rdb` |
+| **Double-Write Buffer** | Pages in `.rdb-dwb` first — survives power loss |
+| **Header Shadow** | Backup page 0 in `.rdb-hdr` — auto-recovers corruption |
+| **Metadata Shadow** | Backup page 1 in `.rdb-meta` — recovers collection registry |
+| **fsync Discipline** | `sync_all()` after every critical write — no flush-only shortcuts |
+| **Two-Phase Checkpoint** | WAL→DB with `checkpoint_in_progress` flag — crash-safe |
+| **CRC32 Checksum** | Every page, every WAL record, full-file footer — detects bitrot |
 
 ---
 
-## Eventual Consistency
+## 🔀 Eventual Consistency
 
 RedDB supports per-field eventual consistency via an append-only transaction log with periodic consolidation. Inspired by CRDT principles (commutative, associative reducers), it enables high-throughput write patterns while guaranteeing convergence.
 
@@ -429,7 +428,7 @@ See the [Eventual Consistency Guide](https://reddb-io.github.io/reddb/#/guides/e
 
 ---
 
-## Geographic Operations
+## 🗺️ Geographic Operations
 
 Built-in geo functions with no external dependencies. Supports both spherical (Haversine) and ellipsoidal (Vincenty/WGS-84) models.
 
@@ -462,7 +461,7 @@ Also available: destination point, bounding box, polygon area, spatial search (R
 
 ---
 
-## Vector Clustering
+## 📈 Vector Clustering
 
 Standalone K-Means and DBSCAN clustering on vector collections, with SIMD-accelerated distance computation and automatic parallelization.
 
@@ -482,11 +481,9 @@ K-Means uses parallel assignment (multi-threaded for datasets > 1K vectors). DBS
 
 ---
 
-## Native Drivers
+## 🚀 Native Drivers
 
-One connection-string API, four languages. Every driver accepts the same
-`connect(uri)` contract so application code ports across runtimes with zero
-ceremony.
+One connection-string API, multiple languages. Same `connect(uri)` everywhere — code ports across runtimes with zero ceremony.
 
 | Language          | Package          | Install                        | Backends                            |
 |-------------------|------------------|--------------------------------|-------------------------------------|
@@ -567,74 +564,87 @@ npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
+
+**Install the `red` binary:**
 
 ```bash
-# Install
 curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
-# The installer verifies the selected release asset against SHA256SUMS before install.
+# Verifies SHA256 before install • auto-detects your OS + arch
+```
 
-# Start the server (wire: 5050, gRPC: 55055, HTTP: 5000)
-red server --wire-bind 127.0.0.1:5050 --grpc-bind 127.0.0.1:55055 --http-bind 127.0.0.1:5000 --path ./data.rdb
+**Start the server:**
 
-# Insert data
+```bash
+red server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:5000 --path ./data.rdb
+# RedWire: 5050 · gRPC: 55055 · HTTP: 5000
+```
+
+**Insert and query via HTTP:**
+
+```bash
 curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
-  -d '{"query":"INSERT INTO hosts (ip, os) VALUES ('\''10.0.0.1'\'', '\''linux'\'')"}'
+  -d '{"query":"INSERT INTO hosts (ip, os) VALUES ('"'"'10.0.0.1'"'"', '"'"'linux'"'"')"}'
 
-# Query it
 curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT * FROM hosts"}'
 ```
 
-Or via npm CLI launcher:
+**Or via npm (no separate install):**
 
 ```bash
-npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:5000
+npx @reddb-io/cli@latest server --http-bind 127.0.0.1:5000
 ```
 
-Or via Docker:
+**Or Docker:**
 
 ```bash
-echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin # if GHCR requires auth
-docker run --rm -p 5050:5050 -p 55055:55055 -p 5000:5000 ghcr.io/reddb-io/reddb:latest
+docker run --rm -p 5050:5050 -p 55055:55055 -p 5000:5000 \
+  ghcr.io/reddb-io/reddb:latest
 ```
 
-Or, if you only need the thin remote-only client (~7 MB image):
-
-```bash
-echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin # if GHCR requires auth
-docker run --rm ghcr.io/reddb-io/reddb-client:latest red://reddb.example.com:5050 -c "SELECT 1"
-```
-
-For production-secure Docker (vault + secrets) and Kubernetes, see
-[`docs/deployment/docker.md`](./docs/deployment/docker.md)
-and [`docs/security/vault.md`](./docs/security/vault.md).
+→ See [`docs/deployment/docker.md`](./docs/deployment/docker.md) and [`docs/security/vault.md`](./docs/security/vault.md) for production setups.
 
 ---
 
-## Workspace layout
+## 📂 Architecture
 
-RedDB ships as a Cargo workspace. The `reddb` crate is the
-umbrella that hosts the `red` binary; the engine, thin client,
-gRPC stubs, and wire vocabulary live in sibling crates.
+RedDB ships as a Cargo workspace:
 
-## Links
-
-- [Documentation](https://reddb-io.github.io/reddb)
-- [GitHub](https://github.com/reddb-io/reddb)
-- [npm driver package](https://www.npmjs.com/package/reddb)
-- [npm CLI launcher](https://www.npmjs.com/package/@reddb-io/cli)
-- [Releases](https://github.com/reddb-io/reddb/releases)
-- [Release Policy](./docs/release-policy.md)
-- [Support Policy](./SUPPORT.md)
-- [Security Policy](./SECURITY.md)
-- [Public Contract Matrix](./docs/reference/contract-matrix.md) — every doc'd promise mapped to a test or a planned-status note
+| Crate | Role |
+|:------|:-----|
+| `reddb` | Binary umbrella; houses the `red` CLI |
+| `reddb-io-engine` | Storage engine, indexes, query execution |
+| `reddb-io-client` | Rust driver with embedded, gRPC, HTTP transports |
+| `reddb-io-wire` | RedWire protocol vocabulary & framing |
+| `reddb-io-rql` | RQL parser and semantic analyzer |
+| `reddb-io-types` | Type system, value codec, cross-model refs |
 
 ---
 
-**Business Source License 1.1** -- source-available; free for self-hosted, internal, and non-production use. Offering RedDB as a managed/hosted database service to third parties requires a commercial license. Converts to AGPL-3.0 on 2030-06-22. See [LICENSE](./LICENSE). Built by [RedDB.io](https://github.com/reddb-io)
+## 📚 Resources
+
+| Resource | Purpose |
+|:---------|:---------|
+| 📖 [Documentation](https://reddb-io.github.io/reddb) | Full guides, API reference, tutorials |
+| 🐙 [GitHub](https://github.com/reddb-io/reddb) | Source code, issues, discussions |
+| 📦 [npm CLI](https://www.npmjs.com/package/@reddb-io/cli) | Install & run via `npx` |
+| 📤 [npm Drivers](https://www.npmjs.com/package/@reddb-io/sdk) | Node/Bun/Deno SDK |
+| 📋 [Release Notes](./docs/release-policy.md) | Version history & changelog |
+| 🛡️ [Security Policy](./SECURITY.md) | Reporting vulnerabilities |
+| ✅ [Contract Matrix](./docs/reference/contract-matrix.md) | Every promise → test or plan |
+
+---
+
+<div align="center">
+
+**Business Source License 1.1** — source-available; free for self-hosted & internal use. Managed services require a commercial license. Converts to AGPL-3.0 on June 22, 2030. See [LICENSE](./LICENSE).
+
+Built by [RedDB.io](https://github.com/reddb-io)
+
+</div>
 
 <!-- contract-matrix:begin -->
 ## Public-surface support
