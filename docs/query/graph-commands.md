@@ -148,11 +148,17 @@ GRAPH CLUSTERING
 
 ## GRAPH TOPOLOGICAL_SORT
 
-Compute topological ordering of a DAG:
+Compute topological ordering of a DAG. Returns nodes in dependency-safe sequence — each node appears before the nodes it points to.
 
 ```sql
 GRAPH TOPOLOGICAL_SORT
 ```
+
+The command fails if the graph contains a cycle. Run `GRAPH CYCLES` or check `is_acyclic` from `GRAPH PROPERTIES` first.
+
+Typical use cases: CI/CD stage ordering, service boot order, package install sequencing, task scheduling.
+
+See [Topology & Topological Sort](/graph/topology.md) for worked examples covering build pipelines, service dependency graphs, network infrastructure, and package resolution.
 
 ## GRAPH PROPERTIES
 
