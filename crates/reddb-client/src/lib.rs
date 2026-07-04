@@ -433,7 +433,7 @@ impl<'a> DocumentClient<'a> {
         let result = self
             .db
             .query(&format!(
-                "UPDATE {collection} DOCUMENTS SET {} WHERE rid = {} RETURNING *",
+                "UPDATE {collection} SET {} WHERE rid = {} RETURNING *",
                 assignments.join(", "),
                 sql_string_literal(rid)
             ))
