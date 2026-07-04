@@ -929,17 +929,7 @@ impl<'a> Parser<'a> {
                         }
                         // Value: recursive
                         let val = self.parse_literal_value()?;
-                        let json_val = match val {
-                            Value::Null => reddb_types::json::Value::Null,
-                            Value::Boolean(b) => reddb_types::json::Value::Bool(b),
-                            Value::Integer(i) => reddb_types::json::Value::Number(i as f64),
-                            Value::Float(f) => reddb_types::json::Value::Number(f),
-                            Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
-                            Value::Json(ref bytes) => reddb_types::json::from_slice(bytes)
-                                .unwrap_or(reddb_types::json::Value::Null),
-                            _ => reddb_types::json::Value::Null,
-                        };
-                        map.insert(key, json_val);
+                        map.insert(key, literal_value_to_json(&val));
                         if !self.consume(&Token::Comma)? {
                             break;
                         }
@@ -956,6 +946,30 @@ impl<'a> Parser<'a> {
                 self.position(),
             )),
         }
+    }
+}
+
+/// Convert a parsed literal `Value` into a `reddb_types::json::Value`.
+///
+/// Array literals now parse into `Value::Array` (issue #1708). When an array
+/// appears inside a JSON object-literal position (e.g.
+/// `{roles: ['edge', 'cache']}`) it must serialise as a JSON array rather than
+/// collapsing to `null` the way the old catch-all arm did. Recurses so nested
+/// arrays and objects round-trip.
+fn literal_value_to_json(val: &Value) -> reddb_types::json::Value {
+    match val {
+        Value::Null => reddb_types::json::Value::Null,
+        Value::Boolean(b) => reddb_types::json::Value::Bool(*b),
+        Value::Integer(i) => reddb_types::json::Value::Number(*i as f64),
+        Value::Float(f) => reddb_types::json::Value::Number(*f),
+        Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
+        Value::Json(bytes) => {
+            reddb_types::json::from_slice(bytes).unwrap_or(reddb_types::json::Value::Null)
+        }
+        Value::Array(items) => {
+            reddb_types::json::Value::Array(items.iter().map(literal_value_to_json).collect())
+        }
+        _ => reddb_types::json::Value::Null,
     }
 }
 
