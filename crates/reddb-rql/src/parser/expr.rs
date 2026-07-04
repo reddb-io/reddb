@@ -191,6 +191,15 @@ impl<'a> Parser<'a> {
                         continue;
                     }
                 }
+                // Didactic (#1704): `->` / `->>` are Postgres JSON operators a
+                // document-model newcomer predictably reaches for. Teach the
+                // dotted-path idiom instead of leaving a dangling `->` for the
+                // caller to reject as a generic "Unexpected token". Graph-mode
+                // traversal consumes `->` / `<-` in graph.rs before it ever
+                // reaches this scalar-expression path, so it is unaffected.
+                if matches!(self.peek(), Token::Arrow) {
+                    return Err(ParseError::json_arrow_operator(self.position()));
+                }
                 break;
             };
             if prec < min_prec {

@@ -1,0 +1,5 @@
+input = "ALTER TABLE events ADD COLUMN ip TEXT GENERATED ALWAYS AS (body) STORED"
+expected_error_substring = "no generated column is needed"
+expected_error_kind = "Syntax"
+source = "crates/reddb-rql/src/parser/error.rs:195"
+kind = "negative"
