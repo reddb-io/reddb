@@ -82,7 +82,7 @@ fn update_documents_where_id_matches_by_logical_id() {
     let updated = exec(
         &rt,
         &format!(
-            "UPDATE issue1363_update_id DOCUMENTS SET score += 5 \
+            "UPDATE issue1363_update_id SET score += 5 \
              WHERE id = {alpha_id} RETURNING name, score"
         ),
     );
@@ -112,7 +112,7 @@ fn update_documents_where_body_field_matches() {
 
     let updated = exec(
         &rt,
-        "UPDATE issue1363_update_body DOCUMENTS SET score += 1 \
+        "UPDATE issue1363_update_body SET score += 1 \
          WHERE body.category = 'active' RETURNING name, score",
     );
     assert_eq!(
@@ -192,7 +192,7 @@ fn no_match_reports_zero_not_error() {
 
     let update = exec(
         &rt,
-        "UPDATE issue1363_nomatch DOCUMENTS SET score += 1 WHERE id = 99999999",
+        "UPDATE issue1363_nomatch SET score += 1 WHERE id = 99999999",
     );
     assert_eq!(update.affected_rows, 0, "no id match → zero, not error");
 
