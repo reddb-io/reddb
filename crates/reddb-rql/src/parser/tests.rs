@@ -2070,7 +2070,9 @@ fn test_parse_dml_literal_value_array_and_object_branches() {
     // preserved verbatim rather than being flattened to JSON `null`.
     let mut parser = Parser::new("[PASSWORD('pw')]").unwrap();
     let value = parser.parse_literal_value().unwrap();
-    assert!(matches!(value, Value::Array(items) if matches!(items.as_slice(), [Value::Password(_)])));
+    assert!(
+        matches!(value, Value::Array(items) if matches!(items.as_slice(), [Value::Password(_)]))
+    );
 
     let mut parser = Parser::new(
         "{'quoted': 'text', ident = 1, type: true, nested: {ok: false}, raw: {\"x\":1}, secret: SECRET('s')}",
