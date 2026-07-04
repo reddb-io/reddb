@@ -72,12 +72,10 @@ CREATE DOCUMENT IF NOT EXISTS events
 
 ## Creating Documents
 
-Once the collection exists, insert documents. Over SQL, use the explicit
-`DOCUMENT` insert form (the JSON payload is the document `body`):
+Once the collection exists, insert documents with the idempotent assertion form:
 
 ```sql
-INSERT INTO events DOCUMENT (body)
-VALUES ('{"event_type":"login","user_id":"u_abc123"}')
+INSERT INTO events DOCUMENT VALUES ({"event_type":"login","user_id":"u_abc123"})
 ```
 
 The HTTP, gRPC, and MCP surfaces below are equivalent.
@@ -242,18 +240,18 @@ return a structured envelope with `code`, `op_index`, and a JSON Pointer
 
 ### SQL UPDATE on documents
 
-Document updates use the explicit `DOCUMENTS` target. Compound assignment,
+Update documents with standard `UPDATE` syntax. Compound assignment,
 `RETURNING`, `LIMIT`, and `ORDER BY ... LIMIT` work the same as for rows:
 
 ```sql
-UPDATE events DOCUMENTS
+UPDATE events
 SET retries += 1
 WHERE event_type = 'login' AND retries < 5
 RETURNING rid, retries
 ```
 
 ```sql
-UPDATE events DOCUMENTS
+UPDATE events
 SET attempts += 1, last_seen = NOW()
 WHERE status = 'pending'
 ORDER BY created_at ASC
