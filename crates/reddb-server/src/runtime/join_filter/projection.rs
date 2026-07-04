@@ -88,15 +88,23 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
                     };
                     match crate::storage::query::evaluator::evaluate(&expr, &row) {
                         Ok(value) => Some(value),
+                        // A shape the typed evaluator does not cover (unknown
+                        // function, or an unresolved reference such as a CAST
+                        // target type lowered to a `TYPE:*` pseudo-column) falls
+                        // back to the legacy path. Genuine data errors (JSON
+                        // parse failure, overflow, …) still propagate.
                         Err(crate::storage::query::evaluator::EvalError::UnknownFunction {
                             ..
-                        }) => Some(Value::Boolean(evaluate_runtime_filter_with_db(
-                            db,
-                            source,
-                            filter,
-                            table_name,
-                            table_alias,
-                        ))),
+                        })
+                        | Err(crate::storage::query::evaluator::EvalError::UnknownColumn(_)) => {
+                            Some(Value::Boolean(evaluate_runtime_filter_with_db(
+                                db,
+                                source,
+                                filter,
+                                table_name,
+                                table_alias,
+                            )))
+                        }
                         Err(err) => return Err(crate::RedDBError::Query(err.to_string())),
                     }
                 } else {
@@ -123,9 +131,17 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
                     };
                     match crate::storage::query::evaluator::evaluate(&expr, &row) {
                         Ok(value) => Some(value),
+                        // A shape the typed evaluator does not cover (unknown
+                        // function, or an unresolved reference such as a CAST
+                        // target type lowered to a `TYPE:*` pseudo-column) falls
+                        // back to the legacy dispatcher. Genuine data errors
+                        // (JSON parse failure, overflow, …) still propagate.
                         Err(crate::storage::query::evaluator::EvalError::UnknownFunction {
                             ..
-                        }) => evaluate_scalar_function_with_db(db, name, args, source),
+                        })
+                        | Err(crate::storage::query::evaluator::EvalError::UnknownColumn(_)) => {
+                            evaluate_scalar_function_with_db(db, name, args, source)
+                        }
                         Err(err) => return Err(crate::RedDBError::Query(err.to_string())),
                     }
                 } else {
