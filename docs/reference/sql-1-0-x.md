@@ -86,10 +86,10 @@ columns or top-level document, KV, node, or edge properties named `rid`,
 | `INSERT ... RETURNING *` | `INSERT INTO users (name) VALUES ('Ada') RETURNING *` | supported |
 | `INSERT ... RETURNING col, ...` | `INSERT INTO users (name) VALUES ('Ada') RETURNING rid, name` | supported |
 | `UPDATE ... SET ... WHERE ...` | `UPDATE users SET active = true WHERE rid = $1` | supported |
-| Explicit update targets | `UPDATE users ROWS SET active = true WHERE rid = $1` | supported |
-| Multi-model update targets | `UPDATE docs DOCUMENTS SET score += 1`; `UPDATE settings KV SET value += 1`; `UPDATE social NODES SET score += 1`; `UPDATE social EDGES SET weight += 0.5` | supported |
+| Model inferred from catalog | `UPDATE docs SET score += 1`; `UPDATE settings SET value += 1` | supported; `ROWS`/`DOCUMENTS`/`KV` markers removed (ADR 0067) |
+| Graph update markers | `UPDATE social NODES SET score += 1`; `UPDATE social EDGES SET weight += 0.5` | supported; only `NODES`/`EDGES` remain — a graph holds both record kinds |
 | Compound assignment | `UPDATE users SET score += 5, attempts %= 3 WHERE rid = $1` | supported |
-| Ordered update batches | `UPDATE users ROWS SET touched = true ORDER BY priority DESC LIMIT 10` | supported; `ORDER BY` requires `LIMIT` |
+| Ordered update batches | `UPDATE users SET touched = true ORDER BY priority DESC LIMIT 10` | supported; `ORDER BY` requires `LIMIT` |
 | `UPDATE ... RETURNING * / cols` | `UPDATE users SET name = 'Ada' WHERE rid = $1 RETURNING rid, name` | supported |
 | `DELETE FROM ... WHERE ...` | `DELETE FROM users WHERE rid = $1` | supported |
 | `DELETE ... RETURNING * / cols` | `DELETE FROM users WHERE rid = $1 RETURNING *` | supported |

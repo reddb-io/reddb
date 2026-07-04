@@ -166,6 +166,28 @@ rule from [ADR 0066](../../.red/adr/0066-reserved-envelope-fields-user-pays.md):
 the envelope vocabulary stays unprefixed and user data pays for top-level
 collisions.
 
+## Identifier vs. data case rule
+
+RQL folds the case of **identifiers** — collection names, column names, and
+keywords — but never touches **your JSON body keys**. Body keys are user data
+and are matched **exactly**, byte for byte, everywhere they are written or read
+([ADR 0067](../../.red/adr/0067-document-dml-surface-clean-break.md)).
+
+```sql
+-- Identifier folding: these three name the same collection.
+INSERT INTO events   DOCUMENT VALUES ({"UserId": 7});
+INSERT INTO Events   DOCUMENT VALUES ({"UserId": 8});
+INSERT INTO EVENTS   DOCUMENT VALUES ({"UserId": 9});
+
+-- Body-key exactness: `UserId` and `userid` are DIFFERENT fields.
+SELECT UserId FROM events;   -- reads the body key `UserId`
+SELECT userid FROM events;   -- reads the (absent) body key `userid` → empty
+```
+
+The practical hazard is a typo'd projection (`userid` vs `UserId`) silently
+returning nothing rather than erroring — the schemaless model cannot know which
+spelling you meant. Keep body-key casing consistent in your writes and reads.
+
 ## Querying Documents
 
 Documents are queryable both as collection-scoped SQL reads and through the universal query engine.
