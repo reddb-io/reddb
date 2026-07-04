@@ -84,6 +84,19 @@ final class Sql
         return "'" . str_replace("'", "''", $encoded) . "'";
     }
 
+    /**
+     * ADR 0067 (#1709): a document body is written as an inline strict-JSON
+     * literal (no surrounding quotes) — the quoted-string coercion is removed.
+     */
+    public static function jsonInlineLiteral(mixed $value): string
+    {
+        $encoded = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($encoded === false) {
+            throw new InvalidArgument('failed to JSON-encode value: ' . json_last_error_msg());
+        }
+        return $encoded;
+    }
+
     public static function identifier(string $value): string
     {
         if ($value !== '' && self::allIdentChars($value)) return $value;
