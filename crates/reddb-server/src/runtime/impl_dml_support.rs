@@ -224,6 +224,11 @@ pub(super) fn find_document_body_json(
         }
         Value::Text(text) => crate::json::from_str(text.as_ref())
             .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
+        // A JSON-position array literal parses losslessly into `Value::Array`
+        // (issue #1708); resolve it to a JSON array here.
+        Value::Array(_) => Ok(crate::presentation::entity_json::storage_value_to_json(
+            &val,
+        )),
         Value::Integer(value) => crate::json::from_str(&value.to_string())
             .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
         Value::UnsignedInteger(value) => crate::json::from_str(&value.to_string())
@@ -374,6 +379,10 @@ pub(super) fn find_column_value_f32_opt(
 }
 
 /// Find a required column value and coerce to Vec<f32> (from Value::Vector).
+///
+/// Array literals now parse losslessly into `Value::Array` (issue #1708), so a
+/// vector-typed column position resolves that array to `Vec<f32>` here rather
+/// than the parser committing to an f32 vector before the target is known.
 pub(super) fn find_column_value_vec_f32(
     columns: &[String],
     values: &[Value],
@@ -382,6 +391,17 @@ pub(super) fn find_column_value_vec_f32(
     let val = find_column_value(columns, values, name)?;
     match val {
         Value::Vector(v) => Ok(v),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Float(f) => Ok(*f as f32),
+                Value::Integer(n) | Value::BigInt(n) => Ok(*n as f32),
+                Value::UnsignedInteger(n) => Ok(*n as f32),
+                other => Err(RedDBError::Query(format!(
+                    "column '{name}' vector array accepts only numeric values, got {other:?}"
+                ))),
+            })
+            .collect(),
         Value::Json(bytes) => {
             // Try to parse as JSON array of numbers
             let s = std::str::from_utf8(&bytes).map_err(|_| {

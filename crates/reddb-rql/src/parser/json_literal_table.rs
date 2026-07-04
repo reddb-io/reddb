@@ -395,15 +395,16 @@ fn quoted_form_still_parses() {
 
 #[test]
 fn vector_literal_still_parses() {
-    // `[0.1, 0.2]` must keep producing a Value::Vector, not be touched
-    // by the JSON sub-mode (which only triggers on `{`).
+    // `[0.1, 0.2, 0.3]` parses losslessly into `Value::Array` (issue #1708),
+    // not the JSON sub-mode (which only triggers on `{`). The runtime coerces
+    // it to a `Value::Vector` at the vector column position.
     let q = parse(r#"INSERT INTO emb VECTOR (dense) VALUES ([0.1, 0.2, 0.3])"#)
         .unwrap()
         .query;
     let QueryExpr::Insert(ins) = q else {
         panic!("expected Insert");
     };
-    assert!(matches!(ins.values[0][0], Value::Vector(_)));
+    assert!(matches!(ins.values[0][0], Value::Array(_)));
 }
 
 #[test]
