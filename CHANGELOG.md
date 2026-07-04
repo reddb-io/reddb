@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.22.0
+
+### Minor Changes
+
+- Document DML overhaul — UPDATE surface + nested SET (ADR 0067, PRD [#1703](https://github.com/reddb-io/reddb/issues/1703), completing the clean break started in v1.21.0):
+
+  - **UPDATE model markers removed.** `UPDATE <c> DOCUMENTS SET …`, `UPDATE <c> ROWS SET …`, and `UPDATE <c> KV SET …` are **rejected** with a didactic error — the catalog already knows the collection's model, so unmarked `UPDATE <c> SET …` infers it. `NODES`/`EDGES` markers stay (a graph holds both record kinds). Dotted assignment targets (`SET a.b.c = …`) now parse for all targets and are validated by the analyzer against the catalog model.
+  - **Nested document SET** deep-merges dotted paths into the document body (intermediate objects created only where absent, siblings preserved), guarded against dotted paths through scalar/array intermediates and respecting the reserved-field rule.
+  - **Docs re-canonicalized**: the Documents teaching surface uses the inline/unmarked forms throughout, with a new Identifier-vs-data case-rule section (identifiers fold case; JSON body keys are matched exactly).
+
+  All published drivers (js, js-client, cpp, dart, dotnet, go, java, kotlin, php, python, python-asyncio, zig, client) emit the unmarked document UPDATE form in this release.
+
 ## 1.21.0
 
 ### Minor Changes
