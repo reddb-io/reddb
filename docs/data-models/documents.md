@@ -76,8 +76,8 @@ Once the collection exists, insert documents. Over SQL, use the explicit
 `DOCUMENT` insert form (the JSON payload is the document `body`):
 
 ```sql
-INSERT INTO events DOCUMENT (body)
-VALUES ('{"event_type":"login","user_id":"u_abc123"}')
+INSERT INTO events DOCUMENT
+VALUES ({"event_type":"login","user_id":"u_abc123"})
 ```
 
 The HTTP, gRPC, and MCP surfaces below are equivalent.

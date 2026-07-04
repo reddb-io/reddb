@@ -41,7 +41,7 @@ that data lives.
 INSERT INTO users (name, email) VALUES ('Alice', 'alice@co.com')
 
 -- JSON documents
-INSERT INTO logs DOCUMENT (body) VALUES ('{"level":"info","msg":"login"}')
+INSERT INTO logs DOCUMENT VALUES ({"level":"info","msg":"login"})
 
 -- Graph edges
 INSERT INTO network EDGE (label, from_rid, to_rid) VALUES ('CONNECTS', 102, 103)

@@ -85,7 +85,7 @@ These are the main structures most users mean when they ask "what can I build in
 | Model | Main write path | Main query path | Best for | Native backing |
 |:------|:----------------|:----------------|:---------|:---------------|
 | Tables & Rows | `CREATE TABLE`, `INSERT INTO users (...)` | `SELECT`, `UPDATE`, `DELETE` | Structured records with typed fields | Native `TableRow` |
-| Documents | `INSERT INTO logs DOCUMENT (body) VALUES (...)` | `SELECT`, `FROM ANY`, field projections | Flexible JSON payloads | User-facing model over the unified collection path |
+| Documents | `INSERT INTO logs DOCUMENT VALUES ({...})` | `SELECT`, `FROM ANY`, field projections | Flexible JSON payloads | User-facing model over the unified collection path |
 | Key-Value | `INSERT INTO config KV (key, value) VALUES (...)` or KV HTTP API | KV API, `SELECT key, value FROM config` | Config, sessions, flags, cache-like lookups | User-facing model over the unified collection path |
 | Cache | Internal Blob Cache Interface first; public API later | Exact key lookup, existence check, invalidation APIs | Arbitrary cached blobs with rich TTL and durable L2 | Proposed supporting engine structure |
 | Graphs | `INSERT INTO network NODE ...`, `INSERT INTO network EDGE (label, from_rid, to_rid) ...` | `MATCH`, `GRAPH ...`, `PATH ...` | Relationships, traversals, analytics | Native `GraphNode` and `GraphEdge` |

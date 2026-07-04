@@ -23,8 +23,8 @@ Connect with `red connect 127.0.0.1:55055` (or POST to
 Each document carries an arbitrary JSON `body`:
 
 ```sql
-INSERT INTO docs DOCUMENT (body) VALUES ('{"category":"ops","slug":"guide","title":"Runbook Guide"}');
-INSERT INTO docs DOCUMENT (body) VALUES ('{"category":"db","slug":"runbook","title":"DB Runbook"}');
+INSERT INTO docs DOCUMENT VALUES ({"category":"ops","slug":"guide","title":"Runbook Guide"});
+INSERT INTO docs DOCUMENT VALUES ({"category":"db","slug":"runbook","title":"DB Runbook"});
 ```
 
 The `docs` collection is created on first write — no schema declaration needed.

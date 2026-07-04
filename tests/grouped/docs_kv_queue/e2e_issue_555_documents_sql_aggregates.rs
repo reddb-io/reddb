@@ -53,10 +53,8 @@ fn seed_documents(rt: &RedDBRuntime, collection: &str) {
         r#"{"level":"error","score":50}"#,
     ];
     for d in docs {
-        rt.execute_query(&format!(
-            "INSERT INTO {collection} DOCUMENT VALUES ({d})"
-        ))
-        .expect("INSERT DOCUMENT");
+        rt.execute_query(&format!("INSERT INTO {collection} DOCUMENT VALUES ({d})"))
+            .expect("INSERT DOCUMENT");
     }
 }
 

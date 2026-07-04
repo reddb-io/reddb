@@ -209,10 +209,7 @@ impl<'a> Parser<'a> {
     /// the removed coercion (`VALUES ('{…}')`) and is rejected with a
     /// didactic error. Parameters (`$N` / `?`) and `JSON_PARSE(<expr>)`
     /// remain valid, so only `Expr::Literal { Value::Text }` is rejected.
-    fn reject_document_string_body(
-        &self,
-        value_exprs: &[Vec<Expr>],
-    ) -> Result<(), ParseError> {
+    fn reject_document_string_body(&self, value_exprs: &[Vec<Expr>]) -> Result<(), ParseError> {
         for row in value_exprs {
             for expr in row {
                 if let Expr::Literal {
