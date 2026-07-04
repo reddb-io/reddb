@@ -91,7 +91,19 @@ pub(super) fn resolve_update_entity_by_logical_id(
     logical_id: EntityId,
 ) -> Option<UnifiedEntity> {
     let store = runtime.inner.db.store();
-    if let Some(entity) = store.get_table_row_by_logical_id(table, logical_id) {
+    // Read-modify-write pre-image must be resolved through the *current
+    // statement snapshot*, not merely the latest live physical version.
+    // `get_table_row_by_logical_id` returns whichever version currently
+    // carries `xmax == 0`, which under concurrent same-row UPDATEs can be a
+    // sibling writer's still-uncommitted version. Applying a compound
+    // assignment (`value += 1`) on top of that pre-image lets a first-
+    // committer-wins winner fold a concurrent loser's (later-aborted) write
+    // into committed state — an isolation violation. Routing through the
+    // MVCC resolver reads the version this transaction is actually allowed
+    // to observe (including its own in-flight writes via `own_xids`).
+    let resolver =
+        crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
+    if let Some(entity) = resolver.resolve_logical_id(&store, table, logical_id) {
         return Some(entity);
     }
     // Fallback for non-table-row entities (graph nodes/edges, etc.) where
