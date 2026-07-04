@@ -189,9 +189,25 @@ impl SnapshotManager {
 
     /// Allocate a new xid and mark it active. Returns the xid for
     /// stamping onto `UnifiedEntity::xmin/xmax`.
+    ///
+    /// Allocation and the `active` insert happen together under the state
+    /// write lock. This is load-bearing for first-committer-wins: a
+    /// concurrent `snapshot()` (state read lock) must never observe a
+    /// *lower-numbered* still-running xid as absent from `active`. Were the
+    /// `fetch_add` done outside the lock, a writer that grabbed the smaller
+    /// xid could still be mid-`begin()` while a later transaction snapshots
+    /// a larger xid — the smaller xid would be missing from `in_progress`,
+    /// yet `xmin <= snapshot.xid`, so the snapshot would treat that
+    /// concurrent (later possibly-committed) writer as visible. That both
+    /// leaks an uncommitted row into a peer's read and lets two writers on
+    /// the same row both commit. Serialising allocation under the lock
+    /// guarantees any xid smaller than a taken snapshot's xid is already in
+    /// `active` (or already finished), so `in_progress` is never short a
+    /// concurrent writer.
     pub fn begin(&self) -> Xid {
+        let mut state = self.state.write();
         let xid = self.next_xid.fetch_add(1, Ordering::Relaxed);
-        self.state.write().active.insert(xid);
+        state.active.insert(xid);
         xid
     }
 
