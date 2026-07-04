@@ -860,6 +860,16 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
     // Scalar — JSON (Phase 1.4 PG parity)
     // ─────────────────────────────────────────────────────────────
     //
+    // JSON_PARSE(text) → Json
+    //   Explicit string-to-JSON conversion. Unlike JSON_VALID, invalid JSON is
+    //   a runtime error in evaluator paths that can surface errors.
+    entry(
+        "JSON_PARSE",
+        ARGS_JSON_TEXT,
+        DataType::Json,
+        FunctionKind::Scalar,
+        false,
+    ),
     // JSON_EXTRACT(json_or_text, path) → Text
     //   Returns the value at `path` serialised as JSON text. Scalar strings
     //   come back with surrounding quotes; scalar numbers/booleans come back
