@@ -3512,7 +3512,7 @@ fn test_parse_insert_vector() {
 #[test]
 fn test_parse_insert_document() {
     let query =
-        parse(r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"name":"test","value":42}')"#).unwrap();
+        parse(r#"INSERT INTO docs DOCUMENT VALUES ({"name":"test","value":42})"#).unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "docs");
         assert_eq!(ins.entity_type, crate::ast::InsertEntityType::Document);
@@ -6883,7 +6883,7 @@ fn doc_form_queue_push_raw_json_with_priority_suffix() {
 #[test]
 fn doc_form_insert_document_with_raw_json_literal_in_values() {
     // README.md:44, landing +page.svelte:54/150/492
-    let q = parse(r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"warn","ip":"10.0.0.1"})"#)
+    let q = parse(r#"INSERT INTO logs DOCUMENT VALUES ({"level":"warn","ip":"10.0.0.1"})"#)
         .unwrap();
     // We don't pin the exact AST shape — just prove it parses to *some* insert.
     match q {
