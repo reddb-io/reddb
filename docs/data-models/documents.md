@@ -164,6 +164,38 @@ rule from [ADR 0066](../../.red/adr/0066-reserved-envelope-fields-user-pays.md):
 the envelope vocabulary stays unprefixed and user data pays for top-level
 collisions.
 
+## Identifier and data case rule
+
+SQL identifiers (collection names, column references in `WHERE` and `SET`)
+fold case — `UserId` and `userid` refer to the same top-level field. JSON
+body keys are user data and are **matched exactly**:
+
+```sql
+INSERT INTO logs DOCUMENT VALUES ({"UserId":"u_123","event":"login"})
+```
+
+This document has two top-level fields: `UserId` and `event`. A query using
+a lowercase identifier still matches the field:
+
+```sql
+SELECT userid FROM logs
+```
+
+returns `u_123`. However, a query that uses exact JSON-key syntax:
+
+```sql
+SELECT body->>'userid' FROM logs
+```
+
+returns `NULL` because the key `userid` does not exist — the stored key is
+`UserId` with uppercase U. This asymmetry is by design per
+[ADR 0067](../../.red/adr/0067-document-dml-surface-clean-break.md): RedDB
+flattens top-level body keys into queryable columns with SQL's case-insensitive
+identifier semantics, but the underlying JSON keys are never case-folded.
+The schema-free document model places the responsibility on the user to avoid
+typos such as `userid` vs `UserId` — an empty result silently alerts you to
+a case mismatch.
+
 ## Querying Documents
 
 Documents are queryable both as collection-scoped SQL reads and through the universal query engine.
