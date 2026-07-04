@@ -109,7 +109,7 @@ public class DocumentClient internal constructor(private val q: Querier) {
             }
             "${Sql.identifier(k)} = ${Sql.valueLiteral(v)}"
         }
-        val sql = "UPDATE ${Sql.identifierPath(collection)} DOCUMENTS SET " +
+        val sql = "UPDATE ${Sql.identifierPath(collection)} SET " +
             parts.joinToString(", ") + " WHERE rid = \$1 RETURNING *"
         val body = q.query(sql, rid)
         val (row, _) = Sql.firstRow(body)
