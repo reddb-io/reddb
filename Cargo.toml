@@ -89,6 +89,7 @@ workspace = true
 name = "llms_txt_generated"
 path = "tests/llms_txt_generated.rs"
 
+
 [[test]]
 name = "docs_getting_started_quickstarts"
 path = "tests/docs_getting_started_quickstarts.rs"
