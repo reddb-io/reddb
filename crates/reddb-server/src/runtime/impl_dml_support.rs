@@ -226,7 +226,9 @@ pub(super) fn find_document_body_json(
             .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
         // A JSON-position array literal parses losslessly into `Value::Array`
         // (issue #1708); resolve it to a JSON array here.
-        Value::Array(_) => Ok(crate::presentation::entity_json::storage_value_to_json(&val)),
+        Value::Array(_) => Ok(crate::presentation::entity_json::storage_value_to_json(
+            &val,
+        )),
         Value::Integer(value) => crate::json::from_str(&value.to_string())
             .map_err(|err| RedDBError::Query(format!("invalid JSON body: {err}"))),
         Value::UnsignedInteger(value) => crate::json::from_str(&value.to_string())
