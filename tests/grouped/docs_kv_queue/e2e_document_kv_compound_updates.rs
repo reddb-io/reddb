@@ -76,7 +76,7 @@ fn document_claim_updates_ordered_subset_with_returning() {
 
     let claimed = exec(
         &rt,
-        "UPDATE doc_claim_tasks DOCUMENTS SET status = 'claimed' WHERE status = 'ready' \
+        "UPDATE doc_claim_tasks SET status = 'claimed' WHERE status = 'ready' \
          CLAIM LIMIT 2 ORDER BY priority ASC RETURNING name, status",
     );
 
@@ -117,7 +117,7 @@ fn kv_claim_uses_key_identity_for_ordered_subset_with_returning() {
 
     let claimed = exec(
         &rt,
-        "UPDATE kv_claim_tasks KV SET value += 100 WHERE value >= 10 \
+        "UPDATE kv_claim_tasks SET value += 100 WHERE value >= 10 \
          CLAIM LIMIT 2 ORDER BY value ASC RETURNING value",
     );
 
@@ -165,7 +165,7 @@ fn document_claim_locks_skip_and_release_on_rollback() {
     exec(&rt, "BEGIN");
     let first = exec(
         &rt,
-        "UPDATE doc_claim_lock_tasks DOCUMENTS SET status = 'claimed' WHERE status = 'ready' \
+        "UPDATE doc_claim_lock_tasks SET status = 'claimed' WHERE status = 'ready' \
          CLAIM LIMIT 1 ORDER BY priority ASC RETURNING name",
     );
     assert_eq!(returned_texts(&first, "name"), vec!["a"]);
@@ -173,7 +173,7 @@ fn document_claim_locks_skip_and_release_on_rollback() {
     set_current_connection_id(145402);
     let second = exec(
         &rt,
-        "UPDATE doc_claim_lock_tasks DOCUMENTS SET status = 'claimed' WHERE status = 'ready' \
+        "UPDATE doc_claim_lock_tasks SET status = 'claimed' WHERE status = 'ready' \
          CLAIM LIMIT 1 ORDER BY priority ASC RETURNING name",
     );
     assert_eq!(second.affected_rows, 1);
@@ -185,7 +185,7 @@ fn document_claim_locks_skip_and_release_on_rollback() {
     set_current_connection_id(145402);
     let after_rollback = exec(
         &rt,
-        "UPDATE doc_claim_lock_tasks DOCUMENTS SET status = 'claimed' WHERE status = 'ready' \
+        "UPDATE doc_claim_lock_tasks SET status = 'claimed' WHERE status = 'ready' \
          CLAIM LIMIT 1 ORDER BY priority ASC RETURNING name",
     );
     assert_eq!(after_rollback.affected_rows, 1);
@@ -210,7 +210,7 @@ fn kv_claim_locks_skip_and_release_on_rollback_by_key() {
     exec(&rt, "BEGIN");
     let first = exec(
         &rt,
-        "UPDATE kv_claim_lock_tasks KV SET value += 100 WHERE value >= 10 \
+        "UPDATE kv_claim_lock_tasks SET value += 100 WHERE value >= 10 \
          CLAIM LIMIT 1 ORDER BY value ASC RETURNING value",
     );
     assert_eq!(int_field(only_record(&first), "value"), 110);
@@ -218,7 +218,7 @@ fn kv_claim_locks_skip_and_release_on_rollback_by_key() {
     set_current_connection_id(145404);
     let second = exec(
         &rt,
-        "UPDATE kv_claim_lock_tasks KV SET value += 100 WHERE value >= 10 \
+        "UPDATE kv_claim_lock_tasks SET value += 100 WHERE value >= 10 \
          CLAIM LIMIT 1 ORDER BY value ASC RETURNING value",
     );
     assert_eq!(second.affected_rows, 1);
@@ -235,7 +235,7 @@ fn kv_claim_locks_skip_and_release_on_rollback_by_key() {
     set_current_connection_id(145404);
     let after_rollback = exec(
         &rt,
-        "UPDATE kv_claim_lock_tasks KV SET value += 100 WHERE value >= 10 \
+        "UPDATE kv_claim_lock_tasks SET value += 100 WHERE value >= 10 \
          CLAIM LIMIT 1 ORDER BY value ASC RETURNING value",
     );
     assert_eq!(after_rollback.affected_rows, 1);
@@ -265,7 +265,7 @@ fn document_compound_update_uses_top_level_where_and_post_image_returning() {
 
     let updated = exec(
         &rt,
-        "UPDATE doc_scores DOCUMENTS SET score += 5 WHERE category = 'active' RETURNING name, score",
+        "UPDATE doc_scores SET score += 5 WHERE category = 'active' RETURNING name, score",
     );
     assert_eq!(updated.affected_rows, 1);
     let returned = only_record(&updated);
@@ -293,7 +293,7 @@ fn kv_compound_update_uses_key_where_and_post_image_returning() {
 
     let updated = exec(
         &rt,
-        "UPDATE counters KV SET value += 7 WHERE key = 'hits' RETURNING value",
+        "UPDATE counters SET value += 7 WHERE key = 'hits' RETURNING value",
     );
     assert_eq!(updated.affected_rows, 1);
     let returned = only_record(&updated);
@@ -320,7 +320,7 @@ fn document_and_kv_compound_failures_abort_without_partial_write() {
 
     let doc_err = err_string(
         &rt,
-        "UPDATE doc_invalid DOCUMENTS SET score += 1 WHERE category = 'batch'",
+        "UPDATE doc_invalid SET score += 1 WHERE category = 'batch'",
     );
     assert!(doc_err.contains("numeric field 'score'"));
     let ok_doc = exec(&rt, "SELECT score FROM doc_invalid WHERE name = 'ok'");
@@ -344,16 +344,16 @@ fn document_and_kv_compound_failures_abort_without_partial_write() {
         "INSERT INTO kv_invalid KV (key, value) VALUES ('max', 9223372036854775807)",
     );
 
-    let kv_err = err_string(&rt, "UPDATE kv_invalid KV SET value /= 0 WHERE key = 'ok'");
+    let kv_err = err_string(&rt, "UPDATE kv_invalid SET value /= 0 WHERE key = 'ok'");
     assert!(kv_err.contains("division by zero"));
-    let modulo_err = err_string(&rt, "UPDATE kv_invalid KV SET value %= 0 WHERE key = 'ok'");
+    let modulo_err = err_string(&rt, "UPDATE kv_invalid SET value %= 0 WHERE key = 'ok'");
     assert!(modulo_err.contains("modulo by zero"));
     let null_err = err_string(
         &rt,
-        "UPDATE kv_invalid KV SET value += 1 WHERE key = 'nullish'",
+        "UPDATE kv_invalid SET value += 1 WHERE key = 'nullish'",
     );
     assert!(null_err.contains("non-null numeric field 'value'"));
-    let overflow_err = err_string(&rt, "UPDATE kv_invalid KV SET value += 1 WHERE key = 'max'");
+    let overflow_err = err_string(&rt, "UPDATE kv_invalid SET value += 1 WHERE key = 'max'");
     assert!(overflow_err.contains("numeric overflow"));
     let ok_kv = exec(&rt, "SELECT value FROM kv_invalid WHERE key = 'ok'");
     assert_eq!(int_field(only_record(&ok_kv), "value"), 10);
@@ -363,10 +363,7 @@ fn document_and_kv_compound_failures_abort_without_partial_write() {
         9_223_372_036_854_775_807
     );
 
-    let missing_err = err_string(
-        &rt,
-        "UPDATE kv_invalid KV SET missing += 1 WHERE key = 'ok'",
-    );
+    let missing_err = err_string(&rt, "UPDATE kv_invalid SET missing += 1 WHERE key = 'ok'");
     assert!(missing_err.contains("existing numeric field 'missing'"));
 }
 
@@ -390,7 +387,7 @@ fn explicit_targets_keep_tenant_rls_scoped_to_matching_item_category() {
 
     let updated = exec(
         &rt,
-        "WITHIN TENANT 'acme' UPDATE tenant_docs DOCUMENTS SET score += 1 RETURNING name, score",
+        "WITHIN TENANT 'acme' UPDATE tenant_docs SET score += 1 RETURNING name, score",
     );
     assert_eq!(updated.affected_rows, 1);
     let returned = only_record(&updated);
