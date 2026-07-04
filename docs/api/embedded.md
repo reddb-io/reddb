@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .save()?;
 
     let doc_rid = db.doc("events")
-        .field("kind", "login")
+        .field("action", "login")
         .field("user", "alice")
         .field("success", true)
         .save()?;
