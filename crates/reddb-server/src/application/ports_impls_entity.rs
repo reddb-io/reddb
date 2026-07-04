@@ -1327,12 +1327,24 @@ fn replace_document_fields_body(
     Ok(())
 }
 
+fn ensure_no_reserved_document_body_fields(body: &JsonValue, collection: &str) -> RedDBResult<()> {
+    if let JsonValue::Object(map) = body {
+        crate::reserved_fields::ensure_no_reserved_public_item_fields(
+            map.keys().map(String::as_str),
+            &format!("document '{collection}'"),
+        )?;
+    }
+    Ok(())
+}
+
 fn replace_document_row_body(
     row: &mut crate::storage::unified::entity::RowData,
     body: JsonValue,
+    collection: &str,
     binary: bool,
     modified_columns: &mut Vec<String>,
 ) -> RedDBResult<()> {
+    ensure_no_reserved_document_body_fields(&body, collection)?;
     let fields = row.named.get_or_insert_with(Default::default);
     replace_document_fields_body(fields, body, binary, modified_columns)?;
 
@@ -1604,7 +1616,13 @@ impl RedDBRuntime {
                     };
                     apply_patch_operations_to_json(&mut body, &document_body_ops)
                         .map_err(crate::RedDBError::Query)?;
-                    replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
+                    replace_document_row_body(
+                        row,
+                        body,
+                        &collection,
+                        binary_body,
+                        &mut modified_columns,
+                    )?;
                 }
 
                 if is_document_collection && !has_patch_operations {
@@ -1617,7 +1635,13 @@ impl RedDBRuntime {
                     )?;
                     if body != previous_body {
                         context_index_dirty = true;
-                        replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
+                        replace_document_row_body(
+                            row,
+                            body,
+                            &collection,
+                            binary_body,
+                            &mut modified_columns,
+                        )?;
                     }
                 }
 
@@ -1631,7 +1655,13 @@ impl RedDBRuntime {
                         let mut body = document_body_from_named(named)?;
                         apply_patch_operations_to_json(&mut body, &field_ops)
                             .map_err(crate::RedDBError::Query)?;
-                        replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
+                        replace_document_row_body(
+                            row,
+                            body,
+                            &collection,
+                            binary_body,
+                            &mut modified_columns,
+                        )?;
                     } else {
                         for op in &field_ops {
                             if let Some(col) = op.path.first() {
@@ -1667,7 +1697,13 @@ impl RedDBRuntime {
                                 map.insert(key.clone(), value.clone());
                             }
                         }
-                        replace_document_row_body(row, body, binary_body, &mut modified_columns)?;
+                        replace_document_row_body(
+                            row,
+                            body,
+                            &collection,
+                            binary_body,
+                            &mut modified_columns,
+                        )?;
                     } else {
                         for (key, value) in fields {
                             modified_columns.push(key.clone());
@@ -2180,6 +2216,7 @@ impl RedDBRuntime {
                     replace_document_row_body(
                         row,
                         body,
+                        &collection,
                         self.binary_document_body_enabled(),
                         &mut modified_columns,
                     )?;
@@ -2216,6 +2253,7 @@ impl RedDBRuntime {
                         replace_document_row_body(
                             row,
                             body,
+                            &collection,
                             self.binary_document_body_enabled(),
                             &mut modified_columns,
                         )?;
