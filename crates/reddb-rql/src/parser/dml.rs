@@ -936,8 +936,16 @@ impl<'a> Parser<'a> {
                 Ok(Value::Null)
             }
             Token::LBracket => {
-                // Parse array literal [val1, val2, ...]
-                // For numeric arrays, produce Value::Vector; for others, produce Value::Json
+                // Parse array literal `[val1, val2, ...]` **losslessly** into a
+                // `Value::Array`, preserving each element's integer/float/other
+                // identity (issue #1708, ADR 0067). The parser deliberately does
+                // NOT decide here whether the array is a vector or a JSON array:
+                // committing to an f32 `Value::Vector` at parse time silently
+                // corrupts large integers destined for a JSON position (e.g.
+                // `[9007199254740993]`). Instead the analyzer/runtime resolves
+                // the concrete shape from the target's type — a vector-typed
+                // position coerces `Value::Array` → `Value::Vector`, a JSON
+                // position coerces it to an exact JSON array.
                 self.advance()?; // consume '['
                 let mut items = Vec::new();
                 if !self.check(&Token::RBracket) {
@@ -949,38 +957,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Token::RBracket)?;
-
-                // Check if all items are numeric (Integer or Float) -> Value::Vector
-                let all_numeric = items
-                    .iter()
-                    .all(|v| matches!(v, Value::Integer(_) | Value::Float(_)));
-                if all_numeric && !items.is_empty() {
-                    let floats: Vec<f32> = items
-                        .iter()
-                        .map(|v| match v {
-                            Value::Float(f) => *f as f32,
-                            Value::Integer(i) => *i as f32,
-                            _ => 0.0,
-                        })
-                        .collect();
-                    Ok(Value::Vector(floats))
-                } else {
-                    // Encode as JSON bytes
-                    let json_arr: Vec<reddb_types::json::Value> = items
-                        .iter()
-                        .map(|v| match v {
-                            Value::Null => reddb_types::json::Value::Null,
-                            Value::Boolean(b) => reddb_types::json::Value::Bool(*b),
-                            Value::Integer(i) => reddb_types::json::Value::Number(*i as f64),
-                            Value::Float(f) => reddb_types::json::Value::Number(*f),
-                            Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
-                            _ => reddb_types::json::Value::Null,
-                        })
-                        .collect();
-                    let json_val = reddb_types::json::Value::Array(json_arr);
-                    let bytes = reddb_types::json::to_vec(&json_val).unwrap_or_default();
-                    Ok(Value::Json(bytes))
-                }
+                Ok(Value::Array(items))
             }
             Token::LBrace => {
                 // Parse JSON object literal {key: value, ...}
@@ -1011,17 +988,7 @@ impl<'a> Parser<'a> {
                         }
                         // Value: recursive
                         let val = self.parse_literal_value()?;
-                        let json_val = match val {
-                            Value::Null => reddb_types::json::Value::Null,
-                            Value::Boolean(b) => reddb_types::json::Value::Bool(b),
-                            Value::Integer(i) => reddb_types::json::Value::Number(i as f64),
-                            Value::Float(f) => reddb_types::json::Value::Number(f),
-                            Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
-                            Value::Json(ref bytes) => reddb_types::json::from_slice(bytes)
-                                .unwrap_or(reddb_types::json::Value::Null),
-                            _ => reddb_types::json::Value::Null,
-                        };
-                        map.insert(key, json_val);
+                        map.insert(key, literal_value_to_json(&val));
                         if !self.consume(&Token::Comma)? {
                             break;
                         }
@@ -1049,6 +1016,30 @@ fn is_legacy_ttl_column(column: &str) -> bool {
     column.eq_ignore_ascii_case("_ttl")
         || column.eq_ignore_ascii_case("_ttl_ms")
         || column.eq_ignore_ascii_case("_expires_at")
+}
+
+/// Convert a parsed literal `Value` into a `reddb_types::json::Value`.
+///
+/// Array literals now parse into `Value::Array` (issue #1708). When an array
+/// appears inside a JSON object-literal position (e.g.
+/// `{roles: ['edge', 'cache']}`) it must serialise as a JSON array rather than
+/// collapsing to `null` the way the old catch-all arm did. Recurses so nested
+/// arrays and objects round-trip.
+fn literal_value_to_json(val: &Value) -> reddb_types::json::Value {
+    match val {
+        Value::Null => reddb_types::json::Value::Null,
+        Value::Boolean(b) => reddb_types::json::Value::Bool(*b),
+        Value::Integer(i) => reddb_types::json::Value::Number(*i as f64),
+        Value::Float(f) => reddb_types::json::Value::Number(*f),
+        Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
+        Value::Json(bytes) => {
+            reddb_types::json::from_slice(bytes).unwrap_or(reddb_types::json::Value::Null)
+        }
+        Value::Array(items) => {
+            reddb_types::json::Value::Array(items.iter().map(literal_value_to_json).collect())
+        }
+        _ => reddb_types::json::Value::Null,
+    }
 }
 
 fn returning_expr_start(token: &Token) -> bool {
@@ -1548,16 +1539,35 @@ mod tests {
         let value = parser.parse_literal_value().expect("secret ref");
         assert!(matches!(value, Value::Json(_)));
 
+        // Array literals parse losslessly into `Value::Array`, preserving each
+        // element's integer/float identity (issue #1708). Vector-vs-JSON typing
+        // is resolved downstream from the target, not guessed at parse time.
         let mut parser = make_parser("[1, 2.5]");
         assert!(matches!(
-            parser.parse_literal_value().expect("vector"),
-            Value::Vector(values) if values == vec![1.0, 2.5]
+            parser.parse_literal_value().expect("array"),
+            Value::Array(items)
+                if items == vec![Value::Integer(1), Value::Float(2.5)]
         ));
 
         let mut parser = make_parser("['a', 2]");
         assert!(matches!(
-            parser.parse_literal_value().expect("json array"),
-            Value::Json(_)
+            parser.parse_literal_value().expect("mixed array"),
+            Value::Array(items)
+                if items == vec![Value::Text("a".into()), Value::Integer(2)]
+        ));
+
+        // A large integer that cannot survive an f32 (or even f64) round-trip
+        // keeps its exact `Value::Integer` identity through the parser.
+        let mut parser = make_parser("[1, 2, 9007199254740993]");
+        assert!(matches!(
+            parser.parse_literal_value().expect("lossless big-int array"),
+            Value::Array(items)
+                if items
+                    == vec![
+                        Value::Integer(1),
+                        Value::Integer(2),
+                        Value::Integer(9007199254740993),
+                    ]
         ));
 
         let mut parser = make_parser("{level = 'info', count: 2}");

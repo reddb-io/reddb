@@ -78,12 +78,16 @@ JSONPath DSL parser.
 
 | Function | Returns |
 |----------|---------|
+| `json_parse(text)` | JSON value parsed from text; invalid input errors |
 | `json_extract(json, '$.path')` | Value at path, or NULL |
 | `json_set(json, '$.path', value)` | Mutated JSON with path set |
 | `json_array_length(json)` | Integer length of top-level array |
 | `json_path_query(json, path)` | Matching subtree |
 
 ```sql
+SELECT json_extract(json_parse(payload_text), '$.user.email') AS email
+FROM events;
+
 SELECT json_extract(payload, '$.user.email') AS email
 FROM events
 WHERE json_array_length(payload->'tags') > 0;

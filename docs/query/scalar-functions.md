@@ -141,6 +141,27 @@ WHERE MONEY_ASSET(balance) = 'USDT'
 
 ---
 
+## JSON Functions
+
+These functions operate on JSON values and JSON text in expression positions.
+
+| Function | Arguments | Returns | Description |
+|:---------|:----------|:--------|:------------|
+| `JSON_PARSE(text)` | Text containing valid JSON | Json | Explicit string-to-JSON conversion; invalid JSON is a runtime error |
+| `JSON_EXTRACT(json, path)` | Json or JSON text, path text | Text | Value at path, serialized as JSON text |
+| `JSON_EXTRACT_TEXT(json, path)` | Json or JSON text, path text | Text | Value at path, with scalar strings unquoted |
+| `JSON_SET(json, path, value)` | Json or JSON text, path text, value | Json | Return a new JSON value with the path set |
+| `JSON_ARRAY_LENGTH(json)` | Json or JSON text | Integer | Top-level array length, or NULL |
+| `JSON_TYPEOF(json)` | Json or JSON text | Text | JSON type name |
+| `JSON_VALID(text)` | Text | Boolean | Whether the text parses as JSON |
+
+```sql
+SELECT JSON_EXTRACT(JSON_PARSE(payload_text), '$.user.email') AS email
+FROM imported_events
+```
+
+---
+
 ## General Functions
 
 | Function | Arguments | Returns | Description |

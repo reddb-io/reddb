@@ -1876,7 +1876,9 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     let QueryExpr::Insert(insert) = query else {
         panic!("Expected InsertQuery");
     };
-    assert!(matches!(insert.values[0][0], Value::Json(_)));
+    // Array literals parse losslessly into `Value::Array` (issue #1708); object
+    // literals `{...}` remain `Value::Json`.
+    assert!(matches!(insert.values[0][0], Value::Array(_)));
     assert!(matches!(insert.values[0][1], Value::Json(_)));
 
     let query =
@@ -1895,10 +1897,13 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     };
     assert_eq!(insert.ttl_ms, Some(42_000));
     assert_eq!(insert.with_metadata.len(), 4);
+    // Array-valued metadata (`empty`, `mixed`) parses losslessly into
+    // `Value::Array` (issue #1708); object-valued metadata (`nested`, `raw`)
+    // stays `Value::Json`.
     assert!(insert
         .with_metadata
         .iter()
-        .all(|(_, value)| matches!(value, Value::Json(_))));
+        .all(|(_, value)| matches!(value, Value::Json(_) | Value::Array(_))));
 
     let query =
         parse("UPDATE counters SET value = value + 1 WHERE id = 7 LIMIT 50 RETURNING id").unwrap();
@@ -2048,27 +2053,25 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
 fn test_parse_dml_literal_value_array_and_object_branches() {
     use reddb_types::types::Value;
 
+    // Array literals parse losslessly into `Value::Array` (issue #1708): the
+    // parser preserves element identity instead of guessing a vector-vs-JSON
+    // shape, so `[1, 2.5]` keeps its `Integer`/`Float` mix.
     let mut parser = Parser::new("[1, 2.5]").unwrap();
     let value = parser.parse_literal_value().unwrap();
-    assert!(matches!(value, Value::Vector(values) if values == vec![1.0, 2.5]));
+    assert!(
+        matches!(value, Value::Array(items) if items == vec![Value::Integer(1), Value::Float(2.5)])
+    );
 
     let mut parser = Parser::new("[]").unwrap();
     let value = parser.parse_literal_value().unwrap();
-    let Value::Json(bytes) = value else {
-        panic!("Expected Value::Json");
-    };
-    let parsed: reddb_types::json::Value = reddb_types::json::from_slice(&bytes).unwrap();
-    assert!(parsed.as_array().is_some_and(|items| items.is_empty()));
+    assert!(matches!(value, Value::Array(items) if items.is_empty()));
 
+    // Non-JSON-encodable elements (e.g. a `PASSWORD(...)` constructor) are
+    // preserved verbatim rather than being flattened to JSON `null`.
     let mut parser = Parser::new("[PASSWORD('pw')]").unwrap();
     let value = parser.parse_literal_value().unwrap();
-    let Value::Json(bytes) = value else {
-        panic!("Expected Value::Json");
-    };
-    let parsed: reddb_types::json::Value = reddb_types::json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        parsed.as_array().and_then(|items| items.first()),
-        Some(&reddb_types::json::Value::Null)
+    assert!(
+        matches!(value, Value::Array(items) if matches!(items.as_slice(), [Value::Password(_)]))
     );
 
     let mut parser = Parser::new(
@@ -3496,13 +3499,21 @@ fn test_parse_insert_vector() {
         assert_eq!(ins.entity_type, crate::ast::InsertEntityType::Vector);
         assert_eq!(ins.columns, vec!["dense", "content"]);
         assert_eq!(ins.values.len(), 1);
-        // The vector literal should be parsed as Value::Vector
+        // The array literal parses losslessly into `Value::Array` (issue
+        // #1708); the runtime coerces it to a `Value::Vector` at the
+        // vector-typed column position.
         match &ins.values[0][0] {
-            reddb_types::types::Value::Vector(v) => {
-                assert_eq!(v.len(), 3);
-                assert!((v[0] - 0.1).abs() < 0.01);
+            reddb_types::types::Value::Array(items) => {
+                assert_eq!(
+                    items,
+                    &vec![
+                        reddb_types::types::Value::Float(0.1),
+                        reddb_types::types::Value::Float(0.2),
+                        reddb_types::types::Value::Float(0.3),
+                    ]
+                );
             }
-            other => panic!("Expected Vector value, got {other:?}"),
+            other => panic!("Expected Array value, got {other:?}"),
         }
     } else {
         panic!("Expected InsertQuery with Vector entity type");
@@ -3538,14 +3549,23 @@ fn test_parse_insert_kv() {
 
 #[test]
 fn test_parse_insert_vector_array_literal() {
-    // Test array literal parsing in VALUES
+    // Integer array literals also parse losslessly into `Value::Array`; the
+    // integer identity of each element is preserved (issue #1708) and the
+    // runtime coerces to `Vec<f32>` only at the vector column.
     let query = parse("INSERT INTO emb VECTOR (dense) VALUES ([1, 2, 3])").unwrap();
     if let QueryExpr::Insert(ins) = query {
         match &ins.values[0][0] {
-            reddb_types::types::Value::Vector(v) => {
-                assert_eq!(v, &[1.0, 2.0, 3.0]);
+            reddb_types::types::Value::Array(items) => {
+                assert_eq!(
+                    items,
+                    &vec![
+                        reddb_types::types::Value::Integer(1),
+                        reddb_types::types::Value::Integer(2),
+                        reddb_types::types::Value::Integer(3),
+                    ]
+                );
             }
-            other => panic!("Expected Vector value, got {other:?}"),
+            other => panic!("Expected Array value, got {other:?}"),
         }
     } else {
         panic!("Expected InsertQuery");

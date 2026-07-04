@@ -240,6 +240,13 @@ pub fn render_value_sql(v: &Value) -> String {
         // JSON bytes are stored as canonical compact JSON; emit them raw so
         // the lexer picks them up as a JsonLiteral token on re-parse.
         Value::Json(bytes) => String::from_utf8_lossy(bytes).to_string(),
+        // Array literals render back to `[...]` so a comparison against an
+        // array literal re-parses losslessly (issue #1708) rather than
+        // collapsing to NULL.
+        Value::Array(items) => {
+            let rendered: Vec<String> = items.iter().map(render_value_sql).collect();
+            format!("[{}]", rendered.join(", "))
+        }
         _ => "NULL".to_string(),
     }
 }

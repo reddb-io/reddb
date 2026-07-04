@@ -425,7 +425,7 @@ fn project_scalar_via_evaluator(
                         None,
                         false,
                         false,
-                    )
+                    )?
                     .get(col_name.as_str())
                     .cloned()
                     .unwrap_or(Value::Null)
