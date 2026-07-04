@@ -110,9 +110,11 @@ fn render_update(uq: &UpdateQuery) -> String {
 
 fn render_update_target(target: UpdateTarget) -> Option<&'static str> {
     match target {
-        UpdateTarget::Rows => None,
-        UpdateTarget::Documents => Some("DOCUMENTS"),
-        UpdateTarget::Kv => Some("KV"),
+        // Row/document/KV updates render unmarked (ADR 0067, #1711): the model
+        // markers were removed and the catalog resolves the model. `Documents`
+        // / `Kv` only arise from runtime catalog inference, never from parsed
+        // SQL, so rendering them back to text must stay unmarked to round-trip.
+        UpdateTarget::Rows | UpdateTarget::Documents | UpdateTarget::Kv => None,
         UpdateTarget::Nodes => Some("NODES"),
         UpdateTarget::Edges => Some("EDGES"),
     }
