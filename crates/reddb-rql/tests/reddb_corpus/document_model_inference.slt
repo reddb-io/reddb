@@ -1,0 +1,80 @@
+# ADR 0067 (#1710) — catalog model inference for unmarked document DML.
+#
+# TRUTH is hand-authored (a RedDB-only surface with no external oracle):
+# the marker rule made real — a model marker exists only where it
+# disambiguates what the catalog cannot know.
+#
+#   * an unmarked INSERT into an existing document collection inserts a
+#     document (the model is inferred from the catalog);
+#   * the DOCUMENT marker is an explicit, idempotent model assertion —
+#     the same statement passes on the first and the thousandth run;
+#   * a marker contradicting the catalog fails with the model-contract
+#     error;
+#   * an unmarked INSERT into an unknown collection is a didactic error
+#     naming both recourses.
+#
+# Result rows are projected to the harness's semantic allowlist (`name`)
+# and compared with `rowsort`, so the golden asserts the *set* of inserted
+# documents without freezing engine-defined insertion order.
+
+# --- Unmarked INSERT into an existing document collection ----------------
+
+statement ok
+CREATE DOCUMENT events
+
+statement ok
+INSERT INTO events DOCUMENT VALUES ({"name": "alice"})
+
+# No DOCUMENT marker: the analyzer resolves the model from the catalog and
+# routes to document creation.
+statement ok
+INSERT INTO events VALUES ({"name": "bob"})
+
+query T rowsort
+SELECT name FROM events
+----
+alice
+bob
+
+# --- Marked INSERT is an idempotent model assertion ----------------------
+
+# First run bootstraps the collection as a document...
+statement ok
+INSERT INTO logs DOCUMENT VALUES ({"name": "first"})
+
+# ...and the identical statement passes again on the existing collection.
+statement ok
+INSERT INTO logs DOCUMENT VALUES ({"name": "second"})
+
+# Once the assertion has bootstrapped the model, the unmarked form infers it.
+statement ok
+INSERT INTO logs VALUES ({"name": "third"})
+
+query T rowsort
+SELECT name FROM logs
+----
+first
+second
+third
+
+# --- A marker that contradicts the catalog fails -------------------------
+
+statement ok
+CREATE TABLE accounts (id INTEGER)
+
+statement error does not allow 'document' writes
+INSERT INTO accounts DOCUMENT VALUES ({"name": "nope"})
+
+# --- Unknown collection + no marker → didactic error ---------------------
+
+statement error does not exist and the INSERT carries no model marker
+INSERT INTO ghosts VALUES ({"name": "boo"})
+
+# The error's named recourse works: the assertion form bootstraps it.
+statement ok
+INSERT INTO ghosts DOCUMENT VALUES ({"name": "boo"})
+
+query T rowsort
+SELECT name FROM ghosts
+----
+boo
