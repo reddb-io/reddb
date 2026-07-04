@@ -105,6 +105,14 @@ impl<'a> Parser<'a> {
         // column list.
         let columns = if matches!(entity_type, InsertEntityType::Document) {
             self.parse_document_insert_columns()?
+        } else if matches!(entity_type, InsertEntityType::Row) && self.check(&Token::Values) {
+            // ADR 0067 (#1710): the bare `INSERT INTO c VALUES (…)` form
+            // carries no column list and no model marker. The model is
+            // inferred from the catalog at analysis time — an existing
+            // document collection routes to document creation — so the
+            // parser leaves the column list empty and defers the routing
+            // decision to the runtime.
+            Vec::new()
         } else {
             self.expect(Token::LParen)?;
             let columns = self.parse_ident_list()?;
@@ -1282,6 +1290,29 @@ mod tests {
             query.returning.as_deref(),
             Some([ReturningItem::All].as_slice())
         );
+    }
+
+    #[test]
+    fn unmarked_bare_values_insert_parses_with_empty_columns() {
+        // ADR 0067 (#1710): `INSERT INTO c VALUES ({…})` with no column
+        // list and no marker parses to a Row insert with an empty column
+        // list; the runtime infers the model from the catalog.
+        let query = insert("INSERT INTO events VALUES ({\"level\": \"info\"})");
+        assert_eq!(query.table, "events");
+        assert_eq!(query.entity_type, InsertEntityType::Row);
+        assert!(query.columns.is_empty());
+        assert_eq!(query.values.len(), 1);
+        assert!(matches!(query.values[0][0], Value::Json(_)));
+
+        // Multi-row bare VALUES keeps working.
+        let query = insert("INSERT INTO events VALUES ({\"a\": 1}), ({\"b\": 2})");
+        assert!(query.columns.is_empty());
+        assert_eq!(query.entity_type, InsertEntityType::Row);
+        assert_eq!(query.values.len(), 2);
+
+        // An explicit column list is still parsed positionally.
+        let query = insert("INSERT INTO t (id) VALUES (1)");
+        assert_eq!(query.columns, vec!["id"]);
     }
 
     #[test]
