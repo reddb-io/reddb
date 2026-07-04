@@ -189,10 +189,47 @@ impl SnapshotManager {
 
     /// Allocate a new xid and mark it active. Returns the xid for
     /// stamping onto `UnifiedEntity::xmin/xmax`.
+    ///
+    /// Allocation and the `active` insert happen together under the state
+    /// write lock. This is load-bearing for first-committer-wins: a
+    /// concurrent snapshot (state read lock) must never observe a
+    /// *lower-numbered* still-running xid as absent from `active`. Were the
+    /// `fetch_add` done outside the lock, a writer that grabbed the smaller
+    /// xid could still be mid-`begin()` while a later transaction snapshots
+    /// a larger xid — the smaller xid would be missing from `in_progress`,
+    /// yet `xmin <= snapshot.xid`, so the snapshot would treat that
+    /// concurrent (later possibly-committed) writer as visible. That both
+    /// leaks an uncommitted row into a peer's read and lets two writers on
+    /// the same row both commit. Serialising allocation under the lock
+    /// guarantees any xid smaller than a taken snapshot's xid is already in
+    /// `active` (or already finished), so `in_progress` is never short a
+    /// concurrent writer.
     pub fn begin(&self) -> Xid {
+        let mut state = self.state.write();
         let xid = self.next_xid.fetch_add(1, Ordering::Relaxed);
-        self.state.write().active.insert(xid);
+        state.active.insert(xid);
         xid
+    }
+
+    /// Capture a fresh *read-committed* snapshot at this instant: sees every
+    /// transaction that has committed so far and hides every still-active
+    /// one. Unlike [`snapshot`], the caller supplies no xid — the snapshot
+    /// id is the current allocator high-water mark, read *under the same
+    /// state lock* that [`begin`] holds while it bumps the counter and
+    /// inserts into `active`. That mutual exclusion is what makes the read
+    /// atomic: a concurrent `begin()` is either wholly visible (counter
+    /// bumped AND present in `active`, hence hidden as in-progress) or
+    /// wholly invisible (neither) — never the torn state where its xid sits
+    /// below the high-water mark yet is missing from `active`, which would
+    /// leak an uncommitted writer as visible.
+    ///
+    /// Used for RMW pre-image reads that must always observe the latest
+    /// committed row version rather than a pinned statement snapshot.
+    pub fn fresh_read_snapshot(&self) -> Snapshot {
+        let state = self.state.read();
+        let xid = self.next_xid.load(Ordering::Relaxed);
+        let in_progress: HashSet<Xid> = state.active.iter().copied().collect();
+        Snapshot { xid, in_progress }
     }
 
     /// Capture a point-in-time snapshot. Must be called after `begin()`
@@ -475,6 +512,35 @@ mod tests {
         assert!(snap.in_progress.contains(&writer));
         // A row written by `writer` with xmin=writer must be invisible.
         assert!(!snap.sees(writer, XID_NONE));
+    }
+
+    #[test]
+    fn fresh_read_snapshot_sees_latest_committed_hides_active() {
+        let m = SnapshotManager::new();
+        // A committed writer must be visible to a fresh read snapshot; an
+        // xid still active must be hidden. This is the RMW pre-image
+        // contract: latest committed, never an uncommitted sibling.
+        let committed = m.begin();
+        m.commit(committed);
+        let active = m.begin();
+
+        let snap = m.fresh_read_snapshot();
+        assert!(snap.sees(committed, XID_NONE));
+        assert!(!snap.sees(active, XID_NONE));
+        assert!(snap.in_progress.contains(&active));
+    }
+
+    #[test]
+    fn fresh_read_snapshot_refreshes_between_calls() {
+        let m = SnapshotManager::new();
+        // Value committed *after* a first read must be visible to a second
+        // fresh read — proving the snapshot is re-evaluated, not pinned.
+        let later = m.begin();
+        let first = m.fresh_read_snapshot();
+        assert!(!first.sees(later, XID_NONE));
+        m.commit(later);
+        let second = m.fresh_read_snapshot();
+        assert!(second.sees(later, XID_NONE));
     }
 
     #[test]
