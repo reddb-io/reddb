@@ -65,9 +65,9 @@ CREATE DOCUMENT IF NOT EXISTS events
 > - `CREATE TABLE events DOCUMENT (id UUID PRIMARY KEY, body JSONB NOT NULL, ...)`
 >   → use `CREATE DOCUMENT events` instead.
 > - Generated columns such as
->   `ALTER TABLE events ADD COLUMN kind TEXT GENERATED ALWAYS AS (body->>'kind') STORED`
+>   `ALTER TABLE events ADD COLUMN event_type TEXT GENERATED ALWAYS AS (body->>'event_type') STORED`
 >   → unnecessary. RedDB automatically flattens top-level fields of each
->   document `body` into queryable columns, so `SELECT kind FROM events` works
+>   document `body` into queryable columns, so `SELECT event_type FROM events` works
 >   with no generated column. See [SQL First](#sql-first) above.
 
 ## Creating Documents
@@ -152,6 +152,19 @@ Returned document items also include the public envelope fields `rid`,
 `collection`, `kind`, `tenant`, `created_at`, and `updated_at`, with
 `kind = 'document'`. Those envelope names are reserved; top-level document body
 fields cannot use them.
+
+## Reserved field names
+
+The public RedDB item envelope reserves these top-level names in user data:
+`rid`, `collection`, `kind`, `tenant`, `created_at`, and `updated_at`.
+Document writes that include one of those names as a top-level `body` field are
+rejected at write time.
+
+If your source JSON uses one of those names, rename that field before inserting
+it, for example from `kind` to `event_type`. This is the permanent collision
+rule from [ADR 0066](../../.red/adr/0066-reserved-envelope-fields-user-pays.md):
+the envelope vocabulary stays unprefixed and user data pays for top-level
+collisions.
 
 ## Querying Documents
 
