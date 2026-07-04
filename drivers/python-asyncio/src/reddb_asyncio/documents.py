@@ -86,7 +86,7 @@ class DocumentClient:
             for field, value in patch.items()
         )
         sql = (
-            f"UPDATE {sql_identifier_path(collection)} DOCUMENTS SET {assignments} "
+            f"UPDATE {sql_identifier_path(collection)} SET {assignments} "
             f"WHERE rid = $1 RETURNING *"
         )
         result = await self._db.query(sql, [rid])
