@@ -1,8 +1,9 @@
 # UPDATE
 
-The `UPDATE` statement modifies RedDB items in a collection. The default target
-is table rows; use an explicit target for documents, KV pairs, graph nodes, or
-graph edges.
+The `UPDATE` statement modifies RedDB items in a collection. The catalog
+infers the model (rows, documents, KV) on existing collections. Only graph
+node and edge updates require explicit markers to disambiguate within a
+mixed-model graph collection.
 
 Prefer positional parameters for values in `SET` and `WHERE`:
 
@@ -18,7 +19,7 @@ The parameterized-query design is tracked in
 ## Syntax
 
 ```sql
-UPDATE collection_name [ROWS|DOCUMENTS|KV|NODES|EDGES]
+UPDATE collection_name [NODES|EDGES]
 SET field1 = value1 [, field2 += value2, ...]
 [WHERE condition]
 [ORDER BY field [ASC|DESC] LIMIT n]
@@ -29,11 +30,9 @@ Target meanings:
 
 | Target | Item kind | Notes |
 |:-------|:----------|:------|
-| omitted / `ROWS` | `row` | Default table-row update path |
-| `DOCUMENTS` | `document` | Updates top-level document body fields |
-| `KV` | `kv` | Updates `key`, `value`, and mutable KV fields |
-| `NODES` | `node` | Updates mutable graph node properties |
-| `EDGES` | `edge` | Updates mutable graph edge properties; `from_rid` and `to_rid` are immutable |
+| omitted | inferred from catalog | Row, document, or KV — the catalog knows the model on existing collections |
+| `NODES` | `node` | Updates mutable graph node properties; used in mixed-model graph collections to disambiguate |
+| `EDGES` | `edge` | Updates mutable graph edge properties; used in mixed-model graph collections to disambiguate; `from_rid` and `to_rid` are immutable |
 
 ## Examples
 
@@ -44,27 +43,29 @@ UPDATE users SET age = $1 WHERE name = $2
 ```
 
 ```sql
-UPDATE users ROWS
+UPDATE users
 SET active = true
 WHERE rid = $1
 RETURNING rid, name, active
 ```
 
-### Update Documents, KV, and Graph Items
+### Update Documents and KV
 
 ```sql
-UPDATE events DOCUMENTS
+UPDATE events
 SET reviewed = true, attempts += 1
 WHERE event_type = 'login'
 RETURNING rid, kind, reviewed, attempts
 ```
 
 ```sql
-UPDATE config KV
+UPDATE config
 SET value += 1
 WHERE key = 'feature.rollout_percent'
 RETURNING rid, key, value
 ```
+
+### Update Graph Items
 
 ```sql
 UPDATE social NODES
@@ -90,7 +91,7 @@ All right-hand sides in the same statement read the item state before the
 update starts.
 
 ```sql
-UPDATE accounts ROWS
+UPDATE accounts
 SET balance += 25, retries %= 3
 WHERE rid = $1
 RETURNING rid, balance, retries
@@ -104,7 +105,7 @@ Math functions can appear anywhere ordinary SQL expressions are accepted,
 including `SET` and `RETURNING` projections:
 
 ```sql
-UPDATE metrics ROWS
+UPDATE metrics
 SET root_score = SQRT(score), score = POWER(score, 2)
 WHERE score >= 0
 RETURNING rid, root_score, score
@@ -122,7 +123,7 @@ and `PI`.
 when `rid` is not already part of the ordering.
 
 ```sql
-UPDATE jobs ROWS
+UPDATE jobs
 SET claimed = true
 WHERE claimed = false
 ORDER BY priority DESC
@@ -130,9 +131,8 @@ LIMIT 25
 RETURNING rid, priority, claimed
 ```
 
-For `DOCUMENTS`, `KV`, `NODES`, and `EDGES`, ordered batches accept top-level
-fields only. Nested paths and computed `ORDER BY` expressions are rejected for
-multi-model updates.
+For all models, ordered batches accept top-level fields only (no nested paths
+or computed `ORDER BY` expressions).
 
 ### Atomic Failure Behavior
 
@@ -159,7 +159,7 @@ curl -X PATCH http://127.0.0.1:5000/collections/users/entities/102 \
 ```bash
 curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
-  -d '{"query": "UPDATE users ROWS SET age = $1 WHERE rid = $2 RETURNING rid, age", "params": [31, 102]}'
+  -d '{"query": "UPDATE users SET age = $1 WHERE rid = $2 RETURNING rid, age", "params": [31, 102]}'
 ```
 
 ## Via gRPC
@@ -192,7 +192,7 @@ as the public RedDB ID `rid`.
 
 ## WITH Clauses
 
-You can attach or replace expiration and metadata on existing entities using `WITH` clauses. These are the structured alternative to the old approach of setting `_ttl` or `_ttl_ms` as regular columns.
+You can attach or replace expiration and metadata on existing entities using `WITH` clauses. These are the structured alternative to legacy `_ttl` or `_ttl_ms` column approaches.
 
 ### Syntax
 
