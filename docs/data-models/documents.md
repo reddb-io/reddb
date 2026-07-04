@@ -242,18 +242,20 @@ return a structured envelope with `code`, `op_index`, and a JSON Pointer
 
 ### SQL UPDATE on documents
 
-Document updates use the explicit `DOCUMENTS` target. Compound assignment,
-`RETURNING`, `LIMIT`, and `ORDER BY ... LIMIT` work the same as for rows:
+Document updates are written **unmarked** — RedDB resolves the document model
+from the catalog (the `DOCUMENTS` marker was removed, ADR 0067). Compound
+assignment, `RETURNING`, `LIMIT`, and `ORDER BY ... LIMIT` work the same as for
+rows, and dotted `SET a.b.c = …` paths address nested body fields:
 
 ```sql
-UPDATE events DOCUMENTS
+UPDATE events
 SET retries += 1
 WHERE event_type = 'login' AND retries < 5
 RETURNING rid, retries
 ```
 
 ```sql
-UPDATE events DOCUMENTS
+UPDATE events
 SET attempts += 1, last_seen = NOW()
 WHERE status = 'pending'
 ORDER BY created_at ASC
