@@ -528,6 +528,161 @@ fn document_path_update_keeps_nested_sibling_fields() {
     assert_eq!(body["keep"].as_str(), Some("me"));
 }
 
+// #1712: a nested SET creates the intermediate objects it traverses, keeps
+// sibling keys, and the flattened top-level read surface reflects the change
+// immediately (the promoted `settings` column is the freshly created object).
+#[test]
+fn document_nested_set_creates_intermediate_objects() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_intermediate_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_intermediate_docs DOCUMENT VALUES ({"name":"doc","keep":"me"})"#,
+    );
+
+    let updated = exec(
+        &rt,
+        "UPDATE body_intermediate_docs SET settings.notifications.email = 'on' WHERE name = 'doc'",
+    );
+    assert_eq!(updated.affected_rows, 1);
+
+    let with_body = exec(&rt, "SELECT body FROM body_intermediate_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["settings"]["notifications"]["email"].as_str(),
+        Some("on"),
+        "intermediate objects must be created by the nested SET, got {body:?}"
+    );
+    assert_eq!(body["keep"].as_str(), Some("me"), "siblings must survive");
+
+    // Immediate flattened read: the newly created top-level `settings` object is
+    // promoted as a column and reflects the merge without a re-open.
+    let promoted = exec(
+        &rt,
+        "SELECT settings FROM body_intermediate_docs WHERE name = 'doc'",
+    );
+    let settings = json_field(only_record(&promoted), "settings");
+    assert_eq!(settings["notifications"]["email"].as_str(), Some("on"));
+}
+
+// #1712 / ADR 0066: a nested SET may not introduce a reserved envelope name at
+// the top level — it is rejected with the upgraded reserved-field error and the
+// document is left untouched.
+#[test]
+fn document_nested_set_rejects_reserved_top_level() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_reserved_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_reserved_docs DOCUMENT VALUES ({"name":"doc","keep":"me"})"#,
+    );
+
+    let error = err_string(
+        &rt,
+        "UPDATE body_reserved_docs SET kind = 'nope' WHERE name = 'doc'",
+    );
+    assert!(
+        error.contains("reserved") && error.contains("kind"),
+        "reserved top-level SET must be rejected with the ADR 0066 error, got: {error}"
+    );
+
+    // The rejected UPDATE must not have mutated the document body.
+    let with_body = exec(&rt, "SELECT body FROM body_reserved_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(body["keep"].as_str(), Some("me"));
+    assert!(
+        body.get("kind").is_none(),
+        "reserved field must not have been written, got {body:?}"
+    );
+}
+
+// #1712: setting a path *through* a scalar (here `count` is a number) fails with
+// a clear error and leaves the document untouched — consistent with the HTTP
+// JSON-patch contract, which never clobbers a scalar into an object.
+#[test]
+fn document_nested_set_through_scalar_rejected() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_scalar_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_scalar_docs DOCUMENT VALUES ({"name":"doc","count":5})"#,
+    );
+
+    let error = err_string(
+        &rt,
+        "UPDATE body_scalar_docs SET count.total = 9 WHERE name = 'doc'",
+    );
+    assert!(
+        error.contains("not an object"),
+        "path-through-scalar must fail with a clear error, got: {error}"
+    );
+
+    let with_body = exec(&rt, "SELECT body FROM body_scalar_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["count"].as_i64(),
+        Some(5),
+        "the scalar must be untouched by the rejected SET, got {body:?}"
+    );
+}
+
+// #1712: array positional paths stay unsupported on the SQL nested-SET surface,
+// matching the HTTP patch contract; the array is left untouched.
+#[test]
+fn document_nested_set_array_positional_rejected() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_array_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_array_docs DOCUMENT VALUES ({"name":"doc","tags":["alpha","beta"]})"#,
+    );
+
+    let error = err_string(
+        &rt,
+        "UPDATE body_array_docs SET tags.0 = 'gamma' WHERE name = 'doc'",
+    );
+    assert!(
+        error.contains("array positional"),
+        "array-positional SET must be rejected with a clear error, got: {error}"
+    );
+
+    let with_body = exec(&rt, "SELECT body FROM body_array_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["tags"],
+        serde_json::json!(["alpha", "beta"]),
+        "the array must be untouched by the rejected SET, got {body:?}"
+    );
+}
+
+// #1712: RETURNING reflects the post-merge document body.
+#[test]
+fn document_nested_set_returning_reflects_merge() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_returning_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_returning_docs DOCUMENT
+           VALUES ({"name":"doc","user":{"address":{"city":"Porto"},"active":true}})"#,
+    );
+
+    let returned = exec(
+        &rt,
+        "UPDATE body_returning_docs SET user.address.city = 'SP' WHERE name = 'doc' RETURNING body",
+    );
+    let body = json_field(only_record(&returned), "body");
+    assert_eq!(
+        body["user"]["address"]["city"].as_str(),
+        Some("SP"),
+        "RETURNING must reflect the post-merge body, got {body:?}"
+    );
+    assert_eq!(
+        body["user"]["active"].as_bool(),
+        Some(true),
+        "RETURNING must preserve siblings, got {body:?}"
+    );
+}
+
 #[test]
 fn document_compound_update_keeps_body_json_in_sync() {
     let rt = runtime();
