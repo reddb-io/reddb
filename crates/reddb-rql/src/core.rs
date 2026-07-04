@@ -1855,15 +1855,21 @@ pub enum InsertEntityType {
     Kv,
 }
 
-/// Explicit item-kind qualifier for UPDATE statements.
+/// Item-kind qualifier for UPDATE statements.
+///
+/// The `DOCUMENTS` / `ROWS` / `KV` model markers were removed (ADR 0067,
+/// #1711): the catalog knows every existing collection's model, so an unmarked
+/// UPDATE parses to `Rows` and the runtime resolves `Documents` / `Kv`
+/// semantics from the catalog. Only `NODES` / `EDGES` remain parse-time markers
+/// — a graph collection holds both record kinds, so only the user can say which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UpdateTarget {
-    /// Default: table/document/KV row-shaped items.
+    /// Unmarked UPDATE: parses as row-shaped, catalog-resolved at runtime.
     #[default]
     Rows,
-    /// UPDATE t DOCUMENTS SET ...
+    /// Catalog-inferred document collection (no parse-time marker).
     Documents,
-    /// UPDATE t KV SET ...
+    /// Catalog-inferred KV collection (no parse-time marker).
     Kv,
     /// UPDATE t NODES SET ...
     Nodes,

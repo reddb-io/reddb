@@ -57,7 +57,7 @@ export class DocumentClient {
       .map(([field, value]) => `${sqlIdentifier(field)} = ${sqlValueLiteral(value)}`)
       .join(', ')
     const result = await this.db.query(
-      `UPDATE ${sqlIdentifierPath(collection)} DOCUMENTS SET ${assignments} WHERE rid = $1 RETURNING *`,
+      `UPDATE ${sqlIdentifierPath(collection)} SET ${assignments} WHERE rid = $1 RETURNING *`,
       rid,
     )
     const item = result.rows?.[0]

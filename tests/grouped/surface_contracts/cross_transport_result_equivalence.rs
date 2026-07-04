@@ -375,12 +375,12 @@ fn insert_document_sql(collection: &str) -> String {
 }
 
 fn partial_update_document_sql(collection: &str) -> String {
-    format!("UPDATE {collection} DOCUMENTS SET score += 5 WHERE name = 'alpha'")
+    format!("UPDATE {collection} SET score += 5 WHERE name = 'alpha'")
 }
 
 fn replace_document_sql(collection: &str) -> String {
     format!(
-        "UPDATE {collection} DOCUMENTS \
+        "UPDATE {collection} \
          SET name = 'beta', score = 99, keep = 'replacement', status = 'done' \
          WHERE name = 'alpha'"
     )

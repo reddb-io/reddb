@@ -183,7 +183,7 @@ func (d *DocumentClient) Patch(ctx context.Context, collection, rid string, patc
 		}
 		parts = append(parts, fmt.Sprintf("%s = %s", sqlIdentifier(field), lit))
 	}
-	sql := fmt.Sprintf("UPDATE %s DOCUMENTS SET %s WHERE rid = $1 RETURNING *",
+	sql := fmt.Sprintf("UPDATE %s SET %s WHERE rid = $1 RETURNING *",
 		sqlIdentifierPath(collection), strings.Join(parts, ", "))
 	body, err := d.q.Query(ctx, sql, rid)
 	if err != nil {

@@ -81,7 +81,7 @@ final class Documents
             $parts[] = sprintf('%s = %s', Sql::identifier($field), Sql::valueLiteral($value));
         }
         $sql = sprintf(
-            'UPDATE %s DOCUMENTS SET %s WHERE rid = $1 RETURNING *',
+            'UPDATE %s SET %s WHERE rid = $1 RETURNING *',
             Sql::identifierPath($collection), implode(', ', $parts)
         );
         $body = $this->q->query($sql, [$rid]);

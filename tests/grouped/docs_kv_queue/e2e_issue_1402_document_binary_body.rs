@@ -197,7 +197,7 @@ fn update_set_keeps_binary_body_in_sync() {
     rt.execute_query(r#"INSERT INTO users DOCUMENT VALUES ({"name":"Alice","tier":"free"})"#)
         .expect("insert");
 
-    rt.execute_query("UPDATE users DOCUMENTS SET tier = 'pro' WHERE name = 'Alice'")
+    rt.execute_query("UPDATE users SET tier = 'pro' WHERE name = 'Alice'")
         .expect("update");
 
     // Still binary on disk after the update.

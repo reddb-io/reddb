@@ -352,7 +352,7 @@ fn runtime_btree_document_path_index_refresh_on_dml() {
     // UPDATE: move svc1 from gold → aaa (aaa < bronze, drops out of range)
     exec(
         &rt,
-        "UPDATE refresh_docs DOCUMENTS SET tier = 'aaa' WHERE name = 'svc1'",
+        "UPDATE refresh_docs SET tier = 'aaa' WHERE name = 'svc1'",
     );
     let after_update = above_bronze(&rt);
     assert_eq!(

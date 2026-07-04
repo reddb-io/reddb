@@ -134,6 +134,47 @@ impl RedDBRuntime {
         }
     }
 
+    /// Resolve the model of an unmarked UPDATE from the catalog (ADR 0067,
+    /// #1711). The `DOCUMENTS` / `ROWS` / `KV` UPDATE markers were removed, so
+    /// an unmarked UPDATE parses to the `Rows` target; the catalog is the
+    /// single source of truth for the collection's model. An existing document
+    /// collection is rewritten to the `Documents` target (the runtime routes
+    /// body / patch semantics off the target the explicit marker used to set);
+    /// a KV collection to `Kv` so the key-immutability guard still fires. Table
+    /// and unknown collections keep the `Rows` default.
+    ///
+    /// Dotted assignment targets (`SET a.b.c = …`) parse for every target — the
+    /// model is not a parse-time fact — but they are legal only on a document
+    /// collection and rejected here with a clear model-oriented error off it.
+    fn resolve_unmarked_update_target(
+        &self,
+        query: &UpdateQuery,
+    ) -> RedDBResult<Option<UpdateQuery>> {
+        // NODES / EDGES are explicit, user-declared graph targets — never
+        // inferred. Dotted paths off a graph target are still off-model.
+        if matches!(query.target, UpdateTarget::Nodes | UpdateTarget::Edges) {
+            ensure_update_dotted_targets_allowed(query, false)?;
+            return Ok(None);
+        }
+        let declared_model = self
+            .db()
+            .collection_contract_arc(&query.table)
+            .map(|contract| contract.declared_model);
+        let is_document = matches!(
+            declared_model,
+            Some(crate::catalog::CollectionModel::Document)
+        );
+        ensure_update_dotted_targets_allowed(query, is_document)?;
+        let inferred = match declared_model {
+            Some(crate::catalog::CollectionModel::Document) => UpdateTarget::Documents,
+            Some(crate::catalog::CollectionModel::Kv) => UpdateTarget::Kv,
+            _ => return Ok(None),
+        };
+        let mut rewritten = query.clone();
+        rewritten.target = inferred;
+        Ok(Some(rewritten))
+    }
+
     /// Execute INSERT INTO table [entity_type] (cols) VALUES (vals), ...
     ///
     /// Each row in `query.values` is zipped with `query.columns` to produce a
@@ -1238,6 +1279,21 @@ impl RedDBRuntime {
         if query.claim_limit.is_some() && self.is_queue_collection(&query.table) {
             return self.execute_queue_shaped_claim(raw_query, query);
         }
+        // ADR 0067 (#1711): the DOCUMENTS / ROWS / KV UPDATE markers were
+        // removed. Resolve the model of an unmarked UPDATE from the catalog so
+        // a document collection routes to document semantics and a KV
+        // collection keeps its key-immutability guard, and gate dotted SET
+        // targets that only a document body can satisfy. Runs before the
+        // contract / RLS gates so every downstream path — the inner scan,
+        // RETURNING — observes the resolved target.
+        let inferred_owned;
+        let query = match self.resolve_unmarked_update_target(query)? {
+            Some(rewritten) => {
+                inferred_owned = rewritten;
+                &inferred_owned
+            }
+            None => query,
+        };
         // CollectionContract gate (#50): runs the APPEND ONLY guard
         // (and any future contract bits) before RLS / RETURNING work
         // so the operator's immutability declaration is honoured

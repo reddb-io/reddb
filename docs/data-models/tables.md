@@ -121,14 +121,14 @@ curl -X PATCH http://127.0.0.1:5000/collections/users/entities/102 \
 Or via SQL:
 
 ```sql
-UPDATE users ROWS
+UPDATE users
 SET age = 31
 WHERE name = 'Alice'
 RETURNING rid, age
 ```
 
 ```sql
-UPDATE users ROWS
+UPDATE users
 SET active = false, age += 1
 WHERE rid = 102
 RETURNING rid, active, age
@@ -137,7 +137,7 @@ RETURNING rid, active, age
 Ordered batch update with deterministic tie-breaker:
 
 ```sql
-UPDATE users ROWS
+UPDATE users
 SET touched = true
 WHERE active = true
 ORDER BY priority DESC
