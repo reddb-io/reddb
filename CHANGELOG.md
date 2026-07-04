@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.21.0
+
+### Minor Changes
+
+- Document DML overhaul (ADR 0066/0067, PRD [#1703](https://github.com/reddb-io/reddb/issues/1703)). The document write surface is redesigned around one canonical form:
+
+  - **Inline strict-JSON literals are the only way to write JSON in RQL** — `INSERT INTO events DOCUMENT VALUES ({"level":"info"})`. The quoted-string coercion (`VALUES ('{…}')`) and the ceremonial `(body)` column list are rejected with didactic errors that name the sanctioned form; legacy `_ttl` metadata columns point at `WITH TTL`.
+  - **`JSON_PARSE(<expr>)`** added as the explicit string→JSON conversion for runtime-string cases.
+  - **Array literals parse losslessly** into a native array; vector-vs-JSON is resolved from the target's type at analysis/runtime instead of committing to an f32 vector at parse time (large integers destined for JSON no longer corrupt).
+  - **Reserved envelope field names** (`rid`, `collection`, `kind`, `tenant`, `created_at`, `updated_at`) are enforced against user data at write time, with an error that names the field, the reserved set, and the rename recourse.
+  - **The `DOCUMENT` marker is an optional idempotent model assertion**: unmarked `INSERT INTO c VALUES ({…})` infers the model from the catalog (existing document collection → document write; existing non-document → model error; unknown → didactic error), and `DOCUMENT` bootstraps-or-validates the collection's model.
+
+  Published JS, js-client, and PHP/Python drivers flip to the inline form in this same release (no deprecation window — stated maintainer policy).
+
 ## 1.20.0
 
 ## 1.18.0
