@@ -156,7 +156,7 @@ fn ordered_index_refreshes_on_insert_update_delete() {
 
     // UPDATE: bumping bob 10 -> 99 re-positions it to the top and makes it
     // appear in a range that previously excluded it.
-    rt.execute_query("UPDATE docs DOCUMENTS SET score = 99 WHERE name = 'bob'")
+    rt.execute_query("UPDATE docs SET score = 99 WHERE name = 'bob'")
         .expect("document update refreshes the ordered index");
     let after_update = rt
         .execute_query("SELECT name FROM docs WHERE score > 40 ORDER BY score ASC")
