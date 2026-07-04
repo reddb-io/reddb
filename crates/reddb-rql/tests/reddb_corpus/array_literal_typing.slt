@@ -1,0 +1,49 @@
+# RedDB-only conformance — array-literal typing (issue #1708, PRD #1703,
+# ADR 0067). HAND-AUTHORED TRUTH (ADR 0053 S3).
+#
+# A bare `[…]` literal parses LOSSLESSLY into an array; whether it becomes a
+# vector or a JSON array is resolved by the runtime from the target's type, not
+# guessed (lossily, as an f32 vector) at parse time. This file exercises both
+# resolutions plus the mixed-type array case.
+#
+# The harness projects each result to its semantic `content` column; the
+# engine-internal id/score/timestamp columns are run-varying and intentionally
+# not pinned (see tests/reddb_conformance.rs). KV/document `value`/`body`
+# positions are not among the projected semantic columns, so the JSON-target
+# cases below assert acceptance (`statement ok`) — the exact-integer round-trip
+# for those positions is pinned at the value level in
+# `crates/reddb-server/tests/issue_1708_array_literal_typing.rs`.
+
+# --- Vector target ---------------------------------------------------------
+# A numeric array at a vector-typed position resolves to a vector. Integer
+# element spellings ([1, 0]) are accepted just like float spellings and rank
+# identically against the unit query.
+statement ok
+CREATE VECTOR v DIM 2 METRIC cosine
+
+statement ok
+INSERT INTO v VECTOR (embedding, content) VALUES ([1, 0], 'near')
+
+statement ok
+INSERT INTO v VECTOR (embedding, content) VALUES ([0, 1], 'far')
+
+# Nearest-first by cosine similarity: 'near' is colinear with [1, 0], 'far' is
+# orthogonal, so the strict ranking is near, far.
+query T nosort
+VECTOR SEARCH v SIMILAR TO [1, 0] LIMIT 2
+----
+near
+far
+
+# --- JSON target -----------------------------------------------------------
+# A numeric array at a JSON/KV position stays an exact JSON array. The large
+# integer 9007199254740993 (2^53 + 1) cannot survive an f32/f64 round-trip, so
+# a parse-time vector guess would corrupt it; the lossless parse preserves it.
+statement ok
+INSERT INTO settings KV (key, value) VALUES ('nums', [1, 2, 9007199254740993])
+
+# --- Mixed-type array ------------------------------------------------------
+# A mixed array is never a vector candidate and resolves to a JSON array with
+# every element's identity preserved.
+statement ok
+INSERT INTO settings KV (key, value) VALUES ('mixed', ['a', 2, true, null])
