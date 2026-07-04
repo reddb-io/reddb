@@ -546,7 +546,10 @@ fn document_nested_set_creates_intermediate_objects() {
     );
     assert_eq!(updated.affected_rows, 1);
 
-    let with_body = exec(&rt, "SELECT body FROM body_intermediate_docs WHERE name = 'doc'");
+    let with_body = exec(
+        &rt,
+        "SELECT body FROM body_intermediate_docs WHERE name = 'doc'",
+    );
     let body = json_field(only_record(&with_body), "body");
     assert_eq!(
         body["settings"]["notifications"]["email"].as_str(),
@@ -587,7 +590,10 @@ fn document_nested_set_rejects_reserved_top_level() {
     );
 
     // The rejected UPDATE must not have mutated the document body.
-    let with_body = exec(&rt, "SELECT body FROM body_reserved_docs WHERE name = 'doc'");
+    let with_body = exec(
+        &rt,
+        "SELECT body FROM body_reserved_docs WHERE name = 'doc'",
+    );
     let body = json_field(only_record(&with_body), "body");
     assert_eq!(body["keep"].as_str(), Some("me"));
     assert!(
@@ -678,7 +684,10 @@ fn document_nested_set_through_array_rejected() {
         "path-through-array must fail with a clear error, got: {error}"
     );
 
-    let with_body = exec(&rt, "SELECT body FROM body_thru_array_docs WHERE name = 'doc'");
+    let with_body = exec(
+        &rt,
+        "SELECT body FROM body_thru_array_docs WHERE name = 'doc'",
+    );
     let body = json_field(only_record(&with_body), "body");
     assert_eq!(
         body["tags"],

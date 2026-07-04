@@ -1260,10 +1260,7 @@ fn reject_document_array_position_path(path: &[String]) -> RedDBResult<()> {
 /// mirrors the HTTP JSON-patch contract: intermediate objects are created only
 /// where a slot is absent, never by silently clobbering a scalar. `body` is the
 /// pre-merge document body.
-fn reject_document_patch_path_through_scalar(
-    body: &JsonValue,
-    path: &[String],
-) -> RedDBResult<()> {
+fn reject_document_patch_path_through_scalar(body: &JsonValue, path: &[String]) -> RedDBResult<()> {
     if path.len() < 2 {
         return Ok(());
     }
