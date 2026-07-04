@@ -1,0 +1,38 @@
+# RedDB-only JSON builtin contracts.
+#
+# Truth is hand-authored from the JSON builtin semantics, not copied from engine
+# output. JSON_PARSE is the explicit string-to-JSON conversion complement to
+# JSON literals.
+
+query TT nosort
+SELECT JSON_EXTRACT(JSON_PARSE('{"user":{"name":"Ada","visits":2}}'), '$.user.name') AS json_name,
+       JSON_EXTRACT_TEXT(JSON_PARSE('{"user":{"name":"Ada","visits":2}}'), '$.user.visits') AS json_visits
+----
+"Ada" 2
+
+statement ok
+CREATE TABLE json_parse_inputs (id INTEGER, raw TEXT, suffix TEXT)
+
+statement ok
+INSERT INTO json_parse_inputs (id, raw, suffix) VALUES
+  (1, '{"user":{"name":"Ada","visits":2}}', '"Ada"}}')
+
+# Round-trip: string column -> JSON_PARSE -> dotted-path read.
+query TT nosort
+SELECT JSON_EXTRACT(JSON_PARSE(raw), '$.user.name') AS json_column_name,
+       JSON_EXTRACT_TEXT(JSON_PARSE(raw), '$.user.visits') AS json_column_visits
+FROM json_parse_inputs
+WHERE id = 1
+----
+"Ada" 2
+
+# Computed expression input is still runtime text.
+query T nosort
+SELECT JSON_EXTRACT(JSON_PARSE('{"user":{"name":' || suffix), '$.user.name') AS json_computed_name
+FROM json_parse_inputs
+WHERE id = 1
+----
+"Ada"
+
+statement error JSON_PARSE failed to parse JSON
+SELECT JSON_PARSE('{"broken":') AS json_invalid
