@@ -57,6 +57,11 @@ const KEEP: &[&str] = &[
     "total_weight",
     "nodes_visited",
     "negative_cycle_detected",
+    "json_name",
+    "json_visits",
+    "json_column_name",
+    "json_column_visits",
+    "json_computed_name",
 ];
 
 use super::support::PersistentRuntime;
