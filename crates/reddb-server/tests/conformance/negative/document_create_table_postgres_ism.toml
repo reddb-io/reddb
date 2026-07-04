@@ -1,0 +1,5 @@
+input = "CREATE TABLE events DOCUMENT (id INT)"
+expected_error_substring = "write `CREATE DOCUMENT <name>`"
+expected_error_kind = "Syntax"
+source = "crates/reddb-rql/src/parser/error.rs:180"
+kind = "negative"

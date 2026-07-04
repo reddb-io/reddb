@@ -131,6 +131,13 @@ impl<'a> Parser<'a> {
         let if_not_exists = self.match_if_not_exists()?;
         let name = self.expect_ident()?;
 
+        // Didactic (#1704): `CREATE TABLE <name> DOCUMENT (…)` is a Postgres-ism
+        // a document-model newcomer predictably tries. Teach the native form
+        // before the generic `expected (` error fires.
+        if self.check(&Token::Document) {
+            return Err(ParseError::document_create_table(self.position()));
+        }
+
         self.expect(Token::LParen)?;
         let mut columns = Vec::new();
         loop {
@@ -1217,6 +1224,12 @@ impl<'a> Parser<'a> {
                 def.unique = true;
             } else if self.match_primary_key()? {
                 def.primary_key = true;
+            } else if matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("GENERATED"))
+            {
+                // Didactic (#1704): `… GENERATED ALWAYS AS (…) STORED` is a
+                // Postgres-ism. Document body fields already auto-flatten into
+                // queryable columns, so teach that instead of the generic error.
+                return Err(ParseError::generated_column_unneeded(self.position()));
             } else {
                 break;
             }
