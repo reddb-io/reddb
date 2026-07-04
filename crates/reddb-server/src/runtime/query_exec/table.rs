@@ -173,7 +173,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     outer_alias,
                 )?;
 
-                return Ok(records
+                return records
                     .iter()
                     .map(|record| {
                         project_runtime_record_with_db(
@@ -186,7 +186,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             false,
                         )
                     })
-                    .collect());
+                    .collect();
             }
             other => {
                 return Err(RedDBError::Query(format!(
@@ -855,7 +855,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             false,
                         )
                     })
-                    .collect();
+                    .collect::<crate::RedDBResult<Vec<_>>>()?;
             }
 
             return Ok(records);
@@ -1558,7 +1558,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 Some(context.table_name),
                 Some(context.table_alias),
             )?;
-            Ok(records
+            records
                 .iter()
                 .map(|record| {
                     project_runtime_record_with_db(
@@ -1571,7 +1571,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
                         entity_projection,
                     )
                 })
-                .collect())
+                .collect()
         }
         other => Err(RedDBError::Query(format!(
             "unsupported canonical table operator {other}"
