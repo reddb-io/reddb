@@ -1,0 +1,77 @@
+# ADR 0067 (#1712) — nested document SET deep-merges into the body.
+#
+# TRUTH is hand-authored (a RedDB-only surface with no external oracle): the
+# HTTP JSON-patch merge contract made available to plain SQL —
+#
+#   * `UPDATE … SET a.b.c = …` deep-merges into the stored document body:
+#     intermediate objects are created as needed, sibling keys are preserved,
+#     and the merged leaf is readable immediately via a dotted-path read;
+#   * a nested SET may not introduce a reserved envelope name at the top level
+#     (Reserved-field rule, ADR 0066) — rejected with the reserved-field error;
+#   * setting a path *through* a non-object (scalar) value fails with a clear
+#     error, matching the HTTP patch contract (a scalar is never clobbered);
+#   * array positional paths stay unsupported — a numeric path segment is not a
+#     valid SQL identifier, so the parser rejects it.
+#
+# Leaf values are read back with JSON_EXTRACT_TEXT (unquoted scalar rendering),
+# projected to the harness's semantic allowlist alias (`json_name`).
+
+statement ok
+CREATE DOCUMENT events
+
+statement ok
+INSERT INTO events DOCUMENT VALUES ({"name":"login","user":{"address":{"city":"Porto","zip":"4000"},"active":true},"keep":"me"})
+
+# --- Nested SET deep-merges into an existing path -------------------------
+
+statement ok
+UPDATE events SET user.address.city = 'SP' WHERE name = 'login'
+
+# The merged leaf is visible immediately via a dotted-path read.
+query T nosort
+SELECT JSON_EXTRACT_TEXT(body, '$.user.address.city') AS json_name FROM events WHERE name = 'login'
+----
+SP
+
+# Sibling keys under the merged path survive untouched.
+query T nosort
+SELECT JSON_EXTRACT_TEXT(body, '$.user.address.zip') AS json_name FROM events WHERE name = 'login'
+----
+4000
+
+# And a sibling one level up survives too.
+query T nosort
+SELECT JSON_EXTRACT_TEXT(body, '$.keep') AS json_name FROM events WHERE name = 'login'
+----
+me
+
+# The row itself is preserved (name is a top-level sibling).
+query T rowsort
+SELECT name FROM events
+----
+login
+
+# --- Intermediate objects are created on demand for absent paths ----------
+
+statement ok
+UPDATE events SET settings.notifications.email = 'on' WHERE name = 'login'
+
+query T nosort
+SELECT JSON_EXTRACT_TEXT(body, '$.settings.notifications.email') AS json_name FROM events WHERE name = 'login'
+----
+on
+
+# --- ADR 0066: a nested SET may not introduce a reserved envelope name ----
+
+statement error reserved
+UPDATE events SET kind = 'nope' WHERE name = 'login'
+
+# --- Setting a path through a scalar fails with a clear error --------------
+
+statement error not an object
+UPDATE events SET keep.more = 'x' WHERE name = 'login'
+
+# --- Array positional paths stay unsupported (rejected at parse) -----------
+
+statement error Unexpected token
+UPDATE events SET user.tags.0 = 'x' WHERE name = 'login'

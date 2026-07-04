@@ -1255,6 +1255,59 @@ fn reject_document_array_position_path(path: &[String]) -> RedDBResult<()> {
     Ok(())
 }
 
+/// Reject a document body `set` whose path would traverse *through* an existing
+/// non-object value (e.g. `SET a.b = …` where `a` is already a scalar). This
+/// mirrors the HTTP JSON-patch contract: intermediate objects are created only
+/// where a slot is absent, never by silently clobbering a scalar. `body` is the
+/// pre-merge document body.
+fn reject_document_patch_path_through_scalar(body: &JsonValue, path: &[String]) -> RedDBResult<()> {
+    if path.len() < 2 {
+        return Ok(());
+    }
+    let scalar_error = |prefix: &str| {
+        crate::RedDBError::Query(format!(
+            "cannot set nested path '{}': '{}' is not an object; setting a path through a non-object value is unsupported — replace that value or the full document body instead",
+            path.join("."),
+            prefix
+        ))
+    };
+    let mut current = body;
+    // Walk the parent path (every segment but the leaf). Each container we index
+    // into must be an object; an absent slot is fine (the merge creates it).
+    for (idx, segment) in path[..path.len() - 1].iter().enumerate() {
+        let JsonValue::Object(map) = current else {
+            return Err(scalar_error(&path[..idx].join(".")));
+        };
+        match map.get(segment) {
+            Some(next) => current = next,
+            None => return Ok(()),
+        }
+    }
+    // `current` is now the leaf's parent container; it must be an object.
+    if !matches!(current, JsonValue::Object(_)) {
+        return Err(scalar_error(&path[..path.len() - 1].join(".")));
+    }
+    Ok(())
+}
+
+/// Apply document body `set`/`unset` operations, enforcing the shared document
+/// patch contract first: array-positional paths and paths that traverse through
+/// a scalar are rejected with clear errors before any mutation touches `body`.
+/// Used by both the SQL nested-`SET` executor and the HTTP JSON-patch operation
+/// path so the two surfaces stay consistent (ADR 0067).
+fn apply_document_body_patch_operations(
+    body: &mut JsonValue,
+    operations: &[PatchEntityOperation],
+) -> RedDBResult<()> {
+    for op in operations {
+        reject_document_array_position_path(&op.path)?;
+        if matches!(op.op, PatchEntityOperationType::Set) {
+            reject_document_patch_path_through_scalar(body, &op.path)?;
+        }
+    }
+    apply_patch_operations_to_json(body, operations).map_err(crate::RedDBError::Query)
+}
+
 fn document_body_from_named(fields: &HashMap<String, Value>) -> RedDBResult<JsonValue> {
     match fields.get("body") {
         Some(Value::Json(bytes)) => {
@@ -1614,8 +1667,7 @@ impl RedDBRuntime {
                             row.named.get_or_insert_with(Default::default),
                         )?,
                     };
-                    apply_patch_operations_to_json(&mut body, &document_body_ops)
-                        .map_err(crate::RedDBError::Query)?;
+                    apply_document_body_patch_operations(&mut body, &document_body_ops)?;
                     replace_document_row_body(
                         row,
                         body,
@@ -2248,8 +2300,7 @@ impl RedDBRuntime {
                         let mut body = document_body_from_named(
                             row.named.get_or_insert_with(Default::default),
                         )?;
-                        apply_patch_operations_to_json(&mut body, &document_body_ops)
-                            .map_err(crate::RedDBError::Query)?;
+                        apply_document_body_patch_operations(&mut body, &document_body_ops)?;
                         replace_document_row_body(
                             row,
                             body,

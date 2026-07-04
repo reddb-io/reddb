@@ -54,8 +54,8 @@ ada-lovelace
 
 # --- Dotted SET targets parse for every collection, gated by the model ----
 
-# On a document collection a dotted path is accepted (executor deep-merge is a
-# later slice; today's runtime behaviour is preserved).
+# On a document collection a dotted path is accepted and deep-merges into the
+# body (executor deep-merge landed in #1712; see document_nested_set_merge.slt).
 statement ok
 UPDATE people SET profile.address.city = 'Lisbon' WHERE name = 'ada-lovelace'
 

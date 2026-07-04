@@ -57,7 +57,10 @@ RETURNING rid, name, active
 ### Update Documents, KV, and Graph Items
 
 Document and KV updates are unmarked — the catalog resolves the model. On a
-document collection a dotted `SET a.b.c = …` path addresses a nested body field.
+document collection a dotted `SET a.b.c = …` path **deep-merges** into the
+document body: intermediate objects are created as needed, sibling keys are
+preserved, and the flattened top-level read surface (and `RETURNING`) reflect
+the change immediately.
 
 ```sql
 UPDATE events
@@ -65,6 +68,21 @@ SET reviewed = true, attempts += 1
 WHERE event_type = 'login'
 RETURNING rid, kind, reviewed, attempts
 ```
+
+```sql
+-- Deep merge: creates `user.address` if absent, keeps other user fields.
+UPDATE events
+SET user.address.city = 'SP'
+WHERE event_type = 'login'
+RETURNING body
+```
+
+A nested `SET` may not introduce a reserved envelope name (`rid`, `collection`,
+`kind`, `tenant`, `created_at`, `updated_at`) at the top level — it is rejected
+with the reserved-field error. Setting a path *through* a non-object value
+(e.g. `a.b` where `a` is a scalar) fails with a clear error, and array
+positional paths (`tags.0`) stay unsupported — replace the array or the full
+`body` instead. These mirror the HTTP JSON-patch contract.
 
 ```sql
 UPDATE config
