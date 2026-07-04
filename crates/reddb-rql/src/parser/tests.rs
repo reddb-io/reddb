@@ -2118,20 +2118,10 @@ fn test_parse_update_with_where() {
 }
 
 #[test]
-fn test_parse_update_explicit_item_targets() {
+fn test_parse_update_graph_markers_stay_others_removed() {
+    // NODES/EDGES survive as parse-time markers; the document/row/KV markers
+    // were removed (ADR 0067, #1711) and reject with a didactic error.
     for (sql, expected) in [
-        (
-            "UPDATE hosts ROWS SET status = 'active'",
-            crate::ast::UpdateTarget::Rows,
-        ),
-        (
-            "UPDATE docs DOCUMENTS SET status = 'published'",
-            crate::ast::UpdateTarget::Documents,
-        ),
-        (
-            "UPDATE settings KV SET value = 'on'",
-            crate::ast::UpdateTarget::Kv,
-        ),
         (
             "UPDATE social NODES SET status = 'seen'",
             crate::ast::UpdateTarget::Nodes,
@@ -2140,6 +2130,10 @@ fn test_parse_update_explicit_item_targets() {
             "UPDATE social EDGES SET status = 'linked'",
             crate::ast::UpdateTarget::Edges,
         ),
+        (
+            "UPDATE hosts SET status = 'active'",
+            crate::ast::UpdateTarget::Rows,
+        ),
     ] {
         let query = parse(sql).unwrap();
         let QueryExpr::Update(update) = query else {
@@ -2147,17 +2141,27 @@ fn test_parse_update_explicit_item_targets() {
         };
         assert_eq!(update.target, expected, "{sql}");
     }
+
+    for marker in ["DOCUMENTS", "ROWS", "KV"] {
+        let sql = format!("UPDATE docs {marker} SET status = 'published'");
+        let err = parse(&sql).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(marker), "{msg}");
+        assert!(msg.contains("has been removed"), "{msg}");
+    }
 }
 
 #[test]
-fn test_parse_update_documents_path_target_round_trips() {
-    let sql = "UPDATE docs DOCUMENTS SET profile.address.city = 'Lisbon' WHERE name = 'ada'";
+fn test_parse_update_dotted_path_target_round_trips_unmarked() {
+    // Dotted SET targets parse for the unmarked form and render back unmarked
+    // (ADR 0067, #1711); the analyzer, not the parser, gates them by model.
+    let sql = "UPDATE docs SET profile.address.city = 'Lisbon' WHERE name = 'ada'";
     let query = parse(sql).unwrap();
     let QueryExpr::Update(update) = &query else {
         panic!("Expected UpdateQuery");
     };
 
-    assert_eq!(update.target, crate::ast::UpdateTarget::Documents);
+    assert_eq!(update.target, crate::ast::UpdateTarget::Rows);
     assert_eq!(update.assignment_exprs[0].0, "profile.address.city");
     assert_eq!(update.assignments[0].0, "profile.address.city");
     assert_eq!(crate::renderer::render(&query), sql);
