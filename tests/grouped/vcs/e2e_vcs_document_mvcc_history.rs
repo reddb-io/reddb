@@ -57,7 +57,7 @@ fn commit(rt: &RedDBRuntime, conn: u64, msg: &str) -> String {
 /// its stable `rid`.
 fn insert_doc(rt: &RedDBRuntime, collection: &str, a: i64) -> u64 {
     let sql =
-        format!("INSERT INTO {collection} DOCUMENT (body) VALUES ('{{\"a\":{a}}}') RETURNING *");
+        format!("INSERT INTO {collection} DOCUMENT VALUES ({{\"a\":{a}}}) RETURNING *");
     let result = rt
         .execute_query(&sql)
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));

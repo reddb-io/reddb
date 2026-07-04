@@ -152,7 +152,7 @@ fn document_and_kv_reads_expose_public_rid_envelope() {
 
     let inserted_doc = exec(
         &rt,
-        r#"INSERT INTO doc_items DOCUMENT (body) VALUES ('{"name":"alpha","score":7}') RETURNING *"#,
+        r#"INSERT INTO doc_items DOCUMENT VALUES ({"name":"alpha","score":7}) RETURNING *"#,
     );
     let doc_rid = assert_public_envelope(only_record(&inserted_doc), "doc_items", "document");
 

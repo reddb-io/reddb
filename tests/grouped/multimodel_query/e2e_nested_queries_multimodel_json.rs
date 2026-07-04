@@ -228,7 +228,7 @@ fn bare_json_literals_insert_into_documents_kv_and_table_json_columns() {
     exec(&rt, "CREATE DOCUMENT docs_json");
     exec(
         &rt,
-        "INSERT INTO docs_json DOCUMENT (body) VALUES \
+        "INSERT INTO docs_json DOCUMENT VALUES \
          ({\"user\":{\"name\":\"Ada\",\"active\":true},\"tags\":[\"beta\"],\"score\":7})",
     );
     let doc = exec(

@@ -70,7 +70,7 @@ fn flag_on_stores_body_as_binary_container() {
     enable_binary_body(&rt);
     rt.execute_query("CREATE DOCUMENT events").expect("create");
     rt.execute_query(
-        r#"INSERT INTO events DOCUMENT (body) VALUES ('{"event_type":"login","attempts":2}')"#,
+        r#"INSERT INTO events DOCUMENT VALUES ({"event_type":"login","attempts":2})"#,
     )
     .expect("insert");
 
@@ -87,7 +87,7 @@ fn default_stores_body_as_binary_container() {
     let rt = runtime();
     rt.execute_query("CREATE DOCUMENT events").expect("create");
     rt.execute_query(
-        r#"INSERT INTO events DOCUMENT (body) VALUES ('{"event_type":"login","attempts":2}')"#,
+        r#"INSERT INTO events DOCUMENT VALUES ({"event_type":"login","attempts":2})"#,
     )
     .expect("insert");
 
@@ -117,7 +117,7 @@ fn explicit_true_observable_behaviour_matches_default() {
             r#"{"level":"info","seq":3,"tags":["checkout","logout"]}"#,
         ] {
             rt.execute_query(&format!(
-                "INSERT INTO docs DOCUMENT (body) VALUES ('{doc}')"
+                "INSERT INTO docs DOCUMENT VALUES ({doc})"
             ))
             .expect("insert");
         }
@@ -170,7 +170,7 @@ fn rich_types_survive_write_then_read() {
     enable_binary_body(&rt);
     rt.execute_query("CREATE DOCUMENT assets").expect("create");
     rt.execute_query(
-        r##"INSERT INTO assets DOCUMENT (body) VALUES ('{"email":"user@example.com","ipv4":"127.0.0.1","subnet":"10.0.0.0/8","color":"#DEADBE"}')"##,
+        r##"INSERT INTO assets DOCUMENT VALUES ({"email":"user@example.com","ipv4":"127.0.0.1","subnet":"10.0.0.0/8","color":"#DEADBE"})"##,
     )
     .expect("insert");
 
@@ -201,7 +201,7 @@ fn update_set_keeps_binary_body_in_sync() {
     enable_binary_body(&rt);
     rt.execute_query("CREATE DOCUMENT users").expect("create");
     rt.execute_query(
-        r#"INSERT INTO users DOCUMENT (body) VALUES ('{"name":"Alice","tier":"free"}')"#,
+        r#"INSERT INTO users DOCUMENT VALUES ({"name":"Alice","tier":"free"})"#,
     )
     .expect("insert");
 
@@ -230,7 +230,7 @@ fn binary_body_survives_reopen() {
         enable_binary_body(&rt);
         rt.execute_query("CREATE DOCUMENT events").expect("create");
         rt.execute_query(
-            r#"INSERT INTO events DOCUMENT (body) VALUES ('{"label":"hello","n":7}')"#,
+            r#"INSERT INTO events DOCUMENT VALUES ({"label":"hello","n":7})"#,
         )
         .expect("insert");
         assert_eq!(&body_bytes(&rt, "events")[..4], RDOC_MAGIC);

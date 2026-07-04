@@ -1324,7 +1324,7 @@ fn create_document_creates_a_usable_document_collection() {
     // collection that accepts DOCUMENT inserts and is queryable end-to-end.
     rt.execute_query("CREATE DOCUMENT docs")
         .expect("CREATE DOCUMENT provisions a document collection");
-    rt.execute_query("INSERT INTO docs DOCUMENT (body) VALUES ('{\"title\":\"one\"}')")
+    rt.execute_query("INSERT INTO docs DOCUMENT VALUES ({\"title\":\"one\"})")
         .expect("document insert into the created collection");
     let res = rt
         .execute_query("SELECT * FROM docs")
@@ -2088,7 +2088,7 @@ fn insert_returning_star_exposes_entity_id_for_non_graph_entities() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     let cases = [
         "INSERT INTO users (name) VALUES ('Alice') RETURNING *",
-        "INSERT INTO docs DOCUMENT (body) VALUES ('{\"title\":\"one\"}') RETURNING *",
+        "INSERT INTO docs DOCUMENT VALUES ({\"title\":\"one\"}) RETURNING *",
         "INSERT INTO settings KV (key, value) VALUES ('max_retries', 5) RETURNING *",
         "INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'axis') RETURNING *",
     ];

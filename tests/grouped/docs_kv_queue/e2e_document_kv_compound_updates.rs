@@ -63,15 +63,15 @@ fn document_claim_updates_ordered_subset_with_returning() {
     );
     exec(
         &rt,
-        r#"INSERT INTO doc_claim_tasks DOCUMENT (body) VALUES ('{"name":"slow","priority":30,"status":"ready"}')"#,
+        r#"INSERT INTO doc_claim_tasks DOCUMENT VALUES ({"name":"slow","priority":30,"status":"ready"})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO doc_claim_tasks DOCUMENT (body) VALUES ('{"name":"fast","priority":10,"status":"ready"}')"#,
+        r#"INSERT INTO doc_claim_tasks DOCUMENT VALUES ({"name":"fast","priority":10,"status":"ready"})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO doc_claim_tasks DOCUMENT (body) VALUES ('{"name":"middle","priority":20,"status":"ready"}')"#,
+        r#"INSERT INTO doc_claim_tasks DOCUMENT VALUES ({"name":"middle","priority":20,"status":"ready"})"#,
     );
 
     let claimed = exec(
@@ -155,11 +155,11 @@ fn document_claim_locks_skip_and_release_on_rollback() {
     );
     exec(
         &rt,
-        r#"INSERT INTO doc_claim_lock_tasks DOCUMENT (body) VALUES ('{"name":"a","priority":10,"status":"ready"}')"#,
+        r#"INSERT INTO doc_claim_lock_tasks DOCUMENT VALUES ({"name":"a","priority":10,"status":"ready"})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO doc_claim_lock_tasks DOCUMENT (body) VALUES ('{"name":"b","priority":20,"status":"ready"}')"#,
+        r#"INSERT INTO doc_claim_lock_tasks DOCUMENT VALUES ({"name":"b","priority":20,"status":"ready"})"#,
     );
 
     exec(&rt, "BEGIN");
@@ -256,11 +256,11 @@ fn document_compound_update_uses_top_level_where_and_post_image_returning() {
     exec(&rt, "CREATE DOCUMENT doc_scores");
     exec(
         &rt,
-        r#"INSERT INTO doc_scores DOCUMENT (body) VALUES ('{"category":"active","name":"alpha","score":10}')"#,
+        r#"INSERT INTO doc_scores DOCUMENT VALUES ({"category":"active","name":"alpha","score":10})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO doc_scores DOCUMENT (body) VALUES ('{"category":"inactive","name":"beta","score":100}')"#,
+        r#"INSERT INTO doc_scores DOCUMENT VALUES ({"category":"inactive","name":"beta","score":100})"#,
     );
 
     let updated = exec(
@@ -311,11 +311,11 @@ fn document_and_kv_compound_failures_abort_without_partial_write() {
     exec(&rt, "CREATE DOCUMENT doc_invalid");
     exec(
         &rt,
-        r#"INSERT INTO doc_invalid DOCUMENT (body) VALUES ('{"category":"batch","name":"ok","score":10}')"#,
+        r#"INSERT INTO doc_invalid DOCUMENT VALUES ({"category":"batch","name":"ok","score":10})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO doc_invalid DOCUMENT (body) VALUES ('{"category":"batch","name":"bad","score":"text"}')"#,
+        r#"INSERT INTO doc_invalid DOCUMENT VALUES ({"category":"batch","name":"bad","score":"text"})"#,
     );
 
     let doc_err = err_string(
@@ -376,11 +376,11 @@ fn explicit_targets_keep_tenant_rls_scoped_to_matching_item_category() {
     exec(&rt, "CREATE DOCUMENT tenant_docs");
     exec(
         &rt,
-        r#"INSERT INTO tenant_docs DOCUMENT (body) VALUES ('{"tenant_id":"acme","name":"a","score":10}')"#,
+        r#"INSERT INTO tenant_docs DOCUMENT VALUES ({"tenant_id":"acme","name":"a","score":10})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO tenant_docs DOCUMENT (body) VALUES ('{"tenant_id":"globex","name":"g","score":20}')"#,
+        r#"INSERT INTO tenant_docs DOCUMENT VALUES ({"tenant_id":"globex","name":"g","score":20})"#,
     );
     exec(
         &rt,

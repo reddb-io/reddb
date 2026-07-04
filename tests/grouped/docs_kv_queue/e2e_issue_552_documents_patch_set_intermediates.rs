@@ -250,8 +250,8 @@ fn sql_update_documents_set_creates_missing_top_level_body_field() {
     rt.execute_query("CREATE DOCUMENT issue552_sql_patch")
         .expect("CREATE DOCUMENT");
     rt.execute_query(
-        r#"INSERT INTO issue552_sql_patch DOCUMENT (body)
-           VALUES ('{"event_type":"login","attempts":1}')"#,
+        r#"INSERT INTO issue552_sql_patch DOCUMENT
+           VALUES ({"event_type":"login","attempts":1})"#,
     )
     .expect("INSERT");
 

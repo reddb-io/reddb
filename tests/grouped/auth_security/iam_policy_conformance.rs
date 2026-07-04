@@ -148,7 +148,7 @@ fn setup_fixture(rt: &RedDBRuntime, fixture: Fixture) {
         }
         Fixture::Docs => {
             rt.execute_query(
-                r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"public":"ok","secret":"no","nested":{"public":"yes","secret":"hidden"}}')"#,
+                r#"INSERT INTO docs DOCUMENT VALUES ({"public":"ok","secret":"no","nested":{"public":"yes","secret":"hidden"}})"#,
             )
             .unwrap();
         }

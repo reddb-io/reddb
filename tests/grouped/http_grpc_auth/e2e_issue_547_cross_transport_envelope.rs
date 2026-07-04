@@ -301,7 +301,7 @@ async fn grpc_connector_document_update_reports_and_applies_affected_row() {
         .expect("create document collection");
     client
         .query_reply(
-            r#"INSERT INTO grpc_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+            r#"INSERT INTO grpc_docs DOCUMENT VALUES ({"name":"doc","score":10})"#,
         )
         .await
         .expect("insert document");

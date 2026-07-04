@@ -122,8 +122,8 @@ fn sql_insert_stores_json_document_and_get_by_id_returns_it() {
 
     let inserted = rt
         .execute_query(
-            r#"INSERT INTO issue540_sql_events DOCUMENT (body)
-               VALUES ('{"event_type":"login","attempts":2,"meta":{"ip":"10.0.0.1"}}')
+            r#"INSERT INTO issue540_sql_events DOCUMENT
+               VALUES ({"event_type":"login","attempts":2,"meta":{"ip":"10.0.0.1"}})
                RETURNING *"#,
         )
         .expect("SQL insert should succeed");
@@ -195,8 +195,8 @@ fn document_survives_engine_reopen() {
     rt.execute_query("CREATE DOCUMENT issue540_persist")
         .expect("CREATE DOCUMENT");
     rt.execute_query(
-        r#"INSERT INTO issue540_persist DOCUMENT (body)
-           VALUES ('{"event_type":"durable","attempts":3}')"#,
+        r#"INSERT INTO issue540_persist DOCUMENT
+           VALUES ({"event_type":"durable","attempts":3})"#,
     )
     .expect("INSERT");
 
@@ -218,7 +218,7 @@ fn document_survives_engine_reopen() {
 // Acceptance: README example for documents has at least one automated test
 // backing it. The README at the repo root shows:
 //
-//   INSERT INTO logs DOCUMENT (body) VALUES ('{"level":"info","msg":"login"}')
+//   INSERT INTO logs DOCUMENT VALUES ({"level":"info","msg":"login"})
 //
 // This test exercises that exact statement end-to-end.
 #[test]
@@ -228,8 +228,8 @@ fn readme_documents_example_runs_end_to_end() {
         .expect("CREATE DOCUMENT logs");
     let inserted = rt
         .execute_query(
-            r#"INSERT INTO logs DOCUMENT (body)
-               VALUES ('{"level":"info","msg":"login"}') RETURNING *"#,
+            r#"INSERT INTO logs DOCUMENT
+               VALUES ({"level":"info","msg":"login"}) RETURNING *"#,
         )
         .expect("README INSERT should succeed");
     assert_eq!(inserted.affected_rows, 1);
@@ -299,8 +299,8 @@ fn issue_1706_corrected_signup_example_runs_over_http_query() {
     let (_db, _rt, addr) = spawn_http_server();
     let statements = [
         "CREATE DOCUMENT issue1706_events",
-        r#"INSERT INTO issue1706_events DOCUMENT (body)
-           VALUES ('{"event_type":"signup","user_id":"u_abc123"}')"#,
+        r#"INSERT INTO issue1706_events DOCUMENT
+           VALUES ({"event_type":"signup","user_id":"u_abc123"})"#,
         "SELECT event_type, user_id FROM issue1706_events WHERE event_type = 'signup'",
     ];
 

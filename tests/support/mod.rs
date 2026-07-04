@@ -324,11 +324,11 @@ pub fn build_sql_fixture(rt: &RedDBRuntime) {
 
     exec(
         &query,
-        "INSERT INTO docs DOCUMENT (body) VALUES ('{\"category\":\"ops\",\"slug\":\"guide\",\"title\":\"Guide\"}')",
+        "INSERT INTO docs DOCUMENT VALUES ({\"category\":\"ops\",\"slug\":\"guide\",\"title\":\"Guide\"})",
     );
     exec(
         &query,
-        "INSERT INTO docs DOCUMENT (body) VALUES ('{\"category\":\"db\",\"slug\":\"runbook\",\"title\":\"Runbook\"}')",
+        "INSERT INTO docs DOCUMENT VALUES ({\"category\":\"db\",\"slug\":\"runbook\",\"title\":\"Runbook\"})",
     );
 
     exec(
@@ -976,7 +976,7 @@ pub fn apply_end_to_end_mutations(rt: &RedDBRuntime) {
     exec(&query, "DELETE FROM docs WHERE slug = 'runbook'");
     exec(
         &query,
-        "INSERT INTO docs DOCUMENT (body) VALUES ('{\"category\":\"ops\",\"slug\":\"faq\",\"title\":\"FAQ\"}')",
+        "INSERT INTO docs DOCUMENT VALUES ({\"category\":\"ops\",\"slug\":\"faq\",\"title\":\"FAQ\"})",
     );
 
     exec(&query, "DELETE FROM settings WHERE key = 'feature_flag'");
