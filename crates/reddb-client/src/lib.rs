@@ -365,8 +365,8 @@ impl<'a> DocumentClient<'a> {
         let result = self
             .db
             .query(&format!(
-                "INSERT INTO {collection} DOCUMENT (body) VALUES ({}) RETURNING *",
-                json_text_literal(body)
+                "INSERT INTO {collection} DOCUMENT VALUES ({}) RETURNING *",
+                json_inline_literal(body)
             ))
             .await?;
         document_item_from_first_row(result)
@@ -876,8 +876,11 @@ fn json_value_literal(value: &JsonValue) -> String {
     }
 }
 
-fn json_text_literal(value: &JsonValue) -> String {
-    sql_string_literal(&value.to_json_string())
+/// ADR 0067 (#1709): a document body is emitted as an inline strict-JSON
+/// literal (`DOCUMENT VALUES ({...})`), not the removed quoted-string
+/// coercion. Callers guarantee `value` is a JSON object.
+fn json_inline_literal(value: &JsonValue) -> String {
+    value.to_json_string()
 }
 
 fn kv_tag_literal(value: &str) -> String {

@@ -74,13 +74,13 @@ fn seed_multi_model(rt: &RedDBRuntime) {
 
     exec(
         rt,
-        "INSERT INTO runbooks DOCUMENT (body) VALUES \
-         ('{\"title\":\"gateway recovery\",\"summary\":\"restart gateway nodes\"}')",
+        "INSERT INTO runbooks DOCUMENT VALUES \
+         ({\"title\":\"gateway recovery\",\"summary\":\"restart gateway nodes\"})",
     );
     exec(
         rt,
-        "INSERT INTO runbooks DOCUMENT (body) VALUES \
-         ('{\"title\":\"db rotation\",\"summary\":\"rotate credentials\"}')",
+        "INSERT INTO runbooks DOCUMENT VALUES \
+         ({\"title\":\"db rotation\",\"summary\":\"rotate credentials\"})",
     );
 
     exec(

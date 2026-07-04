@@ -161,7 +161,7 @@ fn sql_create_attach_and_show_iam_policy_applies_at_runtime() {
 
 fn seed_document(rt: &RedDBRuntime) {
     rt.execute_query(
-        r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"public":"ok","secret":"no","nested":{"public":"yes","secret":"hidden"}}')"#,
+        r#"INSERT INTO docs DOCUMENT VALUES ({"public":"ok","secret":"no","nested":{"public":"yes","secret":"hidden"}})"#,
     )
     .unwrap();
 }

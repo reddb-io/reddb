@@ -205,6 +205,17 @@ async def test_documents_insert_returns_rid_envelope():
         "rid": "doc-1",
         "item": {"rid": "doc-1", "body": {"name": "alice"}},
     }
+    # ADR 0067 (#1709): the emitted INSERT uses the inline JSON literal form
+    # with no (body) column list and no quoted-string body coercion.
+    insert_sql = next(
+        call[1][0] for call in transport.calls
+        if call[0] == "query" and call[1][0].startswith("INSERT")
+    )
+    assert insert_sql == (
+        'INSERT INTO people DOCUMENT VALUES ({"name":"alice"}) RETURNING *'
+    )
+    assert "(body)" not in insert_sql
+    assert "('{" not in insert_sql
 
 
 async def test_documents_get_raises_not_found_on_missing_entity():

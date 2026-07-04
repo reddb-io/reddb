@@ -1080,11 +1080,11 @@ fn red_columns_infers_document_top_level_fields_as_nullable_schema() {
     let rt = runtime();
     exec(
         &rt,
-        r#"INSERT INTO logs DOCUMENT (body) VALUES ('{"level":"warn","ip":"10.0.0.1"}')"#,
+        r#"INSERT INTO logs DOCUMENT VALUES ({"level":"warn","ip":"10.0.0.1"})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO logs DOCUMENT (body) VALUES ('{"level":"info","msg":"login"}')"#,
+        r#"INSERT INTO logs DOCUMENT VALUES ({"level":"info","msg":"login"})"#,
     );
 
     let result = rt

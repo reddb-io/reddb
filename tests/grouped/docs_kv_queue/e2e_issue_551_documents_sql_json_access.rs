@@ -39,10 +39,8 @@ fn seed_documents(rt: &RedDBRuntime, collection: &str) {
         r#"{"level":"info","tags":["checkout","logout"],"seq":3}"#,
     ];
     for d in docs {
-        rt.execute_query(&format!(
-            "INSERT INTO {collection} DOCUMENT (body) VALUES ('{d}')"
-        ))
-        .expect("INSERT DOCUMENT");
+        rt.execute_query(&format!("INSERT INTO {collection} DOCUMENT VALUES ({d})"))
+            .expect("INSERT DOCUMENT");
     }
 }
 

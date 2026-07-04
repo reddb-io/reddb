@@ -1,4 +1,4 @@
-input = 'INSERT INTO logs DOCUMENT (body) VALUES ({"level":"info","msg":"login"})'
+input = 'INSERT INTO logs DOCUMENT VALUES ({"level":"info","msg":"login"})'
 expected_kind = "Insert"
 source = "docs/data-models/overview.md:75"
 kind = "positive"

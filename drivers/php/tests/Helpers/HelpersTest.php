@@ -178,6 +178,20 @@ final class HelpersTest extends TestCase
         $this->assertSame(1, $out->affected);
         $this->assertSame('doc-1', $out->rid);
         $this->assertSame('doc-1', $out->item['rid']);
+        // ADR 0067 (#1709): inline JSON literal form — no (body) column list,
+        // no quoted-string body coercion.
+        $insertSql = '';
+        foreach ($fq->calls as $call) {
+            if (str_starts_with($call['sql'], 'INSERT')) {
+                $insertSql = $call['sql'];
+            }
+        }
+        $this->assertSame(
+            'INSERT INTO people DOCUMENT VALUES ({"name":"alice"}) RETURNING *',
+            $insertSql
+        );
+        $this->assertStringNotContainsString('(body)', $insertSql);
+        $this->assertStringNotContainsString("('{", $insertSql);
     }
 
     public function testDocumentsGetRaisesNotFoundOnMissing(): void

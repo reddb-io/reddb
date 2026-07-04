@@ -79,9 +79,7 @@ fn sql_document_insert_reserved_error_names_full_envelope_and_recourse() {
         .expect("document collection should be created");
 
     let err = rt
-        .execute_query(
-            r#"INSERT INTO sql_reserved_docs DOCUMENT (body) VALUES ('{"kind":"runbook"}')"#,
-        )
+        .execute_query(r#"INSERT INTO sql_reserved_docs DOCUMENT VALUES ({"kind":"runbook"})"#)
         .expect_err("reserved document field should fail");
 
     assert_eq!(

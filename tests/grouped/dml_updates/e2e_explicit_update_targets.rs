@@ -67,7 +67,7 @@ fn explicit_rows_documents_and_kv_targets_update_compatible_collections() {
     exec(&rt, "CREATE DOCUMENT docs");
     exec(
         &rt,
-        r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"name":"alpha","status":"draft"}')"#,
+        r#"INSERT INTO docs DOCUMENT VALUES ({"name":"alpha","status":"draft"})"#,
     );
     let docs = exec(
         &rt,
@@ -100,7 +100,7 @@ fn document_update_keeps_body_and_promoted_columns_in_sync() {
     exec(&rt, "CREATE DOCUMENT docs_sync");
     exec(
         &rt,
-        r#"INSERT INTO docs_sync DOCUMENT (body) VALUES ('{"name":"orig","score":1}')"#,
+        r#"INSERT INTO docs_sync DOCUMENT VALUES ({"name":"orig","score":1})"#,
     );
 
     let updated = exec(

@@ -369,8 +369,8 @@ fn create_document_sql(collection: &str) -> String {
 
 fn insert_document_sql(collection: &str) -> String {
     format!(
-        "INSERT INTO {collection} DOCUMENT (body) VALUES \
-         ('{{\"name\":\"alpha\",\"score\":10,\"keep\":\"sibling\",\"status\":\"draft\"}}')"
+        "INSERT INTO {collection} DOCUMENT VALUES \
+         ({{\"name\":\"alpha\",\"score\":10,\"keep\":\"sibling\",\"status\":\"draft\"}})"
     )
 }
 

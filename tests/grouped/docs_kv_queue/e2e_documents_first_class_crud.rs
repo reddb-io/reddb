@@ -107,7 +107,7 @@ fn create_document_insert_returning_select_and_reopen() {
 
     let inserted = rt
         .execute_query(
-            r#"INSERT INTO events DOCUMENT (body) VALUES ('{"event_type":"login","success":true,"attempts":2,"details":{"ip":"10.0.0.5","agent":"cli"},"roles":["admin","ops"]}') RETURNING *"#,
+            r#"INSERT INTO events DOCUMENT VALUES ({"event_type":"login","success":true,"attempts":2,"details":{"ip":"10.0.0.5","agent":"cli"},"roles":["admin","ops"]}) RETURNING *"#,
         )
         .expect("document insert returning should succeed");
     assert_eq!(inserted.affected_rows, 1);
@@ -537,8 +537,8 @@ fn document_crud_conformance_persists_mutation_and_delete_across_reopen() {
     rt.execute_query("CREATE DOCUMENT conformance_docs")
         .expect("CREATE DOCUMENT should succeed");
     rt.execute_query(
-        r#"INSERT INTO conformance_docs DOCUMENT (body)
-           VALUES ('{"name":"alpha","score":10,"keep":"sibling","status":"draft"}')"#,
+        r#"INSERT INTO conformance_docs DOCUMENT
+           VALUES ({"name":"alpha","score":10,"keep":"sibling","status":"draft"})"#,
     )
     .expect("insert document");
 

@@ -62,7 +62,7 @@ fn seed(rt: &RedDBRuntime, collection: &str) -> u64 {
     ] {
         exec(
             &rt,
-            &format!("INSERT INTO {collection} DOCUMENT (body) VALUES ('{body}')"),
+            &format!("INSERT INTO {collection} DOCUMENT VALUES ({body})"),
         );
     }
     let page = exec(
@@ -221,11 +221,11 @@ fn body_id_field_wins_over_logical_id_alias() {
     exec(&rt, "CREATE DOCUMENT issue1363_own_id");
     exec(
         &rt,
-        r#"INSERT INTO issue1363_own_id DOCUMENT (body) VALUES ('{"id":7,"name":"seven"}')"#,
+        r#"INSERT INTO issue1363_own_id DOCUMENT VALUES ({"id":7,"name":"seven"})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO issue1363_own_id DOCUMENT (body) VALUES ('{"id":8,"name":"eight"}')"#,
+        r#"INSERT INTO issue1363_own_id DOCUMENT VALUES ({"id":8,"name":"eight"})"#,
     );
 
     let page = exec(&rt, "SELECT name FROM issue1363_own_id WHERE id = 7");

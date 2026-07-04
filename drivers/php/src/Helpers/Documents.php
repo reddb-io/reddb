@@ -16,9 +16,9 @@ final class Documents
     {
         $this->ensureCollection($collection);
         $sql = sprintf(
-            'INSERT INTO %s DOCUMENT (body) VALUES (%s) RETURNING *',
+            'INSERT INTO %s DOCUMENT VALUES (%s) RETURNING *',
             Sql::identifierPath($collection),
-            Sql::jsonLiteral($document)
+            Sql::jsonInlineLiteral($document)
         );
         $body = $this->q->query($sql);
         [$row, $affected] = Sql::firstRow($body);

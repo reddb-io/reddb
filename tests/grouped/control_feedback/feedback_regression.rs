@@ -276,7 +276,7 @@ fn fb_old_19_create_document_is_cleared() {
     exec(&rt, "CREATE DOCUMENT fb_old_19_docs");
     exec(
         &rt,
-        r#"INSERT INTO fb_old_19_docs DOCUMENT (body) VALUES ('{"title":"one","keep":"sibling"}')"#,
+        r#"INSERT INTO fb_old_19_docs DOCUMENT VALUES ({"title":"one","keep":"sibling"})"#,
     );
     let read = exec(
         &rt,

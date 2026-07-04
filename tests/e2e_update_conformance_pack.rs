@@ -130,7 +130,7 @@ fn explicit_targets_are_authorized_as_ordinary_updates() {
     exec(&rt, "CREATE DOCUMENT auth_docs");
     exec(
         &rt,
-        r#"INSERT INTO auth_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+        r#"INSERT INTO auth_docs DOCUMENT VALUES ({"name":"doc","score":10})"#,
     );
     exec(&rt, "CREATE KV auth_kv");
     exec(
@@ -439,7 +439,7 @@ fn explicit_document_update_emits_event_and_cdc_identity() {
     exec(&rt, "QUEUE GROUP CREATE conformance_doc_events evt_readers");
     let inserted = exec(
         &rt,
-        r#"INSERT INTO conformance_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}') RETURNING rid"#,
+        r#"INSERT INTO conformance_docs DOCUMENT VALUES ({"name":"doc","score":10}) RETURNING rid"#,
     );
     let rid = uint_field(only_record(&inserted), "rid");
     let start_lsn = rt.cdc_current_lsn();
@@ -483,7 +483,7 @@ fn document_update_keeps_body_json_in_sync_with_promoted_column() {
     exec(&rt, "CREATE DOCUMENT body_sync_docs");
     exec(
         &rt,
-        r#"INSERT INTO body_sync_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10,"keep":"me"}')"#,
+        r#"INSERT INTO body_sync_docs DOCUMENT VALUES ({"name":"doc","score":10,"keep":"me"})"#,
     );
 
     exec(
@@ -518,8 +518,8 @@ fn document_path_update_keeps_nested_sibling_fields() {
     exec(&rt, "CREATE DOCUMENT body_path_docs");
     exec(
         &rt,
-        r#"INSERT INTO body_path_docs DOCUMENT (body)
-           VALUES ('{"name":"doc","profile":{"address":{"city":"Porto","zip":"4000"},"active":true},"keep":"me"}')"#,
+        r#"INSERT INTO body_path_docs DOCUMENT
+           VALUES ({"name":"doc","profile":{"address":{"city":"Porto","zip":"4000"},"active":true},"keep":"me"})"#,
     );
 
     let updated = exec(
@@ -542,7 +542,7 @@ fn document_compound_update_keeps_body_json_in_sync() {
     exec(&rt, "CREATE DOCUMENT body_compound_docs");
     exec(
         &rt,
-        r#"INSERT INTO body_compound_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+        r#"INSERT INTO body_compound_docs DOCUMENT VALUES ({"name":"doc","score":10})"#,
     );
 
     exec(
@@ -585,7 +585,7 @@ fn explicit_updates_recheck_changed_indexed_fields() {
     exec(&rt, "CREATE DOCUMENT indexed_docs");
     exec(
         &rt,
-        r#"INSERT INTO indexed_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+        r#"INSERT INTO indexed_docs DOCUMENT VALUES ({"name":"doc","score":10})"#,
     );
     exec(
         &rt,
@@ -608,7 +608,7 @@ fn explicit_multimodel_compound_updates_survive_reopen_as_post_images() {
         exec(&rt, "CREATE DOCUMENT recovery_docs");
         exec(
             &rt,
-            r#"INSERT INTO recovery_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+            r#"INSERT INTO recovery_docs DOCUMENT VALUES ({"name":"doc","score":10})"#,
         );
         exec(&rt, "CREATE KV recovery_kv");
         exec(

@@ -30,7 +30,7 @@ fn binary_runtime() -> RedDBRuntime {
 
 fn insert(rt: &RedDBRuntime, collection: &str, body_json: &str) {
     rt.execute_query(&format!(
-        "INSERT INTO {collection} DOCUMENT (body) VALUES ('{body_json}')"
+        "INSERT INTO {collection} DOCUMENT VALUES ({body_json})"
     ))
     .unwrap_or_else(|err| panic!("insert {body_json}: {err:?}"));
 }

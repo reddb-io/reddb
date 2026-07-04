@@ -184,9 +184,9 @@ fn red_documents_exposes_document_shaped_columns() {
     exec(&rt, "CREATE DOCUMENT events");
     exec(
         &rt,
-        r#"INSERT INTO events DOCUMENT (body) VALUES
-        ('{"event":"click","path":"/"}'),
-        ('{"event":"view","path":"/about"}')"#,
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"event":"click","path":"/"}),
+        ({"event":"view","path":"/about"})"#,
     );
 
     let result = select(&rt, "SELECT * FROM red.documents");

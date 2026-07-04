@@ -1,0 +1,5 @@
+input = 'INSERT INTO events DOCUMENT (body) VALUES ({"level":"info"})'
+expected_error_substring = "column list is removed"
+expected_error_kind = "Syntax"
+source = "crates/reddb-rql/src/parser/error.rs:227"
+kind = "negative"

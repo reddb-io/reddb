@@ -1,4 +1,4 @@
-input = "FROM ANY WHERE _kind = 'kv' AND _collection = 'config' LIMIT 100"
+input = "FROM ANY WHERE kind = 'kv' AND collection = 'config' LIMIT 100"
 expected_kind = "Table"
 source = "docs/data-models/key-value.md:141"
 kind = "positive"

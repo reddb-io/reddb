@@ -50,15 +50,15 @@ fn document_update_order_by_limit_uses_top_level_document_fields() {
     exec(&rt, "CREATE DOCUMENT ordered_docs");
     exec(
         &rt,
-        r#"INSERT INTO ordered_docs DOCUMENT (body) VALUES ('{"name":"zeta","score":10,"touched":0}')"#,
+        r#"INSERT INTO ordered_docs DOCUMENT VALUES ({"name":"zeta","score":10,"touched":0})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO ordered_docs DOCUMENT (body) VALUES ('{"name":"alpha","score":30,"touched":0}')"#,
+        r#"INSERT INTO ordered_docs DOCUMENT VALUES ({"name":"alpha","score":30,"touched":0})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO ordered_docs DOCUMENT (body) VALUES ('{"name":"beta","score":20,"touched":0}')"#,
+        r#"INSERT INTO ordered_docs DOCUMENT VALUES ({"name":"beta","score":20,"touched":0})"#,
     );
 
     let updated = exec(
@@ -218,15 +218,15 @@ fn document_update_order_by_limit_breaks_ties_by_implicit_rid_asc() {
     exec(&rt, "CREATE DOCUMENT ordered_doc_ties");
     exec(
         &rt,
-        r#"INSERT INTO ordered_doc_ties DOCUMENT (body) VALUES ('{"name":"first","score":7,"touched":0}')"#,
+        r#"INSERT INTO ordered_doc_ties DOCUMENT VALUES ({"name":"first","score":7,"touched":0})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO ordered_doc_ties DOCUMENT (body) VALUES ('{"name":"second","score":7,"touched":0}')"#,
+        r#"INSERT INTO ordered_doc_ties DOCUMENT VALUES ({"name":"second","score":7,"touched":0})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO ordered_doc_ties DOCUMENT (body) VALUES ('{"name":"third","score":7,"touched":0}')"#,
+        r#"INSERT INTO ordered_doc_ties DOCUMENT VALUES ({"name":"third","score":7,"touched":0})"#,
     );
 
     let updated = exec(

@@ -96,10 +96,21 @@ impl<'a> Parser<'a> {
             _ => InsertEntityType::Row,
         };
 
-        // Parse column list
-        self.expect(Token::LParen)?;
-        let columns = self.parse_ident_list()?;
-        self.expect(Token::RParen)?;
+        // Parse column list. ADR 0067 (#1709): the document INSERT column
+        // list is removed — the canonical form is bare
+        // `VALUES (<json-literal>)`. For documents we synthesize the
+        // implicit `body` column so the runtime document path is unchanged,
+        // and reject the legacy `(body)` / `_ttl` column lists with a
+        // didactic error. Every other entity type keeps its mandatory
+        // column list.
+        let columns = if matches!(entity_type, InsertEntityType::Document) {
+            self.parse_document_insert_columns()?
+        } else {
+            self.expect(Token::LParen)?;
+            let columns = self.parse_ident_list()?;
+            self.expect(Token::RParen)?;
+            columns
+        };
 
         // Parse VALUES
         self.expect(Token::Values)?;
@@ -138,6 +149,14 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // ADR 0067 (#1709): a document body is an inline strict-JSON
+        // literal. Reject the removed quoted-string coercion
+        // (`VALUES ('{…}')`) with a didactic error naming the inline
+        // literal and `JSON_PARSE`.
+        if matches!(entity_type, InsertEntityType::Document) {
+            self.reject_document_string_body(&all_value_exprs)?;
+        }
+
         // Parse optional WITH clauses
         let (ttl_ms, expires_at_ms, with_metadata, auto_embed) = self.parse_with_clauses()?;
 
@@ -163,6 +182,46 @@ impl<'a> Parser<'a> {
             auto_embed,
             suppress_events,
         }))
+    }
+
+    /// ADR 0067 (#1709): the document INSERT column list is dead. The
+    /// canonical form is bare `VALUES (<json-literal>)`, so a document
+    /// INSERT carries no column list and we synthesize the implicit
+    /// `body` column here for the runtime document path. A leftover `(…)`
+    /// column list is rejected with a didactic error: `_ttl` metadata
+    /// columns point at `WITH TTL`; anything else (including the old
+    /// ceremonial `body`) shows the bare `VALUES` form.
+    fn parse_document_insert_columns(&mut self) -> Result<Vec<String>, ParseError> {
+        if !self.check(&Token::LParen) {
+            return Ok(vec!["body".to_string()]);
+        }
+        self.expect(Token::LParen)?;
+        let columns = self.parse_ident_list()?;
+        self.expect(Token::RParen)?;
+        if columns.iter().any(|column| is_legacy_ttl_column(column)) {
+            return Err(ParseError::document_insert_ttl_column(self.position()));
+        }
+        Err(ParseError::document_insert_column_list(self.position()))
+    }
+
+    /// ADR 0067 (#1709): a document body must be an inline strict-JSON
+    /// literal. A bare quoted string literal in a document `VALUES` row is
+    /// the removed coercion (`VALUES ('{…}')`) and is rejected with a
+    /// didactic error. Parameters (`$N` / `?`) and `JSON_PARSE(<expr>)`
+    /// remain valid, so only `Expr::Literal { Value::Text }` is rejected.
+    fn reject_document_string_body(&self, value_exprs: &[Vec<Expr>]) -> Result<(), ParseError> {
+        for row in value_exprs {
+            for expr in row {
+                if let Expr::Literal {
+                    value: Value::Text(_),
+                    ..
+                } = expr
+                {
+                    return Err(ParseError::document_insert_quoted_body(self.position()));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Parse TTL duration value using the same logic as CREATE TABLE ... WITH TTL.
@@ -949,6 +1008,16 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// ADR 0067 (#1709): the legacy metadata columns whose presence in a
+/// document INSERT column list should steer the didactic error toward
+/// `WITH TTL`. Mirrors `resolve_sql_ttl_metadata_key` in the server
+/// runtime; kept local so the parser has no server dependency.
+fn is_legacy_ttl_column(column: &str) -> bool {
+    column.eq_ignore_ascii_case("_ttl")
+        || column.eq_ignore_ascii_case("_ttl_ms")
+        || column.eq_ignore_ascii_case("_expires_at")
+}
+
 /// Convert a parsed literal `Value` into a `reddb_types::json::Value`.
 ///
 /// Array literals now parse into `Value::Array` (issue #1708). When an array
@@ -1134,7 +1203,7 @@ mod tests {
                 InsertEntityType::Vector,
             ),
             (
-                "INSERT INTO items DOCUMENT (id) VALUES (1)",
+                "INSERT INTO items DOCUMENT VALUES ({\"id\": 1})",
                 InsertEntityType::Document,
             ),
             ("INSERT INTO items KV (id) VALUES (1)", InsertEntityType::Kv),
@@ -1188,6 +1257,60 @@ mod tests {
             .parse_insert_query()
             .expect_err("bad WITH should fail");
         assert!(err.to_string().contains("expected"));
+    }
+
+    #[test]
+    fn document_insert_canonical_bare_values_form() {
+        // Bare inline JSON literal, no column list — the ADR 0067 form.
+        let query = insert("INSERT INTO events DOCUMENT VALUES ({\"level\": \"info\"})");
+        assert_eq!(query.table, "events");
+        assert_eq!(query.entity_type, InsertEntityType::Document);
+        assert_eq!(query.columns, vec!["body"]);
+        assert_eq!(query.values.len(), 1);
+        assert!(matches!(query.values[0][0], Value::Json(_)));
+
+        // Multi-row plus WITH clauses keep working.
+        let query = insert(
+            "INSERT INTO events DOCUMENT VALUES ({\"a\": 1}), ({\"b\": 2}) \
+             WITH TTL 30 s WITH METADATA (source = 'test') RETURNING *",
+        );
+        assert_eq!(query.columns, vec!["body"]);
+        assert_eq!(query.values.len(), 2);
+        assert_eq!(query.ttl_ms, Some(30_000));
+        assert_eq!(query.with_metadata.len(), 1);
+        assert_eq!(
+            query.returning.as_deref(),
+            Some([ReturningItem::All].as_slice())
+        );
+    }
+
+    #[test]
+    fn document_insert_rejects_removed_forms() {
+        // `(body)` column list -> didactic bare-VALUES rewrite.
+        let mut parser =
+            make_parser("INSERT INTO events DOCUMENT (body) VALUES ({\"level\": \"info\"})");
+        let err = parser
+            .parse_insert_query()
+            .expect_err("document column list should fail");
+        assert!(err.to_string().contains("column list is removed"), "{err}");
+
+        // Legacy `_ttl` column -> point at WITH TTL.
+        let mut parser =
+            make_parser("INSERT INTO events DOCUMENT (body, _ttl) VALUES ({\"a\": 1}, 30)");
+        let err = parser
+            .parse_insert_query()
+            .expect_err("legacy _ttl column should fail");
+        assert!(err.to_string().contains("WITH TTL"), "{err}");
+
+        // Quoted-string body coercion -> inline literal + JSON_PARSE.
+        let mut parser =
+            make_parser("INSERT INTO events DOCUMENT VALUES ('{\"level\": \"info\"}')");
+        let err = parser
+            .parse_insert_query()
+            .expect_err("quoted-string body should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("inline JSON literal"), "{msg}");
+        assert!(msg.contains("JSON_PARSE"), "{msg}");
     }
 
     #[test]
