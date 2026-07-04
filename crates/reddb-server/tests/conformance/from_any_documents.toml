@@ -1,4 +1,4 @@
-input = "FROM ANY WHERE _kind = 'document' AND _collection = 'events' LIMIT 20"
+input = "FROM ANY WHERE kind = 'document' AND collection = 'events' LIMIT 20"
 expected_kind = "Table"
-source = "docs/data-models/documents.md:140"
+source = "docs/data-models/documents.md:196"
 kind = "positive"
