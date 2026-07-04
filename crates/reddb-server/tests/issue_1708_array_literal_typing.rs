@@ -51,10 +51,8 @@ fn json_position_array_round_trips_with_exact_integers() {
 fn json_position_mixed_type_array_round_trips() {
     let rt = runtime();
 
-    rt.execute_query(
-        "INSERT INTO settings KV (key, value) VALUES ('mixed', ['a', 2, true, null])",
-    )
-    .expect("insert mixed-type array");
+    rt.execute_query("INSERT INTO settings KV (key, value) VALUES ('mixed', ['a', 2, true, null])")
+        .expect("insert mixed-type array");
 
     let read = rt
         .execute_query("SELECT key, value FROM settings WHERE key = 'mixed'")
