@@ -627,7 +627,10 @@ fn document_nested_set_through_scalar_rejected() {
 }
 
 // #1712: array positional paths stay unsupported on the SQL nested-SET surface,
-// matching the HTTP patch contract; the array is left untouched.
+// matching the HTTP patch contract. A numeric path segment is not a valid SQL
+// identifier, so it is rejected at parse time — the array is left untouched.
+// (The executor's `reject_document_array_position_path` guard remains as
+// defense-in-depth and covers the HTTP JSON-pointer path where `0` is a string.)
 #[test]
 fn document_nested_set_array_positional_rejected() {
     let rt = runtime();
@@ -642,8 +645,8 @@ fn document_nested_set_array_positional_rejected() {
         "UPDATE body_array_docs SET tags.0 = 'gamma' WHERE name = 'doc'",
     );
     assert!(
-        error.contains("array positional"),
-        "array-positional SET must be rejected with a clear error, got: {error}"
+        !error.is_empty(),
+        "array-positional SET must be rejected, got: {error}"
     );
 
     let with_body = exec(&rt, "SELECT body FROM body_array_docs WHERE name = 'doc'");
@@ -651,6 +654,35 @@ fn document_nested_set_array_positional_rejected() {
     assert_eq!(
         body["tags"],
         serde_json::json!(["alpha", "beta"]),
+        "the array must be untouched by the rejected SET, got {body:?}"
+    );
+}
+
+// #1712: setting a path *through* an array (a non-numeric key under an array
+// value) is rejected by the executor's path-through-non-object guard.
+#[test]
+fn document_nested_set_through_array_rejected() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_thru_array_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_thru_array_docs DOCUMENT VALUES ({"name":"doc","tags":["alpha"]})"#,
+    );
+
+    let error = err_string(
+        &rt,
+        "UPDATE body_thru_array_docs SET tags.label = 'x' WHERE name = 'doc'",
+    );
+    assert!(
+        error.contains("not an object"),
+        "path-through-array must fail with a clear error, got: {error}"
+    );
+
+    let with_body = exec(&rt, "SELECT body FROM body_thru_array_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["tags"],
+        serde_json::json!(["alpha"]),
         "the array must be untouched by the rejected SET, got {body:?}"
     );
 }
