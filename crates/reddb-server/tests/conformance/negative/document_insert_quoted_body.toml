@@ -1,0 +1,5 @@
+input = "INSERT INTO events DOCUMENT VALUES ('{\"level\":\"info\"}')"
+expected_error_substring = "inline JSON literal"
+expected_error_kind = "Syntax"
+source = "crates/reddb-rql/src/parser/error.rs:257"
+kind = "negative"
