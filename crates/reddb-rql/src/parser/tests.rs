@@ -2008,12 +2008,25 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     };
     assert!(matches!(ask.cache, crate::ast::AskCacheClause::NoCache));
 
-    let query = parse("ASK 'who owns passport FDD-12313?' AS RQL").unwrap();
+    // Clean break (ADR 0068, #1751): `PLAN` returns the typed plan without
+    // executing; `AS RQL` and `EXECUTE` were removed with didactic errors.
+    let query = parse("ASK 'who owns passport FDD-12313?' PLAN").unwrap();
     let QueryExpr::Ask(ask) = query else {
         panic!("Expected AskQuery");
     };
-    assert!(ask.as_rql);
+    assert!(ask.plan_only);
     assert!(!ask.explain);
+
+    let err = parse("ASK 'who owns passport FDD-12313?' AS RQL").unwrap_err();
+    assert!(
+        err.to_string().contains("AS RQL was removed") && err.to_string().contains("PLAN"),
+        "AS RQL must reject with a didactic error naming PLAN, got: {err}"
+    );
+    let err = parse("ASK 'list travelers' EXECUTE").unwrap_err();
+    assert!(
+        err.to_string().contains("EXECUTE was removed") && err.to_string().contains("PLAN"),
+        "EXECUTE must reject with a didactic error naming PLAN, got: {err}"
+    );
 
     let query = parse("EXPLAIN ASK 'q' USING openai LIMIT 3 MIN_SCORE 0.7 DEPTH 2").unwrap();
     let QueryExpr::Ask(ask) = query else {
