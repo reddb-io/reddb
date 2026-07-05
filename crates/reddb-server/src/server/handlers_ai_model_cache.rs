@@ -88,7 +88,8 @@ impl RedDBServer {
                     400,
                     format!(
                         "field '{field}' is rejected: pull must not accept plaintext credentials. \
-                         Store the secret in the vault at 'red.secret.ai.huggingface.{{alias}}' and \
+                         Store the secret in the vault at \
+                         'red.secret.ai.providers.huggingface.tokens.{{alias}}' and \
                          reference it via the model's 'credential_alias' or pass 'credential_alias' \
                          on the pull request."
                     ),
@@ -307,14 +308,16 @@ impl RedDBServer {
                 400,
                 format!(
                     "credential_alias '{alias}' resolved to an empty secret; store the \
-                     HuggingFace token at 'red.secret.ai.huggingface.{alias}' before pulling"
+                     HuggingFace token at \
+                     'red.secret.ai.providers.huggingface.tokens.{alias}' before pulling"
                 ),
             )),
             Err(err) => Err((
                 400,
                 format!(
                     "failed to resolve HuggingFace credentials for alias '{alias}': {err}. \
-                     Store the token at 'red.secret.ai.huggingface.{alias}' in the vault."
+                     Store the token at \
+                     'red.secret.ai.providers.huggingface.tokens.{alias}' in the vault."
                 ),
             )),
         }
