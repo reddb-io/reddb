@@ -345,14 +345,14 @@ fn happy_hybrid_from_fusion_rrf_with_k() {
 
 #[test]
 fn happy_insert_auto_embed_default_provider() {
-    // Default provider is "openai" (per dml.rs L196). USING is
-    // omitted on purpose to pin the default-provider path.
+    // No `USING` → empty provider; the runtime resolves it via the
+    // embeddings task pointer (ADR-0068 §5) rather than a hardcoded default.
     let q = parse_query("INSERT INTO docs (id, body) VALUES (1, 'hello') WITH AUTO EMBED (body)");
     match q {
         QueryExpr::Insert(i) => {
             let cfg = i.auto_embed.as_ref().expect("auto_embed must be set");
             assert_eq!(cfg.fields, vec!["body".to_string()]);
-            assert_eq!(cfg.provider, "openai");
+            assert_eq!(cfg.provider, "");
             assert!(cfg.model.is_none());
         }
         other => panic!("expected QueryExpr::Insert, got {other:?}"),
