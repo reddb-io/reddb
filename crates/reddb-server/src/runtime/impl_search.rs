@@ -1747,21 +1747,66 @@ impl RedDBRuntime {
         let planner_provider = parse_provider(&planner_provider_name)?;
         crate::runtime::ai::provider_gate::enforce(self, &planner_provider)?;
 
-        // Stage 1-4 funnel: narrow the schema slice under the caller's scope.
+        // Plan budget: a per-query `STEPS N` request clamped to the config
+        // cap; total executed plan steps can never exceed it (ADR 0068 §4).
+        let max_plan_steps = self.config_u64(
+            "red.config.ai.ask.max_plan_steps",
+            ask_planner::DEFAULT_MAX_PLAN_STEPS as u64,
+        ) as usize;
+        let mut budget = ask_planner::PlanBudget::new(ask.steps, max_plan_steps);
+
+        // Stage 1-4 funnel behind a closure seam. The self-critique folds in
+        // here: when the first pass grounds nothing, exactly one
+        // refine_retrieval re-funnel runs with expanded tokens (relaxed score
+        // floor, wider row cap) before we give up — the single-retry analogy
+        // of ADR 0013. When grounding still fails, ASK answers honestly with a
+        // structured "no matching sources" outcome instead of inventing.
         let scope = self.ai_scope();
-        let row_cap = ask
+        let base_row_cap = ask
             .limit
             .unwrap_or(crate::runtime::ask_pipeline::DEFAULT_ROW_CAP);
-        let ask_context =
-            crate::runtime::ask_pipeline::AskPipeline::execute_with_limit_and_min_score(
+        let funnel = |expanded: bool| -> RedDBResult<ask_planner::NarrowedSlice> {
+            let (row_cap, min_score) = if expanded {
+                (
+                    base_row_cap
+                        .saturating_mul(2)
+                        .max(crate::runtime::ask_pipeline::DEFAULT_ROW_CAP),
+                    None,
+                )
+            } else {
+                (base_row_cap, ask.min_score)
+            };
+            let ctx = crate::runtime::ask_pipeline::AskPipeline::execute_with_limit_and_min_score(
                 self,
                 &scope,
                 &ask.question,
                 row_cap,
-                ask.min_score,
+                min_score,
                 ask.depth,
             )?;
-        let slice = narrowed_slice_from_context(&ask_context);
+            Ok(narrowed_slice_from_context(&ctx))
+        };
+
+        let slice = match ask_planner::ground_with_refine(&funnel)? {
+            ask_planner::GroundingOutcome::NoMatchingSources => {
+                // No planner or synthesis LLM call is made — the model can
+                // never invent an answer over an empty `(none)` slice.
+                return Ok(Some(
+                    self.build_no_matching_sources_result(raw_query, &scope, ask)?,
+                ));
+            }
+            ask_planner::GroundingOutcome::Grounded { slice, refined } => {
+                if refined {
+                    // The single refine_retrieval re-funnel is a plan step.
+                    if let Err(exhausted) = budget.charge(ask_planner::PlanStep::RefineRetrieval) {
+                        return Ok(Some(self.build_budget_exhausted_result(
+                            raw_query, &scope, ask, &budget, &exhausted,
+                        )?));
+                    }
+                }
+                slice
+            }
+        };
 
         // Resolve the planner model independently of the synthesis model
         // (ADR 0068 §3). Planner falls back to the general/ASK default.
@@ -1807,6 +1852,13 @@ impl RedDBRuntime {
                 &rql,
             )?)),
             ask_planner::PlanRouting::Execute { candidate } => {
+                // The query step is budgeted too; exhausting the budget
+                // mid-plan surfaces a structured partial-with-warning.
+                if let Err(exhausted) = budget.charge(ask_planner::PlanStep::Query) {
+                    return Ok(Some(self.build_budget_exhausted_result(
+                        raw_query, &scope, ask, &budget, &exhausted,
+                    )?));
+                }
                 let executed = self.execute_planner_candidate_and_synthesize(
                     raw_query,
                     ask,
@@ -2194,6 +2246,154 @@ impl RedDBRuntime {
         record.set("intent", Value::text(plan.intent.as_str().to_string()));
         record.set("candidate", Value::text(candidate_rql.to_string()));
         record.set("candidate_type", Value::text(statement_type.to_string()));
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+        })
+    }
+
+    /// Honest "no matching sources" outcome (ADR 0068 §4, #1748). Reached only
+    /// after the funnel *and* the single refine_retrieval retry both ground
+    /// nothing. No planner or synthesis LLM call is made, so the model can
+    /// never invent an answer — grounding failure is reported, not papered
+    /// over. The empty outcome is audited like any other ASK.
+    fn build_no_matching_sources_result(
+        &self,
+        raw_query: &str,
+        scope: &crate::runtime::statement_frame::EffectiveScope,
+        ask: &crate::storage::query::ast::AskQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let answer = "No matching sources were found for this question, even after expanding \
+                      retrieval. ASK does not answer without grounding, so no answer was \
+                      generated."
+            .to_string();
+        let plan_summary = "intent=unknown; no_matching_sources; refine_retrieval attempted";
+        self.record_ask_audit(AskAuditInput {
+            scope,
+            question: &ask.question,
+            source_urns: &[],
+            provider: "",
+            model: "",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: 0.0,
+            answer: &answer,
+            citations: &[],
+            cache_hit: false,
+            effective_mode: crate::runtime::ai::strict_validator::Mode::Lenient,
+            temperature: None,
+            seed: None,
+            validation_ok: true,
+            retry_count: 0,
+            errors: &[],
+            intent: Some("no_matching_sources"),
+            plan_summary: Some(plan_summary),
+            executed_query: None,
+        })?;
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "no_matching_sources".into(),
+            "intent".into(),
+            "sources_count".into(),
+            "refined".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", Value::text(answer));
+        record.set("no_matching_sources", Value::Boolean(true));
+        record.set("intent", Value::text("no_matching_sources".to_string()));
+        record.set("sources_count", Value::Integer(0));
+        record.set("refined", Value::Boolean(true));
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+        })
+    }
+
+    /// Structured partial-with-warning when the plan budget is exhausted
+    /// mid-plan (ADR 0068 §4, #1748). A step was attempted after the clamped
+    /// `max_plan_steps` cap was reached — the plan stops here rather than
+    /// looping unbounded, and the truncation is audited.
+    fn build_budget_exhausted_result(
+        &self,
+        raw_query: &str,
+        scope: &crate::runtime::statement_frame::EffectiveScope,
+        ask: &crate::storage::query::ast::AskQuery,
+        budget: &crate::runtime::ai::ask_planner::PlanBudget,
+        exhausted: &crate::runtime::ai::ask_planner::BudgetExhausted,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let warning = format!(
+            "plan budget exhausted: {} step(s) executed (max_plan_steps = {}); the `{}` step \
+             was not run",
+            exhausted.executed_steps,
+            exhausted.max_steps,
+            exhausted.attempted.as_str()
+        );
+        let answer = format!(
+            "This question needed more plan steps than the budget allows, so it stopped early. {warning}."
+        );
+        let executed_labels: Vec<&str> =
+            budget.executed_steps().iter().map(|s| s.as_str()).collect();
+        let plan_summary = format!(
+            "intent=factual; budget_exhausted; executed=[{}]; max_plan_steps={}",
+            executed_labels.join(","),
+            exhausted.max_steps
+        );
+        self.record_ask_audit(AskAuditInput {
+            scope,
+            question: &ask.question,
+            source_urns: &[],
+            provider: "",
+            model: "",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: 0.0,
+            answer: &answer,
+            citations: &[],
+            cache_hit: false,
+            effective_mode: crate::runtime::ai::strict_validator::Mode::Lenient,
+            temperature: None,
+            seed: None,
+            validation_ok: true,
+            retry_count: 0,
+            errors: &[],
+            intent: Some("factual"),
+            plan_summary: Some(&plan_summary),
+            executed_query: None,
+        })?;
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "budget_exhausted".into(),
+            "warning".into(),
+            "max_plan_steps".into(),
+            "executed_steps".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", Value::text(answer));
+        record.set("budget_exhausted", Value::Boolean(true));
+        record.set("warning", Value::text(warning));
+        record.set("max_plan_steps", Value::Integer(exhausted.max_steps as i64));
+        record.set(
+            "executed_steps",
+            Value::Integer(exhausted.executed_steps as i64),
+        );
         result.push(record);
 
         Ok(RuntimeQueryResult {
