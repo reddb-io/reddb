@@ -523,19 +523,29 @@ impl RedDBRuntime {
                 }
                 // If text provided, generate embedding first (semantic search)
                 let search_vector = if let Some(query_text) = text {
-                    let (default_provider, _) = crate::ai::resolve_defaults_from_runtime(self);
+                    // Embeddings follow the embeddings task pointer (ADR-0068
+                    // §5); an explicit `USING` overrides it for this query.
+                    use crate::application::ports::RuntimeEntityPort;
+                    let kv_getter = |key: &str| -> RedDBResult<Option<String>> {
+                        match self.get_kv("red_config", key)? {
+                            Some((Value::Text(s), _)) => Ok(Some(s.to_string())),
+                            _ => Ok(None),
+                        }
+                    };
                     let provider = match provider.as_deref() {
-                        Some(p) => crate::ai::parse_provider(p)?,
-                        None => default_provider,
+                        Some(p) => {
+                            let provider = crate::ai::parse_provider(p)?;
+                            crate::ai::ensure_provider_supports_embeddings(&provider)?;
+                            provider
+                        }
+                        None => crate::ai::resolve_embeddings_provider(&kv_getter)?,
                     };
                     // S3 / #711: planner-level provider gate. Runs
                     // before the credential resolver so the resolver
                     // audit event is not emitted when policy denies.
                     crate::runtime::ai::provider_gate::enforce(self, &provider)?;
                     let api_key = crate::ai::resolve_api_key_from_runtime(&provider, None, self)?;
-                    let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
-                        .ok()
-                        .unwrap_or_else(|| provider.default_embedding_model().to_string());
+                    let model = crate::ai::resolve_embeddings_model(&provider, &kv_getter);
                     let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
                     let request = crate::ai::OpenAiEmbeddingRequest {
                         api_key,
