@@ -189,14 +189,14 @@ pub fn build_planner_prompt(question: &str, slice: &NarrowedSlice) -> String {
 /// Parse the planner model's output into a typed plan. Tolerates code
 /// fences and surrounding prose by extracting the outermost JSON object.
 pub fn parse_plan(raw: &str) -> RedDBResult<AskPlan> {
-    let json = extract_json_object(raw).ok_or_else(|| {
-        RedDBError::Query("ASK planner returned no JSON plan object".to_string())
+    let json = extract_json_object(raw)
+        .ok_or_else(|| RedDBError::Query("ASK planner returned no JSON plan object".to_string()))?;
+    let parsed: crate::json::Value = crate::json::from_str(json).map_err(|err| {
+        RedDBError::Query(format!("ASK planner returned invalid JSON plan: {err}"))
     })?;
-    let parsed: crate::json::Value = crate::json::from_str(json)
-        .map_err(|err| RedDBError::Query(format!("ASK planner returned invalid JSON plan: {err}")))?;
-    let obj = parsed.as_object().ok_or_else(|| {
-        RedDBError::Query("ASK planner plan must be a JSON object".to_string())
-    })?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| RedDBError::Query("ASK planner plan must be a JSON object".to_string()))?;
 
     let intent_raw = obj
         .get("intent")
@@ -350,7 +350,10 @@ mod tests {
     #[test]
     fn parse_plan_rejects_non_json() {
         let err = parse_plan("the answer is 42").unwrap_err();
-        assert!(err.to_string().contains("no JSON plan object"), "got: {err}");
+        assert!(
+            err.to_string().contains("no JSON plan object"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -402,9 +405,9 @@ mod tests {
         )
         .unwrap();
         match route.routing {
-            PlanRouting::RefuseMutating {
-                statement_type, ..
-            } => assert_eq!(statement_type, "delete"),
+            PlanRouting::RefuseMutating { statement_type, .. } => {
+                assert_eq!(statement_type, "delete")
+            }
             other => panic!("expected RefuseMutating, got {other:?}"),
         }
     }
@@ -414,7 +417,9 @@ mod tests {
         let err = plan_and_route(
             "who owns passport FDD-1?",
             &slice(),
-            &mock_model("{\"intent\":\"factual\",\"query\":\"this is not rql\",\"rationale\":\"x\"}"),
+            &mock_model(
+                "{\"intent\":\"factual\",\"query\":\"this is not rql\",\"rationale\":\"x\"}",
+            ),
         )
         .unwrap_err();
         assert!(

@@ -118,7 +118,10 @@ fn factual_ask_generates_executes_and_cites_over_executed_rows() {
     let intent = text(record, "intent").expect("intent column");
     assert_eq!(intent, "factual");
     let executed_query = text(record, "executed_query").expect("executed_query column");
-    assert_eq!(executed_query, "SELECT * FROM travelers WHERE passport = 'FDD-1'");
+    assert_eq!(
+        executed_query,
+        "SELECT * FROM travelers WHERE passport = 'FDD-1'"
+    );
     let sources_count = match record.get("sources_count") {
         Some(Value::Integer(n)) => *n,
         other => panic!("sources_count must be Integer, got {other:?}"),
@@ -219,11 +222,7 @@ fn multi_collection_question_executes_global_any_candidate() {
     let result = rt
         .execute_query("ASK 'what records mention passport FDD-9?' STRICT OFF LIMIT 10")
         .expect("multi-collection ASK should succeed");
-    let record = result
-        .result
-        .records
-        .first()
-        .expect("one canonical row");
+    let record = result.result.records.first().expect("one canonical row");
 
     let executed_query = text(record, "executed_query").expect("executed_query column");
     assert_eq!(executed_query, "SELECT * WHERE passport = 'FDD-9'");
@@ -313,7 +312,9 @@ struct ScriptedStub {
 impl ScriptedStub {
     fn start(chat_responses: Vec<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("stub bind");
-        listener.set_nonblocking(true).expect("nonblocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let addr = listener.local_addr().expect("local addr");
         let shutdown = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));

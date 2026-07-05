@@ -1766,8 +1766,7 @@ impl RedDBRuntime {
         // Resolve the planner model independently of the synthesis model
         // (ADR 0068 §3). Planner falls back to the general/ASK default.
         let synth_model = ask.model.clone().unwrap_or_else(|| default_model.clone());
-        let planner_model =
-            crate::ai::resolve_ask_planner_model_from_runtime(self, &synth_model);
+        let planner_model = crate::ai::resolve_ask_planner_model_from_runtime(self, &synth_model);
 
         let settings = self.ask_cost_guard_settings();
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
@@ -1975,7 +1974,10 @@ impl RedDBRuntime {
         ]);
         let mut record = UnifiedRecord::new();
         record.set("answer", Value::text(synthesized.answer));
-        record.set("provider", Value::text(synthesized.provider.token().to_string()));
+        record.set(
+            "provider",
+            Value::text(synthesized.provider.token().to_string()),
+        );
         record.set("model", Value::text(synth_model.to_string()));
         record.set(
             "mode",
@@ -1984,7 +1986,10 @@ impl RedDBRuntime {
         record.set("intent", Value::text(intent_label.to_string()));
         record.set("executed_query", Value::text(candidate_rql.to_string()));
         record.set("plan_summary", Value::text(plan_summary));
-        record.set("retry_count", Value::Integer(synthesized.retry_count as i64));
+        record.set(
+            "retry_count",
+            Value::Integer(synthesized.retry_count as i64),
+        );
         record.set(
             "prompt_tokens",
             Value::Integer(synthesized.prompt_tokens as i64),
@@ -3931,8 +3936,9 @@ fn planner_value_to_json(value: &Value) -> crate::json::Value {
         Value::Float(f) => crate::json::Value::Number(*f),
         Value::Boolean(b) => crate::json::Value::Bool(*b),
         Value::Text(s) => crate::json::Value::String(s.to_string()),
-        Value::Json(bytes) => crate::json::from_slice(bytes)
-            .unwrap_or_else(|_| crate::json::Value::String(String::from_utf8_lossy(bytes).to_string())),
+        Value::Json(bytes) => crate::json::from_slice(bytes).unwrap_or_else(|_| {
+            crate::json::Value::String(String::from_utf8_lossy(bytes).to_string())
+        }),
         other => crate::json::Value::String(format!("{other:?}")),
     }
 }
