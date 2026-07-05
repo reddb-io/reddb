@@ -969,6 +969,10 @@ pub struct AskQuery {
     /// candidate when (and only when) it is read-only. A mutating
     /// candidate is refused for auto-execution regardless of this flag.
     pub execute: bool,
+    /// Per-query plan-step budget request (`ASK '...' STEPS N`). Clamped to
+    /// `red.config.ai.ask.max_plan_steps` at planning time and never exceeds
+    /// it; `None` falls back to the configured cap.
+    pub steps: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
