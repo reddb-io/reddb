@@ -593,6 +593,151 @@ fn how_to_question_returns_answer_plus_validated_suggestion_never_executed() {
 }
 
 // ===========================================================================
+// #1751 — `ASK ... PLAN`: the plan-only parameter returns the routed intent,
+// the typed plan, and the candidate query WITHOUT executing the candidate and
+// WITHOUT the synthesis call.
+// ===========================================================================
+
+#[test]
+fn plan_only_returns_intent_and_candidate_without_executing_or_synthesizing() {
+    let _env = env_lock().lock().expect("env lock");
+
+    // Only the planner responds — there is NO scripted synthesis answer. If a
+    // synthesis call were made, the stub would fall through to the canned
+    // filler and the assertions below would catch it.
+    let stub = ScriptedStub::start(vec![
+        "{\"intent\":\"factual\",\"query\":\"SELECT * FROM travelers WHERE passport = 'FDD-1'\",\"rationale\":\"passport lookup\"}".to_string(),
+    ]);
+    let _p = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
+    let _b = EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+    let _k = EnvVarGuard::set("REDDB_OPENAI_API_KEY", "sk-test-mock");
+    let _m = EnvVarGuard::set("REDDB_OPENAI_PROMPT_MODEL", "synth-main");
+
+    let rt = open_rt();
+    exec(
+        &rt,
+        "CREATE TABLE travelers (id TEXT PRIMARY KEY, passport TEXT, name TEXT) \
+         WITH CONTEXT INDEX ON (id, passport, name)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO travelers (id, passport, name) VALUES ('t1', 'FDD-1', 'Alice')",
+    );
+
+    configure_planner(&rt);
+
+    let result = rt
+        .execute_query("ASK 'who owns passport FDD-1?' PLAN STRICT OFF")
+        .expect("ASK ... PLAN should return the typed plan");
+    let record = result
+        .result
+        .records
+        .first()
+        .expect("plan-only returns one canonical row");
+
+    // The row is the typed plan, not executed rows: intent + candidate query.
+    assert_eq!(record.get("plan_only"), Some(&Value::Boolean(true)));
+    assert_eq!(text(record, "intent").as_deref(), Some("factual"));
+    assert_eq!(
+        text(record, "candidate_query").as_deref(),
+        Some("SELECT * FROM travelers WHERE passport = 'FDD-1'"),
+        "plan-only must surface the candidate query verbatim"
+    );
+    assert_eq!(text(record, "candidate_type").as_deref(), Some("select"));
+    assert_eq!(record.get("mutating"), Some(&Value::Boolean(false)));
+    // No executed rows leaked into the plan-only result.
+    assert!(
+        record.get("answer").is_none() && record.get("name").is_none(),
+        "plan-only must not execute the candidate or synthesize an answer"
+    );
+
+    // Exactly one chat completion — the planner. Zero synthesis. (The funnel
+    // may separately hit /embeddings, which is not a chat completion.)
+    assert_eq!(
+        stub.chat_bodies().len(),
+        1,
+        "plan-only must call the planner once and never synthesize"
+    );
+
+    // The audit row records the routed intent + plan summary, but no executed
+    // query — nothing ran.
+    let audit = rt
+        .execute_query("SELECT * FROM red_ask_audit")
+        .expect("read audit rows");
+    let audit_row = audit
+        .result
+        .records
+        .iter()
+        .find(|r| text(r, "intent").as_deref() == Some("factual"))
+        .expect("a factual plan-only audit row");
+    assert!(
+        text(audit_row, "executed_query").is_none(),
+        "plan-only records no executed query — nothing ran"
+    );
+}
+
+// ===========================================================================
+// #1751 — `EXPLAIN ASK` shows the routed intent and the plan (retrieval,
+// provider, determinism, cost) WITHOUT executing the candidate or calling
+// the synthesis model — running at most the planner call.
+// ===========================================================================
+
+#[test]
+fn explain_ask_shows_intent_and_plan_without_executing_or_synthesizing() {
+    let _env = env_lock().lock().expect("env lock");
+
+    let stub = ScriptedStub::start(vec![
+        "{\"intent\":\"factual\",\"query\":\"SELECT * FROM travelers WHERE passport = 'FDD-1'\",\"rationale\":\"passport lookup\"}".to_string(),
+    ]);
+    let _p = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
+    let _b = EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+    let _k = EnvVarGuard::set("REDDB_OPENAI_API_KEY", "sk-test-mock");
+    let _m = EnvVarGuard::set("REDDB_OPENAI_PROMPT_MODEL", "synth-main");
+
+    let rt = open_rt();
+    exec(
+        &rt,
+        "CREATE TABLE travelers (id TEXT PRIMARY KEY, passport TEXT, name TEXT) \
+         WITH CONTEXT INDEX ON (id, passport, name)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO travelers (id, passport, name) VALUES ('t1', 'FDD-1', 'Alice')",
+    );
+
+    configure_planner(&rt);
+
+    let result = rt
+        .execute_query("EXPLAIN ASK 'who owns passport FDD-1?' STRICT OFF")
+        .expect("EXPLAIN ASK should return the plan");
+    let record = result
+        .result
+        .records
+        .first()
+        .expect("EXPLAIN ASK returns one canonical row");
+
+    // The retrieval/provider/determinism/cost plan is present, and it now also
+    // carries the routed intent + candidate query.
+    assert!(
+        record.get("plan").is_some(),
+        "EXPLAIN ASK must still carry the retrieval/provider/cost plan"
+    );
+    assert_eq!(text(record, "intent").as_deref(), Some("factual"));
+    assert_eq!(
+        text(record, "candidate_query").as_deref(),
+        Some("SELECT * FROM travelers WHERE passport = 'FDD-1'"),
+        "EXPLAIN ASK must surface the candidate query"
+    );
+
+    // At most the planner call — exactly one chat completion, never synthesis.
+    assert_eq!(
+        stub.chat_bodies().len(),
+        1,
+        "EXPLAIN ASK runs at most the planner call and never synthesizes"
+    );
+}
+
+// ===========================================================================
 // Scripted mock stub — sequenced chat completions + request-body capture.
 // ===========================================================================
 
