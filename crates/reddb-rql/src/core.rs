@@ -962,13 +962,12 @@ pub struct AskQuery {
     pub stream: bool,
     /// Per-query answer-cache override.
     pub cache: AskCacheClause,
-    /// `ASK '...' AS RQL` returns a validated RQL candidate instead of
-    /// calling an AI provider. The runtime owns translation and validation.
-    pub as_rql: bool,
-    /// `ASK '...' EXECUTE` opts in to auto-running a generated RQL
-    /// candidate when (and only when) it is read-only. A mutating
-    /// candidate is refused for auto-execution regardless of this flag.
-    pub execute: bool,
+    /// `ASK '...' PLAN` returns the typed plan (routed intent + candidate
+    /// query) without executing the candidate and without the synthesis
+    /// call (ADR 0068, #1751). The `EXECUTE` and `AS RQL` clauses were
+    /// removed in the same clean break: read-only candidates auto-execute
+    /// by default, and `PLAN` is the inspection-only surface.
+    pub plan_only: bool,
     /// Per-query plan-step budget request (`ASK '...' STEPS N`). Clamped to
     /// `red.config.ai.ask.max_plan_steps` at planning time and never exceeds
     /// it; `None` falls back to the configured cap.
