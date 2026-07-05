@@ -132,6 +132,19 @@ proptest! {
         );
     }
 
+    /// Clean break (ADR 0068, #1751): the removed `AS RQL` / `EXECUTE`
+    /// clauses must never round-trip — the parser rejects them (didactically)
+    /// rather than accepting the dead grammar. Pins the removal across the
+    /// whole question-string corpus.
+    #[test]
+    fn proptest_ask_removed_clauses_reject(s in ask_grammar::ask_removed_clause_stmt()) {
+        harness::roundtrip_property::<AskParser>(&s);
+        prop_assert!(
+            AskParser::parse(&s).is_err(),
+            "removed AS RQL / EXECUTE clause must not parse: {}", s
+        );
+    }
+
     /// Arbitrary-bytes suffix on each AI keyword: never panic.
     #[test]
     fn proptest_ask_arbitrary_suffix_no_panic(
@@ -309,101 +322,80 @@ fn search_context_full_clause_chain_parses() {
 }
 
 #[test]
-fn ask_as_rql_clause_parses() {
-    let q = parse_query("ASK 'who owns passport FDD-12313?' AS RQL");
+fn ask_plan_clause_sets_plan_only() {
+    // Clean break (ADR 0068, #1751): `PLAN` returns the typed plan and
+    // candidate query without executing or synthesizing.
+    let q = parse_query("ASK 'who owns passport FDD-12313?' PLAN");
     match q {
         QueryExpr::Ask(ask) => {
-            assert!(ask.as_rql, "AS RQL should set as_rql");
-            assert!(!ask.execute, "AS RQL without EXECUTE must not set execute");
+            assert!(ask.plan_only, "PLAN should set plan_only");
+            assert!(!ask.explain);
         }
         other => panic!("expected Ask, got {other:?}"),
     }
 }
 
 #[test]
-fn ask_as_rql_execute_clause_parses() {
-    // `EXECUTE` is the opt-in that auto-runs a read-only candidate; it
-    // can appear with `AS RQL` in any order.
-    let q = parse_query("ASK 'who owns passport FDD-12313?' AS RQL EXECUTE");
-    match q {
-        QueryExpr::Ask(ask) => {
-            assert!(ask.as_rql);
-            assert!(ask.execute, "EXECUTE should set execute");
-        }
-        other => panic!("expected Ask, got {other:?}"),
-    }
-}
-
-#[test]
-fn ask_execute_before_as_rql_parses() {
-    let q = parse_query("ASK 'q' EXECUTE AS RQL");
-    match q {
-        QueryExpr::Ask(ask) => {
-            assert!(ask.as_rql);
-            assert!(ask.execute);
-        }
-        other => panic!("expected Ask, got {other:?}"),
-    }
-}
-
-#[test]
-fn ask_execute_specified_twice_errors() {
-    let err = parser::parse("ASK 'q' EXECUTE EXECUTE").expect_err("double EXECUTE must error");
+fn ask_plan_specified_twice_errors() {
+    let err = parser::parse("ASK 'q' PLAN PLAN").expect_err("double PLAN must error");
     assert!(
-        err.to_string().contains("EXECUTE specified more than once"),
+        err.to_string().contains("PLAN specified more than once"),
         "got: {err}"
     );
 }
 
-// ---- inference seam with a mock model (#1273) --------------------
+#[test]
+fn ask_as_rql_clause_is_removed_with_didactic_error() {
+    // `AS RQL` was removed: the didactic error must name the `PLAN`
+    // replacement so callers can migrate without reading the changelog.
+    let err =
+        parser::parse("ASK 'who owns passport FDD-12313?' AS RQL").expect_err("AS RQL was removed");
+    assert!(
+        err.to_string().contains("AS RQL was removed") && err.to_string().contains("PLAN"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn ask_execute_clause_is_removed_with_didactic_error() {
+    // `EXECUTE` was removed: read-only candidates auto-execute by default;
+    // the didactic error must name the `PLAN` inspection replacement.
+    let err = parser::parse("ASK 'list travelers' EXECUTE").expect_err("EXECUTE was removed");
+    assert!(
+        err.to_string().contains("EXECUTE was removed") && err.to_string().contains("PLAN"),
+        "got: {err}"
+    );
+}
+
+// ---- read-only candidate validation seam -------------------------
 //
-// There is no stubbable LLM transport on the SQL ASK path, so the
-// generate-provider seam is exercised here through a mock `RqlModel`
-// closure that stands in for the configured text2text provider.
+// The deterministic `AS RQL` planner and its LLM inference variant were
+// removed in the ADR 0068 clean break (#1751); the planner-first path now
+// owns candidate generation. What survives is the shared parser + read-only
+// classifier seam, exercised here directly.
 
-mod ask_rql_inference {
-    use reddb_server::runtime::ai::ask_rql_planner::{infer, CandidateDisposition};
-    use reddb_server::runtime::ask_pipeline::CandidateCollections;
-
-    fn candidates() -> CandidateCollections {
-        CandidateCollections {
-            collections: vec!["travelers".to_string()],
-            columns_by_collection: std::collections::HashMap::from([(
-                "travelers".to_string(),
-                vec!["passport".to_string(), "name".to_string()],
-            )]),
-        }
-    }
+mod candidate_validation {
+    use reddb_server::runtime::ai::ask_rql_planner::{validate_candidate, CandidateDisposition};
 
     #[test]
     fn invalid_candidate_is_rejected_by_parser() {
-        let model = |_p: &str| Ok("not valid rql at all".to_string());
-        let err = infer("q", &candidates(), Some("travelers"), false, &model).unwrap_err();
+        let err = validate_candidate("not valid rql at all").unwrap_err();
         assert!(err.to_string().contains("invalid RQL candidate"), "{err}");
     }
 
     #[test]
-    fn default_returns_validated_candidate_without_executing() {
-        let model =
-            |_p: &str| Ok("SELECT * FROM travelers WHERE passport = 'FDD-12313'".to_string());
-        let out = infer("q", &candidates(), Some("travelers"), false, &model).unwrap();
-        assert!(!out.execute);
-        assert_eq!(out.candidate.disposition, CandidateDisposition::ReadOnly);
+    fn read_only_select_is_classified_read_only() {
+        let out =
+            validate_candidate("SELECT * FROM travelers WHERE passport = 'FDD-12313'").unwrap();
+        assert_eq!(out.disposition, CandidateDisposition::ReadOnly);
+        assert!(out.is_read_only());
     }
 
     #[test]
-    fn execute_runs_read_only_candidate() {
-        let model =
-            |_p: &str| Ok("SELECT * FROM travelers WHERE passport = 'FDD-12313'".to_string());
-        let out = infer("q", &candidates(), Some("travelers"), true, &model).unwrap();
-        assert!(out.execute, "read-only candidate with EXECUTE must run");
-    }
-
-    #[test]
-    fn mutating_candidate_refused_for_execute() {
-        let model = |_p: &str| Ok("DELETE FROM travelers WHERE passport = 'FDD-12313'".to_string());
-        let err = infer("q", &candidates(), Some("travelers"), true, &model).unwrap_err();
-        assert!(err.to_string().contains("refused"), "{err}");
+    fn mutating_delete_is_classified_mutating() {
+        let out = validate_candidate("DELETE FROM travelers WHERE passport = 'FDD-12313'").unwrap();
+        assert_eq!(out.disposition, CandidateDisposition::Mutating);
+        assert_eq!(out.statement_type, "delete");
     }
 }
 
