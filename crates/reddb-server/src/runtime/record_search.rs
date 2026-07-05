@@ -1474,8 +1474,10 @@ fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
         }
     };
 
-    let provider = crate::ai::resolve_default_provider(&kv_getter);
-    let model = crate::ai::resolve_default_model(&provider, &kv_getter);
+    // Embeddings follow the embeddings task pointer (ADR-0068 §5), not the
+    // inference/ASK provider — a modality-incapable pointer fails loudly.
+    let provider = crate::ai::resolve_embeddings_provider(&kv_getter)?;
+    let model = crate::ai::resolve_embeddings_model(&provider, &kv_getter);
 
     // Issue #681 — when the default provider is `local`, route through
     // the registered local-model backend (registry from #678, cache from
