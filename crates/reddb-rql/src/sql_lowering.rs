@@ -738,6 +738,27 @@ pub fn fold_expr_to_value(expr: Expr) -> Result<Value, String> {
                     Value::Secret(format!("@@plain@@{plaintext}").into_bytes())
                 });
             }
+            // ADR 0067 (#1721): `JSON_PARSE('{…}')` is the sanctioned escape
+            // hatch for writing JSON from a runtime string. Fold a literal
+            // string argument to a `Value::Json` here so it is accepted in
+            // INSERT VALUES positions, using the same parse+canonicalize
+            // pipeline as an inline JSON literal.
+            if name.eq_ignore_ascii_case("JSON_PARSE") && args.len() == 1 {
+                let raw = match fold_expr_to_value(args.into_iter().next().unwrap())? {
+                    Value::Text(text) => text,
+                    other => {
+                        return Err(format!(
+                            "JSON_PARSE() expects a string literal argument, got {other:?}"
+                        ))
+                    }
+                };
+                let parsed = reddb_types::utils::json::parse_json(raw.as_ref())
+                    .map_err(|err| format!("JSON_PARSE failed to parse JSON: {err}"))?;
+                let canonical = reddb_types::serde_json::Value::from(parsed);
+                let bytes = reddb_types::json::to_vec(&canonical)
+                    .map_err(|err| format!("JSON_PARSE failed to encode JSON: {err}"))?;
+                return Ok(Value::Json(bytes));
+            }
             Err(format!(
                 "expression is not a foldable literal: FunctionCall({name})"
             ))

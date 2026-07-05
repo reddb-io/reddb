@@ -250,6 +250,7 @@ std::string kv_tag_literal(const std::string& tag);
 std::string queue_value_literal(const JsonValue& value);
 std::string value_literal(const JsonValue& value);
 std::string json_literal(const JsonValue& value);
+std::string json_inline_literal(const JsonValue& value);
 std::string identifier(const std::string& value);
 std::string identifier_path(const std::string& value);
 void        assert_identifier(const std::string& value, const std::string& label);

@@ -27,7 +27,7 @@ public final class DocumentClient {
         }
         ensureCollection(collection);
         String sql = "INSERT INTO " + Sql.sqlIdentifierPath(collection)
-            + " DOCUMENT (body) VALUES (" + Sql.jsonLiteral(document) + ") RETURNING *";
+            + " DOCUMENT VALUES (" + Sql.jsonInlineLiteral(document) + ") RETURNING *";
         byte[] body = q.query(sql);
         Object[] fr = Sql.firstRow(body);
         @SuppressWarnings("unchecked")

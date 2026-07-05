@@ -72,6 +72,15 @@ final class Sql {
         }
     }
 
+    /** Raw inline JSON literal (no surrounding quotes, no SQL escaping) for RQL's inline JSON body form. */
+    static String jsonInlineLiteral(Object value) {
+        try {
+            return JSON.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            throw new HelperException.InvalidArgument(e.getMessage());
+        }
+    }
+
     static String sqlIdentifier(String value) {
         if (!value.isEmpty() && allIdentChars(value)) return value;
         return "\"" + value.replace("\"", "\"\"") + "\"";

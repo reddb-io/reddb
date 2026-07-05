@@ -70,6 +70,16 @@ found the DML surface accreted rather than designed:
    user data, matched exactly everywhere. The schemaless typo hazard
    (`userid` vs `UserId` → empty result) is a documentation concern,
    not a semantics lever.
+9. **No runtime string→JSON coercion (follow-up [#1721]).** Point 1
+   rejects the quoted-string body at *parse* time; the same strictness
+   applies to the *runtime* positions the parser cannot see. A
+   parameter-bound document body (`DOCUMENT VALUES ($1)` with a string
+   argument) and a bare string bound to a JSON-typed table column are
+   **not silently coerced** — they error, pointing at the inline literal
+   or `JSON_PARSE(<expr>)`. An inline literal already arrives as a JSON
+   value and never reaches these coercion points.
+
+[#1721]: https://github.com/reddb-io/reddb/issues/1721
 
 ## Consequences
 
