@@ -1866,7 +1866,9 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
         panic!("Expected InsertQuery");
     };
     let auto_embed = insert.auto_embed.expect("auto embed config");
-    assert_eq!(auto_embed.provider, "openai");
+    // No `USING` → empty provider; runtime resolves via the embeddings task
+    // pointer (ADR-0068 §5) rather than a hardcoded default.
+    assert_eq!(auto_embed.provider, "");
     assert_eq!(auto_embed.model, None);
 
     let query = parse(
