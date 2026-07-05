@@ -225,8 +225,8 @@ Verification:
 Objective: decide if document insert can accept arbitrary JSON without promoting reserved keys.
 
 Potential contract:
-- `INSERT INTO events DOCUMENT (body) VALUES ('{"kind":"signup"}')` stores raw body and does not promote `kind` to top-level values.
-- A separate `WITH PROMOTE FIELDS` or default promotion mode can reject conflicts.
+- `INSERT INTO events DOCUMENT VALUES ({"event_type":"signup"})` stores the document body (with schema-free keys); reserved field names are rejected at write time.
+- Per [ADR 0066](../../.red/adr/0066-reserved-envelope-fields-user-pays.md), users rename colliding keys; the envelope stays unprefixed.
 
 This is a product decision; defer code until contract is chosen.
 
