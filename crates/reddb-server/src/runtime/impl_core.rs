@@ -70,12 +70,13 @@ pub use super::execution_context::{
     SnapshotBundle, SnapshotContext,
 };
 pub(crate) use super::execution_context::{
-    current_auth_identity, current_config_value, current_kv_value, current_role_projected,
-    current_scope_override, current_secret_value, current_snapshot_requires_index_fallback,
-    current_user_projected, has_scope_override_active, parse_set_local_tenant,
-    update_current_config_value, update_current_kv_value, update_current_secret_value,
-    xids_visible_under_current_snapshot, ConfigSnapshotGuard, CurrentSnapshotGuard, KvStoreGuard,
-    ScopeOverrideGuard, SecretStoreGuard, TxLocalTenantGuard,
+    config_read_permitted, current_auth_identity, current_config_value, current_kv_value,
+    current_role_projected, current_scope_override, current_secret_value,
+    current_snapshot_requires_index_fallback, current_user_projected, has_scope_override_active,
+    kv_read_permitted, parse_set_local_tenant, update_current_config_value,
+    update_current_kv_value, update_current_secret_value, xids_visible_under_current_snapshot,
+    ConfigSnapshotGuard, CurrentSnapshotGuard, KvStoreGuard, ScopeOverrideGuard, SecretStoreGuard,
+    TxLocalTenantGuard,
 };
 
 /// Cheap prefix check for a leading `WITH` keyword. Used to gate the
@@ -2433,7 +2434,10 @@ impl RedDBRuntime {
     ///
     /// Applies secret decryption on SELECT results, identical to `execute_query`.
     pub fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
-        let _config_snapshot_guard = ConfigSnapshotGuard::install(Arc::clone(&self.inner.db));
+        let _config_snapshot_guard = ConfigSnapshotGuard::install(
+            Arc::clone(&self.inner.db),
+            self.inner.auth_store.read().clone(),
+        );
         let _secret_store_guard = SecretStoreGuard::install(self.inner.auth_store.read().clone());
         // View rewrite (Phase 2.1): substitute any `QueryExpr::Table(tq)`
         // whose `tq.table` matches a registered view with the view's
