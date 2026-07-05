@@ -450,9 +450,18 @@ impl RedDBServer {
             Err(response) => return response,
         };
 
-        let provider = match parse_ai_provider(&payload) {
-            Ok(provider) => provider,
-            Err(err) => return json_error(400, err),
+        // An explicit `provider` is honoured verbatim; when absent, the
+        // embeddings task pointer drives selection (ADR-0068 §5).
+        let provider = if json_string_field(&payload, "provider").is_some() {
+            match parse_ai_provider(&payload) {
+                Ok(provider) => provider,
+                Err(err) => return json_error(400, err),
+            }
+        } else {
+            match crate::ai::resolve_embeddings_provider_from_runtime(&self.runtime, "") {
+                Ok(provider) => provider,
+                Err(err) => return json_error(400, err.to_string()),
+            }
         };
         // Provider routing for embeddings:
         //
@@ -492,19 +501,13 @@ impl RedDBServer {
             _ => {}
         }
 
-        let model = json_string_field(&payload, "model").unwrap_or_else(|| {
-            // Provider-specific embedding model env var first, then generic
-            // fallback, then the provider's compiled-in default.
-            std::env::var(format!(
-                "REDDB_{}_EMBEDDING_MODEL",
-                provider.token().to_ascii_uppercase()
-            ))
-            .ok()
-            .or_else(|| std::env::var("REDDB_OPENAI_EMBEDDING_MODEL").ok())
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| provider.default_embedding_model().to_string())
-        });
+        // Explicit `model` wins; otherwise resolve via env → provider models
+        // block → built-in default (ADR-0068 §5).
+        let model = crate::ai::resolve_embeddings_model_from_runtime(
+            &self.runtime,
+            &provider,
+            json_string_field(&payload, "model").as_deref(),
+        );
         let dimensions = match payload
             .get("dimensions")
             .and_then(JsonValue::as_i64)
@@ -1163,9 +1166,9 @@ impl RedDBServer {
             }
         }
 
-        // Save API base URL
+        // Save API base URL (ADR-0068 §5: per-provider, no credential alias).
         if let Some(api_base) = &api_base {
-            let base_key = format!("red.config.ai.{}.{}.base_url", provider.token(), alias);
+            let base_key = crate::ai::provider_base_url_key(&provider);
             let _ = self
                 .entity_use_cases()
                 .delete_kv(RED_CONFIG_COLLECTION, &base_key);
@@ -1217,27 +1220,41 @@ impl RedDBServer {
             .and_then(JsonValue::as_bool)
             .unwrap_or(false);
         if is_default {
-            let _ = self
-                .entity_use_cases()
-                .delete_kv(RED_CONFIG_COLLECTION, "red.config.ai.default.provider");
-            let _ = self.entity_use_cases().create_kv(CreateKvInput {
-                collection: RED_CONFIG_COLLECTION.to_string(),
-                key: "red.config.ai.default.provider".to_string(),
-                value: Value::text(provider.token().to_string()),
-                metadata: Vec::new(),
-            });
+            // ADR-0068 §5 clean break: point the inference task pointer at
+            // this provider and pin its inference model in the provider
+            // models block. When the provider can embed, aim the embeddings
+            // task pointer at it too so it becomes the default for both
+            // modalities; otherwise leave the embeddings pointer untouched.
+            let set_pointer = |key: String, value: String| {
+                let _ = self
+                    .entity_use_cases()
+                    .delete_kv(RED_CONFIG_COLLECTION, &key);
+                let _ = self.entity_use_cases().create_kv(CreateKvInput {
+                    collection: RED_CONFIG_COLLECTION.to_string(),
+                    key,
+                    value: Value::text(value),
+                    metadata: Vec::new(),
+                });
+            };
+
+            set_pointer(
+                "red.config.ai.inference.provider".to_string(),
+                provider.token().to_string(),
+            );
 
             let model = json_string_field(&payload, "model")
                 .unwrap_or_else(|| provider.default_prompt_model().to_string());
-            let _ = self
-                .entity_use_cases()
-                .delete_kv(RED_CONFIG_COLLECTION, "red.config.ai.default.model");
-            let _ = self.entity_use_cases().create_kv(CreateKvInput {
-                collection: RED_CONFIG_COLLECTION.to_string(),
-                key: "red.config.ai.default.model".to_string(),
-                value: Value::text(model.clone()),
-                metadata: Vec::new(),
-            });
+            set_pointer(
+                crate::ai::provider_models_key(&provider, "inference"),
+                model.clone(),
+            );
+
+            if provider.supports_embeddings() {
+                set_pointer(
+                    "red.config.ai.embeddings.provider".to_string(),
+                    provider.token().to_string(),
+                );
+            }
 
             object.insert("is_default".to_string(), JsonValue::Bool(true));
             object.insert("default_model".to_string(), JsonValue::String(model));
