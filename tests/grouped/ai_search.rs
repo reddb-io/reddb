@@ -12,6 +12,9 @@ mod support;
 #[path = "surface_contracts/compile_fail.rs"]
 mod compile_fail;
 
+#[path = "ai_search/e2e_ask_planner_core.rs"]
+mod e2e_ask_planner_core;
+
 #[path = "ai_search/e2e_ask_search_conformance.rs"]
 mod e2e_ask_search_conformance;
 
