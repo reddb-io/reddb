@@ -304,6 +304,67 @@ fn mutating_candidate_is_refused_and_never_executed() {
 }
 
 // ===========================================================================
+// #1748 — grounding critique: a question that grounds nothing (even after the
+// single refine_retrieval re-funnel) returns the honest "no matching sources"
+// outcome and NEVER calls the LLM to invent an answer.
+// ===========================================================================
+
+#[test]
+fn ungrounded_question_returns_no_matching_sources_without_inventing() {
+    let _env = env_lock().lock().expect("env lock");
+
+    // The stub scripts no chat answers: if the planner/synthesis LLM were
+    // ever called for an ungrounded question, it would fall through to the
+    // canned filler — the test asserts that never happens.
+    let stub = ScriptedStub::start(vec![]);
+    let _p = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
+    let _b = EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+    let _k = EnvVarGuard::set("REDDB_OPENAI_API_KEY", "sk-test-mock");
+    let _m = EnvVarGuard::set("REDDB_OPENAI_PROMPT_MODEL", "synth-main");
+
+    let rt = open_rt();
+    exec(
+        &rt,
+        "CREATE TABLE travelers (id TEXT PRIMARY KEY, passport TEXT, name TEXT) \
+         WITH CONTEXT INDEX ON (id, passport, name)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO travelers (id, passport, name) VALUES ('t1', 'FDD-1', 'Alice')",
+    );
+
+    configure_planner(&rt);
+
+    // The question's tokens match no collection or column in the schema, so
+    // the funnel grounds nothing on the first pass and on the single refine
+    // re-funnel — the honest no-matching-sources path.
+    let result = rt
+        .execute_query("ASK 'quantum dragons volcano wibble' STRICT OFF")
+        .expect("ungrounded ASK is a structured outcome, not an error");
+    let record = result.result.records.first().expect("one canonical row");
+
+    assert_eq!(
+        record.get("no_matching_sources"),
+        Some(&Value::Boolean(true)),
+        "an ungrounded question must report no matching sources"
+    );
+    let answer = text(record, "answer").expect("answer column");
+    assert!(
+        answer.contains("No matching sources"),
+        "answer must honestly report the grounding failure, got: {answer:?}"
+    );
+
+    // The LLM was never called to invent an answer — grounding failure short
+    // circuits before any chat completion. (The funnel may still hit
+    // /embeddings, which is not a chat completion.)
+    assert_eq!(
+        stub.chat_bodies().len(),
+        0,
+        "no planner/synthesis chat call may be made for an ungrounded question"
+    );
+}
+
+// ===========================================================================
 // Scripted mock stub — sequenced chat completions + request-body capture.
 // ===========================================================================
 
