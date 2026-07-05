@@ -310,10 +310,13 @@ impl<'a> Parser<'a> {
                 // `consume_ident_ci` would never match. Use the typed
                 // consumer instead. See bug #108 (mirrors the #92 fix
                 // for migration `DEPENDS ON`).
+                // Empty means "no explicit provider" — the runtime resolves
+                // it via the embeddings task pointer (ADR-0068 §5). Only an
+                // explicit `USING` names a provider here.
                 let provider = if self.consume(&Token::Using)? {
                     self.expect_ident()?
                 } else {
-                    "openai".to_string()
+                    String::new()
                 };
                 let model = if self.consume_ident_ci("MODEL")? {
                     Some(self.parse_string()?)
