@@ -229,7 +229,11 @@ impl RedDBRuntime {
         };
         self.check_insert_column_policy(query)?;
         if let Some(ref embed_config) = query.auto_embed {
-            let provider = crate::ai::parse_provider(&embed_config.provider)?;
+            // Empty provider → resolve via the embeddings task pointer
+            // (ADR-0068 §5); an explicit `USING` overrides it. A modality-
+            // incapable provider fails didactically here.
+            let provider =
+                crate::ai::resolve_embeddings_provider_from_runtime(self, &embed_config.provider)?;
             // S3 / #711: planner-level provider gate. Runs before the
             // local-model preflight and the API-key resolver so neither
             // side-effect fires when policy denies.
@@ -946,7 +950,8 @@ impl RedDBRuntime {
         // Auto-embed pipeline: batch-embed fields across all inserted rows via AiBatchClient.
         if let Some(ref embed_config) = query.auto_embed {
             let store = self.inner.db.store();
-            let provider = crate::ai::parse_provider(&embed_config.provider)?;
+            let provider =
+                crate::ai::resolve_embeddings_provider_from_runtime(self, &embed_config.provider)?;
             let is_local_provider = matches!(provider, crate::ai::AiProvider::Local);
             // Local provider runs in-process — no API key path applies.
             // The pre-flight above already required `MODEL '<name>'`
@@ -957,11 +962,13 @@ impl RedDBRuntime {
             } else {
                 crate::ai::resolve_api_key_from_runtime(&provider, None, self)?
             };
-            let model = embed_config.model.clone().unwrap_or_else(|| {
-                std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
-                    .ok()
-                    .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string())
-            });
+            // Explicit `MODEL '<name>'` wins; otherwise resolve via the
+            // provider models block then the built-in default (ADR-0068 §5).
+            let model = crate::ai::resolve_embeddings_model_from_runtime(
+                self,
+                &provider,
+                embed_config.model.as_deref(),
+            );
 
             // Collect the just-inserted rows (most-recently appended, reversed back to insert order).
             let manager = store
