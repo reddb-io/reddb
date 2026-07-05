@@ -562,7 +562,7 @@ JsonObject DocumentClient::patch(const std::string& collection, const std::strin
         parts << sql::identifier(k) << " = " << sql::value_literal(v);
     }
     std::ostringstream os;
-    os << "UPDATE " << sql::identifier_path(collection) << " DOCUMENTS SET "
+    os << "UPDATE " << sql::identifier_path(collection) << " SET "
        << parts.str() << " WHERE rid = $1 RETURNING *";
     std::string body = q_->query(os.str(), {rid});
     auto [row, _] = sql::first_row(body);

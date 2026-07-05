@@ -150,18 +150,19 @@ names are reserved and cannot be used as top-level KV payload fields.
 
 ## Updating KV with SQL
 
-KV updates use the explicit `KV` target. Compound assignment is supported on
-numeric values:
+KV updates are written **unmarked** — RedDB resolves the KV model from the
+catalog (the `KV` marker was removed, ADR 0067). Compound assignment is
+supported on numeric values:
 
 ```sql
-UPDATE config KV
+UPDATE config
 SET value += 1
 WHERE key = 'rollout.percent'
 RETURNING rid, key, value
 ```
 
 ```sql
-UPDATE config KV
+UPDATE config
 SET value = false
 WHERE key = 'feature.dark_mode'
 RETURNING key, value

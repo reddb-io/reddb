@@ -1,11 +1,6 @@
 <div align="center">
 
-<h1>🚀 RedDB</h1>
-
-<p>
-  <strong>The AI-first multi-model database.</strong><br>
-  Tables · Documents · Graphs · Vectors · KV · Time-series · Queues · All in one engine. Ask it anything.
-</p>
+<img src="docs/hero.svg" alt="RedDB — the AI-first multi-model database. Tables, documents, graphs, vectors, KV, time-series and queues in one engine. Ask it anything." width="100%" />
 
 <p>
   <a href="https://github.com/reddb-io/reddb/releases"><img src="https://img.shields.io/github/v/release/reddb-io/reddb?style=for-the-badge&color=ff2056&labelColor=0b0b0d" alt="Release"></a>
@@ -46,7 +41,7 @@ The mental model: your **model** is how you query (table, graph, vector, etc.), 
 INSERT INTO users (name, email) VALUES ('Alice', 'alice@co.com')
 
 -- 📄 JSON documents — inline JSON syntax
-INSERT INTO logs DOCUMENT {"level": "info", "msg": "login"}
+INSERT INTO logs DOCUMENT VALUES ({"level": "info", "msg": "login"})
 
 -- 🔗 Graph edges  
 INSERT INTO network EDGE (label, from_rid, to_rid) VALUES ('CONNECTS', 102, 103)

@@ -16,9 +16,9 @@ final class Documents
     {
         $this->ensureCollection($collection);
         $sql = sprintf(
-            'INSERT INTO %s DOCUMENT (body) VALUES (%s) RETURNING *',
+            'INSERT INTO %s DOCUMENT VALUES (%s) RETURNING *',
             Sql::identifierPath($collection),
-            Sql::jsonLiteral($document)
+            Sql::jsonInlineLiteral($document)
         );
         $body = $this->q->query($sql);
         [$row, $affected] = Sql::firstRow($body);
@@ -81,7 +81,7 @@ final class Documents
             $parts[] = sprintf('%s = %s', Sql::identifier($field), Sql::valueLiteral($value));
         }
         $sql = sprintf(
-            'UPDATE %s DOCUMENTS SET %s WHERE rid = $1 RETURNING *',
+            'UPDATE %s SET %s WHERE rid = $1 RETURNING *',
             Sql::identifierPath($collection), implode(', ', $parts)
         );
         $body = $this->q->query($sql, [$rid]);

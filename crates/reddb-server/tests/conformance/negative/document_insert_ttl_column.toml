@@ -1,0 +1,5 @@
+input = 'INSERT INTO events DOCUMENT (body, _ttl) VALUES ({"level":"info"}, 30)'
+expected_error_substring = "WITH TTL"
+expected_error_kind = "Syntax"
+source = "crates/reddb-rql/src/parser/error.rs:242"
+kind = "negative"

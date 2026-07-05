@@ -189,7 +189,7 @@ pub const DocumentClient = struct {
         const id_path = try identifierPath(self.allocator, collection);
         defer self.allocator.free(id_path);
         const sql = try std.fmt.allocPrint(self.allocator,
-            "UPDATE {s} DOCUMENTS SET {s} WHERE rid = $1 RETURNING *",
+            "UPDATE {s} SET {s} WHERE rid = $1 RETURNING *",
             .{ id_path, parts.items });
         defer self.allocator.free(sql);
         const params = [_][]const u8{rid};

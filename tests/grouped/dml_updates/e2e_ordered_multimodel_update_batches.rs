@@ -50,20 +50,20 @@ fn document_update_order_by_limit_uses_top_level_document_fields() {
     exec(&rt, "CREATE DOCUMENT ordered_docs");
     exec(
         &rt,
-        r#"INSERT INTO ordered_docs DOCUMENT (body) VALUES ('{"name":"zeta","score":10,"touched":0}')"#,
+        r#"INSERT INTO ordered_docs DOCUMENT VALUES ({"name":"zeta","score":10,"touched":0})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO ordered_docs DOCUMENT (body) VALUES ('{"name":"alpha","score":30,"touched":0}')"#,
+        r#"INSERT INTO ordered_docs DOCUMENT VALUES ({"name":"alpha","score":30,"touched":0})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO ordered_docs DOCUMENT (body) VALUES ('{"name":"beta","score":20,"touched":0}')"#,
+        r#"INSERT INTO ordered_docs DOCUMENT VALUES ({"name":"beta","score":20,"touched":0})"#,
     );
 
     let updated = exec(
         &rt,
-        "UPDATE ordered_docs DOCUMENTS SET touched = 1 ORDER BY score ASC LIMIT 2",
+        "UPDATE ordered_docs SET touched = 1 ORDER BY score ASC LIMIT 2",
     );
 
     assert_eq!(updated.affected_rows, 2);
@@ -92,7 +92,7 @@ fn kv_update_order_by_limit_uses_key_value_fields() {
 
     let updated = exec(
         &rt,
-        "UPDATE ordered_kv KV SET value += 100 ORDER BY value DESC LIMIT 2",
+        "UPDATE ordered_kv SET value += 100 ORDER BY value DESC LIMIT 2",
     );
 
     assert_eq!(updated.affected_rows, 2);
@@ -180,35 +180,38 @@ fn edge_update_order_by_limit_uses_graph_edge_properties() {
 fn ordered_non_row_updates_require_limit_and_top_level_fields() {
     let rt = runtime();
 
-    for (target, collection) in [
-        ("DOCUMENTS", "ordered_docs"),
-        ("KV", "ordered_kv"),
-        ("NODES", "ordered_graph_nodes"),
-        ("EDGES", "ordered_graph_edges"),
+    // The DOCUMENTS/KV markers are removed (ADR 0067, #1711), so document and
+    // KV updates are written unmarked; NODES/EDGES stay. The ORDER-BY guards
+    // are parse-level and fire identically for every target.
+    for (marker, collection) in [
+        ("", "ordered_docs"),
+        ("", "ordered_kv"),
+        ("NODES ", "ordered_graph_nodes"),
+        ("EDGES ", "ordered_graph_edges"),
     ] {
         let without_limit = err_string(
             &rt,
-            &format!("UPDATE {collection} {target} SET touched = 1 ORDER BY score"),
+            &format!("UPDATE {collection} {marker}SET touched = 1 ORDER BY score"),
         );
         assert!(
             without_limit.contains("ORDER BY requires LIMIT"),
-            "{target}: {without_limit}"
+            "{marker}: {without_limit}"
         );
 
         let expression = err_string(
             &rt,
-            &format!("UPDATE {collection} {target} SET touched = 1 ORDER BY score + 1 LIMIT 1"),
+            &format!("UPDATE {collection} {marker}SET touched = 1 ORDER BY score + 1 LIMIT 1"),
         );
         assert!(
             expression.contains("top-level fields"),
-            "{target}: {expression}"
+            "{marker}: {expression}"
         );
 
         let nested = err_string(
             &rt,
-            &format!("UPDATE {collection} {target} SET touched = 1 ORDER BY body.score LIMIT 1"),
+            &format!("UPDATE {collection} {marker}SET touched = 1 ORDER BY body.score LIMIT 1"),
         );
-        assert!(nested.contains("top-level fields"), "{target}: {nested}");
+        assert!(nested.contains("top-level fields"), "{marker}: {nested}");
     }
 }
 
@@ -218,20 +221,20 @@ fn document_update_order_by_limit_breaks_ties_by_implicit_rid_asc() {
     exec(&rt, "CREATE DOCUMENT ordered_doc_ties");
     exec(
         &rt,
-        r#"INSERT INTO ordered_doc_ties DOCUMENT (body) VALUES ('{"name":"first","score":7,"touched":0}')"#,
+        r#"INSERT INTO ordered_doc_ties DOCUMENT VALUES ({"name":"first","score":7,"touched":0})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO ordered_doc_ties DOCUMENT (body) VALUES ('{"name":"second","score":7,"touched":0}')"#,
+        r#"INSERT INTO ordered_doc_ties DOCUMENT VALUES ({"name":"second","score":7,"touched":0})"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO ordered_doc_ties DOCUMENT (body) VALUES ('{"name":"third","score":7,"touched":0}')"#,
+        r#"INSERT INTO ordered_doc_ties DOCUMENT VALUES ({"name":"third","score":7,"touched":0})"#,
     );
 
     let updated = exec(
         &rt,
-        "UPDATE ordered_doc_ties DOCUMENTS SET touched = 1 ORDER BY score ASC LIMIT 2",
+        "UPDATE ordered_doc_ties SET touched = 1 ORDER BY score ASC LIMIT 2",
     );
 
     assert_eq!(updated.affected_rows, 2);

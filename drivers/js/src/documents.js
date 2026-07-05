@@ -9,7 +9,7 @@ export class DocumentClient {
     validateObject(document, 'documents.insert document')
     await this.ensureCollection(collection)
     const result = await this.db.query(
-      `INSERT INTO ${sqlIdentifierPath(collection)} DOCUMENT (body) VALUES (${sqlJsonLiteral(document)}) RETURNING *`,
+      `INSERT INTO ${sqlIdentifierPath(collection)} DOCUMENT VALUES (${sqlJsonInlineLiteral(document)}) RETURNING *`,
     )
     const item = result.rows?.[0]
     if (!item || item.rid == null) {
@@ -57,7 +57,7 @@ export class DocumentClient {
       .map(([field, value]) => `${sqlIdentifier(field)} = ${sqlValueLiteral(value)}`)
       .join(', ')
     const result = await this.db.query(
-      `UPDATE ${sqlIdentifierPath(collection)} DOCUMENTS SET ${assignments} WHERE rid = $1 RETURNING *`,
+      `UPDATE ${sqlIdentifierPath(collection)} SET ${assignments} WHERE rid = $1 RETURNING *`,
       rid,
     )
     const item = result.rows?.[0]
@@ -111,6 +111,12 @@ function sqlIdentifier(value) {
 
 function sqlJsonLiteral(value) {
   return sqlString(JSON.stringify(value))
+}
+
+// ADR 0067 (#1709): a document body is written as an inline strict-JSON
+// literal (no surrounding quotes) — the quoted-string coercion is removed.
+function sqlJsonInlineLiteral(value) {
+  return JSON.stringify(value)
 }
 
 function sqlValueLiteral(value) {

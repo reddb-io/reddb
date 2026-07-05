@@ -72,10 +72,12 @@ CREATE DOCUMENT IF NOT EXISTS events
 
 ## Creating Documents
 
-Once the collection exists, insert documents with the idempotent assertion form:
+Once the collection exists, insert documents. Over SQL, use the explicit
+`DOCUMENT` insert form (the JSON payload is the document `body`):
 
 ```sql
-INSERT INTO events DOCUMENT VALUES ({"event_type":"login","user_id":"u_abc123"})
+INSERT INTO events DOCUMENT
+VALUES ({"event_type":"login","user_id":"u_abc123"})
 ```
 
 The HTTP, gRPC, and MCP surfaces below are equivalent.
@@ -164,37 +166,27 @@ rule from [ADR 0066](../../.red/adr/0066-reserved-envelope-fields-user-pays.md):
 the envelope vocabulary stays unprefixed and user data pays for top-level
 collisions.
 
-## Identifier and data case rule
+## Identifier vs. data case rule
 
-SQL identifiers (collection names, column references in `WHERE` and `SET`)
-fold case — `UserId` and `userid` refer to the same top-level field. JSON
-body keys are user data and are **matched exactly**:
-
-```sql
-INSERT INTO logs DOCUMENT VALUES ({"UserId":"u_123","event":"login"})
-```
-
-This document has two top-level fields: `UserId` and `event`. A query using
-a lowercase identifier still matches the field:
+RQL folds the case of **identifiers** — collection names, column names, and
+keywords — but never touches **your JSON body keys**. Body keys are user data
+and are matched **exactly**, byte for byte, everywhere they are written or read
+([ADR 0067](../../.red/adr/0067-document-dml-surface-clean-break.md)).
 
 ```sql
-SELECT userid FROM logs
+-- Identifier folding: these three name the same collection.
+INSERT INTO events   DOCUMENT VALUES ({"UserId": 7});
+INSERT INTO Events   DOCUMENT VALUES ({"UserId": 8});
+INSERT INTO EVENTS   DOCUMENT VALUES ({"UserId": 9});
+
+-- Body-key exactness: `UserId` and `userid` are DIFFERENT fields.
+SELECT UserId FROM events;   -- reads the body key `UserId`
+SELECT userid FROM events;   -- reads the (absent) body key `userid` → empty
 ```
 
-returns `u_123`. However, a query that uses exact JSON-key syntax:
-
-```sql
-SELECT body->>'userid' FROM logs
-```
-
-returns `NULL` because the key `userid` does not exist — the stored key is
-`UserId` with uppercase U. This asymmetry is by design per
-[ADR 0067](../../.red/adr/0067-document-dml-surface-clean-break.md): RedDB
-flattens top-level body keys into queryable columns with SQL's case-insensitive
-identifier semantics, but the underlying JSON keys are never case-folded.
-The schema-free document model places the responsibility on the user to avoid
-typos such as `userid` vs `UserId` — an empty result silently alerts you to
-a case mismatch.
+The practical hazard is a typo'd projection (`userid` vs `UserId`) silently
+returning nothing rather than erroring — the schemaless model cannot know which
+spelling you meant. Keep body-key casing consistent in your writes and reads.
 
 ## Querying Documents
 
@@ -272,8 +264,10 @@ return a structured envelope with `code`, `op_index`, and a JSON Pointer
 
 ### SQL UPDATE on documents
 
-Update documents with standard `UPDATE` syntax. Compound assignment,
-`RETURNING`, `LIMIT`, and `ORDER BY ... LIMIT` work the same as for rows:
+Document updates are written **unmarked** — RedDB resolves the document model
+from the catalog (the `DOCUMENTS` marker was removed, ADR 0067). Compound
+assignment, `RETURNING`, `LIMIT`, and `ORDER BY ... LIMIT` work the same as for
+rows, and dotted `SET a.b.c = …` paths address nested body fields:
 
 ```sql
 UPDATE events

@@ -169,7 +169,7 @@ public sealed class DocumentClient
                     "documents.patch currently accepts top-level document fields");
             parts.Add($"{Sql.Identifier(kv.Key)} = {Sql.ValueLiteral(kv.Value)}");
         }
-        string sql = $"UPDATE {Sql.IdentifierPath(collection)} DOCUMENTS SET {string.Join(", ", parts)} WHERE rid = $1 RETURNING *";
+        string sql = $"UPDATE {Sql.IdentifierPath(collection)} SET {string.Join(", ", parts)} WHERE rid = $1 RETURNING *";
         var body = await _q.QueryAsync(sql, new object?[] { rid }, ct).ConfigureAwait(false);
         var (row, _) = Sql.FirstRow(body.Span);
         if (row is null) throw new HelperException.NotFound($"document \"{rid}\" was not found");

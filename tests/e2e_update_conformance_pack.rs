@@ -130,7 +130,7 @@ fn explicit_targets_are_authorized_as_ordinary_updates() {
     exec(&rt, "CREATE DOCUMENT auth_docs");
     exec(
         &rt,
-        r#"INSERT INTO auth_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+        r#"INSERT INTO auth_docs DOCUMENT VALUES ({"name":"doc","score":10})"#,
     );
     exec(&rt, "CREATE KV auth_kv");
     exec(
@@ -157,23 +157,15 @@ fn explicit_targets_are_authorized_as_ordinary_updates() {
 
     as_user("alice", Role::Write, || {
         assert_eq!(
-            exec(&rt, "UPDATE auth_rows ROWS SET score += 1 WHERE id = 1").affected_rows,
+            exec(&rt, "UPDATE auth_rows SET score += 1 WHERE id = 1").affected_rows,
             1
         );
         assert_eq!(
-            exec(
-                &rt,
-                "UPDATE auth_docs DOCUMENTS SET score += 1 WHERE name = 'doc'"
-            )
-            .affected_rows,
+            exec(&rt, "UPDATE auth_docs SET score += 1 WHERE name = 'doc'").affected_rows,
             1
         );
         assert_eq!(
-            exec(
-                &rt,
-                "UPDATE auth_kv KV SET value += 1 WHERE key = 'counter'"
-            )
-            .affected_rows,
+            exec(&rt, "UPDATE auth_kv SET value += 1 WHERE key = 'counter'").affected_rows,
             1
         );
         assert_eq!(
@@ -195,7 +187,7 @@ fn explicit_targets_are_authorized_as_ordinary_updates() {
     });
 
     let denied = as_user("alice", Role::Write, || {
-        err_string(&rt, "UPDATE auth_denied ROWS SET score = 1 WHERE id = 1")
+        err_string(&rt, "UPDATE auth_denied SET score = 1 WHERE id = 1")
     });
     assert!(denied.contains("table:auth_denied"), "{denied}");
 }
@@ -225,7 +217,7 @@ fn update_returning_obeys_rls_and_column_policy() {
         set_current_tenant("acme".to_string());
         let result = exec(
             &rt,
-            "UPDATE tenant_accounts ROWS SET score += 1 RETURNING id, tenant_id, score",
+            "UPDATE tenant_accounts SET score += 1 RETURNING id, tenant_id, score",
         );
         clear_current_tenant();
         result
@@ -259,7 +251,7 @@ fn update_returning_obeys_rls_and_column_policy() {
     let denied = as_user("alice", Role::Write, || {
         err_string(
             &rt,
-            "UPDATE masked_accounts ROWS SET status = 'active' WHERE id = 1 RETURNING secret",
+            "UPDATE masked_accounts SET status = 'active' WHERE id = 1 RETURNING secret",
         )
     });
     assert!(denied.contains("column:masked_accounts.secret"), "{denied}");
@@ -439,14 +431,14 @@ fn explicit_document_update_emits_event_and_cdc_identity() {
     exec(&rt, "QUEUE GROUP CREATE conformance_doc_events evt_readers");
     let inserted = exec(
         &rt,
-        r#"INSERT INTO conformance_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}') RETURNING rid"#,
+        r#"INSERT INTO conformance_docs DOCUMENT VALUES ({"name":"doc","score":10}) RETURNING rid"#,
     );
     let rid = uint_field(only_record(&inserted), "rid");
     let start_lsn = rt.cdc_current_lsn();
 
     exec(
         &rt,
-        "UPDATE conformance_docs DOCUMENTS SET score += 5 WHERE name = 'doc'",
+        "UPDATE conformance_docs SET score += 5 WHERE name = 'doc'",
     );
 
     let payload = read_event_payload(&rt, "conformance_doc_events");
@@ -483,12 +475,12 @@ fn document_update_keeps_body_json_in_sync_with_promoted_column() {
     exec(&rt, "CREATE DOCUMENT body_sync_docs");
     exec(
         &rt,
-        r#"INSERT INTO body_sync_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10,"keep":"me"}')"#,
+        r#"INSERT INTO body_sync_docs DOCUMENT VALUES ({"name":"doc","score":10,"keep":"me"})"#,
     );
 
     exec(
         &rt,
-        "UPDATE body_sync_docs DOCUMENTS SET score = 42 WHERE name = 'doc'",
+        "UPDATE body_sync_docs SET score = 42 WHERE name = 'doc'",
     );
 
     // The promoted top-level column reflects the new value.
@@ -518,13 +510,13 @@ fn document_path_update_keeps_nested_sibling_fields() {
     exec(&rt, "CREATE DOCUMENT body_path_docs");
     exec(
         &rt,
-        r#"INSERT INTO body_path_docs DOCUMENT (body)
-           VALUES ('{"name":"doc","profile":{"address":{"city":"Porto","zip":"4000"},"active":true},"keep":"me"}')"#,
+        r#"INSERT INTO body_path_docs DOCUMENT
+           VALUES ({"name":"doc","profile":{"address":{"city":"Porto","zip":"4000"},"active":true},"keep":"me"})"#,
     );
 
     let updated = exec(
         &rt,
-        "UPDATE body_path_docs DOCUMENTS SET profile.address.city = 'Lisbon' WHERE name = 'doc'",
+        "UPDATE body_path_docs SET profile.address.city = 'Lisbon' WHERE name = 'doc'",
     );
     assert_eq!(updated.affected_rows, 1);
 
@@ -536,18 +528,214 @@ fn document_path_update_keeps_nested_sibling_fields() {
     assert_eq!(body["keep"].as_str(), Some("me"));
 }
 
+// #1712: a nested SET creates the intermediate objects it traverses, keeps
+// sibling keys, and the flattened top-level read surface reflects the change
+// immediately (the promoted `settings` column is the freshly created object).
+#[test]
+fn document_nested_set_creates_intermediate_objects() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_intermediate_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_intermediate_docs DOCUMENT VALUES ({"name":"doc","keep":"me"})"#,
+    );
+
+    let updated = exec(
+        &rt,
+        "UPDATE body_intermediate_docs SET settings.notifications.email = 'on' WHERE name = 'doc'",
+    );
+    assert_eq!(updated.affected_rows, 1);
+
+    let with_body = exec(
+        &rt,
+        "SELECT body FROM body_intermediate_docs WHERE name = 'doc'",
+    );
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["settings"]["notifications"]["email"].as_str(),
+        Some("on"),
+        "intermediate objects must be created by the nested SET, got {body:?}"
+    );
+    assert_eq!(body["keep"].as_str(), Some("me"), "siblings must survive");
+
+    // Immediate flattened read: the newly created top-level `settings` object is
+    // promoted as a column and reflects the merge without a re-open.
+    let promoted = exec(
+        &rt,
+        "SELECT settings FROM body_intermediate_docs WHERE name = 'doc'",
+    );
+    let settings = json_field(only_record(&promoted), "settings");
+    assert_eq!(settings["notifications"]["email"].as_str(), Some("on"));
+}
+
+// #1712 / ADR 0066: a nested SET may not introduce a reserved envelope name at
+// the top level — it is rejected with the upgraded reserved-field error and the
+// document is left untouched.
+#[test]
+fn document_nested_set_rejects_reserved_top_level() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_reserved_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_reserved_docs DOCUMENT VALUES ({"name":"doc","keep":"me"})"#,
+    );
+
+    let error = err_string(
+        &rt,
+        "UPDATE body_reserved_docs SET kind = 'nope' WHERE name = 'doc'",
+    );
+    assert!(
+        error.contains("reserved") && error.contains("kind"),
+        "reserved top-level SET must be rejected with the ADR 0066 error, got: {error}"
+    );
+
+    // The rejected UPDATE must not have mutated the document body.
+    let with_body = exec(
+        &rt,
+        "SELECT body FROM body_reserved_docs WHERE name = 'doc'",
+    );
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(body["keep"].as_str(), Some("me"));
+    assert!(
+        body.get("kind").is_none(),
+        "reserved field must not have been written, got {body:?}"
+    );
+}
+
+// #1712: setting a path *through* a scalar (here `count` is a number) fails with
+// a clear error and leaves the document untouched — consistent with the HTTP
+// JSON-patch contract, which never clobbers a scalar into an object.
+#[test]
+fn document_nested_set_through_scalar_rejected() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_scalar_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_scalar_docs DOCUMENT VALUES ({"name":"doc","count":5})"#,
+    );
+
+    let error = err_string(
+        &rt,
+        "UPDATE body_scalar_docs SET count.total = 9 WHERE name = 'doc'",
+    );
+    assert!(
+        error.contains("not an object"),
+        "path-through-scalar must fail with a clear error, got: {error}"
+    );
+
+    let with_body = exec(&rt, "SELECT body FROM body_scalar_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["count"].as_i64(),
+        Some(5),
+        "the scalar must be untouched by the rejected SET, got {body:?}"
+    );
+}
+
+// #1712: array positional paths stay unsupported on the SQL nested-SET surface,
+// matching the HTTP patch contract. A numeric path segment is not a valid SQL
+// identifier, so it is rejected at parse time — the array is left untouched.
+// (The executor's `reject_document_array_position_path` guard remains as
+// defense-in-depth and covers the HTTP JSON-pointer path where `0` is a string.)
+#[test]
+fn document_nested_set_array_positional_rejected() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_array_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_array_docs DOCUMENT VALUES ({"name":"doc","tags":["alpha","beta"]})"#,
+    );
+
+    let error = err_string(
+        &rt,
+        "UPDATE body_array_docs SET tags.0 = 'gamma' WHERE name = 'doc'",
+    );
+    assert!(
+        !error.is_empty(),
+        "array-positional SET must be rejected, got: {error}"
+    );
+
+    let with_body = exec(&rt, "SELECT body FROM body_array_docs WHERE name = 'doc'");
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["tags"],
+        serde_json::json!(["alpha", "beta"]),
+        "the array must be untouched by the rejected SET, got {body:?}"
+    );
+}
+
+// #1712: setting a path *through* an array (a non-numeric key under an array
+// value) is rejected by the executor's path-through-non-object guard.
+#[test]
+fn document_nested_set_through_array_rejected() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_thru_array_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_thru_array_docs DOCUMENT VALUES ({"name":"doc","tags":["alpha"]})"#,
+    );
+
+    let error = err_string(
+        &rt,
+        "UPDATE body_thru_array_docs SET tags.label = 'x' WHERE name = 'doc'",
+    );
+    assert!(
+        error.contains("not an object"),
+        "path-through-array must fail with a clear error, got: {error}"
+    );
+
+    let with_body = exec(
+        &rt,
+        "SELECT body FROM body_thru_array_docs WHERE name = 'doc'",
+    );
+    let body = json_field(only_record(&with_body), "body");
+    assert_eq!(
+        body["tags"],
+        serde_json::json!(["alpha"]),
+        "the array must be untouched by the rejected SET, got {body:?}"
+    );
+}
+
+// #1712: RETURNING reflects the post-merge document body.
+#[test]
+fn document_nested_set_returning_reflects_merge() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT body_returning_docs");
+    exec(
+        &rt,
+        r#"INSERT INTO body_returning_docs DOCUMENT
+           VALUES ({"name":"doc","user":{"address":{"city":"Porto"},"active":true}})"#,
+    );
+
+    let returned = exec(
+        &rt,
+        "UPDATE body_returning_docs SET user.address.city = 'SP' WHERE name = 'doc' RETURNING body",
+    );
+    let body = json_field(only_record(&returned), "body");
+    assert_eq!(
+        body["user"]["address"]["city"].as_str(),
+        Some("SP"),
+        "RETURNING must reflect the post-merge body, got {body:?}"
+    );
+    assert_eq!(
+        body["user"]["active"].as_bool(),
+        Some(true),
+        "RETURNING must preserve siblings, got {body:?}"
+    );
+}
+
 #[test]
 fn document_compound_update_keeps_body_json_in_sync() {
     let rt = runtime();
     exec(&rt, "CREATE DOCUMENT body_compound_docs");
     exec(
         &rt,
-        r#"INSERT INTO body_compound_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+        r#"INSERT INTO body_compound_docs DOCUMENT VALUES ({"name":"doc","score":10})"#,
     );
 
     exec(
         &rt,
-        "UPDATE body_compound_docs DOCUMENTS SET score += 5 WHERE name = 'doc'",
+        "UPDATE body_compound_docs SET score += 5 WHERE name = 'doc'",
     );
 
     let promoted = exec(
@@ -578,23 +766,20 @@ fn explicit_updates_recheck_changed_indexed_fields() {
         &rt,
         "CREATE INDEX idx_indexed_rows_score ON indexed_rows (score) USING HASH",
     );
-    exec(&rt, "UPDATE indexed_rows ROWS SET score = 15 WHERE id = 1");
+    exec(&rt, "UPDATE indexed_rows SET score = 15 WHERE id = 1");
     let row = exec(&rt, "SELECT id, score FROM indexed_rows WHERE score = 15");
     assert_eq!(int_field(only_record(&row), "id"), 1);
 
     exec(&rt, "CREATE DOCUMENT indexed_docs");
     exec(
         &rt,
-        r#"INSERT INTO indexed_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+        r#"INSERT INTO indexed_docs DOCUMENT VALUES ({"name":"doc","score":10})"#,
     );
     exec(
         &rt,
         "CREATE INDEX idx_indexed_docs_score ON indexed_docs (score) USING HASH",
     );
-    exec(
-        &rt,
-        "UPDATE indexed_docs DOCUMENTS SET score = 15 WHERE name = 'doc'",
-    );
+    exec(&rt, "UPDATE indexed_docs SET score = 15 WHERE name = 'doc'");
     let doc = exec(&rt, "SELECT name, score FROM indexed_docs WHERE score = 15");
     assert_eq!(text_field(only_record(&doc), "name"), "doc");
 }
@@ -608,7 +793,7 @@ fn explicit_multimodel_compound_updates_survive_reopen_as_post_images() {
         exec(&rt, "CREATE DOCUMENT recovery_docs");
         exec(
             &rt,
-            r#"INSERT INTO recovery_docs DOCUMENT (body) VALUES ('{"name":"doc","score":10}')"#,
+            r#"INSERT INTO recovery_docs DOCUMENT VALUES ({"name":"doc","score":10})"#,
         );
         exec(&rt, "CREATE KV recovery_kv");
         exec(
@@ -622,11 +807,11 @@ fn explicit_multimodel_compound_updates_survive_reopen_as_post_images() {
 
         exec(
             &rt,
-            "UPDATE recovery_docs DOCUMENTS SET score += 5 WHERE name = 'doc'",
+            "UPDATE recovery_docs SET score += 5 WHERE name = 'doc'",
         );
         exec(
             &rt,
-            "UPDATE recovery_kv KV SET value += 7 WHERE key = 'counter'",
+            "UPDATE recovery_kv SET value += 7 WHERE key = 'counter'",
         );
         exec(
             &rt,

@@ -35,6 +35,12 @@ def sql_json_literal(value: Any) -> str:
     return sql_string(_json.dumps(value, separators=(",", ":")))
 
 
+def sql_json_inline_literal(value: Any) -> str:
+    # ADR 0067 (#1709): a document body is written as an inline strict-JSON
+    # literal (no surrounding quotes) — the quoted-string coercion is removed.
+    return _json.dumps(value, separators=(",", ":"))
+
+
 def sql_value_literal(value: Any) -> str:
     if value is None:
         return "NULL"
@@ -52,5 +58,6 @@ __all__ = [
     "sql_identifier_path",
     "sql_string",
     "sql_json_literal",
+    "sql_json_inline_literal",
     "sql_value_literal",
 ]

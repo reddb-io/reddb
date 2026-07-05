@@ -139,6 +139,7 @@
   - [Node & Edge Model](/graph/model.md)
   - [Pathfinding Algorithms](/graph/pathfinding.md)
   - [Graph Properties](/graph/properties.md)
+  - [Topology & Topological Sort](/graph/topology.md)
   - [Centrality](/graph/centrality.md)
   - [Community Detection](/graph/community.md)
   - [Cycle Detection](/graph/cycles.md)

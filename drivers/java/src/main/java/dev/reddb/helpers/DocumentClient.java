@@ -83,7 +83,7 @@ public final class DocumentClient {
             parts.add(Sql.sqlIdentifier(field) + " = " + Sql.valueLiteral(e.getValue()));
         }
         String sql = "UPDATE " + Sql.sqlIdentifierPath(collection)
-            + " DOCUMENTS SET " + String.join(", ", parts) + " WHERE rid = $1 RETURNING *";
+            + " SET " + String.join(", ", parts) + " WHERE rid = $1 RETURNING *";
         byte[] body = q.query(sql, rid);
         Object[] fr = Sql.firstRow(body);
         @SuppressWarnings("unchecked")

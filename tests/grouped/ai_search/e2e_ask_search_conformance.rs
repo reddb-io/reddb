@@ -71,13 +71,13 @@ fn seed_multi_model(rt: &RedDBRuntime) {
     // Documents — JSON body with searchable fields.
     exec(
         rt,
-        "INSERT INTO runbooks DOCUMENT (body) VALUES \
-         ('{\"title\":\"gateway recovery\",\"summary\":\"restart gateway nodes\"}')",
+        "INSERT INTO runbooks DOCUMENT VALUES \
+         ({\"title\":\"gateway recovery\",\"summary\":\"restart gateway nodes\"})",
     );
     exec(
         rt,
-        "INSERT INTO runbooks DOCUMENT (body) VALUES \
-         ('{\"title\":\"db rotation\",\"summary\":\"rotate database credentials\"}')",
+        "INSERT INTO runbooks DOCUMENT VALUES \
+         ({\"title\":\"db rotation\",\"summary\":\"rotate database credentials\"})",
     );
 
     // KV — the value text carries the search term so the global-scan

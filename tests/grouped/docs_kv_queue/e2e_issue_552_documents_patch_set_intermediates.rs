@@ -15,7 +15,7 @@
 //
 // The first three bullets are exercised through both the HTTP PATCH
 // `/collections/{name}/entities/{id}` surface (the public patch endpoint)
-// and the SQL `UPDATE … DOCUMENTS SET …` surface (which routes through
+// and the SQL `UPDATE … SET …` surface (which routes through
 // the same patch core in `apply_loaded_patch_entity_core`). Bullet 4 is
 // pinned at the document body level because that's the surface where
 // array positional paths could plausibly be requested by clients holding
@@ -241,7 +241,7 @@ fn http_patch_array_positional_path_rejected_with_clear_error() {
 }
 
 // Acceptance 3 (SQL): patch is also exposed through SQL — `UPDATE …
-// DOCUMENTS SET …` routes through the same patch core as the HTTP
+// SET …` routes through the same patch core as the HTTP
 // surface, and a SET that targets a previously-absent top-level body
 // key creates it without rewriting the rest of the body.
 #[test]
@@ -250,17 +250,17 @@ fn sql_update_documents_set_creates_missing_top_level_body_field() {
     rt.execute_query("CREATE DOCUMENT issue552_sql_patch")
         .expect("CREATE DOCUMENT");
     rt.execute_query(
-        r#"INSERT INTO issue552_sql_patch DOCUMENT (body)
-           VALUES ('{"event_type":"login","attempts":1}')"#,
+        r#"INSERT INTO issue552_sql_patch DOCUMENT
+           VALUES ({"event_type":"login","attempts":1})"#,
     )
     .expect("INSERT");
 
     let updated = rt
         .execute_query(
-            "UPDATE issue552_sql_patch DOCUMENTS SET status = 'reviewed' \
+            "UPDATE issue552_sql_patch SET status = 'reviewed' \
              WHERE event_type = 'login' RETURNING event_type, attempts, status",
         )
-        .expect("UPDATE DOCUMENTS SET should succeed");
+        .expect("UPDATE SET should succeed");
     assert_eq!(updated.affected_rows, 1);
 
     // Both the pre-existing fields and the freshly-created `status`

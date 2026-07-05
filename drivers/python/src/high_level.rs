@@ -570,8 +570,8 @@ impl DocumentClient {
         let rt = self.embedded()?;
         let collection = sql_identifier_path(collection)?;
         ensure_document_collection(rt, &collection)?;
-        let body = sql_json_literal(py, document.as_any())?;
-        let sql = format!("INSERT INTO {collection} DOCUMENT (body) VALUES ({body}) RETURNING *");
+        let body = sql_json_inline_literal(py, document.as_any())?;
+        let sql = format!("INSERT INTO {collection} DOCUMENT VALUES ({body}) RETURNING *");
         let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
         let row = qr.rows.first().ok_or_else(|| {
             err(
@@ -657,7 +657,7 @@ impl DocumentClient {
             ));
         }
         let sql = format!(
-            "UPDATE {collection} DOCUMENTS SET {} WHERE rid = {rid_sql} RETURNING *",
+            "UPDATE {collection} SET {} WHERE rid = {rid_sql} RETURNING *",
             assignments.join(", ")
         );
         let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
@@ -1650,6 +1650,16 @@ fn sql_json_literal(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String
     let json = py.import("json")?;
     let rendered: String = json.call_method1("dumps", (value,))?.extract()?;
     Ok(sql_string_literal(&rendered))
+}
+
+/// ADR 0067 (#1709): a document body is written as an inline strict-JSON
+/// literal (bare `{...}`, no surrounding quotes) — the quoted-string coercion
+/// is removed. This renders the same JSON as [`sql_json_literal`] without
+/// wrapping it in a SQL string literal.
+fn sql_json_inline_literal(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
+    let json = py.import("json")?;
+    let rendered: String = json.call_method1("dumps", (value,))?.extract()?;
+    Ok(rendered)
 }
 
 fn sql_value_literal(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {

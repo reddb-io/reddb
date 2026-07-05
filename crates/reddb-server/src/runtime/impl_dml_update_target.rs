@@ -27,6 +27,35 @@ pub(super) fn ensure_graph_identity_update_target_allowed(query: &UpdateQuery) -
     Ok(())
 }
 
+/// Reject dotted SET targets on a non-document UPDATE (ADR 0067, #1711).
+///
+/// Dotted assignment targets (`SET a.b.c = …`) parse for every UPDATE now that
+/// the model markers are gone — the model is not a parse-time fact. A nested
+/// path deep-merges into a document body; on any other model there is no nested
+/// body to address, so the parser's permissive acceptance is gated here against
+/// the catalog model with a clear, model-oriented error.
+pub(super) fn ensure_update_dotted_targets_allowed(
+    query: &UpdateQuery,
+    is_document: bool,
+) -> RedDBResult<()> {
+    if is_document {
+        return Ok(());
+    }
+    if let Some((column, _)) = query
+        .assignment_exprs
+        .iter()
+        .find(|(column, _)| column.contains('.'))
+    {
+        return Err(RedDBError::InvalidOperation(format!(
+            "dotted assignment target '{column}' addresses a nested document field, \
+             but collection '{table}' is not a document collection; nested \
+             `SET a.b.c = …` paths are only valid on document collections",
+            table = query.table,
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn ensure_kv_key_update_target_allowed(query: &UpdateQuery) -> RedDBResult<()> {
     if !matches!(query.target, UpdateTarget::Kv) {
         return Ok(());

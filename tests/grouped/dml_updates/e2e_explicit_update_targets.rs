@@ -52,14 +52,15 @@ fn err_string(rt: &RedDBRuntime, sql: &str) -> String {
 }
 
 #[test]
-fn explicit_rows_documents_and_kv_targets_update_compatible_collections() {
+fn unmarked_updates_resolve_row_document_and_kv_models_from_catalog() {
+    // ADR 0067 (#1711): the DOCUMENTS/ROWS/KV markers are gone. An unmarked
+    // UPDATE resolves the collection's model from the catalog — a table gets
+    // row semantics, a document collection gets document semantics, a KV
+    // collection gets KV semantics — without any marker.
     let rt = runtime();
     exec(&rt, "CREATE TABLE accounts (id INT, status TEXT)");
     exec(&rt, "INSERT INTO accounts (id, status) VALUES (1, 'new')");
-    let rows = exec(
-        &rt,
-        "UPDATE accounts ROWS SET status = 'active' WHERE id = 1",
-    );
+    let rows = exec(&rt, "UPDATE accounts SET status = 'active' WHERE id = 1");
     assert_eq!(rows.affected_rows, 1);
     let selected_row = exec(&rt, "SELECT status FROM accounts WHERE id = 1");
     assert_eq!(text_field(only_record(&selected_row), "status"), "active");
@@ -67,11 +68,11 @@ fn explicit_rows_documents_and_kv_targets_update_compatible_collections() {
     exec(&rt, "CREATE DOCUMENT docs");
     exec(
         &rt,
-        r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"name":"alpha","status":"draft"}')"#,
+        r#"INSERT INTO docs DOCUMENT VALUES ({"name":"alpha","status":"draft"})"#,
     );
     let docs = exec(
         &rt,
-        "UPDATE docs DOCUMENTS SET status = 'published' WHERE name = 'alpha'",
+        "UPDATE docs SET status = 'published' WHERE name = 'alpha'",
     );
     assert_eq!(docs.affected_rows, 1);
     let selected_doc = exec(&rt, "SELECT status FROM docs WHERE name = 'alpha'");
@@ -87,7 +88,7 @@ fn explicit_rows_documents_and_kv_targets_update_compatible_collections() {
     );
     let kv = exec(
         &rt,
-        "UPDATE settings KV SET value = 'on' WHERE key = 'feature'",
+        "UPDATE settings SET value = 'on' WHERE key = 'feature'",
     );
     assert_eq!(kv.affected_rows, 1);
     let selected_kv = exec(&rt, "SELECT value FROM settings WHERE key = 'feature'");
@@ -100,13 +101,10 @@ fn document_update_keeps_body_and_promoted_columns_in_sync() {
     exec(&rt, "CREATE DOCUMENT docs_sync");
     exec(
         &rt,
-        r#"INSERT INTO docs_sync DOCUMENT (body) VALUES ('{"name":"orig","score":1}')"#,
+        r#"INSERT INTO docs_sync DOCUMENT VALUES ({"name":"orig","score":1})"#,
     );
 
-    let updated = exec(
-        &rt,
-        "UPDATE docs_sync DOCUMENTS SET score = 99 WHERE name = 'orig'",
-    );
+    let updated = exec(&rt, "UPDATE docs_sync SET score = 99 WHERE name = 'orig'");
 
     assert_eq!(updated.affected_rows, 1);
     let selected = exec(&rt, "SELECT body, score FROM docs_sync WHERE name = 'orig'");
@@ -170,10 +168,7 @@ fn implicit_dynamic_collections_accept_supported_explicit_targets() {
     );
     let node_rid = uint_field(only_record(&node), "rid");
 
-    let row_update = exec(
-        &rt,
-        "UPDATE flexible ROWS SET status = 'row-seen' WHERE id = 1",
-    );
+    let row_update = exec(&rt, "UPDATE flexible SET status = 'row-seen' WHERE id = 1");
     assert_eq!(row_update.affected_rows, 1);
     let selected_row = exec(&rt, "SELECT status FROM flexible WHERE id = 1");
     assert_eq!(text_field(only_record(&selected_row), "status"), "row-seen");
@@ -191,7 +186,12 @@ fn implicit_dynamic_collections_accept_supported_explicit_targets() {
 }
 
 #[test]
-fn explicit_update_targets_reject_incompatible_collection_models_before_mutation() {
+fn removed_document_marker_is_rejected_and_graph_marker_still_gated_by_model() {
+    // ADR 0067 (#1711): the DOCUMENTS/ROWS/KV markers are removed, so a
+    // `DOCUMENTS` marker on any collection is a didactic parse rejection — it
+    // no longer reaches the model-contract gate. NODES/EDGES survive, so a
+    // graph marker on a non-graph collection still surfaces the model-contract
+    // error before any mutation.
     let rt = runtime();
     exec(&rt, "CREATE TABLE accounts (id INT, status TEXT)");
     exec(&rt, "INSERT INTO accounts (id, status) VALUES (1, 'new')");
@@ -200,11 +200,33 @@ fn explicit_update_targets_reject_incompatible_collection_models_before_mutation
         &rt,
         "UPDATE accounts DOCUMENTS SET status = 'bad' WHERE id = 1",
     );
-    assert!(documents.contains("does not allow 'document' updates"));
+    assert!(
+        documents.contains("has been removed"),
+        "expected didactic marker-removal error, got: {documents}"
+    );
 
     let nodes = err_string(&rt, "UPDATE accounts NODES SET status = 'bad' WHERE id = 1");
     assert!(nodes.contains("does not allow 'graph' updates"));
 
     let selected = exec(&rt, "SELECT status FROM accounts WHERE id = 1");
+    assert_eq!(text_field(only_record(&selected), "status"), "new");
+}
+
+#[test]
+fn dotted_set_target_is_rejected_off_a_document_collection() {
+    // ADR 0067 (#1711): dotted assignment targets parse for every collection
+    // but are legal only on a document collection; off-model the analyzer
+    // rejects them before any mutation.
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE ledger (id INT, status TEXT)");
+    exec(&rt, "INSERT INTO ledger (id, status) VALUES (1, 'new')");
+
+    let dotted = err_string(&rt, "UPDATE ledger SET meta.tier = 'gold' WHERE id = 1");
+    assert!(
+        dotted.contains("only valid on document collections"),
+        "expected off-model dotted-target error, got: {dotted}"
+    );
+
+    let selected = exec(&rt, "SELECT status FROM ledger WHERE id = 1");
     assert_eq!(text_field(only_record(&selected), "status"), "new");
 }

@@ -1,0 +1,86 @@
+# ADR 0067 (#1711) — the UPDATE model markers (DOCUMENTS/ROWS/KV) are removed.
+#
+# TRUTH is hand-authored (a RedDB-only surface with no external oracle): the
+# marker rule made real — a model marker exists only where it disambiguates
+# what the catalog cannot know.
+#
+#   * an unmarked UPDATE on a document collection gets document semantics: the
+#     model is resolved from the catalog, exactly the routing the old
+#     `DOCUMENTS` marker forced;
+#   * the removed markers (`DOCUMENTS` / `ROWS` / `KV`) reject with a didactic
+#     error naming the unmarked form;
+#   * `NODES` / `EDGES` stay — a graph collection holds both record kinds, so
+#     only the user can name which one an UPDATE targets;
+#   * dotted `SET a.b.c = …` targets parse for every collection but are legal
+#     only on a document collection; off-model they reject with a clear error.
+#
+# Result rows are projected to the harness's semantic allowlist (`name`), so a
+# golden asserts the mutated field without freezing engine bookkeeping.
+
+# --- Unmarked UPDATE on a document collection gets document semantics ------
+
+statement ok
+CREATE DOCUMENT people
+
+statement ok
+INSERT INTO people DOCUMENT VALUES ({"name": "ada"})
+
+# No DOCUMENTS marker: the analyzer resolves the model from the catalog and
+# routes to document semantics.
+statement ok
+UPDATE people SET name = 'ada-lovelace' WHERE name = 'ada'
+
+query T rowsort
+SELECT name FROM people
+----
+ada-lovelace
+
+# --- The removed markers reject with a didactic error ---------------------
+
+statement error has been removed
+UPDATE people DOCUMENTS SET name = 'nope'
+
+statement error has been removed
+UPDATE people ROWS SET name = 'nope'
+
+statement error has been removed
+UPDATE people KV SET name = 'nope'
+
+# The mutation above never applied — the row is untouched.
+query T rowsort
+SELECT name FROM people
+----
+ada-lovelace
+
+# --- Dotted SET targets parse for every collection, gated by the model ----
+
+# On a document collection a dotted path is accepted and deep-merges into the
+# body (executor deep-merge landed in #1712; see document_nested_set_merge.slt).
+statement ok
+UPDATE people SET profile.address.city = 'Lisbon' WHERE name = 'ada-lovelace'
+
+# On a non-document collection the same dotted target is rejected off-model.
+statement ok
+CREATE TABLE accounts (id INTEGER)
+
+statement error only valid on document collections
+UPDATE accounts SET meta.tier = 'gold' WHERE id = 1
+
+# --- NODES / EDGES stay green ---------------------------------------------
+
+statement ok
+INSERT INTO social NODE (label, name) VALUES ('alice', 'Alice')
+
+statement ok
+INSERT INTO social NODE (label, name) VALUES ('bob', 'Bob')
+
+statement ok
+INSERT INTO social EDGE (label, from, to) VALUES ('KNOWS', 'alice', 'bob')
+
+# A NODES update on a mutable property is accepted; the graph markers survive.
+statement ok
+UPDATE social NODES SET name = 'Alicia' WHERE label = 'alice'
+
+# An EDGES update on a mutable property is accepted.
+statement ok
+UPDATE social EDGES SET name = 'befriends' WHERE label = 'KNOWS'

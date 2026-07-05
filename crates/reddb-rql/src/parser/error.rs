@@ -220,6 +220,52 @@ impl ParseError {
             kind: ParseErrorKind::Syntax,
         }
     }
+
+    /// Didactic (#1709 / ADR 0067): the document INSERT column list is
+    /// removed. Documents are written with a bare inline JSON literal, so
+    /// the old ceremonial `(body)` column list no longer exists.
+    pub fn document_insert_column_list(position: Position) -> Self {
+        Self {
+            message: "the document INSERT column list is removed: write \
+                      `INSERT INTO <collection> DOCUMENT VALUES ({\"level\": \"info\"})` — \
+                      a bare inline JSON literal with no `(body)` column list"
+                .to_string(),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::Syntax,
+        }
+    }
+
+    /// Didactic (#1709 / ADR 0067): legacy `_ttl` / `_ttl_ms` /
+    /// `_expires_at` document INSERT columns are removed; expiry is set
+    /// with the `WITH TTL` clause instead.
+    pub fn document_insert_ttl_column(position: Position) -> Self {
+        Self {
+            message: "legacy `_ttl` metadata columns are removed from document INSERT: \
+                      set expiry with the `WITH TTL <duration>` clause (e.g. \
+                      `INSERT INTO events DOCUMENT VALUES ({\"level\": \"info\"}) WITH TTL 30 m`)"
+                .to_string(),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::Syntax,
+        }
+    }
+
+    /// Didactic (#1709 / ADR 0067): the quoted-string body coercion
+    /// (`VALUES ('{…}')`) is removed. JSON is written as an inline literal;
+    /// `JSON_PARSE(<expr>)` converts a runtime string.
+    pub fn document_insert_quoted_body(position: Position) -> Self {
+        Self {
+            message: "document INSERT no longer coerces a quoted string to JSON: write the \
+                      body as an inline JSON literal — \
+                      `INSERT INTO events DOCUMENT VALUES ({\"level\": \"info\"})` — or wrap a \
+                      runtime string with `JSON_PARSE(<expr>)`"
+                .to_string(),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::Syntax,
+        }
+    }
 }
 
 fn recognized_keyword_name(token: &Token) -> Option<String> {

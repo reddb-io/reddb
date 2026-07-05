@@ -13,7 +13,7 @@ from .errors import RedDBError
 from .sqlutil import (
     sql_identifier,
     sql_identifier_path,
-    sql_json_literal,
+    sql_json_inline_literal,
     sql_value_literal,
 )
 
@@ -31,8 +31,8 @@ class DocumentClient:
         _ensure_object(document, "documents.insert document")
         await self._ensure_collection(collection)
         sql = (
-            f"INSERT INTO {sql_identifier_path(collection)} DOCUMENT (body) "
-            f"VALUES ({sql_json_literal(document)}) RETURNING *"
+            f"INSERT INTO {sql_identifier_path(collection)} DOCUMENT "
+            f"VALUES ({sql_json_inline_literal(document)}) RETURNING *"
         )
         result = await self._db.query(sql)
         item = _first_row(result)
@@ -86,7 +86,7 @@ class DocumentClient:
             for field, value in patch.items()
         )
         sql = (
-            f"UPDATE {sql_identifier_path(collection)} DOCUMENTS SET {assignments} "
+            f"UPDATE {sql_identifier_path(collection)} SET {assignments} "
             f"WHERE rid = $1 RETURNING *"
         )
         result = await self._db.query(sql, [rid])

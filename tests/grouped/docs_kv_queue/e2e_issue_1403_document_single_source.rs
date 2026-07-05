@@ -30,7 +30,7 @@ fn binary_runtime() -> RedDBRuntime {
 
 fn insert(rt: &RedDBRuntime, collection: &str, body_json: &str) {
     rt.execute_query(&format!(
-        "INSERT INTO {collection} DOCUMENT (body) VALUES ('{body_json}')"
+        "INSERT INTO {collection} DOCUMENT VALUES ({body_json})"
     ))
     .unwrap_or_else(|err| panic!("insert {body_json}: {err:?}"));
 }
@@ -274,7 +274,7 @@ fn update_keeps_single_source_and_refreshes_index() {
     rt.execute_query("CREATE INDEX idx_score ON docs (score) USING BTREE")
         .expect("index");
 
-    rt.execute_query("UPDATE docs DOCUMENTS SET score = 80 WHERE name = 'alice'")
+    rt.execute_query("UPDATE docs SET score = 80 WHERE name = 'alice'")
         .expect("update");
 
     // Still no promoted columns after the update.
@@ -340,7 +340,7 @@ fn versioned_document_as_of_projects_the_historical_body() {
     insert(&rt, "vdocs", r#"{"name":"alice","score":1}"#);
     let p1 = commit(&rt, conn, "p1");
 
-    rt.execute_query("UPDATE vdocs DOCUMENTS SET score = 2 WHERE name = 'alice'")
+    rt.execute_query("UPDATE vdocs SET score = 2 WHERE name = 'alice'")
         .expect("update");
     let _p2 = commit(&rt, conn, "p2");
 

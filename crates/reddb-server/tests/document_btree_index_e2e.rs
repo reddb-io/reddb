@@ -34,7 +34,7 @@ fn seeded_runtime() -> RedDBRuntime {
         .expect("create document collection");
     for (name, score) in [("alice", 30), ("bob", 10), ("carol", 50), ("dave", 20)] {
         rt.execute_query(&format!(
-            "INSERT INTO docs DOCUMENT (body) VALUES ('{{\"name\":\"{name}\",\"score\":{score}}}')"
+            "INSERT INTO docs DOCUMENT VALUES ({{\"name\":\"{name}\",\"score\":{score}}})"
         ))
         .expect("insert document");
     }
@@ -144,7 +144,7 @@ fn ordered_index_refreshes_on_insert_update_delete() {
     let rt = seeded_runtime();
 
     // INSERT: a new low score sorts to the front.
-    rt.execute_query("INSERT INTO docs DOCUMENT (body) VALUES ('{\"name\":\"eve\",\"score\":5}')")
+    rt.execute_query("INSERT INTO docs DOCUMENT VALUES ({\"name\":\"eve\",\"score\":5})")
         .expect("insert refreshes the ordered index");
     let after_insert = rt
         .execute_query("SELECT name FROM docs ORDER BY score ASC")
@@ -156,7 +156,7 @@ fn ordered_index_refreshes_on_insert_update_delete() {
 
     // UPDATE: bumping bob 10 -> 99 re-positions it to the top and makes it
     // appear in a range that previously excluded it.
-    rt.execute_query("UPDATE docs DOCUMENTS SET score = 99 WHERE name = 'bob'")
+    rt.execute_query("UPDATE docs SET score = 99 WHERE name = 'bob'")
         .expect("document update refreshes the ordered index");
     let after_update = rt
         .execute_query("SELECT name FROM docs WHERE score > 40 ORDER BY score ASC")

@@ -1,4 +1,4 @@
-input = "FROM ANY WHERE _kind = 'edge' AND _collection = 'social' LIMIT 20"
+input = "FROM ANY WHERE kind = 'edge' AND collection = 'social' LIMIT 20"
 expected_kind = "Table"
 source = "docs/data-models/graphs.md:299"
 kind = "positive"

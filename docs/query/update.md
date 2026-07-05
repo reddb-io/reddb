@@ -1,9 +1,10 @@
 # UPDATE
 
-The `UPDATE` statement modifies RedDB items in a collection. The catalog
-infers the model (rows, documents, KV) on existing collections. Only graph
-node and edge updates require explicit markers to disambiguate within a
-mixed-model graph collection.
+The `UPDATE` statement modifies RedDB items in a collection. The collection's
+model is resolved from the catalog, so table, document, and KV updates are all
+written **unmarked** — RedDB knows whether a collection holds rows, documents,
+or KV pairs. Only graph updates carry a marker: a graph collection holds both
+nodes and edges, so `NODES` / `EDGES` says which record kind an update targets.
 
 Prefer positional parameters for values in `SET` and `WHERE`:
 
@@ -28,11 +29,15 @@ SET field1 = value1 [, field2 += value2, ...]
 
 Target meanings:
 
-| Target | Item kind | Notes |
+| Marker | Item kind | Notes |
 |:-------|:----------|:------|
-| omitted | inferred from catalog | Row, document, or KV — the catalog knows the model on existing collections |
-| `NODES` | `node` | Updates mutable graph node properties; used in mixed-model graph collections to disambiguate |
-| `EDGES` | `edge` | Updates mutable graph edge properties; used in mixed-model graph collections to disambiguate; `from_rid` and `to_rid` are immutable |
+| _(none)_ | `row` / `document` / `kv` | Model resolved from the catalog. On a document collection, dotted `SET a.b.c = …` paths address nested body fields |
+| `NODES` | `node` | Updates mutable graph node properties |
+| `EDGES` | `edge` | Updates mutable graph edge properties; `from_rid` and `to_rid` are immutable |
+
+> The `DOCUMENTS` / `ROWS` / `KV` markers were removed (ADR 0067): the catalog
+> already knows the collection's model, so they were redundant. Writing one is
+> rejected with a didactic error pointing at the unmarked form.
 
 ## Examples
 
@@ -49,7 +54,13 @@ WHERE rid = $1
 RETURNING rid, name, active
 ```
 
-### Update Documents and KV
+### Update Documents, KV, and Graph Items
+
+Document and KV updates are unmarked — the catalog resolves the model. On a
+document collection a dotted `SET a.b.c = …` path **deep-merges** into the
+document body: intermediate objects are created as needed, sibling keys are
+preserved, and the flattened top-level read surface (and `RETURNING`) reflect
+the change immediately.
 
 ```sql
 UPDATE events
@@ -59,13 +70,26 @@ RETURNING rid, kind, reviewed, attempts
 ```
 
 ```sql
+-- Deep merge: creates `user.address` if absent, keeps other user fields.
+UPDATE events
+SET user.address.city = 'SP'
+WHERE event_type = 'login'
+RETURNING body
+```
+
+A nested `SET` may not introduce a reserved envelope name (`rid`, `collection`,
+`kind`, `tenant`, `created_at`, `updated_at`) at the top level — it is rejected
+with the reserved-field error. Setting a path *through* a non-object value
+(e.g. `a.b` where `a` is a scalar) fails with a clear error, and array
+positional paths (`tags.0`) stay unsupported — replace the array or the full
+`body` instead. These mirror the HTTP JSON-patch contract.
+
+```sql
 UPDATE config
 SET value += 1
 WHERE key = 'feature.rollout_percent'
 RETURNING rid, key, value
 ```
-
-### Update Graph Items
 
 ```sql
 UPDATE social NODES
@@ -131,8 +155,9 @@ LIMIT 25
 RETURNING rid, priority, claimed
 ```
 
-For all models, ordered batches accept top-level fields only (no nested paths
-or computed `ORDER BY` expressions).
+For document, KV, and graph (`NODES` / `EDGES`) updates, ordered batches accept
+top-level fields only. Nested paths and computed `ORDER BY` expressions are
+rejected for multi-model updates.
 
 ### Atomic Failure Behavior
 
@@ -192,7 +217,7 @@ as the public RedDB ID `rid`.
 
 ## WITH Clauses
 
-You can attach or replace expiration and metadata on existing entities using `WITH` clauses. These are the structured alternative to legacy `_ttl` or `_ttl_ms` column approaches.
+You can attach or replace expiration and metadata on existing entities using `WITH` clauses. These are the structured alternative to the old approach of setting `_ttl` or `_ttl_ms` as regular columns.
 
 ### Syntax
 

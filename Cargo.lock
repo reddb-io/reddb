@@ -479,9 +479,9 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cmov"
-version = "0.5.3"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f88a43d011fc4a6876cb7344703e297c71dda42494fee094d5f7c76bf13f746"
+checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "colorchoice"
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "jsonwebtoken",
  "proptest",
@@ -2573,7 +2573,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "async-trait",
  "jsonwebtoken",
@@ -2599,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "reddb-io-grpc-proto",
  "reddb-io-wire",
@@ -2608,14 +2608,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "aes-gcm",
 ]
 
 [[package]]
 name = "reddb-io-file"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2632,7 +2632,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "prost",
  "reddb-io-wire",
@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "proptest",
  "reddb-io-types",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-server"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -2732,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.20.0"
+version = "1.22.0"
 dependencies = [
  "insta",
  "proptest",

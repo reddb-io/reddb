@@ -163,7 +163,7 @@ class DocumentClient {
       parts.add('${_sqlIdentifier(field)} = ${_valueLiteral(value)}');
     });
     final body = await _q.query(
-      'UPDATE ${_sqlIdentifierPath(collection)} DOCUMENTS SET '
+      'UPDATE ${_sqlIdentifierPath(collection)} SET '
       '${parts.join(', ')} WHERE rid = \$1 RETURNING *',
       params: [rid],
     );

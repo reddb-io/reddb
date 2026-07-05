@@ -101,7 +101,7 @@ fn seed_documents(rt: &RedDBRuntime, collection: &str, count: usize) {
         let kind = if i % 2 == 0 { "login" } else { "logout" };
         let payload = format!(r#"{{"event_type":"{kind}","seq":{i},"meta":{{"i":{i}}}}}"#);
         rt.execute_query(&format!(
-            "INSERT INTO {collection} DOCUMENT (body) VALUES ('{payload}')"
+            "INSERT INTO {collection} DOCUMENT VALUES ({payload})"
         ))
         .expect("INSERT DOCUMENT");
     }

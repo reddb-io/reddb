@@ -369,18 +369,18 @@ fn create_document_sql(collection: &str) -> String {
 
 fn insert_document_sql(collection: &str) -> String {
     format!(
-        "INSERT INTO {collection} DOCUMENT (body) VALUES \
-         ('{{\"name\":\"alpha\",\"score\":10,\"keep\":\"sibling\",\"status\":\"draft\"}}')"
+        "INSERT INTO {collection} DOCUMENT VALUES \
+         ({{\"name\":\"alpha\",\"score\":10,\"keep\":\"sibling\",\"status\":\"draft\"}})"
     )
 }
 
 fn partial_update_document_sql(collection: &str) -> String {
-    format!("UPDATE {collection} DOCUMENTS SET score += 5 WHERE name = 'alpha'")
+    format!("UPDATE {collection} SET score += 5 WHERE name = 'alpha'")
 }
 
 fn replace_document_sql(collection: &str) -> String {
     format!(
-        "UPDATE {collection} DOCUMENTS \
+        "UPDATE {collection} \
          SET name = 'beta', score = 99, keep = 'replacement', status = 'done' \
          WHERE name = 'alpha'"
     )

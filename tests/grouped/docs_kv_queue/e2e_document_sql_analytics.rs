@@ -98,10 +98,10 @@ fn runtime_queries_document_fields_json_paths_arrays_and_groups() {
     exec(&rt, "CREATE DOCUMENT events");
     exec(
         &rt,
-        r#"INSERT INTO events DOCUMENT (body) VALUES
-        ('{"level":"error","service":{"name":"checkout","tier":"edge"},"tags":["checkout","payment"],"latency_ms":42}'),
-        ('{"level":"info","service":{"name":"checkout","tier":"edge"},"tags":["search"],"latency_ms":7}'),
-        ('{"level":"error","service":{"name":"billing","tier":"core"},"tags":["payment"],"latency_ms":99}')"#,
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"level":"error","service":{"name":"checkout","tier":"edge"},"tags":["checkout","payment"],"latency_ms":42}),
+        ({"level":"info","service":{"name":"checkout","tier":"edge"},"tags":["search"],"latency_ms":7}),
+        ({"level":"error","service":{"name":"billing","tier":"core"},"tags":["payment"],"latency_ms":99})"#,
     );
 
     let projected = exec(
@@ -137,10 +137,10 @@ fn runtime_indexes_nested_document_path_filters() {
     exec(&rt, "CREATE DOCUMENT events");
     exec(
         &rt,
-        r#"INSERT INTO events DOCUMENT (body) VALUES
-        ('{"level":"error","service":{"name":"checkout","tier":"edge"},"latency_ms":42}'),
-        ('{"level":"info","service":{"name":"checkout","tier":"edge"},"latency_ms":7}'),
-        ('{"level":"error","service":{"name":"billing","tier":"core"},"latency_ms":99}')"#,
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"level":"error","service":{"name":"checkout","tier":"edge"},"latency_ms":42}),
+        ({"level":"info","service":{"name":"checkout","tier":"edge"},"latency_ms":7}),
+        ({"level":"error","service":{"name":"billing","tier":"core"},"latency_ms":99})"#,
     );
     exec(
         &rt,
@@ -192,10 +192,10 @@ fn http_query_document_fields_json_paths_arrays_and_groups() {
     post_query(&addr, "CREATE DOCUMENT events");
     post_query(
         &addr,
-        r#"INSERT INTO events DOCUMENT (body) VALUES
-        ('{"level":"error","service":{"name":"checkout","tier":"edge"},"tags":["checkout","payment"],"latency_ms":42}'),
-        ('{"level":"info","service":{"name":"checkout","tier":"edge"},"tags":["search"],"latency_ms":7}'),
-        ('{"level":"error","service":{"name":"billing","tier":"core"},"tags":["payment"],"latency_ms":99}')"#,
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"level":"error","service":{"name":"checkout","tier":"edge"},"tags":["checkout","payment"],"latency_ms":42}),
+        ({"level":"info","service":{"name":"checkout","tier":"edge"},"tags":["search"],"latency_ms":7}),
+        ({"level":"error","service":{"name":"billing","tier":"core"},"tags":["payment"],"latency_ms":99})"#,
     );
 
     let projected = post_query(
@@ -238,12 +238,12 @@ fn runtime_btree_document_path_range_order_and_limit() {
     // Tier values in lexicographic order: bronze < copper < gold < platinum < silver
     exec(
         &rt,
-        r#"INSERT INTO range_docs DOCUMENT (body) VALUES
-        ('{"name":"aaa","tier":"bronze"}'),
-        ('{"name":"bbb","tier":"copper"}'),
-        ('{"name":"ccc","tier":"gold"}'),
-        ('{"name":"ddd","tier":"platinum"}'),
-        ('{"name":"eee","tier":"silver"}')"#,
+        r#"INSERT INTO range_docs DOCUMENT VALUES
+        ({"name":"aaa","tier":"bronze"}),
+        ({"name":"bbb","tier":"copper"}),
+        ({"name":"ccc","tier":"gold"}),
+        ({"name":"ddd","tier":"platinum"}),
+        ({"name":"eee","tier":"silver"})"#,
     );
     exec(&rt, "CREATE INDEX idx_range_tier ON range_docs (body.tier)");
 
@@ -308,10 +308,10 @@ fn runtime_btree_document_path_index_refresh_on_dml() {
     // Initial documents:  svc1=gold (in range), svc2=bronze (boundary), svc3=silver (in range)
     exec(
         &rt,
-        r#"INSERT INTO refresh_docs DOCUMENT (body) VALUES
-        ('{"name":"svc1","tier":"gold"}'),
-        ('{"name":"svc2","tier":"bronze"}'),
-        ('{"name":"svc3","tier":"silver"}')"#,
+        r#"INSERT INTO refresh_docs DOCUMENT VALUES
+        ({"name":"svc1","tier":"gold"}),
+        ({"name":"svc2","tier":"bronze"}),
+        ({"name":"svc3","tier":"silver"})"#,
     );
     exec(
         &rt,
@@ -340,7 +340,7 @@ fn runtime_btree_document_path_index_refresh_on_dml() {
     // INSERT: add svc4 with tier=platinum (platinum > bronze)
     exec(
         &rt,
-        r#"INSERT INTO refresh_docs DOCUMENT (body) VALUES ('{"name":"svc4","tier":"platinum"}')"#,
+        r#"INSERT INTO refresh_docs DOCUMENT VALUES ({"name":"svc4","tier":"platinum"})"#,
     );
     let after_insert = above_bronze(&rt);
     assert_eq!(
@@ -352,7 +352,7 @@ fn runtime_btree_document_path_index_refresh_on_dml() {
     // UPDATE: move svc1 from gold → aaa (aaa < bronze, drops out of range)
     exec(
         &rt,
-        "UPDATE refresh_docs DOCUMENTS SET tier = 'aaa' WHERE name = 'svc1'",
+        "UPDATE refresh_docs SET tier = 'aaa' WHERE name = 'svc1'",
     );
     let after_update = above_bronze(&rt);
     assert_eq!(

@@ -96,10 +96,29 @@ impl<'a> Parser<'a> {
             _ => InsertEntityType::Row,
         };
 
-        // Parse column list
-        self.expect(Token::LParen)?;
-        let columns = self.parse_ident_list()?;
-        self.expect(Token::RParen)?;
+        // Parse column list. ADR 0067 (#1709): the document INSERT column
+        // list is removed — the canonical form is bare
+        // `VALUES (<json-literal>)`. For documents we synthesize the
+        // implicit `body` column so the runtime document path is unchanged,
+        // and reject the legacy `(body)` / `_ttl` column lists with a
+        // didactic error. Every other entity type keeps its mandatory
+        // column list.
+        let columns = if matches!(entity_type, InsertEntityType::Document) {
+            self.parse_document_insert_columns()?
+        } else if matches!(entity_type, InsertEntityType::Row) && self.check(&Token::Values) {
+            // ADR 0067 (#1710): the bare `INSERT INTO c VALUES (…)` form
+            // carries no column list and no model marker. The model is
+            // inferred from the catalog at analysis time — an existing
+            // document collection routes to document creation — so the
+            // parser leaves the column list empty and defers the routing
+            // decision to the runtime.
+            Vec::new()
+        } else {
+            self.expect(Token::LParen)?;
+            let columns = self.parse_ident_list()?;
+            self.expect(Token::RParen)?;
+            columns
+        };
 
         // Parse VALUES
         self.expect(Token::Values)?;
@@ -138,6 +157,14 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // ADR 0067 (#1709): a document body is an inline strict-JSON
+        // literal. Reject the removed quoted-string coercion
+        // (`VALUES ('{…}')`) with a didactic error naming the inline
+        // literal and `JSON_PARSE`.
+        if matches!(entity_type, InsertEntityType::Document) {
+            self.reject_document_string_body(&all_value_exprs)?;
+        }
+
         // Parse optional WITH clauses
         let (ttl_ms, expires_at_ms, with_metadata, auto_embed) = self.parse_with_clauses()?;
 
@@ -163,6 +190,46 @@ impl<'a> Parser<'a> {
             auto_embed,
             suppress_events,
         }))
+    }
+
+    /// ADR 0067 (#1709): the document INSERT column list is dead. The
+    /// canonical form is bare `VALUES (<json-literal>)`, so a document
+    /// INSERT carries no column list and we synthesize the implicit
+    /// `body` column here for the runtime document path. A leftover `(…)`
+    /// column list is rejected with a didactic error: `_ttl` metadata
+    /// columns point at `WITH TTL`; anything else (including the old
+    /// ceremonial `body`) shows the bare `VALUES` form.
+    fn parse_document_insert_columns(&mut self) -> Result<Vec<String>, ParseError> {
+        if !self.check(&Token::LParen) {
+            return Ok(vec!["body".to_string()]);
+        }
+        self.expect(Token::LParen)?;
+        let columns = self.parse_ident_list()?;
+        self.expect(Token::RParen)?;
+        if columns.iter().any(|column| is_legacy_ttl_column(column)) {
+            return Err(ParseError::document_insert_ttl_column(self.position()));
+        }
+        Err(ParseError::document_insert_column_list(self.position()))
+    }
+
+    /// ADR 0067 (#1709): a document body must be an inline strict-JSON
+    /// literal. A bare quoted string literal in a document `VALUES` row is
+    /// the removed coercion (`VALUES ('{…}')`) and is rejected with a
+    /// didactic error. Parameters (`$N` / `?`) and `JSON_PARSE(<expr>)`
+    /// remain valid, so only `Expr::Literal { Value::Text }` is rejected.
+    fn reject_document_string_body(&self, value_exprs: &[Vec<Expr>]) -> Result<(), ParseError> {
+        for row in value_exprs {
+            for expr in row {
+                if let Expr::Literal {
+                    value: Value::Text(_),
+                    ..
+                } = expr
+                {
+                    return Err(ParseError::document_insert_quoted_body(self.position()));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Parse TTL duration value using the same logic as CREATE TABLE ... WITH TTL.
@@ -342,7 +409,7 @@ impl<'a> Parser<'a> {
         let mut assignment_exprs = Vec::new();
         let mut compound_assignment_ops = Vec::new();
         loop {
-            let col = self.parse_update_assignment_target(target)?;
+            let col = self.parse_update_assignment_target()?;
             let compound_op = if self.consume(&Token::Eq)? {
                 None
             } else {
@@ -472,28 +539,34 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_update_assignment_target(
-        &mut self,
-        target: UpdateTarget,
-    ) -> Result<String, ParseError> {
+    fn parse_update_assignment_target(&mut self) -> Result<String, ParseError> {
+        // Dotted assignment targets (`SET a.b.c = …`) parse for every target
+        // (ADR 0067, #1711). Whether a nested path is legal is a model
+        // question the parser cannot answer — the analyzer resolves the
+        // collection's model from the catalog and rejects dotted targets off a
+        // document collection.
         let mut segments = vec![self.expect_column_ident()?];
-        if matches!(target, UpdateTarget::Documents) {
-            while self.consume(&Token::Dot)? {
-                segments.push(self.expect_column_ident()?);
-            }
+        while self.consume(&Token::Dot)? {
+            segments.push(self.expect_column_ident()?);
         }
         Ok(segments.join("."))
     }
 
     fn parse_update_target(&mut self) -> Result<UpdateTarget, ParseError> {
-        if self.consume(&Token::Kv)? {
-            return Ok(UpdateTarget::Kv);
+        // Model markers on UPDATE are removed (ADR 0067, #1711): the catalog
+        // already knows every existing collection's model, so `DOCUMENTS` /
+        // `ROWS` / `KV` are redundant and rejected with a didactic error that
+        // points at the unmarked form. `NODES` / `EDGES` stay — a graph
+        // collection holds both record kinds, so only the user can say which
+        // one an UPDATE targets.
+        if self.check(&Token::Kv) {
+            return Err(self.removed_update_marker_error("KV"));
         }
-        if self.consume(&Token::Rows)? {
-            return Ok(UpdateTarget::Rows);
+        if self.check(&Token::Rows) {
+            return Err(self.removed_update_marker_error("ROWS"));
         }
-        if self.consume_ident_ci("DOCUMENTS")? {
-            return Ok(UpdateTarget::Documents);
+        if matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("DOCUMENTS")) {
+            return Err(self.removed_update_marker_error("DOCUMENTS"));
         }
         if self.consume_ident_ci("NODES")? {
             return Ok(UpdateTarget::Nodes);
@@ -502,6 +575,21 @@ impl<'a> Parser<'a> {
             return Ok(UpdateTarget::Edges);
         }
         Ok(UpdateTarget::Rows)
+    }
+
+    /// Build the didactic error for a removed UPDATE model marker (ADR 0067,
+    /// #1711). The catalog knows the collection's model, so the marker is
+    /// redundant; the message names the unmarked form and the graph exception.
+    fn removed_update_marker_error(&self, marker: &str) -> ParseError {
+        ParseError::new(
+            format!(
+                "the `{marker}` UPDATE model marker has been removed; the catalog \
+                 already knows the collection's model — write `UPDATE <collection> \
+                 SET …` with no marker. (Graph updates still name `NODES` or `EDGES`, \
+                 since a graph collection holds both record kinds.)"
+            ),
+            self.position(),
+        )
     }
 
     /// Parse: DELETE FROM table [WHERE filter]
@@ -877,8 +965,16 @@ impl<'a> Parser<'a> {
                 Ok(Value::Null)
             }
             Token::LBracket => {
-                // Parse array literal [val1, val2, ...]
-                // For numeric arrays, produce Value::Vector; for others, produce Value::Json
+                // Parse array literal `[val1, val2, ...]` **losslessly** into a
+                // `Value::Array`, preserving each element's integer/float/other
+                // identity (issue #1708, ADR 0067). The parser deliberately does
+                // NOT decide here whether the array is a vector or a JSON array:
+                // committing to an f32 `Value::Vector` at parse time silently
+                // corrupts large integers destined for a JSON position (e.g.
+                // `[9007199254740993]`). Instead the analyzer/runtime resolves
+                // the concrete shape from the target's type — a vector-typed
+                // position coerces `Value::Array` → `Value::Vector`, a JSON
+                // position coerces it to an exact JSON array.
                 self.advance()?; // consume '['
                 let mut items = Vec::new();
                 if !self.check(&Token::RBracket) {
@@ -890,38 +986,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Token::RBracket)?;
-
-                // Check if all items are numeric (Integer or Float) -> Value::Vector
-                let all_numeric = items
-                    .iter()
-                    .all(|v| matches!(v, Value::Integer(_) | Value::Float(_)));
-                if all_numeric && !items.is_empty() {
-                    let floats: Vec<f32> = items
-                        .iter()
-                        .map(|v| match v {
-                            Value::Float(f) => *f as f32,
-                            Value::Integer(i) => *i as f32,
-                            _ => 0.0,
-                        })
-                        .collect();
-                    Ok(Value::Vector(floats))
-                } else {
-                    // Encode as JSON bytes
-                    let json_arr: Vec<reddb_types::json::Value> = items
-                        .iter()
-                        .map(|v| match v {
-                            Value::Null => reddb_types::json::Value::Null,
-                            Value::Boolean(b) => reddb_types::json::Value::Bool(*b),
-                            Value::Integer(i) => reddb_types::json::Value::Number(*i as f64),
-                            Value::Float(f) => reddb_types::json::Value::Number(*f),
-                            Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
-                            _ => reddb_types::json::Value::Null,
-                        })
-                        .collect();
-                    let json_val = reddb_types::json::Value::Array(json_arr);
-                    let bytes = reddb_types::json::to_vec(&json_val).unwrap_or_default();
-                    Ok(Value::Json(bytes))
-                }
+                Ok(Value::Array(items))
             }
             Token::LBrace => {
                 // Parse JSON object literal {key: value, ...}
@@ -952,17 +1017,7 @@ impl<'a> Parser<'a> {
                         }
                         // Value: recursive
                         let val = self.parse_literal_value()?;
-                        let json_val = match val {
-                            Value::Null => reddb_types::json::Value::Null,
-                            Value::Boolean(b) => reddb_types::json::Value::Bool(b),
-                            Value::Integer(i) => reddb_types::json::Value::Number(i as f64),
-                            Value::Float(f) => reddb_types::json::Value::Number(f),
-                            Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
-                            Value::Json(ref bytes) => reddb_types::json::from_slice(bytes)
-                                .unwrap_or(reddb_types::json::Value::Null),
-                            _ => reddb_types::json::Value::Null,
-                        };
-                        map.insert(key, json_val);
+                        map.insert(key, literal_value_to_json(&val));
                         if !self.consume(&Token::Comma)? {
                             break;
                         }
@@ -979,6 +1034,40 @@ impl<'a> Parser<'a> {
                 self.position(),
             )),
         }
+    }
+}
+
+/// ADR 0067 (#1709): the legacy metadata columns whose presence in a
+/// document INSERT column list should steer the didactic error toward
+/// `WITH TTL`. Mirrors `resolve_sql_ttl_metadata_key` in the server
+/// runtime; kept local so the parser has no server dependency.
+fn is_legacy_ttl_column(column: &str) -> bool {
+    column.eq_ignore_ascii_case("_ttl")
+        || column.eq_ignore_ascii_case("_ttl_ms")
+        || column.eq_ignore_ascii_case("_expires_at")
+}
+
+/// Convert a parsed literal `Value` into a `reddb_types::json::Value`.
+///
+/// Array literals now parse into `Value::Array` (issue #1708). When an array
+/// appears inside a JSON object-literal position (e.g.
+/// `{roles: ['edge', 'cache']}`) it must serialise as a JSON array rather than
+/// collapsing to `null` the way the old catch-all arm did. Recurses so nested
+/// arrays and objects round-trip.
+fn literal_value_to_json(val: &Value) -> reddb_types::json::Value {
+    match val {
+        Value::Null => reddb_types::json::Value::Null,
+        Value::Boolean(b) => reddb_types::json::Value::Bool(*b),
+        Value::Integer(i) => reddb_types::json::Value::Number(*i as f64),
+        Value::Float(f) => reddb_types::json::Value::Number(*f),
+        Value::Text(s) => reddb_types::json::Value::String(s.to_string()),
+        Value::Json(bytes) => {
+            reddb_types::json::from_slice(bytes).unwrap_or(reddb_types::json::Value::Null)
+        }
+        Value::Array(items) => {
+            reddb_types::json::Value::Array(items.iter().map(literal_value_to_json).collect())
+        }
+        _ => reddb_types::json::Value::Null,
     }
 }
 
@@ -1143,7 +1232,7 @@ mod tests {
                 InsertEntityType::Vector,
             ),
             (
-                "INSERT INTO items DOCUMENT (id) VALUES (1)",
+                "INSERT INTO items DOCUMENT VALUES ({\"id\": 1})",
                 InsertEntityType::Document,
             ),
             ("INSERT INTO items KV (id) VALUES (1)", InsertEntityType::Kv),
@@ -1200,14 +1289,89 @@ mod tests {
     }
 
     #[test]
+    fn document_insert_canonical_bare_values_form() {
+        // Bare inline JSON literal, no column list — the ADR 0067 form.
+        let query = insert("INSERT INTO events DOCUMENT VALUES ({\"level\": \"info\"})");
+        assert_eq!(query.table, "events");
+        assert_eq!(query.entity_type, InsertEntityType::Document);
+        assert_eq!(query.columns, vec!["body"]);
+        assert_eq!(query.values.len(), 1);
+        assert!(matches!(query.values[0][0], Value::Json(_)));
+
+        // Multi-row plus WITH clauses keep working.
+        let query = insert(
+            "INSERT INTO events DOCUMENT VALUES ({\"a\": 1}), ({\"b\": 2}) \
+             WITH TTL 30 s WITH METADATA (source = 'test') RETURNING *",
+        );
+        assert_eq!(query.columns, vec!["body"]);
+        assert_eq!(query.values.len(), 2);
+        assert_eq!(query.ttl_ms, Some(30_000));
+        assert_eq!(query.with_metadata.len(), 1);
+        assert_eq!(
+            query.returning.as_deref(),
+            Some([ReturningItem::All].as_slice())
+        );
+    }
+
+    #[test]
+    fn unmarked_bare_values_insert_parses_with_empty_columns() {
+        // ADR 0067 (#1710): `INSERT INTO c VALUES ({…})` with no column
+        // list and no marker parses to a Row insert with an empty column
+        // list; the runtime infers the model from the catalog.
+        let query = insert("INSERT INTO events VALUES ({\"level\": \"info\"})");
+        assert_eq!(query.table, "events");
+        assert_eq!(query.entity_type, InsertEntityType::Row);
+        assert!(query.columns.is_empty());
+        assert_eq!(query.values.len(), 1);
+        assert!(matches!(query.values[0][0], Value::Json(_)));
+
+        // Multi-row bare VALUES keeps working.
+        let query = insert("INSERT INTO events VALUES ({\"a\": 1}), ({\"b\": 2})");
+        assert!(query.columns.is_empty());
+        assert_eq!(query.entity_type, InsertEntityType::Row);
+        assert_eq!(query.values.len(), 2);
+
+        // An explicit column list is still parsed positionally.
+        let query = insert("INSERT INTO t (id) VALUES (1)");
+        assert_eq!(query.columns, vec!["id"]);
+    }
+
+    #[test]
+    fn document_insert_rejects_removed_forms() {
+        // `(body)` column list -> didactic bare-VALUES rewrite.
+        let mut parser =
+            make_parser("INSERT INTO events DOCUMENT (body) VALUES ({\"level\": \"info\"})");
+        let err = parser
+            .parse_insert_query()
+            .expect_err("document column list should fail");
+        assert!(err.to_string().contains("column list is removed"), "{err}");
+
+        // Legacy `_ttl` column -> point at WITH TTL.
+        let mut parser =
+            make_parser("INSERT INTO events DOCUMENT (body, _ttl) VALUES ({\"a\": 1}, 30)");
+        let err = parser
+            .parse_insert_query()
+            .expect_err("legacy _ttl column should fail");
+        assert!(err.to_string().contains("WITH TTL"), "{err}");
+
+        // Quoted-string body coercion -> inline literal + JSON_PARSE.
+        let mut parser =
+            make_parser("INSERT INTO events DOCUMENT VALUES ('{\"level\": \"info\"}')");
+        let err = parser
+            .parse_insert_query()
+            .expect_err("quoted-string body should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("inline JSON literal"), "{msg}");
+        assert!(msg.contains("JSON_PARSE"), "{msg}");
+    }
+
+    #[test]
     fn update_targets_compound_assignments_order_limit_returning() {
+        // Only NODES/EDGES survive as parse-time markers (ADR 0067, #1711);
+        // an unmarked UPDATE parses to the default Rows target and the runtime
+        // resolves document/KV semantics from the catalog.
         let cases = [
-            ("UPDATE docs KV SET count = 1", UpdateTarget::Kv),
-            ("UPDATE docs ROWS SET count = 1", UpdateTarget::Rows),
-            (
-                "UPDATE docs DOCUMENTS SET count = 1",
-                UpdateTarget::Documents,
-            ),
+            ("UPDATE docs SET count = 1", UpdateTarget::Rows),
             ("UPDATE docs NODES SET count = 1", UpdateTarget::Nodes),
             ("UPDATE docs EDGES SET count = 1", UpdateTarget::Edges),
         ];
@@ -1215,13 +1379,26 @@ mod tests {
             assert_eq!(update(input).target, expected, "{input}");
         }
 
+        // The removed markers are rejected with a didactic error.
+        for marker in ["DOCUMENTS", "ROWS", "KV"] {
+            let input = format!("UPDATE docs {marker} SET count = 1");
+            let mut parser = make_parser(&input);
+            let err = parser
+                .parse_update_query()
+                .expect_err("removed update marker should fail");
+            let msg = err.to_string();
+            assert!(msg.contains(marker), "{msg}");
+            assert!(msg.contains("has been removed"), "{msg}");
+            assert!(msg.contains("with no marker"), "{msg}");
+        }
+
         let query = update(
-            "UPDATE docs DOCUMENTS SET count += 2, title = UPPER(title) \
+            "UPDATE docs SET count += 2, title = UPPER(title) \
              WHERE id = 1 WITH TTL 30 s WITH METADATA (source = 'update') \
              ORDER BY updated_at DESC LIMIT 5 RETURNING weight, title SUPPRESS EVENTS",
         );
         assert_eq!(query.table, "docs");
-        assert_eq!(query.target, UpdateTarget::Documents);
+        assert_eq!(query.target, UpdateTarget::Rows);
         assert_eq!(query.assignment_exprs.len(), 2);
         assert_eq!(query.compound_assignment_ops, vec![Some(BinOp::Add), None]);
         assert_eq!(query.assignments.len(), 0);
@@ -1248,6 +1425,21 @@ mod tests {
             )
         );
         assert!(query.suppress_events);
+    }
+
+    #[test]
+    fn update_dotted_targets_parse_unmarked_for_every_target() {
+        // Dotted assignment targets parse for the unmarked (Rows) target and
+        // for graph targets alike (ADR 0067, #1711); legality is an analyzer
+        // concern, not a parser one.
+        let unmarked = update("UPDATE docs SET profile.address.city = 'Lisbon' WHERE name = 'ada'");
+        assert_eq!(unmarked.target, UpdateTarget::Rows);
+        assert_eq!(unmarked.assignment_exprs[0].0, "profile.address.city");
+        assert_eq!(unmarked.assignments[0].0, "profile.address.city");
+
+        let graph = update("UPDATE social NODES SET meta.seen_at = 1");
+        assert_eq!(graph.target, UpdateTarget::Nodes);
+        assert_eq!(graph.assignment_exprs[0].0, "meta.seen_at");
     }
 
     #[test]
@@ -1425,16 +1617,35 @@ mod tests {
         let value = parser.parse_literal_value().expect("secret ref");
         assert!(matches!(value, Value::Json(_)));
 
+        // Array literals parse losslessly into `Value::Array`, preserving each
+        // element's integer/float identity (issue #1708). Vector-vs-JSON typing
+        // is resolved downstream from the target, not guessed at parse time.
         let mut parser = make_parser("[1, 2.5]");
         assert!(matches!(
-            parser.parse_literal_value().expect("vector"),
-            Value::Vector(values) if values == vec![1.0, 2.5]
+            parser.parse_literal_value().expect("array"),
+            Value::Array(items)
+                if items == vec![Value::Integer(1), Value::Float(2.5)]
         ));
 
         let mut parser = make_parser("['a', 2]");
         assert!(matches!(
-            parser.parse_literal_value().expect("json array"),
-            Value::Json(_)
+            parser.parse_literal_value().expect("mixed array"),
+            Value::Array(items)
+                if items == vec![Value::Text("a".into()), Value::Integer(2)]
+        ));
+
+        // A large integer that cannot survive an f32 (or even f64) round-trip
+        // keeps its exact `Value::Integer` identity through the parser.
+        let mut parser = make_parser("[1, 2, 9007199254740993]");
+        assert!(matches!(
+            parser.parse_literal_value().expect("lossless big-int array"),
+            Value::Array(items)
+                if items
+                    == vec![
+                        Value::Integer(1),
+                        Value::Integer(2),
+                        Value::Integer(9007199254740993),
+                    ]
         ));
 
         let mut parser = make_parser("{level = 'info', count: 2}");

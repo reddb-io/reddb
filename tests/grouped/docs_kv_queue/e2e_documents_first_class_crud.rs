@@ -107,7 +107,7 @@ fn create_document_insert_returning_select_and_reopen() {
 
     let inserted = rt
         .execute_query(
-            r#"INSERT INTO events DOCUMENT (body) VALUES ('{"event_type":"login","success":true,"attempts":2,"details":{"ip":"10.0.0.5","agent":"cli"},"roles":["admin","ops"]}') RETURNING *"#,
+            r#"INSERT INTO events DOCUMENT VALUES ({"event_type":"login","success":true,"attempts":2,"details":{"ip":"10.0.0.5","agent":"cli"},"roles":["admin","ops"]}) RETURNING *"#,
         )
         .expect("document insert returning should succeed");
     assert_eq!(inserted.affected_rows, 1);
@@ -326,12 +326,12 @@ fn rql_document_update_body_replaces_full_body_by_id() {
 
     let replaced = rt
         .execute_query(&format!(
-            "UPDATE issue1366_rql_replace DOCUMENTS \
+            "UPDATE issue1366_rql_replace \
              SET body = '{{\"event_type\":\"replaced\",\"details\":{{\"ip\":\"127.0.0.1\"}}}}' \
              WHERE id = {}",
             created.id.raw()
         ))
-        .expect("UPDATE DOCUMENTS SET body should replace by id");
+        .expect("unmarked UPDATE SET body should replace by id");
     assert_eq!(replaced.affected_rows, 1);
 
     let selected = rt
@@ -537,8 +537,8 @@ fn document_crud_conformance_persists_mutation_and_delete_across_reopen() {
     rt.execute_query("CREATE DOCUMENT conformance_docs")
         .expect("CREATE DOCUMENT should succeed");
     rt.execute_query(
-        r#"INSERT INTO conformance_docs DOCUMENT (body)
-           VALUES ('{"name":"alpha","score":10,"keep":"sibling","status":"draft"}')"#,
+        r#"INSERT INTO conformance_docs DOCUMENT
+           VALUES ({"name":"alpha","score":10,"keep":"sibling","status":"draft"})"#,
     )
     .expect("insert document");
 
@@ -553,7 +553,7 @@ fn document_crud_conformance_persists_mutation_and_delete_across_reopen() {
     assert_eq!(text_field(&initial.result.records[0], "keep"), "sibling");
     assert_eq!(text_field(&initial.result.records[0], "status"), "draft");
 
-    rt.execute_query("UPDATE conformance_docs DOCUMENTS SET score += 5 WHERE name = 'alpha'")
+    rt.execute_query("UPDATE conformance_docs SET score += 5 WHERE name = 'alpha'")
         .expect("partial update document");
     let partial = rt
         .execute_query("SELECT body FROM conformance_docs WHERE name = 'alpha'")
@@ -568,7 +568,7 @@ fn document_crud_conformance_persists_mutation_and_delete_across_reopen() {
     assert_eq!(partial_body["status"], json!("draft"));
 
     rt.execute_query(
-        "UPDATE conformance_docs DOCUMENTS \
+        "UPDATE conformance_docs \
          SET name = 'beta', score = 99, keep = 'replacement', status = 'done' \
          WHERE name = 'alpha'",
     )

@@ -199,7 +199,7 @@ fn ctx_insert_values() {
 
 #[test]
 fn ctx_insert_document_form() {
-    let q = parse(r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"info"})"#)
+    let q = parse(r#"INSERT INTO logs DOCUMENT VALUES ({"level":"info"})"#)
         .unwrap()
         .query;
     assert!(matches!(q, QueryExpr::Insert(_)));
@@ -381,29 +381,29 @@ fn err_lone_open_brace_in_where_position() {
 // ============================================================================
 
 #[test]
-fn quoted_form_still_parses() {
-    let q = parse(r#"INSERT INTO logs DOCUMENT (body) VALUES ('{"a":1}')"#)
-        .unwrap()
-        .query;
-    let QueryExpr::Insert(ins) = q else {
-        panic!("expected Insert");
-    };
-    // Quoted form lands as Value::Text and is converted to Json by the
-    // executor; here we just confirm the parser still accepts it.
-    assert!(matches!(ins.values[0][0], Value::Text(_)));
+fn quoted_document_body_is_rejected() {
+    // ADR 0067 (#1709): the quoted-string body coercion is a clean break —
+    // the parser rejects it with a didactic error naming the inline literal
+    // and JSON_PARSE, and the bare inline form is the only accepted shape.
+    let err = parse(r#"INSERT INTO logs DOCUMENT VALUES ('{"a":1}')"#)
+        .expect_err("quoted document body should be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("inline JSON literal"), "{msg}");
+    assert!(msg.contains("JSON_PARSE"), "{msg}");
 }
 
 #[test]
 fn vector_literal_still_parses() {
-    // `[0.1, 0.2]` must keep producing a Value::Vector, not be touched
-    // by the JSON sub-mode (which only triggers on `{`).
+    // `[0.1, 0.2, 0.3]` parses losslessly into `Value::Array` (issue #1708),
+    // not the JSON sub-mode (which only triggers on `{`). The runtime coerces
+    // it to a `Value::Vector` at the vector column position.
     let q = parse(r#"INSERT INTO emb VECTOR (dense) VALUES ([0.1, 0.2, 0.3])"#)
         .unwrap()
         .query;
     let QueryExpr::Insert(ins) = q else {
         panic!("expected Insert");
     };
-    assert!(matches!(ins.values[0][0], Value::Vector(_)));
+    assert!(matches!(ins.values[0][0], Value::Array(_)));
 }
 
 #[test]

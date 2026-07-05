@@ -110,9 +110,11 @@ fn render_update(uq: &UpdateQuery) -> String {
 
 fn render_update_target(target: UpdateTarget) -> Option<&'static str> {
     match target {
-        UpdateTarget::Rows => None,
-        UpdateTarget::Documents => Some("DOCUMENTS"),
-        UpdateTarget::Kv => Some("KV"),
+        // Row/document/KV updates render unmarked (ADR 0067, #1711): the model
+        // markers were removed and the catalog resolves the model. `Documents`
+        // / `Kv` only arise from runtime catalog inference, never from parsed
+        // SQL, so rendering them back to text must stay unmarked to round-trip.
+        UpdateTarget::Rows | UpdateTarget::Documents | UpdateTarget::Kv => None,
         UpdateTarget::Nodes => Some("NODES"),
         UpdateTarget::Edges => Some("EDGES"),
     }
@@ -240,6 +242,13 @@ pub fn render_value_sql(v: &Value) -> String {
         // JSON bytes are stored as canonical compact JSON; emit them raw so
         // the lexer picks them up as a JsonLiteral token on re-parse.
         Value::Json(bytes) => String::from_utf8_lossy(bytes).to_string(),
+        // Array literals render back to `[...]` so a comparison against an
+        // array literal re-parses losslessly (issue #1708) rather than
+        // collapsing to NULL.
+        Value::Array(items) => {
+            let rendered: Vec<String> = items.iter().map(render_value_sql).collect();
+            format!("[{}]", rendered.join(", "))
+        }
         _ => "NULL".to_string(),
     }
 }
