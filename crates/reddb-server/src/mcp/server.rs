@@ -425,6 +425,7 @@ impl McpServer {
             },
             as_rql: false,
             execute: false,
+            steps: None,
         };
         let result = self
             .runtime
