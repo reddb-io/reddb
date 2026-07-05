@@ -121,6 +121,12 @@ pub struct CallState<'a> {
     pub validation_ok: bool,
     pub retry_count: u32,
     pub errors: &'a [ValidationError],
+    /// Planner-first fields (ADR 0068 / #1747). `None` on the RAG path so
+    /// the row shape is unchanged; `Some` on the planner path, where the
+    /// audit row grows the routed intent, plan summary, and executed query.
+    pub intent: Option<&'a str>,
+    pub plan_summary: Option<&'a str>,
+    pub executed_query: Option<&'a str>,
 }
 
 /// Produce one audit row, ready to insert into `red_ask_audit`.
@@ -168,6 +174,17 @@ pub fn build(state: &CallState<'_>, settings: Settings) -> BTreeMap<&'static str
 
     if settings.include_answer {
         row.insert("answer", json!(state.answer));
+    }
+
+    // Planner-first fields (#1747): present only on the planner path.
+    if let Some(intent) = state.intent {
+        row.insert("intent", json!(intent));
+    }
+    if let Some(plan_summary) = state.plan_summary {
+        row.insert("plan_summary", json!(plan_summary));
+    }
+    if let Some(executed_query) = state.executed_query {
+        row.insert("executed_query", json!(executed_query));
     }
 
     row
@@ -240,7 +257,33 @@ mod tests {
             validation_ok: true,
             retry_count: 0,
             errors,
+            intent: None,
+            plan_summary: None,
+            executed_query: None,
         }
+    }
+
+    #[test]
+    fn planner_fields_present_only_when_set() {
+        let urns: Vec<String> = vec![];
+        let citations: Vec<u32> = vec![];
+        let errors: Vec<ValidationError> = vec![];
+        let mut state = base_state("q?", &urns, "answer", &citations, &errors);
+        let row = build(&state, Settings::default());
+        assert!(!row.contains_key("intent"));
+        assert!(!row.contains_key("plan_summary"));
+        assert!(!row.contains_key("executed_query"));
+
+        state.intent = Some("factual");
+        state.plan_summary = Some("intent=factual; query=SELECT * FROM t WHERE a = 'x'");
+        state.executed_query = Some("SELECT * FROM t WHERE a = 'x'");
+        let row = build(&state, Settings::default());
+        assert_eq!(row.get("intent"), Some(&json!("factual")));
+        assert_eq!(
+            row.get("executed_query"),
+            Some(&json!("SELECT * FROM t WHERE a = 'x'"))
+        );
+        assert!(row.contains_key("plan_summary"));
     }
 
     // ---- answer_hash ----------------------------------------------------

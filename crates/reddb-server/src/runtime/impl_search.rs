@@ -1232,6 +1232,17 @@ impl RedDBRuntime {
             return self.execute_ask_as_rql(raw_query, ask);
         }
 
+        // ADR 0068 / #1747: planner-first path. When enabled, ASK runs the
+        // funnel → planner-LLM → typed plan → auto-executed read-only query
+        // → cited synthesis over the executed rows. A factual plan (or a
+        // structured mutating refusal) returns here; a non-factual intent
+        // returns `None` and falls through to the RAG synthesis path below.
+        if !ask.explain && self.ask_planner_enabled() {
+            if let Some(result) = self.execute_ask_planner_factual(raw_query, ask)? {
+                return Ok(result);
+            }
+        }
+
         // S3 / #711: planner-level provider gate. Runs as the first
         // step — before the AskPipeline and before the credential
         // resolver — so a policy-denied query never spends cycles on
@@ -1519,6 +1530,9 @@ impl RedDBRuntime {
                             validation_ok: false,
                             retry_count,
                             errors: &errors,
+                            intent: None,
+                            plan_summary: None,
+                            executed_query: None,
                         })?;
                         let validation = validation_to_json_with_mode_warning(
                             &citation_result.warnings,
@@ -1620,6 +1634,9 @@ impl RedDBRuntime {
             validation_ok: true,
             retry_count: ask_attempt.retry_count,
             errors: &[],
+            intent: None,
+            plan_summary: None,
+            executed_query: None,
         })?;
 
         // Step 4: Build result
@@ -1679,6 +1696,504 @@ impl RedDBRuntime {
         record.set("sources_flat", Value::Json(sources_flat_bytes));
         record.set("citations", Value::Json(citations_bytes));
         record.set("validation", Value::Json(validation_bytes));
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+        })
+    }
+
+    /// ADR 0068 §1: is the planner-first ASK path enabled? Config-gated so
+    /// this slice can land the factual path without flipping the default
+    /// RAG contract (a later slice makes planner-first the default).
+    fn ask_planner_enabled(&self) -> bool {
+        self.config_bool("red.config.ai.ask.planner", false)
+    }
+
+    /// ADR 0068 / #1747 — the planner-first factual path, end-to-end.
+    ///
+    /// Funnel narrows the schema slice → planner LLM (its own model) emits a
+    /// typed plan over *only* that slice → the `query` step's read-only RQL
+    /// candidate is validated by the production parser + read-only classifier
+    /// → auto-executed under the caller's EffectiveScope → the executed rows
+    /// become `sources_flat` for a cited synthesis call.
+    ///
+    /// Returns `Ok(None)` for a non-factual intent so the caller falls
+    /// through to the RAG path; `Ok(Some(_))` for a factual answer or a
+    /// structured mutating refusal; `Err` for a malformed/planner failure.
+    fn execute_ask_planner_factual(
+        &self,
+        raw_query: &str,
+        ask: &crate::storage::query::ast::AskQuery,
+    ) -> RedDBResult<Option<RuntimeQueryResult>> {
+        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::runtime::ai::ask_planner;
+
+        // Provider gate + failover order (mirrors the RAG path).
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let provider_names =
+            self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
+        let planner_provider_name = provider_names
+            .first()
+            .cloned()
+            .unwrap_or_else(|| default_provider.token().to_string());
+        let planner_provider = parse_provider(&planner_provider_name)?;
+        crate::runtime::ai::provider_gate::enforce(self, &planner_provider)?;
+
+        // Stage 1-4 funnel: narrow the schema slice under the caller's scope.
+        let scope = self.ai_scope();
+        let row_cap = ask
+            .limit
+            .unwrap_or(crate::runtime::ask_pipeline::DEFAULT_ROW_CAP);
+        let ask_context =
+            crate::runtime::ask_pipeline::AskPipeline::execute_with_limit_and_min_score(
+                self,
+                &scope,
+                &ask.question,
+                row_cap,
+                ask.min_score,
+                ask.depth,
+            )?;
+        let slice = narrowed_slice_from_context(&ask_context);
+
+        // Resolve the planner model independently of the synthesis model
+        // (ADR 0068 §3). Planner falls back to the general/ASK default.
+        let synth_model = ask.model.clone().unwrap_or_else(|| default_model.clone());
+        let planner_model = crate::ai::resolve_ask_planner_model_from_runtime(self, &synth_model);
+
+        let settings = self.ask_cost_guard_settings();
+        let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
+        let planner_api_key = resolve_api_key_from_runtime(&planner_provider, None, self)?;
+        let planner_api_base = planner_provider.resolve_api_base();
+
+        // The closure-model seam: the planner LLM behind a `PlannerModel`.
+        // Deterministic by default (temperature 0). The narrowed slice is
+        // the only schema that reaches the model.
+        let planner_closure = |prompt: &str| -> RedDBResult<String> {
+            let response = call_ask_llm(
+                &planner_provider,
+                transport.clone(),
+                planner_api_key.clone(),
+                planner_model.clone(),
+                prompt.to_string(),
+                planner_api_base.clone(),
+                settings.max_completion_tokens as usize,
+                Some(0.0),
+                None,
+                false,
+                None,
+            )?;
+            Ok(response.output_text)
+        };
+        let route = ask_planner::plan_and_route(&ask.question, &slice, &planner_closure)?;
+
+        match route.routing {
+            ask_planner::PlanRouting::Unsupported { .. } => Ok(None),
+            ask_planner::PlanRouting::RefuseMutating {
+                statement_type,
+                rql,
+            } => Ok(Some(self.build_planner_refusal_result(
+                raw_query,
+                &scope,
+                &route.plan,
+                statement_type,
+                &rql,
+            )?)),
+            ask_planner::PlanRouting::Execute { candidate } => {
+                let executed = self.execute_planner_candidate_and_synthesize(
+                    raw_query,
+                    ask,
+                    &scope,
+                    &route.plan,
+                    &candidate.rql,
+                    &provider_names,
+                    &synth_model,
+                    &settings,
+                    transport,
+                )?;
+                Ok(Some(executed))
+            }
+        }
+    }
+
+    /// Auto-execute the validated read-only candidate under the caller's
+    /// EffectiveScope, then synthesize a cited answer over the executed rows.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_planner_candidate_and_synthesize(
+        &self,
+        raw_query: &str,
+        ask: &crate::storage::query::ast::AskQuery,
+        scope: &crate::runtime::statement_frame::EffectiveScope,
+        plan: &crate::runtime::ai::ask_planner::AskPlan,
+        candidate_rql: &str,
+        provider_names: &[String],
+        synth_model: &str,
+        settings: &crate::runtime::ai::cost_guard::Settings,
+        transport: crate::runtime::ai::transport::AiTransport,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        // Auto-execute under the ambient execution context — the same RLS /
+        // EffectiveScope the funnel ran under. An out-of-scope collection is
+        // filtered here, so it can appear in neither plan nor answer.
+        let executed = self.execute_query(candidate_rql)?;
+        let (sources_flat_json, source_urns, source_payloads) =
+            planner_sources_from_result(&executed.result);
+        let sources_flat_bytes =
+            crate::json::to_vec(&sources_flat_json).unwrap_or_else(|_| b"[]".to_vec());
+        let sources_count = source_urns.len();
+
+        let synthesis_prompt =
+            build_planner_synthesis_prompt(&ask.question, candidate_rql, &source_payloads);
+        let sources_fingerprint = format!("{}\n{}", candidate_rql, source_urns.join(","));
+
+        // Cost guard (pre-call) — unchanged machinery.
+        let now = ask_cost_guard_now();
+        let tenant_key = ask_cost_guard_tenant_key(scope.tenant.as_deref());
+        let prompt_tokens = estimate_prompt_tokens(&synthesis_prompt);
+        let planned_cost_usd = estimate_ask_cost_usd(prompt_tokens, settings.max_completion_tokens);
+        let usage = crate::runtime::ai::cost_guard::Usage {
+            prompt_tokens,
+            sources_bytes: saturating_u32(sources_flat_bytes.len()),
+            estimated_cost_usd: planned_cost_usd,
+            ..Default::default()
+        };
+        let daily_state = self.ask_daily_cost_state(&tenant_key, now);
+        if let crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } =
+            crate::runtime::ai::cost_guard::evaluate(&usage, &daily_state, settings, now)
+        {
+            return Err(cost_guard_rejection_to_error(limit, detail));
+        }
+
+        // Synthesis with provider failover + strict citation validation
+        // (one retry) — the same pure modules as the RAG path (criterion 6).
+        let requested_mode = if ask.strict {
+            crate::runtime::ai::strict_validator::Mode::Strict
+        } else {
+            crate::runtime::ai::strict_validator::Mode::Lenient
+        };
+        let mut failed_attempts = Vec::new();
+        let mut synthesized: Option<PlannerSynthesis> = None;
+        for provider_name in provider_names {
+            match self.synthesize_over_rows(
+                provider_name,
+                synth_model,
+                &synthesis_prompt,
+                sources_count,
+                sources_flat_bytes.len(),
+                requested_mode,
+                &sources_fingerprint,
+                ask,
+                settings,
+                &transport,
+                &tenant_key,
+            ) {
+                Ok(result) => {
+                    synthesized = Some(result);
+                    break;
+                }
+                Err(err) => {
+                    let attempt_err = ask_attempt_error_from_reddb(&err);
+                    if attempt_err.is_retryable() {
+                        failed_attempts.push((provider_name.clone(), attempt_err));
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        let synthesized = synthesized.ok_or_else(|| {
+            ask_failover_exhausted_to_error(
+                crate::runtime::ai::provider_failover::FailoverExhausted {
+                    attempts: failed_attempts,
+                },
+            )
+        })?;
+
+        let citations_json =
+            citations_to_json(&synthesized.citation_result.citations, &source_urns);
+        let validation_json = validation_to_json_with_mode_warning(
+            &synthesized.citation_result.warnings,
+            &[],
+            true,
+            synthesized.mode_warning.as_ref(),
+        );
+        let citations_bytes =
+            crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
+        let validation_bytes =
+            crate::json::to_vec(&validation_json).unwrap_or_else(|_| b"{}".to_vec());
+
+        let citation_markers = citation_markers(&synthesized.citation_result.citations);
+        let intent_label = plan.intent.as_str();
+        let plan_summary = plan.summary();
+        self.record_ask_audit(AskAuditInput {
+            scope,
+            question: &ask.question,
+            source_urns: &source_urns,
+            provider: synthesized.provider.token(),
+            model: synth_model,
+            prompt_tokens: i64::from(synthesized.prompt_tokens),
+            completion_tokens: synthesized.completion_tokens.min(i64::MAX as u64) as i64,
+            cost_usd: synthesized.cost_usd,
+            answer: &synthesized.answer,
+            citations: &citation_markers,
+            cache_hit: false,
+            effective_mode: synthesized.effective_mode,
+            temperature: synthesized.temperature,
+            seed: synthesized.seed,
+            validation_ok: true,
+            retry_count: synthesized.retry_count,
+            errors: &[],
+            intent: Some(intent_label),
+            plan_summary: Some(&plan_summary),
+            executed_query: Some(candidate_rql),
+        })?;
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "provider".into(),
+            "model".into(),
+            "mode".into(),
+            "intent".into(),
+            "executed_query".into(),
+            "plan_summary".into(),
+            "retry_count".into(),
+            "prompt_tokens".into(),
+            "completion_tokens".into(),
+            "cost_usd".into(),
+            "cache_hit".into(),
+            "sources_count".into(),
+            "sources_flat".into(),
+            "citations".into(),
+            "validation".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", Value::text(synthesized.answer));
+        record.set(
+            "provider",
+            Value::text(synthesized.provider.token().to_string()),
+        );
+        record.set("model", Value::text(synth_model.to_string()));
+        record.set(
+            "mode",
+            Value::text(strict_mode_label(synthesized.effective_mode)),
+        );
+        record.set("intent", Value::text(intent_label.to_string()));
+        record.set("executed_query", Value::text(candidate_rql.to_string()));
+        record.set("plan_summary", Value::text(plan_summary));
+        record.set(
+            "retry_count",
+            Value::Integer(synthesized.retry_count as i64),
+        );
+        record.set(
+            "prompt_tokens",
+            Value::Integer(synthesized.prompt_tokens as i64),
+        );
+        record.set(
+            "completion_tokens",
+            Value::Integer(synthesized.completion_tokens as i64),
+        );
+        record.set("cost_usd", Value::Float(synthesized.cost_usd));
+        record.set("cache_hit", Value::Boolean(false));
+        record.set("sources_count", Value::Integer(sources_count as i64));
+        record.set("sources_flat", Value::Json(sources_flat_bytes));
+        record.set("citations", Value::Json(citations_bytes));
+        record.set("validation", Value::Json(validation_bytes));
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+        })
+    }
+
+    /// One synthesis attempt against a single provider: cost-metered LLM
+    /// call over the executed rows, strict citation validation with one
+    /// retry. Reuses the RAG path's pure modules unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn synthesize_over_rows(
+        &self,
+        provider_name: &str,
+        model: &str,
+        base_prompt: &str,
+        sources_count: usize,
+        sources_bytes: usize,
+        requested_mode: crate::runtime::ai::strict_validator::Mode,
+        sources_fingerprint: &str,
+        ask: &crate::storage::query::ast::AskQuery,
+        settings: &crate::runtime::ai::cost_guard::Settings,
+        transport: &crate::runtime::ai::transport::AiTransport,
+        tenant_key: &str,
+    ) -> RedDBResult<PlannerSynthesis> {
+        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+
+        let provider = parse_provider(provider_name)?;
+        crate::runtime::ai::provider_gate::enforce(self, &provider)?;
+        let provider_token = provider.token().to_string();
+        let mode_outcome = self
+            .ask_provider_capability_registry(&provider_token)
+            .evaluate_mode(&provider_token, requested_mode);
+        let effective_mode = mode_outcome.effective();
+        let mode_warning = mode_outcome.warning().cloned();
+        let capabilities = self
+            .ask_provider_capability_registry(&provider_token)
+            .capabilities(&provider_token);
+        let determinism = crate::runtime::ai::determinism_decider::decide(
+            crate::runtime::ai::determinism_decider::Inputs {
+                question: &ask.question,
+                sources_fingerprint,
+            },
+            capabilities,
+            crate::runtime::ai::determinism_decider::Overrides {
+                temperature: ask.temperature,
+                seed: ask.seed,
+            },
+            crate::runtime::ai::determinism_decider::Settings {
+                default_temperature: self.config_f64("ask.default_temperature", 0.0) as f32,
+            },
+        );
+
+        let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
+        let api_base = provider.resolve_api_base();
+        let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
+        let mut retry_count = 0_u32;
+        let mut prompt_for_call = base_prompt.to_string();
+        loop {
+            let response = call_ask_llm(
+                &provider,
+                transport.clone(),
+                api_key.clone(),
+                model.to_string(),
+                prompt_for_call.clone(),
+                api_base.clone(),
+                settings.max_completion_tokens as usize,
+                determinism.temperature,
+                determinism.seed,
+                false,
+                None,
+            )?;
+            let completion_tokens = response.completion_tokens.unwrap_or(0);
+            let prompt_tokens = response
+                .prompt_tokens
+                .map(u64_to_u32_saturating)
+                .unwrap_or_else(|| estimate_prompt_tokens(&prompt_for_call));
+            let completion_tokens_u32 = u64_to_u32_saturating(completion_tokens);
+            let cost_usd = estimate_ask_cost_usd(prompt_tokens, completion_tokens_u32);
+            let usage = crate::runtime::ai::cost_guard::Usage {
+                prompt_tokens,
+                sources_bytes: saturating_u32(sources_bytes),
+                completion_tokens: completion_tokens_u32,
+                estimated_cost_usd: cost_usd,
+                ..Default::default()
+            };
+            self.check_and_record_ask_daily_cost(tenant_key, &usage, settings)?;
+
+            let answer = response.output_text;
+            let citation_result =
+                crate::runtime::ai::citation_parser::parse_citations(&answer, sources_count);
+            match crate::runtime::ai::strict_validator::validate(
+                &citation_result,
+                effective_mode,
+                attempt,
+            ) {
+                crate::runtime::ai::strict_validator::Decision::Ok => {
+                    return Ok(PlannerSynthesis {
+                        answer,
+                        provider,
+                        effective_mode,
+                        mode_warning,
+                        temperature: determinism.temperature,
+                        seed: determinism.seed,
+                        retry_count,
+                        prompt_tokens,
+                        completion_tokens,
+                        cost_usd,
+                        citation_result,
+                    });
+                }
+                crate::runtime::ai::strict_validator::Decision::Retry { prompt } => {
+                    attempt = crate::runtime::ai::strict_validator::Attempt::Retry;
+                    retry_count = 1;
+                    prompt_for_call = format!("{prompt}\n\n{base_prompt}");
+                }
+                crate::runtime::ai::strict_validator::Decision::GiveUp { errors } => {
+                    let validation = validation_to_json_with_mode_warning(
+                        &citation_result.warnings,
+                        &errors,
+                        false,
+                        mode_warning.as_ref(),
+                    );
+                    return Err(RedDBError::Validation {
+                        message: "ASK citation validation failed after retry".to_string(),
+                        validation,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Structured refusal for a mutating planner candidate. The candidate is
+    /// never executed under any flag; the suggestion envelope arrives later.
+    fn build_planner_refusal_result(
+        &self,
+        raw_query: &str,
+        scope: &crate::runtime::statement_frame::EffectiveScope,
+        plan: &crate::runtime::ai::ask_planner::AskPlan,
+        statement_type: &str,
+        candidate_rql: &str,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let answer = format!(
+            "This question maps to a mutating `{statement_type}` statement, which ASK never \
+             executes. No query was run."
+        );
+        let plan_summary = plan.summary();
+        self.record_ask_audit(AskAuditInput {
+            scope,
+            question: &plan_summary,
+            source_urns: &[],
+            provider: "",
+            model: "",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: 0.0,
+            answer: &answer,
+            citations: &[],
+            cache_hit: false,
+            effective_mode: crate::runtime::ai::strict_validator::Mode::Lenient,
+            temperature: None,
+            seed: None,
+            validation_ok: true,
+            retry_count: 0,
+            errors: &[],
+            intent: Some(plan.intent.as_str()),
+            plan_summary: Some(&plan_summary),
+            executed_query: None,
+        })?;
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "refused".into(),
+            "intent".into(),
+            "candidate".into(),
+            "candidate_type".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", Value::text(answer));
+        record.set("refused", Value::Boolean(true));
+        record.set("intent", Value::text(plan.intent.as_str().to_string()));
+        record.set("candidate", Value::text(candidate_rql.to_string()));
+        record.set("candidate_type", Value::text(statement_type.to_string()));
         result.push(record);
 
         Ok(RuntimeQueryResult {
@@ -2333,6 +2848,9 @@ impl RedDBRuntime {
             validation_ok: input.validation_ok,
             retry_count: input.retry_count,
             errors: input.errors,
+            intent: input.intent,
+            plan_summary: input.plan_summary,
+            executed_query: input.executed_query,
         };
         let row =
             crate::runtime::ai::audit_record_builder::build(&state, self.ask_audit_settings());
@@ -2714,6 +3232,57 @@ struct AskAuditInput<'a> {
     validation_ok: bool,
     retry_count: u32,
     errors: &'a [crate::runtime::ai::strict_validator::ValidationError],
+    /// Planner-first audit fields (#1747). `None` on the RAG path.
+    intent: Option<&'a str>,
+    plan_summary: Option<&'a str>,
+    executed_query: Option<&'a str>,
+}
+
+impl<'a> AskAuditInput<'a> {
+    /// Construct a RAG-path audit input with the planner-first fields unset.
+    #[allow(clippy::too_many_arguments)]
+    fn rag(
+        scope: &'a crate::runtime::statement_frame::EffectiveScope,
+        question: &'a str,
+        source_urns: &'a [String],
+        provider: &'a str,
+        model: &'a str,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        cost_usd: f64,
+        answer: &'a str,
+        citations: &'a [u32],
+        cache_hit: bool,
+        effective_mode: crate::runtime::ai::strict_validator::Mode,
+        temperature: Option<f32>,
+        seed: Option<u64>,
+        validation_ok: bool,
+        retry_count: u32,
+        errors: &'a [crate::runtime::ai::strict_validator::ValidationError],
+    ) -> Self {
+        AskAuditInput {
+            scope,
+            question,
+            source_urns,
+            provider,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cost_usd,
+            answer,
+            citations,
+            cache_hit,
+            effective_mode,
+            temperature,
+            seed,
+            validation_ok,
+            retry_count,
+            errors,
+            intent: None,
+            plan_summary: None,
+            executed_query: None,
+        }
+    }
 }
 
 fn ask_cache_mode(
@@ -3284,6 +3853,153 @@ fn sse_source_rows_from_sources_json(
 /// `prompt_template::SecretRedactor::new()` defaults, which are the
 /// canonical pattern set. If the audit pipeline grows a separate
 /// redactor with operator-tunable patterns, swap the constructor here.
+/// A single synthesis attempt's result on the planner-first factual path.
+struct PlannerSynthesis {
+    answer: String,
+    provider: crate::ai::AiProvider,
+    effective_mode: crate::runtime::ai::strict_validator::Mode,
+    mode_warning: Option<crate::runtime::ai::provider_capabilities::ModeWarning>,
+    temperature: Option<f32>,
+    seed: Option<u64>,
+    retry_count: u32,
+    prompt_tokens: u32,
+    completion_tokens: u64,
+    cost_usd: f64,
+    citation_result: crate::runtime::ai::citation_parser::CitationParseResult,
+}
+
+/// Build the planner's narrowed slice from the funnel context: candidate
+/// collections with per-collection retrieval scores and columns. Only this
+/// slice reaches the planner LLM — the raw catalog never does.
+fn narrowed_slice_from_context(
+    ctx: &crate::runtime::ask_pipeline::AskContext,
+) -> crate::runtime::ai::ask_planner::NarrowedSlice {
+    use crate::runtime::ai::ask_planner::{NarrowedSlice, ScoredCollection};
+    let mut scores: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+    for hit in &ctx.text_hits {
+        let e = scores.entry(hit.collection.as_str()).or_insert(0.0);
+        if hit.score > *e {
+            *e = hit.score;
+        }
+    }
+    for hit in &ctx.vector_hits {
+        let e = scores.entry(hit.collection.as_str()).or_insert(0.0);
+        if hit.score > *e {
+            *e = hit.score;
+        }
+    }
+    for hit in &ctx.graph_hits {
+        let e = scores.entry(hit.collection.as_str()).or_insert(0.0);
+        if hit.score > *e {
+            *e = hit.score;
+        }
+    }
+    // A literal-matched row is the strongest funnel signal.
+    for row in &ctx.filtered_rows {
+        let e = scores.entry(row.collection.as_str()).or_insert(0.0);
+        if *e < 1.0 {
+            *e = 1.0;
+        }
+    }
+
+    let mut collections: Vec<ScoredCollection> = ctx
+        .candidates
+        .collections
+        .iter()
+        .map(|collection| ScoredCollection {
+            collection: collection.clone(),
+            score: scores.get(collection.as_str()).copied().unwrap_or(0.0),
+            columns: ctx
+                .candidates
+                .columns_by_collection
+                .get(collection)
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .collect();
+    collections.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.collection.cmp(&b.collection))
+    });
+    NarrowedSlice { collections }
+}
+
+/// Convert a storage row value to the in-house JSON value for the source
+/// payload. Common scalars map directly; anything exotic stringifies.
+fn planner_value_to_json(value: &Value) -> crate::json::Value {
+    match value {
+        Value::Null => crate::json::Value::Null,
+        Value::Integer(i) => crate::json::Value::Number(*i as f64),
+        Value::UnsignedInteger(u) => crate::json::Value::Number(*u as f64),
+        Value::Float(f) => crate::json::Value::Number(*f),
+        Value::Boolean(b) => crate::json::Value::Bool(*b),
+        Value::Text(s) => crate::json::Value::String(s.to_string()),
+        Value::Json(bytes) => crate::json::from_slice(bytes).unwrap_or_else(|_| {
+            crate::json::Value::String(String::from_utf8_lossy(bytes).to_string())
+        }),
+        other => crate::json::Value::String(format!("{other:?}")),
+    }
+}
+
+/// Turn the auto-executed result rows into `sources_flat` (JSON array),
+/// their parallel URNs (aligned by index for citation resolution), and
+/// per-row payload strings for the synthesis prompt.
+fn planner_sources_from_result(
+    result: &UnifiedResult,
+) -> (crate::json::Value, Vec<String>, Vec<String>) {
+    let mut arr: Vec<crate::json::Value> = Vec::with_capacity(result.records.len());
+    let mut urns: Vec<String> = Vec::with_capacity(result.records.len());
+    let mut payloads: Vec<String> = Vec::with_capacity(result.records.len());
+    for (idx, rec) in result.records.iter().enumerate() {
+        let mut payload_obj: crate::json::Map<String, crate::json::Value> = Default::default();
+        for (key, value) in rec.iter_fields() {
+            payload_obj.insert(key.to_string(), planner_value_to_json(value));
+        }
+        let payload_json = crate::json::Value::Object(payload_obj);
+        let payload_str =
+            crate::json::to_string(&payload_json).unwrap_or_else(|_| "{}".to_string());
+        let urn = format!("urn:reddb:ask-row:{}", idx + 1);
+
+        let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+        obj.insert(
+            "kind".to_string(),
+            crate::json::Value::String("row".to_string()),
+        );
+        obj.insert("urn".to_string(), crate::json::Value::String(urn.clone()));
+        obj.insert("payload".to_string(), payload_json);
+        arr.push(crate::json::Value::Object(obj));
+        urns.push(urn);
+        payloads.push(payload_str);
+    }
+    (crate::json::Value::Array(arr), urns, payloads)
+}
+
+/// Assemble the synthesis prompt over the executed rows: numbered sources
+/// the model must cite with `[^N]`, plus the executed query for context.
+fn build_planner_synthesis_prompt(question: &str, executed_query: &str, rows: &[String]) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(
+        "You are answering a question using ONLY the executed query result rows below. \
+         Cite every claim with an inline [^N] marker where N is the 1-based row number. \
+         Do not invent facts beyond the rows.\n\n",
+    );
+    prompt.push_str("Executed query: ");
+    prompt.push_str(executed_query);
+    prompt.push_str("\n\nRows:\n");
+    if rows.is_empty() {
+        prompt.push_str("(no rows returned)\n");
+    } else {
+        for (idx, row) in rows.iter().enumerate() {
+            prompt.push_str(&format!("[^{}] {}\n", idx + 1, row));
+        }
+    }
+    prompt.push_str("\nQuestion: ");
+    prompt.push_str(question);
+    prompt
+}
+
 fn render_prompt(ctx: &crate::runtime::ask_pipeline::AskContext, question: &str) -> String {
     use crate::runtime::ai::prompt_template::{
         ContextBlock, ContextSource, PromptTemplate, ProviderTier, SecretRedactor, TemplateSlots,
@@ -4398,6 +5114,9 @@ mod citation_wedge_tests {
             validation_ok: true,
             retry_count: 0,
             errors: &errors,
+            intent: None,
+            plan_summary: None,
+            executed_query: None,
         };
         let audit_row = crate::runtime::ai::audit_record_builder::build(
             &state,
@@ -4612,6 +5331,9 @@ mod citation_wedge_tests {
                 validation_ok: true,
                 retry_count: 0,
                 errors: &errors,
+                intent: None,
+                plan_summary: None,
+                executed_query: None,
             };
             let row = crate::runtime::ai::audit_record_builder::build(
                 &state,
