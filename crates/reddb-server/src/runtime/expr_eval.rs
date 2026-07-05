@@ -717,9 +717,11 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
             }),
         )
     };
+    // Embeddings follow the embeddings task pointer (ADR-0068 §5), not the
+    // inference/ASK provider, when no explicit hint is supplied.
     let provider = match provider_hint {
         Some(name) => crate::ai::parse_provider(name).ok()?,
-        None => crate::ai::resolve_default_provider(&kv_getter),
+        None => crate::ai::resolve_embeddings_provider(&kv_getter).ok()?,
     };
     if !provider.is_openai_compatible() {
         // Anthropic / providers without embedding parity fall out —
@@ -738,7 +740,7 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
     .ok()?;
 
     let api_base = provider.resolve_api_base_with_kv("default", &kv_getter);
-    let model = provider.default_embedding_model().to_string();
+    let model = crate::ai::resolve_embeddings_model(&provider, &kv_getter);
 
     let transport = crate::runtime::ai::transport::AiTransport::new(
         crate::runtime::ai::transport::AiTransportConfig::default(),
