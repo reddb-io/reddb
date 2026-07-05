@@ -1232,14 +1232,19 @@ impl RedDBRuntime {
             return self.execute_ask_as_rql(raw_query, ask);
         }
 
-        // ADR 0068 / #1747: planner-first path. When enabled, ASK runs the
-        // funnel → planner-LLM → typed plan → auto-executed read-only query
-        // → cited synthesis over the executed rows. A factual plan (or a
-        // structured mutating refusal) returns here; a non-factual intent
-        // returns `None` and falls through to the RAG synthesis path below.
+        // ADR 0068 / #1747 / #1749: planner-first path. When enabled, ASK runs
+        // the funnel → planner-LLM → typed plan → routing. A factual plan (or a
+        // structured mutating refusal) is fully handled and returns here. A
+        // synthesis/how-to intent falls through to the ADR 0013 RAG synthesis
+        // path below **unchanged**, carrying only the routed intent so the
+        // downstream audit row records the routing decision (#1749).
+        let mut routed_intent: Option<&'static str> = None;
         if !ask.explain && self.ask_planner_enabled() {
-            if let Some(result) = self.execute_ask_planner_factual(raw_query, ask)? {
-                return Ok(result);
+            match self.execute_ask_planner_prepass(raw_query, ask)? {
+                PlannerPrepass::Handled(result) => return Ok(*result),
+                PlannerPrepass::FallThrough { intent } => {
+                    routed_intent = Some(intent.as_str());
+                }
             }
         }
 
@@ -1530,7 +1535,7 @@ impl RedDBRuntime {
                             validation_ok: false,
                             retry_count,
                             errors: &errors,
-                            intent: None,
+                            intent: routed_intent,
                             plan_summary: None,
                             executed_query: None,
                         })?;
@@ -1634,7 +1639,7 @@ impl RedDBRuntime {
             validation_ok: true,
             retry_count: ask_attempt.retry_count,
             errors: &[],
-            intent: None,
+            intent: routed_intent,
             plan_summary: None,
             executed_query: None,
         })?;
@@ -1717,22 +1722,27 @@ impl RedDBRuntime {
         self.config_bool("red.config.ai.ask.planner", false)
     }
 
-    /// ADR 0068 / #1747 — the planner-first factual path, end-to-end.
+    /// ADR 0068 / #1747 / #1749 — the planner-first pre-pass, end-to-end.
     ///
     /// Funnel narrows the schema slice → planner LLM (its own model) emits a
-    /// typed plan over *only* that slice → the `query` step's read-only RQL
-    /// candidate is validated by the production parser + read-only classifier
-    /// → auto-executed under the caller's EffectiveScope → the executed rows
-    /// become `sources_flat` for a cited synthesis call.
+    /// typed plan over *only* that slice → routing:
+    ///   - **factual**: the `query` step's read-only RQL candidate is validated
+    ///     by the production parser + read-only classifier → auto-executed under
+    ///     the caller's EffectiveScope → the executed rows become `sources_flat`
+    ///     for a cited synthesis call. A mutating candidate is a structured
+    ///     refusal. Both are `PlannerPrepass::Handled`.
+    ///   - **synthesis / how-to**: `PlannerPrepass::FallThrough { intent }` so
+    ///     the caller runs the ADR 0013 RAG path unchanged (#1749). The routed
+    ///     intent rides along only for the downstream audit row — a
+    ///     calculation-shaped question never lands here, it classifies factual
+    ///     (the LLM never invents numbers, ADR 0013 conformance boundary).
     ///
-    /// Returns `Ok(None)` for a non-factual intent so the caller falls
-    /// through to the RAG path; `Ok(Some(_))` for a factual answer or a
-    /// structured mutating refusal; `Err` for a malformed/planner failure.
-    fn execute_ask_planner_factual(
+    /// `Err` for a malformed plan / planner failure.
+    fn execute_ask_planner_prepass(
         &self,
         raw_query: &str,
         ask: &crate::storage::query::ast::AskQuery,
-    ) -> RedDBResult<Option<RuntimeQueryResult>> {
+    ) -> RedDBResult<PlannerPrepass> {
         use crate::ai::{parse_provider, resolve_api_key_from_runtime};
         use crate::runtime::ai::ask_planner;
 
@@ -1840,17 +1850,23 @@ impl RedDBRuntime {
         let route = ask_planner::plan_and_route(&ask.question, &slice, &planner_closure)?;
 
         match route.routing {
-            ask_planner::PlanRouting::Unsupported { .. } => Ok(None),
+            // #1749: synthesis / how-to route to the ADR 0013 RAG path
+            // unchanged; the routed intent rides along for the audit row.
+            ask_planner::PlanRouting::Unsupported { intent } => {
+                Ok(PlannerPrepass::FallThrough { intent })
+            }
             ask_planner::PlanRouting::RefuseMutating {
                 statement_type,
                 rql,
-            } => Ok(Some(self.build_planner_refusal_result(
-                raw_query,
-                &scope,
-                &route.plan,
-                statement_type,
-                &rql,
-            )?)),
+            } => Ok(PlannerPrepass::Handled(Box::new(
+                self.build_planner_refusal_result(
+                    raw_query,
+                    &scope,
+                    &route.plan,
+                    statement_type,
+                    &rql,
+                )?,
+            ))),
             ask_planner::PlanRouting::Execute { candidate } => {
                 // The query step is budgeted too; exhausting the budget
                 // mid-plan surfaces a structured partial-with-warning.
@@ -1870,7 +1886,7 @@ impl RedDBRuntime {
                     &settings,
                     transport,
                 )?;
-                Ok(Some(executed))
+                Ok(PlannerPrepass::Handled(Box::new(executed)))
             }
         }
     }
@@ -4054,6 +4070,19 @@ fn sse_source_rows_from_sources_json(
 /// canonical pattern set. If the audit pipeline grows a separate
 /// redactor with operator-tunable patterns, swap the constructor here.
 /// A single synthesis attempt's result on the planner-first factual path.
+/// Outcome of the planner-first pre-pass (ADR 0068 / #1749).
+///
+/// Either the planner fully handled the ASK (a cited factual answer or a
+/// structured mutating refusal), or it classified a non-factual intent and
+/// the caller must run the ADR 0013 RAG path unchanged — carrying the routed
+/// intent so the downstream audit row records the routing decision.
+enum PlannerPrepass {
+    Handled(Box<RuntimeQueryResult>),
+    FallThrough {
+        intent: crate::runtime::ai::ask_planner::AskIntent,
+    },
+}
+
 struct PlannerSynthesis {
     answer: String,
     provider: crate::ai::AiProvider,
