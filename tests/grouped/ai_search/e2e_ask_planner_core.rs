@@ -365,6 +365,97 @@ fn ungrounded_question_returns_no_matching_sources_without_inventing() {
 }
 
 // ===========================================================================
+// 7 — #1749: a synthesis question routes to the ADR 0013 RAG path unchanged;
+//     the audit row records the routed intent.
+// ===========================================================================
+
+#[test]
+fn synthesis_question_routes_to_rag_and_audit_records_intent() {
+    let _env = env_lock().lock().expect("env lock");
+
+    let stub = ScriptedStub::start(vec![
+        // Planner call → classifies the question as synthesis (no query).
+        "{\"intent\":\"synthesis\",\"query\":null,\"rationale\":\"summarise incidents\"}"
+            .to_string(),
+        // RAG synthesis call → cited answer over the retrieved sources. This
+        // is the ADR 0013 path, untouched by the planner.
+        "Two incidents were reported: an outage and a latency spike [^1]".to_string(),
+    ]);
+    let _p = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
+    let _b = EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+    let _k = EnvVarGuard::set("REDDB_OPENAI_API_KEY", "sk-test-mock");
+    let _m = EnvVarGuard::set("REDDB_OPENAI_PROMPT_MODEL", "synth-main");
+
+    let rt = open_rt();
+    exec(
+        &rt,
+        "CREATE TABLE incidents (id TEXT PRIMARY KEY, title TEXT, day TEXT) \
+         WITH CONTEXT INDEX ON (id, title, day)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO incidents (id, title, day) VALUES \
+           ('i1', 'checkout outage', 'yesterday'), ('i2', 'latency spike', 'yesterday')",
+    );
+
+    configure_planner(&rt);
+
+    let result = rt
+        .execute_query("ASK 'summarise the incidents from yesterday' STRICT OFF LIMIT 5")
+        .expect("synthesis ASK should route to RAG and succeed");
+    let record = result
+        .result
+        .records
+        .first()
+        .expect("RAG ASK returns one canonical row");
+
+    // (contract) The result row is identical to today's RAG ASK — the routing
+    // decision lives in the audit row, never in the answer contract. The
+    // planner-only columns must NOT appear.
+    assert!(
+        record.get("intent").is_none(),
+        "RAG result contract must be unchanged: no `intent` column"
+    );
+    assert!(
+        record.get("executed_query").is_none(),
+        "RAG result contract must be unchanged: no `executed_query` column"
+    );
+    let answer = text(record, "answer").expect("answer column");
+    assert!(
+        answer.contains("incident"),
+        "RAG answer should come back over the retrieved sources, got: {answer:?}"
+    );
+    // The cited-answer contract is preserved: a citations column is present.
+    assert!(
+        record.get("citations").is_some(),
+        "RAG cited-answer contract must be preserved"
+    );
+
+    // Both the planner (classification) and the RAG synthesis LLM were called.
+    assert!(
+        stub.request_count() >= 2,
+        "planner classification + RAG synthesis calls expected, got {}",
+        stub.request_count()
+    );
+
+    // The audit row records the routed intent (#1749). No plan summary /
+    // executed query — synthesis carries only the routing decision.
+    let audit = rt
+        .execute_query("SELECT * FROM red_ask_audit")
+        .expect("read audit rows");
+    let audit_row = audit
+        .result
+        .records
+        .iter()
+        .find(|r| text(r, "intent").as_deref() == Some("synthesis"))
+        .expect("an audit row recording the routed synthesis intent");
+    assert!(
+        text(audit_row, "executed_query").is_none(),
+        "synthesis routes to RAG — no executed query is recorded"
+    );
+}
+
+// ===========================================================================
 // Scripted mock stub — sequenced chat completions + request-body capture.
 // ===========================================================================
 
