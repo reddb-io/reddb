@@ -300,6 +300,15 @@ fn classify(query: &QueryExpr) -> (CandidateDisposition, &'static str) {
         QueryExpr::Update(_) => (Mutating, "update"),
         QueryExpr::Delete(_) => (Mutating, "delete"),
         QueryExpr::Truncate(_) => (Mutating, "truncate"),
+        // Common DDL / streaming statements get distinct kind labels so the
+        // how-to suggestion envelope and its audit row record what was
+        // proposed. They remain `Mutating` — kept advisory, never executed.
+        QueryExpr::CreateTable(_) => (Mutating, "create_table"),
+        QueryExpr::CreateCollection(_) => (Mutating, "create_collection"),
+        QueryExpr::CreateQueue(_) => (Mutating, "create_queue"),
+        QueryExpr::CreateIndex(_) => (Mutating, "create_index"),
+        QueryExpr::AlterTable(_) => (Mutating, "alter_table"),
+        QueryExpr::EventsBackfill(_) => (Mutating, "events_backfill"),
         _ => (Mutating, "mutating"),
     }
 }
