@@ -1918,7 +1918,9 @@ pub struct InsertQuery {
 pub struct AutoEmbedConfig {
     /// Fields to extract text from for embedding
     pub fields: Vec<String>,
-    /// AI provider (e.g. "openai")
+    /// AI provider from an explicit `USING <provider>`. Empty when none was
+    /// given — the runtime then resolves it via the embeddings task pointer
+    /// `red.config.ai.embeddings.provider` (ADR-0068 §5).
     pub provider: String,
     /// Optional model override
     pub model: Option<String>,
