@@ -423,8 +423,7 @@ impl McpServer {
             } else {
                 crate::storage::query::ast::AskCacheClause::Default
             },
-            as_rql: false,
-            execute: false,
+            plan_only: false,
             steps: None,
         };
         let result = self
