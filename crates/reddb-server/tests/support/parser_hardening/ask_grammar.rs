@@ -94,26 +94,47 @@ pub fn ask_stmt() -> impl Strategy<Value = String> {
         proptest::option::of(small_uint()),
         proptest::option::of(small_score()),
         proptest::option::of(ident()),
+        any::<bool>(),
     )
-        .prop_map(|(question, model, depth, limit, min_score, collection)| {
-            let mut s = format!("ASK {}", question);
-            if let Some(m) = model {
-                s.push_str(&format!(" MODEL {}", m));
-            }
-            if let Some(d) = depth {
-                s.push_str(&format!(" DEPTH {}", d));
-            }
-            if let Some(l) = limit {
-                s.push_str(&format!(" LIMIT {}", l));
-            }
-            if let Some(score) = min_score {
-                s.push_str(&format!(" MIN_SCORE {}", score));
-            }
-            if let Some(c) = collection {
-                s.push_str(&format!(" COLLECTION {}", c));
-            }
-            s
-        })
+        .prop_map(
+            |(question, model, depth, limit, min_score, collection, plan_only)| {
+                let mut s = format!("ASK {}", question);
+                if let Some(m) = model {
+                    s.push_str(&format!(" MODEL {}", m));
+                }
+                if let Some(d) = depth {
+                    s.push_str(&format!(" DEPTH {}", d));
+                }
+                if let Some(l) = limit {
+                    s.push_str(&format!(" LIMIT {}", l));
+                }
+                if let Some(score) = min_score {
+                    s.push_str(&format!(" MIN_SCORE {}", score));
+                }
+                if let Some(c) = collection {
+                    s.push_str(&format!(" COLLECTION {}", c));
+                }
+                // ADR 0068 / #1751: `PLAN` is the inspection-only clause that
+                // replaced the removed `AS RQL` / `EXECUTE` forms.
+                if plan_only {
+                    s.push_str(" PLAN");
+                }
+                s
+            },
+        )
+}
+
+/// The removed `AS RQL` / `EXECUTE` clauses (ADR 0068, #1751). These must
+/// no longer parse — feeding them through `parser::parse` in the property
+/// suite pins the clean break: they reject rather than round-trip.
+pub fn ask_removed_clause_stmt() -> impl Strategy<Value = String> {
+    (str_lit(), any::<bool>()).prop_map(|(q, as_rql)| {
+        if as_rql {
+            format!("ASK {} AS RQL", q)
+        } else {
+            format!("ASK {} EXECUTE", q)
+        }
+    })
 }
 
 /// `ASK 'question' USING <provider>`. Because of FIXME(#101), this
