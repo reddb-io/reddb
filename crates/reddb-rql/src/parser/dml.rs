@@ -718,10 +718,11 @@ impl<'a> Parser<'a> {
         let mut cache = AskCacheClause::Default;
         let mut as_rql = false;
         let mut execute = false;
+        let mut steps = None;
 
         // Parse optional clauses in any order. Loop bound = number of
         // clause kinds, so each can appear at most once.
-        for _ in 0..14 {
+        for _ in 0..15 {
             if self.consume(&Token::Using)? {
                 provider = Some(match &self.current.token {
                     Token::String(_) => self.parse_string()?,
@@ -798,6 +799,21 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 execute = true;
+            } else if self.consume_ident_ci("STEPS")? {
+                if steps.is_some() {
+                    return Err(ParseError::new(
+                        "ASK STEPS specified more than once",
+                        self.position(),
+                    ));
+                }
+                let n = self.parse_integer()?;
+                if n < 1 {
+                    return Err(ParseError::new(
+                        "ASK STEPS must be a positive integer",
+                        self.position(),
+                    ));
+                }
+                steps = Some(n as usize);
             } else {
                 break;
             }
@@ -820,6 +836,7 @@ impl<'a> Parser<'a> {
             cache,
             as_rql,
             execute,
+            steps,
         }))
     }
 
@@ -1565,6 +1582,53 @@ mod tests {
         assert_eq!(query.question, "");
         assert_eq!(query.question_param, Some(0));
         assert_eq!(query.cache, AskCacheClause::NoCache);
+    }
+
+    #[test]
+    fn ask_parses_steps_budget_clause() {
+        // Absent by default — the runtime falls back to the config cap.
+        assert_eq!(ask("ASK 'q'").steps, None);
+
+        // A positive STEPS N is captured verbatim (clamping to the config
+        // cap happens later, in the planner).
+        let query = ask("ASK 'q' STEPS 2 STRICT OFF");
+        assert_eq!(query.steps, Some(2));
+
+        // STEPS composes with the other clauses in any order.
+        let query = ask("ASK 'q' DEPTH 3 STEPS 5 LIMIT 4");
+        assert_eq!(query.steps, Some(5));
+        assert_eq!(query.depth, Some(3));
+        assert_eq!(query.limit, Some(4));
+    }
+
+    #[test]
+    fn ask_steps_clause_error_paths() {
+        let mut parser = make_parser("ASK 'q' STEPS 0");
+        let err = parser.parse_ask_query().expect_err("STEPS 0 should fail");
+        assert!(
+            err.to_string()
+                .contains("ASK STEPS must be a positive integer"),
+            "got: {err}"
+        );
+
+        let mut parser = make_parser("ASK 'q' STEPS 2 STEPS 3");
+        let err = parser
+            .parse_ask_query()
+            .expect_err("duplicate STEPS should fail");
+        assert!(
+            err.to_string()
+                .contains("ASK STEPS specified more than once"),
+            "got: {err}"
+        );
+
+        let mut parser = make_parser("ASK 'q' STEPS abc");
+        let err = parser
+            .parse_ask_query()
+            .expect_err("non-integer STEPS should fail");
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("integer"),
+            "got: {err}"
+        );
     }
 
     #[test]
