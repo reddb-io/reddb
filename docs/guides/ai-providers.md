@@ -126,18 +126,48 @@ compiled in: fail fast rather than silently demote.
 
 ## Setting a default provider
 
+The AI config namespace (ADR 0068 §5) splits **inference** (generation,
+ASK) from **embeddings** (AUTO EMBED, SEARCH SIMILAR TEXT). Two task
+pointers say which provider serves each modality:
+
+```sql
+-- Task pointers: who generates, who embeds
+SET CONFIG red.config.ai.inference.provider  = 'groq'
+SET CONFIG red.config.ai.embeddings.provider = 'openai'
+
+-- Per-provider model + base URL live in the provider block
+SET CONFIG red.config.ai.providers.groq.models.inference     = 'llama-3.3-70b-versatile'
+SET CONFIG red.config.ai.providers.openai.models.embeddings  = 'text-embedding-3-small'
+SET CONFIG red.config.ai.providers.groq.base_url             = 'https://api.groq.com/openai/v1'
+```
+
+Posting a credential with `"default": true` sets these pointers for you
+(the embeddings pointer only when the provider can embed):
+
 ```bash
-# Set default provider — drops `USING` from every query
 curl -X POST http://127.0.0.1:5000/ai/credentials \
   -d '{"provider":"groq","api_key":"gsk_xxx","default":true}'
 ```
 
 ```sql
--- ASK uses the default provider when USING is omitted
+-- ASK uses the inference pointer when USING is omitted
 ASK 'what changed in the last 24 hours?'
 ```
 
-Default provider can be overridden per-call with `USING <provider>`.
+**Resolution order for any AI call:** ASK-specific config
+(`red.config.ai.ask.*`) → task pointer → the pointed provider's `models`
+block → the provider's built-in default.
+
+`ASK … USING <provider>` overrides the **inference** side only —
+embeddings still resolve through the embeddings task pointer. A task
+pointer aimed at a provider that lacks the modality (Anthropic has no
+embeddings API) fails with a didactic error naming the pointer to fix;
+there is no silent re-route.
+
+> **Clean break:** `red.config.ai.default.provider`,
+> `red.config.ai.default.model`, and the old
+> `red.config.ai.{provider}.{alias}.base_url` base-URL shape were removed.
+> Writing any of them is rejected with an error naming the new key.
 
 ---
 
