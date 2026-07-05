@@ -155,7 +155,7 @@ the primary source.
 **Canonical vault path:**
 
 ```
-red.secret.ai.<provider>.<alias>.api_key
+red.secret.ai.providers.<provider>.tokens.<alias>
 ```
 
 - `<provider>` matches the **Token** column of the capability matrix
@@ -167,9 +167,9 @@ red.secret.ai.<provider>.<alias>.api_key
 **Stage a key** (after `CREATE VAULT secrets` + `VAULT UNSEAL`):
 
 ```bash
-reddb-cli vault set red.secret.ai.openai.default.api_key "sk-..."
-reddb-cli vault set red.secret.ai.huggingface.default.api_key "hf_..."
-reddb-cli vault set red.secret.ai.openai.prod.api_key "sk-prod-..."
+reddb-cli vault set red.secret.ai.providers.openai.tokens.default "sk-..."
+reddb-cli vault set red.secret.ai.providers.huggingface.tokens.default "hf_..."
+reddb-cli vault set red.secret.ai.providers.openai.tokens.prod "sk-prod-..."
 ```
 
 Vault setup itself is covered in [Security → Vault](/security/vault.md).
@@ -177,14 +177,21 @@ Vault setup itself is covered in [Security → Vault](/security/vault.md).
 **Resolution order** (first non-empty wins, per request — vault first, env as a
 bootstrap fallback):
 
-1. Vault secret: `red.secret.ai.<provider>.<alias>.api_key`
-2. Vault indirection: `red.config.ai.<provider>.<alias>.secret_ref` points at another vault path
+1. Vault token: `red.secret.ai.providers.<provider>.tokens.<alias>`
+2. Vault indirection: `red.config.ai.providers.<provider>.tokens.<alias>.secret_ref` points at another vault path
 3. Env var `REDDB_<PROVIDER>_API_KEY_<ALIAS>` (or `REDDB_<PROVIDER>_API_KEY` for the default alias)
-4. Legacy plaintext config: `red.config.ai.<provider>.<alias>.key` (deprecated — do not use for new deployments)
 
 For the **default** alias (no `"credential"` in the request), the vault path is
-`red.secret.ai.<provider>.default.api_key` and the env fallback is
+`red.secret.ai.providers.<provider>.tokens.default` and the env fallback is
 `REDDB_<PROVIDER>_API_KEY`.
+
+> **Clean break (issue #1745).** The old vault path shape
+> (`red.secret.ai.<provider>.<alias>.api_key`) and the deprecated plaintext
+> config path (`red.config.ai.<provider>.<alias>.key`) are **removed** — there
+> is no deprecation window. A credential still parked at either is rejected
+> with a didactic error naming the new vault path to populate; it is never
+> silently read. Migrate any staged keys to the `providers.<provider>.tokens.<alias>`
+> shape.
 
 A missing key surfaces as a `400` with the exact path the operator
 should populate. There is no silent fallback to a different alias or
@@ -193,7 +200,7 @@ provider.
 **Use the staged key from SQL or HTTP:**
 
 ```sql
--- uses red.secret.ai.openai.default.api_key (default alias is implicit)
+-- uses red.secret.ai.providers.openai.tokens.default (default alias is implicit)
 INSERT INTO docs (body) VALUES ('hello')
   WITH AUTO EMBED (body) USING openai;
 
@@ -220,7 +227,7 @@ namespace off-limits — even from admin:
 
 ```json
 {"effect":"deny","actions":["vault:read","vault:write"],
- "resources":["vault:red.vault/red.secret.ai.custom.*"]}
+ "resources":["vault:red.vault/red.secret.ai.providers.custom.*"]}
 ```
 
 See [Security → Vault](/security/vault.md#locking-down-secrets-by-path-with-policies)
