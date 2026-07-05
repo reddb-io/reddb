@@ -84,12 +84,44 @@ impl NarrowedSlice {
     }
 }
 
+/// A raw suggested statement the planner emitted for a how-to question,
+/// before parser validation. `rql` is the candidate statement text exactly as
+/// the model produced it; it is never trusted until it passes the parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawSuggestion {
+    pub rql: String,
+    pub rationale: String,
+}
+
+/// A parser-validated suggested statement in the how-to envelope. It carries
+/// the `mutating` flag and canonical statement kind and is **advisory only**:
+/// suggested statements — including mutating/DDL ones — are NEVER executed by
+/// ASK. A future apply-command consumes this envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestedStatement {
+    /// The candidate RQL, trimmed, exactly as it parsed.
+    pub rql: String,
+    /// True when the statement writes / drops / alters / otherwise mutates
+    /// state (or is any non-read-only kind). Advisory — never a licence to run.
+    pub mutating: bool,
+    /// Canonical statement-type label (`select`, `insert`, `create_queue`, …).
+    pub statement_type: &'static str,
+    /// Why the planner suggested this statement.
+    pub rationale: String,
+}
+
 /// The typed plan the planner LLM emits, before candidate validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskPlan {
     pub intent: AskIntent,
     /// The `query` step's read-only RQL candidate (factual intent).
     pub query: Option<String>,
+    /// The natural-language answer explaining the approach (how-to intent).
+    /// Empty for the factual/synthesis paths, which synthesize their answer.
+    pub answer: String,
+    /// The how-to suggestion: raw statements before parser validation. Each is
+    /// re-validated through the production parser by [`route_plan`].
+    pub suggestion: Vec<RawSuggestion>,
     /// Model rationale / self-critique, surfaced to plan summary + audit.
     pub rationale: String,
 }
@@ -104,6 +136,28 @@ impl AskPlan {
         }
         out
     }
+}
+
+/// Validate each suggested statement through the production parser, **dropping**
+/// any that do not parse (unparseable model output is never returned raw), and
+/// flag each read-only vs mutating. Mutating/DDL statements are kept in the
+/// envelope — so a future apply-command can consume them — but ASK never runs
+/// them; this function only classifies, it never executes.
+pub fn validate_suggestions(raw: &[RawSuggestion]) -> Vec<SuggestedStatement> {
+    let mut out = Vec::new();
+    for item in raw {
+        // A candidate that fails the production parser is dropped, never
+        // returned raw. The suggestion is advisory regardless of disposition.
+        if let Ok(candidate) = validate_candidate(&item.rql) {
+            out.push(SuggestedStatement {
+                mutating: !candidate.is_read_only(),
+                statement_type: candidate.statement_type,
+                rql: candidate.rql,
+                rationale: item.rationale.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// A model that turns a planner prompt into a typed-plan JSON document.
@@ -138,8 +192,17 @@ pub enum PlanRouting {
         statement_type: &'static str,
         rql: String,
     },
-    /// A non-factual intent (synthesis / how-to). This slice implements the
-    /// factual path only; the orchestrator decides the fallback.
+    /// How-to intent: an advisory suggestion envelope. `answer` explains the
+    /// approach in natural language; `suggestion` carries the parser-validated
+    /// statements, each flagged `mutating`, plus their rationale. Suggested
+    /// statements — including mutating/DDL ones — are NEVER executed; a future
+    /// apply-command consumes this envelope.
+    Suggest {
+        answer: String,
+        suggestion: Vec<SuggestedStatement>,
+    },
+    /// A remaining non-factual intent (synthesis). The orchestrator decides
+    /// the fallback (retrieval-RAG cited answer).
     Unsupported { intent: AskIntent },
 }
 
@@ -222,6 +285,19 @@ pub fn parse_plan(raw: &str) -> RedDBResult<AskPlan> {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    let answer = obj
+        .get("answer")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    let suggestion = obj
+        .get("suggestion")
+        .and_then(|v| v.as_array())
+        .map(parse_suggestions)
+        .unwrap_or_default();
+
     let rationale = obj
         .get("rationale")
         .and_then(|v| v.as_str())
@@ -232,8 +308,48 @@ pub fn parse_plan(raw: &str) -> RedDBResult<AskPlan> {
     Ok(AskPlan {
         intent,
         query,
+        answer,
+        suggestion,
         rationale,
     })
+}
+
+/// Read the `suggestion` array of a how-to plan into raw statements. Each item
+/// may be a bare RQL string or a `{ "rql": "...", "rationale": "..." }` object;
+/// items without any statement text are skipped. Parser validation happens
+/// later in [`validate_suggestions`], not here.
+fn parse_suggestions(items: &[crate::json::Value]) -> Vec<RawSuggestion> {
+    let mut out = Vec::new();
+    for item in items {
+        if let Some(rql) = item.as_str() {
+            let rql = rql.trim();
+            if !rql.is_empty() {
+                out.push(RawSuggestion {
+                    rql: rql.to_string(),
+                    rationale: String::new(),
+                });
+            }
+        } else if let Some(obj) = item.as_object() {
+            let rql = obj
+                .get("rql")
+                .or_else(|| obj.get("statement"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if rql.is_empty() {
+                continue;
+            }
+            let rationale = obj
+                .get("rationale")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            out.push(RawSuggestion { rql, rationale });
+        }
+    }
+    out
 }
 
 /// Route a parsed plan: validate the factual candidate through the parser +
@@ -259,6 +375,16 @@ pub fn route_plan(plan: &AskPlan) -> RedDBResult<PlanRouting> {
                     rql: candidate.rql,
                 }),
             }
+        }
+        AskIntent::HowTo => {
+            // Parser-validate every suggested statement; unparseable ones are
+            // dropped. Mutating/DDL statements survive in the envelope but are
+            // never executed — the suggestion is advisory.
+            let suggestion = validate_suggestions(&plan.suggestion);
+            Ok(PlanRouting::Suggest {
+                answer: plan.answer.clone(),
+                suggestion,
+            })
         }
         other => Ok(PlanRouting::Unsupported { intent: other }),
     }
@@ -671,19 +797,97 @@ mod tests {
     }
 
     #[test]
-    fn how_to_intent_routes_unsupported_in_this_slice() {
+    fn how_to_intent_routes_to_a_validated_suggestion_envelope() {
+        // A how-to plan carries a natural-language answer plus a suggestion of
+        // parser-validated statements — a read-only SELECT, a mutating DDL
+        // CREATE QUEUE, and a mutating EVENTS BACKFILL.
         let route = plan_and_route(
-            "how would I capture events into a queue?",
+            "how would I capture events from orders into a queue?",
             &slice(),
-            &mock_model("{\"intent\":\"how_to\",\"query\":null,\"rationale\":\"guide\"}"),
+            &mock_model(
+                "{\"intent\":\"how_to\",\"answer\":\"Create a queue and backfill events into it.\",\
+                  \"suggestion\":[\
+                    {\"rql\":\"CREATE QUEUE events_q WORK\",\"rationale\":\"the sink queue\"},\
+                    {\"rql\":\"EVENTS BACKFILL orders TO events_q\",\"rationale\":\"seed history\"},\
+                    {\"rql\":\"SELECT * FROM travelers WHERE passport = 'FDD-1'\",\"rationale\":\"inspect\"}\
+                  ],\"rationale\":\"guide\"}",
+            ),
         )
         .unwrap();
-        assert_eq!(
-            route.routing,
-            PlanRouting::Unsupported {
-                intent: AskIntent::HowTo
+        match route.routing {
+            PlanRouting::Suggest { answer, suggestion } => {
+                assert!(answer.contains("Create a queue"));
+                assert_eq!(suggestion.len(), 3);
+                // DDL / mutating statements are present and flagged mutating,
+                // and are NEVER executed — this envelope is advisory only.
+                assert!(suggestion[0].mutating, "CREATE QUEUE is mutating DDL");
+                assert!(suggestion[1].mutating, "EVENTS BACKFILL is mutating");
+                assert!(!suggestion[2].mutating, "the SELECT is read-only");
+                assert_eq!(suggestion[2].statement_type, "select");
+                assert_eq!(suggestion[0].rationale, "the sink queue");
             }
-        );
+            other => panic!("expected Suggest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn how_to_suggestion_drops_unparseable_statements_never_returns_them_raw() {
+        // The middle statement is not valid RQL; it is dropped, and only the
+        // two parser-valid statements survive in the envelope.
+        let route = plan_and_route(
+            "how do I list travelers?",
+            &slice(),
+            &mock_model(
+                "{\"intent\":\"how_to\",\"answer\":\"Select from the collection.\",\
+                  \"suggestion\":[\
+                    {\"rql\":\"SELECT * FROM travelers WHERE passport = 'FDD-1'\"},\
+                    {\"rql\":\"this is not rql at all\"},\
+                    \"DELETE FROM travelers WHERE passport = 'FDD-1'\"\
+                  ]}",
+            ),
+        )
+        .unwrap();
+        match route.routing {
+            PlanRouting::Suggest { suggestion, .. } => {
+                assert_eq!(suggestion.len(), 2, "the unparseable statement is dropped");
+                assert_eq!(suggestion[0].statement_type, "select");
+                // A bare-string suggestion item is accepted and validated too.
+                assert_eq!(suggestion[1].statement_type, "delete");
+                assert!(suggestion[1].mutating);
+                for s in &suggestion {
+                    assert!(
+                        !s.rql.contains("not rql"),
+                        "raw unparseable text must never survive"
+                    );
+                }
+            }
+            other => panic!("expected Suggest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn routing_distinguishes_how_to_from_factual_at_the_closure_model_seam() {
+        // Same slice + question, only the model's intent classification differs
+        // — the closure-model seam is what routes factual vs how-to.
+        let factual = plan_and_route(
+            "how would I capture events into a queue?",
+            &slice(),
+            &mock_model(
+                "{\"intent\":\"factual\",\"query\":\"SELECT * FROM travelers WHERE passport = 'FDD-1'\",\"rationale\":\"x\"}",
+            ),
+        )
+        .unwrap();
+        assert!(matches!(factual.routing, PlanRouting::Execute { .. }));
+
+        let how_to = plan_and_route(
+            "how would I capture events into a queue?",
+            &slice(),
+            &mock_model(
+                "{\"intent\":\"how_to\",\"answer\":\"Use a queue.\",\"suggestion\":[\"CREATE QUEUE events_q WORK\"],\"rationale\":\"x\"}",
+            ),
+        )
+        .unwrap();
+        assert!(matches!(how_to.routing, PlanRouting::Suggest { .. }));
     }
 
     // -----------------------------------------------------------------------
@@ -799,6 +1003,8 @@ mod tests {
         let plan = AskPlan {
             intent: AskIntent::Factual,
             query: Some("SELECT * FROM travelers WHERE passport = 'FDD-1'".to_string()),
+            answer: String::new(),
+            suggestion: Vec::new(),
             rationale: "lookup".to_string(),
         };
         let summary = plan.summary();
