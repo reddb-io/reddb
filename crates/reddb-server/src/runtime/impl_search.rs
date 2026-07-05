@@ -1857,6 +1857,17 @@ impl RedDBRuntime {
             ask_planner::PlanRouting::Unsupported { intent } => {
                 Ok(PlannerPrepass::FallThrough { intent })
             }
+            ask_planner::PlanRouting::Suggest { answer, suggestion } => {
+                Ok(PlannerPrepass::Handled(Box::new(
+                    self.build_suggestion_envelope_result(
+                        raw_query,
+                        &scope,
+                        &route.plan,
+                        &answer,
+                        &suggestion,
+                    )?,
+                )))
+            }
             ask_planner::PlanRouting::RefuseMutating {
                 statement_type,
                 rql,
@@ -2266,6 +2277,121 @@ impl RedDBRuntime {
         record.set("intent", Value::text(plan.intent.as_str().to_string()));
         record.set("candidate", Value::text(candidate_rql.to_string()));
         record.set("candidate_type", Value::text(statement_type.to_string()));
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+        })
+    }
+
+    /// How-to suggestion envelope (ADR 0068, #1750). The question is meta-
+    /// language about the database ("how would I capture events into a
+    /// queue?"); the planner routed to the how-to intent. The envelope carries
+    /// a natural-language `answer` plus a `suggestion` of parser-validated
+    /// statements, each flagged `mutating` with its rationale. Suggested
+    /// statements — including mutating/DDL ones — are returned but NEVER
+    /// executed: ASK stays free of write side-effects, so no query runs here
+    /// (a future apply-command consumes this envelope). The audit row records
+    /// the how-to intent and the suggested statement kinds.
+    fn build_suggestion_envelope_result(
+        &self,
+        raw_query: &str,
+        scope: &crate::runtime::statement_frame::EffectiveScope,
+        plan: &crate::runtime::ai::ask_planner::AskPlan,
+        answer: &str,
+        suggestion: &[crate::runtime::ai::ask_planner::SuggestedStatement],
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let answer = if answer.is_empty() {
+            "Here is how you could approach this. The suggested statements below are advisory \
+             and are not executed."
+                .to_string()
+        } else {
+            answer.to_string()
+        };
+
+        // Structured suggestion array: one object per validated statement,
+        // carrying the mutating flag, canonical kind, and rationale.
+        let suggestion_json = crate::json::Value::Array(
+            suggestion
+                .iter()
+                .map(|s| {
+                    let mut obj = crate::json::Map::new();
+                    obj.insert("rql".to_string(), crate::json::Value::String(s.rql.clone()));
+                    obj.insert("mutating".to_string(), crate::json::Value::Bool(s.mutating));
+                    obj.insert(
+                        "statement_type".to_string(),
+                        crate::json::Value::String(s.statement_type.to_string()),
+                    );
+                    obj.insert(
+                        "rationale".to_string(),
+                        crate::json::Value::String(s.rationale.clone()),
+                    );
+                    crate::json::Value::Object(obj)
+                })
+                .collect(),
+        );
+        let suggestion_bytes =
+            crate::json::to_vec(&suggestion_json).unwrap_or_else(|_| b"[]".to_vec());
+
+        // The audit row records the how-to intent and the suggested statement
+        // kinds (never the raw statements — only their canonical kinds).
+        let kinds: Vec<&str> = suggestion.iter().map(|s| s.statement_type).collect();
+        let mutating_count = suggestion.iter().filter(|s| s.mutating).count();
+        let plan_summary = format!(
+            "intent=how_to; suggested=[{}]; mutating={}/{}",
+            kinds.join(","),
+            mutating_count,
+            suggestion.len()
+        );
+        self.record_ask_audit(AskAuditInput {
+            scope,
+            question: &plan_summary,
+            source_urns: &[],
+            provider: "",
+            model: "",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: 0.0,
+            answer: &answer,
+            citations: &[],
+            cache_hit: false,
+            effective_mode: crate::runtime::ai::strict_validator::Mode::Lenient,
+            temperature: None,
+            seed: None,
+            validation_ok: true,
+            retry_count: 0,
+            errors: &[],
+            intent: Some(plan.intent.as_str()),
+            plan_summary: Some(&plan_summary),
+            executed_query: None,
+        })?;
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "intent".into(),
+            "suggestion".into(),
+            "suggestion_count".into(),
+            "mutating_count".into(),
+            "advisory".into(),
+            "executed".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", Value::text(answer));
+        record.set("intent", Value::text(plan.intent.as_str().to_string()));
+        record.set("suggestion", Value::Json(suggestion_bytes));
+        record.set("suggestion_count", Value::Integer(suggestion.len() as i64));
+        record.set("mutating_count", Value::Integer(mutating_count as i64));
+        // The suggestion is advisory and nothing was executed — ASK never
+        // writes on a how-to question.
+        record.set("advisory", Value::Boolean(true));
+        record.set("executed", Value::Boolean(false));
         result.push(record);
 
         Ok(RuntimeQueryResult {
