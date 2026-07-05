@@ -2275,6 +2275,9 @@ impl RedDBRuntime {
                 Some(true),
             ),
             PlanRouting::Unsupported { .. } => (None, None, None),
+            // A how-to suggestion envelope carries no single executable
+            // candidate — plan-only reports no candidate columns for it.
+            PlanRouting::Suggest { .. } => (None, None, None),
         };
 
         let plan_summary = plan.summary();
@@ -2816,6 +2819,8 @@ impl RedDBRuntime {
                         rql, ..
                     } => Some(rql.clone()),
                     crate::runtime::ai::ask_planner::PlanRouting::Unsupported { .. } => None,
+                    // A how-to suggestion envelope has no single candidate query.
+                    crate::runtime::ai::ask_planner::PlanRouting::Suggest { .. } => None,
                 };
                 (route.plan.intent.as_str().to_string(), candidate)
             }
