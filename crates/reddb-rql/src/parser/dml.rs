@@ -669,7 +669,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse: ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n]
-    /// [LIMIT n] [MIN_SCORE x] [COLLECTION col] [AS RQL]
+    /// [LIMIT n] [MIN_SCORE x] [COLLECTION col] [PLAN]
     pub fn parse_ask_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.parse_ask_query_with_explain(false)
     }
@@ -716,8 +716,7 @@ impl<'a> Parser<'a> {
         let mut strict = true;
         let mut stream = false;
         let mut cache = AskCacheClause::Default;
-        let mut as_rql = false;
-        let mut execute = false;
+        let mut plan_only = false;
         let mut steps = None;
 
         // Parse optional clauses in any order. Loop bound = number of
@@ -777,28 +776,31 @@ impl<'a> Parser<'a> {
                 }
                 cache = AskCacheClause::NoCache;
             } else if self.consume(&Token::As)? {
-                if as_rql {
-                    return Err(ParseError::new(
-                        "ASK AS RQL specified more than once",
-                        self.position(),
-                    ));
-                }
-                let output = self.expect_ident_or_keyword()?;
-                if !output.eq_ignore_ascii_case("RQL") {
-                    return Err(ParseError::new(
-                        "Expected RQL after ASK AS",
-                        self.position(),
-                    ));
-                }
-                as_rql = true;
+                // Clean break (ADR 0068, #1751): `ASK ... AS RQL` was removed.
+                // Point the caller at the replacement: `PLAN` returns the
+                // typed plan and candidate query without executing.
+                return Err(ParseError::new(
+                    "ASK ... AS RQL was removed: use `ASK '<question>' PLAN` to return the \
+                     typed plan and candidate query without executing",
+                    self.position(),
+                ));
             } else if self.consume_ident_ci("EXECUTE")? {
-                if execute {
+                // Clean break (ADR 0068, #1751): `ASK ... EXECUTE` was removed.
+                // Read-only candidates auto-execute by default; `PLAN`
+                // inspects the query without running it.
+                return Err(ParseError::new(
+                    "ASK ... EXECUTE was removed: read-only candidates auto-execute by default; \
+                     use `ASK '<question>' PLAN` to inspect the query without executing",
+                    self.position(),
+                ));
+            } else if self.consume_ident_ci("PLAN")? {
+                if plan_only {
                     return Err(ParseError::new(
-                        "ASK EXECUTE specified more than once",
+                        "ASK PLAN specified more than once",
                         self.position(),
                     ));
                 }
-                execute = true;
+                plan_only = true;
             } else if self.consume_ident_ci("STEPS")? {
                 if steps.is_some() {
                     return Err(ParseError::new(
@@ -834,8 +836,7 @@ impl<'a> Parser<'a> {
             strict,
             stream,
             cache,
-            as_rql,
-            execute,
+            plan_only,
             steps,
         }))
     }
