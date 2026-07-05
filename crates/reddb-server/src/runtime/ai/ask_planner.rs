@@ -620,6 +620,57 @@ mod tests {
     }
 
     #[test]
+    fn synthesis_intent_carries_the_routed_intent_for_the_rag_fallthrough() {
+        // #1749: a summarise/explain question routes to the RAG path. The
+        // routing carries the intent so the orchestrator can record it on the
+        // downstream audit row without re-classifying.
+        let route = plan_and_route(
+            "summarise the incidents from yesterday",
+            &slice(),
+            &mock_model("{\"intent\":\"synthesis\",\"query\":null,\"rationale\":\"rag\"}"),
+        )
+        .unwrap();
+        match route.routing {
+            PlanRouting::Unsupported { intent } => {
+                assert_eq!(intent, AskIntent::Synthesis);
+                assert_eq!(intent.as_str(), "synthesis");
+            }
+            other => panic!("expected Unsupported{{synthesis}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn calculation_question_routes_factual_not_synthesis() {
+        // ADR 0013 conformance boundary (#1749): a calculation-shaped question
+        // must land on the *factual* intent — a read-only aggregate the engine
+        // computes — never synthesis, where the LLM would be free to invent the
+        // number. The planner emits `factual` + a read-only aggregate SELECT;
+        // routing executes it and never falls through to RAG synthesis.
+        let route = plan_and_route(
+            "how many trips went to Lisbon?",
+            &slice(),
+            &mock_model(
+                "{\"intent\":\"factual\",\"query\":\"SELECT COUNT(*) FROM trips WHERE city = 'Lisbon'\",\"rationale\":\"aggregate count\"}",
+            ),
+        )
+        .unwrap();
+        assert_ne!(
+            route.plan.intent,
+            AskIntent::Synthesis,
+            "a calculation must never classify as synthesis (the LLM must not invent numbers)"
+        );
+        match route.routing {
+            PlanRouting::Execute { candidate } => {
+                assert!(candidate.is_read_only());
+                assert_eq!(candidate.statement_type, "select");
+            }
+            other => {
+                panic!("a calculation must route to an executable factual candidate, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
     fn how_to_intent_routes_unsupported_in_this_slice() {
         let route = plan_and_route(
             "how would I capture events into a queue?",
