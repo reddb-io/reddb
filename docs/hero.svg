@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" fill="none" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff2056" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#ff2056" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="strand" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#ff2056" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#ff2056" stop-opacity="0.55"/>
+    </linearGradient>
+    <filter id="blur8" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <style>
+      .blink { animation: blink 1.1s steps(1) infinite; }
+      .pulse { animation: pulse 2.6s ease-in-out infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+      @keyframes pulse { 50% { opacity: 0.55; } }
+      @media (prefers-reduced-motion: reduce) { .blink, .pulse { animation: none; } }
+    </style>
+  </defs>
+
+  <!-- canvas -->
+  <rect width="1200" height="420" rx="16" fill="#0b0b0d"/>
+  <g stroke="#ffffff" stroke-opacity="0.03">
+    <path d="M0 105h1200M0 210h1200M0 315h1200"/>
+    <path d="M300 0v420M600 0v420M900 0v420"/>
+  </g>
+  <circle cx="300" cy="190" r="260" fill="url(#glow)"/>
+
+  <!-- seven strands: one per model, converging into the period of RedDB. -->
+  <g fill="none" stroke-width="1.3">
+    <path d="M82 318 C 82 258, 300 252, 363 216"  stroke="#ff2056" stroke-opacity="0.45"/>
+    <path d="M163 318 C 163 262, 310 250, 364 217" stroke="#ff6b3d" stroke-opacity="0.40"/>
+    <path d="M264 318 C 264 266, 320 248, 365 218" stroke="#f5a524" stroke-opacity="0.38"/>
+    <path d="M345 318 C 345 272, 335 246, 366 219" stroke="#34d399" stroke-opacity="0.35"/>
+    <path d="M433 318 C 433 268, 372 244, 368 220" stroke="#38bdf8" stroke-opacity="0.35"/>
+    <path d="M487 318 C 487 262, 396 242, 370 220" stroke="#8b7cf6" stroke-opacity="0.38"/>
+    <path d="M602 318 C 602 254, 420 240, 372 220" stroke="#f472b6" stroke-opacity="0.40"/>
+  </g>
+
+  <!-- wordmark: RedDB with a glowing period — seven models, one point -->
+  <circle class="pulse" cx="371" cy="212" r="18" fill="#ff2056" opacity="0.30" filter="url(#blur8)"/>
+  <text x="64" y="222" font-size="92" font-weight="800" letter-spacing="-3" fill="#f5f5f7">RedDB</text>
+  <circle cx="371" cy="212" r="7" fill="#ff2056"/>
+
+  <!-- eyebrow + tagline -->
+  <text x="68" y="96" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="13" letter-spacing="4" fill="#8a8a93">SEVEN MODELS &#183; ONE ENGINE &#183; ONE FILE</text>
+  <text x="66" y="266" font-size="21" fill="#c7c7cd">The AI-first multi-model database <tspan fill="#565660">&#8212; ask it anything.</tspan></text>
+
+  <!-- model chips -->
+  <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" letter-spacing="1">
+    <rect x="68"  y="306" width="72"  height="26" rx="13" fill="#131318" stroke="#26262b"/>
+    <circle cx="82" cy="319" r="3" fill="#ff2056"/>
+    <text x="92" y="323" fill="#a5a5ae">TABLES</text>
+
+    <rect x="150" y="306" width="94"  height="26" rx="13" fill="#131318" stroke="#26262b"/>
+    <circle cx="163" cy="319" r="3" fill="#ff6b3d"/>
+    <text x="173" y="323" fill="#a5a5ae">DOCUMENTS</text>
+
+    <rect x="254" y="306" width="72"  height="26" rx="13" fill="#131318" stroke="#26262b"/>
+    <circle cx="264" cy="319" r="3" fill="#f5a524"/>
+    <text x="274" y="323" fill="#a5a5ae">GRAPHS</text>
+
+    <rect x="336" y="306" width="78"  height="26" rx="13" fill="#131318" stroke="#26262b"/>
+    <circle cx="345" cy="319" r="3" fill="#34d399"/>
+    <text x="355" y="323" fill="#a5a5ae">VECTORS</text>
+
+    <rect x="424" y="306" width="42"  height="26" rx="13" fill="#131318" stroke="#26262b"/>
+    <circle cx="433" cy="319" r="3" fill="#38bdf8"/>
+    <text x="443" y="323" fill="#a5a5ae">KV</text>
+
+    <rect x="476" y="306" width="106" height="26" rx="13" fill="#131318" stroke="#26262b"/>
+    <circle cx="487" cy="319" r="3" fill="#8b7cf6"/>
+    <text x="497" y="323" fill="#a5a5ae">TIME-SERIES</text>
+
+    <rect x="592" y="306" width="72"  height="26" rx="13" fill="#131318" stroke="#26262b"/>
+    <circle cx="602" cy="319" r="3" fill="#f472b6"/>
+    <text x="612" y="323" fill="#a5a5ae">QUEUES</text>
+  </g>
+
+  <!-- terminal: the ASK moment -->
+  <g>
+    <rect x="702" y="78" width="436" height="264" rx="12" fill="#101014" stroke="#26262b"/>
+    <circle cx="726" cy="102" r="5" fill="#1f1f24"/>
+    <circle cx="744" cy="102" r="5" fill="#1f1f24"/>
+    <circle cx="762" cy="102" r="5" fill="#1f1f24"/>
+    <text x="786" y="107" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="12" fill="#565660">reddb &#8212; ask</text>
+
+    <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="13.5">
+      <text x="726" y="146" fill="#565660">-- seven models, one question</text>
+      <text x="726" y="172"><tspan fill="#ff2056" font-weight="700">ASK</tspan><tspan fill="#f5c451"> 'who owns passport AB1234567</tspan></text>
+      <text x="726" y="196" fill="#f5c451">      and what services do they use?'</text>
+
+      <text x="726" y="238"><tspan fill="#34d399">&#8594;</tspan><tspan fill="#d7d7de"> Alice Souza owns AB1234567 and uses</tspan></text>
+      <text x="726" y="262" fill="#d7d7de">   VPN + Object Storage.</text>
+      <text x="726" y="290" fill="#565660">   2 graph hops &#183; 1 vector match &#183; 3 rows &#183; 41 ms</text>
+
+      <text x="726" y="322"><tspan fill="#ff2056">reddb&#62;</tspan></text>
+      <rect class="blink" x="786" y="311" width="8" height="14" fill="#ff2056"/>
+    </g>
+  </g>
+</svg>
