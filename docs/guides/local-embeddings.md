@@ -156,10 +156,10 @@ The pull endpoint:
 1. Looks up the model in the registry (404 if missing).
 2. Rejects any plaintext-credential field on the request body. Tokens
    must already be in the vault and referenced via `credential_alias`.
-3. Resolves provider credentials when `credential_alias` is set (env →
-   vault `red.secret.ai.huggingface.{alias}.api_key` → legacy config).
-   Empty / missing resolutions are a 400 — the operator either staged
-   the secret or did not, no silent fallback.
+3. Resolves provider credentials when `credential_alias` is set (vault
+   `red.secret.ai.providers.huggingface.tokens.{alias}` → `secret_ref`
+   indirection → env fallback). Empty / missing resolutions are a 400 —
+   the operator either staged the secret or did not, no silent fallback.
 4. Locates the artifact source. Today RedDB pulls from a local fixture
    directory (`fixture_dir` on the request, or
    `red.config.ai.local.fixture_dir` in `red_config`). Live HuggingFace
@@ -255,7 +255,7 @@ gated / private repos:
 1. Stage the token in the vault under the canonical AI secret path:
 
    ```bash
-   reddb-cli vault set red.secret.ai.huggingface.{alias}.api_key "hf_xxx"
+   reddb-cli vault set red.secret.ai.providers.huggingface.tokens.{alias} "hf_xxx"
    ```
 
 2. Reference it from the model:
@@ -271,11 +271,14 @@ gated / private repos:
         -d '{"fixture_dir":"...", "credential_alias":"{alias}"}'
    ```
 
-The resolution order at pull time is env (`REDDB_HUGGINGFACE_API_KEY_{ALIAS}`)
-→ vault (`red.secret.ai.huggingface.{alias}.api_key`) → legacy config
-(`red.config.ai.huggingface.{alias}.key`). A non-empty resolution is
-required when `credential_alias` is set — RedDB does not silently fall
-back to "no auth" if the operator named an alias.
+The resolution order at pull time is vault
+(`red.secret.ai.providers.huggingface.tokens.{alias}`) → `secret_ref`
+indirection → env fallback (`REDDB_HUGGINGFACE_API_KEY_{ALIAS}`). A non-empty
+resolution is required when `credential_alias` is set — RedDB does not silently
+fall back to "no auth" if the operator named an alias. The old
+`red.secret.ai.huggingface.{alias}.api_key` vault shape and the legacy plaintext
+`red.config.ai.huggingface.{alias}.key` path were removed in the same release
+(issue #1745, no deprecation window).
 
 **The boundary never accepts plaintext.** Both the model-register
 endpoint and the pull endpoint reject `api_key`, `token`, `hf_token`,
