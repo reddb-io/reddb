@@ -1801,17 +1801,19 @@ impl RedDBRuntime {
             ask_planner::GroundingOutcome::NoMatchingSources => {
                 // No planner or synthesis LLM call is made — the model can
                 // never invent an answer over an empty `(none)` slice.
-                return Ok(Some(
+                return Ok(PlannerPrepass::Handled(Box::new(
                     self.build_no_matching_sources_result(raw_query, &scope, ask)?,
-                ));
+                )));
             }
             ask_planner::GroundingOutcome::Grounded { slice, refined } => {
                 if refined {
                     // The single refine_retrieval re-funnel is a plan step.
                     if let Err(exhausted) = budget.charge(ask_planner::PlanStep::RefineRetrieval) {
-                        return Ok(Some(self.build_budget_exhausted_result(
-                            raw_query, &scope, ask, &budget, &exhausted,
-                        )?));
+                        return Ok(PlannerPrepass::Handled(Box::new(
+                            self.build_budget_exhausted_result(
+                                raw_query, &scope, ask, &budget, &exhausted,
+                            )?,
+                        )));
                     }
                 }
                 slice
@@ -1871,9 +1873,11 @@ impl RedDBRuntime {
                 // The query step is budgeted too; exhausting the budget
                 // mid-plan surfaces a structured partial-with-warning.
                 if let Err(exhausted) = budget.charge(ask_planner::PlanStep::Query) {
-                    return Ok(Some(self.build_budget_exhausted_result(
-                        raw_query, &scope, ask, &budget, &exhausted,
-                    )?));
+                    return Ok(PlannerPrepass::Handled(Box::new(
+                        self.build_budget_exhausted_result(
+                            raw_query, &scope, ask, &budget, &exhausted,
+                        )?,
+                    )));
                 }
                 let executed = self.execute_planner_candidate_and_synthesize(
                     raw_query,
