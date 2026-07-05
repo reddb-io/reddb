@@ -1764,6 +1764,25 @@ mod tests {
     }
 
     #[test]
+    fn embeddings_provider_falls_back_to_default_provider_chain() {
+        // With no embeddings-specific override, the embeddings provider
+        // follows the general default-provider chain (here the inference
+        // task pointer). This keeps a single-global-config deployment
+        // routing embeddings through the one provider it named — the
+        // regression the local-vector text-search tests guard against.
+        let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
+            match key {
+                "red.config.ai.inference.provider" => Ok(Some("ollama".to_string())),
+                _ => Ok(None),
+            }
+        };
+        assert_eq!(
+            resolve_embeddings_provider(&kv).unwrap(),
+            AiProvider::Ollama
+        );
+    }
+
+    #[test]
     fn embeddings_model_block_beats_builtin() {
         let block = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
@@ -2213,29 +2232,40 @@ where
     provider.default_prompt_model().to_string()
 }
 
-/// Resolve the embeddings provider from the embeddings task pointer
-/// (`red.config.ai.embeddings.provider`), falling back to OpenAI. Fails
-/// with a didactic error — naming the pointer and the capable providers —
-/// when the pointer names a provider that has no embeddings API, rather
-/// than silently re-routing (ADR-0068 §5; the Anthropic case generalized).
+/// Resolve the embeddings provider. Precedence:
+/// 1. `REDDB_AI_EMBEDDINGS_PROVIDER` env var (embeddings-specific override).
+/// 2. `red.config.ai.embeddings.provider` task pointer.
+/// 3. Fall back to the general default provider — [`resolve_default_provider`]
+///    honours `REDDB_AI_PROVIDER`, the wire-protocol mode selector, and the
+///    ASK/inference chain — so a deployment that only sets a single global
+///    provider (e.g. `REDDB_AI_PROVIDER=local`) still embeds through it.
 ///
-/// `REDDB_AI_EMBEDDINGS_PROVIDER` keeps env precedence over config.
+/// Fails with a didactic error — naming the embeddings pointer and the capable
+/// providers — when the resolved provider has no embeddings API, rather than
+/// silently re-routing (ADR-0068 §5; the Anthropic case generalized).
 pub fn resolve_embeddings_provider<F>(kv_getter: &F) -> crate::RedDBResult<AiProvider>
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
 {
-    let mut provider = AiProvider::OpenAi;
-    if let Ok(value) = std::env::var("REDDB_AI_EMBEDDINGS_PROVIDER") {
-        let value = value.trim().to_string();
-        if !value.is_empty() {
-            provider = parse_provider(&value)?;
-        }
-    } else if let Ok(Some(value)) = kv_getter("red.config.ai.embeddings.provider") {
-        let value = value.trim().to_string();
-        if !value.is_empty() {
-            provider = parse_provider(&value)?;
-        }
-    }
+    let provider = if let Some(value) = std::env::var("REDDB_AI_EMBEDDINGS_PROVIDER")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        parse_provider(&value)?
+    } else if let Some(value) = kv_getter("red.config.ai.embeddings.provider")
+        .ok()
+        .flatten()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        parse_provider(&value)?
+    } else {
+        // No embeddings-specific override: follow the general default
+        // provider so the historical global `REDDB_AI_PROVIDER` selector
+        // keeps driving embeddings when the task pointer is unset.
+        resolve_default_provider(kv_getter)
+    };
     ensure_provider_supports_embeddings(&provider)?;
     Ok(provider)
 }
@@ -2258,7 +2288,14 @@ pub fn ensure_provider_supports_embeddings(provider: &AiProvider) -> crate::RedD
 /// 1. Provider-specific `REDDB_<P>_EMBEDDING_MODEL` env var.
 /// 2. `REDDB_OPENAI_EMBEDDING_MODEL` env var (legacy shared override).
 /// 3. Provider models block `…providers.<p>.models.embeddings`.
-/// 4. Provider built-in default embedding model.
+/// 4. General `REDDB_AI_MODEL` env var (historical global model selector).
+/// 5. Provider built-in default embedding model.
+///
+/// The embeddings-specific sources (1–3) outrank the general `REDDB_AI_MODEL`
+/// selector so an explicit embeddings model always wins; `REDDB_AI_MODEL`
+/// only fills in for the built-in default, which is what keeps a
+/// single-global-config deployment (`REDDB_AI_PROVIDER`+`REDDB_AI_MODEL`)
+/// routing text embeddings through the named model.
 pub fn resolve_embeddings_model<F>(provider: &AiProvider, kv_getter: &F) -> String
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
@@ -2279,6 +2316,12 @@ where
         }
     }
     if let Ok(Some(value)) = kv_getter(&provider_models_key(provider, "embeddings")) {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    if let Ok(value) = std::env::var("REDDB_AI_MODEL") {
         let value = value.trim().to_string();
         if !value.is_empty() {
             return value;
