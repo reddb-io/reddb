@@ -2377,6 +2377,24 @@ pub fn resolve_defaults_from_runtime(
     (provider, model)
 }
 
+/// Resolve the ASK planner model from runtime KV (`red.config.ai.ask.planner_model`),
+/// falling back to `fallback_model` — the resolved synthesis/ASK model — when
+/// no planner model is configured (ADR 0068 §3). Lets a cheap/fast model plan
+/// while the user-chosen model synthesizes.
+pub fn resolve_ask_planner_model_from_runtime(
+    runtime: &crate::runtime::RedDBRuntime,
+    fallback_model: &str,
+) -> String {
+    use crate::application::ports::RuntimeEntityPort;
+    let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
+        match runtime.get_kv("red_config", key)? {
+            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s.to_string())),
+            _ => Ok(None),
+        }
+    };
+    resolve_ask_planner_model(&kv_getter, fallback_model)
+}
+
 /// Resolve default provider + model via RuntimeEntityPort trait (for use in QueryUseCases).
 pub fn resolve_defaults_from_runtime_port<
     P: crate::application::ports::RuntimeEntityPort + ?Sized,
