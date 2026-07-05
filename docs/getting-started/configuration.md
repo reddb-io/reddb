@@ -243,9 +243,9 @@ curl http://127.0.0.1:5000/config
 # Import from JSON file
 curl -X POST http://127.0.0.1:5000/config -d @examples/config.json
 
-# Override specific values
+# Override specific values (new AI schema — ADR 0068 §5)
 curl -X POST http://127.0.0.1:5000/config \
-  -d '{"red":{"ai":{"default":{"provider":"ollama","model":"llama3"}}}}'
+  -d '{"red":{"config":{"ai":{"inference":{"provider":"ollama"},"embeddings":{"provider":"ollama"},"providers":{"ollama":{"models":{"inference":"llama3","embeddings":"nomic-embed-text"}}}}}}}'
 ```
 
 See [`examples/config.json`](https://github.com/reddb-io/reddb/blob/main/examples/config.json) for a complete example with all defaults.
@@ -256,7 +256,7 @@ You can read and write configuration directly from the query engine:
 
 ```sql
 -- Set a config value
-SET CONFIG red.ai.default.provider = 'groq'
+SET CONFIG red.config.ai.inference.provider = 'groq'
 SET CONFIG red.storage.hnsw.ef_search = 100
 
 -- Show all config
@@ -273,15 +273,15 @@ Read, write, or delete a single config key via HTTP:
 
 ```bash
 # Read a key or subtree
-curl http://127.0.0.1:5000/config/red.ai.default.provider
+curl http://127.0.0.1:5000/config/red.config.ai.inference.provider
 
 # Set a key
-curl -X PUT http://127.0.0.1:5000/config/red.ai.default.provider \
+curl -X PUT http://127.0.0.1:5000/config/red.config.ai.inference.provider \
   -H 'content-type: application/json' \
   -d '{"value": "groq"}'
 
 # Delete a key
-curl -X DELETE http://127.0.0.1:5000/config/red.ai.default.model
+curl -X DELETE http://127.0.0.1:5000/config/red.config.ai.ask.model
 ```
 
 ### Resolution Order
@@ -289,21 +289,48 @@ curl -X DELETE http://127.0.0.1:5000/config/red.ai.default.model
 For any setting, RedDB checks in order:
 
 1. **Environment variable** (e.g., `REDDB_AI_PROVIDER`)
-2. **`red_config` KV store** (e.g., `red.ai.default.provider`)
+2. **`red_config` KV store** (e.g., `red.config.ai.inference.provider`)
 3. **Hardcoded default**
 
-### AI & LLM (`red.ai.*`)
+### AI & LLM (`red.config.ai.*`)
+
+The AI namespace splits **inference** (generation, ASK) from **embeddings**
+(AUTO EMBED, SEARCH SIMILAR TEXT). Each task has a *pointer* naming which
+provider serves it, and each provider has a **models block** naming the
+model to use for each modality. For any AI call the resolution order is:
+
+**ASK-specific config → task pointer → the pointed provider's `models`
+block → the provider's built-in default.**
+
+`ASK … USING <provider>` overrides the **inference** side only; embeddings
+keep following the embeddings task pointer. A task pointer aimed at a
+provider that lacks the modality (e.g. Anthropic has no embeddings API)
+fails with a didactic error naming the pointer to fix — RedDB never
+silently re-routes to a different provider.
 
 | Key | Default | Description |
 |:----|:--------|:------------|
-| `red.ai.default.provider` | `openai` | Default provider for ASK, SEARCH SIMILAR TEXT, AUTO EMBED |
-| `red.ai.default.model` | provider default | Default model |
-| `red.ai.{provider}.{alias}.key` | — | API key (e.g., `red.ai.groq.default.key`) |
-| `red.ai.{provider}.{alias}.base_url` | — | Custom API base URL |
-| `red.ai.max_embedding_inputs` | `256` | Max inputs per embedding batch |
-| `red.ai.max_prompt_batch` | `256` | Max prompts per batch |
-| `red.ai.timeout.connect_secs` | `10` | API connection timeout |
-| `red.ai.timeout.read_secs` | `90` | API read timeout |
+| `red.config.ai.ask.provider` | — | ASK planner provider (wins over the inference pointer) |
+| `red.config.ai.ask.model` | inference model | ASK model (wins over the provider models block) |
+| `red.config.ai.ask.planner_model` | ASK model | Planner model for the ASK planner |
+| `red.config.ai.ask.effort` | — | Planner effort hint (e.g. `low`/`medium`/`high`) |
+| `red.config.ai.ask.max_plan_steps` | — | Max ASK planner steps |
+| `red.config.ai.inference.provider` | `openai` | Task pointer: which provider generates |
+| `red.config.ai.embeddings.provider` | `openai` | Task pointer: which provider embeds |
+| `red.config.ai.providers.{provider}.base_url` | — | Custom API base URL for a provider |
+| `red.config.ai.providers.{provider}.models.inference` | provider default | Inference model for that provider |
+| `red.config.ai.providers.{provider}.models.embeddings` | provider default | Embeddings model for that provider |
+| `red.config.ai.{provider}.{alias}.key` | — | API key (e.g., `red.config.ai.groq.default.key`) |
+| `red.config.ai.max_embedding_inputs` | `256` | Max inputs per embedding batch |
+| `red.config.ai.max_prompt_batch` | `256` | Max prompts per batch |
+| `red.config.ai.timeout.connect_secs` | `10` | API connection timeout |
+| `red.config.ai.timeout.read_secs` | `90` | API read timeout |
+
+> **Clean break (ADR 0068 §5):** the old keys `red.config.ai.default.provider`,
+> `red.config.ai.default.model`, and the per-credential base-URL shape
+> `red.config.ai.{provider}.{alias}.base_url` were **removed** — writing any
+> of them is rejected with a didactic error naming the replacement key.
+> There is no deprecation window.
 
 ### Server (`red.server.*`)
 
