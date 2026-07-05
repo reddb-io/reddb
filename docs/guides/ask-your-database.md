@@ -593,16 +593,24 @@ SELECT * WHERE host = $1
 That form is parsed as the universal source `any`, equivalent in intent to
 `FROM ANY` plus a `WHERE` filter.
 
-When you want a prompt converted into a query candidate, request that contract
-explicitly:
+A **factual** `ASK` generates that query shape for you, auto-executes the
+read-only candidate under your RLS scope, and answers from the executed rows.
+To inspect the generated query without running it, add `PLAN`:
 
 ```sql
-ASK 'host 10.0.0.5' AS RQL
+ASK 'host 10.0.0.5' PLAN
 ```
 
-The `AS RQL` path does not call the LLM. It uses schema vocabulary and literal
-extraction, validates the generated read-only query through the parser, and
-returns the candidate in the `rql` column for the caller to execute or approve.
+`ASK ... PLAN` returns the routed `intent`, the `candidate_query`, its
+`candidate_type`, and a `mutating` flag — **it does not execute the candidate
+and does not call the synthesis model**. `EXPLAIN ASK '…'` goes one step
+lighter, returning the retrieval/provider/cost `plan` plus the intent and
+candidate query while running at most the planner call.
+
+> The `AS RQL` and `EXECUTE` clauses were removed in the ADR 0068 clean break
+> (#1751). Read-only candidates auto-execute by default; `PLAN` is the
+> inspection-only replacement. The removed clauses reject with a didactic
+> parse error that names `PLAN`.
 
 ### SEARCH CONTEXT = 3-Tier Strategy
 
@@ -639,8 +647,9 @@ paths. The provider boundary is enforced as follows:
 |:--------|:----------------|:----|
 | `SELECT … COUNT/SUM/AVG/MIN/MAX(…)` | SQL planner + executor | Exact, reproducible, no network call. |
 | `SEARCH CONTEXT 'term'` | Multi-tier index (field → token → scan) | Returns table rows, documents, KV entries, graph nodes/edges, and vectors when each backing collection exists. Empty result set when nothing matches &mdash; the contract is "ground or fall silent". |
-| `ASK '…'` | `AskPipeline` funnel + LLM synthesis | Pipeline grounds first (Stage 4 literal filter / Stage 3 BM25 + vector / Stage 3c graph), then the LLM rewrites the grounded rows into a citation-bearing sentence. |
-| `ASK '…' AS RQL` | Deterministic RQL planner | Uses schema vocabulary + literal extraction to return a parser-validated read-only query candidate. It does not call the LLM and does not execute the generated RQL. |
+| `ASK '…'` | Planner-first funnel + planner LLM + synthesis | Pipeline grounds first, the planner routes intent and (for factual) generates a read-only RQL candidate that auto-executes, then the LLM rewrites the executed/grounded rows into a citation-bearing sentence. |
+| `ASK '…' PLAN` | Planner-first funnel + planner LLM | Returns the routed intent + parser-validated candidate query without executing the candidate and without the synthesis call. |
+| `EXPLAIN ASK '…'` | Planner-first funnel + planner LLM (at most) | Returns the retrieval/provider/determinism/cost plan plus the routed intent and candidate query — never executes or synthesizes. |
 | Missing or unsupported analytics inside an `ASK` question | Pipeline short-circuits with a structured error OR returns an answer that openly cites "no matching sources" | The LLM never invents a number; it can only quote what `sources_flat` contains. |
 
 A practical rule: if the question is a calculation (`how many incidents are
