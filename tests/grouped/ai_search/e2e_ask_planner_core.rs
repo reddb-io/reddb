@@ -118,7 +118,10 @@ fn factual_ask_generates_executes_and_cites_over_executed_rows() {
     let intent = text(record, "intent").expect("intent column");
     assert_eq!(intent, "factual");
     let executed_query = text(record, "executed_query").expect("executed_query column");
-    assert_eq!(executed_query, "SELECT * FROM travelers WHERE passport = 'FDD-1'");
+    assert_eq!(
+        executed_query,
+        "SELECT * FROM travelers WHERE passport = 'FDD-1'"
+    );
     let sources_count = match record.get("sources_count") {
         Some(Value::Integer(n)) => *n,
         other => panic!("sources_count must be Integer, got {other:?}"),
@@ -219,11 +222,7 @@ fn multi_collection_question_executes_global_any_candidate() {
     let result = rt
         .execute_query("ASK 'what records mention passport FDD-9?' STRICT OFF LIMIT 10")
         .expect("multi-collection ASK should succeed");
-    let record = result
-        .result
-        .records
-        .first()
-        .expect("one canonical row");
+    let record = result.result.records.first().expect("one canonical row");
 
     let executed_query = text(record, "executed_query").expect("executed_query column");
     assert_eq!(executed_query, "SELECT * WHERE passport = 'FDD-9'");
@@ -284,8 +283,14 @@ fn mutating_candidate_is_refused_and_never_executed() {
     assert_eq!(record.get("refused"), Some(&Value::Boolean(true)));
     assert_eq!(text(record, "candidate_type").as_deref(), Some("delete"));
 
-    // Only the planner was called; no synthesis.
-    assert_eq!(stub.request_count(), 1, "mutating plan must not synthesize");
+    // Exactly one chat completion — the planner. No synthesis call is
+    // made for a refused mutating candidate. (The funnel may separately
+    // hit /embeddings, which is not a chat completion.)
+    assert_eq!(
+        stub.chat_bodies().len(),
+        1,
+        "mutating plan must not synthesize"
+    );
 
     // The row is untouched — the mutating candidate never executed.
     let survivors = rt
@@ -313,7 +318,9 @@ struct ScriptedStub {
 impl ScriptedStub {
     fn start(chat_responses: Vec<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("stub bind");
-        listener.set_nonblocking(true).expect("nonblocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let addr = listener.local_addr().expect("local addr");
         let shutdown = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));
@@ -333,7 +340,7 @@ impl ScriptedStub {
                         if path.contains("/embeddings") {
                             write_embedding_response(&mut stream);
                         } else {
-                            server_bodies.lock().unwrap().push(body);
+                            server_bodies.lock().expect("bodies lock").push(body);
                             let answer = queue.pop_front().unwrap_or_else(|| last.clone());
                             last = answer.clone();
                             write_chat_response(&mut stream, &answer);
@@ -365,7 +372,7 @@ impl ScriptedStub {
     }
 
     fn chat_bodies(&self) -> Vec<String> {
-        self.chat_bodies.lock().unwrap().clone()
+        self.chat_bodies.lock().expect("bodies lock").clone()
     }
 }
 
