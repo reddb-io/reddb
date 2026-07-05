@@ -456,6 +456,143 @@ fn synthesis_question_routes_to_rag_and_audit_records_intent() {
 }
 
 // ===========================================================================
+// #1750 — how-to intent: the suggestion envelope. A meta-language question
+// ("how would I capture events into a queue?") routes to the how-to intent.
+// The answer explains the approach in natural language and the envelope
+// carries parser-validated statements, each flagged mutating, plus rationale.
+// Mutating/DDL statements appear but are NEVER executed — no write side-effect.
+// ===========================================================================
+
+#[test]
+fn how_to_question_returns_answer_plus_validated_suggestion_never_executed() {
+    let _env = env_lock().lock().expect("env lock");
+
+    // A single scripted chat completion: the planner's how-to plan. It carries
+    // the natural-language answer and a suggestion of four statements — a
+    // read-only SELECT, a DDL CREATE QUEUE, a mutating EVENTS BACKFILL, and one
+    // unparseable string that must be dropped. No synthesis call follows.
+    let plan_json = "{\"intent\":\"how_to\",\
+        \"answer\":\"To capture events from orders into a queue, create a work queue and backfill the existing rows into it.\",\
+        \"suggestion\":[\
+          {\"rql\":\"CREATE QUEUE events_q WORK\",\"rationale\":\"the sink queue\"},\
+          {\"rql\":\"EVENTS BACKFILL orders TO events_q\",\"rationale\":\"seed history\"},\
+          {\"rql\":\"SELECT * FROM orders WHERE sku = 'WIDGET'\",\"rationale\":\"inspect source rows\"},\
+          {\"rql\":\"capture the orders somehow into the queue please\",\"rationale\":\"unparseable\"}\
+        ],\"rationale\":\"how-to guide\"}";
+    let stub = ScriptedStub::start(vec![plan_json.to_string()]);
+    let _p = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
+    let _b = EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+    let _k = EnvVarGuard::set("REDDB_OPENAI_API_KEY", "sk-test-mock");
+    let _m = EnvVarGuard::set("REDDB_OPENAI_PROMPT_MODEL", "synth-main");
+
+    let rt = open_rt();
+    exec(
+        &rt,
+        "CREATE TABLE orders (id TEXT PRIMARY KEY, sku TEXT) WITH CONTEXT INDEX ON (id, sku)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO orders (id, sku) VALUES ('o1', 'WIDGET'), ('o2', 'GADGET')",
+    );
+
+    configure_planner(&rt);
+
+    let result = rt
+        .execute_query("ASK 'how would I capture events from orders into a queue?' STRICT OFF")
+        .expect("how-to ASK returns a structured suggestion envelope, not an error");
+    let record = result.result.records.first().expect("one canonical row");
+
+    // A natural-language answer explaining the approach.
+    let answer = text(record, "answer").expect("answer column");
+    assert!(
+        answer.contains("queue"),
+        "answer should explain the how-to approach, got: {answer:?}"
+    );
+    // Routed to the how-to intent.
+    assert_eq!(text(record, "intent").as_deref(), Some("how_to"));
+    // Nothing was executed and the suggestion is advisory.
+    assert_eq!(record.get("executed"), Some(&Value::Boolean(false)));
+    assert_eq!(record.get("advisory"), Some(&Value::Boolean(true)));
+
+    // The suggestion carries only the parser-validated statements — the
+    // unparseable one is dropped and never returned raw.
+    let suggestion = match record.get("suggestion") {
+        Some(Value::Json(bytes)) => String::from_utf8_lossy(bytes).to_string(),
+        Some(Value::Text(s)) => s.to_string(),
+        other => panic!("suggestion must be JSON/Text, got {other:?}"),
+    };
+    assert_eq!(record.get("suggestion_count"), Some(&Value::Integer(3)));
+    assert_eq!(record.get("mutating_count"), Some(&Value::Integer(2)));
+    // Mutating/DDL statements appear in the envelope, flagged mutating.
+    assert!(
+        suggestion.contains("CREATE QUEUE events_q WORK") && suggestion.contains("create_queue"),
+        "the DDL CREATE QUEUE must appear in the suggestion: {suggestion}"
+    );
+    assert!(
+        suggestion.contains("EVENTS BACKFILL orders TO events_q")
+            && suggestion.contains("events_backfill"),
+        "the mutating EVENTS BACKFILL must appear in the suggestion: {suggestion}"
+    );
+    assert!(
+        suggestion.contains("\"mutating\":true"),
+        "mutating statements must be flagged: {suggestion}"
+    );
+    assert!(
+        suggestion.contains("\"mutating\":false") && suggestion.contains("select"),
+        "the read-only SELECT must be flagged non-mutating: {suggestion}"
+    );
+    // Unparseable model output is never returned raw.
+    assert!(
+        !suggestion.contains("capture the orders somehow"),
+        "unparseable statement text must never survive: {suggestion}"
+    );
+
+    // Exactly one chat completion — the planner. No synthesis, no execution.
+    assert_eq!(
+        stub.chat_bodies().len(),
+        1,
+        "a how-to question makes only the planner call, never a synthesis call"
+    );
+
+    // Conformance pin: no write occurred during the how-to ASK. The source
+    // rows are untouched and the suggested CREATE QUEUE never materialized.
+    let orders = rt
+        .execute_query("SELECT * FROM orders")
+        .expect("select orders");
+    assert_eq!(
+        orders.result.records.len(),
+        2,
+        "the how-to ASK must not write — source rows are untouched"
+    );
+    assert!(
+        rt.execute_query("QUEUE LEN events_q").is_err(),
+        "the suggested CREATE QUEUE must never execute — the queue does not exist"
+    );
+
+    // The audit row records the how-to intent and the suggested statement kinds.
+    let audit = rt
+        .execute_query("SELECT * FROM red_ask_audit")
+        .expect("read audit rows");
+    let audit_row = audit
+        .result
+        .records
+        .iter()
+        .find(|r| text(r, "intent").as_deref() == Some("how_to"))
+        .expect("a how_to audit row");
+    let plan_summary = text(audit_row, "plan_summary").expect("plan_summary column");
+    assert!(
+        plan_summary.contains("intent=how_to"),
+        "audit plan_summary must record the how-to intent: {plan_summary}"
+    );
+    assert!(
+        plan_summary.contains("create_queue")
+            && plan_summary.contains("events_backfill")
+            && plan_summary.contains("select"),
+        "audit plan_summary must record the suggested statement kinds: {plan_summary}"
+    );
+}
+
+// ===========================================================================
 // Scripted mock stub — sequenced chat completions + request-body capture.
 // ===========================================================================
 
