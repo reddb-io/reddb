@@ -1857,17 +1857,15 @@ impl RedDBRuntime {
             ask_planner::PlanRouting::Unsupported { intent } => {
                 Ok(PlannerPrepass::FallThrough { intent })
             }
-            ask_planner::PlanRouting::Suggest { answer, suggestion } => {
-                Ok(PlannerPrepass::Handled(Box::new(
-                    self.build_suggestion_envelope_result(
-                        raw_query,
-                        &scope,
-                        &route.plan,
-                        &answer,
-                        &suggestion,
-                    )?,
-                )))
-            }
+            ask_planner::PlanRouting::Suggest { answer, suggestion } => Ok(
+                PlannerPrepass::Handled(Box::new(self.build_suggestion_envelope_result(
+                    raw_query,
+                    &scope,
+                    &route.plan,
+                    &answer,
+                    &suggestion,
+                )?)),
+            ),
             ask_planner::PlanRouting::RefuseMutating {
                 statement_type,
                 rql,
