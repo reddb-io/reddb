@@ -75,6 +75,13 @@ impl NarrowedSlice {
             .map(|c| c.collection.as_str())
             .collect()
     }
+
+    /// The funnel grounded nothing: no candidate collection survived the
+    /// narrowing. An empty slice must never reach the planner LLM — grounding
+    /// failure is answered honestly, not by inventing a query over `(none)`.
+    pub fn is_empty(&self) -> bool {
+        self.collections.is_empty()
+    }
 }
 
 /// The typed plan the planner LLM emits, before candidate validation.
@@ -275,6 +282,163 @@ pub fn plan_and_route<M: PlannerModel>(
     })
 }
 
+// ===========================================================================
+// Plan budget (ADR 0068 §4, issue #1748)
+// ===========================================================================
+
+/// Default `red.config.ai.ask.max_plan_steps` cap when unset.
+pub const DEFAULT_MAX_PLAN_STEPS: usize = 3;
+
+/// A budgeted step in the executed plan. `refine_retrieval` and `query` are
+/// the steps the budget accounts for; each consumes exactly one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanStep {
+    /// A single re-funnel with expanded tokens after grounding fails on the
+    /// first pass (ADR 0013 single-retry analogy).
+    RefineRetrieval,
+    /// The read-only RQL candidate the planner emitted.
+    Query,
+}
+
+impl PlanStep {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanStep::RefineRetrieval => "refine_retrieval",
+            PlanStep::Query => "query",
+        }
+    }
+}
+
+/// Resolve the effective plan-step budget: a per-query `STEPS N` request is
+/// clamped to the configured `max_plan_steps` cap and never exceeds it; an
+/// absent request falls back to the cap. The result is always at least 1.
+pub fn clamp_plan_steps(requested: Option<usize>, cap: usize) -> usize {
+    let cap = cap.max(1);
+    match requested {
+        Some(n) => n.clamp(1, cap),
+        None => cap,
+    }
+}
+
+/// The budget was exhausted mid-plan: a step was attempted after the cap was
+/// already reached. The orchestrator turns this into a structured
+/// partial-with-warning result rather than looping unbounded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetExhausted {
+    pub attempted: PlanStep,
+    pub executed_steps: usize,
+    pub max_steps: usize,
+}
+
+/// A bounded plan-step counter. Total executed steps can never exceed
+/// `max_steps` — the anti-unbounded-loop guard (ADR 0068 §4).
+#[derive(Debug, Clone)]
+pub struct PlanBudget {
+    max_steps: usize,
+    executed: Vec<PlanStep>,
+}
+
+impl PlanBudget {
+    /// Build a budget from a per-query `STEPS N` request and the config cap.
+    /// The request is clamped so it can never exceed the cap.
+    pub fn new(requested_steps: Option<usize>, cap: usize) -> Self {
+        Self {
+            max_steps: clamp_plan_steps(requested_steps, cap),
+            executed: Vec::new(),
+        }
+    }
+
+    /// The clamped ceiling on total executed steps.
+    pub fn max_steps(&self) -> usize {
+        self.max_steps
+    }
+
+    /// How many steps have executed so far.
+    pub fn executed_count(&self) -> usize {
+        self.executed.len()
+    }
+
+    /// Steps still available before the budget is exhausted.
+    pub fn remaining(&self) -> usize {
+        self.max_steps.saturating_sub(self.executed.len())
+    }
+
+    /// The executed steps, in order — surfaced to the audit row.
+    pub fn executed_steps(&self) -> &[PlanStep] {
+        &self.executed
+    }
+
+    /// Charge one plan step. Returns `Err(BudgetExhausted)` — without
+    /// recording the step — when the cap is already reached.
+    pub fn charge(&mut self, step: PlanStep) -> Result<(), BudgetExhausted> {
+        if self.executed.len() >= self.max_steps {
+            return Err(BudgetExhausted {
+                attempted: step,
+                executed_steps: self.executed.len(),
+                max_steps: self.max_steps,
+            });
+        }
+        self.executed.push(step);
+        Ok(())
+    }
+}
+
+// ===========================================================================
+// Grounding critique + single refine_retrieval retry (ADR 0068 §4)
+// ===========================================================================
+
+/// The funnel behind a closure seam so the retry/refusal logic is unit-tested
+/// without a live retrieval pass. `expanded` requests the refine_retrieval
+/// widening (expanded tokens, relaxed score floor) on the single retry.
+pub trait RetrievalFunnel {
+    fn funnel(&self, expanded: bool) -> RedDBResult<NarrowedSlice>;
+}
+
+impl<F> RetrievalFunnel for F
+where
+    F: Fn(bool) -> RedDBResult<NarrowedSlice>,
+{
+    fn funnel(&self, expanded: bool) -> RedDBResult<NarrowedSlice> {
+        self(expanded)
+    }
+}
+
+/// The outcome of the grounding critique: either a grounded slice (possibly
+/// after the single refine_retrieval retry) or an honest "no matching
+/// sources" — never an invented answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GroundingOutcome {
+    /// A slice that grounds. `refined` is true when the single
+    /// refine_retrieval retry produced it.
+    Grounded { slice: NarrowedSlice, refined: bool },
+    /// Both the first funnel pass and the single refine_retrieval retry
+    /// grounded nothing. ASK answers honestly instead of inventing.
+    NoMatchingSources,
+}
+
+/// Fold the self-critique into grounding: run the funnel; if it grounds
+/// nothing, re-funnel **exactly once** with expanded tokens (mirroring the
+/// single citation retry of ADR 0013); if that still grounds nothing, report
+/// `NoMatchingSources` so ASK answers honestly rather than inventing.
+pub fn ground_with_refine<F: RetrievalFunnel>(funnel: &F) -> RedDBResult<GroundingOutcome> {
+    let first = funnel.funnel(false)?;
+    if !first.is_empty() {
+        return Ok(GroundingOutcome::Grounded {
+            slice: first,
+            refined: false,
+        });
+    }
+    // Exactly one refine_retrieval re-funnel with expanded tokens.
+    let refined = funnel.funnel(true)?;
+    if !refined.is_empty() {
+        return Ok(GroundingOutcome::Grounded {
+            slice: refined,
+            refined: true,
+        });
+    }
+    Ok(GroundingOutcome::NoMatchingSources)
+}
+
 /// Extract the outermost `{...}` JSON object from a model response that may
 /// carry code fences or surrounding prose.
 fn extract_json_object(raw: &str) -> Option<&str> {
@@ -469,6 +633,114 @@ mod tests {
                 intent: AskIntent::HowTo
             }
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan budget: STEPS clamp + bounded step counter (#1748).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn steps_clause_is_clamped_to_the_config_cap_never_exceeding_it() {
+        // Above the cap → clamped down to the cap.
+        assert_eq!(clamp_plan_steps(Some(9), 3), 3);
+        // At/below the cap → honored verbatim.
+        assert_eq!(clamp_plan_steps(Some(2), 3), 2);
+        assert_eq!(clamp_plan_steps(Some(3), 3), 3);
+        // Absent → falls back to the cap.
+        assert_eq!(clamp_plan_steps(None, 3), 3);
+        // Never below 1, even for a zero cap or a zero request.
+        assert_eq!(clamp_plan_steps(Some(0), 3), 1);
+        assert_eq!(clamp_plan_steps(None, 0), 1);
+    }
+
+    #[test]
+    fn plan_budget_charges_until_exhausted_then_refuses_more() {
+        let mut budget = PlanBudget::new(Some(2), 3);
+        assert_eq!(budget.max_steps(), 2);
+        assert_eq!(budget.remaining(), 2);
+
+        assert!(budget.charge(PlanStep::RefineRetrieval).is_ok());
+        assert_eq!(budget.remaining(), 1);
+        assert!(budget.charge(PlanStep::Query).is_ok());
+        assert_eq!(budget.remaining(), 0);
+        assert_eq!(
+            budget.executed_steps(),
+            &[PlanStep::RefineRetrieval, PlanStep::Query]
+        );
+
+        // The third step exhausts the budget — no unbounded loop.
+        let err = budget.charge(PlanStep::Query).unwrap_err();
+        assert_eq!(err.max_steps, 2);
+        assert_eq!(err.executed_steps, 2);
+        assert_eq!(err.attempted, PlanStep::Query);
+        // The refused step is not recorded.
+        assert_eq!(budget.executed_count(), 2);
+    }
+
+    #[test]
+    fn plan_budget_request_above_cap_cannot_buy_extra_steps() {
+        // STEPS 5 with a cap of 1 → only one step ever executes.
+        let mut budget = PlanBudget::new(Some(5), 1);
+        assert_eq!(budget.max_steps(), 1);
+        assert!(budget.charge(PlanStep::Query).is_ok());
+        assert!(budget.charge(PlanStep::RefineRetrieval).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Grounding critique + single refine_retrieval retry (#1748).
+    // -----------------------------------------------------------------------
+
+    /// A funnel closure that counts calls and returns empty/non-empty per the
+    /// script `[first, refined]`.
+    fn scripted_funnel(
+        script: Vec<bool>,
+    ) -> (impl RetrievalFunnel, std::rc::Rc<std::cell::Cell<usize>>) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let calls_inner = calls.clone();
+        let funnel = move |_expanded: bool| -> RedDBResult<NarrowedSlice> {
+            let n = calls_inner.get();
+            calls_inner.set(n + 1);
+            let non_empty = script.get(n).copied().unwrap_or(false);
+            Ok(if non_empty {
+                slice()
+            } else {
+                NarrowedSlice::default()
+            })
+        };
+        (funnel, calls)
+    }
+
+    #[test]
+    fn grounding_succeeds_on_first_pass_without_refining() {
+        let (funnel, calls) = scripted_funnel(vec![true]);
+        let outcome = ground_with_refine(&funnel).unwrap();
+        assert_eq!(calls.get(), 1, "no refine when the first pass grounds");
+        match outcome {
+            GroundingOutcome::Grounded { refined, .. } => assert!(!refined),
+            other => panic!("expected Grounded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_first_pass_triggers_exactly_one_refine_retrieval() {
+        // First pass grounds nothing; the single refine retry grounds.
+        let (funnel, calls) = scripted_funnel(vec![false, true]);
+        let outcome = ground_with_refine(&funnel).unwrap();
+        assert_eq!(calls.get(), 2, "exactly one refine re-funnel");
+        match outcome {
+            GroundingOutcome::Grounded { refined, .. } => assert!(refined),
+            other => panic!("expected Grounded after refine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn second_grounding_failure_returns_no_matching_sources_not_an_invented_answer() {
+        // Both passes ground nothing → honest no-matching-sources; the funnel
+        // is called exactly twice and never a third time.
+        let (funnel, calls) = scripted_funnel(vec![false, false]);
+        let outcome = ground_with_refine(&funnel).unwrap();
+        assert_eq!(calls.get(), 2, "exactly one refine retry, then give up");
+        assert_eq!(outcome, GroundingOutcome::NoMatchingSources);
     }
 
     #[test]
