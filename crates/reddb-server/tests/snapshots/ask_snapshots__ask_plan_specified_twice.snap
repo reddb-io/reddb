@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/ask_snapshots.rs
+expression: "fmt_parse_error(\"ASK 'q' PLAN PLAN\")"
+---
+input: "ASK 'q' PLAN PLAN"
+kind:  Syntax
+error: Parse error at 1:18: ASK PLAN specified more than once
