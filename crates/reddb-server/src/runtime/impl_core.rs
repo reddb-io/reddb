@@ -1071,6 +1071,10 @@ impl RedDBRuntime {
                         "red.secrets.* is reserved for vault secrets; use SET SECRET".to_string(),
                     ));
                 }
+                // ADR-0068 §5 clean break: reject the removed AI config keys
+                // (old `default.*` provider/model and per-alias base_url shape)
+                // with a didactic error naming the replacement key.
+                crate::ai::validate_ai_config_key_on_write(key)?;
                 match self.check_managed_config_write_for_set_config(key) {
                     Err(err) => Err(err),
                     Ok(()) => {
