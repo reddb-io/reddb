@@ -1,9 +1,22 @@
 {
   "red": {
     "ai": {
-      "default": {
-        "provider": "openai",
+      "inference": {
+        "provider": "openai"
+      },
+      "embeddings": {
+        "provider": "openai"
+      },
+      "ask": {
         "model": "gpt-4.1-mini"
+      },
+      "providers": {
+        "openai": {
+          "models": {
+            "inference": "gpt-4.1-mini",
+            "embeddings": "text-embedding-3-small"
+          }
+        }
       },
       "openai": {
         "default": {
