@@ -62,7 +62,7 @@ SET CONFIG mycompany.C.Z.W = NULL; -- delete
 Secret writes:
 
 ```sql
-SET SECRET red.secret.ai.openai.default.api_key = 'sk_...';
+SET SECRET red.secret.ai.providers.openai.tokens.default = 'sk_...';
 SET SECRET mycompany.payments.stripe.key = 'sk_...';
 DELETE SECRET mycompany.payments.stripe.key;
 SET SECRET mycompany.payments.stripe.key = NULL; -- delete
@@ -81,7 +81,7 @@ Variable reads:
 SELECT $red.config.backup.enabled;
 SELECT $config.mycompany.C.Z.W;
 
-SELECT $red.secret.ai.openai.default.api_key; -- returns ***
+SELECT $red.secret.ai.providers.openai.tokens.default; -- returns ***
 SELECT $secret.mycompany.payments.stripe.key; -- returns ***
 ```
 
@@ -363,8 +363,8 @@ Initial consumers:
 AI credential storage contract:
 
 ```text
-red.secret.ai.<provider>.<alias>.api_key
-red.config.ai.<provider>.<alias>.api_key = &red.secret.ai.<provider>.<alias>.api_key
+red.secret.ai.providers.<provider>.tokens.<alias>
+red.config.ai.providers.<provider>.tokens.<alias>.secret_ref = 'red.secret.ai.providers.<provider>.tokens.<alias>'
 red.config.ai.<provider>.<alias>.base_url = 'https://...'
 red.config.ai.default.provider = 'openai'
 red.config.ai.default.model = '...'
@@ -625,7 +625,7 @@ for efficiency:
 CLI must support safe secret input without shell history:
 
 ```bash
-red secret set red.secret.ai.openai.default.api_key --stdin
+red secret set red.secret.ai.providers.openai.tokens.default --stdin
 red secret set red.secret.mtls.private_key --file /run/secrets/tls.key
 red secret list
 red secret delete mycompany.payments.stripe.key
@@ -648,9 +648,13 @@ Config file import may include secret references, not secret values:
   "red": {
     "config": {
       "ai": {
-        "openai": {
-          "default": {
-            "api_key": {"$secret": "red.secret.ai.openai.default.api_key"}
+        "providers": {
+          "openai": {
+            "tokens": {
+              "default": {
+                "secret_ref": {"$secret": "red.secret.ai.providers.openai.tokens.default"}
+              }
+            }
           }
         }
       }

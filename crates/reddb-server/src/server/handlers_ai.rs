@@ -1152,10 +1152,6 @@ impl RedDBServer {
             let _ = self
                 .entity_use_cases()
                 .delete_kv(RED_CONFIG_COLLECTION, &key_name);
-            let legacy_key = crate::ai::ai_api_legacy_config_key(&provider, alias);
-            let _ = self
-                .entity_use_cases()
-                .delete_kv(RED_CONFIG_COLLECTION, &legacy_key);
             match self.entity_use_cases().create_kv(CreateKvInput {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: key_name.clone(),
@@ -1802,9 +1798,10 @@ struct LocalAiModelSpec {
     pull_policy: String,
     trust_policy: String,
     /// Vault alias used to resolve provider credentials for the pull
-    /// (currently HuggingFace). Resolves via `red.secret.ai.{provider}.{alias}`
-    /// per the shared `resolve_api_key` contract. Plaintext secrets are
-    /// never accepted at this boundary.
+    /// (currently HuggingFace). Resolves via
+    /// `red.secret.ai.providers.{provider}.tokens.{alias}` per the shared
+    /// `resolve_api_key` contract. Plaintext secrets are never accepted at
+    /// this boundary.
     credential_alias: Option<String>,
 }
 
@@ -1817,7 +1814,7 @@ impl LocalAiModelSpec {
                 return Err(format!(
                     "field '{field}' is rejected: registered models must not store plaintext \
                      provider credentials. Use 'credential_alias' and store the secret in the \
-                     vault at 'red.secret.ai.{{provider}}.{{alias}}' instead."
+                     vault at 'red.secret.ai.providers.{{provider}}.tokens.{{alias}}' instead."
                 ));
             }
         }
@@ -2432,11 +2429,11 @@ mod tests {
             .0;
         assert_eq!(ref_value, Value::Text(secret_path.clone().into()));
 
-        let legacy_key = crate::ai::ai_api_legacy_config_key(&AiProvider::OpenAi, &alias);
+        let removed_legacy = format!("red.config.ai.openai.{alias}.key");
         assert!(
             server
                 .entity_use_cases()
-                .get_kv(RED_CONFIG_COLLECTION, &legacy_key)
+                .get_kv(RED_CONFIG_COLLECTION, &removed_legacy)
                 .expect("read legacy")
                 .is_none(),
             "legacy plaintext config key must not be written"
@@ -3152,9 +3149,9 @@ mod tests {
 
     #[test]
     fn pull_with_unset_credential_alias_errors_with_vault_remediation() {
-        // The model entry has credential_alias=hf_prod but no secret
-        // has been stored at red.secret.ai.huggingface.hf_prod, so the
-        // pull must fail before touching the cache and the error must
+        // The model entry has credential_alias=hf_prod but no secret has
+        // been stored at red.secret.ai.providers.huggingface.tokens.hf_prod,
+        // so the pull must fail before touching the cache and the error must
         // point the operator at the vault path.
         let (server, path) = make_server("pull_alias_unset");
         let resp =
@@ -3167,7 +3164,8 @@ mod tests {
         assert_eq!(resp.status, 400, "expected 400 missing-credential");
         let body = String::from_utf8_lossy(&resp.body);
         assert!(
-            body.contains("hf_prod") && body.contains("red.secret.ai.huggingface.hf_prod"),
+            body.contains("hf_prod")
+                && body.contains("red.secret.ai.providers.huggingface.tokens.hf_prod"),
             "vault remediation missing: {body}"
         );
         let _ = std::fs::remove_file(path);
@@ -3182,28 +3180,18 @@ mod tests {
         let resp =
             register_local_model_with(&server, "mini", 4, r#", "credential_alias":"hf_prod""#);
         assert_eq!(resp.status, 201);
-        // Stage the credential via the legacy config KV path. The
-        // resolver walks vault (red.secret.*) → env → legacy
-        // (red.config.*.key), so a value here is the simplest stand-in
-        // for a real vault that does not need an AuthStore set up.
-        let legacy_key =
-            crate::ai::ai_api_legacy_config_key(&crate::ai::AiProvider::HuggingFace, "hf_prod");
-        server
-            .entity_use_cases()
-            .create_kv(CreateKvInput {
-                collection: RED_CONFIG_COLLECTION.to_string(),
-                key: legacy_key,
-                value: Value::text("hf_real_token"),
-                metadata: Vec::new(),
-            })
-            .expect("stage credential");
-        std::env::remove_var("REDDB_HUGGINGFACE_API_KEY_HF_PROD");
+        // Stage the credential via the env fallback (the resolution order is
+        // vault → secret_ref → env). Env is the simplest stand-in that does
+        // not need an AuthStore-backed vault set up in this unit test. The
+        // removed legacy plaintext config path is no longer read (#1745).
+        std::env::set_var("REDDB_HUGGINGFACE_API_KEY_HF_PROD", "hf_real_token");
         std::env::remove_var("REDDB_HUGGINGFACE_API_KEY");
 
         // No fixture_dir → the fixture stage fails. We assert the
         // error is the fixture-stage error, proving credential
         // resolution passed.
         let resp = server.handle_ai_model_pull("mini", Vec::new());
+        std::env::remove_var("REDDB_HUGGINGFACE_API_KEY_HF_PROD");
         assert_eq!(resp.status, 400);
         let body = String::from_utf8_lossy(&resp.body);
         assert!(

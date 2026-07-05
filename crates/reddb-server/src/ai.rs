@@ -1088,17 +1088,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_api_key_prefers_vault_secret_over_legacy_config() {
+    fn resolve_api_key_prefers_new_vault_path_over_removed_paths() {
         let provider = AiProvider::OpenAi;
         let alias = "vault_unit_alias";
         let secret_path = ai_api_secret_path(&provider, alias);
-        let legacy_key = ai_api_legacy_config_key(&provider, alias);
+        let removed_legacy = removed_plaintext_config_key(&provider, alias);
+        let removed_vault = removed_vault_api_key_path(&provider, alias);
 
         let resolved = resolve_api_key(&provider, Some(alias), |key| {
             if key == secret_path {
                 Ok(Some("vault-key".to_string()))
-            } else if key == legacy_key {
-                Ok(Some("legacy-key".to_string()))
+            } else if key == removed_legacy || key == removed_vault {
+                Ok(Some("stale-key".to_string()))
             } else {
                 Ok(None)
             }
@@ -1106,6 +1107,81 @@ mod tests {
         .expect("resolve");
 
         assert_eq!(resolved, "vault-key");
+    }
+
+    #[test]
+    fn resolve_api_key_rejects_removed_plaintext_config_path() {
+        let provider = AiProvider::Custom("cred1745legacy".to_string());
+        let alias = "prod";
+        let removed_legacy = removed_plaintext_config_key(&provider, alias);
+        let new_path = ai_api_secret_path(&provider, alias);
+
+        // Only the removed plaintext config path holds a value: resolution
+        // must reject didactically, naming the new vault path.
+        let err = resolve_api_key(&provider, Some(alias), |key| {
+            if key == removed_legacy {
+                Ok(Some("stale-plaintext-key".to_string()))
+            } else {
+                Ok(None)
+            }
+        })
+        .expect_err("must reject removed path");
+        let msg = err.to_string();
+        assert!(msg.contains(&removed_legacy), "names removed path: {msg}");
+        assert!(msg.contains(&new_path), "names new vault path: {msg}");
+    }
+
+    #[test]
+    fn resolve_api_key_rejects_removed_vault_api_key_path() {
+        let provider = AiProvider::Custom("cred1745oldvault".to_string());
+        let removed_vault = removed_vault_api_key_path(&provider, "default");
+        let new_path = ai_api_secret_path(&provider, "default");
+
+        let err = resolve_api_key(&provider, None, |key| {
+            if key == removed_vault {
+                Ok(Some("stale-vault-key".to_string()))
+            } else {
+                Ok(None)
+            }
+        })
+        .expect_err("must reject removed vault path");
+        let msg = err.to_string();
+        assert!(msg.contains(&removed_vault), "names removed path: {msg}");
+        assert!(msg.contains(&new_path), "names new vault path: {msg}");
+    }
+
+    #[test]
+    fn resolve_api_key_alias_token_overrides_default_per_request() {
+        let provider = AiProvider::OpenAi;
+        let default_path = ai_api_secret_path(&provider, "default");
+        let prod_path = ai_api_secret_path(&provider, "prod");
+        let getter = |key: &str| {
+            if key == default_path {
+                Ok(Some("default-token".to_string()))
+            } else if key == prod_path {
+                Ok(Some("prod-token".to_string()))
+            } else {
+                Ok(None)
+            }
+        };
+        // A request naming the `prod` alias resolves the tenant token; a
+        // request naming no credential resolves the implicit `default`.
+        assert_eq!(
+            resolve_api_key(&provider, Some("prod"), getter).expect("prod"),
+            "prod-token"
+        );
+        assert_eq!(
+            resolve_api_key(&provider, None, getter).expect("default"),
+            "default-token"
+        );
+    }
+
+    #[test]
+    fn ai_api_secret_path_uses_providers_tokens_shape() {
+        let path = ai_api_secret_path(&AiProvider::OpenAi, "default");
+        assert_eq!(path, "red.secret.ai.providers.openai.tokens.default");
+        let aliased = ai_api_secret_path(&AiProvider::OpenAi, "Prod");
+        assert_eq!(aliased, "red.secret.ai.providers.openai.tokens.prod");
     }
 
     #[test]
@@ -1894,21 +1970,23 @@ pub fn resolve_defaults_from_runtime_port<
 /// bootstrap fallback so a fresh deployment can talk to a provider
 /// before any key has been written to the vault.
 ///
-/// Aliased lookup (`credential_alias = Some(..)`):
-/// 1. Vault secret path: `red.secret.ai.<provider>.<alias>.api_key`
-/// 2. Vault secret indirected via `red.config.ai.<provider>.<alias>.secret_ref`
-/// 3. Env fallback with alias: `REDDB_<PROVIDER>_API_KEY_{ALIAS}`
-/// 4. Legacy KV config: `red.config.ai.<provider>.<alias>.key`
+/// Resolution order (issue #1745 — clean break, no deprecation window):
+/// 1. Vault token path: `red.secret.ai.providers.<provider>.tokens.<alias>`
+/// 2. Vault token indirected via
+///    `red.config.ai.providers.<provider>.tokens.<alias>.secret_ref`
+/// 3. Env fallback: `REDDB_<PROVIDER>_API_KEY[_<ALIAS>]`
 ///
-/// Default lookup (`credential_alias = None`):
-/// 1. Vault secret path: `red.secret.ai.<provider>.default.api_key`
-/// 2. Vault secret indirected via `secret_ref`
-/// 3. Env fallback: `REDDB_<PROVIDER>_API_KEY`
-/// 4. Legacy KV config (`red.config.ai.<provider>.default.key` and the
-///    short `<provider>/default` form)
+/// The alias `default` is implicit when `credential_alias = None`. First
+/// non-empty source wins per request.
+///
+/// The old vault path shape (`red.secret.ai.<provider>.<alias>.api_key`)
+/// and the legacy plaintext config path (`red.config.ai.<provider>.<alias>.key`)
+/// are **removed**: a credential still sitting at either is rejected with a
+/// didactic error naming the new vault path to populate — never silently
+/// read.
 ///
 /// `kv_getter` receives either a `red.secret.*` path (routed to the
-/// encrypted vault by [`resolve_api_key_from_runtime`]) or a legacy
+/// encrypted vault by [`resolve_api_key_from_runtime`]) or a
 /// `red.config.*` key and returns the value if found. Vault-stored keys
 /// are therefore encrypted at rest and rotatable via the existing vault
 /// KV path; the env vars carry no such guarantees, which is why they are
@@ -1934,13 +2012,13 @@ where
     }
 
     if let Some(alias) = credential_alias.map(str::trim).filter(|a| !a.is_empty()) {
-        // 1. Vault secret path (managed, encrypted at rest).
+        // 1. Vault token path (managed, encrypted at rest).
         if let Some(key) = kv_getter(&ai_api_secret_path(provider, alias))? {
             if !key.trim().is_empty() {
                 return Ok(key);
             }
         }
-        // 2. Vault secret reachable through a configured indirection ref.
+        // 2. Vault token reachable through a configured indirection ref.
         if let Some(secret_ref) = kv_getter(&ai_api_secret_ref_config_key(provider, alias))? {
             if let Some(key) = kv_getter(secret_ref.trim())? {
                 if !key.trim().is_empty() {
@@ -1952,26 +2030,24 @@ where
         if let Some(key) = resolve_key_from_env_alias(provider, alias) {
             return Ok(key);
         }
-        let legacy_key = ai_api_legacy_config_key(provider, alias);
-        if let Some(key) = kv_getter(&legacy_key)? {
-            if !key.trim().is_empty() {
-                return Ok(key);
-            }
-        }
+        // Clean break: a credential still sitting at a removed path is
+        // rejected didactically, never silently read (issue #1745).
+        reject_removed_credential_paths(provider, alias, &kv_getter)?;
         return Err(crate::RedDBError::Query(format!(
-            "credential '{alias}' not found for {}. Set env {} or store it in the vault",
+            "credential '{alias}' not found for {}. Set env {} or store it in the vault at '{}'",
             provider.token(),
-            provider.alias_key_env_name(alias)
+            provider.alias_key_env_name(alias),
+            ai_api_secret_path(provider, alias),
         )));
     }
 
-    // 1. Vault secret path (managed, encrypted at rest).
+    // 1. Vault token path (managed, encrypted at rest).
     if let Some(key) = kv_getter(&ai_api_secret_path(provider, "default"))? {
         if !key.trim().is_empty() {
             return Ok(key);
         }
     }
-    // 2. Vault secret reachable through a configured indirection ref.
+    // 2. Vault token reachable through a configured indirection ref.
     if let Some(secret_ref) = kv_getter(&ai_api_secret_ref_config_key(provider, "default"))? {
         if let Some(key) = kv_getter(secret_ref.trim())? {
             if !key.trim().is_empty() {
@@ -1988,27 +2064,40 @@ where
         }
     }
 
-    if let Some(key) = kv_getter(&ai_api_legacy_config_key(provider, "default"))? {
-        if !key.trim().is_empty() {
-            return Ok(key);
-        }
-    }
-
-    let legacy_short_key = format!("{}/default", provider.token());
-    if let Some(key) = kv_getter(&legacy_short_key)? {
-        if !key.trim().is_empty() {
-            return Ok(key);
-        }
-    }
+    // Clean break: reject a credential still sitting at a removed path
+    // instead of silently reading it (issue #1745).
+    reject_removed_credential_paths(provider, "default", &kv_getter)?;
 
     Err(crate::RedDBError::Query(format!(
-        "missing {} API key. Set {} or provide credential alias",
+        "missing {} API key. Set {} or store it in the vault at '{}'",
         provider.token(),
-        provider.default_key_env_name()
+        provider.default_key_env_name(),
+        ai_api_secret_path(provider, "default"),
     )))
 }
 
+/// Vault token path (issue #1745): the sole credential source in the vault.
 pub fn ai_api_secret_path(provider: &AiProvider, alias: &str) -> String {
+    format!(
+        "red.secret.ai.providers.{}.tokens.{}",
+        provider.token(),
+        normalize_credential_alias_path(alias)
+    )
+}
+
+/// Config key holding a vault indirection ref for the token (issue #1745).
+pub fn ai_api_secret_ref_config_key(provider: &AiProvider, alias: &str) -> String {
+    format!(
+        "red.config.ai.providers.{}.tokens.{}.secret_ref",
+        provider.token(),
+        normalize_credential_alias_path(alias)
+    )
+}
+
+/// Removed vault path shape (`red.secret.ai.<provider>.<alias>.api_key`,
+/// issue #1745). Probed ONLY to reject with a migration error — never read
+/// as a credential source.
+fn removed_vault_api_key_path(provider: &AiProvider, alias: &str) -> String {
     format!(
         "red.secret.ai.{}.{}.api_key",
         provider.token(),
@@ -2016,20 +2105,43 @@ pub fn ai_api_secret_path(provider: &AiProvider, alias: &str) -> String {
     )
 }
 
-pub fn ai_api_secret_ref_config_key(provider: &AiProvider, alias: &str) -> String {
-    format!(
-        "red.config.ai.{}.{}.secret_ref",
-        provider.token(),
-        normalize_credential_alias_path(alias)
-    )
-}
-
-pub fn ai_api_legacy_config_key(provider: &AiProvider, alias: &str) -> String {
+/// Removed plaintext config path (`red.config.ai.<provider>.<alias>.key`,
+/// issue #1745). Probed ONLY to reject with a migration error.
+fn removed_plaintext_config_key(provider: &AiProvider, alias: &str) -> String {
     format!(
         "red.config.ai.{}.{}.key",
         provider.token(),
         normalize_credential_alias_path(alias)
     )
+}
+
+/// Fail with a didactic error if a credential is still parked at either of
+/// the removed paths (old vault shape or legacy plaintext config). The
+/// clean break forbids silently falling back to them (issue #1745).
+fn reject_removed_credential_paths<F>(
+    provider: &AiProvider,
+    alias: &str,
+    kv_getter: &F,
+) -> crate::RedDBResult<()>
+where
+    F: Fn(&str) -> crate::RedDBResult<Option<String>>,
+{
+    let new_path = ai_api_secret_path(provider, alias);
+    for removed in [
+        removed_vault_api_key_path(provider, alias),
+        removed_plaintext_config_key(provider, alias),
+    ] {
+        if let Some(value) = kv_getter(&removed)? {
+            if !value.trim().is_empty() {
+                return Err(crate::RedDBError::Query(format!(
+                    "AI credential found at removed path '{removed}'. The AI credential vault \
+                     path changed (issue #1745): store the token at '{new_path}' instead. The \
+                     old vault path shape and the legacy plaintext config path are no longer read."
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn normalize_credential_alias_path(alias: &str) -> String {
@@ -2067,7 +2179,8 @@ fn normalize_alias_token(alias: &str) -> String {
 /// Convenience: resolve API key using a RedDBRuntime's KV store.
 ///
 /// Emits an `ai.credential.resolve` audit event so operators can answer
-/// "which principal caused us to read `red.secret.ai.<provider>.*`?"
+/// "which principal caused us to read
+/// `red.secret.ai.providers.<provider>.tokens.*`?"
 /// even though the read itself is performed as system (the AI subsystem
 /// must always be able to fetch the key the query needs — denying it
 /// would be denying the query at the wrong layer). The audit record

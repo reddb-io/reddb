@@ -2554,10 +2554,8 @@ mod tests {
             .runtime
             .execute_query("SET CONFIG runtime.ai.transport_retry_max_attempts = 1")
             .expect("disable retries");
-        server
-            .runtime
-            .execute_query("SET CONFIG red.config.ai.openai.default.key = 'sk-test'")
-            .expect("set api key");
+        // Legacy plaintext config path removed (#1745); provision via env.
+        std::env::set_var("REDDB_OPENAI_API_KEY", "sk-test");
 
         let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
 
@@ -2583,10 +2581,8 @@ mod tests {
             .runtime
             .execute_query("SET CONFIG runtime.ai.transport_retry_max_attempts = 1")
             .expect("disable retries");
-        server
-            .runtime
-            .execute_query("SET CONFIG red.config.ai.openai.default.key = 'sk-test'")
-            .expect("set api key");
+        // Legacy plaintext config path removed (#1745); provision via env.
+        std::env::set_var("REDDB_OPENAI_API_KEY", "sk-test");
 
         let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
 
@@ -2966,10 +2962,8 @@ mod tests {
 
         let server = make_server();
         configure_ask_stub_runtime(&server);
-        server
-            .runtime
-            .execute_query("SET CONFIG red.config.ai.groq.default.key = 'sk-groq'")
-            .expect("set groq api key");
+        // Legacy plaintext config path removed (#1745); provision via env.
+        std::env::set_var("REDDB_GROQ_API_KEY", "sk-groq");
 
         let r = server.handle_query(
             br#"{"query": "ASK 'why did login fail?' USING 'groq,openai' TEMPERATURE 0.7 SEED 42"}"#.to_vec(),
@@ -3019,10 +3013,8 @@ mod tests {
 
         let server = make_server();
         configure_ask_stub_runtime(&server);
-        server
-            .runtime
-            .execute_query("SET CONFIG red.config.ai.groq.default.key = 'sk-groq'")
-            .expect("set groq api key");
+        // Legacy plaintext config path removed (#1745); provision via env.
+        std::env::set_var("REDDB_GROQ_API_KEY", "sk-groq");
         server
             .runtime
             .execute_query("SET CONFIG ask.providers.fallback = 'groq,openai'")
@@ -3054,10 +3046,8 @@ mod tests {
 
         let server = make_server();
         configure_ask_stub_runtime(&server);
-        server
-            .runtime
-            .execute_query("SET CONFIG red.config.ai.groq.default.key = 'sk-groq'")
-            .expect("set groq api key");
+        // Legacy plaintext config path removed (#1745); provision via env.
+        std::env::set_var("REDDB_GROQ_API_KEY", "sk-groq");
 
         let r = server.handle_query(
             br#"{"query": "ASK 'why did login fail?' USING 'groq,openai'"}"#.to_vec(),
@@ -3341,10 +3331,10 @@ mod tests {
             .runtime
             .execute_query("SET CONFIG runtime.ai.transport_retry_max_attempts = 1")
             .expect("disable transport retries");
-        server
-            .runtime
-            .execute_query("SET CONFIG red.config.ai.openai.default.key = 'sk-test'")
-            .expect("set api key");
+        // Provision the credential via the env fallback. The legacy plaintext
+        // config path was removed (#1745); callers hold ASK_ENV_LOCK and an
+        // EnvVarGuard for this var, so the value is scoped to the test.
+        std::env::set_var("REDDB_OPENAI_API_KEY", "sk-test");
     }
 
     fn ask_audit_rows(server: &RedDBServer) -> Vec<BTreeMap<String, crate::json::Value>> {

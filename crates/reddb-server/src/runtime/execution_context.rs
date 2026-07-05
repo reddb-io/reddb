@@ -650,7 +650,7 @@ mod tests {
                 "vault-aes-key".to_string(),
             ),
             (
-                "red.secret.ai.anthropic.default.api_key".to_string(),
+                "red.secret.ai.providers.anthropic.tokens.default".to_string(),
                 "provider-key".to_string(),
             ),
             ("acme.key".to_string(), "user-value".to_string()),
@@ -659,8 +659,14 @@ mod tests {
         with_secret_values(values, || {
             assert_eq!(current_secret_value("red.vault/aes_key"), None);
             assert_eq!(current_secret_value("red.vault/red.secret.aes_key"), None);
+            // The AI provider-token namespace is hard-blocked from `$secret`
+            // regardless of role, on the new path shape (#1745).
             assert_eq!(
-                current_secret_value("red.vault/ai.anthropic.default.api_key"),
+                current_secret_value("red.vault/ai.providers.anthropic.tokens.default"),
+                None
+            );
+            assert_eq!(
+                current_secret_value("red.vault/red.secret.ai.providers.anthropic.tokens.default"),
                 None
             );
             assert_eq!(

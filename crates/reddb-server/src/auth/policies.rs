@@ -1620,6 +1620,26 @@ mod tests {
     }
 
     #[test]
+    fn glob_ai_credential_alias_paths_are_separable_per_alias() {
+        // Policy separability (#1745): a vault grant scoped to a tenant
+        // alias's token sub-path must NOT reach the `default` alias token.
+        // The new path shape `red.secret.ai.providers.<p>.tokens.<alias>`
+        // puts the alias in a distinct trailing segment, so an alias-scoped
+        // glob cannot match another alias.
+        let prod = compile_glob("vault:red.vault/red.secret.ai.providers.openai.tokens.prod*");
+        assert!(glob_matches(
+            &prod,
+            "vault:red.vault/red.secret.ai.providers.openai.tokens.prod"
+        ));
+        // Granting write on the `prod` alias sub-path grants no read of the
+        // `default` alias token.
+        assert!(!glob_matches(
+            &prod,
+            "vault:red.vault/red.secret.ai.providers.openai.tokens.default"
+        ));
+    }
+
+    #[test]
     fn action_match_exact() {
         assert!(action_matches(&compile_action("select"), "select"));
         assert!(!action_matches(&compile_action("select"), "selectall"));

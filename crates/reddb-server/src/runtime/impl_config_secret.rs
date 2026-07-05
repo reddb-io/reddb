@@ -64,7 +64,7 @@ mod tests {
     fn show_secrets_allows_only_user_managed_keys() {
         assert!(!show_secrets_allows_key("red.secret.aes_key"));
         assert!(!show_secrets_allows_key(
-            "red.secret.ai.anthropic.default.api_key"
+            "red.secret.ai.providers.anthropic.tokens.default"
         ));
         assert!(!show_secrets_allows_key("red.config.ai.default.provider"));
         assert!(show_secrets_allows_key("acme.key"));

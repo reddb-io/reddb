@@ -329,7 +329,7 @@ SHOW CONFIG red.secret.stripe;
 
 Vault actions are policy-evaluable per resource path. The resource is
 `vault:<collection>/<key>` and supports segment globbing, so a single
-policy can cover an entire prefix like `red.secret.ai.*`.
+policy can cover an entire prefix like `red.secret.ai.providers.*`.
 
 | Action | Gates |
 |:---|:---|
@@ -351,7 +351,7 @@ admin) can read or rotate it:**
       "sid": "no-read-ai-custom",
       "effect": "deny",
       "actions": ["vault:read", "vault:read_metadata", "vault:write"],
-      "resources": ["vault:red.vault/red.secret.ai.custom.*"]
+      "resources": ["vault:red.vault/red.secret.ai.providers.custom.*"]
     }
   ]
 }
@@ -371,7 +371,7 @@ everyone else:**
       "sid": "allow-keeper",
       "effect": "allow",
       "actions": ["vault:read"],
-      "resources": ["vault:red.vault/red.secret.ai.openai.*"]
+      "resources": ["vault:red.vault/red.secret.ai.providers.openai.*"]
     }
   ]
 }
