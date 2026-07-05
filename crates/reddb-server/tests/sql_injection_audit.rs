@@ -184,17 +184,18 @@ fn ask_path_does_not_re_execute_llm_output_as_sql() {
         &ask.min_score,
         &ask.provider,
         &ask.model,
-        &ask.as_rql,
+        &ask.plan_only,
     );
-    assert!(!ask.as_rql);
+    assert!(!ask.plan_only);
 
-    let parsed =
-        parse_multi("ASK 'who owns passport FDD-12313?' AS RQL").expect("parse ASK AS RQL");
+    // Clean break (ADR 0068, #1751): `PLAN` returns the typed plan and
+    // candidate query without executing; it never re-parses LLM output.
+    let parsed = parse_multi("ASK 'who owns passport FDD-12313?' PLAN").expect("parse ASK PLAN");
     let ask = match parsed {
         QueryExpr::Ask(a) => a,
         other => panic!("expected Ask, got {:?}", other),
     };
-    assert!(ask.as_rql);
+    assert!(ask.plan_only);
 
     // Sanity: an injection-shaped question string is just text.
     let parsed = parse_multi("ASK '''; DROP TABLE users; --'").expect("parse ASK with payload");
