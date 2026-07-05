@@ -974,7 +974,15 @@ fn coerce_contract_literal(
     let target = column.data_type;
     match target {
         DataType::Blob => Ok(Value::Blob(raw.as_bytes().to_vec())),
-        DataType::Json => Ok(Value::Json(raw.as_bytes().to_vec())),
+        // ADR 0067 (#1721): a JSON value is written as an inline strict-JSON
+        // literal — a bare string is not silently wrapped as JSON. Wrap a
+        // runtime string with `JSON_PARSE(<expr>)`. (An inline literal already
+        // arrives as `Value::Json` and never reaches this coercion.)
+        DataType::Json => Err(crate::RedDBError::Query(format!(
+            "column '{column_name}' in collection '{collection}' requires an inline strict-JSON \
+             literal (e.g. `{{\"k\": \"v\"}}`) or `JSON_PARSE(<expr>)`; a bare string is not \
+             coerced to JSON (ADR 0067)"
+        ))),
         DataType::Timestamp => raw.parse::<i64>().map(Value::Timestamp).map_err(|err| {
             crate::RedDBError::Query(format!(
                 "failed to coerce column '{}' in collection '{}' to '{}': {}",

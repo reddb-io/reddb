@@ -339,6 +339,12 @@ std::string json_literal(const JsonValue& v) {
     return "'" + replace_all(enc, "'", "''") + "'";
 }
 
+// ADR 0067 (#1709): a document body is written as an inline strict-JSON
+// literal (no surrounding quotes) — the quoted-string coercion is removed.
+std::string json_inline_literal(const JsonValue& v) {
+    return json_encode(v);
+}
+
 std::string identifier(const std::string& value) {
     if (!value.empty() && all_ident_chars(value)) return value;
     return "\"" + replace_all(value, "\"", "\"\"") + "\"";
@@ -498,7 +504,7 @@ InsertResult DocumentClient::insert(const std::string& collection,
     JsonValue doc = JsonValue::make_object(document);
     std::ostringstream os;
     os << "INSERT INTO " << sql::identifier_path(collection)
-       << " DOCUMENT (body) VALUES (" << sql::json_literal(doc) << ") RETURNING *";
+       << " DOCUMENT VALUES (" << sql::json_inline_literal(doc) << ") RETURNING *";
     std::string body = q_->query(os.str(), {});
     auto [row, affected] = sql::first_row(body);
     if (!row) {

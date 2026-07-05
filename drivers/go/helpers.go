@@ -97,11 +97,11 @@ func (d *DocumentClient) Insert(ctx context.Context, collection string, document
 	if err := d.ensureCollection(ctx, collection); err != nil {
 		return nil, err
 	}
-	jsonLit, err := jsonLiteral(document)
+	jsonLit, err := jsonInlineLiteral(document)
 	if err != nil {
 		return nil, err
 	}
-	sql := fmt.Sprintf("INSERT INTO %s DOCUMENT (body) VALUES (%s) RETURNING *",
+	sql := fmt.Sprintf("INSERT INTO %s DOCUMENT VALUES (%s) RETURNING *",
 		sqlIdentifierPath(collection), jsonLit)
 	body, err := d.q.Query(ctx, sql)
 	if err != nil {
@@ -708,12 +708,15 @@ func valueLiteral(value any) (string, error) {
 	return kvValueLiteral(value)
 }
 
-func jsonLiteral(value any) (string, error) {
+// jsonInlineLiteral returns the raw JSON encoding of value with no
+// surrounding quotes and no SQL escaping, for use where the RQL lexer
+// parses an inline JSON literal directly (e.g. DOCUMENT VALUES (...)).
+func jsonInlineLiteral(value any) (string, error) {
 	bs, err := json.Marshal(value)
 	if err != nil {
 		return "", NewError(CodeInvalidArgument, err.Error())
 	}
-	return "'" + strings.ReplaceAll(string(bs), "'", "''") + "'", nil
+	return string(bs), nil
 }
 
 func sqlIdentifier(value string) string {

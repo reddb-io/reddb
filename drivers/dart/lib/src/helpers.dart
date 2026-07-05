@@ -100,8 +100,8 @@ class DocumentClient {
   ) async {
     await _ensureCollection(collection);
     final body = await _q.query(
-      'INSERT INTO ${_sqlIdentifierPath(collection)} DOCUMENT (body) '
-      'VALUES (${_jsonLiteral(document)}) RETURNING *',
+      'INSERT INTO ${_sqlIdentifierPath(collection)} DOCUMENT '
+      'VALUES (${_jsonInlineLiteral(document)}) RETURNING *',
     );
     final (row, declared) = _firstRow(body);
     if (row == null || row['rid'] == null) {
@@ -195,8 +195,8 @@ class DocumentClient {
     final rids = <String>[];
     for (final p in payloads) {
       final body = await _q.query(
-        'INSERT INTO ${_sqlIdentifierPath(collection)} DOCUMENT (body) '
-        'VALUES (${_jsonLiteral(p)}) RETURNING *',
+        'INSERT INTO ${_sqlIdentifierPath(collection)} DOCUMENT '
+        'VALUES (${_jsonInlineLiteral(p)}) RETURNING *',
       );
       final (row, _) = _firstRow(body);
       if (row == null || row['rid'] == null) {
@@ -523,10 +523,9 @@ String _queueValueLiteral(Object? value) {
 
 String _valueLiteral(Object? value) => _kvValueLiteral(value);
 
-String _jsonLiteral(Object? value) {
-  final s = jsonEncode(value);
-  return "'${s.replaceAll("'", "''")}'";
-}
+/// ADR 0067 (#1709): a document body is written as an inline strict-JSON
+/// literal (no surrounding quotes) — the quoted-string coercion is removed.
+String _jsonInlineLiteral(Object? value) => jsonEncode(value);
 
 String _sqlIdentifier(String value) {
   if (value.isNotEmpty && _allIdentChars(value)) return value;

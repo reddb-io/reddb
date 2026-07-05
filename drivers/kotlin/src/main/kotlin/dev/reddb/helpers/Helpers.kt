@@ -69,8 +69,8 @@ public class DocumentClient internal constructor(private val q: Querier) {
             throw HelperException.InvalidArgument("documents.insert document must be an object")
         }
         ensureCollection(collection)
-        val sql = "INSERT INTO ${Sql.identifierPath(collection)} DOCUMENT (body) VALUES " +
-            "(${Sql.jsonLiteral(document)}) RETURNING *"
+        val sql = "INSERT INTO ${Sql.identifierPath(collection)} DOCUMENT VALUES " +
+            "(${Sql.jsonInlineLiteral(document)}) RETURNING *"
         val body = q.query(sql)
         val (row, affectedRaw) = Sql.firstRow(body)
         if (row == null || row["rid"] == null) {
@@ -330,8 +330,9 @@ internal object Sql {
 
     fun valueLiteral(value: Any?): String = kvValueLiteral(value)
 
-    fun jsonLiteral(value: Any?): String =
-        "'" + mapper.writeValueAsString(value).replace("'", "''") + "'"
+    // ADR 0067 (#1709): a document body is written as an inline strict-JSON
+    // literal (no surrounding quotes) — the quoted-string coercion is removed.
+    fun jsonInlineLiteral(value: Any?): String = mapper.writeValueAsString(value)
 
     fun identifier(value: String): String =
         if (value.isNotEmpty() && allIdentChars(value)) value

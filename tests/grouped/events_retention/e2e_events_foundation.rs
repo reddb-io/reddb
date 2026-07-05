@@ -295,7 +295,7 @@ fn redact_nested_dotted_path() {
 
     exec(
         &rt,
-        r#"INSERT INTO docs (id, body) VALUES (1, '{"user":{"email":"secret@example.com","name":"Bob"},"title":"hello"}')"#,
+        r#"INSERT INTO docs (id, body) VALUES (1, {"user":{"email":"secret@example.com","name":"Bob"},"title":"hello"})"#,
     );
 
     let payload = read_event_payload(&rt, "docs_events");
@@ -328,7 +328,7 @@ fn redact_wildcard_nested_path() {
 
     exec(
         &rt,
-        r#"INSERT INTO events_log (id, body) VALUES (1, '{"sender":{"email":"a@x.com","name":"A"},"recipient":{"email":"b@x.com","name":"B"}}')"#,
+        r#"INSERT INTO events_log (id, body) VALUES (1, {"sender":{"email":"a@x.com","name":"A"},"recipient":{"email":"b@x.com","name":"B"}})"#,
     );
 
     let payload = read_event_payload(&rt, "events_log_events");

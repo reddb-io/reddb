@@ -122,7 +122,7 @@ public sealed class DocumentClient
         if (document is null)
             throw new HelperException.InvalidArgument("documents.insert document must be an object");
         await EnsureCollectionAsync(collection, ct).ConfigureAwait(false);
-        string sql = $"INSERT INTO {Sql.IdentifierPath(collection)} DOCUMENT (body) VALUES ({Sql.JsonLiteral(document)}) RETURNING *";
+        string sql = $"INSERT INTO {Sql.IdentifierPath(collection)} DOCUMENT VALUES ({Sql.JsonInlineLiteral(document)}) RETURNING *";
         var body = await _q.QueryAsync(sql, Array.Empty<object?>(), ct).ConfigureAwait(false);
         var (row, affected) = Sql.FirstRow(body.Span);
         if (row is null || !row.TryGetValue("rid", out var rid) || rid is null)
@@ -545,8 +545,13 @@ internal static class Sql
 
     public static string ValueLiteral(object? value) => KvValueLiteral(value);
 
-    public static string JsonLiteral(object? value)
-        => "'" + JsonSerializer.Serialize(value, JsonOpts).Replace("'", "''") + "'";
+    /// <summary>
+    /// Returns the raw JSON encoding of <paramref name="value"/> with no
+    /// surrounding quotes and no SQL escaping, for use where the RQL lexer
+    /// parses an inline JSON literal directly (e.g. <c>DOCUMENT VALUES (...)</c>).
+    /// </summary>
+    public static string JsonInlineLiteral(object? value)
+        => JsonSerializer.Serialize(value, JsonOpts);
 
     public static string Identifier(string value)
         => !string.IsNullOrEmpty(value) && AllIdentChars(value)

@@ -117,12 +117,12 @@ pub const DocumentClient = struct {
 
     pub fn insert(self: DocumentClient, collection: []const u8, document: json.Value) !InsertResult {
         try self.ensureCollection(collection);
-        const lit = try jsonLiteral(self.allocator, document);
+        const lit = try jsonInlineLiteral(self.allocator, document);
         defer self.allocator.free(lit);
         const id_path = try identifierPath(self.allocator, collection);
         defer self.allocator.free(id_path);
         const sql = try std.fmt.allocPrint(self.allocator,
-            "INSERT INTO {s} DOCUMENT (body) VALUES ({s}) RETURNING *",
+            "INSERT INTO {s} DOCUMENT VALUES ({s}) RETURNING *",
             .{ id_path, lit });
         defer self.allocator.free(sql);
         const body = try self.q.query(self.allocator, sql, &.{});
@@ -596,10 +596,11 @@ pub fn valueLiteral(allocator: Allocator, value: json.Value) ![]u8 {
     return kvValueLiteral(allocator, value);
 }
 
-pub fn jsonLiteral(allocator: Allocator, value: json.Value) ![]u8 {
-    const enc = try jsonEncode(allocator, value);
-    defer allocator.free(enc);
-    return try quoteWith(allocator, enc, '\'');
+// jsonInlineLiteral returns the raw JSON encoding of value with no
+// surrounding quotes and no SQL escaping, for use where the RQL lexer
+// parses an inline JSON literal directly (e.g. DOCUMENT VALUES (...)).
+pub fn jsonInlineLiteral(allocator: Allocator, value: json.Value) ![]u8 {
+    return try jsonEncode(allocator, value);
 }
 
 fn quoteWith(allocator: Allocator, value: []const u8, quote: u8) ![]u8 {
