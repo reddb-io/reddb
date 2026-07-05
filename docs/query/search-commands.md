@@ -235,10 +235,18 @@ stable URNs for UI deep-links. See
 [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md) for the grounding contract.
 
 > [!IMPORTANT]
-> Plain `ASK` is retrieval-grounded answer synthesis. It does not convert the
-> question into a `SELECT`, and LLM output is never parsed or executed as RQL.
-> Use `ASK ... AS RQL` when you want RedDB to return a validated read-only RQL
-> candidate for caller approval/execution.
+> `ASK` is planner-first (ADR 0068). Every question runs a planning step that
+> routes it to an intent and, for a factual question, generates a read-only
+> RQL candidate that **auto-executes by default**. A candidate that is not
+> read-only is never executed under any flag. To inspect the plan and the
+> generated query without running anything, add the `PLAN` clause; to see the
+> plan (intent, retrieval, provider, cost) without even calling the planner's
+> synthesis step, use `EXPLAIN ASK`.
+>
+> The `EXECUTE` and `AS RQL` clauses were **removed** (clean break, no
+> deprecation window). `EXECUTE` is gone because read-only candidates now
+> auto-execute; `AS RQL` is replaced by `PLAN`. Both dead clauses reject with
+> a didactic parse error that names `PLAN`.
 
 ```sql
 ASK 'what happened on host 10.0.0.1?' USING groq
@@ -261,7 +269,13 @@ ASK 'list all users with admin access' USING ollama MODEL 'llama3'
 | `STREAM` | No | HTTP/SSE token stream; transports without SSE return non-streaming rows |
 | `CACHE TTL '5m'` | No | Cache this answer for the supplied TTL |
 | `NOCACHE` | No | Bypass the global ASK cache default |
-| `AS RQL` | No | Return a deterministic, parser-validated RQL candidate instead of calling an AI provider |
+| `PLAN` | No | Return the typed plan (routed intent + candidate query) without executing the candidate and without the synthesis call |
+| `STEPS n` | No | Per-query plan-step budget, clamped to `red.config.ai.ask.max_plan_steps` |
+
+> [!NOTE]
+> `EXECUTE` and `AS RQL` were removed (ADR 0068, #1751). Read-only candidates
+> auto-execute by default; use `PLAN` to inspect the generated query without
+> running it. The removed clauses reject with a didactic parse error.
 
 ### Examples
 
@@ -275,8 +289,11 @@ ASK 'summarize all vulnerabilities' USING anthropic MODEL 'claude-sonnet-4-20250
 -- Scope to a collection with a result limit
 ASK 'what changed today?' COLLECTION audit_logs LIMIT 50
 
--- Convert a field/literal prompt into validated RQL without an LLM call
-ASK 'who owns passport FDD-12313?' AS RQL
+-- Inspect the routed intent + generated query without executing it
+ASK 'who owns passport FDD-12313?' PLAN
+
+-- Predict cost/behavior: intent + retrieval/provider/cost plan, no synthesis
+EXPLAIN ASK 'who owns passport FDD-12313?'
 
 -- All optional clauses combined
 ASK 'explain the network topology' USING ollama MODEL 'llama3' STRICT ON CACHE TTL '5m' DEPTH 3 LIMIT 100 COLLECTION network
@@ -298,26 +315,24 @@ ASK executes a retrieval-then-synthesis pipeline:
 
 3. **LLM Synthesis** — Sends the context + your question to the configured AI provider. The LLM generates a natural-language answer with inline `[^N]` markers, and RedDB validates those markers against `sources_flat`.
 
-There is no generated query-plan step in this pipeline. If the right operation
-is "find records where a field has this value", write that directly:
+For a **factual** question, the planner generates a read-only RQL candidate,
+re-validates it through the production parser, and auto-executes it under your
+RLS scope; the executed rows become the grounded sources for the cited answer.
+To inspect that candidate without running it, add `PLAN`:
 
 ```sql
-SELECT * WHERE passport = $1
+ASK 'who owns passport FDD-12313?' PLAN
 ```
 
-If you want RedDB to produce that query shape from a prompt, ask for an RQL
-candidate explicitly:
+`ASK ... PLAN` returns one row with the routed `intent`, the `candidate_query`,
+its `candidate_type`, and a `mutating` flag — **no execution, no synthesis**.
+A missing `FROM` means the universal source `any`, so the eventual query
+searches eligible collections and applies the `WHERE` filter itself.
 
-```sql
-ASK 'passport FDD-12313' AS RQL
-```
-
-`ASK ... AS RQL` uses schema vocabulary and literal extraction to produce a
-read-only `SELECT`, validates the generated text through the parser, and
-returns it in the `rql` column. Missing `FROM` means the universal source
-`any`, so the eventual query searches eligible collections and applies the
-`WHERE` filter itself. This path does not call an AI provider and does not
-execute the generated RQL for you.
+To predict cost and behavior without even the planner's synthesis step, use
+`EXPLAIN ASK` — it returns the retrieval/provider/determinism/cost `plan`
+alongside the routed `intent` and `candidate_query`, running at most the
+planner call.
 
 If no provider is configured, ASK returns an error. Configure one with:
 

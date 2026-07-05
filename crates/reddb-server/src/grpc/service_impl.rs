@@ -219,8 +219,7 @@ fn ask_query_from_request(
         strict: request.strict.unwrap_or(true),
         stream,
         cache: crate::storage::query::ast::AskCacheClause::Default,
-        as_rql: false,
-        execute: false,
+        plan_only: false,
         steps: None,
     })
 }

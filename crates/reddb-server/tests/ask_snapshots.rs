@@ -77,6 +77,17 @@ snap!(ask_limit_garbage, "ASK 'q' LIMIT @#$%");
 snap!(ask_collection_no_ident, "ASK 'q' COLLECTION");
 snap!(ask_garbage_after_question, "ASK 'q' @#$%");
 
+// ----- clean-break didactic errors (ADR 0068, #1751) -------------
+// `AS RQL` and `EXECUTE` were removed; each rejects with a didactic
+// error that names the `PLAN` replacement. The snapshots pin the
+// exact messages so a wording regression is caught in review.
+snap!(
+    ask_as_rql_removed,
+    "ASK 'who owns passport FDD-12313?' AS RQL"
+);
+snap!(ask_execute_removed, "ASK 'list travelers' EXECUTE");
+snap!(ask_plan_specified_twice, "ASK 'q' PLAN PLAN");
+
 // ----- SEARCH CONTEXT error scenarios ----------------------------
 
 snap!(search_context_eof, "SEARCH CONTEXT");

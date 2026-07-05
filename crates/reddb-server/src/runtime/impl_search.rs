@@ -1228,8 +1228,18 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::ai::{parse_provider, resolve_api_key_from_runtime};
 
-        if ask.as_rql {
-            return self.execute_ask_as_rql(raw_query, ask);
+        // ADR 0068 / #1751: `ASK ... PLAN` returns the typed plan (routed
+        // intent + candidate query) without executing the candidate and
+        // without the synthesis call. It always runs the planner — even when
+        // the `red.config.ai.ask.planner` gate is off — because it is an
+        // explicit request to inspect the plan. Zero execution, zero synthesis.
+        if ask.plan_only {
+            match self.execute_ask_planner_prepass(raw_query, ask, true)? {
+                PlannerPrepass::Handled(result) => return Ok(*result),
+                PlannerPrepass::FallThrough { .. } => {
+                    unreachable!("plan_only prepass builds the plan before routing")
+                }
+            }
         }
 
         // ADR 0068 / #1747 / #1749: planner-first path. When enabled, ASK runs
@@ -1240,7 +1250,7 @@ impl RedDBRuntime {
         // downstream audit row records the routing decision (#1749).
         let mut routed_intent: Option<&'static str> = None;
         if !ask.explain && self.ask_planner_enabled() {
-            match self.execute_ask_planner_prepass(raw_query, ask)? {
+            match self.execute_ask_planner_prepass(raw_query, ask, false)? {
                 PlannerPrepass::Handled(result) => return Ok(*result),
                 PlannerPrepass::FallThrough { intent } => {
                     routed_intent = Some(intent.as_str());
@@ -1742,6 +1752,7 @@ impl RedDBRuntime {
         &self,
         raw_query: &str,
         ask: &crate::storage::query::ast::AskQuery,
+        plan_only: bool,
     ) -> RedDBResult<PlannerPrepass> {
         use crate::ai::{parse_provider, resolve_api_key_from_runtime};
         use crate::runtime::ai::ask_planner;
@@ -1850,6 +1861,15 @@ impl RedDBRuntime {
             Ok(response.output_text)
         };
         let route = ask_planner::plan_and_route(&ask.question, &slice, &planner_closure)?;
+
+        // #1751: `ASK ... PLAN` stops here — the typed plan (intent + candidate
+        // query) is returned without executing the candidate or synthesizing.
+        // The `Query` plan step is never charged because nothing runs.
+        if plan_only {
+            return Ok(PlannerPrepass::Handled(Box::new(
+                self.build_plan_only_result(raw_query, &scope, &route)?,
+            )));
+        }
 
         match route.routing {
             // #1749: synthesis / how-to route to the ADR 0013 RAG path
@@ -2224,6 +2244,104 @@ impl RedDBRuntime {
         }
     }
 
+    /// `ASK ... PLAN` (ADR 0068 §4, #1751): return the typed plan — routed
+    /// intent, candidate query, and its read-only/mutating disposition —
+    /// without executing the candidate and without the synthesis call. The
+    /// planner LLM has already run (routing decided); nothing downstream runs.
+    /// The inspection is audited like any other ASK, with no executed query.
+    fn build_plan_only_result(
+        &self,
+        raw_query: &str,
+        scope: &crate::runtime::statement_frame::EffectiveScope,
+        route: &crate::runtime::ai::ask_planner::PlannedRoute,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::runtime::ai::ask_planner::PlanRouting;
+
+        let plan = &route.plan;
+        // Resolve the candidate query + disposition from the routing decision.
+        // A non-factual intent (synthesis / how-to) carries no candidate.
+        let (candidate_query, candidate_type, mutating) = match &route.routing {
+            PlanRouting::Execute { candidate } => (
+                Some(candidate.rql.clone()),
+                Some(candidate.statement_type.to_string()),
+                Some(false),
+            ),
+            PlanRouting::RefuseMutating {
+                statement_type,
+                rql,
+            } => (
+                Some(rql.clone()),
+                Some(statement_type.to_string()),
+                Some(true),
+            ),
+            PlanRouting::Unsupported { .. } => (None, None, None),
+            // A how-to suggestion envelope carries no single executable
+            // candidate — plan-only reports no candidate columns for it.
+            PlanRouting::Suggest { .. } => (None, None, None),
+        };
+
+        let plan_summary = plan.summary();
+        self.record_ask_audit(AskAuditInput {
+            scope,
+            question: &plan_summary,
+            source_urns: &[],
+            provider: "",
+            model: "",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: 0.0,
+            answer: "",
+            citations: &[],
+            cache_hit: false,
+            effective_mode: crate::runtime::ai::strict_validator::Mode::Lenient,
+            temperature: None,
+            seed: None,
+            validation_ok: true,
+            retry_count: 0,
+            errors: &[],
+            intent: Some(plan.intent.as_str()),
+            plan_summary: Some(&plan_summary),
+            executed_query: None,
+        })?;
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "plan_only".into(),
+            "intent".into(),
+            "candidate_query".into(),
+            "candidate_type".into(),
+            "mutating".into(),
+            "rationale".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("plan_only", Value::Boolean(true));
+        record.set("intent", Value::text(plan.intent.as_str().to_string()));
+        match candidate_query {
+            Some(query) => record.set("candidate_query", Value::text(query)),
+            None => record.set("candidate_query", Value::Null),
+        }
+        match candidate_type {
+            Some(kind) => record.set("candidate_type", Value::text(kind)),
+            None => record.set("candidate_type", Value::Null),
+        }
+        match mutating {
+            Some(flag) => record.set("mutating", Value::Boolean(flag)),
+            None => record.set("mutating", Value::Null),
+        }
+        record.set("rationale", Value::text(plan.rationale.clone()));
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+        })
+    }
+
     /// Structured refusal for a mutating planner candidate. The candidate is
     /// never executed under any flag; the suggestion envelope arrives later.
     fn build_planner_refusal_result(
@@ -2552,181 +2670,45 @@ impl RedDBRuntime {
         })
     }
 
-    fn execute_ask_as_rql(
-        &self,
-        raw_query: &str,
-        ask: &crate::storage::query::ast::AskQuery,
-    ) -> RedDBResult<RuntimeQueryResult> {
-        let scope = self.ai_scope();
-        let tokens = crate::runtime::ask_pipeline::extract_tokens(&ask.question);
-        if tokens.is_empty() {
-            return Err(RedDBError::Query(
-                "ASK AS RQL question yielded no usable tokens".to_string(),
-            ));
-        }
-        let candidates = crate::runtime::ask_pipeline::match_schema(self, &scope, &tokens)?;
-
-        // Inference path (#1273): when `ai.ask_rql.backend = "llm"` and a
-        // generate provider is available, the model proposes the RQL
-        // candidate; otherwise fall back to the deterministic planner. Both
-        // candidates are re-validated through the parser via the same seam.
-        let candidate;
-        let engine;
-        let field;
-        let value;
-        let candidate_fields;
-        let candidate_collections;
-        let mut warnings;
-        let used_inference;
-        match self.ask_rql_inference(ask, &candidates)? {
-            Some(inference) => {
-                candidate = inference.candidate;
-                engine = "runtime-ai-rql-inference";
-                field = None;
-                value = None;
-                candidate_fields = Vec::new();
-                candidate_collections = candidates.collections.clone();
-                warnings = inference.warnings;
-                used_inference = true;
-            }
-            None => {
-                let plan = crate::runtime::ai::ask_rql_planner::plan(
-                    &ask.question,
-                    &tokens,
-                    &candidates,
-                    ask.collection.as_deref(),
-                )?;
-                // Re-validate the deterministic candidate through the same
-                // parser seam so the disposition / EXECUTE gating is shared.
-                candidate = crate::runtime::ai::ask_rql_planner::validate_candidate(&plan.rql)?;
-                engine = "runtime-ai-rql-planner";
-                field = Some(plan.field);
-                value = Some(plan.value);
-                candidate_fields = plan.candidate_fields;
-                candidate_collections = plan.candidate_collections;
-                warnings = plan.warnings;
-                used_inference = false;
-            }
-        }
-
-        // EXECUTE policy: auto-run read-only candidates only; a mutating
-        // candidate is refused for auto-execution regardless of EXECUTE.
-        if ask.execute {
-            if candidate.is_read_only() {
-                let mut executed = self.execute_query(&candidate.rql)?;
-                executed.query = raw_query.to_string();
-                return Ok(executed);
-            }
-            return Err(RedDBError::Query(format!(
-                "ASK ... EXECUTE refused: generated `{}` candidate is mutating and is never \
-                 auto-executed",
-                candidate.statement_type
-            )));
-        }
-
-        // The inference path already records the not-executed / mutating
-        // advisory inside `infer`; only the deterministic path needs it here.
-        if !used_inference {
-            if candidate.is_read_only() {
-                warnings.push(
-                    "candidate not executed; add EXECUTE to auto-run read-only candidates"
-                        .to_string(),
-                );
-            } else {
-                warnings.push(format!(
-                    "candidate is a mutating `{}` statement and is never auto-executed",
-                    candidate.statement_type
-                ));
-            }
-        }
-
-        let mut result = UnifiedResult::with_columns(vec![
-            "rql".into(),
-            "statement_type".into(),
-            "field".into(),
-            "value".into(),
-            "collection".into(),
-            "candidate_fields".into(),
-            "candidate_collections".into(),
-            "warnings".into(),
-        ]);
-        let mut record = UnifiedRecord::new();
-        record.set("rql", Value::text(candidate.rql));
-        record.set("statement_type", Value::text(candidate.statement_type));
-        match field {
-            Some(field) => record.set("field", Value::text(field)),
-            None => record.set("field", Value::Null),
-        }
-        match value {
-            Some(value) => record.set("value", Value::text(value)),
-            None => record.set("value", Value::Null),
-        }
-        match ask.collection.clone() {
-            Some(collection) => record.set("collection", Value::text(collection)),
-            None => record.set("collection", Value::Null),
-        }
-        record.set(
-            "candidate_fields",
-            Value::Json(json_string_array_bytes(&candidate_fields)),
-        );
-        record.set(
-            "candidate_collections",
-            Value::Json(json_string_array_bytes(&candidate_collections)),
-        );
-        record.set("warnings", Value::Json(json_string_array_bytes(&warnings)));
-        result.push(record);
-
-        Ok(RuntimeQueryResult {
-            query: raw_query.to_string(),
-            mode: QueryMode::Sql,
-            statement: "ask_as_rql",
-            engine,
-            result,
-            affected_rows: 0,
-            statement_type: "select",
-            bookmark: None,
-        })
-    }
-
-    /// Inference backend (#1273): when `ai.ask_rql.backend = "llm"`,
-    /// translate the question into an RQL candidate via the configured
-    /// generate provider. Returns `None` when the backend is disabled or no
-    /// provider / API key is available, so the caller falls back to the
-    /// deterministic planner. The model output is always re-validated
-    /// through the parser inside `ask_rql_planner::infer`.
-    fn ask_rql_inference(
+    /// Run the planner LLM over an already-grounded slice and route the plan —
+    /// WITHOUT executing the candidate or synthesizing. Shared by `EXPLAIN ASK`
+    /// (which reuses the funnel it already ran) and any other plan-inspection
+    /// caller. The planner model is resolved independently of the synthesis
+    /// model (ADR 0068 §3) and always runs deterministic (temperature 0).
+    fn plan_route_over_slice(
         &self,
         ask: &crate::storage::query::ast::AskQuery,
-        candidates: &crate::runtime::ask_pipeline::CandidateCollections,
-    ) -> RedDBResult<Option<crate::runtime::ai::ask_rql_planner::AskRqlInference>> {
-        if self.config_string("ai.ask_rql.backend", "deterministic") != "llm" {
-            return Ok(None);
-        }
+        slice: &crate::runtime::ai::ask_planner::NarrowedSlice,
+    ) -> RedDBResult<crate::runtime::ai::ask_planner::PlannedRoute> {
+        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::runtime::ai::ask_planner;
 
         let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
-        let provider = match ask.provider.as_deref() {
-            Some(name) => crate::ai::parse_provider(name)?,
-            None => default_provider,
-        };
-        crate::runtime::ai::provider_gate::enforce(self, &provider)?;
-        let api_key = match crate::ai::resolve_api_key_from_runtime(&provider, None, self) {
-            Ok(key) => key,
-            Err(_) => return Ok(None),
-        };
-        let api_base = provider.resolve_api_base();
-        let model = ask.model.clone().unwrap_or(default_model);
-        let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
-        let max_tokens = self.config_f64("ai.ask_rql.max_tokens", 256.0).max(1.0) as usize;
+        let provider_names =
+            self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
+        let planner_provider_name = provider_names
+            .first()
+            .cloned()
+            .unwrap_or_else(|| default_provider.token().to_string());
+        let planner_provider = parse_provider(&planner_provider_name)?;
+        crate::runtime::ai::provider_gate::enforce(self, &planner_provider)?;
 
-        let generate = move |prompt: &str| -> RedDBResult<String> {
+        let synth_model = ask.model.clone().unwrap_or(default_model);
+        let planner_model = crate::ai::resolve_ask_planner_model_from_runtime(self, &synth_model);
+        let settings = self.ask_cost_guard_settings();
+        let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
+        let planner_api_key = resolve_api_key_from_runtime(&planner_provider, None, self)?;
+        let planner_api_base = planner_provider.resolve_api_base();
+
+        let planner_closure = |prompt: &str| -> RedDBResult<String> {
             let response = call_ask_llm(
-                &provider,
+                &planner_provider,
                 transport.clone(),
-                api_key.clone(),
-                model.clone(),
+                planner_api_key.clone(),
+                planner_model.clone(),
                 prompt.to_string(),
-                api_base.clone(),
-                max_tokens,
+                planner_api_base.clone(),
+                settings.max_completion_tokens as usize,
                 Some(0.0),
                 None,
                 false,
@@ -2734,15 +2716,7 @@ impl RedDBRuntime {
             )?;
             Ok(response.output_text)
         };
-
-        let inference = crate::runtime::ai::ask_rql_planner::infer(
-            &ask.question,
-            candidates,
-            ask.collection.as_deref(),
-            ask.execute,
-            &generate,
-        )?;
-        Ok(Some(inference))
+        ask_planner::plan_and_route(&ask.question, slice, &planner_closure)
     }
 
     fn execute_explain_ask(
@@ -2827,9 +2801,45 @@ impl RedDBRuntime {
             },
         );
 
-        let mut result = UnifiedResult::with_columns(vec!["plan".into()]);
+        // #1751: EXPLAIN ASK also surfaces the routed intent and candidate
+        // query — running at most the planner call, never execution or
+        // synthesis. When the planner is disabled or the funnel grounded
+        // nothing, the intent is reported as `unknown` with no candidate.
+        let (intent_label, candidate_query) = if self.ask_planner_enabled() {
+            let slice = narrowed_slice_from_context(ask_context);
+            if slice.is_empty() {
+                ("unknown".to_string(), None)
+            } else {
+                let route = self.plan_route_over_slice(ask, &slice)?;
+                let candidate = match &route.routing {
+                    crate::runtime::ai::ask_planner::PlanRouting::Execute { candidate } => {
+                        Some(candidate.rql.clone())
+                    }
+                    crate::runtime::ai::ask_planner::PlanRouting::RefuseMutating {
+                        rql, ..
+                    } => Some(rql.clone()),
+                    crate::runtime::ai::ask_planner::PlanRouting::Unsupported { .. } => None,
+                    // A how-to suggestion envelope has no single candidate query.
+                    crate::runtime::ai::ask_planner::PlanRouting::Suggest { .. } => None,
+                };
+                (route.plan.intent.as_str().to_string(), candidate)
+            }
+        } else {
+            ("unknown".to_string(), None)
+        };
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "plan".into(),
+            "intent".into(),
+            "candidate_query".into(),
+        ]);
         let mut record = UnifiedRecord::new();
         record.set("plan", Value::Json(plan.to_string_compact().into_bytes()));
+        record.set("intent", Value::text(intent_label));
+        match candidate_query {
+            Some(query) => record.set("candidate_query", Value::text(query)),
+            None => record.set("candidate_query", Value::Null),
+        }
         result.push(record);
 
         Ok(RuntimeQueryResult {
@@ -5355,59 +5365,27 @@ mod citation_wedge_tests {
     }
 
     #[test]
-    fn ask_as_rql_returns_validated_universal_select_without_provider() {
+    fn ask_as_rql_and_execute_are_removed_with_didactic_errors() {
+        // Clean break (ADR 0068, #1751): the `AS RQL` and `EXECUTE` clauses
+        // were removed. Read-only candidates auto-execute by default and the
+        // `PLAN` clause inspects the query without running it. Both dead
+        // clauses reject at parse time with a didactic error naming `PLAN`.
         let rt = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
-        rt.execute_query("CREATE TABLE travelers (passport TEXT, name TEXT)")
-            .expect("create table");
-        rt.execute_query("INSERT INTO travelers (passport, name) VALUES ('FDD-12313', 'Ada')")
-            .expect("insert row");
 
-        let planned = rt
+        let err = rt
             .execute_query("ASK 'who owns passport FDD-12313?' AS RQL")
-            .expect("ASK AS RQL should not require an AI provider");
-        assert_eq!(planned.engine, "runtime-ai-rql-planner");
-
-        let record = planned.result.records.first().expect("one plan row");
-        let rql = match record.get("rql") {
-            Some(Value::Text(text)) => text.to_string(),
-            other => panic!("rql column should be text, got {other:?}"),
-        };
-        assert_eq!(rql, "SELECT * WHERE passport = 'FDD-12313'");
-
-        let selected = rt
-            .execute_query(&rql)
-            .expect("generated RQL should parse and execute");
-        assert_eq!(selected.engine, "runtime-table");
-        assert_eq!(selected.result.records.len(), 1);
-        assert_eq!(
-            selected.result.records[0].get("name"),
-            Some(&Value::text("Ada".to_string()))
+            .expect_err("AS RQL was removed");
+        assert!(
+            err.to_string().contains("AS RQL was removed") && err.to_string().contains("PLAN"),
+            "AS RQL must reject with a didactic error naming PLAN, got: {err}"
         );
-    }
 
-    #[test]
-    fn ask_as_rql_execute_runs_read_only_candidate_and_returns_rows() {
-        let rt = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
-        rt.execute_query("CREATE TABLE travelers (passport TEXT, name TEXT)")
-            .expect("create table");
-        rt.execute_query("INSERT INTO travelers (passport, name) VALUES ('FDD-12313', 'Ada')")
-            .expect("insert row");
-
-        // Default (no EXECUTE) returns the validated candidate, no rows.
-        let planned = rt
-            .execute_query("ASK 'who owns passport FDD-12313?' AS RQL")
-            .expect("ASK AS RQL candidate");
-        assert_eq!(planned.engine, "runtime-ai-rql-planner");
-
-        // EXECUTE auto-runs the read-only candidate and returns the rows.
-        let executed = rt
-            .execute_query("ASK 'who owns passport FDD-12313?' AS RQL EXECUTE")
-            .expect("ASK AS RQL EXECUTE should run the read-only candidate");
-        assert_eq!(executed.engine, "runtime-table");
-        assert_eq!(executed.result.records.len(), 1);
-        assert_eq!(
-            executed.result.records[0].get("name"),
-            Some(&Value::text("Ada".to_string()))
+        let err = rt
+            .execute_query("ASK 'list travelers' EXECUTE")
+            .expect_err("EXECUTE was removed");
+        assert!(
+            err.to_string().contains("EXECUTE was removed") && err.to_string().contains("PLAN"),
+            "EXECUTE must reject with a didactic error naming PLAN, got: {err}"
         );
     }
 
