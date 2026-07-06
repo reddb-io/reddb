@@ -278,6 +278,7 @@ impl RedDBRuntime {
                             match crate::runtime::config_matrix::default_for(
                                 "concurrency.locking.deadlock_timeout_ms",
                             ) {
+                                Some(crate::serde_json::Value::Integer(n)) => n as u64,
                                 Some(crate::serde_json::Value::Number(n)) => n as u64,
                                 _ => 5000,
                             }
