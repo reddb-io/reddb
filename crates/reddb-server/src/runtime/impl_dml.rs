@@ -1248,6 +1248,8 @@ impl RedDBRuntime {
             );
         }
 
+        let _ = self.inner.db.hypertables().route(collection, timestamp_ns);
+
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
             collection,
