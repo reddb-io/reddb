@@ -666,7 +666,7 @@ impl RedDB {
                 segment_id,
                 &payload,
                 rows.len() as u64,
-                reddb_file::AppendOnlySegmentCodec::Zstd,
+                reddb_file::append_only_segment::AppendOnlySegmentCodec::Zstd,
             )?;
         }
         Ok(())
