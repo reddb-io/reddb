@@ -8,6 +8,11 @@ use std::fmt;
 pub enum JsonValue {
     Null,
     Bool(bool),
+    /// An exact integer literal that fits `i64` (no fractional part, no
+    /// exponent). Kept distinct from [`JsonValue::Number`] so integers
+    /// beyond f64's exact range (±2^53) survive the round-trip losslessly
+    /// (issue #1768). `Number` still carries genuine floats.
+    Integer(i64),
     Number(f64),
     String(String),
     Array(Vec<JsonValue>),
@@ -23,10 +28,19 @@ impl JsonValue {
         }
     }
 
-    /// Returns the value as f64 if it is a number.
+    /// Returns the value as f64 if it is a number (exact integers widen).
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             JsonValue::Number(n) => Some(*n),
+            JsonValue::Integer(n) => Some(*n as f64),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as an exact `i64` when it is an integer literal.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            JsonValue::Integer(n) => Some(*n),
             _ => None,
         }
     }
@@ -129,6 +143,7 @@ impl JsonValue {
         match self {
             JsonValue::Null => out.push_str("null"),
             JsonValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            JsonValue::Integer(n) => out.push_str(&format!("{n}")),
             JsonValue::Number(n) => {
                 if n.fract() == 0.0 {
                     out.push_str(&format!("{}", *n as i64));
@@ -205,13 +220,15 @@ impl From<f64> for JsonValue {
 
 impl From<i64> for JsonValue {
     fn from(value: i64) -> JsonValue {
-        JsonValue::Number(value as f64)
+        JsonValue::Integer(value)
     }
 }
 
 impl From<usize> for JsonValue {
     fn from(value: usize) -> JsonValue {
-        JsonValue::Number(value as f64)
+        i64::try_from(value)
+            .map(JsonValue::Integer)
+            .unwrap_or_else(|_| JsonValue::Number(value as f64))
     }
 }
 
@@ -299,7 +316,13 @@ impl<'a> JsonParser<'a> {
             _ => return Err("invalid number literal".to_string()),
         }
 
+        // Track whether the literal has a fractional part or exponent; a bare
+        // integer (neither) is parsed losslessly into `i64` when it fits, so
+        // integers beyond f64's exact range survive the round-trip (#1768).
+        let mut is_float = false;
+
         if !self.eof() && self.current_char() == b'.' {
+            is_float = true;
             self.pos += 1;
             if self.eof() || !self.current_char().is_ascii_digit() {
                 return Err("invalid number literal".to_string());
@@ -310,6 +333,7 @@ impl<'a> JsonParser<'a> {
         }
 
         if !self.eof() && (self.current_char() == b'e' || self.current_char() == b'E') {
+            is_float = true;
             self.pos += 1;
             if !self.eof() && (self.current_char() == b'+' || self.current_char() == b'-') {
                 self.pos += 1;
@@ -324,6 +348,13 @@ impl<'a> JsonParser<'a> {
 
         let slice = &self.input[start..self.pos];
         let s = std::str::from_utf8(slice).map_err(|_| "invalid UTF-8 in number".to_string())?;
+        if !is_float {
+            // A bare integer literal. Parse it exactly as `i64`; only fall back
+            // to the lossy f64 form when the magnitude exceeds `i64`'s range.
+            if let Ok(int) = s.parse::<i64>() {
+                return Ok(JsonValue::Integer(int));
+            }
+        }
         let value = s
             .parse::<f64>()
             .map_err(|_| "failed to parse number".to_string())?;
