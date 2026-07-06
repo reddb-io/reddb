@@ -48,6 +48,7 @@ fn open(store_dir: &Path) -> RedDBRuntime {
 fn json_field_to_storage(value: &reddb::json::Value) -> Value {
     match value {
         reddb::json::Value::String(text) => Value::text(text.clone()),
+        reddb::json::Value::Integer(number) => Value::Integer(*number),
         reddb::json::Value::Number(number) => {
             if number.fract() == 0.0 && *number >= i64::MIN as f64 && *number <= i64::MAX as f64 {
                 Value::Integer(*number as i64)
