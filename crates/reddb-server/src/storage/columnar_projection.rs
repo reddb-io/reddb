@@ -126,6 +126,15 @@ impl std::fmt::Display for ProjectionError {
 
 impl std::error::Error for ProjectionError {}
 
+impl ProjectionError {
+    fn is_projection_artifact_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Block(_) | Self::Envelope(_) | Self::CorruptSegment(_)
+        )
+    }
+}
+
 impl From<ColumnBlockError> for ProjectionError {
     fn from(e: ColumnBlockError) -> Self {
         Self::Block(e)
@@ -345,6 +354,19 @@ impl ColumnarProjection {
         self.manifest = ProjectionManifest::default();
     }
 
+    /// Rebuild the derived projection from the row log. This is the repair
+    /// primitive for missing or corrupt projection artifacts: truth stays in
+    /// [`AppendOnlyCollection`], so repair is drop-and-regenerate.
+    pub fn rebuild_from_truth(
+        &mut self,
+        collection: &AppendOnlyCollection,
+        checkpoint_lsn: u64,
+        budget: TranscodeBudget,
+    ) -> Result<EmitOutcome, ProjectionError> {
+        self.drop_projection();
+        self.emit_at_checkpoint(collection, checkpoint_lsn, budget)
+    }
+
     /// Emit columnar segments for the un-materialized tail up to `checkpoint_lsn`,
     /// bounded by `budget`. Never fails for lack of budget: it transcodes a
     /// prefix and defers the rest. This is the *only* producer of columnar
@@ -489,6 +511,45 @@ impl ColumnarProjection {
             out.push(lsn_row.row.clone());
         }
         Ok(out)
+    }
+
+    /// Analytical scan with projection repair. Missing derived segment bytes
+    /// or checksum/envelope/frame failures never make the query depend on a
+    /// bad projection: the projection is dropped, rebuilt from the row log, and
+    /// scanned again under the same LSN pin.
+    pub fn repairing_analytical_scan(
+        &mut self,
+        collection: &AppendOnlyCollection,
+        pinned_lsn: u64,
+        budget: TranscodeBudget,
+    ) -> Result<Vec<Row>, ProjectionError> {
+        if self.projection_artifacts_missing() {
+            self.rebuild_from_truth(collection, pinned_lsn, budget)?;
+            return self.analytical_scan(collection, pinned_lsn);
+        }
+
+        match self.analytical_scan(collection, pinned_lsn) {
+            Ok(rows) => Ok(rows),
+            Err(err) if err.is_projection_artifact_failure() => {
+                self.rebuild_from_truth(collection, pinned_lsn, budget)?;
+                self.analytical_scan(collection, pinned_lsn)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn projection_artifacts_missing(&self) -> bool {
+        if self.manifest.segments.is_empty() {
+            return false;
+        }
+        if self.manifest.segments.len() != self.segments.len() {
+            return true;
+        }
+        self.manifest
+            .segments
+            .iter()
+            .zip(self.segments.iter())
+            .any(|(manifest, stored)| manifest != &stored.entry)
     }
 
     /// Verify a sealed segment (envelope + `RDCC` CRC), decode it, and push its
@@ -1166,6 +1227,51 @@ mod tests {
             .expect("rebuild");
         let after = projection.analytical_scan(&collection, 300).expect("scan");
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn repairing_scan_rebuilds_after_projection_artifacts_are_deleted() {
+        let collection = filled(300);
+        let mut projection = ColumnarProjection::new(schema(), KEY);
+        projection
+            .emit_at_checkpoint(&collection, 300, TranscodeBudget::default())
+            .expect("emit");
+        assert!(!projection.segments.is_empty());
+
+        // Simulate a backup/restore or operator cleanup that preserves truth
+        // but omits the derived segment files.
+        projection.segments.clear();
+
+        let scan = projection
+            .repairing_analytical_scan(&collection, 300, TranscodeBudget::default())
+            .expect("repairing scan");
+
+        assert_eq!(scan, collection.row_scan(300));
+        assert!(!projection.manifest().segments().is_empty());
+        assert!(!projection.segments.is_empty());
+    }
+
+    #[test]
+    fn repairing_scan_rebuilds_after_projection_checksum_mismatch() {
+        let collection = filled(20);
+        let mut projection = ColumnarProjection::new(schema(), KEY);
+        projection
+            .emit_at_checkpoint(&collection, 20, TranscodeBudget::default())
+            .expect("emit");
+        let original_segment_id = projection.manifest().segments()[0].segment_id;
+
+        projection.segments[0].sealed[0] ^= 0xFF;
+
+        let scan = projection
+            .repairing_analytical_scan(&collection, 20, TranscodeBudget::default())
+            .expect("repairing scan");
+
+        assert_eq!(scan, collection.row_scan(20));
+        assert_ne!(
+            projection.manifest().segments()[0].segment_id,
+            original_segment_id,
+            "corrupt projection bytes must be replaced by a rebuilt segment"
+        );
     }
 
     #[test]
