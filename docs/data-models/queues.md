@@ -117,6 +117,9 @@ QUEUE LPUSH tasks {"urgent":true}
 -- Push with priority (priority queues only)
 QUEUE PUSH urgent_tasks {"job":"deploy"} PRIORITY 10
 
+-- Push with an ordering key for grouped FIFO-per-entity delivery
+QUEUE PUSH tasks {"job":"invoice","account_id":"acct_123"} KEY 'acct_123'
+
 -- Delayed delivery (relative): message is durable and inspectable
 -- but not deliverable until 30 s after push.
 QUEUE PUSH tasks {"job":"reminder"} DELAY 30s
@@ -145,6 +148,29 @@ A delayed message is delivered the next time a reader runs after its
 availability instant has passed. `QUEUE READ ... WAIT <duration>`
 honours `DELAY` natively — a parked waiter wakes when the message
 becomes due, capped by the caller's `WAIT` budget.
+
+### Ordering keys
+
+`QUEUE PUSH ... KEY '<key>'` serializes grouped delivery for messages with the
+same key. For each `(consumer group, key)`, RedDB returns at most one pending
+delivery at a time; later messages with that key are skipped until the pending
+message is ACKed. Messages with different keys, and keyless messages, continue
+to deliver normally.
+
+Use one ordering key per entity when you need FIFO processing for that entity:
+for example, use `KEY 'acct_123'` for all jobs that mutate account `acct_123`
+instead of creating one queue or one consumer per account. In FANOUT queues each
+consumer group serializes the key independently, so one group's in-flight
+message does not block another group.
+
+Ordering keys apply only to grouped delivery (`QUEUE READ` plus ACK/NACK).
+Raw deque pops (`QUEUE POP`, `LPOP`, `RPOP`) intentionally stay outside the
+ordering guarantee; mixing POP consumers with keyed grouped consumers can
+observe or remove messages without respecting key serialization.
+
+Ordering keys cannot be combined with `DELAY` / `AVAILABLE AT`, and priority
+queues reject keyed pushes because delayed and priority delivery both reorder
+messages by definition.
 
 ### Pop (dequeue)
 
@@ -454,7 +480,7 @@ WHERE attempts >= 3
 LIMIT 50
 ```
 
-Queue projection columns are `id`, `payload`, `priority`, `attempts`, `last_error`, `enqueued_at`, `available_at`, `dlq`, and `tenant`.
+Queue projection columns are `id`, `payload`, `priority`, `attempts`, `last_error`, `enqueued_at`, `available_at`, `key`, `dlq`, and `tenant`.
 
 Use `QUEUE MOVE` to replay a bounded batch from one queue to another:
 
@@ -470,6 +496,7 @@ LIMIT 100
 
 - **At-least-once delivery**: unacknowledged messages reappear after crash recovery.
 - **Consumer group tracking**: per-consumer delivery state with NACK/claim support.
+- **Ordering keys**: grouped consumers receive at most one pending delivery per `(group, key)`.
 - **WAL integration**: push/pop/ack are durable via write-ahead log.
 
 ## Configuration

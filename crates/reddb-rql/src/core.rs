@@ -3040,6 +3040,9 @@ pub enum QueueCommand {
         value: Value,
         side: QueueSide,
         priority: Option<i32>,
+        /// Optional per-message ordering key. Grouped delivery serializes
+        /// messages sharing this key per consumer group.
+        key: Option<String>,
         /// Per-message delayed availability (issue #722). `None` means the
         /// message is deliverable immediately. `Some(_)` resolves to an
         /// `available_at_ns` metadata field at push time; delivery paths

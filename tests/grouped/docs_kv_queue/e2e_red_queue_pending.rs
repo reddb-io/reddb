@@ -11,11 +11,12 @@ use reddb::runtime::mvcc::{
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-const QUEUE_PENDING_COLUMNS: [&str; 7] = [
+const QUEUE_PENDING_COLUMNS: [&str; 8] = [
     "queue",
     "group",
     "message_id",
     "delivery_id",
+    "key",
     "attempts",
     "lock_deadline",
     "locked_by",
@@ -23,6 +24,31 @@ const QUEUE_PENDING_COLUMNS: [&str; 7] = [
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
+}
+
+#[test]
+fn red_queue_pending_exposes_ordering_key() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE QUEUE keyed WITH MAX_ATTEMPTS 3");
+    exec(&rt, "QUEUE GROUP CREATE keyed workers");
+    exec(&rt, "QUEUE PUSH keyed 'job' KEY 'tenant-7'");
+    exec(
+        &rt,
+        "QUEUE READ keyed GROUP workers CONSUMER worker1 COUNT 1",
+    );
+
+    let result = rt
+        .execute_query("SELECT queue, key FROM red.queue_pending")
+        .expect("red.queue_pending select")
+        .result;
+
+    assert_eq!(result.records.len(), 1);
+    let row = &result.records[0];
+    assert_eq!(row.get("queue"), Some(&Value::text("keyed")));
+    assert_eq!(row.get("key"), Some(&Value::text("tenant-7")));
+
+    cleanup_scope();
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {

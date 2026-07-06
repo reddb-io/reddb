@@ -821,6 +821,24 @@ impl QueueStore for PrimaryQueueStore {
         }
     }
 
+    fn read_ordering_key(&self, queue: &str, message_id: MessageId) -> Option<String> {
+        let store = self.store();
+        super::impl_queue::read_message_ordering_key(
+            store.as_ref(),
+            queue,
+            EntityId::new(message_id),
+        )
+    }
+
+    fn ordering_key_in_flight(&self, queue: &str, group: &str, ordering_key: &str) -> bool {
+        self.pending_message_ids(queue, Some(group))
+            .into_iter()
+            .any(|message_id| {
+                self.read_ordering_key(queue, message_id)
+                    .is_some_and(|key| key == ordering_key)
+            })
+    }
+
     fn read_pending_payload(&self, delivery_id: &str) -> Option<Value> {
         let (_, row) = self.find_pending_by_delivery(delivery_id)?;
         self.read_message(&row.queue, row.message_id)

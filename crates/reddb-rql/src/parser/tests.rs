@@ -6937,6 +6937,30 @@ fn doc_form_queue_push_raw_json_with_priority_suffix() {
 }
 
 #[test]
+fn queue_push_accepts_ordering_key_suffix() {
+    let q = parse("QUEUE PUSH tasks 'job-1' KEY 'customer-42'").unwrap();
+    let QueryExpr::QueueCommand(QueueCommand::Push { key, .. }) = q else {
+        panic!("expected Push");
+    };
+    assert_eq!(key.as_deref(), Some("customer-42"));
+}
+
+#[test]
+fn queue_push_rejects_key_with_delayed_availability() {
+    for sql in [
+        "QUEUE PUSH tasks 'job-1' KEY 'customer-42' DELAY 1s",
+        "QUEUE PUSH tasks 'job-1' AVAILABLE AT 1735689600000 KEY 'customer-42'",
+    ] {
+        let err = parse(sql).expect_err("KEY plus delayed availability must fail");
+        assert!(
+            err.to_string()
+                .contains("QUEUE PUSH KEY cannot be combined with DELAY / AVAILABLE AT"),
+            "{sql}: {err}"
+        );
+    }
+}
+
+#[test]
 fn doc_form_insert_document_with_raw_json_literal_in_values() {
     // README.md:44, landing +page.svelte:54/150/492
     let q =

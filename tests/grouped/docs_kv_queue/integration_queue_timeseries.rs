@@ -695,6 +695,84 @@ fn test_fanout_queue_ack_isolation() {
 }
 
 #[test]
+fn test_ordering_key_serializes_grouped_delivery_and_exposes_key() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE keyed WORK");
+    exec(&rt, "QUEUE GROUP CREATE keyed workers");
+    exec(&rt, "QUEUE PUSH keyed 'a1' KEY 'account-a'");
+    exec(&rt, "QUEUE PUSH keyed 'a2' KEY 'account-a'");
+    exec(&rt, "QUEUE PUSH keyed 'b1' KEY 'account-b'");
+
+    let first = exec(&rt, "QUEUE READ keyed GROUP workers CONSUMER alice COUNT 1");
+    assert_eq!(first.result.records.len(), 1);
+    assert_eq!(text(&first.result.records[0], "payload"), "a1");
+    let first_id = text(&first.result.records[0], "message_id");
+
+    let second = exec(&rt, "QUEUE READ keyed GROUP workers CONSUMER bob COUNT 2");
+    assert_eq!(second.result.records.len(), 1);
+    assert_eq!(text(&second.result.records[0], "payload"), "b1");
+
+    let projection = exec(&rt, "SELECT id, payload, key FROM QUEUE keyed");
+    let rows: Vec<_> = projection
+        .result
+        .records
+        .iter()
+        .map(|row| (text(row, "payload"), text(row, "key")))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("a1".to_string(), "account-a".to_string()),
+            ("a2".to_string(), "account-a".to_string()),
+            ("b1".to_string(), "account-b".to_string()),
+        ]
+    );
+
+    exec(&rt, &format!("QUEUE ACK keyed GROUP workers '{first_id}'"));
+    let unblocked = exec(&rt, "QUEUE READ keyed GROUP workers CONSUMER carol COUNT 1");
+    assert_eq!(unblocked.result.records.len(), 1);
+    assert_eq!(text(&unblocked.result.records[0], "payload"), "a2");
+}
+
+#[test]
+fn test_fanout_ordering_key_is_independent_per_consumer_group() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE fanout_keyed FANOUT");
+    exec(&rt, "QUEUE PUSH fanout_keyed 'first' KEY 'tenant-1'");
+    exec(&rt, "QUEUE PUSH fanout_keyed 'second' KEY 'tenant-1'");
+
+    let alice = exec(&rt, "QUEUE READ fanout_keyed CONSUMER alice COUNT 1");
+    assert_eq!(alice.result.records.len(), 1);
+    assert_eq!(text(&alice.result.records[0], "payload"), "first");
+
+    let bob = exec(&rt, "QUEUE READ fanout_keyed CONSUMER bob COUNT 1");
+    assert_eq!(bob.result.records.len(), 1);
+    assert_eq!(text(&bob.result.records[0], "payload"), "first");
+
+    let alice_blocked = exec(&rt, "QUEUE READ fanout_keyed CONSUMER alice COUNT 1");
+    assert!(
+        alice_blocked.result.records.is_empty(),
+        "alice must not receive the second same-key message until first is ACKed"
+    );
+}
+
+#[test]
+fn test_ordering_key_rejects_priority_queue_push() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE urgent_keyed PRIORITY");
+    let err = rt
+        .execute_query("QUEUE PUSH urgent_keyed 'job' KEY 'account-a'")
+        .expect_err("KEY onto priority queue must fail");
+    assert!(
+        format!("{err:?}").contains("ordering key"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
 fn test_fanout_queue_dlq_per_consumer() {
     let rt = rt();
 

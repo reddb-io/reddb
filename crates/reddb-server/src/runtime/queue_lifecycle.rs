@@ -198,7 +198,13 @@ impl<S: QueueStore> QueueLifecycle<S> {
             }
         };
         let mut out = Vec::with_capacity(count.min(available.len()));
-        for message_id in available.into_iter().take(count) {
+        for message_id in available {
+            if out.len() >= count {
+                break;
+            }
+            if self.ordering_key_blocked(queue, group, message_id) {
+                continue;
+            }
             let deadline = now + self.config.lock_duration;
             let delivery_id = self
                 .store
@@ -270,6 +276,9 @@ impl<S: QueueStore> QueueLifecycle<S> {
         for message_id in available {
             if out.len() >= count {
                 break;
+            }
+            if self.ordering_key_blocked(queue, group, message_id) {
+                continue;
             }
             let deadline = now + self.config.lock_duration;
             let delivery_id = self
@@ -605,6 +614,12 @@ impl<S: QueueStore> QueueLifecycle<S> {
             .push(outcome);
     }
 
+    fn ordering_key_blocked(&self, queue: &str, group: &str, message_id: MessageId) -> bool {
+        self.store
+            .read_ordering_key(queue, message_id)
+            .is_some_and(|key| self.store.ordering_key_in_flight(queue, group, &key))
+    }
+
     #[cfg(test)]
     pub(crate) fn recorded_outcomes(&self) -> Vec<RetirementOutcome> {
         self.outcomes.lock().expect("outcomes poisoned").clone()
@@ -686,6 +701,62 @@ mod tests {
         assert_ne!(a[0].delivery_id, b[0].delivery_id);
         assert_ne!(a[0].payload, b[0].payload);
         assert_eq!(b[0].payload, Value::text("second"));
+    }
+
+    #[test]
+    fn work_ordering_key_skip_scan_blocks_same_key_only_for_group() {
+        let store = store_with(&[(1, "first-a"), (2, "second-a"), (3, "first-b")]);
+        store.seed_ordering_key("q", 1, "a");
+        store.seed_ordering_key("q", 2, "a");
+        store.seed_ordering_key("q", 3, "b");
+        let lc = lifecycle(store);
+
+        let first = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "alice", 1)
+            .expect("first read");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].payload, Value::text("first-a"));
+
+        let second = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "bob", 2)
+            .expect("second read");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].payload, Value::text("first-b"));
+
+        lc.ack(&QueueTxn::new(), &first[0].delivery_id)
+            .expect("ack first key");
+        let unblocked = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "carol", 1)
+            .expect("unblocked read");
+        assert_eq!(unblocked.len(), 1);
+        assert_eq!(unblocked[0].payload, Value::text("second-a"));
+    }
+
+    #[test]
+    fn fanout_ordering_keys_are_scoped_per_group() {
+        let store = store_with(&[(1, "first"), (2, "second")]);
+        store.seed_ordering_key("q", 1, "same");
+        store.seed_ordering_key("q", 2, "same");
+        let mut config = LifecycleConfig::default();
+        config.mode = QueueMode::Fanout;
+        let lc = QueueLifecycle::new(store, config);
+
+        let alice = lc
+            .group_read(&QueueTxn::new(), "q", "_fanout_alice", "alice", 1)
+            .expect("alice read");
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].payload, Value::text("first"));
+
+        let bob = lc
+            .group_read(&QueueTxn::new(), "q", "_fanout_bob", "bob", 1)
+            .expect("bob read");
+        assert_eq!(bob.len(), 1);
+        assert_eq!(bob[0].payload, Value::text("first"));
+
+        let alice_blocked = lc
+            .group_read(&QueueTxn::new(), "q", "_fanout_alice", "alice", 1)
+            .expect("alice second read");
+        assert!(alice_blocked.is_empty());
     }
 
     #[test]

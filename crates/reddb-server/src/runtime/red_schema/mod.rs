@@ -264,11 +264,12 @@ const QUEUE_COLUMNS: [&str; 8] = [
     "internal",
 ];
 
-const QUEUE_PENDING_COLUMNS: [&str; 7] = [
+const QUEUE_PENDING_COLUMNS: [&str; 8] = [
     "queue",
     "group",
     "message_id",
     "delivery_id",
+    "key",
     "attempts",
     "lock_deadline",
     "locked_by",
