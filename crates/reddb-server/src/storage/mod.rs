@@ -93,6 +93,14 @@ pub mod blockchain;
 // primitives the wiring will call into.
 pub mod signed_writes;
 
+// Columnar analytics projection (ADR 0069, #1766): the derived, disposable
+// columnar representation of an append-only collection. Emitted on the
+// checkpoint path, sealed under the crypto page envelope, and read via the
+// LSN-pinned analytical scan (columnar segments + un-materialized row tail
+// under one pinned snapshot). Runtime wiring into `SegmentManager` checkpoint
+// and the query executor lands in follow-up slices.
+pub mod columnar_projection;
+
 // Public surface re-used by the rest of the codebase.
 pub use backend::{BackendError, LocalBackend, RemoteBackend};
 pub use embedded::{
