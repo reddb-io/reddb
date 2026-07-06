@@ -1655,6 +1655,7 @@ fn mcp_keyed_ident(value: &str) -> Result<String, String> {
 fn mcp_value_literal(value: &JsonValue) -> Result<String, String> {
     match value {
         JsonValue::String(value) => Ok(format!("'{}'", value.replace('\'', "''"))),
+        JsonValue::Integer(value) => Ok(value.to_string()),
         JsonValue::Number(value) => Ok(value.to_string()),
         JsonValue::Bool(value) => Ok(value.to_string()),
         JsonValue::Null => Ok("NULL".to_string()),
