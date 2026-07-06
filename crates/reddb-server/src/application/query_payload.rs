@@ -677,6 +677,7 @@ fn json_filter_value(value: &JsonValue) -> RedDBResult<RuntimeFilterValue> {
     Ok(match value {
         JsonValue::Null => RuntimeFilterValue::Null,
         JsonValue::Bool(value) => RuntimeFilterValue::Bool(*value),
+        JsonValue::Integer(value) => RuntimeFilterValue::Int(*value),
         JsonValue::Number(value) => {
             if value.fract().abs() < f64::EPSILON {
                 RuntimeFilterValue::Int(*value as i64)
