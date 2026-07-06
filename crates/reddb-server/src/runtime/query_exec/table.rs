@@ -906,8 +906,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // Bloom filter: extract PK key for segment pruning
         let bloom_key = extract_bloom_key_for_pk(filter);
         if let Some(ref key) = bloom_key {
-            let (entities, _pruned) = manager.query_with_bloom_hint(Some(key), |_| true);
-            if entities.is_empty() {
+            if !manager.bloom_may_contain_key(key) {
                 return Ok(Vec::new());
             }
         }
