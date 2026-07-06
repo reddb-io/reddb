@@ -8,9 +8,16 @@ use std::time::Duration;
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::server::RedDBServer;
 use reddb::storage::query::UnifiedRecord;
+use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::storage::schema::Value;
+use reddb::{RedDBOptions, StorageDeployPreset};
 use serde_json::{json, Value as JsonValue};
 use support::{checkpoint_and_reopen, PersistentDbPath};
+
+const PROB_HLL_STATE_PREFIX: &str = "red.probabilistic.hll.";
+const PROB_SKETCH_STATE_PREFIX: &str = "red.probabilistic.sketch.";
+const PROB_FILTER_STATE_PREFIX: &str = "red.probabilistic.filter.";
+const PROB_ENCODING_MARKER_KEY: &str = "red.probabilistic.state_encoding";
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("runtime")
@@ -44,6 +51,104 @@ fn bool_value(row: &UnifiedRecord, column: &str) -> bool {
         Some(Value::Boolean(value)) => *value,
         other => panic!("expected bool column {column}, got {other:?}"),
     }
+}
+
+fn state_key(prefix: &str, name: &str) -> String {
+    format!("{prefix}{}", hex_encode(name.as_bytes()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn config_values(rt: &RedDBRuntime, key: &str) -> Vec<Value> {
+    let Some(manager) = rt.db().store().get_collection("red_config") else {
+        return Vec::new();
+    };
+    manager
+        .query_all(|_| true)
+        .into_iter()
+        .filter_map(|entity| {
+            let EntityData::Row(row) = entity.data else {
+                return None;
+            };
+            let named = row.named?;
+            let Some(Value::Text(candidate)) = named.get("key") else {
+                return None;
+            };
+            if candidate.as_ref() == key {
+                named.get("value").cloned()
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn delete_config_key(rt: &RedDBRuntime, key: &str) {
+    let store = rt.db().store();
+    let Some(manager) = store.get_collection("red_config") else {
+        return;
+    };
+    let ids: Vec<EntityId> = manager
+        .query_all(|_| true)
+        .into_iter()
+        .filter_map(|entity| {
+            let EntityData::Row(row) = &entity.data else {
+                return None;
+            };
+            let named = row.named.as_ref()?;
+            let Some(Value::Text(candidate)) = named.get("key") else {
+                return None;
+            };
+            (candidate.as_ref() == key).then_some(entity.id)
+        })
+        .collect();
+    for id in ids {
+        store
+            .delete("red_config", id)
+            .expect("delete seeded config row");
+    }
+}
+
+fn insert_config_value(rt: &RedDBRuntime, key: &str, value: Value) {
+    let store = rt.db().store();
+    let _ = store.get_or_create_collection("red_config");
+    let entity = UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::TableRow {
+            table: std::sync::Arc::from("red_config"),
+            row_id: 0,
+        },
+        EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(
+                [
+                    ("key".to_string(), Value::text(key.to_string())),
+                    ("value".to_string(), value),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            schema: None,
+        }),
+    );
+    store
+        .insert_auto("red_config", entity)
+        .expect("insert seeded config row");
+}
+
+fn open_persistent_runtime(path: &std::path::Path) -> Result<RedDBRuntime, String> {
+    let path = path.to_string_lossy().to_string();
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())?;
+    RedDBRuntime::with_options(options).map_err(|err| format!("{err:?}"))
 }
 
 fn spawn_http_server() -> (support::TempDbFile, String) {
@@ -148,9 +253,11 @@ fn probabilistic_state_survives_reopen_for_commands_and_sql_read_forms() {
 
     exec(&rt, "CREATE SKETCH clicks");
     exec(&rt, "SKETCH ADD clicks 'signup' 5");
+    exec(&rt, "SKETCH ADD clicks 'login' 2");
 
     exec(&rt, "CREATE FILTER sessions");
     exec(&rt, "FILTER ADD sessions 'sess:abc'");
+    exec(&rt, "FILTER ADD sessions 'sess:def'");
 
     let reopened = checkpoint_and_reopen(&path, rt);
 
@@ -165,18 +272,123 @@ fn probabilistic_state_survives_reopen_for_commands_and_sql_read_forms() {
 
     let sketch_command = exec(&reopened, "SKETCH COUNT clicks 'signup'");
     assert_eq!(uint_value(only_record(&sketch_command), "estimate"), 5);
+    let sketch_info = exec(&reopened, "SKETCH INFO clicks");
+    assert_eq!(uint_value(only_record(&sketch_info), "total"), 7);
     let sketch_sql = exec(&reopened, "SELECT FREQ('signup') AS freq FROM clicks");
     assert_eq!(sketch_sql.result.columns, vec!["freq"]);
     assert_eq!(uint_value(only_record(&sketch_sql), "freq"), 5);
 
     let filter_command = exec(&reopened, "FILTER CHECK sessions 'sess:abc'");
     assert!(bool_value(only_record(&filter_command), "exists"));
+    let filter_info = exec(&reopened, "FILTER INFO sessions");
+    assert_eq!(uint_value(only_record(&filter_info), "count"), 2);
     let filter_sql = exec(
         &reopened,
         "SELECT CONTAINS('sess:abc') AS hit FROM sessions",
     );
     assert_eq!(filter_sql.result.columns, vec!["hit"]);
     assert!(bool_value(only_record(&filter_sql), "hit"));
+}
+
+#[test]
+fn probabilistic_state_writes_raw_blobs_and_compacts_superseded_rows() {
+    let rt = runtime();
+
+    exec(&rt, "CREATE HLL visitors");
+    for i in 0..8 {
+        exec(&rt, &format!("HLL ADD visitors 'user-{i}'"));
+    }
+
+    exec(&rt, "CREATE SKETCH clicks WIDTH 16 DEPTH 3");
+    for i in 0..8 {
+        exec(&rt, &format!("SKETCH ADD clicks 'button-{i}' {}", i + 1));
+    }
+
+    exec(&rt, "CREATE FILTER sessions CAPACITY 100");
+    for i in 0..8 {
+        exec(&rt, &format!("FILTER ADD sessions 'sess-{i}'"));
+    }
+
+    for key in [
+        state_key(PROB_HLL_STATE_PREFIX, "visitors"),
+        state_key(PROB_SKETCH_STATE_PREFIX, "clicks"),
+        state_key(PROB_FILTER_STATE_PREFIX, "sessions"),
+    ] {
+        let values = config_values(&rt, &key);
+        assert_eq!(values.len(), 1, "expected compacted single state row for {key}");
+        assert!(
+            matches!(values.first(), Some(Value::Blob(_))),
+            "expected raw Blob state for {key}, got {values:?}"
+        );
+    }
+}
+
+#[test]
+fn probabilistic_legacy_hex_state_migrates_once_to_raw_blob() {
+    let path = PersistentDbPath::new("probabilistic_legacy_migration");
+    let rt = path.open_runtime();
+
+    exec(&rt, "CREATE HLL visitors");
+    exec(&rt, "HLL ADD visitors 'alice' 'bob'");
+    let key = state_key(PROB_HLL_STATE_PREFIX, "visitors");
+    let raw = match config_values(&rt, &key).pop() {
+        Some(Value::Blob(bytes)) => bytes,
+        other => panic!("expected raw HLL state before legacy seed, got {other:?}"),
+    };
+    delete_config_key(&rt, PROB_ENCODING_MARKER_KEY);
+    delete_config_key(&rt, &key);
+    insert_config_value(&rt, &key, Value::text(hex_encode(&raw)));
+
+    let reopened = checkpoint_and_reopen(&path, rt);
+    let hll_command = exec(&reopened, "HLL COUNT visitors");
+    assert_eq!(uint_value(only_record(&hll_command), "count"), 2);
+
+    let values = config_values(&reopened, &key);
+    assert_eq!(values.len(), 1, "legacy row should be compacted during migration");
+    assert!(
+        matches!(values.first(), Some(Value::Blob(bytes)) if bytes == &raw),
+        "expected migrated raw HLL state, got {values:?}"
+    );
+    assert!(
+        matches!(
+            config_values(&reopened, PROB_ENCODING_MARKER_KEY).last(),
+            Some(Value::Text(value)) if value.as_ref() == "raw-v1"
+        ),
+        "migration should stamp the raw encoding marker"
+    );
+}
+
+#[test]
+fn probabilistic_legacy_hex_state_is_rejected_after_raw_marker() {
+    let dir = tempfile::Builder::new()
+        .prefix("reddb-probabilistic-legacy-reject-")
+        .tempdir()
+        .expect("temp dir");
+    let path = dir.path().join("data.rdb");
+    let rt = open_persistent_runtime(&path).expect("open runtime");
+
+    exec(&rt, "CREATE HLL visitors");
+    exec(&rt, "HLL ADD visitors 'alice'");
+    let key = state_key(PROB_HLL_STATE_PREFIX, "visitors");
+    let raw = match config_values(&rt, &key).pop() {
+        Some(Value::Blob(bytes)) => bytes,
+        other => panic!("expected raw HLL state before legacy append, got {other:?}"),
+    };
+    insert_config_value(&rt, &key, Value::text(hex_encode(&raw)));
+
+    let native = reddb::NativeUseCases::new(&rt);
+    native.create_snapshot().expect("snapshot");
+    native.checkpoint().expect("checkpoint");
+    drop(rt);
+
+    let message = match open_persistent_runtime(&path) {
+        Ok(_) => panic!("raw-marked legacy state should fail"),
+        Err(err) => err,
+    };
+    assert!(
+        message.contains("legacy hex-encoded HLL state for 'visitors' is rejected"),
+        "unexpected error: {message}"
+    );
 }
 
 #[test]
