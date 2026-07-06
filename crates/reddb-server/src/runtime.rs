@@ -1397,6 +1397,7 @@ mod impl_dml_ttl;
 mod impl_dml_update_analysis;
 mod impl_dml_update_target;
 mod impl_ec;
+pub mod impl_ephemeral;
 mod impl_events;
 mod impl_fast_path;
 mod impl_graph;
