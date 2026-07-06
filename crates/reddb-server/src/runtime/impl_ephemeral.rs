@@ -12,9 +12,10 @@
 //! types.
 //!
 //! The loaded collection is named by its sanitized file stem and — as the
-//! single loaded file — is also addressable by the positional file alias
-//! [`POSITIONAL_ALIAS`] (`t`), wired as a non-materialized view so
-//! `SELECT … FROM t` rewrites to the underlying collection.
+//! single loaded file — is also materialized under the positional file
+//! alias [`POSITIONAL_ALIAS`] (`t`), so `SELECT … FROM t` and
+//! `SELECT … FROM <stem>` resolve identically for every query shape
+//! (projections, filters, and aggregates alike).
 
 use std::path::Path;
 
@@ -124,11 +125,11 @@ fn delimiter_for_extension(ext: &str) -> Option<u8> {
 impl RedDBRuntime {
     /// Materialize a local CSV/TSV file as a row table in this runtime.
     ///
-    /// The collection is auto-created from the sanitized file stem and a
-    /// non-materialized view `t` ([`POSITIONAL_ALIAS`]) is registered so
-    /// the single loaded file is addressable both ways. Intended for the
-    /// in-memory ephemeral store — nothing durable is written beyond what
-    /// this runtime already persists.
+    /// The collection is auto-created from the sanitized file stem, and —
+    /// as the single loaded file — is also materialized under the
+    /// positional alias `t` ([`POSITIONAL_ALIAS`]) so it is addressable
+    /// both ways. Intended for the in-memory ephemeral store — nothing
+    /// durable is written beyond what this runtime already persists.
     pub fn materialize_data_file(&self, path: &Path) -> Result<EphemeralTable, EphemeralError> {
         let display = path.display().to_string();
 
@@ -156,8 +157,36 @@ impl RedDBRuntime {
             path: display.clone(),
         })?;
 
+        let rows_imported = self.import_csv_into(path, &collection, delimiter, &display)?;
+
+        // The single loaded file is also addressable by the positional
+        // alias `t`. Rather than a rewrite view — which leaks on
+        // aggregates and other non-trivial shapes — `t` is materialized
+        // as its own real collection so every query resolves identically
+        // through either name. Skipped when the stem already sanitized to
+        // `t` (e.g. `t.csv`), which would collide.
+        if collection != POSITIONAL_ALIAS {
+            self.import_csv_into(path, POSITIONAL_ALIAS, delimiter, &display)?;
+        }
+
+        Ok(EphemeralTable {
+            collection,
+            alias: POSITIONAL_ALIAS.to_string(),
+            rows_imported,
+        })
+    }
+
+    /// Import `path` into `collection` via the shared [`CsvImporter`],
+    /// returning the number of data rows written.
+    fn import_csv_into(
+        &self,
+        path: &Path,
+        collection: &str,
+        delimiter: u8,
+        display: &str,
+    ) -> Result<usize, EphemeralError> {
         let importer = CsvImporter::new(CsvConfig {
-            collection: collection.clone(),
+            collection: collection.to_string(),
             has_header: true,
             delimiter,
             skip_errors: false,
@@ -165,34 +194,23 @@ impl RedDBRuntime {
         });
 
         let store = self.inner.db.store();
+        // The shared CsvImporter writes straight through `store.insert`,
+        // which does not auto-create the collection — provision it up
+        // front the same way the runtime's INSERT path does on first
+        // write.
+        let _ = store.get_or_create_collection(collection);
         let stats = importer
             .import_file(path, store.as_ref())
             .map_err(|e| EphemeralError::Import {
-                path: display.clone(),
+                path: display.to_string(),
                 source: e.to_string(),
             })?;
 
         // The rows were written straight through the store, so nudge the
         // planner/result cache exactly as the COPY path does.
-        self.note_table_write(&collection);
+        self.note_table_write(collection);
 
-        // Register the positional alias as a plain (non-materialized)
-        // view so `FROM t` rewrites to the underlying collection. Both
-        // names are safe identifiers, so the inline SQL is well-formed.
-        if collection != POSITIONAL_ALIAS {
-            let create_view =
-                format!("CREATE VIEW {POSITIONAL_ALIAS} AS SELECT * FROM {collection}");
-            self.execute_query(&create_view)
-                .map_err(|e| EphemeralError::Alias {
-                    source: e.to_string(),
-                })?;
-        }
-
-        Ok(EphemeralTable {
-            collection,
-            alias: POSITIONAL_ALIAS.to_string(),
-            rows_imported: stats.records_imported,
-        })
+        Ok(stats.records_imported)
     }
 }
 
