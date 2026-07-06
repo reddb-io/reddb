@@ -130,8 +130,8 @@ impl OperationalManifest {
             }
         };
 
-        let active_paths = active_collection_paths(&manifest);
-        self.quarantine_unreferenced_files(&active_paths)?;
+        let protected_paths = self.protected_collection_paths(&manifest)?;
+        self.quarantine_unreferenced_files(&protected_paths)?;
 
         let pending_drops = manifest
             .collections
@@ -144,16 +144,19 @@ impl OperationalManifest {
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
         if !pending_drops.is_empty() {
+            let fork_referenced_paths = self.fork_referenced_collection_paths()?;
             for (_, path) in &pending_drops {
-                let _ = fs::remove_file(self.collections_dir().join(path));
+                if !fork_referenced_paths.contains(path) {
+                    let _ = fs::remove_file(self.collections_dir().join(path));
+                }
             }
             for (name, _) in pending_drops {
                 manifest.collections.remove(&name);
             }
             manifest.generation += 1;
             self.publish(&manifest)?;
-            let active_paths = active_collection_paths(&manifest);
-            self.quarantine_unreferenced_files(&active_paths)?;
+            let protected_paths = self.protected_collection_paths(&manifest)?;
+            self.quarantine_unreferenced_files(&protected_paths)?;
         }
 
         Ok(completed_pending_drops)
@@ -206,7 +209,12 @@ impl OperationalManifest {
         let Some(entry) = manifest.collections.remove(name) else {
             return Ok(());
         };
-        let _ = fs::remove_file(self.collections_dir().join(entry.path));
+        if !self
+            .fork_referenced_collection_paths()?
+            .contains(&entry.path)
+        {
+            let _ = fs::remove_file(self.collections_dir().join(entry.path));
+        }
         manifest.generation += 1;
         self.publish(&manifest)
     }
@@ -370,6 +378,10 @@ impl OperationalManifest {
         }
         fs::remove_dir_all(&fork.root)?;
         let _ = sync_dir(&self.forks_dir());
+        if let Some(manifest) = self.load_current()? {
+            let protected_paths = self.protected_collection_paths(&manifest)?;
+            self.quarantine_unreferenced_files(&protected_paths)?;
+        }
         Ok(true)
     }
 
@@ -398,6 +410,40 @@ impl OperationalManifest {
             }
         }
         Ok(out)
+    }
+
+    fn protected_collection_paths(&self, manifest: &Manifest) -> io::Result<BTreeSet<String>> {
+        let mut paths = active_collection_paths(manifest);
+        paths.extend(self.fork_referenced_collection_paths()?);
+        Ok(paths)
+    }
+
+    fn fork_referenced_collection_paths(&self) -> io::Result<BTreeSet<String>> {
+        let mut paths = BTreeSet::new();
+        let parent_identity = self.store_identity();
+        let parent_collections_dir = self.collections_dir();
+        for fork in self.fork_handles()? {
+            let Some(manifest) = fork.load_current()? else {
+                continue;
+            };
+            if manifest
+                .fork_origin
+                .as_ref()
+                .map(|origin| origin.parent_store.as_str())
+                != Some(parent_identity.as_str())
+            {
+                continue;
+            }
+            for entry in manifest.collections.values() {
+                let Some(source) = &entry.source else {
+                    continue;
+                };
+                if Path::new(source) == parent_collections_dir.join(&entry.path) {
+                    paths.insert(entry.path.clone());
+                }
+            }
+        }
+        Ok(paths)
     }
 
     pub fn read_generation_for_test(&self) -> io::Result<u64> {
@@ -997,6 +1043,43 @@ mod tests {
         assert!(parent.list_forks().unwrap().is_empty());
         // Dropping again is idempotent.
         assert!(!parent.drop_fork("exp").unwrap());
+    }
+
+    #[test]
+    fn parent_recovery_retains_dropped_collection_file_referenced_by_live_fork() {
+        let path = temp_db_path("fork_retains_parent_drop");
+        let parent = OperationalManifest::for_db_path(&path);
+        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
+        write_collection(&parent, "users", b"as-of-fork");
+        parent.create_fork("exp", 12).unwrap();
+
+        parent.begin_drop_collection("users").unwrap();
+        let completed = parent.recover_or_bootstrap(&[]).unwrap();
+
+        assert_eq!(completed, vec!["users".to_string()]);
+        assert!(
+            parent.collection_path_for_test("users").exists(),
+            "live fork source must keep the parent artifact available"
+        );
+        let fork = parent.fork_handle("exp");
+        fork.hydrate_collection("users").unwrap();
+        assert_eq!(read_collection(&fork, "users"), b"as-of-fork");
+    }
+
+    #[test]
+    fn dropping_last_referencing_fork_releases_parent_file_to_retention() {
+        let path = temp_db_path("fork_drop_releases_parent_file");
+        let parent = OperationalManifest::for_db_path(&path);
+        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
+        write_collection(&parent, "users", b"as-of-fork");
+        parent.create_fork("exp", 12).unwrap();
+        parent.begin_drop_collection("users").unwrap();
+        parent.recover_or_bootstrap(&[]).unwrap();
+
+        assert!(parent.drop_fork("exp").unwrap());
+
+        assert!(!parent.collection_path_for_test("users").exists());
+        assert!(parent.quarantine_path_for_test("users.rcol").exists());
     }
 
     #[test]
