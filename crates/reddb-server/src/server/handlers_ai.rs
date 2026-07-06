@@ -1910,6 +1910,7 @@ impl LocalAiModelSpec {
             .get("dimensions")
             .ok_or_else(|| "field 'dimensions' is required".to_string())?;
         let dimensions = match dimensions_value {
+            JsonValue::Integer(n) if *n >= 1 && *n <= u32::MAX as i64 => *n as u32,
             JsonValue::Number(n)
                 if n.is_finite() && *n >= 1.0 && n.fract().abs() < f64::EPSILON =>
             {
