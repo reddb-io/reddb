@@ -1109,6 +1109,7 @@ impl McpServer {
                 .map(|(k, v)| {
                     let val_str = match v {
                         JsonValue::String(s) => format!("'{}'", s),
+                        JsonValue::Integer(n) => n.to_string(),
                         JsonValue::Number(n) => n.to_string(),
                         JsonValue::Bool(b) => b.to_string(),
                         _ => format!("'{}'", v),
