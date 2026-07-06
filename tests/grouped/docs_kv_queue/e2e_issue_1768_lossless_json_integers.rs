@@ -71,8 +71,11 @@ fn genuine_float_keeps_float_behaviour() {
     let rt = runtime();
     rt.execute_query("CREATE DOCUMENT issue1768_float")
         .expect("CREATE DOCUMENT");
+    // `5e-1` = 0.5 exercises exponent notation with a genuinely fractional
+    // value (an integral value like `1.5e3`=1500 legitimately coerces to
+    // Integer — the pre-#1768 behaviour for integral numbers is unchanged).
     rt.execute_query(
-        "INSERT INTO issue1768_float DOCUMENT VALUES ({\"ratio\":3.5,\"exp\":1.5e3})",
+        "INSERT INTO issue1768_float DOCUMENT VALUES ({\"ratio\":3.5,\"exp\":5e-1})",
     )
     .expect("INSERT DOCUMENT");
 
@@ -85,14 +88,15 @@ fn genuine_float_keeps_float_behaviour() {
         Value::Float(3.5),
         "a fractional literal must stay a float"
     );
-    match select_one(
-        &rt,
-        "SELECT body.exp AS exp_val FROM issue1768_float",
-        "exp_val",
-    ) {
-        Value::Float(n) => assert_eq!(n, 1500.0),
-        other => panic!("exponent literal must stay a float, got {other:?}"),
-    }
+    assert_eq!(
+        select_one(
+            &rt,
+            "SELECT body.exp AS exp_val FROM issue1768_float",
+            "exp_val",
+        ),
+        Value::Float(0.5),
+        "a fractional exponent literal must stay a float"
+    );
 }
 
 proptest! {
