@@ -28,11 +28,11 @@
 //!    single pinned LSN. A row committed after the last checkpoint is therefore
 //!    immediately visible; `AS OF` composes by pinning a historical LSN.
 //!
-//! Scope is deliberately narrow: one append-only collection, scalar columns
-//! (`Integer`/`Timestamp`/`Float`/`Boolean`/`Text`), in-process segment store.
-//! Wiring the emitter into the live `SegmentManager` checkpoint and the query
-//! executor's scan is the follow-up slice; the equivalence/freshness/budget
-//! oracles here prove the loop is correct end to end first.
+//! Scope is deliberately narrow: one append-only collection, the full storable
+//! [`Value`] type set, in-process segment store. Wiring the emitter into the
+//! live `SegmentManager` checkpoint and the query executor's scan is the
+//! follow-up slice; the equivalence/freshness/budget oracles here prove the
+//! loop is correct end to end first.
 
 use crate::storage::schema::types::{DataType, Value};
 use crate::storage::unified::{
@@ -54,7 +54,7 @@ pub type Row = Vec<Value>;
 pub struct ProjectionColumn {
     /// Stable column id — the key the `RDCC` directory addresses columns by.
     pub column_id: u32,
-    /// Declared scalar type. Only the minimal set is accepted at emit time.
+    /// Declared value type.
     pub data_type: DataType,
 }
 
@@ -84,8 +84,6 @@ pub enum ProjectionError {
         expected: DataType,
         found: &'static str,
     },
-    /// The declared column type is outside this slice's minimal scalar set.
-    UnsupportedType(DataType),
     /// A row's arity did not match the schema width.
     RowWidth { expected: usize, found: usize },
     /// LSNs must be strictly increasing on the append-only log.
@@ -110,7 +108,6 @@ impl std::fmt::Display for ProjectionError {
                 f,
                 "projection column {column}: expected {expected}, found {found}"
             ),
-            Self::UnsupportedType(dt) => write!(f, "projection: unsupported column type {dt}"),
             Self::RowWidth { expected, found } => {
                 write!(
                     f,
@@ -525,22 +522,11 @@ impl ColumnarProjection {
     }
 }
 
-/// The minimal scalar set this slice materializes. Anything else is rejected
-/// at emit time rather than silently mis-encoded.
+/// The full storable value set this slice materializes. Runtime values must
+/// match the declared column type; nothing is coerced through the projection.
 fn check_value_type(column: usize, dt: &DataType, value: &Value) -> Result<(), ProjectionError> {
-    let ok = matches!(
-        (dt, value),
-        (DataType::Integer, Value::Integer(_))
-            | (DataType::Timestamp, Value::Timestamp(_))
-            | (DataType::Float, Value::Float(_))
-            | (DataType::Boolean, Value::Boolean(_))
-            | (DataType::Text, Value::Text(_))
-    );
-    if ok {
+    if value_matches_declared_type(dt, value) {
         return Ok(());
-    }
-    if !is_supported_type(dt) {
-        return Err(ProjectionError::UnsupportedType(*dt));
     }
     Err(ProjectionError::TypeMismatch {
         column,
@@ -549,116 +535,117 @@ fn check_value_type(column: usize, dt: &DataType, value: &Value) -> Result<(), P
     })
 }
 
-fn is_supported_type(dt: &DataType) -> bool {
-    matches!(
-        dt,
-        DataType::Integer
-            | DataType::Timestamp
-            | DataType::Float
-            | DataType::Boolean
-            | DataType::Text
-    )
+fn value_matches_declared_type(dt: &DataType, value: &Value) -> bool {
+    match (dt, value) {
+        (DataType::Nullable, Value::Null) => true,
+        (DataType::TextZstd, Value::Text(_)) => true,
+        (DataType::BlobZstd, Value::Blob(_)) => true,
+        _ => value.data_type() == *dt,
+    }
 }
 
 fn value_kind(value: &Value) -> &'static str {
     match value {
+        Value::Null => "Null",
         Value::Integer(_) => "Integer",
+        Value::UnsignedInteger(_) => "UnsignedInteger",
         Value::Timestamp(_) => "Timestamp",
         Value::Float(_) => "Float",
         Value::Boolean(_) => "Boolean",
         Value::Text(_) => "Text",
-        _ => "unsupported",
+        Value::Blob(_) => "Blob",
+        Value::Duration(_) => "Duration",
+        Value::IpAddr(_) => "IpAddr",
+        Value::MacAddr(_) => "MacAddr",
+        Value::Vector(_) => "Vector",
+        Value::Json(_) => "Json",
+        Value::Uuid(_) => "Uuid",
+        Value::NodeRef(_) => "NodeRef",
+        Value::EdgeRef(_) => "EdgeRef",
+        Value::VectorRef(_, _) => "VectorRef",
+        Value::RowRef(_, _) => "RowRef",
+        Value::Color(_) => "Color",
+        Value::Email(_) => "Email",
+        Value::Url(_) => "Url",
+        Value::Phone(_) => "Phone",
+        Value::Semver(_) => "Semver",
+        Value::Cidr(_, _) => "Cidr",
+        Value::Date(_) => "Date",
+        Value::Time(_) => "Time",
+        Value::Decimal(_) => "Decimal",
+        Value::EnumValue(_) => "Enum",
+        Value::Array(_) => "Array",
+        Value::TimestampMs(_) => "TimestampMs",
+        Value::Ipv4(_) => "Ipv4",
+        Value::Ipv6(_) => "Ipv6",
+        Value::Subnet(_, _) => "Subnet",
+        Value::Port(_) => "Port",
+        Value::Latitude(_) => "Latitude",
+        Value::Longitude(_) => "Longitude",
+        Value::GeoPoint(_, _) => "GeoPoint",
+        Value::Country2(_) => "Country2",
+        Value::Country3(_) => "Country3",
+        Value::Lang2(_) => "Lang2",
+        Value::Lang5(_) => "Lang5",
+        Value::Currency(_) => "Currency",
+        Value::AssetCode(_) => "AssetCode",
+        Value::Money { .. } => "Money",
+        Value::ColorAlpha(_) => "ColorAlpha",
+        Value::BigInt(_) => "BigInt",
+        Value::KeyRef(_, _) => "KeyRef",
+        Value::DocRef(_, _) => "DocRef",
+        Value::TableRef(_) => "TableRef",
+        Value::PageRef(_) => "PageRef",
+        Value::Secret(_) => "Secret",
+        Value::Password(_) => "Password",
     }
 }
 
-/// Append one scalar value's raw little-endian bytes to its column stream.
-/// Fixed-width types write their native width; `Text` is length-prefixed
-/// (`u32` LE length ‖ utf-8) so a variable-width column round-trips exactly.
+/// Append one typed value's canonical bytes to its column stream.
 fn encode_cell(dt: DataType, value: &Value, out: &mut Vec<u8>) -> Result<(), ProjectionError> {
-    match (dt, value) {
-        (DataType::Integer, Value::Integer(v)) => out.extend_from_slice(&v.to_le_bytes()),
-        (DataType::Timestamp, Value::Timestamp(v)) => out.extend_from_slice(&v.to_le_bytes()),
-        (DataType::Float, Value::Float(v)) => out.extend_from_slice(&v.to_le_bytes()),
-        (DataType::Boolean, Value::Boolean(v)) => out.push(u8::from(*v)),
-        (DataType::Text, Value::Text(s)) => {
-            let bytes = s.as_bytes();
-            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(bytes);
-        }
-        _ => return Err(ProjectionError::UnsupportedType(dt)),
-    }
+    check_value_type(0, &dt, value)?;
+    let encoded = value.to_bytes();
+    out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+    out.extend_from_slice(&encoded);
     Ok(())
 }
 
-/// Decode a column's raw stream back into `row_count` scalar values, the exact
+/// Decode a column's raw stream back into `row_count` values, the exact
 /// inverse of [`encode_cell`].
 fn decode_column(
     dt: DataType,
     data: &[u8],
     row_count: usize,
 ) -> Result<Vec<Value>, ProjectionError> {
-    match dt {
-        DataType::Integer => decode_i64(data, row_count, Value::Integer),
-        DataType::Timestamp => decode_i64(data, row_count, Value::Timestamp),
-        DataType::Float => {
-            if data.len() != row_count * 8 {
-                return Err(ProjectionError::CorruptSegment("ragged float stream"));
-            }
-            Ok(data
-                .chunks_exact(8)
-                .map(|b| Value::Float(f64::from_le_bytes(to_8(b))))
-                .collect())
-        }
-        DataType::Boolean => {
-            if data.len() != row_count {
-                return Err(ProjectionError::CorruptSegment("ragged bool stream"));
-            }
-            Ok(data.iter().map(|b| Value::Boolean(*b != 0)).collect())
-        }
-        DataType::Text => decode_text(data, row_count),
-        other => Err(ProjectionError::UnsupportedType(other)),
-    }
-}
-
-fn decode_i64(
-    data: &[u8],
-    row_count: usize,
-    wrap: fn(i64) -> Value,
-) -> Result<Vec<Value>, ProjectionError> {
-    if data.len() != row_count * 8 {
-        return Err(ProjectionError::CorruptSegment("ragged i64 stream"));
-    }
-    Ok(data
-        .chunks_exact(8)
-        .map(|b| wrap(i64::from_le_bytes(to_8(b))))
-        .collect())
-}
-
-fn decode_text(data: &[u8], row_count: usize) -> Result<Vec<Value>, ProjectionError> {
     let mut out = Vec::with_capacity(row_count);
     let mut cur = 0usize;
     for _ in 0..row_count {
         if cur + 4 > data.len() {
-            return Err(ProjectionError::CorruptSegment("truncated text length"));
+            return Err(ProjectionError::CorruptSegment("truncated value length"));
         }
         let len = u32::from_le_bytes(to_4(&data[cur..cur + 4])) as usize;
         cur += 4;
         let end = cur
             .checked_add(len)
             .filter(|e| *e <= data.len())
-            .ok_or(ProjectionError::CorruptSegment("truncated text body"))?;
-        let s = std::str::from_utf8(&data[cur..end])
-            .map_err(|_| ProjectionError::CorruptSegment("invalid utf-8 in text column"))?;
-        out.push(Value::Text(s.into()));
+            .ok_or(ProjectionError::CorruptSegment("truncated value body"))?;
+        let (value, consumed) = Value::from_bytes(&data[cur..end])
+            .map_err(|_| ProjectionError::CorruptSegment("invalid value bytes"))?;
+        if consumed != len {
+            return Err(ProjectionError::CorruptSegment("trailing value bytes"));
+        }
+        if !value_matches_declared_type(&dt, &value) {
+            return Err(ProjectionError::CorruptSegment(
+                "decoded value type mismatch",
+            ));
+        }
+        out.push(value);
         cur = end;
     }
+    if cur != data.len() {
+        return Err(ProjectionError::CorruptSegment("trailing column bytes"));
+    }
     Ok(out)
-}
-
-fn to_8(b: &[u8]) -> [u8; 8] {
-    let mut a = [0u8; 8];
-    a.copy_from_slice(b);
-    a
 }
 
 fn to_4(b: &[u8]) -> [u8; 4] {
@@ -670,6 +657,7 @@ fn to_4(b: &[u8]) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     const KEY: [u8; 32] = [7u8; 32];
 
@@ -706,6 +694,161 @@ mod tests {
             Value::Boolean(i % 2 == 0),
             Value::Text(format!("event-{i}").into()),
         ]
+    }
+
+    fn full_type_schema_and_row(seed: u8) -> (ProjectionSchema, Row) {
+        let types_and_values = vec![
+            (DataType::Nullable, Value::Null),
+            (DataType::Integer, Value::Integer(i64::MIN + seed as i64)),
+            (
+                DataType::UnsignedInteger,
+                Value::UnsignedInteger(u64::MAX - seed as u64),
+            ),
+            (
+                DataType::Float,
+                Value::Float(f64::from_bits(0x4009_21fb_5444_2d18)),
+            ),
+            (DataType::Text, Value::Text(format!("text-{seed}").into())),
+            (DataType::Blob, Value::Blob(vec![0, seed, 255])),
+            (DataType::Boolean, Value::Boolean(seed % 2 == 0)),
+            (
+                DataType::Timestamp,
+                Value::Timestamp(-1_700_000_000 + seed as i64),
+            ),
+            (DataType::Duration, Value::Duration(-42 + seed as i64)),
+            (
+                DataType::IpAddr,
+                Value::IpAddr(IpAddr::V6(Ipv6Addr::new(
+                    0x2606,
+                    0x4700,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    seed as u16,
+                ))),
+            ),
+            (DataType::MacAddr, Value::MacAddr([0, 1, 2, 3, 4, seed])),
+            (
+                DataType::Vector,
+                Value::Vector(vec![1.25, -2.5, seed as f32]),
+            ),
+            (
+                DataType::Json,
+                Value::Json(format!(r#"{{"seed":{seed}}}"#).into_bytes()),
+            ),
+            (DataType::Uuid, Value::Uuid([seed; 16])),
+            (DataType::NodeRef, Value::NodeRef(format!("node-{seed}"))),
+            (DataType::EdgeRef, Value::EdgeRef(format!("edge-{seed}"))),
+            (
+                DataType::VectorRef,
+                Value::VectorRef(format!("vectors-{seed}"), 99),
+            ),
+            (
+                DataType::RowRef,
+                Value::RowRef(format!("table-{seed}"), 100),
+            ),
+            (DataType::Color, Value::Color([seed, 2, 3])),
+            (
+                DataType::Email,
+                Value::Email(format!("u{seed}@example.com")),
+            ),
+            (
+                DataType::Url,
+                Value::Url(format!("https://example.com/{seed}")),
+            ),
+            (DataType::Phone, Value::Phone(55_119_000_0000 + seed as u64)),
+            (DataType::Semver, Value::Semver(1_002_003 + seed as u32)),
+            (DataType::Cidr, Value::Cidr(0x0a00_0000 + seed as u32, 24)),
+            (DataType::Date, Value::Date(-20_000 + seed as i32)),
+            (DataType::Time, Value::Time(86_399_000 - seed as u32)),
+            (DataType::Decimal, Value::Decimal(-123_456 + seed as i64)),
+            (DataType::Enum, Value::EnumValue(seed)),
+            (
+                DataType::Array,
+                Value::Array(vec![
+                    Value::Integer(seed as i64),
+                    Value::Text("nested".into()),
+                ]),
+            ),
+            (
+                DataType::TimestampMs,
+                Value::TimestampMs(1_700_000_000_000 + seed as i64),
+            ),
+            (
+                DataType::Ipv4,
+                Value::Ipv4(u32::from(Ipv4Addr::new(192, 0, 2, seed))),
+            ),
+            (DataType::Ipv6, Value::Ipv6(Ipv6Addr::LOCALHOST.octets())),
+            (
+                DataType::Subnet,
+                Value::Subnet(0xc000_0200 + seed as u32, 0xffff_ff00),
+            ),
+            (DataType::Port, Value::Port(8000 + seed as u16)),
+            (
+                DataType::Latitude,
+                Value::Latitude(-23_550_000 + seed as i32),
+            ),
+            (
+                DataType::Longitude,
+                Value::Longitude(-46_633_000 + seed as i32),
+            ),
+            (
+                DataType::GeoPoint,
+                Value::GeoPoint(-23_550_000, -46_633_000 + seed as i32),
+            ),
+            (DataType::Country2, Value::Country2(*b"BR")),
+            (DataType::Country3, Value::Country3(*b"BRA")),
+            (DataType::Lang2, Value::Lang2(*b"pt")),
+            (DataType::Lang5, Value::Lang5(*b"pt-BR")),
+            (DataType::Currency, Value::Currency(*b"BRL")),
+            (
+                DataType::AssetCode,
+                Value::AssetCode(format!("ASSET{seed}")),
+            ),
+            (
+                DataType::Money,
+                Value::Money {
+                    asset_code: "BRL".to_string(),
+                    minor_units: -1_234_567 + seed as i64,
+                    scale: 2,
+                },
+            ),
+            (DataType::ColorAlpha, Value::ColorAlpha([seed, 2, 3, 4])),
+            (DataType::BigInt, Value::BigInt(i64::MAX - seed as i64)),
+            (
+                DataType::KeyRef,
+                Value::KeyRef(format!("kv-{seed}"), format!("key-{seed}")),
+            ),
+            (DataType::DocRef, Value::DocRef(format!("docs-{seed}"), 321)),
+            (DataType::TableRef, Value::TableRef(format!("table-{seed}"))),
+            (DataType::PageRef, Value::PageRef(42 + seed as u32)),
+            (DataType::Secret, Value::Secret(vec![seed, 7, 8, 9])),
+            (
+                DataType::Password,
+                Value::Password(format!("argon2id-hash-{seed}")),
+            ),
+            (
+                DataType::TextZstd,
+                Value::Text(format!("toast-text-{seed}").into()),
+            ),
+            (DataType::BlobZstd, Value::Blob(vec![9, 8, 7, seed])),
+        ];
+
+        let columns = types_and_values
+            .iter()
+            .enumerate()
+            .map(|(idx, (data_type, _))| ProjectionColumn {
+                column_id: idx as u32,
+                data_type: *data_type,
+            })
+            .collect();
+        let row = types_and_values
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
+        (ProjectionSchema::new(columns), row)
     }
 
     /// Fill a collection with rows at lsn = 1..=n.
@@ -765,6 +908,29 @@ mod tests {
         // Scanning exactly at the materialized ceiling uses only columnar rows.
         let scan = projection.analytical_scan(&collection, 300).expect("scan");
         assert_eq!(scan, collection.row_scan(300));
+    }
+
+    #[test]
+    fn full_value_type_set_round_trips_through_columnar_projection() {
+        let (schema, first) = full_type_schema_and_row(1);
+        let (_, second) = full_type_schema_and_row(2);
+        let mut collection = AppendOnlyCollection::new(schema.clone());
+        collection.append(1, first).expect("append first");
+        collection.append(2, second).expect("append second");
+
+        let mut projection = ColumnarProjection::new(schema, KEY);
+        let outcome = projection
+            .emit_at_checkpoint(&collection, 2, TranscodeBudget::default())
+            .expect("emit");
+        assert_eq!(outcome.rows_materialized, 2);
+        assert_eq!(outcome.rows_deferred, 0);
+
+        let via_projection = projection.analytical_scan(&collection, 2).expect("scan");
+        let via_row = collection.row_scan(2);
+        assert_eq!(
+            via_projection, via_row,
+            "every storable value type must round-trip without coercion or loss"
+        );
     }
 
     #[test]
@@ -974,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_and_mismatched_types_are_rejected() {
+    fn mismatched_types_are_rejected() {
         let s = ProjectionSchema::new(vec![ProjectionColumn {
             column_id: 0,
             data_type: DataType::Integer,
@@ -983,16 +1149,6 @@ mod tests {
         assert!(matches!(
             c.append(1, vec![Value::Text("x".into())]),
             Err(ProjectionError::TypeMismatch { .. })
-        ));
-
-        let s2 = ProjectionSchema::new(vec![ProjectionColumn {
-            column_id: 0,
-            data_type: DataType::Blob,
-        }]);
-        let mut c2 = AppendOnlyCollection::new(s2);
-        assert!(matches!(
-            c2.append(1, vec![Value::Blob(vec![1, 2, 3])]),
-            Err(ProjectionError::UnsupportedType(_))
         ));
     }
 }
