@@ -45,6 +45,22 @@ fn transaction_docs_name_supported_table_row_guarantees() {
 }
 
 #[test]
+fn transaction_docs_name_commit_time_observable_effect_contract() {
+    for required in [
+        "Commit-time observable effects",
+        "Observable effects fire only at `COMMIT`",
+        "Subscription event delivery",
+        "queue message visibility",
+        "queue-wait notifications",
+        "must not be observable on any\nchannel",
+        "ADR 0071",
+        "always aborts",
+    ] {
+        assert_contains(TRANSACTIONS_DOC, required);
+    }
+}
+
+#[test]
 fn transaction_docs_name_explicit_deferrals() {
     for required in [
         "Full multi-model rollout is out of scope",
