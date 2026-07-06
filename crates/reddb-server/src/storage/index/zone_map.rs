@@ -86,7 +86,7 @@ impl ZoneMap {
         }
     }
 
-    /// Default: sized for 4 KB table pages (~128 rows).
+    /// Default: sized for 16 KiB table pages.
     pub fn new() -> Self {
         Self::with_capacity(128)
     }

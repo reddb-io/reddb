@@ -30,15 +30,11 @@ Bloom filter pruning appears in query explain output:
 Bloom filter pruned 3 of 5 segments
 ```
 
-## Registry
+## Segment Ownership
 
-The `BloomFilterRegistry` manages bloom filters across all segments and collections:
-
-- `register_segment(collection, segment_id)` -- create bloom for new segment
-- `add_key(collection, segment_id, key)` -- insert key on entity write
-- `candidate_segments(collection, key)` -- return segments that might contain key
-- `freeze_segment(collection, segment_id)` -- freeze on seal
-- `merge_segments(collection, a, b, new_id)` -- merge on compaction
+Segment bloom filters are embedded in segment metadata rather than managed by a
+separate registry. Segment creation, entity indexing, sealing, and compaction
+own their bloom state alongside the other per-segment metadata.
 
 ## See Also
 

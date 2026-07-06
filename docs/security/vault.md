@@ -36,7 +36,7 @@ encrypted with **AES-256-GCM** before they hit the pager's write path:
 | Salt                | 16 bytes, persisted in the page header               |
 | KDF                 | Argon2id, `m=16MB`, `t=3`, `p=1`, 32-byte tag        |
 | Page header layout  | `magic(4) | version(1) | salt(16) | payload_len(4)` |
-| Page size           | matches the pager (default 4 KiB)                    |
+| Page size           | matches the pager (default 16 KiB)                   |
 
 The 16 MB Argon2id memory cost is intentionally lighter than the default
 64 MB used for password hashing inside the vault — operators want vault

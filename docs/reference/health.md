@@ -88,7 +88,7 @@ virtual table:
 SELECT name, model, entities, in_memory_bytes, on_disk_bytes FROM red.collections;
 ```
 
-`on_disk_bytes` is a conservative estimate (reachable B-tree pages × the 4 KiB
+`on_disk_bytes` is a conservative estimate (reachable B-tree pages × the 16 KiB
 page size); it is `NULL` when the local page store cannot expose a root page,
 and excludes shared header/freelist/WAL bytes and unreachable artifacts. See
 [`red.collections`](red-schema.md#redcollections) for the full column set and

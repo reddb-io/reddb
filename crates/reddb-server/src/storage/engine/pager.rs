@@ -6,7 +6,7 @@
 //!
 //! # Responsibilities
 //!
-//! 1. **Page I/O**: Read/write 4KB pages from/to disk
+//! 1. **Page I/O**: Read/write 16 KiB pages from/to disk
 //! 2. **Caching**: Integrate with SIEVE PageCache
 //! 3. **Allocation**: Manage free page allocation via FreeList
 //! 4. **Header Management**: Maintain database header (page 0)

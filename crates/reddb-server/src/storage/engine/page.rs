@@ -312,7 +312,7 @@ impl std::fmt::Display for PageError {
 
 impl std::error::Error for PageError {}
 
-/// A 4KB page with header and content
+/// A 16 KiB page with header and content
 ///
 /// This is the core data structure for the storage engine.
 #[derive(Clone)]

@@ -146,7 +146,7 @@ Each collection has its own B+ tree rooted at the page stored in the metadata pa
 - All data in **leaf nodes** (interior nodes store only keys + child pointers)
 - Leaf nodes form a **doubly-linked list** for range scans
 - Max key size: **1024 bytes**
-- Max inline value size: **4096 bytes** (4 KB, derived as `PAGE_SIZE / 4`)
+- Max inline value size: **4096 bytes** (4 KiB, derived as `PAGE_SIZE / 4`)
 - Minimum fill factor: **25%** before merge
 
 ### Leaf Page Layout
@@ -535,7 +535,7 @@ All length-prefixed fields use varint encoding for compact storage.
 
 | Location | Stored At | Covers |
 |:---------|:----------|:-------|
-| Page checksum | Page header offset 28 (u32 LE) | Entire 4096-byte page (with checksum field zeroed) |
+| Page checksum | Page header offset 28 (u32 LE) | Entire 16 KiB page (with checksum field zeroed) |
 | WAL record checksum | Last 4 bytes of each record | All record bytes preceding the checksum |
 
 Checksums are **verified on read** and **updated on write**. A mismatch on read indicates corruption.

@@ -292,7 +292,7 @@ impl From<SegmentId> for u64 {
 /// Page ID for storage page identification.
 ///
 /// Pages are the fundamental unit of storage I/O. Each page has
-/// a fixed size (typically 4KB or 8KB) and contains records or
+/// a fixed size (16 KiB in the page engine) and contains records or
 /// index data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 #[repr(transparent)]
