@@ -5,13 +5,19 @@
 //! even planned. Error messages name the table and the DDL so the
 //! operator can self-service the fix.
 //!
-//! Non-goal of this sprint: `ALTER TABLE ... SET/UNSET APPEND_ONLY`.
-//! When that lands, add a test here that flips the flag at runtime
-//! and verifies the DML surface reacts correctly — the contract
-//! mutator is the only moving piece.
+//! The physical append-only segment contract is file-owned: runtime tests
+//! assert the end-to-end flush/reopen behavior, while the segment format and
+//! manifest metadata are parsed through `reddb-file`.
+
+#[path = "../../support/mod.rs"]
+mod support;
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
+
+fn persistent_rt(db: &support::TempDbFile) -> RedDBRuntime {
+    RedDBRuntime::with_options(RedDBOptions::persistent(db.path())).expect("persistent runtime")
+}
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
@@ -171,4 +177,90 @@ fn append_only_still_allows_select_and_insert_returning() {
         })
         .expect("INSERT RETURNING on APPEND ONLY must succeed");
     assert_eq!(result.result.records.len(), 1);
+}
+
+#[test]
+fn append_only_checkpoint_publishes_immutable_segment_and_reopens_rows() {
+    let db = support::temp_db_file("append-only-segment-v1");
+    let rt = persistent_rt(&db);
+    {
+        let q = QueryUseCases::new(&rt);
+        exec(&q, "CREATE TABLE audit_log (id INT, msg TEXT) APPEND ONLY");
+        exec(&q, "INSERT INTO audit_log (id, msg) VALUES (1, 'hello')");
+        exec(&q, "INSERT INTO audit_log (id, msg) VALUES (2, 'world')");
+    }
+
+    rt.checkpoint()
+        .expect("checkpoint should flush append-only segment");
+
+    let manifest = reddb_file::OperationalManifest::for_db_path(db.path());
+    let segments = manifest
+        .append_only_segments_for_test("audit_log")
+        .expect("append-only segment entries");
+    assert_eq!(segments.len(), 1, "one closed segment should be published");
+    let entry = &segments[0];
+    assert_eq!(
+        entry.format_version,
+        reddb_file::APPEND_ONLY_SEGMENT_FORMAT_VERSION
+    );
+    assert_eq!(entry.chunk_size, reddb_file::APPEND_ONLY_SEGMENT_CHUNK_SIZE);
+    assert_eq!(entry.codec, reddb_file::AppendOnlySegmentCodec::Zstd);
+    assert_eq!(entry.row_count, 2);
+    assert!(
+        !entry.chunks.is_empty(),
+        "manifest entry must record chunk checksums"
+    );
+    assert!(
+        entry.chunks.iter().all(|chunk| chunk.checksum != 0),
+        "chunk checksums must be non-zero: {:?}",
+        entry.chunks
+    );
+
+    let segment_path = manifest.append_only_segment_path_for_test(&entry.path);
+    let decoded = reddb_file::read_append_only_segment(&segment_path)
+        .expect("segment bytes must decode through reddb-file");
+    assert_eq!(decoded.codec, reddb_file::AppendOnlySegmentCodec::Zstd);
+    assert_eq!(decoded.rows, 2);
+    let bytes_before_reopen = std::fs::read(&segment_path).expect("segment exists before reopen");
+
+    drop(rt);
+    let reopened = persistent_rt(&db);
+    let q = QueryUseCases::new(&reopened);
+    let result = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT msg FROM audit_log ORDER BY id ASC".into(),
+        })
+        .expect("append-only rows should survive reopen");
+    assert_eq!(result.result.records.len(), 2);
+    assert!(result.result.records[0]
+        .get("msg")
+        .expect("msg column")
+        .to_string()
+        .contains("hello"));
+    assert!(result.result.records[1]
+        .get("msg")
+        .expect("msg column")
+        .to_string()
+        .contains("world"));
+
+    let bytes_after_reopen = std::fs::read(&segment_path).expect("segment exists after reopen");
+    assert_eq!(
+        bytes_after_reopen, bytes_before_reopen,
+        "closed append-only segments must not be modified in place"
+    );
+
+    let orphan = manifest.append_only_segment_path_for_test("unpublished-audit.segment");
+    std::fs::write(&orphan, b"prepared but unpublished").expect("write orphan segment");
+    drop(reopened);
+    let _ = persistent_rt(&db);
+    assert!(
+        !orphan.exists(),
+        "unpublished segment file should be quarantined"
+    );
+    assert!(
+        manifest
+            .quarantine_path_for_test("unpublished-audit.segment")
+            .exists(),
+        "orphan segment should land in operational quarantine"
+    );
 }
