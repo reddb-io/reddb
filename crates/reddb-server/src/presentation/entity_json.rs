@@ -69,7 +69,11 @@ pub(crate) fn compact_entity_json_string(entity: &UnifiedEntity) -> String {
 pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
     match value {
         Value::Null => JsonValue::Null,
-        Value::Integer(value) => JsonValue::Integer(*value),
+        // #1768: the JSON *view* keeps the f64 form (wire text is identical for
+        // in-range integers). Exact-integer losslessness is carried by the
+        // typed storage `Value::Integer` path (SELECT `body.field`) and by the
+        // document-body codec, not by this presentation converter.
+        Value::Integer(value) => JsonValue::Number(*value as f64),
         Value::UnsignedInteger(value) => JsonValue::Number(*value as f64),
         Value::Float(value) => JsonValue::Number(*value),
         Value::Text(value) => JsonValue::String(value.to_string()),
