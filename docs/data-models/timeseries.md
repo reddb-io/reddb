@@ -24,8 +24,9 @@ CREATE TIMESERIES cpu_metrics RETENTION 90 d
 ```
 
 `CREATE TIMESERIES` is not just documentation. It persists the collection contract as a native
-time-series model, and that is what makes `INSERT INTO cpu_metrics (...)` validate and store native
-time-series points instead of generic table rows.
+time-series model, registers an inferred 1-day chunk interval on the `timestamp` axis, and routes
+`INSERT INTO cpu_metrics (...)` through native point validation and chunk metadata instead of
+generic table rows.
 
 With downsampling policies:
 
@@ -42,6 +43,7 @@ Parameters:
 | `RETENTION` | Auto-delete data older than duration | None (keep forever) |
 | `DOWNSAMPLE` | `target:source:aggregation` policies | None |
 | `CHUNK_SIZE` | Points per chunk before sealing | 1024 |
+| Chunk interval | Inferred timestamp chunk width | 1 day |
 
 ## Inserting Data Points
 
@@ -146,33 +148,35 @@ SELECT * FROM cpu_metrics
 
 Time-series data uses a chunked storage model for efficiency:
 
-- **Points** are grouped by (metric, tags) into **chunks** of up to 1024 points
-- **Delta-of-delta encoding** for timestamps: regular intervals compress to near-zero overhead
-- **Gorilla XOR compression** for float values: similar consecutive values compress extremely well
-- **Chunks seal automatically** when full, enabling immutable compressed storage
+- **Points** are routed into timestamp chunks using the inferred `timestamp`
+  time axis and a default 1-day chunk interval
+- **SQL reads** still expose the same logical point columns (`metric`, `value`,
+  `timestamp`, `tags`), including range predicates, `time_bucket()`, and tag
+  filters
+- **Delta-of-delta encoding** compresses sealed timestamp streams
+- **Gorilla XOR compression** compresses sealed float values
 - **Retention policies** run in the maintenance cycle, dropping expired chunks
 
-## Columnar analytical storage
-
-By default a sealed chunk is stored **row-oriented**. For analytical
-workloads — large scans and aggregations over sealed history — you can opt a
-collection into **columnar** storage with the `COLUMNAR` keyword at create
-time. Sealed chunks are then written in the column-major
+Sealed chunks are stored in the column-major
 [RDCC format](../engine/columnar-chunk-format.md): each column is compressed
 with a codec matched to its shape (delta-of-delta for timestamps, Gorilla
 XOR for float values) and carries skip indexes so the reader prunes data it
-cannot need.
+cannot need. `NO COLUMNAR` is the explicit opt-out for workloads that need
+row-sealed chunks instead.
 
 ```sql
--- A columnar time-series collection.
+-- Columnar is the default; this spelling is accepted for clarity.
 CREATE TIMESERIES cpu_cold COLUMNAR RETENTION 365 d
+
+-- Opt out of RDCC sealing while keeping native chunk routing.
+CREATE TIMESERIES cpu_recent NO COLUMNAR RETENTION 7 d
 ```
 
 `COLUMNAR` is a standalone keyword and composes with the other clauses in any
 order (`RETENTION`, `CHUNK_SIZE`, `DOWNSAMPLE`, …). It is also accepted on
 `CREATE HYPERTABLE` — see [Hypertables → Columnar storage](./hypertables.md#columnar-storage).
 
-### Worked example
+### Columnar Seal Example
 
 ```sql
 -- 1. Create a columnar hypertable: sealed chunks land in RDCC form.
@@ -199,12 +203,12 @@ ingestion and recent-data queries behave identically to the row engine.
 
 | Workload | Storage |
 |:---------|:--------|
-| Analytical scans / aggregations over large sealed history | **Columnar** (`COLUMNAR`) |
-| General-purpose collections, point lookups, recent-data reads | **Row** (default) |
+| Analytical scans / aggregations over large sealed history | **Columnar** (default) |
+| General-purpose collections, point lookups, recent-data reads | **Row** (`NO COLUMNAR`) |
 
 Columnar wins when queries sweep many sealed rows but touch few columns and
-benefit from granule + bloom skipping. The row engine stays the default for
-everything else — it has lower per-chunk overhead and no transpose cost on
+benefit from granule + bloom skipping. The row seal path remains available
+for collections that want lower per-chunk overhead and no transpose cost on
 seal. The choice is per collection and fixed at create time.
 
 ## Retention Policies
@@ -232,8 +236,8 @@ mixed-TTL / per-chunk override recipes.
 
 ## Scaling out — hypertables + continuous aggregates
 
-`CREATE TIMESERIES` stays the lightest surface for a single stream.
-For workloads with many series, heavy analytics, or dashboards,
+`CREATE TIMESERIES` stays the lightest chunked surface for native points.
+For workloads with many arbitrary columns, heavy analytics, or dashboards,
 graduate to:
 
 - [**Hypertables**](./hypertables.md) — auto chunking by time, O(1)
