@@ -6,6 +6,8 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 const PROB_HLL_STATE_PREFIX: &str = "red.probabilistic.hll.";
 const PROB_SKETCH_STATE_PREFIX: &str = "red.probabilistic.sketch.";
 const PROB_FILTER_STATE_PREFIX: &str = "red.probabilistic.filter.";
+const PROB_ENCODING_MARKER_KEY: &str = "red.probabilistic.state_encoding";
+const PROB_ENCODING_RAW_V1: &str = "raw-v1";
 
 fn probabilistic_read<'a, T>(lock: &'a RwLock<T>, _name: &str) -> RwLockReadGuard<'a, T> {
     lock.read()
@@ -70,81 +72,126 @@ enum ProbabilisticReadProjection {
     Contains { element: String, label: String },
 }
 
+struct ProbabilisticStateEntry {
+    name: String,
+    bytes: Vec<u8>,
+    migrated_from_legacy_hex: bool,
+}
+
 impl RedDBRuntime {
     pub(crate) fn load_probabilistic_state(&self) -> RedDBResult<()> {
+        let reject_legacy_hex = self.probabilistic_raw_encoding_marker();
+        let mut migrated_legacy_hex = false;
         {
-            let entries = self.latest_probabilistic_state_entries(PROB_HLL_STATE_PREFIX);
+            let entries = self.latest_probabilistic_state_entries(
+                PROB_HLL_STATE_PREFIX,
+                "HLL",
+                reject_legacy_hex,
+            )?;
             let mut hlls =
                 probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
-            for (name, data_hex) in entries {
-                let bytes = hex::decode(&data_hex).map_err(|err| {
-                    RedDBError::Internal(format!("invalid persisted HLL state for '{name}': {err}"))
-                })?;
-                let Some(hll) =
-                    crate::storage::primitives::hyperloglog::HyperLogLog::from_bytes(bytes)
-                else {
+            for entry in entries {
+                let Some(hll) = crate::storage::primitives::hyperloglog::HyperLogLog::from_bytes(
+                    entry.bytes.clone(),
+                ) else {
                     return Err(RedDBError::Internal(format!(
-                        "invalid persisted HLL state for '{name}'"
+                        "invalid persisted HLL state for '{}'",
+                        entry.name
                     )));
                 };
-                hlls.insert(name, hll);
+                if entry.migrated_from_legacy_hex {
+                    self.persist_probabilistic_blob(
+                        PROB_HLL_STATE_PREFIX,
+                        &entry.name,
+                        &entry.bytes,
+                    )?;
+                    migrated_legacy_hex = true;
+                }
+                hlls.insert(entry.name, hll);
             }
         }
 
         {
-            let entries = self.latest_probabilistic_state_entries(PROB_SKETCH_STATE_PREFIX);
+            let entries = self.latest_probabilistic_state_entries(
+                PROB_SKETCH_STATE_PREFIX,
+                "SKETCH",
+                reject_legacy_hex,
+            )?;
             let mut sketches = probabilistic_write(
                 &self.inner.probabilistic.sketches,
                 "probabilistic sketch store",
             );
-            for (name, data_hex) in entries {
-                let bytes = hex::decode(&data_hex).map_err(|err| {
-                    RedDBError::Internal(format!(
-                        "invalid persisted SKETCH state for '{name}': {err}"
-                    ))
-                })?;
+            for entry in entries {
                 let sketch =
                     crate::storage::primitives::count_min_sketch::CountMinSketch::from_bytes(
-                        &bytes,
+                        &entry.bytes,
                     )
                     .ok_or_else(|| {
-                        RedDBError::Internal(format!("invalid persisted SKETCH state for '{name}'"))
+                        RedDBError::Internal(format!(
+                            "invalid persisted SKETCH state for '{}'",
+                            entry.name
+                        ))
                     })?;
-                sketches.insert(name, sketch);
+                if entry.migrated_from_legacy_hex {
+                    self.persist_probabilistic_blob(
+                        PROB_SKETCH_STATE_PREFIX,
+                        &entry.name,
+                        &entry.bytes,
+                    )?;
+                    migrated_legacy_hex = true;
+                }
+                sketches.insert(entry.name, sketch);
             }
         }
 
         {
-            let entries = self.latest_probabilistic_state_entries(PROB_FILTER_STATE_PREFIX);
+            let entries = self.latest_probabilistic_state_entries(
+                PROB_FILTER_STATE_PREFIX,
+                "FILTER",
+                reject_legacy_hex,
+            )?;
             let mut filters = probabilistic_write(
                 &self.inner.probabilistic.filters,
                 "probabilistic filter store",
             );
-            for (name, data_hex) in entries {
-                let bytes = hex::decode(&data_hex).map_err(|err| {
+            for entry in entries {
+                let filter = crate::storage::primitives::cuckoo_filter::CuckooFilter::from_bytes(
+                    &entry.bytes,
+                )
+                .ok_or_else(|| {
                     RedDBError::Internal(format!(
-                        "invalid persisted FILTER state for '{name}': {err}"
+                        "invalid persisted FILTER state for '{}'",
+                        entry.name
                     ))
                 })?;
-                let filter =
-                    crate::storage::primitives::cuckoo_filter::CuckooFilter::from_bytes(&bytes)
-                        .ok_or_else(|| {
-                            RedDBError::Internal(format!(
-                                "invalid persisted FILTER state for '{name}'"
-                            ))
-                        })?;
-                filters.insert(name, filter);
+                if entry.migrated_from_legacy_hex {
+                    self.persist_probabilistic_blob(
+                        PROB_FILTER_STATE_PREFIX,
+                        &entry.name,
+                        &entry.bytes,
+                    )?;
+                    migrated_legacy_hex = true;
+                }
+                filters.insert(entry.name, filter);
             }
         }
 
+        if migrated_legacy_hex {
+            self.persist_probabilistic_encoding_marker();
+        }
         Ok(())
     }
 
-    fn latest_probabilistic_state_entries(&self, prefix: &str) -> Vec<(String, String)> {
+    fn latest_probabilistic_state_entries(
+        &self,
+        prefix: &str,
+        kind: &str,
+        reject_legacy_hex: bool,
+    ) -> RedDBResult<Vec<ProbabilisticStateEntry>> {
         let Some(manager) = self.inner.db.store().get_collection("red_config") else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let mut latest: std::collections::HashMap<String, (u64, Option<String>)> =
+        let mut latest: std::collections::HashMap<String, (u64, Option<Value>)> =
             std::collections::HashMap::new();
         for entity in manager.query_all(|_| true) {
             let EntityData::Row(row) = &entity.data else {
@@ -160,7 +207,8 @@ impl RedDBRuntime {
                 continue;
             };
             let value = match named.get("value") {
-                Some(Value::Text(value)) => Some(value.to_string()),
+                Some(Value::Blob(value)) => Some(Value::Blob(value.clone())),
+                Some(Value::Text(value)) => Some(Value::Text(value.clone())),
                 Some(Value::Null) => None,
                 _ => continue,
             };
@@ -173,15 +221,75 @@ impl RedDBRuntime {
             }
         }
 
-        latest
-            .into_iter()
-            .filter_map(|(encoded_name, (_, value))| {
-                let value = value?;
-                let bytes = hex::decode(encoded_name).ok()?;
-                let name = String::from_utf8(bytes).ok()?;
-                Some((name, value))
-            })
-            .collect()
+        let mut entries = Vec::new();
+        for (encoded_name, (_, value)) in latest {
+            let Some(value) = value else {
+                continue;
+            };
+            let Some(name) = hex::decode(&encoded_name)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+            else {
+                continue;
+            };
+            match value {
+                Value::Blob(bytes) => entries.push(ProbabilisticStateEntry {
+                    name,
+                    bytes,
+                    migrated_from_legacy_hex: false,
+                }),
+                Value::Text(data_hex) if reject_legacy_hex => {
+                    return Err(RedDBError::Internal(format!(
+                        "legacy hex-encoded {kind} state for '{name}' is rejected after probabilistic state migrated to raw bytes"
+                    )));
+                }
+                Value::Text(data_hex) => {
+                    let bytes = hex::decode(data_hex.as_ref()).map_err(|err| {
+                        RedDBError::Internal(format!(
+                            "invalid legacy hex-encoded {kind} state for '{name}': {err}"
+                        ))
+                    })?;
+                    entries.push(ProbabilisticStateEntry {
+                        name,
+                        bytes,
+                        migrated_from_legacy_hex: true,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(entries)
+    }
+
+    fn probabilistic_raw_encoding_marker(&self) -> bool {
+        let Some(manager) = self.inner.db.store().get_collection("red_config") else {
+            return false;
+        };
+        let mut latest: Option<(u64, bool)> = None;
+        for entity in manager.query_all(|_| true) {
+            let EntityData::Row(row) = &entity.data else {
+                continue;
+            };
+            let Some(named) = &row.named else {
+                continue;
+            };
+            let Some(Value::Text(key)) = named.get("key") else {
+                continue;
+            };
+            if key.as_ref() != PROB_ENCODING_MARKER_KEY {
+                continue;
+            }
+            let is_raw = matches!(
+                named.get("value"),
+                Some(Value::Text(value)) if value.as_ref() == PROB_ENCODING_RAW_V1
+            );
+            let entity_id = entity.id.raw();
+            match latest {
+                Some((existing_id, _)) if existing_id > entity_id => {}
+                _ => latest = Some((entity_id, is_raw)),
+            }
+        }
+        latest.map(|(_, is_raw)| is_raw).unwrap_or(false)
     }
 
     fn persist_probabilistic_blob(
@@ -191,19 +299,76 @@ impl RedDBRuntime {
         bytes: &[u8],
     ) -> RedDBResult<()> {
         let key = format!("{prefix}{}", hex::encode(name.as_bytes()));
-        self.inner
-            .db
-            .store()
-            .set_config_tree(&key, &crate::serde_json::Value::String(hex::encode(bytes)));
+        self.compact_config_key(&key);
+        self.insert_config_value(&key, Value::Blob(bytes.to_vec()))?;
+        self.persist_probabilistic_encoding_marker();
         Ok(())
     }
 
     fn delete_probabilistic_blob(&self, prefix: &str, name: &str) -> RedDBResult<()> {
         let key = format!("{prefix}{}", hex::encode(name.as_bytes()));
-        self.inner
-            .db
-            .store()
-            .set_config_tree(&key, &crate::serde_json::Value::Null);
+        self.compact_config_key(&key);
+        self.insert_config_value(&key, Value::Null)?;
+        Ok(())
+    }
+
+    fn persist_probabilistic_encoding_marker(&self) {
+        self.compact_config_key(PROB_ENCODING_MARKER_KEY);
+        let _ = self.insert_config_value(
+            PROB_ENCODING_MARKER_KEY,
+            Value::text(PROB_ENCODING_RAW_V1.to_string()),
+        );
+    }
+
+    fn compact_config_key(&self, key: &str) {
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection("red_config") else {
+            return;
+        };
+        let ids: Vec<EntityId> = manager
+            .query_all(|_| true)
+            .into_iter()
+            .filter_map(|entity| {
+                let EntityData::Row(row) = &entity.data else {
+                    return None;
+                };
+                let named = row.named.as_ref()?;
+                let Some(Value::Text(candidate)) = named.get("key") else {
+                    return None;
+                };
+                (candidate.as_ref() == key).then_some(entity.id)
+            })
+            .collect();
+        for id in ids {
+            let _ = store.delete("red_config", id);
+        }
+    }
+
+    fn insert_config_value(&self, key: &str, value: Value) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let _ = store.get_or_create_collection("red_config");
+        let entity = UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TableRow {
+                table: std::sync::Arc::from("red_config"),
+                row_id: 0,
+            },
+            EntityData::Row(crate::storage::RowData {
+                columns: Vec::new(),
+                named: Some(
+                    [
+                        ("key".to_string(), Value::text(key.to_string())),
+                        ("value".to_string(), value),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                schema: None,
+            }),
+        );
+        store
+            .insert_auto("red_config", entity)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
         Ok(())
     }
 
