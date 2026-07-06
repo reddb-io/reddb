@@ -3936,6 +3936,7 @@ fn apply_capability_json_field(target: &mut bool, value: Option<&crate::json::Va
 fn json_value_bool(value: &crate::json::Value) -> Option<bool> {
     match value {
         crate::json::Value::Bool(b) => Some(*b),
+        crate::json::Value::Integer(n) => Some(*n != 0),
         crate::json::Value::Number(n) => Some(*n != 0.0),
         crate::json::Value::String(s) => text_bool(s),
         _ => None,
