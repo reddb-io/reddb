@@ -69,7 +69,7 @@ pub(crate) fn compact_entity_json_string(entity: &UnifiedEntity) -> String {
 pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
     match value {
         Value::Null => JsonValue::Null,
-        Value::Integer(value) => JsonValue::Number(*value as f64),
+        Value::Integer(value) => JsonValue::Integer(*value),
         Value::UnsignedInteger(value) => JsonValue::Number(*value as f64),
         Value::Float(value) => JsonValue::Number(*value),
         Value::Text(value) => JsonValue::String(value.to_string()),
