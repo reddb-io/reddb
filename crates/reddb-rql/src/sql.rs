@@ -4253,6 +4253,9 @@ impl<'a> Parser<'a> {
                     Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("STATS")? {
                     let mut query = TableQuery::new("red.stats");
+                    // Optional `FOR` keyword: `SHOW STATS FOR <collection>`
+                    // desugars identically to `SHOW STATS <collection>`.
+                    let _ = self.consume(&Token::For)?;
                     let collection = match self.peek().clone() {
                         Token::Ident(name) => {
                             self.advance()?;
