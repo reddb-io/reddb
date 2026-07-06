@@ -359,14 +359,19 @@ fn evaluate_runtime_config_function(
         return Some(value);
     }
     if let Some(db) = db {
-        // `$config.<path>` desugars to CONFIG("red.config/<path>") but SET CONFIG
-        // stores under the bare key — so try the stripped key too (#1370).
-        let key_str: &str = key.as_ref();
-        let bare = key_str.strip_prefix("red.config/").unwrap_or(key_str);
-        if let Some(value) = lookup_latest_kv_value(db, "red_config", &key)
-            .or_else(|| lookup_latest_kv_value(db, "red_config", bare))
-        {
-            return Some(value);
+        // #1743 — gate the raw `red_config` fallback on `config:read`; without
+        // it a principal denied by `current_config_value` would leak the value
+        // through this bypass path.
+        if crate::runtime::impl_core::config_read_permitted(&key) {
+            // `$config.<path>` desugars to CONFIG("red.config/<path>") but SET CONFIG
+            // stores under the bare key — so try the stripped key too (#1370).
+            let key_str: &str = key.as_ref();
+            let bare = key_str.strip_prefix("red.config/").unwrap_or(key_str);
+            if let Some(value) = lookup_latest_kv_value(db, "red_config", &key)
+                .or_else(|| lookup_latest_kv_value(db, "red_config", bare))
+            {
+                return Some(value);
+            }
         }
     }
     args.get(1)
@@ -384,8 +389,13 @@ fn evaluate_runtime_kv_function(
     let collection = expr_path_text(args.first()?)?;
     let key = expr_path_text(args.get(1)?)?;
     if let Some(db) = db {
-        if let Some(value) = lookup_latest_kv_value(db, &collection, &key) {
-            return Some(value);
+        // #1743 — `KV('red_config', …)` is the same leak surface as `$config`;
+        // gate config-collection reads on `config:read`. Other collections are
+        // unaffected.
+        if crate::runtime::impl_core::kv_read_permitted(&collection, &key) {
+            if let Some(value) = lookup_latest_kv_value(db, &collection, &key) {
+                return Some(value);
+            }
         }
     }
     args.get(2)

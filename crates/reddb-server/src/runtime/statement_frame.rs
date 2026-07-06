@@ -388,7 +388,10 @@ impl StatementExecutionFrame {
     pub(super) fn install(&self, runtime: &RedDBRuntime) -> StatementFrameGuards {
         StatementFrameGuards {
             _tx_local_guard: TxLocalTenantGuard::install(self.tx_local_tenant.clone()),
-            _config_snapshot_guard: ConfigSnapshotGuard::install(Arc::clone(&runtime.inner.db)),
+            _config_snapshot_guard: ConfigSnapshotGuard::install(
+                Arc::clone(&runtime.inner.db),
+                runtime.inner.auth_store.read().clone(),
+            ),
             _secret_store_guard: SecretStoreGuard::install(runtime.inner.auth_store.read().clone()),
             _kv_store_guard: KvStoreGuard::install(runtime.inner.auth_store.read().clone()),
             _snapshot_guard: CurrentSnapshotGuard::install(SnapshotContext {

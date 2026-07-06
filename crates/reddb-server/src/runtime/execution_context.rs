@@ -577,19 +577,35 @@ pub(crate) fn current_config_value(path: &str) -> Option<Value> {
         if resolver.values.is_none() {
             resolver.values = Some(latest_config_snapshot(&resolver.db));
         }
-        let values = resolver.values.as_ref()?;
         // #1370 — `$config.<path>` desugars to `CONFIG("red.config/<path>")`,
         // but `SET CONFIG <path>` stores under the bare key. Mirror the secret
         // resolver: after the namespaced key, fall back to the stripped bare
-        // key, then the dotted `red.config.<rest>` legacy form.
-        values.get(&key).cloned().or_else(|| {
-            key.strip_prefix("red.config/").and_then(|rest| {
-                values
-                    .get(rest)
-                    .cloned()
-                    .or_else(|| values.get(&format!("red.config.{rest}")).cloned())
-            })
-        })
+        // key, then the dotted `red.config.<rest>` legacy form. Track the key
+        // that matched so the `config:read` gate authorizes the real target.
+        let found = {
+            let values = resolver.values.as_ref()?;
+            values
+                .get(&key)
+                .map(|value| (key.clone(), value.clone()))
+                .or_else(|| {
+                    key.strip_prefix("red.config/").and_then(|rest| {
+                        values
+                            .get(rest)
+                            .map(|value| (rest.to_string(), value.clone()))
+                            .or_else(|| {
+                                let legacy = format!("red.config.{rest}");
+                                values.get(&legacy).map(|value| (legacy, value.clone()))
+                            })
+                    })
+                })
+        }?;
+        // #1743 — hard-block the reserved `red.config.*` namespace and gate the
+        // read on `config:read`, mirroring the `$secret` sibling. Denied reads
+        // resolve to `None` (→ SQL NULL), never an error.
+        if !resolver.can_read(&found.0) {
+            return None;
+        }
+        Some(found.1)
     })
 }
 
@@ -709,6 +725,34 @@ mod tests {
     }
 
     #[test]
+    fn config_key_read_allowed_hard_blocks_reserved_namespace() {
+        // The reserved `red.config.*` system namespace is denied role- and
+        // store-independently, mirroring the `red.secret.*` block (#1743).
+        assert!(!config_key_read_allowed(
+            None,
+            None,
+            "red.config/red.config.aes_key"
+        ));
+        assert!(!config_key_read_allowed(None, None, "red.config.aes_key"));
+        // Ordinary config keys pass when no store is installed (non-IAM path).
+        assert!(config_key_read_allowed(
+            None,
+            None,
+            "red.config/ai.openrouter.default.key"
+        ));
+        assert!(config_key_read_allowed(None, None, "acme.flags.beta"));
+    }
+
+    #[test]
+    fn is_config_collection_matches_system_config_stores() {
+        assert!(is_config_collection("red_config"));
+        assert!(is_config_collection("RED_CONFIG"));
+        assert!(is_config_collection("red.config"));
+        assert!(!is_config_collection("users"));
+        assert!(!is_config_collection("red_kv"));
+    }
+
+    #[test]
     fn update_current_kv_value_reflects_in_resolver() {
         with_kv_values(HashMap::new(), || {
             assert_eq!(current_kv_value("red.kv/feature.flag"), None);
@@ -789,7 +833,99 @@ fn insert_latest_config_value(
 
 struct ConfigResolver {
     db: Arc<RedDB>,
+    store: Option<Arc<crate::auth::store::AuthStore>>,
+    identity: Option<(String, crate::auth::Role, Option<String>)>,
     values: Option<HashMap<String, Value>>,
+}
+
+impl ConfigResolver {
+    fn can_read(&self, key: &str) -> bool {
+        config_key_read_allowed(self.store.as_ref(), self.identity.as_ref(), key)
+    }
+}
+
+/// The reserved `red.config.*` system-config namespace. Never expose it via
+/// the inline `$config`/`CONFIG()`/`KV()` resolver regardless of IAM role,
+/// mirroring the role-independent `red.secret.*` hard-block (#1743).
+fn is_reserved_config_key(key: &str) -> bool {
+    let key = key.strip_prefix("red.config/").unwrap_or(key);
+    key.starts_with("red.config.") || key == "red.config"
+}
+
+/// The system config-store collections (`red_config` / `red.config`) reached
+/// by the inline resolver. A `KV(<collection>, key)` read of one of these is
+/// gated exactly like `$config`; any other collection is unaffected (#1743).
+fn is_config_collection(collection: &str) -> bool {
+    matches!(
+        collection.to_ascii_lowercase().as_str(),
+        "red_config" | "red.config"
+    )
+}
+
+fn config_resource_target(key: &str) -> String {
+    let bare = key.strip_prefix("red.config/").unwrap_or(key);
+    format!("red.config/{bare}")
+}
+
+/// Shared inline-config read gate: a role-independent hard-block on the
+/// reserved `red.config.*` namespace, then a `config:read` capability check
+/// mirroring `SHOW CONFIG` / the `$secret` sibling (#1743). Absent a store or
+/// with IAM authorization disabled, only the hard-block applies so existing
+/// non-IAM `$config` reads keep working.
+fn config_key_read_allowed(
+    store: Option<&Arc<crate::auth::store::AuthStore>>,
+    identity: Option<&(String, crate::auth::Role, Option<String>)>,
+    key: &str,
+) -> bool {
+    if is_reserved_config_key(key) {
+        return false;
+    }
+    let Some(store) = store else {
+        return true;
+    };
+    if !store.iam_authorization_enabled() {
+        return true;
+    }
+    let Some((username, role, tenant)) = identity else {
+        return true;
+    };
+    let principal = crate::auth::UserId::from_parts(tenant.as_deref(), username);
+    let mut resource =
+        crate::auth::policies::ResourceRef::new("config".to_string(), config_resource_target(key));
+    if let Some(tenant) = tenant {
+        resource = resource.with_tenant(tenant.clone());
+    }
+    let ctx = crate::auth::policies::EvalContext {
+        principal_tenant: tenant.clone(),
+        current_tenant: tenant.clone(),
+        peer_ip: None,
+        mfa_present: false,
+        now_ms: crate::auth::now_ms(),
+        principal_is_admin_role: *role == crate::auth::Role::Admin,
+        principal_is_platform_scoped: tenant.is_none(),
+    };
+    store.check_policy_authz_with_role(&principal, "config:read", &resource, &ctx, *role)
+}
+
+/// Whether the current principal may read config `key` through the inline
+/// `$config`/`CONFIG()`/`KV('red_config', …)` resolver. Used by the db-fallback
+/// lookup paths that bypass [`current_config_value`] (#1743).
+pub(crate) fn config_read_permitted(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    CURRENT_CONFIG_RESOLVER.with(|cell| match cell.borrow().as_ref() {
+        Some(resolver) => resolver.can_read(&key),
+        None => !is_reserved_config_key(&key),
+    })
+}
+
+/// Gate a raw `KV(collection, key)` read: config system collections go through
+/// the `$config` gate; every other collection is unaffected (#1743).
+pub(crate) fn kv_read_permitted(collection: &str, key: &str) -> bool {
+    if is_config_collection(collection) {
+        config_read_permitted(key)
+    } else {
+        true
+    }
 }
 
 pub(crate) struct ConfigSnapshotGuard {
@@ -797,9 +933,22 @@ pub(crate) struct ConfigSnapshotGuard {
 }
 
 impl ConfigSnapshotGuard {
-    pub(super) fn install(db: Arc<RedDB>) -> Self {
-        let previous = CURRENT_CONFIG_RESOLVER
-            .with(|cell| cell.replace(Some(ConfigResolver { db, values: None })));
+    pub(super) fn install(
+        db: Arc<RedDB>,
+        store: Option<Arc<crate::auth::store::AuthStore>>,
+    ) -> Self {
+        let identity = current_auth_identity().map(|(username, role)| {
+            let tenant = current_tenant();
+            (username, role, tenant)
+        });
+        let previous = CURRENT_CONFIG_RESOLVER.with(|cell| {
+            cell.replace(Some(ConfigResolver {
+                db,
+                store,
+                identity,
+                values: None,
+            }))
+        });
         Self { previous }
     }
 }
