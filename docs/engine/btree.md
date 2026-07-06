@@ -82,4 +82,4 @@ B-Tree parameters are tuned for the page size:
 |:----------|:------|:------------|
 | Branching factor | ~128 | Keys per internal node |
 | Leaf capacity | ~64 | Entries per leaf node |
-| Page size | 4096 bytes | Default page size |
+| Page size | 16,384 bytes | Default page size |
