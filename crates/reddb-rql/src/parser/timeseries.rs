@@ -20,7 +20,7 @@ impl<'a> Parser<'a> {
         let mut downsample_policies = Vec::new();
         let mut session_key: Option<String> = None;
         let mut session_gap_ms: Option<u64> = None;
-        let mut columnar = false;
+        let mut columnar = true;
 
         // Parse optional clauses in any order
         loop {
@@ -30,8 +30,18 @@ impl<'a> Parser<'a> {
                 retention_ms = Some((value * unit) as u64);
             } else if self.consume_ident_ci("CHUNK_SIZE")? || self.consume_ident_ci("CHUNKSIZE")? {
                 chunk_size = Some(self.parse_integer()? as usize);
+            } else if self.consume_ident_ci("NO")? {
+                if !self.consume_ident_ci("COLUMNAR")? {
+                    return Err(ParseError::expected(
+                        vec!["COLUMNAR"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                columnar = false;
             } else if self.consume_ident_ci("COLUMNAR")? {
-                // `COLUMNAR` — activate columnar analytical storage (#911).
+                // `COLUMNAR` is accepted as an explicit spelling of the
+                // automatic default.
                 columnar = true;
             } else if self.consume_ident_ci("DOWNSAMPLE")? {
                 downsample_policies.push(self.parse_downsample_policy_spec()?);
@@ -355,15 +365,25 @@ impl<'a> Parser<'a> {
         let mut chunk_interval_ns: Option<u64> = None;
         let mut ttl_ns: Option<u64> = None;
         let mut retention_ms = None;
-        let mut columnar = false;
+        let mut columnar = true;
 
         loop {
             if self.consume_ident_ci("TIME_COLUMN")? {
                 time_column = Some(self.expect_ident()?);
             } else if self.consume_ident_ci("CHUNK_INTERVAL")? {
                 chunk_interval_ns = Some(self.parse_duration_ns_literal("CHUNK_INTERVAL")?);
+            } else if self.consume_ident_ci("NO")? {
+                if !self.consume_ident_ci("COLUMNAR")? {
+                    return Err(ParseError::expected(
+                        vec!["COLUMNAR"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                columnar = false;
             } else if self.consume_ident_ci("COLUMNAR")? {
-                // `COLUMNAR` — activate columnar analytical storage (#911).
+                // `COLUMNAR` is accepted as an explicit spelling of the
+                // automatic default.
                 columnar = true;
             } else if self.consume_ident_ci("TTL")? {
                 ttl_ns = Some(self.parse_duration_ns_literal("TTL")?);
@@ -546,7 +566,7 @@ mod tests {
     #[test]
     fn create_timeseries_accepts_clause_order_defaults_and_columnar() {
         let query = parse_query(
-            "CREATE TIMESERIES IF NOT EXISTS readings COLUMNAR DOWNSAMPLE 1h:raw \
+            "CREATE TIMESERIES IF NOT EXISTS readings DOWNSAMPLE 1h:raw \
              RETENTION 2 h CHUNKSIZE 64",
         )
         .unwrap();
@@ -563,6 +583,15 @@ mod tests {
         assert_eq!(timeseries.session_key, None);
         assert_eq!(timeseries.session_gap_ms, None);
         assert!(timeseries.hypertable.is_none());
+    }
+
+    #[test]
+    fn create_timeseries_accepts_no_columnar_opt_out() {
+        let query = parse_query("CREATE TIMESERIES readings NO COLUMNAR").unwrap();
+        let QueryExpr::CreateTimeSeries(timeseries) = query else {
+            panic!("expected create timeseries");
+        };
+        assert!(!timeseries.columnar);
     }
 
     #[test]
@@ -628,7 +657,7 @@ mod tests {
     #[test]
     fn create_hypertable_and_drop_timeseries_parse_variants() {
         let query = parse_query(
-            "CREATE HYPERTABLE IF NOT EXISTS events TIME_COLUMN ts COLUMNAR \
+            "CREATE HYPERTABLE IF NOT EXISTS events TIME_COLUMN ts \
              CHUNK_INTERVAL '30m' TTL '10s' RETENTION 1 h",
         )
         .unwrap();
@@ -643,6 +672,15 @@ mod tests {
         assert_eq!(hypertable.time_column, "ts");
         assert_eq!(hypertable.chunk_interval_ns, 30 * 60 * 1_000_000_000);
         assert_eq!(hypertable.default_ttl_ns, Some(10 * 1_000_000_000));
+
+        let query = parse_query(
+            "CREATE HYPERTABLE cold_events TIME_COLUMN ts CHUNK_INTERVAL '1h' NO COLUMNAR",
+        )
+        .unwrap();
+        let QueryExpr::CreateTimeSeries(timeseries) = query else {
+            panic!("expected hypertable as timeseries");
+        };
+        assert!(!timeseries.columnar);
 
         let query = parse_query("DROP TIMESERIES IF EXISTS tenant.metrics.*").unwrap();
         assert!(matches!(

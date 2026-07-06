@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::*;
 
 const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
+const COLUMNAR_PROJECTION_SIZE_FLOOR_ROWS: usize = 4;
 
 impl RedDBRuntime {
     pub fn execute_create_timeseries(
@@ -206,9 +207,10 @@ impl RedDBRuntime {
     /// chunk's rows are materialised from the entity store into a
     /// `TimeSeriesChunk`, sealed columnar, and the resulting RDCC
     /// `ColumnBlock` recorded in `ChunkMeta.columnar_page` (bytes stashed
-    /// for read-back). Without the flag the chunk falls to the row seal
-    /// and `columnar_page` stays `None` — no behaviour change. Returns the
-    /// number of chunks sealed columnar.
+    /// for read-back). Columnar-eligible chunks below the projection size
+    /// floor stay open and are picked up by a later seal once they grow.
+    /// Opted-out chunks fall to the row seal and `columnar_page` stays
+    /// `None`. Returns the number of chunks sealed columnar.
     pub fn seal_hypertable_chunks(&self, collection: &str) -> RedDBResult<usize> {
         let analytical = self
             .inner
@@ -237,6 +239,10 @@ impl RedDBRuntime {
             // lands in this chunk's `[start, end)` window — the same
             // entity/row reader the read-bridge serves row chunks from.
             let points = materialize_row_points(&manager, &time_col, start, end);
+            let columnar_enabled = analytical.as_ref().is_some_and(|cfg| cfg.columnar);
+            if columnar_enabled && points.len() < COLUMNAR_PROJECTION_SIZE_FLOOR_ROWS {
+                continue;
+            }
 
             let mut chunk = crate::storage::timeseries::TimeSeriesChunk::with_max_points(
                 collection.to_string(),
@@ -536,11 +542,11 @@ fn remove_timeseries_metadata(store: &crate::storage::unified::UnifiedStore, ser
     }
 }
 
-/// Build the contract's [`AnalyticalStorageConfig`] when the DDL carried
-/// `COLUMNAR` (#911). `time_key` is the column carrying the time axis —
+/// Build the contract's [`AnalyticalStorageConfig`] for the automatic
+/// projection policy. `time_key` is the column carrying the time axis —
 /// the hypertable's declared time column, or the timeseries `timestamp`
-/// convention. `None` when columnar was not requested, so non-columnar
-/// collections keep the row engine default.
+/// convention. `None` means the collection explicitly opted out and keeps
+/// the row engine.
 fn analytical_storage_for(
     columnar: bool,
     time_key: &str,
