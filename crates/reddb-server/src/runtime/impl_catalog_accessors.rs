@@ -53,6 +53,7 @@ impl RedDBRuntime {
         // prevent us from durably persisting what's already in memory.
         // The remote upload is the side-effect that risks clobbering a
         // peer's state, so it's behind the lease gate.
+        let started = std::time::Instant::now();
         self.inner.db.flush_local_only().map_err(|err| {
             // Issue #205 — local flush failure is a CheckpointFailed
             // operator-grade event. The local-flush path also covers
@@ -71,6 +72,10 @@ impl RedDBRuntime {
             .emit_global();
             RedDBError::Engine(msg)
         })?;
+        let checkpoint_lsn = self.cdc_current_lsn();
+        self.inner
+            .checkpoint_projection_stats
+            .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);
         if let Err(err) = self.assert_remote_write_allowed("checkpoint") {
             tracing::warn!(
                 target: "reddb::serverless::lease",

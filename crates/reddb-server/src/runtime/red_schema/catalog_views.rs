@@ -514,17 +514,67 @@ pub(super) fn stats_snapshot(
     // `SELECT * FROM red.stats` is the only path that scans everything.
     let target = stats_target_collection(query);
 
+    let checkpoint_stats = runtime
+        .inner
+        .checkpoint_projection_stats
+        .snapshot(runtime.cdc_current_lsn());
+    let pending_wal_records = runtime.db().embedded_pending_wal_records().unwrap_or(0);
+
     let mut rows = Vec::new();
     for collection in snapshot.collections {
-        if collection.model != CollectionModel::Table {
-            continue;
-        }
         if let Some(target) = target.as_deref() {
             if collection.name != target {
                 continue;
             }
         }
         if !visible_collections.is_none_or(|visible| visible.contains(&collection.name)) {
+            continue;
+        }
+
+        rows.push(stats_row(
+            &schema,
+            &collection.name,
+            Value::Null,
+            "pending_wal_records",
+            Value::UnsignedInteger(pending_wal_records),
+        ));
+        rows.push(stats_row(
+            &schema,
+            &collection.name,
+            Value::Null,
+            "current_lsn",
+            Value::UnsignedInteger(checkpoint_stats.current_lsn),
+        ));
+        rows.push(stats_row(
+            &schema,
+            &collection.name,
+            Value::Null,
+            "last_materialized_lsn",
+            Value::UnsignedInteger(checkpoint_stats.last_materialized_lsn),
+        ));
+        rows.push(stats_row(
+            &schema,
+            &collection.name,
+            Value::Null,
+            "projection_lag",
+            Value::UnsignedInteger(checkpoint_stats.projection_lag),
+        ));
+        rows.push(stats_row(
+            &schema,
+            &collection.name,
+            Value::Null,
+            "checkpoints_completed",
+            Value::UnsignedInteger(checkpoint_stats.checkpoints_completed),
+        ));
+        rows.push(stats_row(
+            &schema,
+            &collection.name,
+            Value::Null,
+            "last_checkpoint_duration_ms",
+            Value::UnsignedInteger(checkpoint_stats.last_checkpoint_duration_ms),
+        ));
+
+        if collection.model != CollectionModel::Table {
             continue;
         }
         let Some(analyzed) = crate::storage::query::planner::stats_catalog::analyze_collection(

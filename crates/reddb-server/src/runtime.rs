@@ -950,6 +950,46 @@ impl RmwLockTable {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct CheckpointProjectionStats {
+    last_materialized_lsn: std::sync::atomic::AtomicU64,
+    checkpoints_completed: std::sync::atomic::AtomicU64,
+    last_checkpoint_duration_ms: std::sync::atomic::AtomicU64,
+}
+
+impl CheckpointProjectionStats {
+    pub(crate) fn record_checkpoint(&self, lsn: u64, duration_ms: u64) {
+        use std::sync::atomic::Ordering;
+
+        self.last_materialized_lsn.store(lsn, Ordering::Relaxed);
+        self.last_checkpoint_duration_ms
+            .store(duration_ms, Ordering::Relaxed);
+        self.checkpoints_completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self, current_lsn: u64) -> CheckpointProjectionStatsSnapshot {
+        use std::sync::atomic::Ordering;
+
+        let last_materialized_lsn = self.last_materialized_lsn.load(Ordering::Relaxed);
+        CheckpointProjectionStatsSnapshot {
+            current_lsn,
+            last_materialized_lsn,
+            projection_lag: current_lsn.saturating_sub(last_materialized_lsn),
+            checkpoints_completed: self.checkpoints_completed.load(Ordering::Relaxed),
+            last_checkpoint_duration_ms: self.last_checkpoint_duration_ms.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CheckpointProjectionStatsSnapshot {
+    pub(crate) current_lsn: u64,
+    pub(crate) last_materialized_lsn: u64,
+    pub(crate) projection_lag: u64,
+    pub(crate) checkpoints_completed: u64,
+    pub(crate) last_checkpoint_duration_ms: u64,
+}
+
 struct RuntimeInner {
     db: Arc<RedDB>,
     layout: PhysicalLayout,
@@ -961,6 +1001,7 @@ struct RuntimeInner {
     probabilistic: probabilistic_store::ProbabilisticStore,
     index_store: index_store::IndexStore,
     cdc: crate::replication::cdc::CdcBuffer,
+    pub(crate) checkpoint_projection_stats: CheckpointProjectionStats,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
     query_cache: parking_lot::RwLock<crate::storage::query::planner::cache::PlanCache>,
     result_cache: parking_lot::RwLock<(

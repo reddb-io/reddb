@@ -265,6 +265,12 @@ models share the same contract in later slices:
 | Metric | Entity | Value |
 |--------|--------|-------|
 | `row_count` | `NULL` | Number of rows in the collection. |
+| `current_lsn` | `NULL` | Current runtime LSN used as the freshness pin for projection health. |
+| `last_materialized_lsn` | `NULL` | Last LSN durably materialized by the checkpoint/projection path. |
+| `projection_lag` | `NULL` | Difference between `current_lsn` and `last_materialized_lsn`. |
+| `checkpoints_completed` | `NULL` | Number of checkpoints completed by this runtime. |
+| `last_checkpoint_duration_ms` | `NULL` | Duration of the last completed checkpoint in milliseconds. |
+| `pending_wal_records` | `NULL` | Pending embedded WAL records in the single-file artifact; `0` for non-embedded runtimes. |
 | `null_count` | column name | Number of rows where the column is `NULL` or absent. |
 | `distinct_count` | column name | Number of distinct non-null values in the column. |
 | `most_common_values` | column name | Array of the column's most common values (hottest first, capped). |

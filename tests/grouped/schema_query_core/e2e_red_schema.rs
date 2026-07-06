@@ -1118,6 +1118,59 @@ fn select_from_red_stats_materializes_long_format_profiling_rows() {
 }
 
 #[test]
+fn red_stats_exposes_checkpoint_projection_lag() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE events (id INT, name TEXT)");
+    exec(&rt, "INSERT INTO events (id, name) VALUES (1, 'created')");
+
+    rt.checkpoint().expect("checkpoint should succeed");
+
+    let after_checkpoint = rt
+        .execute_query(
+            "SELECT * FROM red.stats WHERE collection = 'events' \
+             AND metric IN ('last_materialized_lsn', 'projection_lag')",
+        )
+        .expect("red.stats checkpoint projection metrics")
+        .result
+        .records;
+
+    let materialized = after_checkpoint
+        .iter()
+        .find(|row| row.get("metric") == Some(&Value::text("last_materialized_lsn")))
+        .expect("last_materialized_lsn metric present");
+    let materialized_lsn = uint_field(materialized, "value");
+    assert!(
+        materialized_lsn > 0,
+        "checkpoint should publish a non-zero materialized LSN"
+    );
+
+    let lag = after_checkpoint
+        .iter()
+        .find(|row| row.get("metric") == Some(&Value::text("projection_lag")))
+        .expect("projection_lag metric present");
+    assert_eq!(uint_field(lag, "value"), 0);
+
+    exec(&rt, "INSERT INTO events (id, name) VALUES (2, 'updated')");
+
+    let after_write = rt
+        .execute_query(
+            "SELECT * FROM red.stats WHERE collection = 'events' \
+             AND metric = 'projection_lag'",
+        )
+        .expect("red.stats projection lag after write")
+        .result
+        .records;
+    let lag = after_write.first().expect("projection_lag row present");
+    assert!(
+        uint_field(lag, "value") > 0,
+        "a write after checkpoint should create projection lag"
+    );
+
+    cleanup_scope();
+}
+
+#[test]
 fn show_schema_desugars_to_red_columns_collection_filter() {
     cleanup_scope();
     let rt = runtime();
