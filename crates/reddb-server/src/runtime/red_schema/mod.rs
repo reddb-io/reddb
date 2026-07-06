@@ -233,18 +233,14 @@ const POLICY_COLUMNS: [&str; 8] = [
     "enabled",
 ];
 
-const STATS_COLUMNS: [&str; 10] = [
-    "collection",
-    "entities",
-    "segments",
-    "growing_count",
-    "sealed_count",
-    "archived_count",
-    "seal_ops",
-    "compact_ops",
-    "last_write_ms",
-    "attention_score",
-];
+// Issue #1787 — `red.stats` is the long-format profiling view served
+// from the third, **computed** freshness tier: reading it runs an
+// on-demand profiling scan (never a cached snapshot). Each row is one
+// `(collection, entity, metric, value)` tuple. `entity` is the column
+// name for per-column metrics and `NULL` for collection-wide metrics
+// (e.g. `row_count`). This slice profiles row tables; other models
+// share the same contract in later slices.
+const STATS_COLUMNS: [&str; 4] = ["collection", "entity", "metric", "value"];
 
 const RETENTION_COLUMNS: [&str; 7] = [
     "name",
@@ -858,7 +854,9 @@ pub(super) fn red_query(
         VirtualTableKind::Policies => {
             governance_views::policies_snapshot(runtime, tenant, visible_collections)
         }
-        VirtualTableKind::Stats => catalog_views::stats_snapshot(runtime, visible_collections),
+        VirtualTableKind::Stats => {
+            catalog_views::stats_snapshot(runtime, visible_collections, query)
+        }
         VirtualTableKind::Subscriptions => {
             ops_views::subscriptions_snapshot(runtime, visible_collections)
         }
