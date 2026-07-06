@@ -15,12 +15,11 @@ use crate::storage::{EntityKind, UnifiedEntity};
 
 /// Per-collection analytical-storage seam (PRD #850, Phase 1).
 ///
-/// Declares that a `Metrics`/`TimeSeries` collection's hypertable chunks
+/// Declares whether a `Metrics`/`TimeSeries` collection's hypertable chunks
 /// are backed by the **columnar** sealed-chunk layout
-/// ([`column_block`](crate::storage::unified::column_block)) rather than
-/// the default row engine. `columnar = false` (or the whole config
-/// absent) keeps the row engine — the seal dispatch routes only
-/// columnar-flagged chunks to the `ColumnBlock` writer.
+/// ([`column_block`](crate::storage::unified::column_block)). In-scope
+/// collections get `columnar = true` automatically; `columnar = false` (or
+/// the whole config absent on older contracts) keeps the row engine.
 ///
 /// `time_key` / `order_by_key` mirror the ClickHouse `ORDER BY` intent so
 /// downstream slices (#854 granules, #856 vectorized read) can lay the
