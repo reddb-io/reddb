@@ -3,6 +3,8 @@
 Status: accepted
 Date: 2026-05-16
 Implemented: 2026-06-15
+Amended: the "at-least-once with no order; FIFO users run a single consumer"
+clause is superseded for keyed messages by ADR 0072 (ordering keys).
 
 ## Context
 
