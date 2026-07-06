@@ -104,6 +104,7 @@ pub(crate) fn create_kv_reply(
         .to_string();
     let value = match payload.get("value") {
         Some(crate::serde_json::Value::String(s)) => crate::storage::schema::Value::text(s.clone()),
+        Some(crate::serde_json::Value::Integer(n)) => crate::storage::schema::Value::Integer(*n),
         Some(crate::serde_json::Value::Number(n)) => {
             if n.fract().abs() < f64::EPSILON {
                 crate::storage::schema::Value::Integer(*n as i64)
