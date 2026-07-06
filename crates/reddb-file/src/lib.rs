@@ -17,6 +17,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 pub mod ai_model_cache;
+pub mod append_only_segment;
 pub mod audit_log;
 pub mod backup_manifest;
 pub mod backup_temp;
@@ -68,6 +69,11 @@ pub use ai_model_cache::{
     write_ai_model_cache_manifest, AiModelCacheManifest, AiModelCacheManifestFile,
     AI_MODEL_CACHE_DIR_NAME, AI_MODEL_CACHE_MANIFEST_FILE, AI_MODEL_CACHE_PURGE_DIR_NAME,
     AI_MODEL_CACHE_STAGING_DIR_NAME,
+};
+pub use append_only_segment::{
+    read_append_only_segment, write_append_only_segment, AppendOnlyChunkRef,
+    AppendOnlySegmentCodec, AppendOnlySegmentMetadata, AppendOnlySegmentRead,
+    APPEND_ONLY_SEGMENT_CHUNK_SIZE, APPEND_ONLY_SEGMENT_FORMAT_VERSION,
 };
 pub use audit_log::{rotate_audit_log, AuditLogRotation};
 pub use backup_manifest::{
