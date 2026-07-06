@@ -269,6 +269,12 @@ pub(crate) trait QueueStore {
     /// Read the stored payload for `message_id` on `queue`, if known.
     fn read_message(&self, queue: &str, message_id: MessageId) -> Option<Value>;
 
+    /// Read the optional ordering key stored on `message_id`.
+    fn read_ordering_key(&self, queue: &str, message_id: MessageId) -> Option<String>;
+
+    /// Whether `group` already has a pending delivery with `ordering_key`.
+    fn ordering_key_in_flight(&self, queue: &str, group: &str, ordering_key: &str) -> bool;
+
     /// Read the stored payload for the message backing `delivery_id`, if it
     /// is currently held. Used by `QueueLifecycle::nack` to capture the
     /// payload before `ack_pending` retires the underlying message.
@@ -413,6 +419,8 @@ struct State {
     /// by tests via `seed_max_attempts`; absence falls back to
     /// `DEFAULT_READ_MAX_ATTEMPTS`.
     max_attempts: HashMap<(QueueId, MessageId), u32>,
+    /// Optional ordering keys keyed by `(queue, message_id)`.
+    ordering_keys: HashMap<(QueueId, MessageId), String>,
     dlq: Vec<DlqRecord>,
 }
 
@@ -465,6 +473,14 @@ impl InMemoryQueueStore {
         state
             .payloads
             .insert((queue.to_string(), message_id), payload);
+    }
+
+    /// Associate an ordering key with `(queue, message_id)` — test helper.
+    pub(crate) fn seed_ordering_key(&self, queue: &str, message_id: MessageId, key: &str) {
+        let mut state = self.state.lock().expect("state poisoned");
+        state
+            .ordering_keys
+            .insert((queue.to_string(), message_id), key.to_string());
     }
 
     fn next_delivery_id(&self) -> DeliveryId {
@@ -581,6 +597,9 @@ impl QueueStore for InMemoryQueueStore {
         }
         state
             .payloads
+            .remove(&(entry.queue.clone(), entry.message_id));
+        state
+            .ordering_keys
             .remove(&(entry.queue.clone(), entry.message_id));
         // ack-and-delete on a WORK-mode queue tombstones the underlying
         // message — mirror the runtime-side `record_pending_tombstone`
@@ -700,6 +719,26 @@ impl QueueStore for InMemoryQueueStore {
             .cloned()
     }
 
+    fn read_ordering_key(&self, queue: &str, message_id: MessageId) -> Option<String> {
+        let state = self.state.lock().expect("state poisoned");
+        state
+            .ordering_keys
+            .get(&(queue.to_string(), message_id))
+            .cloned()
+    }
+
+    fn ordering_key_in_flight(&self, queue: &str, group: &str, ordering_key: &str) -> bool {
+        let state = self.state.lock().expect("state poisoned");
+        state.pending.values().any(|pending| {
+            pending.queue == queue
+                && pending.group == group
+                && state
+                    .ordering_keys
+                    .get(&(pending.queue.clone(), pending.message_id))
+                    .is_some_and(|key| key == ordering_key)
+        })
+    }
+
     fn read_pending_payload(&self, delivery_id: &str) -> Option<Value> {
         let state = self.state.lock().expect("state poisoned");
         let entry = state.pending.get(delivery_id)?;
@@ -769,6 +808,7 @@ impl QueueStore for InMemoryQueueStore {
             // Drop the available rows and their payloads.
             state.queues.remove(queue);
             state.payloads.retain(|(q, _), _| q != queue);
+            state.ordering_keys.retain(|(q, _), _| q != queue);
         }
 
         // Tombstones recorded after the state mutation, mirroring the
