@@ -348,7 +348,7 @@ impl UnifiedStore {
     /// Open or create a page-based database
     ///
     /// This uses the page engine for ACID durability with B-tree indices.
-    /// The database file uses 4KB pages with checksums and efficient caching.
+    /// The database file uses 16 KiB pages with checksums and efficient caching.
     ///
     /// # Arguments
     ///
