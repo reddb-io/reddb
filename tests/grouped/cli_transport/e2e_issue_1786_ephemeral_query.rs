@@ -42,16 +42,21 @@ fn red_query_csv_file_no_server_no_store() {
     let path_str = path.display().to_string();
 
     // Query by the positional alias, JSON so the assertion is byte-stable.
-    let (code, stdout, stderr) =
-        run_query(&path_str, "SELECT count(*) AS n FROM t", &["--json"]);
+    let (code, stdout, stderr) = run_query(&path_str, "SELECT count(*) AS n FROM t", &["--json"]);
     assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
     assert!(stdout.contains("\"ok\":true"), "stdout: {stdout}");
-    assert!(stdout.contains("\"n\":2"), "expected count 2; stdout: {stdout}");
+    assert!(
+        stdout.contains("\"n\":2"),
+        "expected count 2; stdout: {stdout}"
+    );
 
     // Query by the sanitized file-stem name, numeric filter proves typed
     // columns (only the age-30 row survives `age > 26`).
-    let (code, stdout, stderr) =
-        run_query(&path_str, "SELECT name FROM people WHERE age > 26", &["--json"]);
+    let (code, stdout, stderr) = run_query(
+        &path_str,
+        "SELECT name FROM people WHERE age > 26",
+        &["--json"],
+    );
     assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
     assert!(stdout.contains("\"Alice\""), "stdout: {stdout}");
     assert!(!stdout.contains("\"Bob\""), "Bob leaked: {stdout}");
@@ -72,8 +77,11 @@ fn red_query_tsv_file_by_alias() {
     fs::write(&path, "id\tcity\n1\tLisbon\n2\tPorto\n").expect("write fixture");
     let path_str = path.display().to_string();
 
-    let (code, stdout, stderr) =
-        run_query(&path_str, "SELECT city FROM t WHERE city = 'Porto'", &["--json"]);
+    let (code, stdout, stderr) = run_query(
+        &path_str,
+        "SELECT city FROM t WHERE city = 'Porto'",
+        &["--json"],
+    );
     assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
     assert!(stdout.contains("\"Porto\""), "stdout: {stdout}");
     assert!(!stdout.contains("\"Lisbon\""), "Lisbon leaked: {stdout}");
