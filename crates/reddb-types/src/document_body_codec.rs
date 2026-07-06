@@ -32,14 +32,28 @@ use crate::value_codec;
 pub const MAGIC: &[u8; 4] = b"RDOC";
 
 /// Format version byte for the plain (inline-keys-only) container.
-pub const VERSION: u8 = 0x01;
+///
+/// Bumped from `0x01` to `0x03` for the lossless-integer clean break
+/// (issue #1768): values now carry exact integers instead of the f64 form
+/// that silently lost precision beyond ±2^53. A pre-bump body decodes with a
+/// didactic [`DocBodyError::SupersededVersion`] rather than being
+/// reinterpreted under the new semantics.
+pub const VERSION: u8 = 0x03;
 
 /// Format version byte for the dictionary-aware container (PRD-1398).
 ///
-/// Identical layout to v1 except each offset-table entry carries a key *kind*
-/// tag: a field name is either a key-id into the per-collection
-/// [`KeyDictionary`] (common keys) or stored inline (rare/unique keys).
-pub const VERSION_DICT: u8 = 0x02;
+/// Identical layout to the plain container except each offset-table entry
+/// carries a key *kind* tag: a field name is either a key-id into the
+/// per-collection [`KeyDictionary`] (common keys) or stored inline
+/// (rare/unique keys). Bumped from `0x02` to `0x04` alongside [`VERSION`]
+/// for the issue #1768 clean break.
+pub const VERSION_DICT: u8 = 0x04;
+
+/// Superseded plain-container version, pre-#1768 (lossy f64 numbers).
+const SUPERSEDED_VERSION: u8 = 0x01;
+
+/// Superseded dictionary-container version, pre-#1768 (lossy f64 numbers).
+const SUPERSEDED_VERSION_DICT: u8 = 0x02;
 
 /// Byte size of one entry in the offset table: u16 key_len + u32 val_offset.
 const ENTRY_SIZE: usize = 6;
@@ -70,8 +84,12 @@ pub enum DocBodyError {
     TruncatedData,
     /// First 4 bytes do not match `b"RDOC"`.
     BadMagic,
-    /// Version byte is not `0x01`.
+    /// Version byte is not a version this codec understands.
     UnsupportedVersion(u8),
+    /// Version byte names a format superseded by a clean break: the body was
+    /// written before the lossless-integer cutover (issue #1768) and must not
+    /// be silently reinterpreted under the new semantics.
+    SupersededVersion(u8),
     /// A field name or value points outside the container buffer.
     OffsetOutOfBounds,
     /// A field name is not valid UTF-8.
@@ -98,6 +116,14 @@ impl std::fmt::Display for DocBodyError {
             Self::TruncatedData => write!(f, "document body: truncated data"),
             Self::BadMagic => write!(f, "document body: bad magic bytes (expected RDOC)"),
             Self::UnsupportedVersion(v) => write!(f, "document body: unsupported version {v}"),
+            Self::SupersededVersion(v) => write!(
+                f,
+                "document body: format version {v} is superseded by version {VERSION} \
+                 (issue #1768). This body was written before the lossless-integer clean \
+                 break, when numbers were stored as f64 and integers beyond ±2^53 lost \
+                 precision. It is refused rather than silently reinterpreted — re-insert \
+                 the document to rewrite it in the current format."
+            ),
             Self::OffsetOutOfBounds => write!(f, "document body: offset points outside buffer"),
             Self::InvalidFieldName => write!(f, "document body: field name is not valid UTF-8"),
             Self::FieldLimitExceeded => {
@@ -265,6 +291,16 @@ pub fn decode_value_at_offset(data: &[u8], val_offset: u32) -> Result<Value, Doc
     Ok(value)
 }
 
+/// Classify an unexpected version byte: a pre-#1768 format (`0x01`/`0x02`) is
+/// a superseded clean break; anything else is simply unrecognised.
+fn version_error(version: u8) -> DocBodyError {
+    if version == SUPERSEDED_VERSION || version == SUPERSEDED_VERSION_DICT {
+        DocBodyError::SupersededVersion(version)
+    } else {
+        DocBodyError::UnsupportedVersion(version)
+    }
+}
+
 /// Parse the container header and return `(num_fields, offset_table)`.
 ///
 /// Each table entry is `(key_len: u16, val_offset: u32)`.  The table may be
@@ -280,7 +316,7 @@ pub fn parse_header(data: &[u8]) -> Result<(usize, Vec<(u16, u32)>), DocBodyErro
         return Err(DocBodyError::BadMagic);
     }
     if data[4] != VERSION {
-        return Err(DocBodyError::UnsupportedVersion(data[4]));
+        return Err(version_error(data[4]));
     }
 
     let n = u16::from_le_bytes([data[5], data[6]]) as usize;
@@ -430,7 +466,7 @@ pub fn parse_dict_header(data: &[u8]) -> Result<(usize, Vec<DictEntry>), DocBody
         return Err(DocBodyError::BadMagic);
     }
     if data[4] != VERSION_DICT {
-        return Err(DocBodyError::UnsupportedVersion(data[4]));
+        return Err(version_error(data[4]));
     }
 
     let n = u16::from_le_bytes([data[5], data[6]]) as usize;
@@ -597,6 +633,44 @@ mod tests {
             let got = decode_value_at_offset(&buf, val_offset).expect("decode_at_offset");
             assert_eq!(got, *v, "field {k} mismatch");
         }
+    }
+
+    /// A pre-#1768 plain body (version `0x01`) is refused with the didactic
+    /// [`DocBodyError::SupersededVersion`], never silently reinterpreted under
+    /// the new lossless-integer semantics.
+    #[test]
+    fn superseded_plain_version_is_rejected_didactically() {
+        let fields = [("id", Value::Integer(1))];
+        let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
+        let mut buf = Vec::new();
+        encode(&refs, &mut buf).expect("encode");
+        assert_eq!(buf[4], VERSION, "fresh body must carry the bumped version");
+
+        // Rewrite the version byte to the superseded plain-container version.
+        buf[4] = SUPERSEDED_VERSION;
+        let err = decode(&buf).expect_err("pre-bump body must be refused");
+        assert_eq!(err, DocBodyError::SupersededVersion(SUPERSEDED_VERSION));
+
+        // The message is didactic: it names the clean break and the remedy.
+        let msg = err.to_string();
+        assert!(msg.contains("superseded"), "{msg}");
+        assert!(msg.contains("#1768"), "{msg}");
+        assert!(msg.contains("re-insert"), "{msg}");
+    }
+
+    /// A pre-#1768 dictionary body (version `0x02`) is likewise refused.
+    #[test]
+    fn superseded_dict_version_is_rejected_didactically() {
+        let fields = [("id", Value::Integer(1))];
+        let refs: Vec<(&str, &Value)> = fields.iter().map(|(k, v)| (*k, v)).collect();
+        let mut dict = KeyDictionary::new();
+        let mut buf = Vec::new();
+        encode_with_dictionary(&refs, &mut dict, |_| true, &mut buf).expect("encode");
+        assert_eq!(buf[4], VERSION_DICT);
+
+        buf[4] = SUPERSEDED_VERSION_DICT;
+        let err = decode_with_dictionary(&buf, &dict).expect_err("pre-bump v2 must be refused");
+        assert_eq!(err, DocBodyError::SupersededVersion(SUPERSEDED_VERSION_DICT));
     }
 
     #[test]
