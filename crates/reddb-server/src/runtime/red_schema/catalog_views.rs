@@ -480,9 +480,26 @@ pub(super) fn collections_snapshot(
         .collect()
 }
 
+/// Number of most-common values surfaced per column in `red.stats`.
+/// The planner tracks up to 100; the introspection view keeps the
+/// hottest handful so the long-format `value` array stays readable.
+const STATS_MCV_LIMIT: usize = 10;
+
+/// Long-format `red.stats` profiling view (issue #1787). This is the
+/// **computed** freshness tier: every read runs an on-demand profiling
+/// scan over the target row tables rather than serving a cached
+/// snapshot. Emitted rows are `(collection, entity, metric, value)`:
+///
+/// * `row_count` — one row per collection, `entity` is `NULL`.
+/// * `null_count` / `distinct_count` / `most_common_values` — one row
+///   per column, `entity` is the column name.
+///
+/// This slice profiles row (`TABLE`) collections only; other models
+/// share the same contract in later slices.
 pub(super) fn stats_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
+    query: &TableQuery,
 ) -> Vec<UnifiedRecord> {
     let snapshot = runtime.db().catalog_model_snapshot();
     let schema = Arc::new(
@@ -492,61 +509,106 @@ pub(super) fn stats_snapshot(
             .collect::<Vec<_>>(),
     );
     let store = runtime.db().store();
+    // `SHOW STATS <name>` desugars to a `collection = '<name>'` filter;
+    // scope the profiling scan to that one collection so an unfiltered
+    // `SELECT * FROM red.stats` is the only path that scans everything.
+    let target = stats_target_collection(query);
 
-    snapshot
-        .collections
-        .into_iter()
-        .filter(|collection| {
-            visible_collections.is_none_or(|visible| visible.contains(&collection.name))
-        })
-        .map(|collection| {
-            let manager_stats = store
-                .get_collection(&collection.name)
-                .map(|manager| manager.stats());
-            let entities = manager_stats
-                .as_ref()
-                .map(|stats| stats.total_entities)
-                .unwrap_or(collection.entities);
-            let growing_count = manager_stats
-                .as_ref()
-                .map(|stats| stats.growing_count)
-                .unwrap_or(0);
-            let sealed_count = manager_stats
-                .as_ref()
-                .map(|stats| stats.sealed_count)
-                .unwrap_or(0);
-            let archived_count = manager_stats
-                .as_ref()
-                .map(|stats| stats.archived_count)
-                .unwrap_or(0);
-            let segments = manager_stats
-                .as_ref()
-                .map(|stats| stats.growing_count + stats.sealed_count + stats.archived_count)
-                .unwrap_or(collection.segments);
-            let seal_ops = manager_stats
-                .as_ref()
-                .map(|stats| stats.seal_ops)
-                .unwrap_or(0);
-            let compact_ops = manager_stats
-                .as_ref()
-                .map(|stats| stats.compact_ops)
-                .unwrap_or(0);
+    let mut rows = Vec::new();
+    for collection in snapshot.collections {
+        if collection.model != CollectionModel::Table {
+            continue;
+        }
+        if let Some(target) = target.as_deref() {
+            if collection.name != target {
+                continue;
+            }
+        }
+        if !visible_collections.is_none_or(|visible| visible.contains(&collection.name)) {
+            continue;
+        }
+        let Some(analyzed) = crate::storage::query::planner::stats_catalog::analyze_collection(
+            store.as_ref(),
+            &collection.name,
+        ) else {
+            continue;
+        };
 
-            UnifiedRecord::with_schema(
-                Arc::clone(&schema),
-                vec![
-                    Value::text(collection.name),
-                    Value::UnsignedInteger(entities as u64),
-                    Value::UnsignedInteger(segments as u64),
-                    Value::UnsignedInteger(growing_count as u64),
-                    Value::UnsignedInteger(sealed_count as u64),
-                    Value::UnsignedInteger(archived_count as u64),
-                    Value::UnsignedInteger(seal_ops),
-                    Value::UnsignedInteger(compact_ops),
-                    Value::Null,
-                    Value::UnsignedInteger(collection.attention_score as u64),
-                ],
-            )
+        rows.push(stats_row(
+            &schema,
+            &collection.name,
+            Value::Null,
+            "row_count",
+            Value::UnsignedInteger(analyzed.row_count),
+        ));
+        for column in &analyzed.columns {
+            rows.push(stats_row(
+                &schema,
+                &collection.name,
+                Value::text(column.name.clone()),
+                "null_count",
+                Value::UnsignedInteger(column.null_count),
+            ));
+            rows.push(stats_row(
+                &schema,
+                &collection.name,
+                Value::text(column.name.clone()),
+                "distinct_count",
+                Value::UnsignedInteger(column.distinct_count),
+            ));
+            rows.push(stats_row(
+                &schema,
+                &collection.name,
+                Value::text(column.name.clone()),
+                "most_common_values",
+                Value::Array(most_common_values(column.mcv.as_ref())),
+            ));
+        }
+    }
+    rows
+}
+
+fn stats_row(
+    schema: &Arc<Vec<Arc<str>>>,
+    collection: &str,
+    entity: Value,
+    metric: &str,
+    value: Value,
+) -> UnifiedRecord {
+    UnifiedRecord::with_schema(
+        Arc::clone(schema),
+        vec![Value::text(collection), entity, Value::text(metric), value],
+    )
+}
+
+/// Extract the single collection targeted by a `collection = '<name>'`
+/// equality filter (as produced by `SHOW STATS <name>`). Returns `None`
+/// for any other shape so the caller profiles every visible row table.
+fn stats_target_collection(query: &TableQuery) -> Option<String> {
+    match query.filter.as_ref() {
+        Some(Filter::Compare {
+            field: FieldRef::TableColumn { column, .. },
+            op: CompareOp::Eq,
+            value: Value::Text(collection),
+        }) if column == "collection" => Some(collection.to_string()),
+        _ => None,
+    }
+}
+
+fn most_common_values(
+    mcv: Option<&crate::storage::query::planner::MostCommonValues>,
+) -> Vec<Value> {
+    use crate::storage::query::planner::ColumnValue;
+    let Some(mcv) = mcv else {
+        return Vec::new();
+    };
+    mcv.values
+        .iter()
+        .take(STATS_MCV_LIMIT)
+        .map(|(value, _freq)| match value {
+            ColumnValue::Int(v) => Value::Integer(*v),
+            ColumnValue::Float(v) => Value::Float(*v),
+            ColumnValue::Text(v) => Value::text(v.clone()),
         })
         .collect()
 }
