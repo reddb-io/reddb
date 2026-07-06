@@ -8,6 +8,7 @@ pub(crate) fn parse_json_bind_value(s: &str) -> Result<Value, String> {
     Ok(match json_val {
         JsonValue::Null => Value::Null,
         JsonValue::Bool(b) => Value::Boolean(b),
+        JsonValue::Integer(n) => Value::Integer(n),
         JsonValue::Number(n) => {
             if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
                 Value::Integer(n as i64)
