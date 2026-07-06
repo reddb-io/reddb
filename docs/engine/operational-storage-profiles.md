@@ -69,6 +69,36 @@ Primary-replica production and all cluster deployments use an operational
 directory rather than a single file. The directory model is split across several
 ADRs:
 
+### Forking an embedded single-file store
+
+Store forks (ADR 0070) require the operational directory substrate because the
+fork manifest shares immutable artifacts with the parent and hydrates mutable
+collection files lazily on first write. An embedded single-file `.rdb` has no
+shared-segment substrate, so RedDB rejects direct fork attempts on that profile
+instead of silently copying the file.
+
+The supported path is explicit:
+
+1. Open the embedded `.rdb` source and create a named physical export.
+2. Open the exported `.rdb` with an operational-directory storage profile, such
+   as `primary-replica-production-ha`.
+3. Fork that operational store. The fork records the exported store's identity
+   as `parent_store` and the current durable LSN as `fork_lsn`.
+
+With the runtime API, the shape is:
+
+```rust
+let export = single_file_runtime.create_export("fork-source")?;
+let operational = RedDBRuntime::with_options(
+    RedDBOptions::persistent(&export.data_path)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())?,
+)?;
+let fork = operational.fork_store("experiment")?;
+```
+
+Calling `fork_store` on the original embedded single-file runtime returns a
+didactic error that points back to this export path.
+
 ### Collection layouts (ADR 0041)
 
 [ADR 0041](../../.red/adr/0041-operational-collection-layouts.md) gives mutable and

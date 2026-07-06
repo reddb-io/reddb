@@ -1054,7 +1054,24 @@ impl RedDB {
 
         self.flush()?;
 
-        let mut metadata = self.load_or_bootstrap_physical_metadata(true)?;
+        let mut metadata = match self.load_or_bootstrap_physical_metadata(true) {
+            Ok(metadata) => metadata,
+            Err(_)
+                if self.options.storage_profile.deploy_profile
+                    == crate::storage::DeployProfile::Embedded
+                    && self.options.storage_profile.packaging
+                        == crate::storage::StoragePackaging::SingleFile =>
+            {
+                crate::physical::PhysicalMetadataFile::from_state(
+                    self.options.clone(),
+                    self.catalog_snapshot(),
+                    self.physical_collection_roots(),
+                    self.physical_index_state(),
+                    None,
+                )
+            }
+            Err(err) => return Err(err),
+        };
         let export_data_path = reddb_file::copy_physical_export_data_file(path, &name)?;
         let export_metadata_path = PhysicalMetadataFile::metadata_path_for(&export_data_path);
         let export_metadata_binary_path =

@@ -1,6 +1,40 @@
 use super::*;
 
+const SINGLE_FILE_FORK_GUIDANCE: &str = "store fork is not available directly on embedded \
+single-file stores. Export the .rdb through the operational-directory layout first, then fork \
+that operational store. See docs/engine/operational-storage-profiles.md#forking-an-embedded-single-file-store";
+
 impl RedDBRuntime {
+    pub fn fork_store(&self, name: &str) -> RedDBResult<reddb_file::ForkInfo> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RedDBError::InvalidOperation(
+                "store fork name cannot be empty".to_string(),
+            ));
+        }
+        if self.inner.embedded_single_file {
+            return Err(RedDBError::InvalidOperation(
+                SINGLE_FILE_FORK_GUIDANCE.to_string(),
+            ));
+        }
+        let data_path = self.inner.db.options().data_path.as_ref().ok_or_else(|| {
+            RedDBError::InvalidOperation("store fork requires a data path".into())
+        })?;
+
+        self.flush()?;
+        let fork_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let manifest =
+            crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
+        manifest
+            .create_fork(name, fork_lsn)
+            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))?;
+        Ok(reddb_file::ForkInfo {
+            name: name.to_string(),
+            parent_store: manifest.store_identity(),
+            fork_lsn,
+        })
+    }
+
     pub fn replica_relay_manifest_path(&self, replica_id: &str) -> Option<std::path::PathBuf> {
         let plan = self.primary_replica_file_plan()?;
         Some(plan.relay_manifest_path(replica_id))
