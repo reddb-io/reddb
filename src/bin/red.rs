@@ -1624,6 +1624,7 @@ fn main() {
                 cols.push(k.clone());
                 vals.push(match v {
                     reddb::json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                    reddb::json::Value::Integer(n) => n.to_string(),
                     reddb::json::Value::Number(n) => n.to_string(),
                     reddb::json::Value::Bool(b) => b.to_string(),
                     reddb::json::Value::Null => "NULL".to_string(),
@@ -2393,6 +2394,7 @@ fn main() {
                     cols.push(k.clone());
                     vals.push(match v {
                         reddb::json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                        reddb::json::Value::Integer(n) => n.to_string(),
                         reddb::json::Value::Number(n) => n.to_string(),
                         reddb::json::Value::Bool(b) => b.to_string(),
                         reddb::json::Value::Null => "NULL".to_string(),
