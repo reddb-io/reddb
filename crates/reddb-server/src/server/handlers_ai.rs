@@ -194,6 +194,7 @@ impl RedDBServer {
 
         let store_value = match &value {
             JsonValue::String(s) => Value::text(s.clone()),
+            JsonValue::Integer(n) => Value::Integer(*n),
             JsonValue::Number(n) => {
                 if n.fract().abs() < f64::EPSILON {
                     Value::Integer(*n as i64)
@@ -266,6 +267,7 @@ impl RedDBServer {
                 .delete_kv(RED_CONFIG_COLLECTION, key);
             let store_value = match value {
                 JsonValue::String(s) => Value::text(s.clone()),
+                JsonValue::Integer(n) => Value::Integer(*n),
                 JsonValue::Number(n) => {
                     if n.fract().abs() < f64::EPSILON {
                         Value::Integer(*n as i64)
