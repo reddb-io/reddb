@@ -148,13 +148,87 @@ fn drop_hypertable_removes_registry_entry() {
 }
 
 #[test]
-fn plain_create_timeseries_does_not_register_hypertable() {
+fn plain_create_timeseries_registers_default_chunk_spec_and_routes_points() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);
     q.execute(ExecuteQueryInput {
         query: "CREATE TIMESERIES legacy RETENTION 30 DAYS".into(),
     })
     .expect("create timeseries ok");
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO legacy (metric, value, timestamp) VALUES ('cpu.idle', 94.8, 1704067200000000000)".into(),
+    })
+    .expect("insert timeseries point");
+
     let db = rt.db();
-    assert!(db.hypertables().get("legacy").is_none());
+    let spec = db
+        .hypertables()
+        .get("legacy")
+        .expect("plain timeseries registered for chunk routing");
+    assert_eq!(spec.time_column, "timestamp");
+    assert_eq!(spec.chunk_interval_ns, 86_400_000_000_000);
+    assert_eq!(spec.default_ttl_ns, Some(30 * 86_400_000_000_000));
+
+    let chunks = db.hypertables().show_chunks("legacy");
+    assert_eq!(chunks.len(), 1, "point should land in a chunk");
+    assert_eq!(chunks[0].row_count, 1);
+}
+
+#[test]
+fn plain_create_timeseries_batch_insert_seals_columnar_and_keeps_sql_reads() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE TIMESERIES cpu RETENTION 7 DAYS".into(),
+    })
+    .expect("create timeseries ok");
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO cpu (metric, value, tags, timestamp) VALUES \
+                ('cpu.usage', 10.0, {host: 'srv1'}, 0), \
+                ('cpu.usage', 20.0, {host: 'srv1'}, 60000000000), \
+                ('cpu.usage', 30.0, {host: 'srv2'}, 300000000000), \
+                ('cpu.usage', 40.0, {host: 'srv2'}, 360000000000)"
+            .into(),
+    })
+    .expect("batch insert native points");
+
+    let rows = q
+        .execute(ExecuteQueryInput {
+            query:
+                "SELECT time_bucket(5m) AS bucket, avg(value) AS avg_value, count(*) AS samples \
+                    FROM cpu WHERE metric = 'cpu.usage' GROUP BY time_bucket(5m)"
+                    .into(),
+        })
+        .expect("time_bucket read");
+    assert_eq!(rows.result.records.len(), 2);
+
+    let tag_filtered = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT metric, value, timestamp, tags FROM cpu WHERE tags.host = 'srv1' ORDER BY timestamp ASC".into(),
+        })
+        .expect("tag filtered read");
+    assert_eq!(tag_filtered.result.records.len(), 2);
+
+    let db = rt.db();
+    let chunks = db.hypertables().show_chunks("cpu");
+    assert_eq!(
+        chunks.len(),
+        1,
+        "batch should route through one default chunk"
+    );
+    assert_eq!(chunks[0].row_count, 4);
+
+    assert_eq!(
+        rt.seal_hypertable_chunks("cpu")
+            .expect("seal plain timeseries"),
+        1,
+        "sealed plain timeseries chunk should use columnar compression"
+    );
+    assert_eq!(rt.columnar_chunk_count("cpu"), 1);
+    assert_eq!(
+        rt.columnar_chunk_points("cpu", 0, 0, 360_000_000_000)
+            .expect("columnar chunk points")
+            .len(),
+        4
+    );
 }

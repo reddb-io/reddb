@@ -128,11 +128,14 @@ fn red_timeseries_exposes_timeseries_shaped_columns_for_plain_timeseries() {
 
     let row = find_row(&result.result.records, "name", "events").expect("events row");
     assert!(
-        !boolean(row, "is_hypertable"),
-        "plain CREATE TIMESERIES is not a hypertable"
+        boolean(row, "is_hypertable"),
+        "plain CREATE TIMESERIES uses the chunked storage path"
     );
-    assert!(matches!(row.get("time_column"), Some(Value::Null)));
-    assert!(matches!(row.get("chunk_interval_ms"), Some(Value::Null)));
+    assert_eq!(row.get("time_column"), Some(&Value::text("timestamp")));
+    assert_eq!(
+        row.get("chunk_interval_ms"),
+        Some(&Value::UnsignedInteger(86_400_000))
+    );
     assert!(matches!(row.get("oldest_ts_ms"), Some(Value::Null)));
     assert!(matches!(row.get("newest_ts_ms"), Some(Value::Null)));
     // retention 7 days → 604_800_000 ms.

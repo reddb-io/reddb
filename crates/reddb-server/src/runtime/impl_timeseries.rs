@@ -7,6 +7,7 @@ use super::*;
 
 const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
 const COLUMNAR_PROJECTION_SIZE_FLOOR_ROWS: usize = 4;
+const DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS: u64 = 86_400_000_000_000;
 
 impl RedDBRuntime {
     pub fn execute_create_timeseries(
@@ -70,21 +71,31 @@ impl RedDBRuntime {
         }
         save_timeseries_metadata(store.as_ref(), query)?;
 
-        // `CREATE HYPERTABLE` additionally registers a HypertableSpec
-        // so chunk routing + retention sweeps can address this table.
-        // Plain `CREATE TIMESERIES` leaves `hypertable` = None and the
-        // runtime behaves as before.
-        if let Some(ht) = &query.hypertable {
-            let mut spec = crate::storage::timeseries::HypertableSpec::new(
-                query.name.clone(),
-                ht.time_column.clone(),
-                ht.chunk_interval_ns,
-            );
-            if let Some(ttl) = ht.default_ttl_ns {
-                spec = spec.with_ttl_ns(ttl);
+        let spec = match &query.hypertable {
+            Some(ht) => {
+                let mut spec = crate::storage::timeseries::HypertableSpec::new(
+                    query.name.clone(),
+                    ht.time_column.clone(),
+                    ht.chunk_interval_ns,
+                );
+                if let Some(ttl) = ht.default_ttl_ns {
+                    spec = spec.with_ttl_ns(ttl);
+                }
+                spec
             }
-            self.inner.db.hypertables().register(spec);
-        }
+            None => {
+                let mut spec = crate::storage::timeseries::HypertableSpec::new(
+                    query.name.clone(),
+                    "timestamp",
+                    DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS,
+                );
+                if let Some(ttl_ms) = query.retention_ms {
+                    spec = spec.with_ttl_ns(ttl_ms.saturating_mul(1_000_000));
+                }
+                spec
+            }
+        };
+        self.inner.db.hypertables().register(spec);
 
         self.invalidate_result_cache();
         self.inner
@@ -471,19 +482,22 @@ fn materialize_row_points(
 ) -> Vec<(u64, f64)> {
     let mut points: Vec<(u64, f64)> = manager
         .query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .and_then(|row| row.get_field(time_col))
-                .and_then(field_as_u64)
-                .is_some_and(|ts| ts >= start && ts < end)
+            let ts = match &entity.data {
+                EntityData::Row(row) => row.get_field(time_col).and_then(field_as_u64),
+                EntityData::TimeSeries(point) => Some(point.timestamp_ns),
+                _ => None,
+            };
+            ts.is_some_and(|ts| ts >= start && ts < end)
         })
         .iter()
-        .filter_map(|entity| {
-            let row = entity.data.as_row()?;
-            let ts = row.get_field(time_col).and_then(field_as_u64)?;
-            let value = row.get_field("value").and_then(field_as_f64).unwrap_or(0.0);
-            Some((ts, value))
+        .filter_map(|entity| match &entity.data {
+            EntityData::Row(row) => {
+                let ts = row.get_field(time_col).and_then(field_as_u64)?;
+                let value = row.get_field("value").and_then(field_as_f64).unwrap_or(0.0);
+                Some((ts, value))
+            }
+            EntityData::TimeSeries(point) => Some((point.timestamp_ns, point.value)),
+            _ => None,
         })
         .collect();
     points.sort_by_key(|(ts, _)| *ts);

@@ -663,14 +663,18 @@ pub(super) fn timeseries_writes_snapshot(
         let buckets: BTreeMap<(u64, u64), u64> = manager.fold_entities_parallel(
             BTreeMap::new,
             |mut local, entity| {
-                let Some(row) = entity.data.as_row() else {
-                    return local;
-                };
-                let Some(value) = row.get_field(&time_col) else {
-                    return local;
-                };
-                let Some(ts_ns) = value_to_unsigned_ns(value) else {
-                    return local;
+                let ts_ns = match &entity.data {
+                    EntityData::Row(row) => {
+                        let Some(value) = row.get_field(&time_col) else {
+                            return local;
+                        };
+                        let Some(ts_ns) = value_to_unsigned_ns(value) else {
+                            return local;
+                        };
+                        ts_ns
+                    }
+                    EntityData::TimeSeries(point) => point.timestamp_ns,
+                    _ => return local,
                 };
                 let ts_ms = ts_ns / 1_000_000;
                 for size in &active_sizes {
