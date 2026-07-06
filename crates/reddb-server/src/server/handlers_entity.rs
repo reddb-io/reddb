@@ -617,6 +617,7 @@ impl RedDBServer {
 
         let value = match payload.get("value") {
             Some(JsonValue::String(s)) => Value::text(s.clone()),
+            Some(JsonValue::Integer(n)) => Value::Integer(*n),
             Some(JsonValue::Number(n)) => {
                 if n.fract().abs() < f64::EPSILON {
                     Value::Integer(*n as i64)
