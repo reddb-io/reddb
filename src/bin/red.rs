@@ -24,6 +24,7 @@ use reddb::service_cli::{
     install_systemd_service, probe_listener, render_systemd_unit, run_server_with_large_stack,
     BootstrapConfig, ServerCommandConfig, ServerTransport, SystemdServiceConfig,
 };
+use reddb_client::{format_query_result, QueryResult, RowFormat, ValueOut};
 
 // ---------------------------------------------------------------------------
 // JSON output helpers
@@ -82,7 +83,13 @@ fn is_ephemeral_data_file(arg: &str) -> bool {
 /// print the result, and discard the store. No server, no pre-existing
 /// store, nothing durable created — the collection is addressable by its
 /// sanitized file-stem name and by the positional alias `t`.
-fn run_ephemeral_query(args: &[String], file: &str, sql: &str, json_mode: bool) -> ! {
+fn run_ephemeral_query(
+    args: &[String],
+    file: &str,
+    sql: &str,
+    json_mode: bool,
+    row_format: RowFormat,
+) -> ! {
     use std::path::Path;
 
     if sql.is_empty() {
@@ -152,7 +159,7 @@ fn run_ephemeral_query(args: &[String], file: &str, sql: &str, json_mode: bool) 
             if json_mode {
                 json_ok("query", &format_result_json(&qr));
             } else {
-                print!("{}", format_result_pretty(&qr));
+                print_row_result(&qr, row_format);
             }
             std::process::exit(0);
         }
@@ -163,6 +170,96 @@ fn run_ephemeral_query(args: &[String], file: &str, sql: &str, json_mode: bool) 
             eprintln!("query error: {err}");
             std::process::exit(1);
         }
+    }
+}
+
+fn parse_row_format(flags: &HashMap<String, FlagValue>) -> Result<RowFormat, String> {
+    match flag_string(flags, "format") {
+        Some(value) => RowFormat::parse(value.as_str()).ok_or_else(|| {
+            format!(
+                "unknown row format '{value}'; expected {}",
+                RowFormat::vocabulary()
+            )
+        }),
+        None => Ok(RowFormat::Table),
+    }
+}
+
+fn print_row_result(result: &reddb::runtime::RuntimeQueryResult, format: RowFormat) {
+    let result = runtime_query_result_to_client(result);
+    let bytes = format_query_result(&result, format);
+    std::io::stdout().write_all(&bytes).expect("write stdout");
+}
+
+fn runtime_query_result_to_client(result: &reddb::runtime::RuntimeQueryResult) -> QueryResult {
+    let columns = if !result.result.columns.is_empty() {
+        result.result.columns.clone()
+    } else {
+        result
+            .result
+            .records
+            .first()
+            .map(|record| {
+                let mut keys: Vec<String> = record
+                    .column_names()
+                    .iter()
+                    .map(|key| key.to_string())
+                    .collect();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default()
+    };
+    let rows = result
+        .result
+        .records
+        .iter()
+        .map(|record| {
+            let mut entries: Vec<(&str, &reddb::storage::schema::Value)> = record
+                .iter_fields()
+                .map(|(key, value)| (key.as_ref(), value))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), schema_value_to_value_out(value)))
+                .collect()
+        })
+        .collect();
+    QueryResult {
+        statement: result.statement_type.to_string(),
+        affected: result.affected_rows,
+        columns,
+        rows,
+    }
+}
+
+fn schema_value_to_value_out(value: &reddb::storage::schema::Value) -> ValueOut {
+    use reddb::storage::schema::Value;
+    match value {
+        Value::Null => ValueOut::Null,
+        Value::Boolean(value) => ValueOut::Bool(*value),
+        Value::Integer(value) => ValueOut::Integer(*value),
+        Value::UnsignedInteger(value) => i64::try_from(*value)
+            .map(ValueOut::Integer)
+            .unwrap_or_else(|_| ValueOut::String(value.to_string())),
+        Value::Float(value) => ValueOut::Float(*value),
+        Value::BigInt(value) => ValueOut::Integer(*value),
+        Value::TimestampMs(value)
+        | Value::Timestamp(value)
+        | Value::Duration(value)
+        | Value::Decimal(value) => ValueOut::Integer(*value),
+        Value::Password(_) | Value::Secret(_) => ValueOut::String("***".to_string()),
+        Value::Json(bytes) => reddb::json::from_slice::<reddb::json::Value>(bytes)
+            .ok()
+            .and_then(|json| reddb::json::to_string(&json).ok())
+            .map(ValueOut::String)
+            .unwrap_or(ValueOut::Null),
+        Value::Text(value) => ValueOut::String(value.to_string()),
+        Value::Email(value) | Value::Url(value) | Value::NodeRef(value) | Value::EdgeRef(value) => {
+            ValueOut::String(value.clone())
+        }
+        other => ValueOut::String(format!("{other}")),
     }
 }
 
@@ -1289,6 +1386,13 @@ fn main() {
 
         "query" => {
             let json_mode = wants_json(&result.flags);
+            let row_format = parse_row_format(&result.flags).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("query", &err);
+                }
+                eprintln!("query: {err}");
+                std::process::exit(1);
+            });
             // Ephemeral-store tracer (PRD #1785, issue #1786):
             // `red query <file.csv|file.tsv> <sql>` materializes the file
             // into a throwaway in-memory store and queries it. Detected
@@ -1300,6 +1404,7 @@ fn main() {
                     remaining[0].as_str(),
                     remaining[1].as_str(),
                     json_mode,
+                    row_format,
                 );
             }
             let sql = remaining.first().map(|s| s.as_str()).unwrap_or("");
@@ -1356,7 +1461,7 @@ fn main() {
                     if json_mode {
                         json_ok("query", &format_result_json(&qr));
                     } else {
-                        print!("{}", format_result_pretty(&qr));
+                        print_row_result(&qr, row_format);
                     }
                 }
                 Err(err) => {
@@ -3710,6 +3815,9 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 flags.push(cli::types::FlagSchema::new("param-type").with_description(
                     "Type override for the preceding --param \
                              (text|int|float|bool|null|vec|json).",
+                ));
+                flags.push(cli::types::FlagSchema::new("format").with_description(
+                    "Row output format for query results (table|json|ndjson|csv|tsv).",
                 ));
             }
         }

@@ -115,6 +115,7 @@ async-trait = "0.1"
 proptest = "1"
 prost = "0.14"
 tempfile = "3"
+csv = "1"
 
 [[bin]]
 name = "red_client"

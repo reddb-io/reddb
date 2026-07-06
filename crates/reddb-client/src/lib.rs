@@ -71,12 +71,14 @@ pub mod grpc;
 pub mod router;
 
 pub mod redwire;
+pub mod row_format;
 
 #[cfg(feature = "http")]
 pub mod http;
 
 pub use error::{ClientError, ErrorCode, Result};
 pub use params::{IntoParams, IntoValue, Value};
+pub use row_format::{format_query_result, RowFormat};
 pub use types::{
     BulkInsertResult, DeleteResult, DocumentItem, ExistsResult, InsertResult, JsonValue, KvItem,
     KvWatchEvent, ListOptions, ListResult, QueryResult, Row, ValueOut,

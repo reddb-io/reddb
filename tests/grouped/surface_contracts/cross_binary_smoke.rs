@@ -231,6 +231,46 @@ fn red_client_round_trips_against_red_over_grpc() {
 }
 
 #[test]
+fn red_client_accepts_each_row_format_over_grpc() {
+    let Some(red_client) = skip_if_no_red_client() else {
+        return;
+    };
+    let _guard = lock_boot();
+    let port = pick_port();
+    let _dir = support::temp_data_dir("cross-smoke-row-format");
+    let mut server = match boot_red_grpc(port, &_dir.join("data.rdb")) {
+        Ok(h) => h,
+        Err(e) => panic!("could not start `red server`: {e}"),
+    };
+
+    if !wait_for_listener("127.0.0.1", port, Duration::from_secs(15)) {
+        let (out, err) = drain_output(&mut server.child);
+        panic!("`red server` did not listen on {port} within 15s\nstdout:\n{out}\nstderr:\n{err}");
+    }
+
+    let uri = format!("grpc://127.0.0.1:{port}");
+    for (format, expected) in [
+        ("table", "LIT:1\n-----\n1\n"),
+        ("json", "[{\"LIT:1\":1}]\n"),
+        ("ndjson", "{\"LIT:1\":1}\n"),
+        ("csv", "LIT:1\n1\n"),
+        ("tsv", "LIT:1\n1\n"),
+    ] {
+        let out = Command::new(&red_client)
+            .args([&uri, "-c", "SELECT 1", "--format", format])
+            .output()
+            .expect("spawn red_client");
+        let code = out.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(code, 0, "format {format}; stderr: {stderr}");
+        assert_eq!(stdout, expected, "format {format}");
+    }
+
+    server.kill();
+}
+
+#[test]
 fn red_client_round_trips_against_red_over_redwire() {
     let Some(red_client) = skip_if_no_red_client() else {
         return;

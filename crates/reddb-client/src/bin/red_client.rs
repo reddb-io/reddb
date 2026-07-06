@@ -32,7 +32,7 @@ use std::process::ExitCode;
 
 use reddb_client::connector::http::{query_one_shot as http_query_one_shot, Auth as HttpAuth};
 use reddb_client::redwire::{Auth as RedWireAuth, ConnectOptions, RedWireClient};
-use reddb_client::{repl::run_repl, RedDBClient};
+use reddb_client::{format_query_result, repl::run_repl, QueryResult, RedDBClient, RowFormat};
 use reddb_wire::{is_embedded_connection_uri, parse, ConnectionTarget, ParseErrorKind};
 
 const EXIT_USAGE: u8 = 1;
@@ -101,7 +101,7 @@ async fn run_http(base_url: String, parsed: ParsedArgs) -> ExitCode {
                     .await;
             match result {
                 Ok(Ok(body)) => {
-                    println!("{body}");
+                    print_one_shot_result(&body, parsed.format);
                     ExitCode::SUCCESS
                 }
                 Ok(Err(e)) => {
@@ -132,7 +132,7 @@ async fn run_grpc(endpoint: String, parsed: ParsedArgs) -> ExitCode {
     match parsed.command {
         Some(Command::OneShot(sql)) => match client.query(&sql).await {
             Ok(out) => {
-                println!("{out}");
+                print_one_shot_result(&out, parsed.format);
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -171,7 +171,7 @@ async fn run_redwire(host: String, port: u16, tls: bool, parsed: ParsedArgs) -> 
     match parsed.command {
         Some(Command::OneShot(sql)) => match client.query_raw(&sql).await {
             Ok(out) => {
-                println!("{out}");
+                print_one_shot_result(&out, parsed.format);
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -192,6 +192,7 @@ async fn run_redwire(host: String, port: u16, tls: bool, parsed: ParsedArgs) -> 
 struct ParsedArgs {
     uri: String,
     token: Option<String>,
+    format: RowFormat,
     command: Option<Command>,
 }
 
@@ -204,6 +205,7 @@ enum Command {
 fn parse_argv(args: &[String]) -> Result<ParsedArgs, String> {
     let mut uri: Option<String> = None;
     let mut token: Option<String> = None;
+    let mut format = RowFormat::Table;
     let mut command: Option<Command> = None;
     let mut i = 0;
     while i < args.len() {
@@ -219,6 +221,28 @@ fn parse_argv(args: &[String]) -> Result<ParsedArgs, String> {
                     .ok_or_else(|| format!("red_client: {a} requires a value"))?;
                 token = Some(v.clone());
                 i += 2;
+            }
+            "--format" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("red_client: {a} requires a value"))?;
+                format = RowFormat::parse(v).ok_or_else(|| {
+                    format!(
+                        "red_client: unknown --format {v}; expected {}",
+                        RowFormat::vocabulary()
+                    )
+                })?;
+                i += 2;
+            }
+            other if other.starts_with("--format=") => {
+                let v = other.trim_start_matches("--format=");
+                format = RowFormat::parse(v).ok_or_else(|| {
+                    format!(
+                        "red_client: unknown --format {v}; expected {}",
+                        RowFormat::vocabulary()
+                    )
+                })?;
+                i += 1;
             }
             "-c" | "--command" => {
                 let v = args
@@ -247,8 +271,20 @@ fn parse_argv(args: &[String]) -> Result<ParsedArgs, String> {
     Ok(ParsedArgs {
         uri,
         token,
+        format,
         command,
     })
+}
+
+fn print_one_shot_result(body: &str, format: RowFormat) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        println!("{body}");
+        return;
+    };
+    let result = QueryResult::from_envelope(value);
+    let bytes = format_query_result(&result, format);
+    use std::io::Write;
+    std::io::stdout().write_all(&bytes).expect("write stdout");
 }
 
 #[derive(Debug)]

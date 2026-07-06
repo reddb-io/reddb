@@ -27,6 +27,9 @@ mod e2e_issue_1588_wire_tls_bind;
 #[path = "cli_transport/e2e_issue_1786_ephemeral_query.rs"]
 mod e2e_issue_1786_ephemeral_query;
 
+#[path = "cli_transport/e2e_issue_1788_row_formats.rs"]
+mod e2e_issue_1788_row_formats;
+
 #[path = "surface_contracts/cross_binary_smoke.rs"]
 mod cross_binary_smoke;
 
