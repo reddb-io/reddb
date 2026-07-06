@@ -228,6 +228,7 @@ impl RedDBRuntime {
         };
 
         let mut sealed_columnar = 0usize;
+        let mut changed = false;
         for meta in registry.show_chunks(collection) {
             if meta.sealed {
                 continue;
@@ -263,14 +264,28 @@ impl RedDBRuntime {
 
             match routed {
                 crate::storage::timeseries::chunk::SealedChunkStorage::Columnar(bytes) => {
-                    let page = crate::storage::engine::PageLocation::new(0, 0, bytes.len() as u32);
+                    let page = self
+                        .inner
+                        .db
+                        .write_column_block_page(&bytes)
+                        .map_err(|err| {
+                            RedDBError::Internal(format!("columnar page write failed: {err}"))
+                        })?;
                     registry.seal_chunk_columnar(&meta.id, page, bytes);
                     sealed_columnar += 1;
+                    changed = true;
                 }
                 crate::storage::timeseries::chunk::SealedChunkStorage::Row => {
                     registry.seal_chunk(&meta.id);
+                    changed = true;
                 }
             }
+        }
+        if changed {
+            self.inner
+                .db
+                .persist_metadata()
+                .map_err(|e| RedDBError::Internal(e.to_string()))?;
         }
         Ok(sealed_columnar)
     }
@@ -314,6 +329,35 @@ impl RedDBRuntime {
                 .map(|p| (p.timestamp_ns, p.value))
                 .collect(),
         )
+    }
+
+    pub fn columnar_chunk_range_scan(
+        &self,
+        collection: &str,
+        chunk_start_ns: u64,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> Option<crate::storage::timeseries::chunk::PrunedColumnScan> {
+        let id = crate::storage::timeseries::ChunkId {
+            hypertable: collection.to_string(),
+            start_ns: chunk_start_ns,
+        };
+        let bytes = self.inner.db.hypertables().columnar_block(&id)?;
+        crate::storage::timeseries::chunk::query_column_block_range(&bytes, start_ns, end_ns).ok()
+    }
+
+    pub fn columnar_chunk_value_eq_scan(
+        &self,
+        collection: &str,
+        chunk_start_ns: u64,
+        target: f64,
+    ) -> Option<crate::storage::timeseries::chunk::PrunedColumnScan> {
+        let id = crate::storage::timeseries::ChunkId {
+            hypertable: collection.to_string(),
+            start_ns: chunk_start_ns,
+        };
+        let bytes = self.inner.db.hypertables().columnar_block(&id)?;
+        crate::storage::timeseries::chunk::query_column_block_value_eq(&bytes, target).ok()
     }
 
     /// Read-bridge (#861): read every point of `collection` in the
