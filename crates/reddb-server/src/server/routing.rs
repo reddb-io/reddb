@@ -2321,7 +2321,8 @@ mod tests {
         let body: crate::json::Value =
             crate::json::from_slice(&response.body).expect("refusal body is valid JSON");
         assert_eq!(body["ok"], crate::json::Value::Bool(false));
-        assert_eq!(body["retry_after_secs"], crate::json::Value::Number(5.0));
+        // #1768: an integer wire value re-parses to an exact JSON integer.
+        assert_eq!(body["retry_after_secs"], crate::json::Value::Integer(5));
         let error = &body["error"];
         assert_eq!(
             error["code"],
@@ -2329,8 +2330,8 @@ mod tests {
                 crate::server::http_principal_limiter::PRINCIPAL_INFLIGHT_CODE.to_string()
             )
         );
-        assert_eq!(error["limit"], crate::json::Value::Number(64.0));
-        assert_eq!(error["current"], crate::json::Value::Number(64.0));
+        assert_eq!(error["limit"], crate::json::Value::Integer(64));
+        assert_eq!(error["current"], crate::json::Value::Integer(64));
         // The principal round-trips intact through the tainted-field escape.
         assert_eq!(
             error["principal"],
@@ -2879,7 +2880,11 @@ mod tests {
 
         let collection = payload.get("collection").unwrap();
         // Empty table classifies as `model=table` without probing rows.
-        assert_eq!(collection.get("entity_count"), Some(&crate::json!(0.0)));
+        // #1768: the re-parsed wire integer is an exact JSON integer.
+        assert_eq!(
+            collection.get("entity_count"),
+            Some(&crate::json::Value::Integer(0))
+        );
         // Strict schema produces a typed column list from the contract.
         let schema = collection.get("schema").unwrap();
         let mode = schema
@@ -2968,7 +2973,10 @@ mod tests {
             .unwrap()
             .get("model_specific")
             .unwrap();
-        assert_eq!(model_specific.get("dimension"), Some(&crate::json!(8.0)));
+        assert_eq!(
+            model_specific.get("dimension"),
+            Some(&crate::json::Value::Integer(8))
+        );
         assert_eq!(model_specific.get("metric"), Some(&crate::json!("cosine")));
         let actions = payload
             .get("collection")
@@ -3050,7 +3058,7 @@ mod tests {
             assert_eq!(collection.get("model"), Some(&crate::json!(model)));
             assert_eq!(
                 collection.get("entity_count"),
-                Some(&crate::json!(0.0)),
+                Some(&crate::json::Value::Integer(0)),
                 "empty collection {name} should report 0 entities without probing"
             );
         }
