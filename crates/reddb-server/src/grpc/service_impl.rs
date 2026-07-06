@@ -1840,6 +1840,7 @@ impl RedDb for GrpcRuntime {
                     .map(|v| match v {
                         JsonValue::Null => Value::Null,
                         JsonValue::Bool(b) => Value::Boolean(b),
+                        JsonValue::Integer(n) => Value::Integer(n),
                         JsonValue::Number(n) => {
                             if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
                                 Value::Integer(n as i64)
