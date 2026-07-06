@@ -5,16 +5,16 @@ use crate::ast::{
     CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
     CreateSloQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateUserStmt,
     CreateVcsRefQuery, CreateVectorQuery, CreateViewQuery, DeleteQuery, DropCollectionQuery,
-    DropDocumentQuery, DropForeignTableQuery, DropGraphQuery, DropIndexQuery, DropKvQuery,
-    DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery, DropServerQuery,
-    DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVcsRefQuery, DropVectorQuery,
-    DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef,
-    Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery,
-    IsolationLevel, JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction,
-    ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery, RankOfQuery, RankRangeQuery,
-    RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
-    TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VcsCommand,
-    VcsConflictResolution, VcsRefKind, VcsResetMode, VectorQuery,
+    DropDocumentQuery, DropForeignTableQuery, DropForkQuery, DropGraphQuery, DropIndexQuery,
+    DropKvQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery,
+    DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVcsRefQuery,
+    DropVectorQuery, DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery,
+    Expr, FieldRef, Filter, ForeignColumnDef, ForkStoreQuery, GrantStmt, GraphCommand, GraphQuery,
+    HybridQuery, InsertQuery, IsolationLevel, JoinQuery, KvCommand, MaintenanceCommand, PathQuery,
+    PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery, RankOfQuery,
+    RankRangeQuery, RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery,
+    SearchCommand, Span, TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery,
+    VcsCommand, VcsConflictResolution, VcsRefKind, VcsResetMode, VectorQuery,
 };
 use crate::lexer::Token;
 use crate::parser::{ParseError, Parser, SafeTokenDisplay};
@@ -120,6 +120,8 @@ pub enum SqlCommand {
     TransactionControl(TxnControl),
     Maintenance(MaintenanceCommand),
     Vcs(VcsCommand),
+    ForkStore(ForkStoreQuery),
+    DropFork(DropForkQuery),
     CreateSchema(CreateSchemaQuery),
     DropSchema(DropSchemaQuery),
     CreateSequence(CreateSequenceQuery),
@@ -1472,6 +1474,8 @@ pub enum SqlAdminCommand {
     AlterUser(AlterUserStmt),
     CreateUser(CreateUserStmt),
     IamPolicy(QueryExpr),
+    ForkStore(ForkStoreQuery),
+    DropFork(DropForkQuery),
 }
 
 impl SqlStatement {
@@ -1583,6 +1587,8 @@ impl SqlStatement {
             }
             SqlStatement::Admin(SqlAdminCommand::Maintenance(cmd)) => SqlCommand::Maintenance(cmd),
             SqlStatement::Admin(SqlAdminCommand::Vcs(cmd)) => SqlCommand::Vcs(cmd),
+            SqlStatement::Admin(SqlAdminCommand::ForkStore(q)) => SqlCommand::ForkStore(q),
+            SqlStatement::Admin(SqlAdminCommand::DropFork(q)) => SqlCommand::DropFork(q),
             SqlStatement::Schema(SqlSchemaCommand::CreateSchema(q)) => SqlCommand::CreateSchema(q),
             SqlStatement::Schema(SqlSchemaCommand::DropSchema(q)) => SqlCommand::DropSchema(q),
             SqlStatement::Schema(SqlSchemaCommand::CreateSequence(q)) => {
@@ -1732,6 +1738,8 @@ impl SqlCommand {
             SqlCommand::TransactionControl(ctl) => QueryExpr::TransactionControl(ctl),
             SqlCommand::Maintenance(cmd) => QueryExpr::MaintenanceCommand(cmd),
             SqlCommand::Vcs(cmd) => QueryExpr::VcsCommand(cmd),
+            SqlCommand::ForkStore(q) => QueryExpr::ForkStore(q),
+            SqlCommand::DropFork(q) => QueryExpr::DropFork(q),
             SqlCommand::CreateSchema(q) => QueryExpr::CreateSchema(q),
             SqlCommand::DropSchema(q) => QueryExpr::DropSchema(q),
             SqlCommand::CreateSequence(q) => QueryExpr::CreateSequence(q),
@@ -1866,6 +1874,8 @@ impl SqlCommand {
             }
             SqlCommand::Maintenance(cmd) => SqlStatement::Admin(SqlAdminCommand::Maintenance(cmd)),
             SqlCommand::Vcs(cmd) => SqlStatement::Admin(SqlAdminCommand::Vcs(cmd)),
+            SqlCommand::ForkStore(q) => SqlStatement::Admin(SqlAdminCommand::ForkStore(q)),
+            SqlCommand::DropFork(q) => SqlStatement::Admin(SqlAdminCommand::DropFork(q)),
             SqlCommand::CreateSchema(q) => SqlStatement::Schema(SqlSchemaCommand::CreateSchema(q)),
             SqlCommand::DropSchema(q) => SqlStatement::Schema(SqlSchemaCommand::DropSchema(q)),
             SqlCommand::CreateSequence(q) => {
@@ -2089,6 +2099,9 @@ impl<'a> Parser<'a> {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("RESET") => {
+                self.parse_sql_statement().map(FrontendStatement::Sql)
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("FORK") => {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
             Token::Ident(name)
@@ -2796,6 +2809,32 @@ impl<'a> Parser<'a> {
         self.parse_sql_command().map(SqlCommand::into_statement)
     }
 
+    fn parse_fork_store_command(&mut self) -> Result<SqlCommand, ParseError> {
+        self.advance()?; // FORK
+        if !self.consume_ident_ci("STORE")? {
+            return Err(ParseError::expected(
+                vec!["STORE"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        self.expect(Token::As)?;
+        let name = self.expect_ident()?;
+        let at_lsn = if self.consume_ident_ci("AT")? {
+            if !self.consume_ident_ci("LSN")? {
+                return Err(ParseError::expected(
+                    vec!["LSN"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            Some(self.parse_u64_slot("fork LSN")?)
+        } else {
+            None
+        };
+        Ok(SqlCommand::ForkStore(ForkStoreQuery { name, at_lsn }))
+    }
+
     fn parse_dotted_admin_path(&mut self, lowercase: bool) -> Result<String, ParseError> {
         let mut path = self.expect_ident()?;
         while self.consume(&Token::Dot)? {
@@ -3397,6 +3436,9 @@ impl<'a> Parser<'a> {
 
     fn parse_sql_command_inner(&mut self) -> Result<SqlCommand, ParseError> {
         match self.peek() {
+            Token::Ident(name) if name.eq_ignore_ascii_case("FORK") => {
+                self.parse_fork_store_command()
+            }
             Token::Select => match self.parse_select_query()? {
                 QueryExpr::Table(query) => Ok(SqlCommand::Select(query)),
                 QueryExpr::Join(query) => Ok(SqlCommand::Join(query)),
@@ -3545,7 +3587,11 @@ impl<'a> Parser<'a> {
                     ));
                 }
 
-                if self.consume_ident_ci("BRANCH")? {
+                if self.consume_ident_ci("FORK")? {
+                    let if_exists = self.match_if_exists()?;
+                    let name = self.expect_ident()?;
+                    Ok(SqlCommand::DropFork(DropForkQuery { name, if_exists }))
+                } else if self.consume_ident_ci("BRANCH")? {
                     self.parse_drop_vcs_ref(VcsRefKind::Branch)
                 } else if self.consume_ident_ci("TAG")? {
                     self.parse_drop_vcs_ref(VcsRefKind::Tag)
