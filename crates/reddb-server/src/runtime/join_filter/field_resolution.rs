@@ -219,6 +219,7 @@ pub(in crate::runtime) fn runtime_json_value_to_runtime_value(value: &JsonValue)
     match value {
         JsonValue::Null => Some(Value::Null),
         JsonValue::Bool(value) => Some(Value::Boolean(*value)),
+        JsonValue::Integer(value) => Some(Value::Integer(*value)),
         JsonValue::Number(value) => Some(Value::Float(*value)),
         JsonValue::String(value) => Some(Value::text(value.clone())),
         JsonValue::Array(values) => Some(Value::Array(
