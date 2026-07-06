@@ -250,7 +250,7 @@ pub use native_store::{
     STORE_VERSION_V1, STORE_VERSION_V10, STORE_VERSION_V2, STORE_VERSION_V3, STORE_VERSION_V4,
     STORE_VERSION_V5, STORE_VERSION_V6, STORE_VERSION_V7, STORE_VERSION_V8, STORE_VERSION_V9,
 };
-pub use operational_manifest::OperationalManifest;
+pub use operational_manifest::{ForkInfo, ForkOrigin, OperationalManifest};
 pub use physical_metadata::{
     copy_physical_export_data_file, copy_physical_metadata_binary_to_journal,
     decode_persisted_physical_hypertable_chunk_json, decode_persisted_physical_hypertable_json,
