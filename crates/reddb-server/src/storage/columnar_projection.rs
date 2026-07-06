@@ -208,6 +208,10 @@ impl AppendOnlyCollection {
             .iter()
             .filter(move |r| r.lsn > after && r.lsn <= up_to)
     }
+
+    fn next_visible_lsn_after(&self, after: u64, up_to: u64) -> Option<u64> {
+        self.rows_between(after, up_to).next().map(|r| r.lsn)
+    }
 }
 
 /// A manifest record for one emitted columnar segment. Always `derived`:
@@ -470,6 +474,10 @@ impl ColumnarProjection {
         for stored in &self.segments {
             if stored.entry.last_lsn > columnar_ceiling {
                 continue;
+            }
+            match collection.next_visible_lsn_after(tail_start, pinned_lsn) {
+                Some(next_lsn) if next_lsn == stored.entry.first_lsn => {}
+                Some(_) | None => return Ok(collection.row_scan(pinned_lsn)),
             }
             self.verify_and_decode_segment(stored, &mut out)?;
             tail_start = tail_start.max(stored.entry.last_lsn);
@@ -972,6 +980,41 @@ mod tests {
             );
             assert_eq!(via_projection.len(), pin as usize);
         }
+    }
+
+    #[test]
+    fn historical_pin_before_projection_coverage_falls_back_to_row_path() {
+        // Issue #1770: a projection can retain only newer columnar coverage.
+        // An AS OF pin whose visible history starts before that coverage must
+        // answer from the row/time-travel path rather than returning only the
+        // retained columnar suffix plus tail.
+        let collection = filled(300);
+        let mut projection = ColumnarProjection::new(schema(), KEY);
+        projection
+            .emit_at_checkpoint(
+                &collection,
+                300,
+                TranscodeBudget {
+                    max_rows: u64::MAX,
+                    segment_rows: 100,
+                    size_floor_rows: 1,
+                },
+            )
+            .expect("emit segmented projection");
+
+        projection.segments.remove(0);
+        projection.manifest.segments.remove(0);
+
+        let pinned = 250;
+        let via_projection = projection
+            .analytical_scan(&collection, pinned)
+            .expect("historical scan");
+        let via_row = collection.row_scan(pinned);
+
+        assert_eq!(
+            via_projection, via_row,
+            "historical AS OF must not drop rows older than projection coverage"
+        );
     }
 
     #[test]
