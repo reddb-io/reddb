@@ -356,6 +356,9 @@ pub struct PhysicalHypertableChunk {
     /// `RDCC` `ColumnBlock` location; `None` → legacy row-stored. Absent on
     /// sidecars written before the feature, decoding to `None`.
     pub columnar_page: Option<crate::storage::engine::PageLocation>,
+    /// Columnar blocks are derived, rebuildable artifacts (ADR 0069), not
+    /// source-of-truth row data. Backup/restore may skip or rebuild them.
+    pub columnar_derived: bool,
 }
 
 /// A persisted hypertable spec plus all of its chunks. Stored in the
