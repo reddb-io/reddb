@@ -562,7 +562,7 @@ impl RedDB {
             .cloned()
             .map(super::EphemeralDataPathCleanup::new);
 
-        Self {
+        let db = Self {
             store: Arc::new(store),
             preprocessors: Arc::new(RwLock::new(Vec::new())),
             index_config: IndexConfig::default(),
@@ -585,9 +585,10 @@ impl RedDB {
             turbo_collections: std::sync::OnceLock::new(),
             turbo_rebuild_workers: parking_lot::Mutex::new(Vec::new()),
             _ephemeral_cleanup: ephemeral_cleanup,
-        }
-        .with_initialized_metadata()
-        .map_err(|err| format!("initialize RedDB metadata: {err}").into())
+        };
+        db.recover_operational_manifest()?;
+        db.with_initialized_metadata()
+            .map_err(|err| format!("initialize RedDB metadata: {err}").into())
     }
 
     /// Flush changes to disk (if persistence is enabled).
@@ -619,6 +620,7 @@ impl RedDB {
             } else {
                 self.store.save_to_file(path)?;
             }
+            self.flush_append_only_segments(path)?;
             self.persist_metadata()?;
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
             // the WAL checkpoint cycle. Each turbo collection with a
@@ -628,6 +630,60 @@ impl RedDB {
             // (`StorageLayout::Minimal`) has no snapshot path and is
             // a no-op.
             self.dump_turbo_snapshots(0);
+        }
+        Ok(())
+    }
+
+    fn flush_append_only_segments(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        for contract in self
+            .collection_contracts()
+            .into_iter()
+            .filter(|contract| contract.append_only)
+        {
+            let Some(manager) = self.store.get_collection(&contract.name) else {
+                continue;
+            };
+            let _ = manager.force_seal();
+            let mut rows = manager.query_all(|_| true);
+            if rows.is_empty() {
+                continue;
+            }
+            rows.sort_by_key(|entity| entity.id.raw());
+            let segment_id = rows
+                .last()
+                .map(|entity| entity.id.raw())
+                .unwrap_or(rows.len() as u64);
+            let mut payload = Vec::new();
+            for entity in &rows {
+                payload.extend_from_slice(format!("{entity:?}\n").as_bytes());
+            }
+            manifest.publish_append_only_segment(
+                &contract.name,
+                segment_id,
+                &payload,
+                rows.len() as u64,
+                reddb_file::AppendOnlySegmentCodec::Zstd,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn recover_operational_manifest(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let mut collections = self.store.list_collections();
+        collections.sort();
+        let pending_drops = reddb_file::OperationalManifest::for_db_path(path)
+            .recover_or_bootstrap(&collections)?;
+        for name in pending_drops {
+            if self.store.get_collection(&name).is_some() {
+                self.store.drop_collection(&name)?;
+            }
         }
         Ok(())
     }
