@@ -2354,6 +2354,69 @@ fn test_fast_entity_id_lookup_persistent() {
 }
 
 #[test]
+fn test_rid_filter_with_bloom_probe_keeps_row_sets() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "INSERT INTO rid_bloom_probe (name, dept) VALUES ('alice', 'engineering')"
+                .into(),
+        })
+        .expect("insert should succeed");
+
+    let all = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM rid_bloom_probe".into(),
+        })
+        .expect("select all should succeed");
+    let rid = match all.result.records[0].get("rid") {
+        Some(Value::UnsignedInteger(n)) => *n,
+        other => panic!("rid was not UnsignedInteger: {other:?}"),
+    };
+
+    let by_rid = query
+        .execute(ExecuteQueryInput {
+            query: format!("SELECT * FROM rid_bloom_probe WHERE rid = {rid}"),
+        })
+        .expect("select by present rid should succeed");
+    let by_rid_and_dept = query
+        .execute(ExecuteQueryInput {
+            query: format!(
+                "SELECT * FROM rid_bloom_probe WHERE rid = {rid} AND dept = 'engineering'"
+            ),
+        })
+        .expect("select by present rid and conjunct should succeed");
+    assert_eq!(by_rid.result.records.len(), 1);
+    assert_eq!(by_rid_and_dept.result.records.len(), 1);
+    assert_eq!(
+        by_rid_and_dept.result.records[0].get("name"),
+        by_rid.result.records[0].get("name")
+    );
+    assert_eq!(
+        by_rid_and_dept.result.records[0].get("dept"),
+        by_rid.result.records[0].get("dept")
+    );
+
+    let absent_rid = rid + 1000;
+    let absent_by_rid = query
+        .execute(ExecuteQueryInput {
+            query: format!("SELECT * FROM rid_bloom_probe WHERE rid = {absent_rid}"),
+        })
+        .expect("select by absent rid should succeed");
+    let absent_by_rid_and_dept = query
+        .execute(ExecuteQueryInput {
+            query: format!(
+                "SELECT * FROM rid_bloom_probe WHERE rid = {absent_rid} AND dept = 'engineering'"
+            ),
+        })
+        .expect("select by absent rid and conjunct should succeed");
+
+    assert!(absent_by_rid.result.records.is_empty());
+    assert!(absent_by_rid_and_dept.result.records.is_empty());
+}
+
+#[test]
 fn test_drop_table_cleans_contract_and_indices() {
     let rt = rt();
     let query = QueryUseCases::new(&rt);

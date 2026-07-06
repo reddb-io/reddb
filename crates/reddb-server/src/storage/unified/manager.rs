@@ -1353,59 +1353,29 @@ impl SegmentManager {
         results
     }
 
-    /// Query with bloom filter hint: skip the growing segment when bloom says key is absent.
+    /// Probe segment blooms for a key without materializing matching entities.
     ///
-    /// This is the integration point for bloom filter pruning.
-    /// When a query has an equality predicate on a known key, the executor
-    /// can call this instead of `query_all` to avoid scanning when the
-    /// bloom filter proves the key doesn't exist.
-    ///
-    /// Returns (results, bloom_pruned) where bloom_pruned indicates if the
-    /// segment was skipped.
-    pub fn query_with_bloom_hint<F>(
-        &self,
-        key_hint: Option<&[u8]>,
-        filter: F,
-    ) -> (Vec<UnifiedEntity>, bool)
-    where
-        F: Fn(&UnifiedEntity) -> bool,
-    {
-        let mut results = Vec::new();
-        let mut bloom_pruned = false;
-
+    /// Returns `false` only when every consulted segment bloom proves absence.
+    /// Missing segment state is conservative and returns `true`.
+    pub fn bloom_may_contain_key(&self, key: &[u8]) -> bool {
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
-            if let Some(key) = key_hint {
-                if !growing.bloom_might_contain_key(key) {
-                    bloom_pruned = true;
-                    return (results, bloom_pruned);
-                }
+            if growing.bloom_might_contain_key(key) {
+                return true;
             }
-            for entity in growing.iter() {
-                if filter(entity) {
-                    results.push(entity.clone());
-                }
-            }
+        } else {
+            return true;
         }
 
-        // Sealed segments (currently empty iter, but future-proofed)
         let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
             let segment = segment_arc.read();
-            if let Some(key) = key_hint {
-                if !segment.bloom_might_contain_key(key) {
-                    bloom_pruned = true;
-                    continue;
-                }
-            }
-            for entity in segment.iter() {
-                if filter(entity) {
-                    results.push(entity.clone());
-                }
+            if segment.bloom_might_contain_key(key) {
+                return true;
             }
         }
 
-        (results, bloom_pruned)
+        false
     }
 
     /// Filter by metadata across all segments
@@ -1620,6 +1590,23 @@ mod tests {
         let id = manager.insert(entity).unwrap();
         assert!(manager.get(id).is_some());
         assert_eq!(manager.count(), 1);
+    }
+
+    #[test]
+    fn bloom_may_contain_key_probes_inserted_rid_bytes() {
+        let manager = SegmentManager::new("test_collection");
+
+        let entity = UnifiedEntity::table_row(
+            manager.next_entity_id(),
+            "users",
+            1,
+            vec![Value::text("Alice".to_string())],
+        );
+
+        let id = manager.insert(entity).unwrap();
+
+        assert!(manager.bloom_may_contain_key(&id.raw().to_le_bytes()));
+        assert!(!manager.bloom_may_contain_key(&u64::MAX.to_le_bytes()));
     }
 
     #[test]
