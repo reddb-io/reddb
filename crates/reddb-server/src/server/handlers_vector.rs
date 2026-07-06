@@ -196,6 +196,7 @@ fn str_field(obj: &Map<std::string::String, JsonValue>, key: &str) -> Option<Str
 
 fn num_field(obj: &Map<std::string::String, JsonValue>, key: &str) -> Option<f64> {
     obj.get(key).and_then(|v| match v {
+        JsonValue::Integer(n) => Some(*n as f64),
         JsonValue::Number(n) => Some(*n),
         _ => None,
     })
