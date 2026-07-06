@@ -39,7 +39,17 @@ pub(crate) fn decode_container_to_json(bytes: &[u8]) -> Option<JsonValue> {
     let fields = document_body_codec::decode(bytes).ok()?;
     let mut map = Map::new();
     for (key, value) in fields {
-        map.insert(key, storage_value_to_json(&value));
+        // #1768: the document body is the one JSON surface that must preserve
+        // exact integers (a large integer written into a body comes back
+        // exactly). A top-level integer field is emitted as an exact JSON
+        // integer here rather than through the f64 `storage_value_to_json`
+        // view. Nested integers ride inside `Value::Json` blobs, which
+        // round-trip through the integer-aware parser already.
+        let json = match &value {
+            Value::Integer(n) => JsonValue::Integer(*n),
+            other => storage_value_to_json(other),
+        };
+        map.insert(key, json);
     }
     Some(JsonValue::Object(map))
 }
