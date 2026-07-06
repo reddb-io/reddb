@@ -470,6 +470,13 @@ pub(super) fn queue_pending_snapshot(
             (lock_deadline_ms, delivery_count, delivery_id)
         };
         let attempts = delivery_count.saturating_sub(1);
+        let ordering_key = super::super::impl_queue::read_message_ordering_key(
+            store.as_ref(),
+            &queue,
+            EntityId::new(message_id),
+        )
+        .map(Value::text)
+        .unwrap_or(Value::Null);
 
         records.push(UnifiedRecord::with_schema(
             Arc::clone(&schema),
@@ -478,6 +485,7 @@ pub(super) fn queue_pending_snapshot(
                 Value::text(group),
                 Value::UnsignedInteger(message_id),
                 Value::text(delivery_id),
+                ordering_key,
                 Value::UnsignedInteger(attempts),
                 Value::TimestampMs(lock_deadline_ms as i64),
                 Value::text(consumer),
