@@ -4,7 +4,7 @@
 //! skip, vectorized read) but left it dark: no production path activated
 //! it. This test pins the activation wiring this slice adds:
 //!
-//!   1. `CREATE HYPERTABLE ... COLUMNAR` sets the contract's
+//!   1. `CREATE HYPERTABLE ...` sets the contract's
 //!      `analytical_storage.columnar = true`.
 //!   2. `RedDBRuntime::seal_hypertable_chunks` — the production caller of
 //!      `seal_chunk_with_config` — routes a columnar chunk's seal through
@@ -12,8 +12,8 @@
 //!      `ChunkMeta.columnar_page`.
 //!   3. Read-back over that columnar chunk (the #856 column-block range
 //!      scan) returns the ingested points.
-//!   4. A hypertable created WITHOUT `COLUMNAR` still seals row-oriented:
-//!      no `columnar_page`, no columnar block.
+//!   4. `NO COLUMNAR` opts a collection out: row seal, no `columnar_page`,
+//!      analytical reads fall back through the row bridge.
 
 use reddb_server::{RedDBOptions, RedDBRuntime};
 
@@ -42,7 +42,7 @@ fn columnar_hypertable_seals_through_columnar_arm_and_reads_back() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     seed(
         &rt,
-        "CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h' COLUMNAR",
+        "CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h'",
         "cpu",
     );
 
@@ -73,14 +73,14 @@ fn non_columnar_hypertable_seals_row_oriented() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     seed(
         &rt,
-        "CREATE HYPERTABLE mem TIME_COLUMN ts CHUNK_INTERVAL '1h'",
+        "CREATE HYPERTABLE mem TIME_COLUMN ts CHUNK_INTERVAL '1h' NO COLUMNAR",
         "mem",
     );
 
-    // Criterion 3: without the flag the chunk seals row-oriented — no
+    // Criterion 3: with the opt-out the chunk seals row-oriented — no
     // columnar seal, no columnar_page, no columnar block to read.
     let sealed = rt.seal_hypertable_chunks("mem").expect("seal mem");
-    assert_eq!(sealed, 0, "no chunk should seal columnar without the flag");
+    assert_eq!(sealed, 0, "opted-out chunks must not seal columnar");
     assert_eq!(
         rt.columnar_chunk_count("mem"),
         0,
@@ -90,4 +90,43 @@ fn non_columnar_hypertable_seals_row_oriented() {
         rt.columnar_chunk_points("mem", 0, 0, u64::MAX).is_none(),
         "row-sealed chunk exposes no columnar block"
     );
+    let got = rt
+        .read_bridge_points("mem", 0, u64::MAX)
+        .expect("row bridge");
+    let want: Vec<(u64, f64)> = POINTS.iter().map(|(ts, v)| (*ts, *v as f64)).collect();
+    assert_eq!(got, want, "opted-out analytical reads fall back to rows");
+}
+
+#[test]
+fn automatic_columnar_skips_tiny_chunks_until_they_cross_the_floor() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE HYPERTABLE tiny TIME_COLUMN ts CHUNK_INTERVAL '1h'")
+        .expect("create hypertable");
+
+    for (ts, value) in &POINTS[..3] {
+        rt.execute_query(&format!(
+            "INSERT INTO tiny (ts, value) VALUES ({ts}, {value})"
+        ))
+        .expect("insert under floor");
+    }
+    assert_eq!(
+        rt.seal_hypertable_chunks("tiny").expect("seal under floor"),
+        0,
+        "under-floor chunks are skipped, not row-sealed"
+    );
+    assert_eq!(rt.columnar_chunk_count("tiny"), 0);
+
+    for (ts, value) in &POINTS[3..4] {
+        rt.execute_query(&format!(
+            "INSERT INTO tiny (ts, value) VALUES ({ts}, {value})"
+        ))
+        .expect("insert crossing floor");
+    }
+    assert_eq!(
+        rt.seal_hypertable_chunks("tiny")
+            .expect("seal after crossing floor"),
+        1,
+        "the same collection is picked up once it crosses the floor"
+    );
+    assert_eq!(rt.columnar_chunk_count("tiny"), 1);
 }
