@@ -339,6 +339,7 @@ pub(crate) fn json_to_storage_value(value: &JsonValue) -> RedDBResult<Value> {
     match value {
         JsonValue::Null => Ok(Value::Null),
         JsonValue::Bool(value) => Ok(Value::Boolean(*value)),
+        JsonValue::Integer(value) => Ok(Value::Integer(*value)),
         JsonValue::Number(value) => {
             if value.fract().abs() < f64::EPSILON {
                 Ok(Value::Integer(*value as i64))
@@ -357,6 +358,7 @@ pub(crate) fn json_to_metadata_value(value: &JsonValue) -> RedDBResult<MetadataV
     match value {
         JsonValue::Null => Ok(MetadataValue::Null),
         JsonValue::Bool(value) => Ok(MetadataValue::Bool(*value)),
+        JsonValue::Integer(value) => Ok(MetadataValue::Int(*value)),
         JsonValue::Number(value) => {
             if value.fract().abs() < f64::EPSILON {
                 Ok(MetadataValue::Int(*value as i64))
@@ -588,7 +590,7 @@ fn metadata_value_to_json(value: &MetadataValue) -> JsonValue {
     match value {
         MetadataValue::Null => JsonValue::Null,
         MetadataValue::Bool(value) => JsonValue::Bool(*value),
-        MetadataValue::Int(value) => JsonValue::Number(*value as f64),
+        MetadataValue::Int(value) => JsonValue::Integer(*value),
         MetadataValue::Float(value) => JsonValue::Number(*value),
         MetadataValue::String(value) => JsonValue::String(value.clone()),
         MetadataValue::Bytes(value) => {
@@ -685,6 +687,7 @@ fn metadata_value_from_json(value: &JsonValue) -> RedDBResult<MetadataValue> {
     match value {
         JsonValue::Null => Ok(MetadataValue::Null),
         JsonValue::Bool(value) => Ok(MetadataValue::Bool(*value)),
+        JsonValue::Integer(value) => Ok(MetadataValue::Int(*value)),
         JsonValue::Number(value) => {
             if value.fract().abs() < f64::EPSILON {
                 Ok(MetadataValue::Int(*value as i64))
