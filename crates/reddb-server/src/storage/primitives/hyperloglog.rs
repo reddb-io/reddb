@@ -1,8 +1,8 @@
 //! HyperLogLog — Probabilistic Cardinality Estimation
 //!
-//! Estimates the number of distinct elements in a set using ~12KB of memory
-//! with ~0.81% standard error. Based on the HyperLogLog algorithm by Flajolet
-//! et al. with bias correction.
+//! Estimates the number of distinct elements in a set using 16,384 default
+//! registers (~16 KiB) with ~0.81% standard error. Based on the HyperLogLog
+//! algorithm by Flajolet et al. with bias correction.
 //!
 //! # Example
 //! ```ignore
@@ -26,7 +26,7 @@ pub struct HyperLogLog {
 }
 
 impl HyperLogLog {
-    /// Create a new HLL with 16384 registers (~16KB memory)
+    /// Create a new HLL with 16,384 registers (~16 KiB memory)
     pub fn new() -> Self {
         Self::with_precision(DEFAULT_PRECISION).expect("default HLL precision is valid")
     }
