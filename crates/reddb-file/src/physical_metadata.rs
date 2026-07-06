@@ -1837,6 +1837,10 @@ fn hypertable_chunk_json_value(chunk: &PersistedPhysicalHypertableChunk) -> serd
             .map(page_location_json_value)
             .unwrap_or(serde_json::Value::Null),
     );
+    object.insert(
+        "columnar_derived".to_string(),
+        serde_json::Value::Bool(chunk.columnar_derived),
+    );
     serde_json::Value::Object(object)
 }
 
@@ -1844,6 +1848,14 @@ fn hypertable_chunk_from_json_value(
     value: &serde_json::Value,
 ) -> RdbFileResult<PersistedPhysicalHypertableChunk> {
     let object = expect_object(value, "hypertable chunk")?;
+    let columnar_page = match object.get("columnar_page") {
+        Some(serde_json::Value::Null) | None => None,
+        Some(value) => Some(page_location_from_json_value(value)?),
+    };
+    let columnar_derived = object
+        .get("columnar_derived")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(columnar_page.is_some());
     Ok(PersistedPhysicalHypertableChunk {
         start_ns: json_u64_required(object, "start_ns")?,
         end_ns_exclusive: json_u64_required(object, "end_ns_exclusive")?,
@@ -1858,10 +1870,8 @@ fn hypertable_chunk_from_json_value(
             Some(serde_json::Value::Null) | None => None,
             Some(value) => Some(json_u64_value(value)?),
         },
-        columnar_page: match object.get("columnar_page") {
-            Some(serde_json::Value::Null) | None => None,
-            Some(value) => Some(page_location_from_json_value(value)?),
-        },
+        columnar_page,
+        columnar_derived,
     })
 }
 
