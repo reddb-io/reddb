@@ -2907,8 +2907,10 @@ pub struct CreateTimeSeriesQuery {
     /// `SESSION_GAP <duration>` — default inactivity gap (ms) for the
     /// `SESSIONIZE` operator. Issue #576 slice 1.
     pub session_gap_ms: Option<u64>,
-    /// `COLUMNAR` — activate columnar analytical storage (PRD #850,
-    /// #911). When true the collection contract is built with
+    /// Columnar analytical storage policy (PRD #850, #911, #1772).
+    /// Defaults to true for in-scope collections; `NO COLUMNAR` sets it
+    /// false as the per-collection opt-out. When true the collection
+    /// contract is built with
     /// `analytical_storage.columnar = true`, so sealing a chunk routes
     /// through `seal_chunk_with_config`'s columnar arm and emits an
     /// RDCC `ColumnBlock` instead of the row seal.
