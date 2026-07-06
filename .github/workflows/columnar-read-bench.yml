@@ -1,0 +1,36 @@
+name: Columnar Read Bench Gate
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - '.github/workflows/columnar-read-bench.yml'
+      - 'crates/reddb-server/benches/columnar_read_bench.rs'
+      - 'crates/reddb-server/src/storage/query/batch.rs'
+      - 'crates/reddb-server/src/storage/timeseries/**'
+      - 'docs/engine/columnar-execution.md'
+      - 'docs/perf/2026-06-03-columnar-read.md'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  columnar-read-bench:
+    name: Columnar projection read guard
+    if: github.actor != 'dependabot[bot]'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-columnar-read-bench-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Run guarded Criterion lane
+        run: cargo bench -p reddb-io-server --bench columnar_read_bench projection-vs-row-guard -- --sample-size 10
