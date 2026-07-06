@@ -139,6 +139,7 @@ fn extract_two_points(body: &JsonValue) -> Option<(f64, f64, f64, f64)> {
 
 fn num_field(obj: &Map<String, JsonValue>, key: &str) -> Option<f64> {
     obj.get(key).and_then(|v| match v {
+        JsonValue::Integer(n) => Some(*n as f64),
         JsonValue::Number(n) => Some(*n),
         _ => None,
     })
