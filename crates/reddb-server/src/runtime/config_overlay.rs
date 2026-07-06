@@ -187,6 +187,13 @@ pub fn coerce_env_value(key: &str, raw: &str) -> Option<crate::storage::schema::
             "false" | "0" | "off" | "no" => Some(Value::Boolean(false)),
             _ => None,
         },
+        // An integer-typed default coerces the env override as a whole number,
+        // preferring the unsigned form (matching the pre-#1768 Number path).
+        JsonValue::Integer(_) => raw
+            .parse::<u64>()
+            .ok()
+            .map(Value::UnsignedInteger)
+            .or_else(|| raw.parse::<i64>().ok().map(Value::Integer)),
         JsonValue::Number(n) => {
             if n.fract().abs() < f64::EPSILON {
                 raw.parse::<u64>().ok().map(Value::UnsignedInteger)
