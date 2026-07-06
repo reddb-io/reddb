@@ -1,6 +1,85 @@
 use super::*;
 
 impl RedDB {
+    pub(crate) fn write_column_block_page(
+        &self,
+        bytes: &[u8],
+    ) -> Result<crate::storage::engine::PageLocation, Box<dyn std::error::Error>> {
+        use crate::storage::engine::PageType;
+
+        let store = self.store();
+        let Some(pager) = store.pager() else {
+            return Ok(crate::storage::engine::PageLocation::new(
+                0,
+                0,
+                bytes.len() as u32,
+            ));
+        };
+        let content_size = crate::storage::engine::page::CONTENT_SIZE;
+        let page_count = bytes.len().max(1).div_ceil(content_size);
+        let mut first_page_id = None;
+        for page_index in 0..page_count {
+            let mut page = pager.allocate_page(PageType::ColumnBlock)?;
+            let page_id = page.page_id();
+            if let Some(first) = first_page_id {
+                let expected = first + page_index as u32;
+                if page_id != expected {
+                    return Err(format!(
+                        "column block page allocation was not contiguous: got {page_id}, expected {expected}"
+                    )
+                    .into());
+                }
+            } else {
+                first_page_id = Some(page_id);
+            }
+            let start = page_index * content_size;
+            let end = (start + content_size).min(bytes.len());
+            if start < end {
+                page.content_mut()[..end - start].copy_from_slice(&bytes[start..end]);
+            }
+            pager.write_page_encrypted(page_id, page)?;
+        }
+        Ok(crate::storage::engine::PageLocation::new(
+            first_page_id.expect("page_count is at least one"),
+            0,
+            bytes.len() as u32,
+        ))
+    }
+
+    pub(crate) fn read_column_block_page(
+        &self,
+        loc: crate::storage::engine::PageLocation,
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        let store = self.store();
+        let Some(pager) = store.pager() else {
+            return Ok(None);
+        };
+        let content_size = crate::storage::engine::page::CONTENT_SIZE;
+        let mut remaining = loc.length as usize;
+        let mut page_id = loc.page_id;
+        let mut offset = loc.offset as usize;
+        let mut out = Vec::with_capacity(remaining);
+        while remaining > 0 {
+            let page = pager.read_page_decrypted(page_id)?;
+            if page.page_type()? != crate::storage::engine::PageType::ColumnBlock {
+                return Err(format!("page {page_id} is not a ColumnBlock page").into());
+            }
+            if offset > content_size {
+                return Err(format!(
+                    "column block page location offset out of bounds: {offset} > {content_size}"
+                )
+                .into());
+            }
+            let available = content_size - offset;
+            let take = remaining.min(available);
+            out.extend_from_slice(&page.content()[offset..offset + take]);
+            remaining -= take;
+            page_id = page_id.saturating_add(1);
+            offset = 0;
+        }
+        Ok(Some(out))
+    }
+
     pub fn tree_definitions(&self) -> Vec<crate::physical::PhysicalTreeDefinition> {
         self.physical_metadata()
             .map(|metadata| metadata.tree_definitions)
@@ -365,6 +444,7 @@ impl RedDB {
                     sealed: chunk.sealed,
                     ttl_override_ns: chunk.ttl_override_ns,
                     columnar_page: chunk.columnar_page,
+                    columnar_derived: chunk.columnar_page.is_some(),
                 });
         }
         registry
@@ -404,7 +484,7 @@ impl RedDB {
             }
             registry.register(spec);
             for chunk in &hypertable.chunks {
-                registry.restore_chunk(crate::storage::timeseries::ChunkMeta {
+                let meta = crate::storage::timeseries::ChunkMeta {
                     id: crate::storage::timeseries::ChunkId {
                         hypertable: hypertable.name.clone(),
                         start_ns: chunk.start_ns,
@@ -416,7 +496,15 @@ impl RedDB {
                     sealed: chunk.sealed,
                     ttl_override_ns: chunk.ttl_override_ns,
                     columnar_page: chunk.columnar_page,
-                });
+                };
+                let id = meta.id.clone();
+                let columnar_page = meta.columnar_page;
+                registry.restore_chunk(meta);
+                if let Some(loc) = columnar_page {
+                    if let Ok(Some(bytes)) = self.read_column_block_page(loc) {
+                        registry.restore_columnar_block(&id, bytes);
+                    }
+                }
             }
         }
     }
