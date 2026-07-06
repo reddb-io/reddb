@@ -166,6 +166,7 @@ pub use crate::physical::{
     SHM_HEADER_SIZE, SHM_MAGIC, SHM_VERSION,
 };
 pub use crate::replication::{ReplicationConfig, ReplicationRole};
+pub use crate::runtime::impl_ephemeral::{EphemeralError, EphemeralTable, POSITIONAL_ALIAS};
 pub use crate::runtime::{
     ConnectionPoolConfig, RedDBRuntime, RuntimeConnection, RuntimeFilter, RuntimeFilterValue,
     RuntimeGraphCentralityAlgorithm, RuntimeGraphCentralityResult, RuntimeGraphCentralityScore,
