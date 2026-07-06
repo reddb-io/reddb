@@ -237,6 +237,17 @@ pub(crate) fn cross_modal_value_tokens(value: &crate::storage::schema::Value) ->
                         }
                         *budget = budget.saturating_sub(1);
                     }
+                    crate::serde_json::Value::Integer(value) => {
+                        let value = *value;
+                        if value >= 0 {
+                            let u = value as u64;
+                            push(tokens, seen, u.to_string());
+                            push(tokens, seen, format!("e{u}"));
+                        } else {
+                            push(tokens, seen, value.to_string());
+                        }
+                        *budget = budget.saturating_sub(1);
+                    }
                     crate::serde_json::Value::Number(value) => {
                         let i = *value as i64;
                         if *value >= 0.0 && value.fract().abs() < f64::EPSILON {
