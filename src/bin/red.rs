@@ -69,6 +69,103 @@ fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
     let _ = rt.checkpoint();
 }
 
+/// Returns `true` when the first `query` positional names a CSV/TSV data
+/// file, triggering the ephemeral-store tracer (PRD #1785, issue #1786):
+/// `red query <file.csv> <sql>`.
+fn is_ephemeral_data_file(arg: &str) -> bool {
+    let lower = arg.to_ascii_lowercase();
+    lower.ends_with(".csv") || lower.ends_with(".tsv") || lower.ends_with(".tab")
+}
+
+/// Run the ephemeral-store tracer: materialize a local CSV/TSV file into
+/// a throwaway in-memory embedded store, execute the query against it,
+/// print the result, and discard the store. No server, no pre-existing
+/// store, nothing durable created — the collection is addressable by its
+/// sanitized file-stem name and by the positional alias `t`.
+fn run_ephemeral_query(args: &[String], file: &str, sql: &str, json_mode: bool) -> ! {
+    use std::path::Path;
+
+    if sql.is_empty() {
+        if json_mode {
+            json_error("query", "Usage: red query <file.csv|file.tsv> <sql>");
+        }
+        eprintln!("Usage: red query <file.csv|file.tsv> <sql>");
+        eprintln!("Example: red query data.csv \"SELECT * FROM t\"");
+        std::process::exit(1);
+    }
+
+    let params = collect_query_params(args).unwrap_or_else(|err| {
+        if json_mode {
+            json_error("query", &err);
+        }
+        eprintln!("query: {err}");
+        std::process::exit(1);
+    });
+
+    // Throwaway in-memory store — nothing durable is written.
+    let rt = reddb::RedDBRuntime::in_memory().unwrap_or_else(|err| {
+        if json_mode {
+            json_error("query", &err.to_string());
+        }
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    });
+
+    if let Err(err) = rt.materialize_data_file(Path::new(file)) {
+        // Missing, unreadable, or malformed files land here as a
+        // didactic message rather than a panic.
+        if json_mode {
+            json_error("query", &err.to_string());
+        }
+        eprintln!("query error: {err}");
+        std::process::exit(1);
+    }
+
+    let exec_result = if params.is_empty() {
+        rt.execute_query(sql)
+    } else {
+        use reddb::storage::query::modes::parse_multi;
+        use reddb::storage::query::user_params;
+        match parse_multi(sql) {
+            Ok(expr) => match user_params::bind(&expr, &params) {
+                Ok(bound) => rt.execute_query_expr(bound),
+                Err(err) => {
+                    if json_mode {
+                        json_error("query", &err.to_string());
+                    }
+                    eprintln!("query error: {err}");
+                    std::process::exit(1);
+                }
+            },
+            Err(err) => {
+                if json_mode {
+                    json_error("query", &err.to_string());
+                }
+                eprintln!("query error: {err}");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    match exec_result {
+        Ok(qr) => {
+            if json_mode {
+                json_ok("query", &format_result_json(&qr));
+            } else {
+                print!("{}", format_result_pretty(&qr));
+            }
+            std::process::exit(0);
+        }
+        Err(err) => {
+            if json_mode {
+                json_error("query", &err.to_string());
+            }
+            eprintln!("query error: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[derive(Clone)]
 struct McpClientOptions {
     redacted_uri: String,
@@ -1192,6 +1289,14 @@ fn main() {
 
         "query" => {
             let json_mode = wants_json(&result.flags);
+            // Ephemeral-store tracer (PRD #1785, issue #1786):
+            // `red query <file.csv|file.tsv> <sql>` materializes the file
+            // into a throwaway in-memory store and queries it. Detected
+            // when a second positional is present and the first names a
+            // CSV/TSV data file.
+            if remaining.len() >= 2 && is_ephemeral_data_file(remaining[0].as_str()) {
+                run_ephemeral_query(&args, remaining[0].as_str(), remaining[1].as_str(), json_mode);
+            }
             let sql = remaining.first().map(|s| s.as_str()).unwrap_or("");
             if sql.is_empty() {
                 if json_mode {
