@@ -375,7 +375,9 @@ impl OperationalManifest {
 
     /// Read this manifest's fork origin, if it is a fork.
     pub fn fork_origin(&self) -> io::Result<Option<ForkOrigin>> {
-        Ok(self.load_current()?.and_then(|manifest| manifest.fork_origin))
+        Ok(self
+            .load_current()?
+            .and_then(|manifest| manifest.fork_origin))
     }
 
     fn forks_dir(&self) -> PathBuf {
