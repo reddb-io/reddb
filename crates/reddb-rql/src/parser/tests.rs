@@ -2585,6 +2585,24 @@ fn test_parse_show_stats_name_desugars_with_collection_filter() {
 }
 
 #[test]
+fn test_parse_show_stats_for_name_desugars_with_collection_filter() {
+    let query = parse("SHOW STATS FOR users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.stats");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: reddb_types::types::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
 fn test_parse_events_status_desugars_to_red_subscriptions_select() {
     let query = parse("EVENTS STATUS").unwrap();
     if let QueryExpr::Table(tq) = query {
