@@ -28,8 +28,14 @@ const OLD_ROW: &[(u64, i64)] = &[
 ];
 
 /// Post-upgrade data: lands in the SECOND chunk (`[1h, 2h)`), sealed
-/// columnar after `COLUMNAR` is turned on.
-const NEW_COLUMNAR: &[(u64, i64)] = &[(HOUR_NS + 1_000_000_000, 40), (HOUR_NS + 2_000_000_000, 50)];
+/// columnar after columnar projection is turned on. Four rows crosses
+/// the automatic projection size floor.
+const NEW_COLUMNAR: &[(u64, i64)] = &[
+    (HOUR_NS + 1_000_000_000, 40),
+    (HOUR_NS + 2_000_000_000, 50),
+    (HOUR_NS + 3_000_000_000, 60),
+    (HOUR_NS + 4_000_000_000, 70),
+];
 
 fn insert(rt: &RedDBRuntime, collection: &str, rows: &[(u64, i64)]) {
     for (ts, value) in rows {
@@ -53,7 +59,7 @@ fn enable_columnar(rt: &RedDBRuntime, collection: &str, time_key: &str) {
         order_by_key: None,
     });
     db.save_collection_contract(contract)
-        .expect("save columnar-enabled contract");
+        .expect("save columnar contract");
 }
 
 fn want(rows: &[(u64, i64)]) -> Vec<(u64, f64)> {
@@ -64,16 +70,16 @@ fn want(rows: &[(u64, i64)]) -> Vec<(u64, f64)> {
 fn read_bridge_serves_row_and_columnar_chunks_after_enabling_columnar() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
 
-    // --- Before the upgrade: a plain (non-columnar) hypertable with data ---
-    rt.execute_query("CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h'")
+    // --- Before the upgrade: an opted-out hypertable with row-stored data ---
+    rt.execute_query("CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h' NO COLUMNAR")
         .expect("create hypertable");
     insert(&rt, "cpu", OLD_ROW);
 
-    // Seal the existing chunk row-oriented (no columnar flag yet).
+    // Seal the existing chunk row-oriented (the collection opted out).
     assert_eq!(
         rt.seal_hypertable_chunks("cpu").expect("seal row"),
         0,
-        "without the flag nothing seals columnar"
+        "the opt-out keeps existing chunks row-stored"
     );
     assert_eq!(
         rt.columnar_chunk_count("cpu"),
@@ -124,7 +130,7 @@ fn read_bridge_serves_row_and_columnar_chunks_after_enabling_columnar() {
 #[test]
 fn read_bridge_prunes_chunks_outside_the_query_range() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
-    rt.execute_query("CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h'")
+    rt.execute_query("CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h' NO COLUMNAR")
         .expect("create hypertable");
 
     insert(&rt, "cpu", OLD_ROW);
