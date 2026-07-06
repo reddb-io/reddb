@@ -254,10 +254,8 @@ struct RegistryInner {
     chunks: BTreeMap<(String, u64), ChunkMeta>,
     /// `(hypertable, start_ns)` → the sealed chunk's RDCC `ColumnBlock`
     /// bytes, populated by [`seal_chunk_columnar`](HypertableRegistry::seal_chunk_columnar)
-    /// (PRD #850, #911). RAM-resident: the migration discriminant
-    /// `ChunkMeta.columnar_page` persists across restart, but durable
-    /// engine-page persistence of these bytes is a follow-up — until the
-    /// page-write bridge lands, a columnar chunk's block lives only here.
+    /// during seal and by [`restore_columnar_block`](HypertableRegistry::restore_columnar_block)
+    /// during boot after reading the recorded engine page.
     columnar_blocks: BTreeMap<(String, u64), Vec<u8>>,
 }
 
@@ -546,10 +544,30 @@ impl HypertableRegistry {
         }
     }
 
+    /// Rehydrate a previously persisted RDCC block after boot has restored
+    /// the chunk metadata and read the recorded `ColumnBlock` page.
+    pub fn restore_columnar_block(&self, id: &ChunkId, bytes: Vec<u8>) -> bool {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let key = (id.hypertable.clone(), id.start_ns);
+        if guard
+            .chunks
+            .get(&key)
+            .is_some_and(|meta| meta.columnar_page.is_some())
+        {
+            guard.columnar_blocks.insert(key, bytes);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Fetch the RDCC `ColumnBlock` bytes recorded for a columnar-sealed
     /// chunk by [`seal_chunk_columnar`](Self::seal_chunk_columnar). `None`
-    /// for row-sealed chunks or chunks whose bytes are not RAM-resident
-    /// (e.g. after a restart, pending the durable page-write bridge).
+    /// for row-sealed chunks or chunks whose durable page could not be
+    /// rehydrated.
     pub fn columnar_block(&self, id: &ChunkId) -> Option<Vec<u8>> {
         let guard = match self.inner.lock() {
             Ok(g) => g,

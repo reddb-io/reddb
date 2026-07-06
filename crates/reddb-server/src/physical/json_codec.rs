@@ -997,12 +997,20 @@ fn hypertable_chunk_to_persisted(
                 offset: loc.offset,
                 length: loc.length,
             }),
+        columnar_derived: chunk.columnar_derived,
     }
 }
 
 fn hypertable_chunk_from_persisted(
     chunk: reddb_file::PersistedPhysicalHypertableChunk,
 ) -> PhysicalHypertableChunk {
+    let columnar_page = chunk
+        .columnar_page
+        .map(|loc| crate::storage::engine::PageLocation {
+            page_id: loc.page_id,
+            offset: loc.offset,
+            length: loc.length,
+        });
     PhysicalHypertableChunk {
         start_ns: chunk.start_ns,
         end_ns_exclusive: chunk.end_ns_exclusive,
@@ -1011,13 +1019,8 @@ fn hypertable_chunk_from_persisted(
         max_ts_ns: chunk.max_ts_ns,
         sealed: chunk.sealed,
         ttl_override_ns: chunk.ttl_override_ns,
-        columnar_page: chunk
-            .columnar_page
-            .map(|loc| crate::storage::engine::PageLocation {
-                page_id: loc.page_id,
-                offset: loc.offset,
-                length: loc.length,
-            }),
+        columnar_page,
+        columnar_derived: chunk.columnar_derived,
     }
 }
 
@@ -1141,6 +1144,7 @@ mod tests {
             sealed: true,
             ttl_override_ns: Some(99),
             columnar_page: Some(crate::storage::engine::PageLocation::new(7, 0, 1234)),
+            columnar_derived: true,
         };
         let decoded =
             hypertable_chunk_from_json(&hypertable_chunk_to_json(&chunk)).expect("decode");
@@ -1148,6 +1152,7 @@ mod tests {
             decoded.columnar_page,
             Some(crate::storage::engine::PageLocation::new(7, 0, 1234))
         );
+        assert!(decoded.columnar_derived);
         assert!(decoded.sealed);
         assert_eq!(decoded.ttl_override_ns, Some(99));
     }
@@ -1164,6 +1169,7 @@ mod tests {
         obj.insert("max_ts_ns".to_string(), JsonValue::Number(0.0));
         let decoded = hypertable_chunk_from_json(&JsonValue::Object(obj)).expect("decode");
         assert_eq!(decoded.columnar_page, None);
+        assert!(!decoded.columnar_derived);
     }
 
     #[test]

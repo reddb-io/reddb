@@ -578,6 +578,7 @@ fn physical_metadata_core_contracts_round_trip() {
                 offset: 45,
                 length: 46,
             }),
+            columnar_derived: true,
         }],
     };
     let hypertable_json = encode_persisted_physical_hypertable_json(&hypertable).unwrap();
@@ -591,4 +592,5 @@ fn physical_metadata_core_contracts_round_trip() {
             length: 46,
         })
     );
+    assert!(decoded_hypertable.chunks[0].columnar_derived);
 }
