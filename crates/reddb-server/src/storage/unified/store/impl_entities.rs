@@ -1657,6 +1657,13 @@ fn flatten_config_json(
         crate::serde_json::Value::String(s) => {
             out.push((prefix.to_string(), Value::text(s.clone())));
         }
+        crate::serde_json::Value::Integer(n) => {
+            if *n >= 0 {
+                out.push((prefix.to_string(), Value::UnsignedInteger(*n as u64)));
+            } else {
+                out.push((prefix.to_string(), Value::Integer(*n)));
+            }
+        }
         crate::serde_json::Value::Number(n) => {
             if n.fract().abs() < f64::EPSILON {
                 out.push((prefix.to_string(), Value::UnsignedInteger(*n as u64)));
