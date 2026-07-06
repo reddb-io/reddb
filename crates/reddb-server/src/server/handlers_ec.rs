@@ -15,6 +15,7 @@ pub(crate) fn handle_ec_mutate(
         JsonValue::Object(ref obj) => obj
             .get("id")
             .and_then(|v| match v {
+                JsonValue::Integer(n) => Some(*n as u64),
                 JsonValue::Number(n) => Some(*n as u64),
                 JsonValue::String(s) => s.parse::<u64>().ok(),
                 _ => None,
@@ -27,6 +28,7 @@ pub(crate) fn handle_ec_mutate(
         JsonValue::Object(ref obj) => obj
             .get("value")
             .and_then(|v| match v {
+                JsonValue::Integer(n) => Some(*n as f64),
                 JsonValue::Number(n) => Some(*n),
                 _ => None,
             })
