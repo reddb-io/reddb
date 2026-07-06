@@ -106,9 +106,9 @@ impl RuntimeSchemaPort for RedDBRuntime {
             hypertable: None,
             session_key: None,
             session_gap_ms: None,
-            // Programmatic create_timeseries has no DDL surface for the
-            // columnar flag; default to the row engine (#911).
-            columnar: false,
+            // Programmatic create_timeseries follows the automatic
+            // projection policy; SQL callers can opt out with NO COLUMNAR.
+            columnar: true,
         };
         RedDBRuntime::execute_create_timeseries(self, &raw_query, &query)
     }
