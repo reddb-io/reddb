@@ -9,6 +9,11 @@ pub type Map<K, V> = BTreeMap<K, V>;
 pub enum Value {
     Null,
     Bool(bool),
+    /// An exact integer that fits `i64`. Distinct from [`Value::Number`] so
+    /// integers beyond f64's exact range (±2^53) survive the round-trip
+    /// through the document body losslessly (issue #1768). `Number` still
+    /// carries genuine floats.
+    Integer(i64),
     Number(f64),
     String(String),
     Array(Vec<Value>),
@@ -32,12 +37,14 @@ impl Value {
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Number(n) => Some(*n),
+            Value::Integer(n) => Some(*n as f64),
             _ => None,
         }
     }
 
     pub fn as_i64(&self) -> Option<i64> {
         match self {
+            Value::Integer(n) => Some(*n),
             Value::Number(n) => Some(*n as i64),
             _ => None,
         }
@@ -45,6 +52,7 @@ impl Value {
 
     pub fn as_u64(&self) -> Option<u64> {
         match self {
+            Value::Integer(n) if *n >= 0 => Some(*n as u64),
             Value::Number(n) if *n >= 0.0 => Some(*n as u64),
             _ => None,
         }
@@ -95,6 +103,7 @@ impl Value {
         match self {
             Value::Null => out.push_str("null"),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Integer(n) => out.push_str(&format!("{n}")),
             Value::Number(n) => {
                 if n.fract() == 0.0 {
                     out.push_str(&format!("{}", *n as i64));
@@ -136,7 +145,7 @@ impl Value {
 
     fn write_pretty(&self, out: &mut String, indent: usize) {
         match self {
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            Value::Null | Value::Bool(_) | Value::Integer(_) | Value::Number(_) | Value::String(_) => {
                 out.push_str(&self.to_string_compact());
             }
             Value::Array(values) => {
@@ -416,6 +425,44 @@ mod tests {
         assert!(from_value::<[u8; 3]>(Value::Null).is_err());
     }
 
+    /// An integer beyond f64's exact range (2^53 + 1 = 9007199254740993)
+    /// survives parse → encode → parse exactly. The pre-#1768 f64 path would
+    /// have snapped it to 9007199254740992.
+    #[test]
+    fn large_integer_round_trips_exactly_through_text() {
+        let big = 9_007_199_254_740_993_i64; // 2^53 + 1
+        let text = format!("{{\"n\":{big}}}");
+        let value: Value = from_str(&text).expect("parse");
+        assert_eq!(value["n"], Value::Integer(big));
+        // Re-serialise and re-parse: the exact integer must persist.
+        let reencoded = value.to_string_compact();
+        assert_eq!(reencoded, text);
+        let reparsed: Value = from_str(&reencoded).expect("reparse");
+        assert_eq!(reparsed["n"], Value::Integer(big));
+    }
+
+    /// A genuine float keeps its `Number` representation and behaviour.
+    #[test]
+    fn genuine_float_stays_a_number() {
+        let value: Value = from_str("{\"f\":3.5}").expect("parse");
+        assert_eq!(value["f"], Value::Number(3.5));
+        let value: Value = from_str("{\"e\":1.5e10}").expect("parse");
+        assert!(matches!(value["e"], Value::Number(_)));
+    }
+
+    proptest::proptest! {
+        /// Every `i64` — including both extremes — round-trips exactly through
+        /// the JSON text surface as an exact integer, never a lossy float.
+        #[test]
+        fn integer_extremes_round_trip_exactly(n in proptest::prelude::any::<i64>()) {
+            let text = format!("{{\"n\":{n}}}");
+            let value: Value = from_str(&text).expect("parse");
+            proptest::prop_assert_eq!(&value["n"], &Value::Integer(n));
+            let reparsed: Value = from_str(&value.to_string_compact()).expect("reparse");
+            proptest::prop_assert_eq!(&reparsed["n"], &Value::Integer(n));
+        }
+    }
+
     #[test]
     fn string_and_byte_entry_points_round_trip_and_reject_bad_inputs() {
         let bytes = to_vec(&vec![1u8, 2, 3]).unwrap();
@@ -435,6 +482,7 @@ impl From<JsonValue> for Value {
         match value {
             JsonValue::Null => Value::Null,
             JsonValue::Bool(b) => Value::Bool(b),
+            JsonValue::Integer(n) => Value::Integer(n),
             JsonValue::Number(n) => Value::Number(n),
             JsonValue::String(s) => Value::String(s),
             JsonValue::Array(values) => Value::Array(values.into_iter().map(Value::from).collect()),
@@ -638,6 +686,7 @@ impl JsonDecode for bool {
 impl JsonDecode for u8 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as u8),
             Value::Number(n) => Ok(n as u8),
             _ => Err("expected number".to_string()),
         }
@@ -647,6 +696,7 @@ impl JsonDecode for u8 {
 impl JsonDecode for u16 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as u16),
             Value::Number(n) => Ok(n as u16),
             _ => Err("expected number".to_string()),
         }
@@ -656,6 +706,7 @@ impl JsonDecode for u16 {
 impl JsonDecode for u32 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as u32),
             Value::Number(n) => Ok(n as u32),
             _ => Err("expected number".to_string()),
         }
@@ -665,6 +716,7 @@ impl JsonDecode for u32 {
 impl JsonDecode for u64 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as u64),
             Value::Number(n) => Ok(n as u64),
             _ => Err("expected number".to_string()),
         }
@@ -674,6 +726,7 @@ impl JsonDecode for u64 {
 impl JsonDecode for usize {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as usize),
             Value::Number(n) => Ok(n as usize),
             _ => Err("expected number".to_string()),
         }
@@ -683,6 +736,7 @@ impl JsonDecode for usize {
 impl JsonDecode for i64 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n),
             Value::Number(n) => Ok(n as i64),
             _ => Err("expected number".to_string()),
         }
@@ -692,6 +746,7 @@ impl JsonDecode for i64 {
 impl JsonDecode for i32 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as i32),
             Value::Number(n) => Ok(n as i32),
             _ => Err("expected number".to_string()),
         }
@@ -701,6 +756,7 @@ impl JsonDecode for i32 {
 impl JsonDecode for f32 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as f32),
             Value::Number(n) => Ok(n as f32),
             _ => Err("expected number".to_string()),
         }
