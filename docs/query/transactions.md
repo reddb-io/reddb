@@ -54,6 +54,19 @@ If the application crashes or the connection drops before `COMMIT`,
 in-flight transaction state is discarded because the WAL never sees a
 complete commit record.
 
+## Commit-time observable effects
+
+Observable effects fire only at `COMMIT`. Subscription event delivery,
+queue message visibility, and queue-wait notifications are not published
+while a transaction is executing. If the transaction aborts, those effects
+are discarded with the staged writes and must not be observable on any
+channel.
+
+This is an engine contract, not a best-effort behavior. It is required by
+[ADR 0071](../../.red/adr/0071-explain-never-commits.md), where
+`EXPLAIN ANALYZE` for mutating statements executes inside a transaction
+that always aborts.
+
 ## Canonical reservation recipe
 
 Use a transaction when a workflow must claim resource units, remember an
