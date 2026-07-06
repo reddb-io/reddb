@@ -8,8 +8,8 @@ use std::time::Duration;
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::server::RedDBServer;
 use reddb::storage::query::UnifiedRecord;
-use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::storage::schema::Value;
+use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, StorageDeployPreset};
 use serde_json::{json, Value as JsonValue};
 use support::{checkpoint_and_reopen, PersistentDbPath};
@@ -315,7 +315,11 @@ fn probabilistic_state_writes_raw_blobs_and_compacts_superseded_rows() {
         state_key(PROB_FILTER_STATE_PREFIX, "sessions"),
     ] {
         let values = config_values(&rt, &key);
-        assert_eq!(values.len(), 1, "expected compacted single state row for {key}");
+        assert_eq!(
+            values.len(),
+            1,
+            "expected compacted single state row for {key}"
+        );
         assert!(
             matches!(values.first(), Some(Value::Blob(_))),
             "expected raw Blob state for {key}, got {values:?}"
@@ -344,7 +348,11 @@ fn probabilistic_legacy_hex_state_migrates_once_to_raw_blob() {
     assert_eq!(uint_value(only_record(&hll_command), "count"), 2);
 
     let values = config_values(&reopened, &key);
-    assert_eq!(values.len(), 1, "legacy row should be compacted during migration");
+    assert_eq!(
+        values.len(),
+        1,
+        "legacy row should be compacted during migration"
+    );
     assert!(
         matches!(values.first(), Some(Value::Blob(bytes)) if bytes == &raw),
         "expected migrated raw HLL state, got {values:?}"
