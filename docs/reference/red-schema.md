@@ -19,7 +19,7 @@ Implemented relations:
 | `red.show_indexes` | `SHOW INDEXES`, `SHOW INDICES`, `SHOW INDEXES ON <collection>`, `SHOW INDICES ON <collection>` |
 | `red.indices`     | Full index status metadata |
 | `red.policies`    | `SHOW POLICIES`, `SHOW POLICIES ON <collection>` |
-| `red.stats`       | `SHOW STATS`, `SHOW STATS <collection>` |
+| `red.stats`       | `SHOW STATS`, `SHOW STATS [FOR] <collection>` |
 | `red.subscriptions` | `EVENTS STATUS`, `EVENTS STATUS <collection>` |
 | `red.registry` | Governance registry metadata; see [Control Evidence Matrix](../compliance/control-evidence-matrix.md). |
 | `red.registry_history` | Governance registry supersession history; see [Control Evidence Matrix](../compliance/control-evidence-matrix.md). |
@@ -221,33 +221,66 @@ available from the auth registry.
 
 ## `red.stats`
 
-`red.stats` exposes one operational stats row per visible collection. `SHOW
-STATS` is syntax sugar for:
+`red.stats` is the **computed**-tier profiling view. Unlike the hot and cold
+catalog-snapshot tiers, reading `red.stats` triggers an on-demand profiling scan
+of the target collections — it never serves a cached snapshot. See the
+[freshness tiers](#freshness-tiers) section below.
+
+The view is **long-format**: each row is one `(collection, entity, metric,
+value)` tuple, so every model can share one output contract. `entity` is the
+column name for per-column metrics and `NULL` for collection-wide metrics.
+
+`SHOW STATS` is syntax sugar for:
 
 ```sql
 SELECT * FROM red.stats;
 ```
 
-`SHOW STATS <name>` adds a collection filter:
+`SHOW STATS <name>` and the equivalent `SHOW STATS FOR <name>` add a collection
+filter (and scope the profiling scan to that one collection):
 
 ```sql
 SELECT * FROM red.stats WHERE collection = '<name>';
 ```
 
-Current columns:
+Because the shape is long-format, individual metrics are directly
+filterable/joinable:
 
-| Column            | Description |
-|-------------------|-------------|
-| `collection`      | Collection name. |
-| `entities`        | Live entity count from `ManagerStats` when available, otherwise the catalog snapshot count. |
-| `segments`        | Segment count from `ManagerStats` when available, otherwise the catalog snapshot count. |
-| `growing_count`   | Number of growing segments reported by `ManagerStats`, or `0` when unavailable. |
-| `sealed_count`    | Number of sealed segments reported by `ManagerStats`, or `0` when unavailable. |
-| `archived_count`  | Number of archived segments reported by `ManagerStats`, or `0` when unavailable. |
-| `seal_ops`        | Number of seal operations reported by `ManagerStats`, or `0` when unavailable. |
-| `compact_ops`     | Number of compaction operations reported by `ManagerStats`, or `0` when unavailable. |
-| `last_write_ms`   | Last write timestamp in Unix milliseconds. Currently `NULL` because collection-level write timestamps are not exposed by `ManagerStats` or the catalog snapshot APIs. |
-| `attention_score` | Catalog attention score for the collection. Larger numbers indicate more severe drift, rebuild, rematerialization, or rerun needs. |
+```sql
+SELECT * FROM red.stats WHERE collection = 'users' AND metric = 'distinct_count';
+```
+
+Columns:
+
+| Column       | Description |
+|--------------|-------------|
+| `collection` | Collection name being profiled. |
+| `entity`     | The sub-entity the metric describes: the column name for per-column metrics, or `NULL` for collection-wide metrics. |
+| `metric`     | The metric name (see below). |
+| `value`      | The metric value. Type varies by metric (integer counts, or an array for `most_common_values`). |
+
+Row-table (`TABLE` model) metric set — this slice profiles row tables; other
+models share the same contract in later slices:
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `row_count` | `NULL` | Number of rows in the collection. |
+| `null_count` | column name | Number of rows where the column is `NULL` or absent. |
+| `distinct_count` | column name | Number of distinct non-null values in the column. |
+| `most_common_values` | column name | Array of the column's most common values (hottest first, capped). |
+
+### Freshness tiers
+
+`red.*` columns and views split across three consistency tiers:
+
+- **hot** — fields such as `name`, `model`, `entities`, `segments`,
+  `attention`, `in_memory_bytes` read directly from the live catalog snapshot on
+  every query (sub-ms).
+- **cold** — fields requiring B-tree walks (e.g. `on_disk_bytes`) cache for a
+  short window per collection.
+- **computed** — `red.stats` runs an on-demand profiling scan on every read,
+  never a cached snapshot. Computation is scan-based; the columnar analytics
+  projection is a planned fast-path, not a prerequisite.
 
 ## `red.subscriptions`
 
