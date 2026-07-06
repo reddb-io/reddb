@@ -14,6 +14,10 @@ mod support;
 
 use reddb::application::ExecuteQueryInput;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
+use reddb_file::append_only_segment::{
+    read_append_only_segment, AppendOnlySegmentCodec, APPEND_ONLY_SEGMENT_CHUNK_SIZE,
+    APPEND_ONLY_SEGMENT_FORMAT_VERSION,
+};
 
 fn persistent_rt(db: &support::TempDbFile) -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::persistent(db.path())).expect("persistent runtime")
@@ -199,12 +203,9 @@ fn append_only_checkpoint_publishes_immutable_segment_and_reopens_rows() {
         .expect("append-only segment entries");
     assert_eq!(segments.len(), 1, "one closed segment should be published");
     let entry = &segments[0];
-    assert_eq!(
-        entry.format_version,
-        reddb_file::APPEND_ONLY_SEGMENT_FORMAT_VERSION
-    );
-    assert_eq!(entry.chunk_size, reddb_file::APPEND_ONLY_SEGMENT_CHUNK_SIZE);
-    assert_eq!(entry.codec, reddb_file::AppendOnlySegmentCodec::Zstd);
+    assert_eq!(entry.format_version, APPEND_ONLY_SEGMENT_FORMAT_VERSION);
+    assert_eq!(entry.chunk_size, APPEND_ONLY_SEGMENT_CHUNK_SIZE);
+    assert_eq!(entry.codec, AppendOnlySegmentCodec::Zstd);
     assert_eq!(entry.row_count, 2);
     assert!(
         !entry.chunks.is_empty(),
@@ -217,9 +218,9 @@ fn append_only_checkpoint_publishes_immutable_segment_and_reopens_rows() {
     );
 
     let segment_path = manifest.append_only_segment_path_for_test(&entry.path);
-    let decoded = reddb_file::read_append_only_segment(&segment_path)
+    let decoded = read_append_only_segment(&segment_path)
         .expect("segment bytes must decode through reddb-file");
-    assert_eq!(decoded.codec, reddb_file::AppendOnlySegmentCodec::Zstd);
+    assert_eq!(decoded.codec, AppendOnlySegmentCodec::Zstd);
     assert_eq!(decoded.rows, 2);
     let bytes_before_reopen = std::fs::read(&segment_path).expect("segment exists before reopen");
 
