@@ -44,18 +44,8 @@ const POLICY_COLUMNS: [&str; 8] = [
     "enabled",
 ];
 
-const STATS_COLUMNS: [&str; 10] = [
-    "collection",
-    "entities",
-    "segments",
-    "growing_count",
-    "sealed_count",
-    "archived_count",
-    "seal_ops",
-    "compact_ops",
-    "last_write_ms",
-    "attention_score",
-];
+// Issue #1787 — `red.stats` is the long-format computed profiling view.
+const STATS_COLUMNS: [&str; 4] = ["collection", "entity", "metric", "value"];
 
 const REGISTRY_COLUMNS: [&str; 12] = [
     "id",
@@ -463,6 +453,110 @@ fn red_schema_introspection_is_stable_across_virtual_tables() {
         assert_eq!(first, second, "{sql} changed between reads");
         assert!(!first.1.is_empty(), "{sql} returned no rows");
     }
+
+    cleanup_scope();
+}
+
+#[test]
+fn show_stats_row_table_returns_long_format_metric_set() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, active BOOLEAN)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO users (id, email, active) VALUES (1, 'a@example.com', true)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO users (id, email, active) VALUES (2, 'b@example.com', true)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO users (id, email, active) VALUES (3, NULL, false)",
+    );
+
+    let (columns, rows) = query_snapshot(&rt, "SHOW STATS users");
+    assert_eq!(columns, vec!["collection", "entity", "metric", "value"]);
+    assert!(
+        rows.iter().all(|row| row[0] == Value::text("users")),
+        "every SHOW STATS row is scoped to the requested collection: {rows:?}"
+    );
+
+    // Collection-wide `row_count` carries a NULL entity.
+    let row_count = rows
+        .iter()
+        .find(|row| row[2] == Value::text("row_count"))
+        .expect("row_count metric present");
+    assert_eq!(row_count[1], Value::Null);
+    assert_eq!(row_count[3], Value::UnsignedInteger(3));
+
+    // Per-column null / distinct counts for `email` (one NULL, two distinct).
+    let email_nulls = rows
+        .iter()
+        .find(|row| row[1] == Value::text("email") && row[2] == Value::text("null_count"))
+        .expect("email null_count present");
+    assert_eq!(email_nulls[3], Value::UnsignedInteger(1));
+    let email_distinct = rows
+        .iter()
+        .find(|row| row[1] == Value::text("email") && row[2] == Value::text("distinct_count"))
+        .expect("email distinct_count present");
+    assert_eq!(email_distinct[3], Value::UnsignedInteger(2));
+
+    // Most-common-values is emitted per column as an array.
+    assert!(
+        rows.iter().any(|row| row[1] == Value::text("email")
+            && row[2] == Value::text("most_common_values")
+            && matches!(row[3], Value::Array(_))),
+        "email most_common_values array present: {rows:?}"
+    );
+
+    // The long format is directly filterable/joinable on `metric`.
+    let (_, filtered) = query_snapshot(
+        &rt,
+        "SELECT * FROM red.stats WHERE collection = 'users' AND metric = 'distinct_count'",
+    );
+    assert!(!filtered.is_empty(), "metric-filtered select returns rows");
+    assert!(
+        filtered
+            .iter()
+            .all(|row| row[2] == Value::text("distinct_count")),
+        "metric filter keeps only distinct_count rows: {filtered:?}"
+    );
+
+    cleanup_scope();
+}
+
+#[test]
+fn show_stats_requires_tenant_for_non_admin_identity() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE users (id INT)");
+    set_current_connection_id(24403);
+    set_current_auth_identity("alice".to_string(), Role::Read);
+
+    // `red.stats` follows the shared `red.*` tenant gate: a tenant-less
+    // non-admin identity is rejected before any profiling scan runs.
+    let err = rt
+        .execute_query("SHOW STATS")
+        .expect_err("tenant-less non-admin should be rejected")
+        .to_string();
+    assert!(err.contains("active tenant"), "error was: {err}");
+
+    // With an active tenant the scan runs and stays scoped to the tenant.
+    set_current_tenant("acme".to_string());
+    let scoped = rt
+        .execute_query(
+            "SELECT * FROM red.stats WHERE collection = 'users' AND metric = 'row_count'",
+        )
+        .expect("tenant-scoped red.stats read");
+    assert!(scoped
+        .result
+        .records
+        .iter()
+        .all(|record| record.get("collection") == Some(&Value::text("users"))));
 
     cleanup_scope();
 }
@@ -983,7 +1077,7 @@ fn select_from_red_indices_materializes_index_status_rows() {
 }
 
 #[test]
-fn select_from_red_stats_materializes_collection_counters() {
+fn select_from_red_stats_materializes_long_format_profiling_rows() {
     cleanup_scope();
     let rt = runtime();
     exec(&rt, "CREATE TABLE users (id INT, name TEXT)");
@@ -995,36 +1089,30 @@ fn select_from_red_stats_materializes_collection_counters() {
 
     assert_eq!(
         result.result.columns,
-        vec![
-            "collection",
-            "entities",
-            "segments",
-            "growing_count",
-            "sealed_count",
-            "archived_count",
-            "seal_ops",
-            "compact_ops",
-            "last_write_ms",
-            "attention_score"
-        ]
+        vec!["collection", "entity", "metric", "value"]
     );
-    assert_eq!(result.result.records.len(), 1);
-    let row = &result.result.records[0];
-    assert_eq!(row.get("collection"), Some(&Value::text("users")));
-    assert_eq!(row.get("entities"), Some(&Value::UnsignedInteger(1)));
-    assert!(matches!(
-        row.get("segments"),
-        Some(Value::UnsignedInteger(_))
-    ));
-    assert!(matches!(
-        row.get("growing_count"),
-        Some(Value::UnsignedInteger(_))
-    ));
-    assert_eq!(row.get("last_write_ms"), Some(&Value::Null));
-    assert!(matches!(
-        row.get("attention_score"),
-        Some(Value::UnsignedInteger(_))
-    ));
+    assert!(!result.result.records.is_empty());
+    assert!(result
+        .result
+        .records
+        .iter()
+        .all(|row| row.get("collection") == Some(&Value::text("users"))));
+
+    // Collection-wide row_count with a NULL entity.
+    let row_count = result
+        .result
+        .records
+        .iter()
+        .find(|row| row.get("metric") == Some(&Value::text("row_count")))
+        .expect("row_count metric present");
+    assert_eq!(row_count.get("entity"), Some(&Value::Null));
+    assert_eq!(row_count.get("value"), Some(&Value::UnsignedInteger(1)));
+
+    // Per-column metrics carry the column name as `entity`.
+    assert!(result.result.records.iter().any(|row| {
+        row.get("entity") == Some(&Value::text("name"))
+            && row.get("metric") == Some(&Value::text("distinct_count"))
+    }));
 
     cleanup_scope();
 }
@@ -1250,18 +1338,21 @@ fn show_stats_desugars_to_red_stats() {
     let single = rt
         .execute_query("SHOW STATS users")
         .expect("show stats users");
-    assert_eq!(single.result.records.len(), 1);
-    assert_eq!(
-        single.result.records[0].get("collection"),
-        Some(&Value::text("users"))
-    );
-    let expected = rt
-        .execute_query("SELECT attention_score FROM red.stats WHERE collection = 'users'")
-        .expect("red.stats users");
-    assert_eq!(
-        single.result.records[0].get("attention_score"),
-        expected.result.records[0].get("attention_score")
-    );
+    // Long-format: every row is scoped to `users` and carries a
+    // NULL-entity `row_count` row plus per-column metric rows.
+    assert!(single
+        .result
+        .records
+        .iter()
+        .all(|record| record.get("collection") == Some(&Value::text("users"))));
+    let row_count = single
+        .result
+        .records
+        .iter()
+        .find(|record| record.get("metric") == Some(&Value::text("row_count")))
+        .expect("row_count metric present");
+    assert_eq!(row_count.get("entity"), Some(&Value::Null));
+    assert_eq!(row_count.get("value"), Some(&Value::UnsignedInteger(1)));
 
     let all = rt.execute_query("SHOW STATS").expect("show stats");
     let collections = all

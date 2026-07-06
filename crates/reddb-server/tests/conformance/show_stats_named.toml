@@ -1,4 +1,4 @@
 input = "SHOW STATS users"
 expected_kind = "Table"
-source = "docs/reference/red-schema.md:41"
+source = "docs/reference/red-schema.md:243"
 kind = "positive"

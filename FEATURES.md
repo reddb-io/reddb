@@ -273,8 +273,9 @@ Scope: compare the `red-ui` pages (`query`, `collections`, `cluster`,
    latency, error count, last write timestamp, and last error. This should feed
    both collection list badges and per-collection toolbar status.
 
-   Current gap: `red.stats.last_write_ms` is documented as `NULL` because the
-   backing stats APIs do not expose collection-level write timestamps.
+   Current gap: no `red.*` surface exposes collection-level write timestamps —
+   the backing stats APIs do not track them, and `red.stats` is now the
+   long-format profiling view (row/column metrics), not operational counters.
 
 4. Add server-side query pagination/cursor support for large UI tables.
 

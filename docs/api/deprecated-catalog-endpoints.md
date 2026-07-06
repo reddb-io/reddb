@@ -21,5 +21,5 @@ Use `POST /query` with the corresponding `red.*` SQL relation instead. `GET /cat
 | `GET /catalog/analytics-jobs/operational` | `SELECT * FROM red.analytics_jobs WHERE operational = true` |
 | `GET /catalog/analytics-jobs/status` | `SELECT * FROM red.analytics_jobs` |
 | `GET /catalog/analytics-jobs/attention` | `SELECT * FROM red.analytics_jobs WHERE needs_attention = true` |
-| `GET /catalog/collections/readiness` | No exact implemented `red.*` equivalent yet; use `SELECT name, model, schema_mode, entities, segments, internal, tenant_id FROM red.collections` plus `red.stats` for operational counters. |
-| `GET /catalog/collections/readiness/attention` | No exact implemented `red.*` equivalent yet; use `SELECT * FROM red.stats WHERE attention_score > 0` for currently exposed collection attention. |
+| `GET /catalog/collections/readiness` | No exact implemented `red.*` equivalent yet; use `SELECT name, model, schema_mode, entities, segments, internal, tenant_id FROM red.collections`. (`red.stats` is now the long-format profiling view — row/column metrics, not operational counters.) |
+| `GET /catalog/collections/readiness/attention` | No exact implemented `red.*` equivalent yet; collection attention is no longer surfaced via `red.stats` (which became the long-format profiling view). |
