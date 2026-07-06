@@ -3,6 +3,9 @@
 #[path = "grouped/mvcc_transactions/docs_transaction_guarantees.rs"]
 mod docs_transaction_guarantees;
 
+#[path = "grouped/mvcc_transactions/e2e_commit_time_effect_invariant.rs"]
+mod e2e_commit_time_effect_invariant;
+
 #[path = "grouped/mvcc_transactions/e2e_cross_model_tx.rs"]
 mod e2e_cross_model_tx;
 
