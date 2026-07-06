@@ -30,7 +30,11 @@ fn csv_materializes_as_row_table_addressable_by_stem_and_alias() {
     // Ages 30 and 9 discriminate numeric vs. lexical comparison: `age > 26`
     // returns only Alice under numeric typing, but both rows if the column
     // stayed textual ('9' > '26' lexically).
-    let path = write_fixture(dir.path(), "people.csv", "id,name,age\n1,Alice,30\n2,Bob,9\n");
+    let path = write_fixture(
+        dir.path(),
+        "people.csv",
+        "id,name,age\n1,Alice,30\n2,Bob,9\n",
+    );
 
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
     let table = rt.materialize_data_file(&path).expect("materialize csv");
@@ -46,7 +50,9 @@ fn csv_materializes_as_row_table_addressable_by_stem_and_alias() {
     assert_eq!(by_stem.result.records.len(), 2);
 
     // Addressable by the positional alias `t`.
-    let by_alias = rt.execute_query("SELECT * FROM t").expect("select by alias");
+    let by_alias = rt
+        .execute_query("SELECT * FROM t")
+        .expect("select by alias");
     assert_eq!(by_alias.result.records.len(), 2);
 
     // Header-derived column with inferred integer type: numeric `>` keeps
