@@ -170,13 +170,24 @@ impl PrimaryReplicaFilePlan {
         slots: &ReplicationSlotCatalog,
         current_lsn: u64,
     ) -> RdbFileResult<WalRetentionPlan> {
+        self.plan_wal_retention_with_fork_lsns(slots, &[], current_lsn)
+    }
+
+    pub fn plan_wal_retention_with_fork_lsns(
+        &self,
+        slots: &ReplicationSlotCatalog,
+        fork_lsns: &[u64],
+        current_lsn: u64,
+    ) -> RdbFileResult<WalRetentionPlan> {
         if slots.timeline != self.timeline {
             return Err(RdbFileError::InvalidOperation(format!(
                 "slot catalog timeline {} does not match file plan timeline {}",
                 slots.timeline.0, self.timeline.0
             )));
         }
-        let oldest_required_lsn = slots.retention_floor_lsn();
+        let replica_floor_lsn = slots.retention_floor_lsn();
+        let fork_floor_lsn = fork_lsns.iter().copied().min();
+        let oldest_required_lsn = min_optional_lsn(replica_floor_lsn, fork_floor_lsn);
         let current_segment = self.wal_segment_index(current_lsn);
         let keep_from_segment =
             current_segment.saturating_sub(self.retention.min_segments.saturating_sub(1));
@@ -193,7 +204,7 @@ impl PrimaryReplicaFilePlan {
             if *segment_index >= keep_from_segment {
                 continue;
             }
-            if !self.wal_segment_released_by_slots(*segment_index, oldest_required_lsn) {
+            if !self.wal_segment_released(*segment_index, replica_floor_lsn, fork_floor_lsn) {
                 continue;
             }
             removable_bytes = removable_bytes.saturating_add(*bytes);
@@ -216,7 +227,7 @@ impl PrimaryReplicaFilePlan {
                 {
                     continue;
                 }
-                if !self.wal_segment_released_by_slots(*segment_index, oldest_required_lsn) {
+                if !self.wal_segment_released(*segment_index, replica_floor_lsn, fork_floor_lsn) {
                     continue;
                 }
                 removable_bytes = removable_bytes.saturating_add(*bytes);
@@ -241,7 +252,16 @@ impl PrimaryReplicaFilePlan {
         slots: &ReplicationSlotCatalog,
         current_lsn: u64,
     ) -> RdbFileResult<WalPruneResult> {
-        let plan = self.plan_wal_retention(slots, current_lsn)?;
+        self.prune_wal_segments_with_fork_lsns(slots, &[], current_lsn)
+    }
+
+    pub fn prune_wal_segments_with_fork_lsns(
+        &self,
+        slots: &ReplicationSlotCatalog,
+        fork_lsns: &[u64],
+        current_lsn: u64,
+    ) -> RdbFileResult<WalPruneResult> {
+        let plan = self.plan_wal_retention_with_fork_lsns(slots, fork_lsns, current_lsn)?;
         let mut removed_segments = Vec::new();
         for path in &plan.removable_segments {
             fs::remove_file(path)?;
@@ -288,18 +308,33 @@ impl PrimaryReplicaFilePlan {
         Ok(segments)
     }
 
-    fn wal_segment_released_by_slots(
+    fn wal_segment_released(
         &self,
         segment_index: u64,
-        oldest_required_lsn: Option<u64>,
+        replica_floor_lsn: Option<u64>,
+        fork_floor_lsn: Option<u64>,
     ) -> bool {
+        if fork_floor_lsn
+            .map(|floor| self.wal_segment_end_lsn(segment_index) > floor)
+            .unwrap_or(false)
+        {
+            return false;
+        }
         if !self.retention.keep_until_replicas_ack {
             return true;
         }
-        let Some(floor) = oldest_required_lsn else {
+        let Some(floor) = replica_floor_lsn else {
             return false;
         };
         self.wal_segment_end_lsn(segment_index) <= floor
+    }
+}
+
+fn min_optional_lsn(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
 
@@ -553,4 +588,60 @@ fn decode_wal_record(
         lsn,
         payload,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "reddb_file_primary_replica_wal_{name}_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn wal_retention_floor_accounts_for_live_fork_lsns() {
+        let root = temp_root("fork_floor");
+        let plan = PrimaryReplicaFilePlan::new(&root, TimelineId(1))
+            .with_segment_bytes(1024 * 1024)
+            .with_retention(WalRetentionPolicy {
+                min_segments: 1,
+                max_bytes: 1024 * 1024 * 1024,
+                keep_until_replicas_ack: false,
+            });
+        for index in 0..5 {
+            let path = plan.wal_segment_path(index * plan.segment_bytes);
+            write_bytes_atomically(&path, &[index as u8]).expect("write fake redwal");
+        }
+        let catalog = ReplicationSlotCatalog::new(TimelineId(1));
+
+        let retention = plan
+            .plan_wal_retention_with_fork_lsns(
+                &catalog,
+                &[2 * plan.segment_bytes],
+                5 * plan.segment_bytes,
+            )
+            .expect("plan retention");
+
+        assert_eq!(retention.oldest_required_lsn, Some(2 * plan.segment_bytes));
+        assert_eq!(retention.retained_bytes_before_prune, 5);
+        assert_eq!(retention.retained_bytes_after_prune, 3);
+        assert_eq!(retention.removable_segments.len(), 2);
+        assert_eq!(retention.removable_segments[0], plan.wal_segment_path(0));
+        assert_eq!(
+            retention.removable_segments[1],
+            plan.wal_segment_path(plan.segment_bytes)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

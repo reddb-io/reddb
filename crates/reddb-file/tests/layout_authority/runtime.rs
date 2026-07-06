@@ -697,8 +697,8 @@ fn server_primary_replica_wal_segments_are_file_owned() {
     let runtime = read(root.join("crates/reddb-server/src/runtime/impl_primary_replica_file.rs"));
     let runtime_non_test = non_test_source(&runtime);
     for required in [
-        "plan.plan_wal_retention(&catalog, current_lsn)",
-        "plan.prune_wal_segments(&catalog, current_lsn)",
+        "plan.plan_wal_retention_with_fork_lsns(&catalog, &fork_lsns, current_lsn)",
+        "plan.prune_wal_segments_with_fork_lsns(&catalog, &fork_lsns, current_lsn)",
     ] {
         assert!(
             runtime_non_test.contains(required),
