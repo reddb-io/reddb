@@ -55,6 +55,10 @@ pub enum QueryExpr {
     CreateVcsRef(CreateVcsRefQuery),
     /// DROP BRANCH/TAG ref DDL
     DropVcsRef(DropVcsRefQuery),
+    /// FORK STORE AS name [AT LSN n]
+    ForkStore(ForkStoreQuery),
+    /// DROP FORK name
+    DropFork(DropForkQuery),
     /// GRAPH subcommand (NEIGHBORHOOD, SHORTEST_PATH, etc.)
     GraphCommand(GraphCommand),
     /// SEARCH subcommand (SIMILAR, TEXT, HYBRID)
@@ -2264,6 +2268,20 @@ pub struct CreateVcsRefQuery {
 pub struct DropVcsRefQuery {
     pub kind: VcsRefKind,
     pub name: String,
+}
+
+/// FORK STORE AS name [AT LSN n]
+#[derive(Debug, Clone)]
+pub struct ForkStoreQuery {
+    pub name: String,
+    pub at_lsn: Option<u64>,
+}
+
+/// DROP FORK name
+#[derive(Debug, Clone)]
+pub struct DropForkQuery {
+    pub name: String,
+    pub if_exists: bool,
 }
 
 /// ALTER TABLE name operations
