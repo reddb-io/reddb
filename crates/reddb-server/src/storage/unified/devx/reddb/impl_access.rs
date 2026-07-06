@@ -530,6 +530,7 @@ impl RedDB {
         match value {
             JsonValue::Null => None,
             JsonValue::Bool(value) => Some(value.to_string()),
+            JsonValue::Integer(value) => Some(value.to_string()),
             JsonValue::Number(value) => Some(value.to_string()),
             JsonValue::String(value) => Some(value.clone()),
             JsonValue::Array(_) | JsonValue::Object(_) => None,
