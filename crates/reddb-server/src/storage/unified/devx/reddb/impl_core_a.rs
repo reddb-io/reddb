@@ -145,6 +145,38 @@ fn promote_ready_replica_rebootstrap(
     Ok(true)
 }
 
+fn operational_store_from_embedded_artifact(
+    path: &Path,
+    config: UnifiedStoreConfig,
+) -> Result<Option<UnifiedStore>, Box<dyn std::error::Error>> {
+    let artifact = match crate::storage::EmbeddedRdbArtifact::open(path) {
+        Ok(artifact) => artifact,
+        Err(_) => return Ok(None),
+    };
+    let Some(snapshot) = crate::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)? else {
+        return Ok(None);
+    };
+    let source = UnifiedStore::load_from_bytes_with_config(&snapshot, config.clone())?;
+
+    std::fs::remove_file(path)?;
+    let store = UnifiedStore::open_with_config(path, config)?;
+    for collection in source.list_collections() {
+        store.create_collection(collection.clone())?;
+        let Some(manager) = source.get_collection(&collection) else {
+            continue;
+        };
+        for entity in manager.query_all(|_| true) {
+            store.insert_auto(&collection, entity)?;
+        }
+    }
+    let aux = source.aux_metadata();
+    if !aux.is_empty() {
+        store.set_aux_metadata(aux);
+    }
+    store.persist()?;
+    Ok(Some(store))
+}
+
 fn should_cleanup_ephemeral_data_path(options: &RedDBOptions, path: &Path) -> bool {
     options
         .metadata
@@ -477,6 +509,10 @@ impl RedDB {
                     Some(path_buf),
                     false,
                 )
+            } else if let Some(store) =
+                operational_store_from_embedded_artifact(&path_buf, store_config.clone())?
+            {
+                (store, Some(path_buf), true)
             } else {
                 (
                     UnifiedStore::open_with_config(&path_buf, store_config.clone())?,
