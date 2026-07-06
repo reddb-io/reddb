@@ -1295,7 +1295,12 @@ fn main() {
             // when a second positional is present and the first names a
             // CSV/TSV data file.
             if remaining.len() >= 2 && is_ephemeral_data_file(remaining[0].as_str()) {
-                run_ephemeral_query(&args, remaining[0].as_str(), remaining[1].as_str(), json_mode);
+                run_ephemeral_query(
+                    &args,
+                    remaining[0].as_str(),
+                    remaining[1].as_str(),
+                    json_mode,
+                );
             }
             let sql = remaining.first().map(|s| s.as_str()).unwrap_or("");
             if sql.is_empty() {
