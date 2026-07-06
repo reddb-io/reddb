@@ -79,8 +79,11 @@ fn assert_representative_payload(tags: &JsonValue) {
 
     let port = object.get("port").unwrap_or(&JsonValue::Null);
     assert!(
-        matches!(port, JsonValue::Number(_)),
-        "numeric tag value must round-trip as JSON number, got {port:?}"
+        // An integer tag round-trips as an exact JSON integer since #1768
+        // (previously the f64 `Number` form). A genuine float would stay
+        // `Number`.
+        matches!(port, JsonValue::Integer(_) | JsonValue::Number(_)),
+        "numeric tag value must round-trip as a JSON number, got {port:?}"
     );
     assert_eq!(port.as_i64(), Some(8080));
 
