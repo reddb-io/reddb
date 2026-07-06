@@ -4,18 +4,15 @@
 //! through the columnar `create_rows_batch_columnar` port (#110).
 //!
 //! `bulk_insert(N rows)` must produce a single batched
-//! `BulkUpsertEntityRecords` WAL action — not N per-row records the
-//! old `execute_query` loop emitted. We pin that by comparing on-disk
-//! WAL byte growth: per-row inserts grow proportional to N records
-//! (each carries the full collection-name + per-row framing overhead),
-//! a single batch grows by one record's worth of framing plus the
-//! row payloads.
+//! `BulkUpsertEntityRecords` write — not N per-row writes the old
+//! `execute_query` loop emitted. We pin that through the SQL stats
+//! surface: before a checkpoint, per-row inserts create many more
+//! pending embedded WAL records than the batched path.
 
 use std::path::{Path, PathBuf};
 
 use reddb_client::embedded::EmbeddedClient;
-use reddb_client::JsonValue;
-use reddb_server::storage::EmbeddedRdbArtifact;
+use reddb_client::{JsonValue, ValueOut};
 
 /// Auto-cleaning DB path: holds the [`tempfile::TempDir`] guard so the temp
 /// directory and the `.rdb` artifact are removed on drop, including on panic.
@@ -42,16 +39,23 @@ fn unique_db_path(label: &str) -> TempDbPath {
     TempDbPath { _dir: dir, path }
 }
 
-/// Inspects the live WAL embedded in the single-file `.rdb` artifact (there is
-/// no `.rdb-uwal` sidecar — the WAL lives inside the artifact). Returns
-/// `(record_count, encoded_bytes)`. Must be called *before* dropping the
-/// client: drop triggers a checkpoint that drains and truncates the WAL,
-/// washing out exactly the per-batch-vs-per-row records we compare.
-fn wal_stats(data_path: &Path) -> (usize, u64) {
-    let open = EmbeddedRdbArtifact::open(data_path).expect("open rdb artifact");
-    let payloads = EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read wal payloads");
-    let bytes = EmbeddedRdbArtifact::wal_payloads_encoded_len(&payloads).expect("wal encoded len");
-    (payloads.len(), bytes)
+fn stats_metric(db: &EmbeddedClient, collection: &str, metric: &str) -> u64 {
+    let result = db
+        .query(&format!(
+            "SELECT value FROM red.stats WHERE collection = '{collection}' \
+             AND metric = '{metric}'"
+        ))
+        .expect("stats query");
+    let row = result.rows.first().expect("stats row");
+    let value = row
+        .iter()
+        .find(|(name, _)| name == "value")
+        .map(|(_, value)| value)
+        .expect("stats value");
+    match value {
+        ValueOut::Integer(value) if *value >= 0 => *value as u64,
+        other => panic!("expected unsigned {metric}, got {other:?}"),
+    }
 }
 
 fn rows(n: usize) -> Vec<JsonValue> {
@@ -70,17 +74,8 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
     const N: usize = 50;
 
     // Run 1: single bulk_insert(N).
-    //
-    // We count WAL records *before* drop — the engine's
-    // `WalDurableGrouped` mode waits for durability before
-    // `append_actions` returns, so the records are on disk by the time
-    // `bulk_insert` returns. We avoid `close()` because it triggers a
-    // checkpoint that drains and truncates the WAL, washing out exactly
-    // the per-batch-vs-per-row records we want to compare. Opening a DB
-    // writes a shared ~115-record catalog baseline, so we compare the
-    // *delta* between the two paths, not absolute counts.
     let bulk_path = unique_db_path("bulk");
-    let bulk_count = {
+    let bulk_lag = {
         let db = EmbeddedClient::open(bulk_path.to_path_buf()).expect("open bulk db");
         let inserted = db.bulk_insert("users", &rows(N)).expect("bulk insert");
         assert_eq!(
@@ -92,7 +87,7 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
             N,
             "bulk_insert returned wrong ids count"
         );
-        let after = wal_stats(&bulk_path).0;
+        let after = stats_metric(&db, "users", "pending_wal_records");
         drop(db);
         after
     };
@@ -101,7 +96,7 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
     // `bulk_insert` loop used to do internally. Same payload set,
     // same engine config.
     let perrow_path = unique_db_path("perrow");
-    let perrow_count = {
+    let perrow_lag = {
         let db = EmbeddedClient::open(perrow_path.to_path_buf()).expect("open perrow db");
         for i in 0..N {
             let sql = format!(
@@ -110,25 +105,22 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
             );
             db.query(&sql).expect("per-row insert");
         }
-        let after = wal_stats(&perrow_path).0;
+        let after = stats_metric(&db, "users", "pending_wal_records");
         drop(db);
         after
     };
 
     eprintln!(
-        "WAL records for {N} rows: bulk_insert={bulk_count}, per-row={perrow_count} (delta {})",
-        perrow_count.saturating_sub(bulk_count)
+        "pending WAL records for {N} rows: bulk_insert={bulk_lag}, per-row={perrow_lag} (delta {})",
+        perrow_lag.saturating_sub(bulk_lag)
     );
 
-    // The batch path emits one `BulkUpsertEntityRecords` WAL record for
-    // all N rows; the per-row path emits one transaction per row. Both
-    // share the catalog baseline, so the signal is the delta: per-row
-    // adds ~N records, the batch adds 1. A conservative N/2 threshold
-    // catches a regression where `bulk_insert` reverts to a per-row loop
-    // (its count would jump by ~N and collapse this margin).
+    // A conservative N/2 threshold catches a regression where
+    // `bulk_insert` reverts to a per-row loop: pending WAL records
+    // would jump by ~N and collapse this margin.
     assert!(
-        perrow_count >= bulk_count + N / 2,
-        "expected per-row WAL ({perrow_count} records) to dwarf batch WAL ({bulk_count}) by ~N — bulk_insert likely regressed back to a per-row loop"
+        perrow_lag >= bulk_lag + N as u64 / 2,
+        "expected per-row pending WAL records ({perrow_lag}) to dwarf batch pending WAL records ({bulk_lag}) by ~N; bulk_insert likely regressed back to a per-row loop"
     );
 }
 
@@ -209,15 +201,15 @@ fn bulk_insert_empty_is_noop() {
 
 /// Pins #111: `EmbeddedClient::insert` routes through the same
 /// `create_rows_batch_columnar` port as `bulk_insert`, so a single
-/// `insert` call must produce a byte-identical WAL append to a 1-row
+/// `insert` call should leave pending WAL records exactly like a 1-row
 /// `bulk_insert`. If anyone re-introduces the `build_insert_sql` +
-/// `execute_query` round-trip, the SQL parser path changes the WAL
-/// framing and these counts/bytes diverge.
+/// `execute_query` round-trip, the SQL parser path changes the write
+/// shape and these stats diverge.
 #[test]
-fn insert_emits_one_wal_record_per_call() {
+fn insert_and_one_row_bulk_insert_advance_projection_lag_equally() {
     // Run 1: a single `insert` of one row.
     let insert_path = unique_db_path("insert-one");
-    let (insert_count, insert_bytes) = {
+    let insert_lag = {
         let db = EmbeddedClient::open(insert_path.to_path_buf()).expect("open insert db");
         let res = db
             .insert(
@@ -229,17 +221,16 @@ fn insert_emits_one_wal_record_per_call() {
             )
             .expect("single insert");
         assert_eq!(res.affected, 1, "insert returned wrong affected count");
-        let after = wal_stats(&insert_path);
+        let after = stats_metric(&db, "users", "pending_wal_records");
         drop(db);
         after
     };
 
     // Run 2: a 1-row `bulk_insert` of the same payload — known to
     // route through `create_rows_batch_columnar` post-#110. Both runs
-    // hit the same port with the same row, so the WAL must be
-    // byte-identical.
+    // hit the same port with the same row, so the stats should match.
     let bulk_path = unique_db_path("bulk-one");
-    let (bulk_count, bulk_bytes) = {
+    let bulk_lag = {
         let db = EmbeddedClient::open(bulk_path.to_path_buf()).expect("open bulk db");
         let inserted = db
             .bulk_insert(
@@ -252,27 +243,20 @@ fn insert_emits_one_wal_record_per_call() {
             .expect("bulk insert one");
         assert_eq!(inserted.affected, 1);
         assert_eq!(inserted.ids.len(), 1);
-        let after = wal_stats(&bulk_path);
+        let after = stats_metric(&db, "users", "pending_wal_records");
         drop(db);
         after
     };
 
-    eprintln!(
-        "WAL for 1 row: insert=({insert_count} records, {insert_bytes} bytes), bulk_insert(1)=({bulk_count} records, {bulk_bytes} bytes)"
-    );
+    eprintln!("pending WAL records for 1 row: insert={insert_lag}, bulk_insert(1)={bulk_lag}");
 
-    // The direct columnar port shares the same WAL framing as the 1-row
-    // bulk path. Identical record count *and* byte length pin that
-    // `insert` hits `create_rows_batch_columnar`, not the SQL
-    // `execute_query` round-trip (which wraps the row in extra
-    // parser/transaction framing and would shift these values).
+    // The direct columnar port shares the same write shape as the 1-row
+    // bulk path. Identical lag pins that `insert` hits
+    // `create_rows_batch_columnar`, not the SQL `execute_query`
+    // round-trip.
     assert_eq!(
-        insert_count, bulk_count,
-        "insert WAL record count ({insert_count}) should match 1-row bulk_insert ({bulk_count})"
-    );
-    assert_eq!(
-        insert_bytes, bulk_bytes,
-        "insert WAL bytes ({insert_bytes}) should match 1-row bulk_insert ({bulk_bytes}) — insert likely regressed back to the SQL round-trip"
+        insert_lag, bulk_lag,
+        "insert pending WAL records ({insert_lag}) should match 1-row bulk_insert ({bulk_lag})"
     );
 }
 
