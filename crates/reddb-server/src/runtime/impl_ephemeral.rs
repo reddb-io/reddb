@@ -51,8 +51,6 @@ pub enum EphemeralError {
     EmptyStem { path: String },
     /// The CSV import path rejected the file (I/O or parse failure).
     Import { path: String, source: String },
-    /// Registering the positional alias view failed.
-    Alias { source: String },
 }
 
 impl std::fmt::Display for EphemeralError {
@@ -72,9 +70,6 @@ impl std::fmt::Display for EphemeralError {
             ),
             EphemeralError::Import { path, source } => {
                 write!(f, "failed to load '{path}': {source}")
-            }
-            EphemeralError::Alias { source } => {
-                write!(f, "failed to register positional alias '{POSITIONAL_ALIAS}': {source}")
             }
         }
     }
@@ -142,12 +137,11 @@ impl RedDBRuntime {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let delimiter = delimiter_for_extension(&ext).ok_or_else(|| {
-            EphemeralError::UnsupportedExtension {
+        let delimiter =
+            delimiter_for_extension(&ext).ok_or_else(|| EphemeralError::UnsupportedExtension {
                 path: display.clone(),
                 ext: ext.clone(),
-            }
-        })?;
+            })?;
 
         let stem = path
             .file_stem()
@@ -199,12 +193,13 @@ impl RedDBRuntime {
         // front the same way the runtime's INSERT path does on first
         // write.
         let _ = store.get_or_create_collection(collection);
-        let stats = importer
-            .import_file(path, store.as_ref())
-            .map_err(|e| EphemeralError::Import {
-                path: display.to_string(),
-                source: e.to_string(),
-            })?;
+        let stats =
+            importer
+                .import_file(path, store.as_ref())
+                .map_err(|e| EphemeralError::Import {
+                    path: display.to_string(),
+                    source: e.to_string(),
+                })?;
 
         // The rows were written straight through the store, so nudge the
         // planner/result cache exactly as the COPY path does.
@@ -230,7 +225,10 @@ mod tests {
             sanitize_stem("vendas-2026 (v2)").as_deref(),
             Some("vendas_2026_v2")
         );
-        assert_eq!(sanitize_stem("__weird__name__").as_deref(), Some("weird_name"));
+        assert_eq!(
+            sanitize_stem("__weird__name__").as_deref(),
+            Some("weird_name")
+        );
     }
 
     #[test]
