@@ -590,7 +590,8 @@ fn metadata_value_to_json(value: &MetadataValue) -> JsonValue {
     match value {
         MetadataValue::Null => JsonValue::Null,
         MetadataValue::Bool(value) => JsonValue::Bool(*value),
-        MetadataValue::Int(value) => JsonValue::Integer(*value),
+        // #1768: metadata JSON view keeps the f64 form (see storage_value_to_json).
+        MetadataValue::Int(value) => JsonValue::Number(*value as f64),
         MetadataValue::Float(value) => JsonValue::Number(*value),
         MetadataValue::String(value) => JsonValue::String(value.clone()),
         MetadataValue::Bytes(value) => {
