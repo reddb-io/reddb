@@ -596,6 +596,16 @@ impl RedDB {
         Ok(())
     }
 
+    pub fn embedded_pending_wal_records(&self) -> Option<u64> {
+        if !embedded_single_file_selected(&self.options) {
+            return None;
+        }
+        let path = self.path.as_ref()?;
+        let artifact = crate::storage::EmbeddedRdbArtifact::open(path).ok()?;
+        let payloads = crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&artifact).ok()?;
+        Some(payloads.len() as u64)
+    }
+
     /// Walk the registered `vector.turbo` collections and trigger one
     /// async snapshot dump per collection. `lsn` is recorded in the
     /// snapshot header; pass `0` when the runtime layer doesn't track
