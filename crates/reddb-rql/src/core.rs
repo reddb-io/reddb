@@ -2946,10 +2946,12 @@ pub const DEFAULT_QUEUE_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_QUEUE_LOCK_DEADLINE_MS: u64 = 30_000;
 /// Default `IN_FLIGHT_CAP_PER_GROUP` for `CREATE QUEUE` when omitted.
 pub const DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP: u32 = 10_000;
+/// Default push idempotency window for `QUEUE PUSH ... DEDUP` when omitted.
+pub const DEFAULT_QUEUE_DEDUP_WINDOW_MS: u64 = 300_000;
 
 /// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration] [WITH DLQ name]
 /// [MAX_ATTEMPTS n] [LOCK_DEADLINE_MS n] [IN_FLIGHT_CAP_PER_GROUP n]
-/// [RETRY_DELAY duration]
+/// [RETRY_DELAY duration] [DEDUP_WINDOW duration]
 #[derive(Debug, Clone)]
 pub struct CreateQueueQuery {
     pub name: String,
@@ -2969,6 +2971,9 @@ pub struct CreateQueueQuery {
     /// issue #722 to defer the next delivery attempt. An authorized
     /// `NACK ... WITH DELAY <duration>` overrides this per-failure.
     pub retry_delay_ms: Option<u64>,
+    /// Queue-scoped push idempotency window. `None` means the engine
+    /// default applies at runtime.
+    pub dedup_window_ms: Option<u64>,
 }
 
 /// ALTER QUEUE name SET <clause>
@@ -2978,6 +2983,7 @@ pub struct CreateQueueQuery {
 ///   IN_FLIGHT_CAP_PER_GROUP n
 ///   DLQ name
 ///   RETRY_DELAY duration
+///   DEDUP_WINDOW duration
 #[derive(Debug, Clone, Default)]
 pub struct AlterQueueQuery {
     pub name: String,
@@ -2989,6 +2995,8 @@ pub struct AlterQueueQuery {
     /// Update the queue's default retry delay (issue #723). `Some(0)`
     /// clears the delay back to immediate requeue.
     pub retry_delay_ms: Option<u64>,
+    /// Update the queue-scoped push idempotency window.
+    pub dedup_window_ms: Option<u64>,
 }
 
 /// DROP QUEUE [IF EXISTS] name
@@ -3049,6 +3057,10 @@ pub enum QueueCommand {
         /// (`QUEUE READ`, `QUEUE POP`, `QUEUE READ … WAIT`) refuse to
         /// deliver the message until that instant.
         available: Option<QueueAvailability>,
+        /// Optional producer push idempotency key. Duplicate pushes with
+        /// the same key on the same queue return the first message id
+        /// while the queue's dedup window is active.
+        dedup_key: Option<String>,
     },
     Pop {
         queue: String,
