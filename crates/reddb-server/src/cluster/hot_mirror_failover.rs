@@ -288,7 +288,8 @@ mod tests {
         ShardOwnershipCatalog,
     };
     use crate::cluster::ownership_lease::{
-        admit_durable_write, DurableWriteReject, LeasedOwner, OwnershipLease, SupervisorTerm,
+        admit_durable_write, DurableWriteReject, LeasedOwner, OwnershipLease, OwnershipLeaseTiming,
+        SupervisorTerm,
     };
     use crate::cluster::ownership_transition::{CatchUpEvidence, CommitWatermark};
 
@@ -352,7 +353,7 @@ mod tests {
             ident("CN=node-a"),
             old_epoch,
             0,
-            60_000,
+            OwnershipLeaseTiming::new(60_000, 0, 0).unwrap(),
         ));
 
         let evidence =
