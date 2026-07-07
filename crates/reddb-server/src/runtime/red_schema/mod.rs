@@ -238,8 +238,8 @@ const POLICY_COLUMNS: [&str; 8] = [
 // on-demand profiling scan (never a cached snapshot). Each row is one
 // `(collection, entity, metric, value)` tuple. `entity` is the column
 // name for per-column metrics and `NULL` for collection-wide metrics
-// (e.g. `row_count`). This slice profiles row tables; other models
-// share the same contract in later slices.
+// (e.g. `row_count`). Model-specific vocabularies are emitted through
+// the same four-column shape.
 const STATS_COLUMNS: [&str; 4] = ["collection", "entity", "metric", "value"];
 
 const RETENTION_COLUMNS: [&str; 7] = [
