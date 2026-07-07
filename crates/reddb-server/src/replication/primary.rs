@@ -26,6 +26,12 @@ fn term_from_payload(payload: &[u8]) -> u64 {
         .unwrap_or(crate::replication::DEFAULT_REPLICATION_TERM)
 }
 
+fn authority_from_payload(payload: &[u8]) -> (u64, Option<u64>) {
+    crate::replication::cdc::ChangeRecord::decode(payload)
+        .map(|record| (record.term, record.ownership_epoch))
+        .unwrap_or((crate::replication::DEFAULT_REPLICATION_TERM, None))
+}
+
 /// In-memory WAL buffer for replication.
 /// Primary appends records here; replicas consume from it.
 ///
@@ -122,8 +128,11 @@ fn logical_wal_entry_term(entry: &reddb_file::LogicalWalEntry) -> u64 {
 fn logical_wal_data_with_framing_term(entry: &reddb_file::LogicalWalEntry) -> Vec<u8> {
     let term = logical_wal_entry_term(entry);
     match crate::replication::cdc::ChangeRecord::decode(&entry.data) {
-        Ok(mut record) if record.term != term => {
+        Ok(mut record) if record.term != term || record.ownership_epoch != entry.ownership_epoch => {
             record.term = term;
+            if entry.ownership_epoch.is_some() {
+                record.ownership_epoch = entry.ownership_epoch;
+            }
             record.encode()
         }
         _ => entry.data.clone(),
@@ -243,12 +252,25 @@ impl LogicalWalSpool {
         timestamp_ms: u64,
         data: &[u8],
     ) -> io::Result<()> {
-        self.append_with_term_and_timestamp(term_from_payload(data), lsn, timestamp_ms, data)
+        let (term, ownership_epoch) = authority_from_payload(data);
+        self.append_with_term_epoch_and_timestamp(term, ownership_epoch, lsn, timestamp_ms, data)
     }
 
     pub fn append_with_term_and_timestamp(
         &self,
         term: u64,
+        lsn: u64,
+        timestamp_ms: u64,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let (_, ownership_epoch) = authority_from_payload(data);
+        self.append_with_term_epoch_and_timestamp(term, ownership_epoch, lsn, timestamp_ms, data)
+    }
+
+    pub fn append_with_term_epoch_and_timestamp(
+        &self,
+        term: u64,
+        ownership_epoch: Option<u64>,
         lsn: u64,
         timestamp_ms: u64,
         data: &[u8],
@@ -266,7 +288,7 @@ impl LogicalWalSpool {
         //   (b) crc32 is computed exactly once over the same bytes the
         //       reader will checksum, with zero risk of header/payload
         //       drift from a partial flush.
-        let frame = reddb_file::encode_logical_wal_v3(term, lsn, timestamp_ms, data)?;
+        let frame = reddb_file::encode_logical_wal_v3(term, ownership_epoch, lsn, timestamp_ms, data)?;
 
         file.write_all(&frame)?;
         // PLAN.md Phase 2 mandates `sync_all` for logical WAL durability.
