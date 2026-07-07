@@ -36,6 +36,25 @@ impl RedDBRuntime {
             .ok_or_else(|| RedDBError::Internal(format!("created store fork {name} is missing")))
     }
 
+    pub fn detach_fork_store(&self, name: &str) -> RedDBResult<bool> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RedDBError::InvalidOperation(
+                "store fork name cannot be empty".to_string(),
+            ));
+        }
+        let data_path = self.inner.db.options().data_path.as_ref().ok_or_else(|| {
+            RedDBError::InvalidOperation("store fork requires a data path".into())
+        })?;
+
+        let manifest =
+            crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
+        manifest
+            .detach_fork(name)
+            .map(|detached| detached.is_some())
+            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))
+    }
+
     pub fn replica_relay_manifest_path(&self, replica_id: &str) -> Option<std::path::PathBuf> {
         let plan = self.primary_replica_file_plan()?;
         Some(plan.relay_manifest_path(replica_id))
