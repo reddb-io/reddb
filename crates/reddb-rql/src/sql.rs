@@ -13,8 +13,9 @@ use crate::ast::{
     GraphCommand, GraphQuery, HybridQuery, InsertQuery, IsolationLevel, JoinQuery, KvCommand,
     MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
     QueueSelectQuery, RankOfQuery, RankRangeQuery, RefreshMaterializedViewQuery, RevokeStmt,
-    RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand, TruncateQuery, TxnControl,
-    UpdateQuery, VcsCommand, VcsConflictResolution, VcsRefKind, VcsResetMode, VectorQuery,
+    RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand, TruncateQuery,
+    TxnControl, UpdateQuery, VcsCommand, VcsConflictResolution, VcsRefKind, VcsResetMode,
+    VectorQuery,
 };
 use crate::lexer::Token;
 use crate::parser::{ParseError, Parser, SafeTokenDisplay};
