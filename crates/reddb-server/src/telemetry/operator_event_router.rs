@@ -855,6 +855,15 @@ mod tests {
                 new_primary_addr: new_primary_addr.clone(),
                 new_term: *new_term,
             },
+            OperatorEvent::OwnershipFenced {
+                reason,
+                ownership_epoch,
+                range_identity,
+            } => OperatorEvent::OwnershipFenced {
+                reason: reason.clone(),
+                ownership_epoch: *ownership_epoch,
+                range_identity: range_identity.clone(),
+            },
         }
     }
 

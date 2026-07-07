@@ -51,6 +51,9 @@ mod e2e_issue_833_replication_failover;
 #[path = "replication/e2e_issue_840_replication_auto_rollback.rs"]
 mod e2e_issue_840_replication_auto_rollback;
 
+#[path = "replication/e2e_issue_1836_ownership_admission.rs"]
+mod e2e_issue_1836_ownership_admission;
+
 #[path = "replication/e2e_replica_readonly.rs"]
 mod e2e_replica_readonly;
 

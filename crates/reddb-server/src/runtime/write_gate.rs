@@ -24,12 +24,23 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::api::{RedDBError, RedDBOptions, RedDBResult};
+use crate::cluster::{
+    admit_durable_write, CollectionId, DurableWriteReject, LeasedOwner, NodeIdentity,
+    OwnershipEpoch, OwnershipLease, PlacementMetadata, RangeBounds, RangeId, RangeOwnership,
+    ShardKeyMode, ShardOwnershipCatalog, SupervisorTerm,
+};
 use crate::replication::flow_control::{Admission, FlowController};
 use crate::replication::ReplicationRole;
+use crate::telemetry::operator_event::OperatorEvent;
 
 /// Env var that sets the flow-control soft target (in LSN records).
 /// `0` / unset disables write-admission throttling (the default).
 pub const FLOW_CONTROL_SOFT_TARGET_ENV: &str = "RED_REPLICATION_FLOW_CONTROL_SOFT_TARGET_LSN";
+
+const RESERVED_GLOBAL_SYSTEM_COLLECTION: &str = "system.global";
+const RESERVED_GLOBAL_SYSTEM_RANGE_ID: u64 = 0;
+const RESERVED_GLOBAL_SYSTEM_RANGE_KEY: &[u8] = b"reserved-global-system-range";
+const DEFAULT_PRIMARY_REPLICA_OWNER: &str = "CN=primary-replica-primary,O=reddb";
 
 /// Categorises the write so the rejection error can name a sensible
 /// surface in operator-facing logs without leaking internal call sites.
@@ -134,6 +145,10 @@ pub struct WriteGate {
     /// lags and recovers, and an operator read-only pin never clears it.
     /// Disabled by default (soft target `0`).
     flow: FlowController,
+    /// ADR 0037/0058 durable-write ownership admission for range-owned state.
+    /// `None` for standalone/single-node deployments; primary-replica primaries
+    /// install the reserved global system range gate.
+    ownership: parking_lot::RwLock<Option<OwnershipAdmissionGate>>,
 }
 
 impl WriteGate {
@@ -142,6 +157,13 @@ impl WriteGate {
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .unwrap_or(0);
+        let ownership = match options.replication.role {
+            ReplicationRole::Primary => Some(OwnershipAdmissionGate::primary_replica(
+                DEFAULT_PRIMARY_REPLICA_OWNER,
+                options.replication.term,
+            )),
+            ReplicationRole::Standalone | ReplicationRole::Replica { .. } => None,
+        };
         Self {
             read_only: AtomicBool::new(options.read_only),
             role: options.replication.role.clone(),
@@ -150,6 +172,7 @@ impl WriteGate {
             last_archive_at_ms: AtomicU64::new(0),
             pause_threshold_secs: AtomicU64::new(0),
             flow: FlowController::new(soft_target, options.replication.quorum.clone()),
+            ownership: parking_lot::RwLock::new(ownership),
         }
     }
 
@@ -188,6 +211,7 @@ impl WriteGate {
                 kind.label()
             )));
         }
+        self.check_ownership(kind)?;
         if self.read_only.load(Ordering::Acquire) {
             return Err(RedDBError::ReadOnly(format!(
                 "instance is configured read_only — {} rejected",
@@ -222,6 +246,11 @@ impl WriteGate {
             || self.auto_paused.load(Ordering::Acquire)
             || matches!(self.role, ReplicationRole::Replica { .. })
             || matches!(self.lease_state(), LeaseGateState::NotHeld)
+            || self
+                .ownership
+                .read()
+                .as_ref()
+                .is_some_and(|gate| gate.is_fenced())
     }
 
     /// Whether the operator explicitly pinned this instance read-only
@@ -348,6 +377,203 @@ impl WriteGate {
     pub(crate) fn set_lease_state(&self, state: LeaseGateState) -> LeaseGateState {
         LeaseGateState::from_u8(self.lease.swap(state as u8, Ordering::AcqRel))
     }
+
+    fn check_ownership(&self, kind: WriteKind) -> RedDBResult<()> {
+        let Some(gate) = self.ownership.read().as_ref().cloned() else {
+            return Ok(());
+        };
+        match gate.admit() {
+            Ok(()) => Ok(()),
+            Err(reject) => {
+                let detail = OwnershipFenceDetail::from_reject(&reject);
+                OperatorEvent::OwnershipFenced {
+                    reason: detail.reason.clone(),
+                    ownership_epoch: detail.current_epoch,
+                    range_identity: detail.range_identity.clone(),
+                }
+                .emit_global();
+                Err(RedDBError::ReadOnly(format!(
+                    "ownership_fenced reason={} current_epoch={} range={} — {} rejected below routing",
+                    detail.reason,
+                    detail.current_epoch,
+                    detail.range_identity,
+                    kind.label()
+                )))
+            }
+        }
+    }
+
+    pub fn promote_primary_replica_owner(
+        &self,
+        new_owner_subject: &str,
+        new_term: u64,
+    ) -> RedDBResult<()> {
+        let new_owner = node_identity(new_owner_subject)?;
+        let mut guard = self.ownership.write();
+        let Some(gate) = guard.as_mut() else {
+            return Ok(());
+        };
+        gate.promote_to(new_owner, new_term)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OwnershipAdmissionGate {
+    catalog: ShardOwnershipCatalog,
+    holder: LeasedOwner,
+    node: NodeIdentity,
+    collection: CollectionId,
+    range_id: RangeId,
+    key: Vec<u8>,
+    current_term: SupervisorTerm,
+    now_ms: u64,
+}
+
+impl OwnershipAdmissionGate {
+    fn primary_replica(owner_subject: &str, term: u64) -> Self {
+        let owner = node_identity(owner_subject).expect("static primary-replica owner identity");
+        let collection =
+            CollectionId::new(RESERVED_GLOBAL_SYSTEM_COLLECTION).expect("static collection id");
+        let range_id = RangeId::new(RESERVED_GLOBAL_SYSTEM_RANGE_ID);
+        let range = RangeOwnership::establish(
+            collection.clone(),
+            range_id,
+            ShardKeyMode::Ordered,
+            RangeBounds::full(),
+            owner.clone(),
+            Vec::<NodeIdentity>::new(),
+            PlacementMetadata::with_replication_factor(1),
+        );
+        let current_term = SupervisorTerm::new(term);
+        let lease = OwnershipLease::grant(
+            current_term,
+            collection.clone(),
+            range_id,
+            owner.clone(),
+            OwnershipEpoch::initial(),
+            0,
+            u64::MAX,
+        );
+        let mut catalog = ShardOwnershipCatalog::new();
+        catalog
+            .apply_update(range)
+            .expect("initial reserved global system range is valid");
+        Self {
+            catalog,
+            holder: LeasedOwner::with_lease(lease),
+            node: owner,
+            collection,
+            range_id,
+            key: RESERVED_GLOBAL_SYSTEM_RANGE_KEY.to_vec(),
+            current_term,
+            now_ms: 0,
+        }
+    }
+
+    fn admit(&self) -> Result<(), DurableWriteReject> {
+        admit_durable_write(
+            &self.catalog,
+            &self.holder,
+            &self.node,
+            &self.collection,
+            &self.key,
+            self.current_term,
+            self.now_ms,
+        )
+        .map(|_| ())
+    }
+
+    fn is_fenced(&self) -> bool {
+        self.admit().is_err()
+    }
+
+    fn promote_to(&mut self, new_owner: NodeIdentity, new_term: u64) -> RedDBResult<()> {
+        let current = self
+            .catalog
+            .range(&self.collection, self.range_id)
+            .ok_or_else(|| RedDBError::Internal("reserved global system range missing".into()))?
+            .clone();
+        self.catalog
+            .apply_update(current.transfer_to(new_owner, [self.node.clone()]))
+            .map_err(|err| RedDBError::Catalog(err.to_string()))?;
+        self.current_term = SupervisorTerm::new(new_term);
+        Ok(())
+    }
+}
+
+struct OwnershipFenceDetail {
+    reason: String,
+    current_epoch: u64,
+    range_identity: String,
+}
+
+impl OwnershipFenceDetail {
+    fn from_reject(reject: &DurableWriteReject) -> Self {
+        match reject {
+            DurableWriteReject::NoRange { collection } => Self {
+                reason: "no_range".to_string(),
+                current_epoch: 0,
+                range_identity: collection.to_string(),
+            },
+            DurableWriteReject::StaleOwnership {
+                collection,
+                range_id,
+                current_epoch,
+                ..
+            } => Self {
+                reason: "stale_ownership".to_string(),
+                current_epoch: current_epoch.value(),
+                range_identity: format!("{collection}/{range_id}"),
+            },
+            DurableWriteReject::NotOwner {
+                collection,
+                range_id,
+                epoch,
+                ..
+            } => Self {
+                reason: "not_owner".to_string(),
+                current_epoch: epoch.value(),
+                range_identity: format!("{collection}/{range_id}"),
+            },
+            DurableWriteReject::Fenced {
+                collection,
+                range_id,
+                reason,
+            } => Self {
+                reason: fence_reason_label(reason).to_string(),
+                current_epoch: 0,
+                range_identity: format!("{collection}/{range_id}"),
+            },
+        }
+    }
+}
+
+fn fence_reason_label(reason: &crate::cluster::FenceReason) -> &'static str {
+    match reason {
+        crate::cluster::FenceReason::Unleased => "unleased",
+        crate::cluster::FenceReason::Revoked => "revoked",
+        crate::cluster::FenceReason::TermSuperseded { .. } => "term_superseded",
+        crate::cluster::FenceReason::EpochSuperseded { .. } => "epoch_superseded",
+        crate::cluster::FenceReason::Expired { .. } => "expired",
+    }
+}
+
+fn node_identity(subject: &str) -> RedDBResult<NodeIdentity> {
+    NodeIdentity::from_certificate_subject(subject)
+        .map_err(|err| RedDBError::InvalidConfig(err.to_string()))
+}
+
+#[cfg(test)]
+impl WriteGate {
+    fn install_primary_replica_ownership_gate_for_test(&self, owner_subject: &str, term: u64) {
+        *self.ownership.write() =
+            Some(OwnershipAdmissionGate::primary_replica(owner_subject, term));
+    }
+
+    fn promote_primary_replica_owner_for_test(&self, new_owner_subject: &str, new_term: u64) {
+        self.promote_primary_replica_owner(new_owner_subject, new_term)
+            .expect("test promotion succeeds");
+    }
 }
 
 #[cfg(test)]
@@ -363,6 +589,7 @@ mod tests {
             last_archive_at_ms: AtomicU64::new(0),
             pause_threshold_secs: AtomicU64::new(0),
             flow: FlowController::disabled(),
+            ownership: parking_lot::RwLock::new(None),
         }
     }
 
@@ -586,6 +813,7 @@ mod tests {
             last_archive_at_ms: AtomicU64::new(0),
             pause_threshold_secs: AtomicU64::new(0),
             flow: FlowController::new(soft_target, quorum),
+            ownership: parking_lot::RwLock::new(None),
         }
     }
 
@@ -672,6 +900,26 @@ mod tests {
         match err {
             RedDBError::ReadOnly(msg) => assert!(msg.contains("replica")),
             other => panic!("expected ReadOnly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ownership_admission_fences_deposed_primary() {
+        let g = gate(false, ReplicationRole::Primary);
+        g.install_primary_replica_ownership_gate_for_test("CN=node-a,O=reddb", 7);
+
+        assert!(g.check(WriteKind::Dml).is_ok());
+
+        g.promote_primary_replica_owner_for_test("CN=node-b,O=reddb", 8);
+        let err = g.check(WriteKind::Dml).unwrap_err();
+        match err {
+            RedDBError::ReadOnly(msg) => {
+                assert!(msg.contains("ownership_fenced"), "{msg}");
+                assert!(msg.contains("reason=stale_ownership"), "{msg}");
+                assert!(msg.contains("current_epoch=2"), "{msg}");
+                assert!(msg.contains("range=system.global/0"), "{msg}");
+            }
+            other => panic!("expected ownership fencing ReadOnly, got {other:?}"),
         }
     }
 }
