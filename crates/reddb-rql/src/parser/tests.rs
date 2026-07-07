@@ -6946,6 +6946,27 @@ fn queue_push_accepts_ordering_key_suffix() {
 }
 
 #[test]
+fn queue_push_accepts_dedup_suffix_and_queue_window_ddl() {
+    let q = parse("QUEUE PUSH tasks 'job-1' DEDUP 'retry-42'").unwrap();
+    let QueryExpr::QueueCommand(QueueCommand::Push { dedup_key, .. }) = q else {
+        panic!("expected Push");
+    };
+    assert_eq!(dedup_key.as_deref(), Some("retry-42"));
+
+    let create = parse("CREATE QUEUE tasks DEDUP_WINDOW 5 min").unwrap();
+    let QueryExpr::CreateQueue(create) = create else {
+        panic!("expected CreateQueue");
+    };
+    assert_eq!(create.dedup_window_ms, Some(300_000));
+
+    let alter = parse("ALTER QUEUE tasks SET DEDUP_WINDOW 30 s").unwrap();
+    let QueryExpr::AlterQueue(alter) = alter else {
+        panic!("expected AlterQueue");
+    };
+    assert_eq!(alter.dedup_window_ms, Some(30_000));
+}
+
+#[test]
 fn queue_push_rejects_key_with_delayed_availability() {
     for sql in [
         "QUEUE PUSH tasks 'job-1' KEY 'customer-42' DELAY 1s",
