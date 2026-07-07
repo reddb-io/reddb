@@ -1,4 +1,4 @@
-//! End-to-end CLI tests for the ephemeral-store tracer (issue #1786).
+//! End-to-end CLI tests for the ephemeral-store tracer (issues #1786, #1792).
 //!
 //! Spawns the real `red` binary via `CARGO_BIN_EXE_red` so the full
 //! `main()` path is exercised: `red query <file.csv|file.tsv|file.json|file.ndjson> <sql>`
@@ -16,6 +16,24 @@ fn red_binary() -> PathBuf {
 fn run_query(file: &str, sql: &str, extra: &[&str]) -> (i32, String, String) {
     let mut cmd = Command::new(red_binary());
     cmd.arg("query").arg(file).arg(sql);
+    for a in extra {
+        cmd.arg(a);
+    }
+    let out = cmd.output().expect("spawn red query");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn run_query_files(files: &[&str], sql: &str, extra: &[&str]) -> (i32, String, String) {
+    let mut cmd = Command::new(red_binary());
+    cmd.arg("query");
+    for file in files {
+        cmd.arg(file);
+    }
+    cmd.arg(sql);
     for a in extra {
         cmd.arg(a);
     }
@@ -198,6 +216,95 @@ fn red_query_tsv_file_by_alias() {
     assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
     assert!(stdout.contains("\"Porto\""), "stdout: {stdout}");
     assert!(!stdout.contains("\"Lisbon\""), "Lisbon leaked: {stdout}");
+}
+
+#[test]
+fn red_query_multiple_files_join_by_alias_and_stem() {
+    let dir = temp_dir("multi");
+    let users = dir.path().join("users.csv");
+    let orders = dir.path().join("orders.csv");
+    fs::write(&users, "id,name\n1,Alice\n2,Bob\n").expect("write users");
+    fs::write(&orders, "id,user_id,total\n10,1,25\n11,2,7\n").expect("write orders");
+    let users_str = users.display().to_string();
+    let orders_str = orders.display().to_string();
+
+    let (code, stdout, stderr) = run_query_files(
+        &[&users_str, &orders_str],
+        "SELECT t1.name, t2.total FROM t1 JOIN t2 ON t1.id = t2.user_id WHERE t2.total > 10",
+        &["--json"],
+    );
+    assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
+    assert!(stdout.contains("\"Alice\""), "stdout: {stdout}");
+    assert!(stdout.contains("\"t2.total\":25"), "stdout: {stdout}");
+    assert!(!stdout.contains("\"Bob\""), "Bob leaked: {stdout}");
+
+    let (code, stdout, stderr) = run_query_files(
+        &[&users_str, &orders_str],
+        "SELECT users.name, orders.total FROM users JOIN orders ON users.id = orders.user_id WHERE orders.total > 10",
+        &["--json"],
+    );
+    assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
+    assert!(
+        stdout.contains("\"users.name\":\"Alice\""),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("\"orders.total\":25"), "stdout: {stdout}");
+
+    let (code, stdout, stderr) =
+        run_query_files(&[&users_str, &orders_str], "SHOW STATS t1", &["--json"]);
+    assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
+    assert!(stdout.contains("\"collection\":\"t1\""), "stdout: {stdout}");
+    assert!(
+        stdout.contains("\"metric\":\"row_count\""),
+        "stdout: {stdout}"
+    );
+
+    let (code, stdout, stderr) =
+        run_query_files(&[&users_str, &orders_str], "SHOW STATS users", &["--json"]);
+    assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
+    assert!(
+        stdout.contains("\"collection\":\"users\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"metric\":\"row_count\""),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn red_query_multiple_files_collision_uses_deterministic_stems_and_aliases() {
+    let dir = temp_dir("collision");
+    let plain = dir.path().join("items.csv");
+    let punctuated = dir.path().join("items!!.csv");
+    fs::write(&plain, "id,label\n1,first\n").expect("write plain");
+    fs::write(&punctuated, "id,label\n1,second\n").expect("write punctuated");
+    let plain_str = plain.display().to_string();
+    let punctuated_str = punctuated.display().to_string();
+
+    let (code, stdout, stderr) = run_query_files(
+        &[&plain_str, &punctuated_str],
+        "SELECT t1.label, t2.label FROM t1 JOIN t2 ON t1.id = t2.id",
+        &["--json"],
+    );
+    assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
+    assert!(stdout.contains("\"first\""), "stdout: {stdout}");
+    assert!(stdout.contains("\"second\""), "stdout: {stdout}");
+
+    let (code, stdout, stderr) = run_query_files(
+        &[&plain_str, &punctuated_str],
+        "SELECT items.label, items_2.label FROM items JOIN items_2 ON items.id = items_2.id",
+        &["--json"],
+    );
+    assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
+    assert!(
+        stdout.contains("\"items.label\":\"first\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"items_2.label\":\"second\""),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
