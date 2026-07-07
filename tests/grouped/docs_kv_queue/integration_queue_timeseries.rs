@@ -584,6 +584,73 @@ fn test_queue_move_bypasses_push_dedup_but_preserves_producer_guard() {
 }
 
 #[test]
+fn test_queue_move_preserves_ordering_key_and_replays_tail_of_key() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE jobs WITH DLQ failed_jobs MAX_ATTEMPTS 1");
+    exec(&rt, "QUEUE GROUP CREATE jobs workers");
+    exec(&rt, "QUEUE PUSH jobs 'a-dead' KEY 'account-a'");
+    exec(&rt, "QUEUE PUSH jobs 'b-dead' KEY 'account-b'");
+
+    let failed = exec(&rt, "QUEUE READ jobs GROUP workers CONSUMER reaper COUNT 2");
+    assert_eq!(payloads(&failed), vec!["a-dead", "b-dead"]);
+    for row in &failed.result.records {
+        let id = text(row, "message_id");
+        exec(&rt, &format!("QUEUE NACK jobs GROUP workers '{id}'"));
+    }
+
+    let dlq_a = exec(
+        &rt,
+        "SELECT payload, key FROM QUEUE failed_jobs WHERE key = 'account-a' LIMIT 10",
+    );
+    assert_eq!(payloads(&dlq_a), vec!["a-dead"]);
+    assert_eq!(text(&dlq_a.result.records[0], "key"), "account-a");
+
+    exec(&rt, "QUEUE PUSH jobs 'a-live' KEY 'account-a'");
+    exec(&rt, "QUEUE PUSH jobs 'b-live' KEY 'account-b'");
+
+    let moved = exec(
+        &rt,
+        "QUEUE MOVE FROM failed_jobs TO jobs WHERE key = 'account-a' LIMIT 10",
+    );
+    assert_eq!(uint(&moved.result.records[0], "committed"), 1);
+    assert_eq!(
+        payloads(&exec(&rt, "SELECT payload FROM QUEUE failed_jobs")),
+        vec!["b-dead"],
+        "MOVE must filter the DLQ by ordering key",
+    );
+
+    let jobs_a = exec(
+        &rt,
+        "SELECT payload, key FROM QUEUE jobs WHERE key = 'account-a' LIMIT 10",
+    );
+    assert_eq!(payloads(&jobs_a), vec!["a-live", "a-dead"]);
+    assert!(jobs_a
+        .result
+        .records
+        .iter()
+        .all(|row| text(row, "key") == "account-a"));
+
+    let first_redelivery = exec(
+        &rt,
+        "QUEUE READ jobs GROUP workers CONSUMER worker1 COUNT 3",
+    );
+    assert_eq!(
+        payloads(&first_redelivery),
+        vec!["a-live", "b-live"],
+        "replayed same-key message must wait behind the current key tail",
+    );
+    let live_a_id = text(&first_redelivery.result.records[0], "message_id");
+
+    exec(&rt, &format!("QUEUE ACK jobs GROUP workers '{live_a_id}'"));
+    let replayed = exec(
+        &rt,
+        "QUEUE READ jobs GROUP workers CONSUMER worker2 COUNT 1",
+    );
+    assert_eq!(payloads(&replayed), vec!["a-dead"]);
+}
+
+#[test]
 fn test_dlq_promotion_bypasses_target_push_dedup_index() {
     let rt = rt();
 

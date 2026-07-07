@@ -2550,17 +2550,21 @@ fn insert_moved_queue_message(
                 None
             },
             enqueued_at_ns: message.enqueued_at_ns,
-            attempts: message.attempts,
-            max_attempts: message.max_attempts,
+            attempts: 0,
+            max_attempts: config.max_attempts,
             acked: false,
         }),
     );
     let id = store
         .insert_auto(queue, entity)
         .map_err(|err| RedDBError::Internal(err.to_string()))?;
-    if let Some(ttl_ms) = config.ttl_ms {
+    if config.ttl_ms.is_some() || message.ordering_key.is_some() {
         store
-            .set_metadata(queue, id, queue_message_ttl_metadata(ttl_ms))
+            .set_metadata(
+                queue,
+                id,
+                queue_message_metadata(config.ttl_ms, None, message.ordering_key.as_deref()),
+            )
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
     }
     Ok(id)
