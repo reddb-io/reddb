@@ -11,10 +11,6 @@ on:
     paths:
       - 'crates/reddb-file/**'
       - '.github/workflows/file-coverage.yml'
-  pull_request:
-    paths:
-      - 'crates/reddb-file/**'
-      - '.github/workflows/file-coverage.yml'
   workflow_dispatch:
 
 concurrency:

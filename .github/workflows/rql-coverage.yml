@@ -10,10 +10,6 @@ on:
     paths:
       - 'crates/reddb-rql/**'
       - '.github/workflows/rql-coverage.yml'
-  pull_request:
-    paths:
-      - 'crates/reddb-rql/**'
-      - '.github/workflows/rql-coverage.yml'
   workflow_dispatch:
 
 concurrency:

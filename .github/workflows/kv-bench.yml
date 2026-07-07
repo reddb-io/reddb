@@ -1,7 +1,7 @@
 name: KV Benchmark Gate
 
 on:
-  pull_request:
+  push:
     branches: [ main, develop ]
     paths:
       - '.github/workflows/kv-bench.yml'
@@ -10,6 +10,10 @@ on:
       - 'crates/reddb-server/**'
       - 'src/bin/red.rs'
   workflow_dispatch:
+
+concurrency:
+  group: kv-bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

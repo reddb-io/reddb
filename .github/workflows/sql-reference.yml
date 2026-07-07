@@ -18,6 +18,10 @@ on:
       - 'crates/reddb-server/src/storage/query/sql.rs'
       - '.github/workflows/sql-reference.yml'
 
+concurrency:
+  group: sql-reference-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     runs-on: blacksmith-2vcpu-ubuntu-2404

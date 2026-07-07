@@ -40,8 +40,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ubuntu-dependabot-rust-1.91.0
+          # Reuse the cache CI saves on push to main; never save from a
+          # Dependabot branch (cost policy — PR branches persist no caches).
+          shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
+          save-if: "false"
 
       - name: cargo check
         run: cargo check --locked --all

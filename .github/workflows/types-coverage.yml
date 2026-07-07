@@ -11,10 +11,6 @@ on:
     paths:
       - 'crates/reddb-types/**'
       - '.github/workflows/types-coverage.yml'
-  pull_request:
-    paths:
-      - 'crates/reddb-types/**'
-      - '.github/workflows/types-coverage.yml'
   workflow_dispatch:
 
 concurrency:
