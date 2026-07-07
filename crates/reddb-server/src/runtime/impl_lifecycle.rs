@@ -224,6 +224,7 @@ impl RedDBRuntime {
                 checkpoint_projection_stats: super::CheckpointProjectionStats::default(),
                 checkpoint_columnar_emission_budget_chunks: options
                     .checkpoint_columnar_emission_budget_chunks,
+                columnar_projection_size_floor_rows: options.columnar_projection_size_floor_rows,
                 backup_scheduler: crate::replication::scheduler::BackupScheduler::new(3600),
                 query_cache: parking_lot::RwLock::new(
                     crate::storage::query::planner::cache::PlanCache::new(1000),
