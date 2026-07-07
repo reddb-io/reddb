@@ -10,6 +10,7 @@ impl RedDBServer {
             query,
             entity_types,
             capabilities,
+            commit_policy,
             params,
         } = request;
         let stream_ask = is_stream_ask_query(&query);
@@ -35,13 +36,33 @@ impl RedDBServer {
                 let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
                 if is_mutation {
                     let post_lsn = self.runtime.cdc_current_lsn();
-                    if let Err(err) = self.runtime.enforce_commit_policy(post_lsn) {
-                        // Only fired when RED_COMMIT_FAIL_ON_TIMEOUT=true
-                        // — operator opted into hard-blocking. 504
-                        // is the right code: the local write
-                        // succeeded, but the configured durability
-                        // contract didn't.
-                        return json_error(504, err.to_string());
+                    if let Err(err) = self
+                        .runtime
+                        .enforce_commit_policy_for_request(post_lsn, commit_policy)
+                    {
+                        match err {
+                            crate::api::RedDBError::Validation {
+                                message,
+                                validation,
+                            } => {
+                                let mut object = crate::json::Map::new();
+                                object.insert("ok".to_string(), crate::json::Value::Bool(false));
+                                object.insert(
+                                    "error".to_string(),
+                                    crate::json_field::SerializedJsonField::tainted(&message),
+                                );
+                                object.insert("validation".to_string(), validation);
+                                return json_response(422, crate::json::Value::Object(object));
+                            }
+                            other => {
+                                // Only fired when RED_COMMIT_FAIL_ON_TIMEOUT=true
+                                // — operator opted into hard-blocking. 504
+                                // is the right code: the local write
+                                // succeeded, but the configured durability
+                                // contract didn't.
+                                return json_error(504, other.to_string());
+                            }
+                        }
                     }
                 }
                 json_response(

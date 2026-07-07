@@ -49,6 +49,14 @@ jobs:
       - name: cargo check
         run: cargo check --locked --all
 
+      - name: drivers/python lockfile still resolves
+        # drivers/python opts out of the workspace but path-depends on
+        # workspace crates; a root dependency bump can strand its separate
+        # Cargo.lock (see #1914 — ed25519-dalek 3.0 broke main post-merge).
+        # cargo metadata is resolution-only: fast, no compile.
+        working-directory: drivers/python
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
       - name: Unit tests
         run: cargo test --locked --lib
 

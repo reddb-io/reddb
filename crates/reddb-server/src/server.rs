@@ -403,6 +403,7 @@ struct ParsedQueryRequest {
     query: String,
     entity_types: Option<Vec<String>>,
     capabilities: Option<Vec<String>>,
+    commit_policy: Option<crate::replication::CommitPolicy>,
     /// Optional positional `$N` bind parameters (#358). When `Some`, the
     /// query handler runs the user_params binder before executing.
     /// Absence preserves the legacy `query`-only behavior.

@@ -38,6 +38,30 @@ impl CommitPolicy {
         }
     }
 
+    pub fn detail_label(self) -> String {
+        match self {
+            Self::AckN(n) => format!("ack_n={n}"),
+            _ => self.label().to_string(),
+        }
+    }
+
+    pub fn parse_strict(raw: &str) -> Option<Self> {
+        let lower = raw.trim().to_ascii_lowercase();
+        if lower == "local" {
+            return Some(Self::Local);
+        }
+        if lower == "remote_wal" {
+            return Some(Self::RemoteWal);
+        }
+        if lower == "quorum" {
+            return Some(Self::Quorum);
+        }
+        if let Some(n_str) = lower.strip_prefix("ack_n=") {
+            return n_str.parse::<u32>().ok().map(Self::AckN);
+        }
+        None
+    }
+
     /// Parse from `RED_PRIMARY_COMMIT_POLICY` env var. Accepts:
     /// `local` (default), `remote_wal`, `ack_n=N` (decimal),
     /// `quorum`. Unknown values fall back to `Local` with a warning.
@@ -105,5 +129,15 @@ mod tests {
         assert_eq!(CommitPolicy::RemoteWal.label(), "remote_wal");
         assert_eq!(CommitPolicy::AckN(5).label(), "ack_n");
         assert_eq!(CommitPolicy::Quorum.label(), "quorum");
+    }
+
+    #[test]
+    fn strict_parse_rejects_unknown_values() {
+        assert_eq!(
+            CommitPolicy::parse_strict("ack_n=2"),
+            Some(CommitPolicy::AckN(2))
+        );
+        assert_eq!(CommitPolicy::parse_strict("nonsense"), None);
+        assert_eq!(CommitPolicy::parse_strict(""), None);
     }
 }

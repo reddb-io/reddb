@@ -141,7 +141,15 @@ impl std::fmt::Display for CollectionGroupId {
 pub struct CollectionGroupAuthority {
     group: CollectionGroupId,
     authority: NodeIdentity,
-    collections: BTreeSet<CollectionId>,
+    slices: Vec<AuthorityCatalogSlice>,
+}
+
+/// One range-bounded shard ownership catalog slice published by a Placement
+/// Authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthorityCatalogSlice {
+    collection: CollectionId,
+    bounds: RangeBounds,
 }
 
 impl CollectionGroupAuthority {
@@ -155,10 +163,37 @@ impl CollectionGroupAuthority {
         if collections.is_empty() {
             return Err(PlacementAuthorityError::EmptyCatalogSlice { group });
         }
+        let slices = collections
+            .into_iter()
+            .map(|collection| AuthorityCatalogSlice {
+                collection,
+                bounds: RangeBounds::full(),
+            })
+            .collect();
         Ok(Self {
             group,
             authority,
-            collections,
+            slices,
+        })
+    }
+
+    /// Assign explicit range-bounded catalog slices to one group.
+    pub fn with_slices(
+        group: CollectionGroupId,
+        authority: NodeIdentity,
+        slices: impl IntoIterator<Item = (CollectionId, RangeBounds)>,
+    ) -> Result<Self, PlacementAuthorityError> {
+        let slices = slices
+            .into_iter()
+            .map(|(collection, bounds)| AuthorityCatalogSlice { collection, bounds })
+            .collect::<Vec<_>>();
+        if slices.is_empty() {
+            return Err(PlacementAuthorityError::EmptyCatalogSlice { group });
+        }
+        Ok(Self {
+            group,
+            authority,
+            slices,
         })
     }
 
@@ -171,14 +206,26 @@ impl CollectionGroupAuthority {
     }
 
     pub fn collections(&self) -> impl Iterator<Item = &CollectionId> {
-        self.collections.iter()
+        self.slices.iter().map(|slice| &slice.collection)
     }
 
-    fn overlaps(&self, other: &CollectionGroupAuthority) -> Option<CollectionId> {
-        self.collections
-            .intersection(&other.collections)
-            .next()
-            .cloned()
+    pub fn slices(&self) -> impl Iterator<Item = (&CollectionId, &RangeBounds)> {
+        self.slices
+            .iter()
+            .map(|slice| (&slice.collection, &slice.bounds))
+    }
+
+    fn overlaps(&self, other: &CollectionGroupAuthority) -> Option<(CollectionId, RangeBounds)> {
+        for existing in &self.slices {
+            for attempted in &other.slices {
+                if existing.collection == attempted.collection {
+                    if let Some(overlap) = existing.bounds.intersection(&attempted.bounds) {
+                        return Some((existing.collection.clone(), overlap));
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -195,7 +242,10 @@ pub enum PlacementAuthorityError {
     OverlappingCatalogSlice {
         collection: CollectionId,
         existing_group: CollectionGroupId,
+        existing_authority: NodeIdentity,
         attempted_group: CollectionGroupId,
+        attempted_authority: NodeIdentity,
+        overlap: RangeBounds,
     },
 }
 
@@ -214,10 +264,13 @@ impl std::fmt::Display for PlacementAuthorityError {
             Self::OverlappingCatalogSlice {
                 collection,
                 existing_group,
+                existing_authority,
                 attempted_group,
+                attempted_authority,
+                overlap,
             } => write!(
                 f,
-                "collection {collection} is already in group {existing_group}, so group {attempted_group} would overlap its catalog slice"
+                "placement authority {attempted_authority} for group {attempted_group} overlaps placement authority {existing_authority} for group {existing_group} on {collection}{overlap}"
             ),
         }
     }
@@ -242,20 +295,7 @@ impl PlacementAuthorityCatalog {
         &mut self,
         assignment: CollectionGroupAuthority,
     ) -> Result<(), PlacementAuthorityError> {
-        if self.assignments.contains_key(assignment.group()) {
-            return Err(PlacementAuthorityError::DuplicateCollectionGroup {
-                group: assignment.group().clone(),
-            });
-        }
-        for existing in self.assignments.values() {
-            if let Some(collection) = existing.overlaps(&assignment) {
-                return Err(PlacementAuthorityError::OverlappingCatalogSlice {
-                    collection,
-                    existing_group: existing.group().clone(),
-                    attempted_group: assignment.group().clone(),
-                });
-            }
-        }
+        self.validate_assignment(&assignment)?;
         self.assignments
             .insert(assignment.group().clone(), assignment);
         Ok(())
@@ -272,9 +312,133 @@ impl PlacementAuthorityCatalog {
         &self,
         collection: &CollectionId,
     ) -> Option<&CollectionGroupAuthority> {
-        self.assignments
-            .values()
-            .find(|assignment| assignment.collections.contains(collection))
+        self.assignments.values().find(|assignment| {
+            assignment
+                .slices
+                .iter()
+                .any(|slice| &slice.collection == collection)
+        })
+    }
+
+    /// Replace one group with the two assignments produced by a collection-group
+    /// split. Both replacements are checked against each other and all surviving
+    /// assignments before mutation.
+    pub fn split_collection_group_slice(
+        &mut self,
+        retired_group: &CollectionGroupId,
+        retained: CollectionGroupAuthority,
+        carved: CollectionGroupAuthority,
+    ) -> Result<(), PlacementAuthorityError> {
+        self.replace_assignments([retired_group], [retained, carved])
+    }
+
+    /// Replace multiple adjacent group slices with one merged assignment.
+    pub fn merge_collection_group_slices<'a>(
+        &mut self,
+        retired_groups: impl IntoIterator<Item = &'a CollectionGroupId>,
+        merged: CollectionGroupAuthority,
+    ) -> Result<(), PlacementAuthorityError> {
+        self.replace_assignments(retired_groups, [merged])
+    }
+
+    /// Replace a source group with its retained slice plus a reassigned slice.
+    pub fn reassign_collection_group_slice(
+        &mut self,
+        retired_group: &CollectionGroupId,
+        retained: CollectionGroupAuthority,
+        reassigned: CollectionGroupAuthority,
+    ) -> Result<(), PlacementAuthorityError> {
+        self.replace_assignments([retired_group], [retained, reassigned])
+    }
+
+    /// Administrative replacement uses the same invariant checker as ordinary
+    /// placement transitions; force may bypass operator policy, not catalog
+    /// integrity.
+    pub fn force_replace_assignments<'a>(
+        &mut self,
+        retired_groups: impl IntoIterator<Item = &'a CollectionGroupId>,
+        replacements: impl IntoIterator<Item = CollectionGroupAuthority>,
+    ) -> Result<(), PlacementAuthorityError> {
+        self.replace_assignments(retired_groups, replacements)
+    }
+
+    fn validate_assignment(
+        &self,
+        assignment: &CollectionGroupAuthority,
+    ) -> Result<(), PlacementAuthorityError> {
+        if self.assignments.contains_key(assignment.group()) {
+            return Err(PlacementAuthorityError::DuplicateCollectionGroup {
+                group: assignment.group().clone(),
+            });
+        }
+        for existing in self.assignments.values() {
+            if let Some((collection, overlap)) = existing.overlaps(assignment) {
+                return Err(PlacementAuthorityError::OverlappingCatalogSlice {
+                    collection,
+                    existing_group: existing.group().clone(),
+                    existing_authority: existing.authority().clone(),
+                    attempted_group: assignment.group().clone(),
+                    attempted_authority: assignment.authority().clone(),
+                    overlap,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn replace_assignments<'a>(
+        &mut self,
+        retired_groups: impl IntoIterator<Item = &'a CollectionGroupId>,
+        replacements: impl IntoIterator<Item = CollectionGroupAuthority>,
+    ) -> Result<(), PlacementAuthorityError> {
+        let retired_groups = retired_groups.into_iter().cloned().collect::<BTreeSet<_>>();
+        let replacements = replacements.into_iter().collect::<Vec<_>>();
+        let mut next = self
+            .assignments
+            .iter()
+            .filter(|(group, _)| !retired_groups.contains(group))
+            .map(|(group, assignment)| (group.clone(), assignment.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        for replacement in replacements {
+            if let Some(existing) = next.get(replacement.group()) {
+                if let Some((collection, overlap)) = existing.overlaps(&replacement) {
+                    return Err(PlacementAuthorityError::OverlappingCatalogSlice {
+                        collection,
+                        existing_group: existing.group().clone(),
+                        existing_authority: existing.authority().clone(),
+                        attempted_group: replacement.group().clone(),
+                        attempted_authority: replacement.authority().clone(),
+                        overlap,
+                    });
+                }
+                if existing.authority() != replacement.authority() {
+                    return Err(PlacementAuthorityError::DuplicateCollectionGroup {
+                        group: replacement.group().clone(),
+                    });
+                }
+                let mut merged = existing.clone();
+                merged.slices.extend(replacement.slices);
+                next.insert(merged.group().clone(), merged);
+                continue;
+            }
+            for existing in next.values() {
+                if let Some((collection, overlap)) = existing.overlaps(&replacement) {
+                    return Err(PlacementAuthorityError::OverlappingCatalogSlice {
+                        collection,
+                        existing_group: existing.group().clone(),
+                        existing_authority: existing.authority().clone(),
+                        attempted_group: replacement.group().clone(),
+                        attempted_authority: replacement.authority().clone(),
+                        overlap,
+                    });
+                }
+            }
+            next.insert(replacement.group().clone(), replacement);
+        }
+
+        self.assignments = next;
+        Ok(())
     }
 }
 
@@ -396,6 +560,22 @@ impl RangeBound {
     }
 }
 
+impl std::fmt::Display for RangeBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Min => f.write_str("Min"),
+            Self::Max => f.write_str("Max"),
+            Self::Key(bytes) => {
+                f.write_str("0x")?;
+                for byte in bytes {
+                    write!(f, "{byte:02x}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Position<'a> {
     Min,
@@ -469,6 +649,24 @@ impl RangeBounds {
             && other.lower.position() < self.upper.position()
     }
 
+    /// The exact half-open range shared by these bounds, if any.
+    pub fn intersection(&self, other: &RangeBounds) -> Option<RangeBounds> {
+        if !self.overlaps(other) {
+            return None;
+        }
+        let lower = if self.lower.position() >= other.lower.position() {
+            self.lower.clone()
+        } else {
+            other.lower.clone()
+        };
+        let upper = if self.upper.position() <= other.upper.position() {
+            self.upper.clone()
+        } else {
+            other.upper.clone()
+        };
+        Some(RangeBounds { lower, upper })
+    }
+
     /// Split this `[lower, upper)` range at `at` into a lower child
     /// `[lower, at)` and an upper child `[at, upper)`. The split point must fall
     /// **strictly inside** the range (`lower < at < upper`); a point at or
@@ -491,6 +689,12 @@ impl RangeBounds {
             upper: self.upper.clone(),
         };
         Ok((lower, upper))
+    }
+}
+
+impl std::fmt::Display for RangeBounds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}, {})", self.lower, self.upper)
     }
 }
 
@@ -2003,7 +2207,273 @@ mod tests {
             PlacementAuthorityError::OverlappingCatalogSlice {
                 collection: events,
                 existing_group: analytics,
+                existing_authority: ident("CN=placement-authority-b"),
                 attempted_group: support,
+                attempted_authority: ident("CN=placement-authority-c"),
+                overlap: RangeBounds::full(),
+            }
+        );
+    }
+
+    #[test]
+    fn placement_authority_creation_rejects_overlapping_range_slice() {
+        let orders = collection("orders");
+        let commerce = CollectionGroupId::new("commerce").unwrap();
+        let support = CollectionGroupId::new("support").unwrap();
+        let mut catalog = PlacementAuthorityCatalog::new();
+        catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [(orders.clone(), bounds(b"a", b"m"))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let err = catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    support.clone(),
+                    ident("CN=placement-authority-b"),
+                    [(orders.clone(), bounds(b"h", b"z"))],
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            PlacementAuthorityError::OverlappingCatalogSlice {
+                collection: orders,
+                existing_group: commerce,
+                existing_authority: ident("CN=placement-authority-a"),
+                attempted_group: support,
+                attempted_authority: ident("CN=placement-authority-b"),
+                overlap: bounds(b"h", b"m"),
+            }
+        );
+    }
+
+    #[test]
+    fn placement_authority_split_rejects_overlapping_replacement() {
+        let orders = collection("orders");
+        let commerce = CollectionGroupId::new("commerce").unwrap();
+        let archive = CollectionGroupId::new("archive").unwrap();
+        let mut catalog = PlacementAuthorityCatalog::new();
+        catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [(orders.clone(), bounds(b"a", b"z"))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let err = catalog
+            .split_collection_group_slice(
+                &commerce,
+                CollectionGroupAuthority::with_slices(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [(orders.clone(), bounds(b"a", b"n"))],
+                )
+                .unwrap(),
+                CollectionGroupAuthority::with_slices(
+                    archive.clone(),
+                    ident("CN=placement-authority-b"),
+                    [(orders.clone(), bounds(b"m", b"z"))],
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            PlacementAuthorityError::OverlappingCatalogSlice {
+                collection: orders,
+                existing_group: commerce,
+                existing_authority: ident("CN=placement-authority-a"),
+                attempted_group: archive,
+                attempted_authority: ident("CN=placement-authority-b"),
+                overlap: bounds(b"m", b"n"),
+            }
+        );
+    }
+
+    #[test]
+    fn placement_authority_merge_rejects_overlap_with_surviving_authority() {
+        let orders = collection("orders");
+        let commerce = CollectionGroupId::new("commerce").unwrap();
+        let archive = CollectionGroupId::new("archive").unwrap();
+        let support = CollectionGroupId::new("support").unwrap();
+        let mut catalog = PlacementAuthorityCatalog::new();
+        catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [(orders.clone(), bounds(b"a", b"m"))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    archive.clone(),
+                    ident("CN=placement-authority-b"),
+                    [(orders.clone(), bounds(b"m", b"t"))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    support.clone(),
+                    ident("CN=placement-authority-c"),
+                    [(orders.clone(), bounds(b"t", b"z"))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let err = catalog
+            .merge_collection_group_slices(
+                [&commerce, &archive],
+                CollectionGroupAuthority::with_slices(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [(orders.clone(), bounds(b"a", b"u"))],
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            PlacementAuthorityError::OverlappingCatalogSlice {
+                collection: orders,
+                existing_group: support,
+                existing_authority: ident("CN=placement-authority-c"),
+                attempted_group: commerce,
+                attempted_authority: ident("CN=placement-authority-a"),
+                overlap: bounds(b"t", b"u"),
+            }
+        );
+    }
+
+    #[test]
+    fn placement_authority_reassign_rejects_overlapping_target_slice() {
+        let orders = collection("orders");
+        let commerce = CollectionGroupId::new("commerce").unwrap();
+        let archive = CollectionGroupId::new("archive").unwrap();
+        let mut catalog = PlacementAuthorityCatalog::new();
+        catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [(orders.clone(), bounds(b"a", b"m"))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    archive.clone(),
+                    ident("CN=placement-authority-b"),
+                    [(orders.clone(), bounds(b"m", b"z"))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let err = catalog
+            .reassign_collection_group_slice(
+                &commerce,
+                CollectionGroupAuthority::with_slices(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [(orders.clone(), bounds(b"a", b"h"))],
+                )
+                .unwrap(),
+                CollectionGroupAuthority::with_slices(
+                    archive.clone(),
+                    ident("CN=placement-authority-b"),
+                    [(orders.clone(), bounds(b"h", b"n"))],
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            PlacementAuthorityError::OverlappingCatalogSlice {
+                collection: orders,
+                existing_group: archive.clone(),
+                existing_authority: ident("CN=placement-authority-b"),
+                attempted_group: archive,
+                attempted_authority: ident("CN=placement-authority-b"),
+                overlap: bounds(b"m", b"n"),
+            }
+        );
+    }
+
+    #[test]
+    fn forced_placement_authority_replacement_still_rejects_overlap() {
+        let orders = collection("orders");
+        let commerce = CollectionGroupId::new("commerce").unwrap();
+        let archive = CollectionGroupId::new("archive").unwrap();
+        let support = CollectionGroupId::new("support").unwrap();
+        let mut catalog = PlacementAuthorityCatalog::new();
+        catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    commerce.clone(),
+                    ident("CN=placement-authority-a"),
+                    [(orders.clone(), bounds(b"a", b"m"))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        catalog
+            .assign(
+                CollectionGroupAuthority::with_slices(
+                    archive.clone(),
+                    ident("CN=placement-authority-b"),
+                    [(orders.clone(), bounds(b"m", b"z"))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let err = catalog
+            .force_replace_assignments(
+                [&commerce],
+                [CollectionGroupAuthority::with_slices(
+                    support.clone(),
+                    ident("CN=placement-authority-root"),
+                    [(orders.clone(), bounds(b"h", b"t"))],
+                )
+                .unwrap()],
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            PlacementAuthorityError::OverlappingCatalogSlice {
+                collection: orders,
+                existing_group: archive,
+                existing_authority: ident("CN=placement-authority-b"),
+                attempted_group: support,
+                attempted_authority: ident("CN=placement-authority-root"),
+                overlap: bounds(b"m", b"t"),
             }
         );
     }
