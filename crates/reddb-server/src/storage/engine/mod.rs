@@ -1,7 +1,7 @@
 //! RedDB Storage Engine
 //!
 //! A page-based storage engine inspired by SQLite/Turso architecture.
-//! Implements 4KB aligned pages for efficient disk I/O with SIEVE caching.
+//! Implements 16 KiB pages for efficient disk I/O with SIEVE caching.
 //!
 //! # Architecture
 //!

@@ -36,7 +36,7 @@ impl PageEncryptor {
     /// Layout: `[nonce (12)] [ciphertext (N)] [tag (16)]`; the
     /// `plaintext` of size N yields N + [`OVERHEAD`] bytes. The caller
     /// ensures the plaintext fits the target page size (e.g. 4068
-    /// bytes → a 4096-byte page). `page_id` is bound as AAD.
+    /// bytes → a 16 KiB page). `page_id` is bound as AAD.
     pub fn encrypt(&self, page_id: u32, plaintext: &[u8]) -> Vec<u8> {
         reddb_crypto::encrypt_page(self.key_bytes(), page_id, plaintext)
             .expect("page envelope encryption failed (CSPRNG)")

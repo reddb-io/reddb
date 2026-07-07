@@ -1002,6 +1002,7 @@ struct RuntimeInner {
     index_store: index_store::IndexStore,
     cdc: crate::replication::cdc::CdcBuffer,
     pub(crate) checkpoint_projection_stats: CheckpointProjectionStats,
+    pub(crate) checkpoint_columnar_emission_budget_chunks: usize,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
     query_cache: parking_lot::RwLock<crate::storage::query::planner::cache::PlanCache>,
     result_cache: parking_lot::RwLock<(

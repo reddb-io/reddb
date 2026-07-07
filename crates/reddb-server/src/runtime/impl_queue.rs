@@ -224,6 +224,8 @@ pub(super) struct QueueMessageView {
     /// means immediate availability. Sourced from the
     /// `_available_at_ns` metadata field, populated on push.
     pub(super) available_at_ns: Option<u64>,
+    /// Optional grouped-delivery ordering key, sourced from message metadata.
+    pub(super) ordering_key: Option<String>,
 }
 
 impl QueueMessageView {
@@ -931,11 +933,18 @@ impl RedDBRuntime {
                 value,
                 side,
                 priority,
+                key,
                 available,
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
                 let config = load_queue_config(store.as_ref(), queue);
+                if key.is_some() && config.priority {
+                    return Err(RedDBError::Query(format!(
+                        "ordering key is not supported on priority queue '{}'",
+                        queue
+                    )));
+                }
                 if priority.is_some() && !config.priority {
                     return Err(RedDBError::Query(format!(
                         "queue '{}' is not a priority queue",
@@ -990,12 +999,12 @@ impl RedDBRuntime {
                         ms.saturating_mul(1_000_000)
                     }
                 });
-                if config.ttl_ms.is_some() || available_at_ns.is_some() {
+                if config.ttl_ms.is_some() || available_at_ns.is_some() || key.is_some() {
                     store
                         .set_metadata(
                             queue,
                             id,
-                            queue_message_metadata(config.ttl_ms, available_at_ns),
+                            queue_message_metadata(config.ttl_ms, available_at_ns, key.as_deref()),
                         )
                         .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 }
@@ -1451,18 +1460,31 @@ impl RedDBRuntime {
                 let effective_delay_ms = delay_ms.or(config.retry_delay_ms).unwrap_or(0);
                 let pending_attempt = ps.read_pending_attempt(&did).map_err(map_qse)?;
                 let nack_attempts = pending_attempt.attempts.saturating_add(1);
-                let outcome = lifecycle.nack(&txn, &did).map_err(map_qse)?;
+                let retry_available_at_ns = if effective_delay_ms > 0 {
+                    Some(now_ns().saturating_add(effective_delay_ms.saturating_mul(1_000_000)))
+                } else {
+                    None
+                };
+                let retry_deadline = if effective_delay_ms > 0 {
+                    Some(
+                        std::time::Instant::now()
+                            + std::time::Duration::from_millis(effective_delay_ms),
+                    )
+                } else {
+                    None
+                };
+                let outcome = lifecycle
+                    .nack_with_retry_deadline(&txn, &did, retry_deadline)
+                    .map_err(map_qse)?;
                 // Apply delay only when the message was actually
                 // requeued — DLQ promotion / drop terminate the
                 // retry cycle and a delay would be meaningless.
                 if matches!(outcome, RetirementOutcome::Requeued) && effective_delay_ms > 0 {
-                    let at_ns =
-                        now_ns().saturating_add(effective_delay_ms.saturating_mul(1_000_000));
                     set_message_available_at_ns(
                         store.as_ref(),
                         queue,
                         message_entity,
-                        Some(at_ns),
+                        retry_available_at_ns,
                         config.ttl_ms,
                     )?;
                 }
@@ -2364,6 +2386,7 @@ pub(super) fn load_queue_message_views_with_runtime(
         .filter_map(queue_message_view_from_entity)
         .map(|mut view| {
             view.available_at_ns = read_message_available_at_ns(store, queue, view.id);
+            view.ordering_key = read_message_ordering_key(store, queue, view.id);
             view
         })
         .collect())
@@ -2387,6 +2410,7 @@ fn queue_message_view_from_entity(entity: UnifiedEntity) -> Option<QueueMessageV
         max_attempts: data.max_attempts,
         enqueued_at_ns: data.enqueued_at_ns,
         available_at_ns: None,
+        ordering_key: None,
     })
 }
 
@@ -2479,6 +2503,7 @@ fn queue_projection_default_columns() -> Vec<String> {
         "last_error",
         "enqueued_at",
         "available_at",
+        "key",
         "dlq",
         "tenant",
     ]
@@ -2513,6 +2538,13 @@ fn queue_projection_value(message: &QueueMessageView, dlq: bool, column: &str) -
         "available_at" => Some(Value::UnsignedInteger(
             message.available_at_ns.unwrap_or(message.enqueued_at_ns),
         )),
+        "key" => Some(
+            message
+                .ordering_key
+                .as_ref()
+                .map(|key| Value::text(key.clone()))
+                .unwrap_or(Value::Null),
+        ),
         "dlq" => Some(Value::Boolean(dlq)),
         "tenant" => queue_message_tenant(&message.payload).or(Some(Value::Null)),
         _ => None,
@@ -3203,7 +3235,7 @@ pub(super) fn now_ns() -> u64 {
 }
 
 pub(super) fn queue_message_ttl_metadata(ttl_ms: u64) -> Metadata {
-    queue_message_metadata(Some(ttl_ms), None)
+    queue_message_metadata(Some(ttl_ms), None, None)
 }
 
 /// Build the per-message metadata row attached to a queue message. Both
@@ -3214,6 +3246,7 @@ pub(super) fn queue_message_ttl_metadata(ttl_ms: u64) -> Metadata {
 pub(super) fn queue_message_metadata(
     ttl_ms: Option<u64>,
     available_at_ns: Option<u64>,
+    ordering_key: Option<&str>,
 ) -> Metadata {
     let mut fields = HashMap::new();
     if let Some(ttl_ms) = ttl_ms {
@@ -3230,6 +3263,12 @@ pub(super) fn queue_message_metadata(
         fields.insert(
             "_available_at_ns".to_string(),
             MetadataValue::Timestamp(at_ns),
+        );
+    }
+    if let Some(key) = ordering_key {
+        fields.insert(
+            "_ordering_key".to_string(),
+            MetadataValue::String(key.to_string()),
         );
     }
     Metadata::with_fields(fields)
@@ -3277,11 +3316,30 @@ pub(super) fn set_message_available_at_ns(
             _ => None,
         })
         .or(fallback_ttl_ms);
-    let metadata = queue_message_metadata(existing_ttl_ms, available_at_ns);
+    let existing_ordering_key = read_message_ordering_key(store, queue, message_id);
+    let metadata = queue_message_metadata(
+        existing_ttl_ms,
+        available_at_ns,
+        existing_ordering_key.as_deref(),
+    );
     match store.set_metadata(queue, message_id, metadata) {
         Ok(()) => Ok(()),
         Err(crate::storage::StoreError::CollectionNotFound(_)) => Ok(()),
         Err(err) => Err(RedDBError::Internal(err.to_string())),
+    }
+}
+
+/// Read the `_ordering_key` metadata for a queue message. Returns `None`
+/// for keyless messages or when the metadata row is absent.
+pub(super) fn read_message_ordering_key(
+    store: &UnifiedStore,
+    queue: &str,
+    message_id: EntityId,
+) -> Option<String> {
+    let md = store.get_metadata(queue, message_id)?;
+    match md.get("_ordering_key")? {
+        MetadataValue::String(value) => Some(value.clone()),
+        _ => None,
     }
 }
 

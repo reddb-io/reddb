@@ -282,6 +282,7 @@ impl JoinReorderingPass {
                 let base = structured_size.min(vector_size);
                 hq.limit.map(|l| base.min(l as f64)).unwrap_or(base)
             }
+            QueryExpr::Explain(explain) => Self::estimate_size(&explain.inner),
             // DML/DDL/Command statements return minimal result sets
             QueryExpr::Insert(_)
             | QueryExpr::Update(_)

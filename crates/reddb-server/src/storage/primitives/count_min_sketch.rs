@@ -102,11 +102,12 @@ impl CountMinSketch {
             + self.depth * std::mem::size_of::<Vec<u64>>()
     }
 
-    /// Serialize to bytes: [width:4][depth:4][counters...]
+    /// Serialize to bytes: [width:4][depth:4][total:8][counters...]
     pub fn as_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(8 + self.depth * self.width * 8);
+        let mut buf = Vec::with_capacity(16 + self.depth * self.width * 8);
         buf.extend_from_slice(&(self.width as u32).to_le_bytes());
         buf.extend_from_slice(&(self.depth as u32).to_le_bytes());
+        buf.extend_from_slice(&self.total.to_le_bytes());
         for row in &self.counters {
             for &val in row {
                 buf.extend_from_slice(&val.to_le_bytes());
@@ -122,22 +123,27 @@ impl CountMinSketch {
         }
         let width = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
         let depth = u32::from_le_bytes(bytes[4..8].try_into().ok()?) as usize;
-        let expected = 8 + depth * width * 8;
-        if bytes.len() != expected {
+        let counters_len = depth * width * 8;
+        let legacy_len = 8 + counters_len;
+        let current_len = 16 + counters_len;
+        let (mut offset, mut total) = if bytes.len() == current_len {
+            (16, u64::from_le_bytes(bytes[8..16].try_into().ok()?))
+        } else if bytes.len() == legacy_len {
+            (8, 0)
+        } else {
             return None;
-        }
+        };
         let mut counters = vec![vec![0u64; width]; depth];
-        let mut offset = 8;
-        let mut total = 0u64;
         for row in &mut counters {
             for cell in row.iter_mut() {
                 *cell = u64::from_le_bytes(bytes[offset..offset + 8].try_into().ok()?);
                 offset += 8;
             }
         }
-        // Approximate total from first row
-        for &val in &counters[0] {
-            total = total.saturating_add(val);
+        if bytes.len() == legacy_len {
+            for &val in &counters[0] {
+                total = total.saturating_add(val);
+            }
         }
         Some(Self {
             counters,
@@ -264,6 +270,7 @@ mod tests {
         assert_eq!(restored.width(), 100);
         assert_eq!(restored.depth(), 3);
         assert!(restored.estimate(b"test") >= 42);
+        assert_eq!(restored.total(), 42);
     }
 
     #[test]

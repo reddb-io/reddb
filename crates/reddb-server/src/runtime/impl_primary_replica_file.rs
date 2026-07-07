@@ -1,6 +1,60 @@
 use super::*;
 
+const SINGLE_FILE_FORK_GUIDANCE: &str = "store fork is not available directly on embedded \
+single-file stores. Export the .rdb through the operational-directory layout first, then fork \
+that operational store. See docs/engine/operational-storage-profiles.md#forking-an-embedded-single-file-store";
+
 impl RedDBRuntime {
+    pub fn fork_store(&self, name: &str) -> RedDBResult<reddb_file::ForkInfo> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RedDBError::InvalidOperation(
+                "store fork name cannot be empty".to_string(),
+            ));
+        }
+        if self.inner.embedded_single_file {
+            return Err(RedDBError::InvalidOperation(
+                SINGLE_FILE_FORK_GUIDANCE.to_string(),
+            ));
+        }
+        let data_path = self.inner.db.options().data_path.as_ref().ok_or_else(|| {
+            RedDBError::InvalidOperation("store fork requires a data path".into())
+        })?;
+
+        self.flush()?;
+        let fork_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let manifest =
+            crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
+        manifest
+            .create_fork(name, fork_lsn)
+            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))?;
+        manifest
+            .list_forks()
+            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))?
+            .into_iter()
+            .find(|fork| fork.name == name)
+            .ok_or_else(|| RedDBError::Internal(format!("created store fork {name} is missing")))
+    }
+
+    pub fn detach_fork_store(&self, name: &str) -> RedDBResult<bool> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RedDBError::InvalidOperation(
+                "store fork name cannot be empty".to_string(),
+            ));
+        }
+        let data_path = self.inner.db.options().data_path.as_ref().ok_or_else(|| {
+            RedDBError::InvalidOperation("store fork requires a data path".into())
+        })?;
+
+        let manifest =
+            crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
+        manifest
+            .detach_fork(name)
+            .map(|detached| detached.is_some())
+            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))
+    }
+
     pub fn replica_relay_manifest_path(&self, replica_id: &str) -> Option<std::path::PathBuf> {
         let plan = self.primary_replica_file_plan()?;
         Some(plan.relay_manifest_path(replica_id))
@@ -295,6 +349,16 @@ impl RedDBRuntime {
         }
     }
 
+    fn primary_replica_fork_lsns(&self) -> RedDBResult<Vec<u64>> {
+        let Some(data_path) = self.inner.db.options().data_path.as_ref() else {
+            return Ok(Vec::new());
+        };
+        crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path)
+            .list_forks()
+            .map(|forks| forks.into_iter().map(|fork| fork.fork_lsn).collect())
+            .map_err(|err| RedDBError::Internal(err.to_string()))
+    }
+
     pub fn primary_replica_wal_retention_plan(
         &self,
     ) -> RedDBResult<Option<reddb_file::WalRetentionPlan>> {
@@ -305,8 +369,9 @@ impl RedDBRuntime {
             return Ok(None);
         };
         let current_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let fork_lsns = self.primary_replica_fork_lsns()?;
         Ok(Some(
-            plan.plan_wal_retention(&catalog, current_lsn)
+            plan.plan_wal_retention_with_fork_lsns(&catalog, &fork_lsns, current_lsn)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?,
         ))
     }
@@ -431,8 +496,9 @@ impl RedDBRuntime {
         let Some(catalog) = self.primary_replica_slot_catalog()? else {
             return Ok(None);
         };
+        let fork_lsns = self.primary_replica_fork_lsns()?;
         Ok(Some(
-            plan.prune_wal_segments(&catalog, current_lsn)
+            plan.prune_wal_segments_with_fork_lsns(&catalog, &fork_lsns, current_lsn)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?,
         ))
     }

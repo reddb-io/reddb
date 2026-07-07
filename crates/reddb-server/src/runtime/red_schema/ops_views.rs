@@ -123,6 +123,41 @@ pub(super) fn analytics_sources_snapshot(
         })
         .collect()
 }
+
+pub(super) fn forks_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<UnifiedRecord>> {
+    let db = runtime.db();
+    let Some(path) = db.options().data_path.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let schema = Arc::new(
+        FORK_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let forks = reddb_file::OperationalManifest::for_db_path(path)
+        .list_forks()
+        .map_err(RedDBError::Io)?;
+    Ok(forks
+        .into_iter()
+        .map(|fork| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(fork.name),
+                    Value::text(fork.parent_store),
+                    Value::UnsignedInteger(fork.fork_lsn),
+                    Value::text(fork.hydration_state.as_str()),
+                    Value::UnsignedInteger(fork.collections_total),
+                    Value::UnsignedInteger(fork.shared_by_reference),
+                    Value::UnsignedInteger(fork.hydrating),
+                    Value::UnsignedInteger(fork.hydrated),
+                ],
+            )
+        })
+        .collect())
+}
+
 pub(super) fn subscriptions_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
@@ -470,6 +505,13 @@ pub(super) fn queue_pending_snapshot(
             (lock_deadline_ms, delivery_count, delivery_id)
         };
         let attempts = delivery_count.saturating_sub(1);
+        let ordering_key = super::super::impl_queue::read_message_ordering_key(
+            store.as_ref(),
+            &queue,
+            EntityId::new(message_id),
+        )
+        .map(Value::text)
+        .unwrap_or(Value::Null);
 
         records.push(UnifiedRecord::with_schema(
             Arc::clone(&schema),
@@ -478,6 +520,7 @@ pub(super) fn queue_pending_snapshot(
                 Value::text(group),
                 Value::UnsignedInteger(message_id),
                 Value::text(delivery_id),
+                ordering_key,
                 Value::UnsignedInteger(attempts),
                 Value::TimestampMs(lock_deadline_ms as i64),
                 Value::text(consumer),

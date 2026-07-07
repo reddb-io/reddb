@@ -149,12 +149,13 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let queue = self.expect_ident()?;
                 let value = self.parse_value()?;
-                let (priority, available) = self.parse_push_tail_clauses()?;
+                let (priority, key, available) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
                     side: QueueSide::Right,
                     priority,
+                    key,
                     available,
                 }))
             }
@@ -250,12 +251,13 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let queue = self.expect_ident()?;
                 let value = self.parse_value()?;
-                let (_priority, available) = self.parse_push_tail_clauses()?;
+                let (_priority, key, available) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
                     side: QueueSide::Left,
                     priority: None,
+                    key,
                     available,
                 }))
             }
@@ -263,12 +265,13 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let queue = self.expect_ident()?;
                 let value = self.parse_value()?;
-                let (priority, available) = self.parse_push_tail_clauses()?;
+                let (priority, key, available) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
                     side: QueueSide::Right,
                     priority,
+                    key,
                     available,
                 }))
             }
@@ -458,16 +461,18 @@ impl<'a> Parser<'a> {
         Ok((group, message_id, delivery_id, delay_ms))
     }
 
-    /// Parse the optional `PRIORITY <int>`, `DELAY <duration>`, and
-    /// `AVAILABLE AT <unix_ms>` tail of a `QUEUE PUSH` / `RPUSH` / `LPUSH`
+    /// Parse the optional `PRIORITY <int>`, `KEY '<key>'`,
+    /// `DELAY <duration>`, and `AVAILABLE AT <unix_ms>` tail of a
+    /// `QUEUE PUSH` / `RPUSH` / `LPUSH`
     /// (issue #722). Clauses may appear in any order; each may appear at
     /// most once. `AVAILABLE AT` and `DELAY` are mutually exclusive — both
     /// produce a per-message availability instant, so accepting both
     /// would force the parser to pick a winner silently.
     fn parse_push_tail_clauses(
         &mut self,
-    ) -> Result<(Option<i32>, Option<QueueAvailability>), ParseError> {
+    ) -> Result<(Option<i32>, Option<String>, Option<QueueAvailability>), ParseError> {
         let mut priority: Option<i32> = None;
+        let mut key: Option<String> = None;
         let mut available: Option<QueueAvailability> = None;
         loop {
             if self.consume(&Token::Priority)? {
@@ -478,11 +483,31 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 priority = Some(self.parse_integer()? as i32);
+            } else if self.consume(&Token::Key)? {
+                if key.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate KEY clause".to_string(),
+                        self.position(),
+                    ));
+                }
+                if available.is_some() {
+                    return Err(ParseError::new(
+                        "QUEUE PUSH KEY cannot be combined with DELAY / AVAILABLE AT".to_string(),
+                        self.position(),
+                    ));
+                }
+                key = Some(self.parse_string()?);
             } else if self.peek_ident_ci("DELAY") {
                 self.advance()?;
                 if available.is_some() {
                     return Err(ParseError::new(
                         "QUEUE PUSH accepts at most one of DELAY / AVAILABLE AT".to_string(),
+                        self.position(),
+                    ));
+                }
+                if key.is_some() {
+                    return Err(ParseError::new(
+                        "QUEUE PUSH KEY cannot be combined with DELAY / AVAILABLE AT".to_string(),
                         self.position(),
                     ));
                 }
@@ -504,13 +529,19 @@ impl<'a> Parser<'a> {
                         self.position(),
                     ));
                 }
+                if key.is_some() {
+                    return Err(ParseError::new(
+                        "QUEUE PUSH KEY cannot be combined with DELAY / AVAILABLE AT".to_string(),
+                        self.position(),
+                    ));
+                }
                 let unix_ms = self.parse_integer()?.max(0) as u64;
                 available = Some(QueueAvailability::AtUnixMs(unix_ms));
             } else {
                 break;
             }
         }
-        Ok((priority, available))
+        Ok((priority, key, available))
     }
 
     /// Parse an optional `WAIT <duration>` tail (slice A of PRD #718).

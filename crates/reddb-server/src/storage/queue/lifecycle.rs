@@ -261,13 +261,25 @@ pub(crate) trait QueueStore {
     fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32;
 
     /// Move `original` onto the DLQ at `dlq_target`.
-    fn enqueue_dlq(&self, txn: &QueueTxn, dlq_target: &str, original: Value) -> Result<()>;
+    fn enqueue_dlq(
+        &self,
+        txn: &QueueTxn,
+        dlq_target: &str,
+        original: Value,
+        ordering_key: Option<&str>,
+    ) -> Result<()>;
 
     /// Pending deadline for `delivery_id`, if it is currently held.
     fn read_lock_deadline(&self, delivery_id: &str) -> Option<Instant>;
 
     /// Read the stored payload for `message_id` on `queue`, if known.
     fn read_message(&self, queue: &str, message_id: MessageId) -> Option<Value>;
+
+    /// Read the optional ordering key stored on `message_id`.
+    fn read_ordering_key(&self, queue: &str, message_id: MessageId) -> Option<String>;
+
+    /// Whether `group` already has a pending delivery with `ordering_key`.
+    fn ordering_key_in_flight(&self, queue: &str, group: &str, ordering_key: &str) -> bool;
 
     /// Read the stored payload for the message backing `delivery_id`, if it
     /// is currently held. Used by `QueueLifecycle::nack` to capture the
@@ -375,6 +387,8 @@ pub(crate) struct BumpedAttempt {
     pub(crate) attempts: u32,
     pub(crate) queue: QueueId,
     pub(crate) message_id: MessageId,
+    pub(crate) group: ConsumerGroupId,
+    pub(crate) consumer: String,
 }
 
 /// Crate-wide fallback when a `read_max_attempts` caller hits a tuple
@@ -388,6 +402,7 @@ pub(crate) const DEFAULT_READ_MAX_ATTEMPTS: u32 = 3;
 pub(crate) struct DlqRecord {
     pub target: DlqTarget,
     pub original: Value,
+    pub ordering_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -413,6 +428,8 @@ struct State {
     /// by tests via `seed_max_attempts`; absence falls back to
     /// `DEFAULT_READ_MAX_ATTEMPTS`.
     max_attempts: HashMap<(QueueId, MessageId), u32>,
+    /// Optional ordering keys keyed by `(queue, message_id)`.
+    ordering_keys: HashMap<(QueueId, MessageId), String>,
     dlq: Vec<DlqRecord>,
 }
 
@@ -465,6 +482,14 @@ impl InMemoryQueueStore {
         state
             .payloads
             .insert((queue.to_string(), message_id), payload);
+    }
+
+    /// Associate an ordering key with `(queue, message_id)` — test helper.
+    pub(crate) fn seed_ordering_key(&self, queue: &str, message_id: MessageId, key: &str) {
+        let mut state = self.state.lock().expect("state poisoned");
+        state
+            .ordering_keys
+            .insert((queue.to_string(), message_id), key.to_string());
     }
 
     fn next_delivery_id(&self) -> DeliveryId {
@@ -582,6 +607,9 @@ impl QueueStore for InMemoryQueueStore {
         state
             .payloads
             .remove(&(entry.queue.clone(), entry.message_id));
+        state
+            .ordering_keys
+            .remove(&(entry.queue.clone(), entry.message_id));
         // ack-and-delete on a WORK-mode queue tombstones the underlying
         // message — mirror the runtime-side `record_pending_tombstone`
         // call so tests observe the would-be MVCC tombstone. Drop the
@@ -647,12 +675,16 @@ impl QueueStore for InMemoryQueueStore {
         let count = entry.attempts;
         let queue = entry.queue.clone();
         let message_id = entry.message_id;
-        let key = (queue.clone(), message_id, entry.group.clone());
+        let group = entry.group.clone();
+        let consumer = entry.consumer.clone();
+        let key = (queue.clone(), message_id, group.clone());
         state.attempts.insert(key, count);
         Ok(BumpedAttempt {
             attempts: count,
             queue,
             message_id,
+            group,
+            consumer,
         })
     }
 
@@ -666,6 +698,8 @@ impl QueueStore for InMemoryQueueStore {
             attempts: entry.attempts,
             queue: entry.queue.clone(),
             message_id: entry.message_id,
+            group: entry.group.clone(),
+            consumer: entry.consumer.clone(),
         })
     }
 
@@ -678,11 +712,18 @@ impl QueueStore for InMemoryQueueStore {
             .unwrap_or(DEFAULT_READ_MAX_ATTEMPTS)
     }
 
-    fn enqueue_dlq(&self, _txn: &QueueTxn, dlq_target: &str, original: Value) -> Result<()> {
+    fn enqueue_dlq(
+        &self,
+        _txn: &QueueTxn,
+        dlq_target: &str,
+        original: Value,
+        ordering_key: Option<&str>,
+    ) -> Result<()> {
         let mut state = self.state.lock().expect("state poisoned");
         state.dlq.push(DlqRecord {
             target: dlq_target.to_string(),
             original,
+            ordering_key: ordering_key.map(str::to_string),
         });
         Ok(())
     }
@@ -698,6 +739,26 @@ impl QueueStore for InMemoryQueueStore {
             .payloads
             .get(&(queue.to_string(), message_id))
             .cloned()
+    }
+
+    fn read_ordering_key(&self, queue: &str, message_id: MessageId) -> Option<String> {
+        let state = self.state.lock().expect("state poisoned");
+        state
+            .ordering_keys
+            .get(&(queue.to_string(), message_id))
+            .cloned()
+    }
+
+    fn ordering_key_in_flight(&self, queue: &str, group: &str, ordering_key: &str) -> bool {
+        let state = self.state.lock().expect("state poisoned");
+        state.pending.values().any(|pending| {
+            pending.queue == queue
+                && pending.group == group
+                && state
+                    .ordering_keys
+                    .get(&(pending.queue.clone(), pending.message_id))
+                    .is_some_and(|key| key == ordering_key)
+        })
     }
 
     fn read_pending_payload(&self, delivery_id: &str) -> Option<Value> {
@@ -769,6 +830,7 @@ impl QueueStore for InMemoryQueueStore {
             // Drop the available rows and their payloads.
             state.queues.remove(queue);
             state.payloads.retain(|(q, _), _| q != queue);
+            state.ordering_keys.retain(|(q, _), _| q != queue);
         }
 
         // Tombstones recorded after the state mutation, mirroring the
@@ -1229,16 +1291,23 @@ mod tests {
         let store = InMemoryQueueStore::new();
         let t = txn();
         store
-            .enqueue_dlq(&t, "orders.dlq", Value::text("payload-1"))
+            .enqueue_dlq(
+                &t,
+                "orders.dlq",
+                Value::text("payload-1"),
+                Some("account-7"),
+            )
             .unwrap();
         store
-            .enqueue_dlq(&t, "orders.dlq", Value::Integer(42))
+            .enqueue_dlq(&t, "orders.dlq", Value::Integer(42), None)
             .unwrap();
         let snap = store.dlq_snapshot();
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].target, "orders.dlq");
         assert_eq!(snap[0].original, Value::text("payload-1"));
+        assert_eq!(snap[0].ordering_key.as_deref(), Some("account-7"));
         assert_eq!(snap[1].original, Value::Integer(42));
+        assert_eq!(snap[1].ordering_key, None);
     }
 
     #[test]

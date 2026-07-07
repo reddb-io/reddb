@@ -4,7 +4,7 @@
 //! - All values stored in leaf nodes
 //! - Interior nodes only contain keys and child pointers
 //! - Leaf nodes form a doubly-linked list for range scans
-//! - Each node fits in a single 4KB page
+//! - Each node fits in a single 16 KiB page
 //!
 //! # Page Layout
 //!

@@ -152,6 +152,11 @@ pub enum QueryExpr {
     RollbackMigration(RollbackMigrationQuery),
     /// EXPLAIN MIGRATION name
     ExplainMigration(ExplainMigrationQuery),
+    /// EXPLAIN <statement>
+    ///
+    /// Plan-only wrapper: the executor must inspect the wrapped statement
+    /// without executing it.
+    Explain(ExplainQuery),
     /// `EVENTS BACKFILL collection [WHERE pred] TO queue [LIMIT n]`.
     EventsBackfill(EventsBackfillQuery),
     /// `EVENTS BACKFILL STATUS collection` placeholder for the status slice.
@@ -786,6 +791,11 @@ pub struct RollbackMigrationQuery {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExplainMigrationQuery {
     pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExplainQuery {
+    pub inner: Box<QueryExpr>,
 }
 
 /// Probabilistic data structure commands
@@ -3058,6 +3068,9 @@ pub enum QueueCommand {
         value: Value,
         side: QueueSide,
         priority: Option<i32>,
+        /// Optional per-message ordering key. Grouped delivery serializes
+        /// messages sharing this key per consumer group.
+        key: Option<String>,
         /// Per-message delayed availability (issue #722). `None` means the
         /// message is deliverable immediately. `Some(_)` resolves to an
         /// `available_at_ns` metadata field at push time; delivery paths

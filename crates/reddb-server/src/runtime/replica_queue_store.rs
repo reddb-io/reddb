@@ -315,6 +315,8 @@ impl QueueStore for ReplicaQueueStore {
             attempts: self.read_attempts(&row.queue, row.message_id, &row.group),
             queue: row.queue,
             message_id: row.message_id,
+            group: row.group,
+            consumer: String::new(),
         })
     }
 
@@ -337,7 +339,13 @@ impl QueueStore for ReplicaQueueStore {
         }
     }
 
-    fn enqueue_dlq(&self, _txn: &QueueTxn, _dlq_target: &str, _original: Value) -> Result<()> {
+    fn enqueue_dlq(
+        &self,
+        _txn: &QueueTxn,
+        _dlq_target: &str,
+        _original: Value,
+        _ordering_key: Option<&str>,
+    ) -> Result<()> {
         Err(QueueStoreError::ReplicaImmutable)
     }
 
@@ -356,6 +364,24 @@ impl QueueStore for ReplicaQueueStore {
             EntityData::QueueMessage(data) if !data.acked => Some(data.payload),
             _ => None,
         }
+    }
+
+    fn read_ordering_key(&self, queue: &str, message_id: MessageId) -> Option<String> {
+        let store = self.store();
+        super::impl_queue::read_message_ordering_key(
+            store.as_ref(),
+            queue,
+            EntityId::new(message_id),
+        )
+    }
+
+    fn ordering_key_in_flight(&self, queue: &str, group: &str, ordering_key: &str) -> bool {
+        self.pending_message_ids(queue, Some(group))
+            .into_iter()
+            .any(|message_id| {
+                self.read_ordering_key(queue, message_id)
+                    .is_some_and(|key| key == ordering_key)
+            })
     }
 
     fn read_pending_payload(&self, delivery_id: &str) -> Option<Value> {
@@ -601,7 +627,7 @@ mod tests {
         ));
         assert!(matches!(
             replica
-                .enqueue_dlq(&t, "dlq", Value::text("x"))
+                .enqueue_dlq(&t, "dlq", Value::text("x"), None)
                 .unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));

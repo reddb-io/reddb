@@ -3,13 +3,16 @@
 //! Covers the plain `EXPLAIN <stmt>` surface: the runtime intercepts
 //! before SQL parsing, runs the planner on the inner statement
 //! without executing it, and returns the CanonicalLogicalNode tree
-//! as rows. Columns: op, source, est_rows, est_cost, depth.
+//! as rows. Columns: op, source, estimated_rows, estimated_cost, depth.
 //!
 //! `EXPLAIN ALTER FOR CREATE TABLE ...` is a separate schema-diff
 //! command and stays on the regular SQL path.
 
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+
+const EXPLAIN_PLAN_COLUMNS: &[&str] =
+    &["op", "source", "estimated_rows", "estimated_cost", "depth"];
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
@@ -38,10 +41,7 @@ fn explain_select_returns_plan_tree_rows() {
     assert_eq!(result.affected_rows, 0);
 
     // Column contract — HTTP/gRPC surface depends on this shape.
-    assert_eq!(
-        result.result.columns,
-        vec!["op", "source", "est_rows", "est_cost", "depth"]
-    );
+    assert_eq!(result.result.columns, EXPLAIN_PLAN_COLUMNS);
 
     assert!(
         !result.result.records.is_empty(),
@@ -58,9 +58,9 @@ fn explain_select_returns_plan_tree_rows() {
         Some(Value::Text(op)) => assert!(!op.is_empty(), "root op must be non-empty"),
         other => panic!("root op must be Text, got {other:?}"),
     }
-    // est_rows/est_cost are floats.
-    assert!(matches!(root.get("est_rows"), Some(Value::Float(_))));
-    assert!(matches!(root.get("est_cost"), Some(Value::Float(_))));
+    // Planner row counts and costs must be explicitly labeled as estimates.
+    assert!(matches!(root.get("estimated_rows"), Some(Value::Float(_))));
+    assert!(matches!(root.get("estimated_cost"), Some(Value::Float(_))));
 }
 
 #[test]
@@ -77,23 +77,64 @@ fn explain_is_case_insensitive() {
 }
 
 #[test]
-fn explain_does_not_execute_the_inner_statement() {
+fn explain_dml_returns_plan_rows_without_executing_inner_statement() {
     let rt = rt();
     exec(&rt, "CREATE TABLE audit (id INT, note TEXT)");
+    exec(
+        &rt,
+        "INSERT INTO audit (id, note) VALUES (1, 'keep'), (2, 'remove')",
+    );
 
-    // EXPLAIN on an INSERT must not actually write the row.
-    let _ = rt
-        .execute_query("EXPLAIN INSERT INTO audit (id, note) VALUES (99, 'boom')")
-        .expect("EXPLAIN INSERT should succeed");
+    for sql in [
+        "EXPLAIN INSERT INTO audit (id, note) VALUES (99, 'boom')",
+        "EXPLAIN UPDATE audit SET note = 'changed' WHERE id = 1",
+        "EXPLAIN DELETE FROM audit WHERE id = 2",
+    ] {
+        let explained = rt.execute_query(sql).expect(sql);
+        assert_eq!(explained.statement, "explain", "{sql}");
+        assert_eq!(explained.affected_rows, 0, "{sql}");
+        assert_eq!(explained.result.columns, EXPLAIN_PLAN_COLUMNS, "{sql}");
+        assert_eq!(explained.result.records.len(), 1, "{sql}");
+
+        let root = &explained.result.records[0];
+        assert!(
+            matches!(root.get("op"), Some(Value::Text(op)) if op.as_ref() == "dml_ddl"),
+            "{sql}: {root:?}"
+        );
+        assert!(
+            matches!(root.get("source"), Some(Value::Null)),
+            "{sql}: {root:?}"
+        );
+        assert!(
+            matches!(root.get("estimated_rows"), Some(Value::Float(0.0))),
+            "{sql}: {root:?}"
+        );
+        assert!(
+            matches!(root.get("estimated_cost"), Some(Value::Float(1.0))),
+            "{sql}: {root:?}"
+        );
+        assert!(
+            matches!(root.get("depth"), Some(Value::Integer(0))),
+            "{sql}: {root:?}"
+        );
+    }
 
     let after = rt
-        .execute_query("SELECT * FROM audit")
+        .execute_query("SELECT id, note FROM audit")
         .expect("SELECT after EXPLAIN");
     assert_eq!(
         after.result.records.len(),
-        0,
-        "EXPLAIN must not materialise the INSERT"
+        2,
+        "EXPLAIN must not materialise INSERT, UPDATE, or DELETE"
     );
+    assert!(after.result.records.iter().any(|row| {
+        matches!(row.get("id"), Some(Value::Integer(1)))
+            && matches!(row.get("note"), Some(Value::Text(note)) if note.as_ref() == "keep")
+    }));
+    assert!(after.result.records.iter().any(|row| {
+        matches!(row.get("id"), Some(Value::Integer(2)))
+            && matches!(row.get("note"), Some(Value::Text(note)) if note.as_ref() == "remove")
+    }));
 }
 
 #[test]
@@ -112,10 +153,10 @@ fn explain_alter_still_routes_to_schema_diff() {
         result.err()
     );
     let r = result.unwrap();
-    // Both my new EXPLAIN and the existing EXPLAIN ALTER set
+    // Both generic EXPLAIN and the existing EXPLAIN ALTER set
     // statement="explain", so distinguish by the column shape: the
     // schema-diff command reports ["table","format","diff"], while
-    // the plan-tree shape is ["op","source","est_rows","est_cost","depth"].
+    // the plan-tree shape is ["op","source","estimated_rows","estimated_cost","depth"].
     assert_eq!(
         r.result.columns,
         vec!["table", "format", "diff"],

@@ -195,6 +195,10 @@ harness = false
 name = "concurrent_commit_bench"
 harness = false
 
+[[bench]]
+name = "timeseries_ingest_bench"
+harness = false
+
 [dev-dependencies]
 # Criterion benchmark harness for blob_cache_bench (#190).
 criterion = { version = "0.8", features = ["html_reports"] }

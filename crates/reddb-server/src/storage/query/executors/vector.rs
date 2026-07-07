@@ -655,6 +655,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::ApplyMigration(_) => "apply_migration",
         QueryExpr::RollbackMigration(_) => "rollback_migration",
         QueryExpr::ExplainMigration(_) => "explain_migration",
+        QueryExpr::Explain(_) => "explain",
         QueryExpr::EventsBackfill(_) => "events_backfill",
         QueryExpr::EventsBackfillStatus { .. } => "events_backfill_status",
     }

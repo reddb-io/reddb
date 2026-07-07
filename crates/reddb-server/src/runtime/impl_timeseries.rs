@@ -7,6 +7,13 @@ use super::*;
 
 const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
 const COLUMNAR_PROJECTION_SIZE_FLOOR_ROWS: usize = 4;
+const DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS: u64 = 86_400_000_000_000;
+
+#[derive(Default)]
+struct SealHypertableChunksOutcome {
+    chunks_sealed: usize,
+    columnar_chunks_sealed: usize,
+}
 
 impl RedDBRuntime {
     pub fn execute_create_timeseries(
@@ -70,21 +77,31 @@ impl RedDBRuntime {
         }
         save_timeseries_metadata(store.as_ref(), query)?;
 
-        // `CREATE HYPERTABLE` additionally registers a HypertableSpec
-        // so chunk routing + retention sweeps can address this table.
-        // Plain `CREATE TIMESERIES` leaves `hypertable` = None and the
-        // runtime behaves as before.
-        if let Some(ht) = &query.hypertable {
-            let mut spec = crate::storage::timeseries::HypertableSpec::new(
-                query.name.clone(),
-                ht.time_column.clone(),
-                ht.chunk_interval_ns,
-            );
-            if let Some(ttl) = ht.default_ttl_ns {
-                spec = spec.with_ttl_ns(ttl);
+        let spec = match &query.hypertable {
+            Some(ht) => {
+                let mut spec = crate::storage::timeseries::HypertableSpec::new(
+                    query.name.clone(),
+                    ht.time_column.clone(),
+                    ht.chunk_interval_ns,
+                );
+                if let Some(ttl) = ht.default_ttl_ns {
+                    spec = spec.with_ttl_ns(ttl);
+                }
+                spec
             }
-            self.inner.db.hypertables().register(spec);
-        }
+            None => {
+                let mut spec = crate::storage::timeseries::HypertableSpec::new(
+                    query.name.clone(),
+                    "timestamp",
+                    DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS,
+                );
+                if let Some(ttl_ms) = query.retention_ms {
+                    spec = spec.with_ttl_ns(ttl_ms.saturating_mul(1_000_000));
+                }
+                spec
+            }
+        };
+        self.inner.db.hypertables().register(spec);
 
         self.invalidate_result_cache();
         self.inner
@@ -212,6 +229,41 @@ impl RedDBRuntime {
     /// Opted-out chunks fall to the row seal and `columnar_page` stays
     /// `None`. Returns the number of chunks sealed columnar.
     pub fn seal_hypertable_chunks(&self, collection: &str) -> RedDBResult<usize> {
+        self.seal_hypertable_chunks_internal(collection, usize::MAX, true)
+            .map(|outcome| outcome.columnar_chunks_sealed)
+    }
+
+    pub(crate) fn seal_hypertable_chunks_for_checkpoint(
+        &self,
+        max_chunks: usize,
+    ) -> RedDBResult<usize> {
+        if max_chunks == 0 {
+            return Ok(0);
+        }
+
+        let mut remaining = max_chunks;
+        let mut sealed = 0usize;
+        for collection in self.inner.db.hypertables().names() {
+            if remaining == 0 {
+                break;
+            }
+            let outcome = self.seal_hypertable_chunks_internal(&collection, remaining, false)?;
+            remaining = remaining.saturating_sub(outcome.chunks_sealed);
+            sealed += outcome.chunks_sealed;
+        }
+        Ok(sealed)
+    }
+
+    fn seal_hypertable_chunks_internal(
+        &self,
+        collection: &str,
+        max_chunks: usize,
+        include_tail_chunk: bool,
+    ) -> RedDBResult<SealHypertableChunksOutcome> {
+        if max_chunks == 0 {
+            return Ok(SealHypertableChunksOutcome::default());
+        }
+
         let analytical = self
             .inner
             .db
@@ -219,17 +271,31 @@ impl RedDBRuntime {
             .and_then(|c| c.analytical_storage.clone());
         let registry = self.inner.db.hypertables();
         let Some(spec) = registry.get(collection) else {
-            return Ok(0);
+            return Ok(SealHypertableChunksOutcome::default());
         };
         let time_col = spec.time_column.clone();
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
-            return Ok(0);
+            return Ok(SealHypertableChunksOutcome::default());
         };
 
-        let mut sealed_columnar = 0usize;
-        for meta in registry.show_chunks(collection) {
+        let chunks = registry.show_chunks(collection);
+        let tail_chunk_start = if include_tail_chunk {
+            None
+        } else {
+            chunks.iter().map(|meta| meta.id.start_ns).max()
+        };
+
+        let mut outcome = SealHypertableChunksOutcome::default();
+        let mut changed = false;
+        for meta in chunks {
+            if outcome.chunks_sealed >= max_chunks {
+                break;
+            }
             if meta.sealed {
+                continue;
+            }
+            if Some(meta.id.start_ns) == tail_chunk_start {
                 continue;
             }
             let start = meta.id.start_ns;
@@ -263,16 +329,32 @@ impl RedDBRuntime {
 
             match routed {
                 crate::storage::timeseries::chunk::SealedChunkStorage::Columnar(bytes) => {
-                    let page = crate::storage::engine::PageLocation::new(0, 0, bytes.len() as u32);
+                    let page = self
+                        .inner
+                        .db
+                        .write_column_block_page(&bytes)
+                        .map_err(|err| {
+                            RedDBError::Internal(format!("columnar page write failed: {err}"))
+                        })?;
                     registry.seal_chunk_columnar(&meta.id, page, bytes);
-                    sealed_columnar += 1;
+                    outcome.columnar_chunks_sealed += 1;
+                    outcome.chunks_sealed += 1;
+                    changed = true;
                 }
                 crate::storage::timeseries::chunk::SealedChunkStorage::Row => {
                     registry.seal_chunk(&meta.id);
+                    outcome.chunks_sealed += 1;
+                    changed = true;
                 }
             }
         }
-        Ok(sealed_columnar)
+        if changed {
+            self.inner
+                .db
+                .persist_metadata()
+                .map_err(|e| RedDBError::Internal(e.to_string()))?;
+        }
+        Ok(outcome)
     }
 
     /// Count this hypertable's chunks that were sealed columnar — i.e.
@@ -314,6 +396,35 @@ impl RedDBRuntime {
                 .map(|p| (p.timestamp_ns, p.value))
                 .collect(),
         )
+    }
+
+    pub fn columnar_chunk_range_scan(
+        &self,
+        collection: &str,
+        chunk_start_ns: u64,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> Option<crate::storage::timeseries::chunk::PrunedColumnScan> {
+        let id = crate::storage::timeseries::ChunkId {
+            hypertable: collection.to_string(),
+            start_ns: chunk_start_ns,
+        };
+        let bytes = self.inner.db.hypertables().columnar_block(&id)?;
+        crate::storage::timeseries::chunk::query_column_block_range(&bytes, start_ns, end_ns).ok()
+    }
+
+    pub fn columnar_chunk_value_eq_scan(
+        &self,
+        collection: &str,
+        chunk_start_ns: u64,
+        target: f64,
+    ) -> Option<crate::storage::timeseries::chunk::PrunedColumnScan> {
+        let id = crate::storage::timeseries::ChunkId {
+            hypertable: collection.to_string(),
+            start_ns: chunk_start_ns,
+        };
+        let bytes = self.inner.db.hypertables().columnar_block(&id)?;
+        crate::storage::timeseries::chunk::query_column_block_value_eq(&bytes, target).ok()
     }
 
     /// Read-bridge (#861): read every point of `collection` in the
@@ -427,19 +538,22 @@ fn materialize_row_points(
 ) -> Vec<(u64, f64)> {
     let mut points: Vec<(u64, f64)> = manager
         .query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .and_then(|row| row.get_field(time_col))
-                .and_then(field_as_u64)
-                .is_some_and(|ts| ts >= start && ts < end)
+            let ts = match &entity.data {
+                EntityData::Row(row) => row.get_field(time_col).and_then(field_as_u64),
+                EntityData::TimeSeries(point) => Some(point.timestamp_ns),
+                _ => None,
+            };
+            ts.is_some_and(|ts| ts >= start && ts < end)
         })
         .iter()
-        .filter_map(|entity| {
-            let row = entity.data.as_row()?;
-            let ts = row.get_field(time_col).and_then(field_as_u64)?;
-            let value = row.get_field("value").and_then(field_as_f64).unwrap_or(0.0);
-            Some((ts, value))
+        .filter_map(|entity| match &entity.data {
+            EntityData::Row(row) => {
+                let ts = row.get_field(time_col).and_then(field_as_u64)?;
+                let value = row.get_field("value").and_then(field_as_f64).unwrap_or(0.0);
+                Some((ts, value))
+            }
+            EntityData::TimeSeries(point) => Some((point.timestamp_ns, point.value)),
+            _ => None,
         })
         .collect();
     points.sort_by_key(|(ts, _)| *ts);

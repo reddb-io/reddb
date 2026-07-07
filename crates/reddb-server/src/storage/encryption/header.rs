@@ -8,7 +8,7 @@
 //! Since `DatabaseHeader` in `pager.rs` is fixed structure (u32 fields), we might need to extend it
 //! or use a separate page (e.g. Page 1?) or just reserved bytes in Page 0?
 //! `HEADER_SIZE` in `page.rs` is 32 bytes.
-//! A standard 4KB page has plenty of room.
+//! A standard 16 KiB page has plenty of room.
 //!
 //! We will implement serialization for this header so it can be embedded in Page 0 after the main header.
 

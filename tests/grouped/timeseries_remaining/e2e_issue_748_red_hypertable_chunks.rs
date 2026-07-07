@@ -154,9 +154,13 @@ fn red_hypertable_chunks_marks_empty_chunks_with_null_bounds() {
 }
 
 #[test]
-fn red_hypertable_chunks_skips_non_hypertable_collections() {
+fn red_hypertable_chunks_includes_plain_timeseries_chunks() {
     let rt = rt();
     exec(&rt, "CREATE TIMESERIES legacy RETENTION 1 d");
+    exec(
+        &rt,
+        "INSERT INTO legacy (metric, value, timestamp) VALUES ('cpu.idle', 94.8, 0)",
+    );
     exec(&rt, "CREATE TABLE plain_table (id INT)");
 
     let result = select(&rt, "SELECT * FROM red.hypertable_chunks");
@@ -171,8 +175,8 @@ fn red_hypertable_chunks_skips_non_hypertable_collections() {
         })
         .collect();
     assert!(
-        !names.contains("legacy"),
-        "plain timeseries are not hypertables: {names:?}"
+        names.contains("legacy"),
+        "plain timeseries chunks should be visible: {names:?}"
     );
     assert!(
         !names.contains("plain_table"),
@@ -372,26 +376,33 @@ fn red_timeseries_writes_collection_filter_narrows_to_one_hypertable() {
 }
 
 #[test]
-fn red_timeseries_writes_skips_non_hypertable_timeseries() {
+fn red_timeseries_writes_buckets_plain_timeseries_points() {
     let rt = rt();
-    // Plain CREATE TIMESERIES does not declare a time column, so the
-    // bucketed-writes surface has nothing to bucket by — it must not
-    // emit rows for these collections.
     exec(&rt, "CREATE TIMESERIES legacy RETENTION 1 d");
+    exec(
+        &rt,
+        "INSERT INTO legacy (metric, value, timestamp) VALUES ('cpu.idle', 94.8, 0)",
+    );
 
     let result = select(&rt, "SELECT * FROM red.timeseries_writes");
     assert!(
-        result.result.records.is_empty(),
-        "plain timeseries has no time column to bucket: {:?}",
+        result.result.records.iter().any(
+            |row| matches!(row.get("collection"), Some(Value::Text(name)) if &**name == "legacy")
+        ),
+        "plain timeseries points should be bucketed: {:?}",
         result.result.records
     );
 
-    // Sanity: also no rows when filtered to that specific collection.
     let filtered = select(
         &rt,
         "SELECT * FROM red.timeseries_writes WHERE collection = 'legacy'",
     );
-    assert!(filtered.result.records.is_empty());
+    assert_eq!(filtered.result.records.len(), 3);
+    assert!(filtered
+        .result
+        .records
+        .iter()
+        .all(|row| uint(row, "events_count") == 1));
 }
 
 #[test]

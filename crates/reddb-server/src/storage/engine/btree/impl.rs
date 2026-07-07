@@ -174,7 +174,7 @@ impl BTree {
                     if can_insert_leaf(&page, key, value) {
                         insert_into_leaf(&mut page, key, value)?;
                         // Skip update_checksum here — pager.write_page
-                        // below recomputes it. Saves one CRC32 on 4KB
+                        // below recomputes it. Saves one CRC32 on 16 KiB
                         // per insert on the hot append path.
                         let page_id = page.page_id();
                         // Update cached high_key

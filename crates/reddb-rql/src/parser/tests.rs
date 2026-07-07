@@ -2183,6 +2183,39 @@ fn test_parse_update_dotted_path_target_round_trips_unmarked() {
 }
 
 #[test]
+fn explain_insert_round_trips_as_plan_only_wrapper() {
+    let sql = "EXPLAIN INSERT INTO audit (id, note) VALUES (1, 'planned')";
+    let query = parse(sql).unwrap();
+    let QueryExpr::Explain(explain) = &query else {
+        panic!("Expected Explain wrapper");
+    };
+    assert!(matches!(explain.inner.as_ref(), QueryExpr::Insert(_)));
+    assert_eq!(crate::renderer::render(&query), sql);
+}
+
+#[test]
+fn explain_update_round_trips_as_plan_only_wrapper() {
+    let sql = "EXPLAIN UPDATE audit SET note = 'planned' WHERE id = 1";
+    let query = parse(sql).unwrap();
+    let QueryExpr::Explain(explain) = &query else {
+        panic!("Expected Explain wrapper");
+    };
+    assert!(matches!(explain.inner.as_ref(), QueryExpr::Update(_)));
+    assert_eq!(crate::renderer::render(&query), sql);
+}
+
+#[test]
+fn explain_delete_round_trips_as_plan_only_wrapper() {
+    let sql = "EXPLAIN DELETE FROM audit WHERE id = 1";
+    let query = parse(sql).unwrap();
+    let QueryExpr::Explain(explain) = &query else {
+        panic!("Expected Explain wrapper");
+    };
+    assert!(matches!(explain.inner.as_ref(), QueryExpr::Delete(_)));
+    assert_eq!(crate::renderer::render(&query), sql);
+}
+
+#[test]
 fn test_parse_update_from_any_remains_rejected() {
     let err = parse("UPDATE FROM ANY SET status = 'bad'").unwrap_err();
     assert!(err.to_string().contains("expected: identifier"));
@@ -6934,6 +6967,30 @@ fn doc_form_queue_push_raw_json_with_priority_suffix() {
     };
     assert_eq!(priority, Some(10));
     assert!(matches!(value, reddb_types::types::Value::Json(_)));
+}
+
+#[test]
+fn queue_push_accepts_ordering_key_suffix() {
+    let q = parse("QUEUE PUSH tasks 'job-1' KEY 'customer-42'").unwrap();
+    let QueryExpr::QueueCommand(QueueCommand::Push { key, .. }) = q else {
+        panic!("expected Push");
+    };
+    assert_eq!(key.as_deref(), Some("customer-42"));
+}
+
+#[test]
+fn queue_push_rejects_key_with_delayed_availability() {
+    for sql in [
+        "QUEUE PUSH tasks 'job-1' KEY 'customer-42' DELAY 1s",
+        "QUEUE PUSH tasks 'job-1' AVAILABLE AT 1735689600000 KEY 'customer-42'",
+    ] {
+        let err = parse(sql).expect_err("KEY plus delayed availability must fail");
+        assert!(
+            err.to_string()
+                .contains("QUEUE PUSH KEY cannot be combined with DELAY / AVAILABLE AT"),
+            "{sql}: {err}"
+        );
+    }
 }
 
 #[test]

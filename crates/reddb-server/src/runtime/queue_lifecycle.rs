@@ -198,7 +198,13 @@ impl<S: QueueStore> QueueLifecycle<S> {
             }
         };
         let mut out = Vec::with_capacity(count.min(available.len()));
-        for message_id in available.into_iter().take(count) {
+        for message_id in available {
+            if out.len() >= count {
+                break;
+            }
+            if self.ordering_key_blocked(queue, group, message_id) {
+                continue;
+            }
             let deadline = now + self.config.lock_duration;
             let delivery_id = self
                 .store
@@ -271,6 +277,9 @@ impl<S: QueueStore> QueueLifecycle<S> {
             if out.len() >= count {
                 break;
             }
+            if self.ordering_key_blocked(queue, group, message_id) {
+                continue;
+            }
             let deadline = now + self.config.lock_duration;
             let delivery_id = self
                 .store
@@ -333,6 +342,15 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// it. Callers never see the decision — observe outcomes via the test
     /// tap.
     pub(crate) fn nack(&self, txn: &QueueTxn, delivery_id: &str) -> Result<RetirementOutcome> {
+        self.nack_with_retry_deadline(txn, delivery_id, None)
+    }
+
+    pub(crate) fn nack_with_retry_deadline(
+        &self,
+        txn: &QueueTxn,
+        delivery_id: &str,
+        retry_deadline: Option<Instant>,
+    ) -> Result<RetirementOutcome> {
         let bumped = self.store.bump_attempt(txn, delivery_id)?;
         let max_attempts = self
             .store
@@ -346,8 +364,12 @@ impl<S: QueueStore> QueueLifecycle<S> {
                         .store
                         .read_pending_payload(delivery_id)
                         .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+                    let ordering_key = self
+                        .store
+                        .read_ordering_key(&bumped.queue, bumped.message_id);
                     self.retire(txn, delivery_id)?;
-                    self.store.enqueue_dlq(txn, target, payload)?;
+                    self.store
+                        .enqueue_dlq(txn, target, payload, ordering_key.as_deref())?;
                     outcome = RetirementOutcome::MovedToDlq(target.clone());
                     self.record(outcome.clone());
                 }
@@ -358,7 +380,18 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 }
             }
         } else {
-            self.store.release_pending(txn, delivery_id)?;
+            if let Some(deadline) = retry_deadline {
+                self.store.mark_pending(
+                    txn,
+                    &bumped.queue,
+                    bumped.message_id,
+                    &bumped.group,
+                    &bumped.consumer,
+                    deadline,
+                )?;
+            } else {
+                self.store.release_pending(txn, delivery_id)?;
+            }
             outcome = RetirementOutcome::Requeued;
             self.record(outcome.clone());
         }
@@ -530,12 +563,17 @@ impl<S: QueueStore> QueueLifecycle<S> {
     fn retire_exhausted(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()> {
         match &self.config.dlq_target {
             Some(target) => {
+                let pending = self.store.read_pending_attempt(delivery_id)?;
                 let payload = self
                     .store
                     .read_pending_payload(delivery_id)
                     .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+                let ordering_key = self
+                    .store
+                    .read_ordering_key(&pending.queue, pending.message_id);
                 self.retire(txn, delivery_id)?;
-                self.store.enqueue_dlq(txn, target, payload)?;
+                self.store
+                    .enqueue_dlq(txn, target, payload, ordering_key.as_deref())?;
                 self.record(RetirementOutcome::MovedToDlq(target.clone()));
             }
             None => {
@@ -603,6 +641,12 @@ impl<S: QueueStore> QueueLifecycle<S> {
             .lock()
             .expect("outcomes poisoned")
             .push(outcome);
+    }
+
+    fn ordering_key_blocked(&self, queue: &str, group: &str, message_id: MessageId) -> bool {
+        self.store
+            .read_ordering_key(queue, message_id)
+            .is_some_and(|key| self.store.ordering_key_in_flight(queue, group, &key))
     }
 
     #[cfg(test)]
@@ -686,6 +730,139 @@ mod tests {
         assert_ne!(a[0].delivery_id, b[0].delivery_id);
         assert_ne!(a[0].payload, b[0].payload);
         assert_eq!(b[0].payload, Value::text("second"));
+    }
+
+    #[test]
+    fn work_ordering_key_skip_scan_blocks_same_key_only_for_group() {
+        let store = store_with(&[(1, "first-a"), (2, "second-a"), (3, "first-b")]);
+        store.seed_ordering_key("q", 1, "a");
+        store.seed_ordering_key("q", 2, "a");
+        store.seed_ordering_key("q", 3, "b");
+        let lc = lifecycle(store);
+
+        let first = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "alice", 1)
+            .expect("first read");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].payload, Value::text("first-a"));
+
+        let second = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "bob", 2)
+            .expect("second read");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].payload, Value::text("first-b"));
+
+        lc.ack(&QueueTxn::new(), &first[0].delivery_id)
+            .expect("ack first key");
+        let unblocked = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "carol", 1)
+            .expect("unblocked read");
+        assert_eq!(unblocked.len(), 1);
+        assert_eq!(unblocked[0].payload, Value::text("second-a"));
+    }
+
+    #[test]
+    fn delayed_nack_keeps_ordering_key_blocked_until_retry_deadline() {
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "first-a"), (2, "second-a")]);
+        store.seed_ordering_key("q", 1, "a");
+        store.seed_ordering_key("q", 2, "a");
+        store.seed_max_attempts("q", 1, 5);
+        let lc = QueueLifecycle::with_clock(
+            store,
+            LifecycleConfig::default(),
+            clock.clone() as Arc<dyn Clock>,
+        );
+
+        let first = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "alice", 1)
+            .expect("first read");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].payload, Value::text("first-a"));
+
+        let retry_deadline = clock.now() + Duration::from_millis(100);
+        lc.nack_with_retry_deadline(
+            &QueueTxn::new(),
+            &first[0].delivery_id,
+            Some(retry_deadline),
+        )
+        .expect("delayed nack");
+
+        let blocked = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "bob", 1)
+            .expect("same-key read before retry");
+        assert!(
+            blocked.is_empty(),
+            "later same-key message must not overtake delayed retry"
+        );
+
+        clock.advance(Duration::from_millis(101));
+        let retry = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "carol", 1)
+            .expect("retry read");
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].payload, Value::text("first-a"));
+    }
+
+    #[test]
+    fn claim_refresh_keeps_ordering_key_blocking_later_same_key_messages() {
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "first-a"), (2, "second-a")]);
+        store.seed_ordering_key("q", 1, "a");
+        store.seed_ordering_key("q", 2, "a");
+        store.seed_max_attempts("q", 1, 5);
+        let lc = QueueLifecycle::with_clock(
+            store,
+            config_with_lock(Duration::from_millis(100)),
+            clock.clone() as Arc<dyn Clock>,
+        );
+
+        let first = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "alice", 1)
+            .expect("first read");
+        assert_eq!(first.len(), 1);
+
+        clock.advance(Duration::from_millis(150));
+        let claimed = lc
+            .claim_delivering("q", "bob", 0, &QueueTxn::new())
+            .expect("claim expired");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].payload, Value::text("first-a"));
+
+        let blocked = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "carol", 1)
+            .expect("same-key read after claim");
+        assert!(
+            blocked.is_empty(),
+            "claimed delivery must keep same-key successor blocked"
+        );
+    }
+
+    #[test]
+    fn fanout_ordering_keys_are_scoped_per_group() {
+        let store = store_with(&[(1, "first"), (2, "second")]);
+        store.seed_ordering_key("q", 1, "same");
+        store.seed_ordering_key("q", 2, "same");
+        let mut config = LifecycleConfig::default();
+        config.mode = QueueMode::Fanout;
+        let lc = QueueLifecycle::new(store, config);
+
+        let alice = lc
+            .group_read(&QueueTxn::new(), "q", "_fanout_alice", "alice", 1)
+            .expect("alice read");
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].payload, Value::text("first"));
+
+        let bob = lc
+            .group_read(&QueueTxn::new(), "q", "_fanout_bob", "bob", 1)
+            .expect("bob read");
+        assert_eq!(bob.len(), 1);
+        assert_eq!(bob[0].payload, Value::text("first"));
+
+        let alice_blocked = lc
+            .group_read(&QueueTxn::new(), "q", "_fanout_alice", "alice", 1)
+            .expect("alice second read");
+        assert!(alice_blocked.is_empty());
     }
 
     #[test]

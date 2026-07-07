@@ -21,6 +21,7 @@ use logical_helpers::*;
 
 pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> CanonicalLogicalNode {
     match expr {
+        QueryExpr::Explain(explain) => logical_plan_node_with_catalog(db, &explain.inner),
         QueryExpr::Table(query) => {
             let mut details = BTreeMap::new();
             let effective_projection_count = effective_table_projections(query).len();

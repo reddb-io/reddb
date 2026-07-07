@@ -172,6 +172,7 @@ pub struct PersistedPhysicalHypertableChunk {
     pub sealed: bool,
     pub ttl_override_ns: Option<u64>,
     pub columnar_page: Option<PhysicalPageLocation>,
+    pub columnar_derived: bool,
 }
 
 #[derive(Debug, Clone)]
