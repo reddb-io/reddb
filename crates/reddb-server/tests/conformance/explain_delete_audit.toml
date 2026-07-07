@@ -1,0 +1,4 @@
+input = "EXPLAIN DELETE FROM audit WHERE id = 2"
+expected_kind = "Explain"
+source = "tests/grouped/sql_window/e2e_explain.rs:91"
+kind = "positive"
