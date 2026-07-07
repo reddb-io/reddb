@@ -2127,7 +2127,9 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("RESET") => {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
-            Token::Ident(name) if name.eq_ignore_ascii_case("FORK") => {
+            Token::Ident(name)
+                if name.eq_ignore_ascii_case("FORK") || name.eq_ignore_ascii_case("PROMOTE") =>
+            {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
             Token::Ident(name)
