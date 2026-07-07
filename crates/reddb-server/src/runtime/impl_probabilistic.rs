@@ -8,6 +8,13 @@ const PROB_SKETCH_STATE_PREFIX: &str = "red.probabilistic.sketch.";
 const PROB_FILTER_STATE_PREFIX: &str = "red.probabilistic.filter.";
 const PROB_ENCODING_MARKER_KEY: &str = "red.probabilistic.state_encoding";
 const PROB_ENCODING_RAW_V1: &str = "raw-v1";
+const PROB_WAL_KIND_HLL: u8 = 1;
+const PROB_WAL_KIND_SKETCH: u8 = 2;
+const PROB_WAL_KIND_FILTER: u8 = 3;
+const PROB_WAL_OP_ADD: u8 = 1;
+const PROB_WAL_OP_DELETE: u8 = 2;
+const PROB_WAL_OP_SNAPSHOT: u8 = 3;
+const PROB_WAL_OP_DROP: u8 = 4;
 
 fn probabilistic_read<'a, T>(lock: &'a RwLock<T>, _name: &str) -> RwLockReadGuard<'a, T> {
     lock.read()
@@ -179,6 +186,7 @@ impl RedDBRuntime {
         if migrated_legacy_hex {
             self.persist_probabilistic_encoding_marker();
         }
+        self.apply_replayed_probabilistic_deltas()?;
         Ok(())
     }
 
@@ -309,6 +317,220 @@ impl RedDBRuntime {
         let key = format!("{prefix}{}", hex::encode(name.as_bytes()));
         self.compact_config_key(&key);
         self.insert_config_value(&key, Value::Null)?;
+        Ok(())
+    }
+
+    pub(crate) fn persist_probabilistic_snapshots(&self) -> RedDBResult<()> {
+        let hll_snapshots: Vec<(String, Vec<u8>)> = {
+            let hlls =
+                probabilistic_read(&self.inner.probabilistic.hlls, "probabilistic HLL store");
+            hlls.iter()
+                .map(|(name, hll)| (name.clone(), hll.as_bytes().to_vec()))
+                .collect()
+        };
+        for (name, bytes) in hll_snapshots {
+            self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, &name, &bytes)?;
+            self.append_probabilistic_snapshot_delta(PROB_WAL_KIND_HLL, &name, bytes)?;
+        }
+
+        let sketch_snapshots: Vec<(String, Vec<u8>)> = {
+            let sketches = probabilistic_read(
+                &self.inner.probabilistic.sketches,
+                "probabilistic sketch store",
+            );
+            sketches
+                .iter()
+                .map(|(name, sketch)| (name.clone(), sketch.as_bytes()))
+                .collect()
+        };
+        for (name, bytes) in sketch_snapshots {
+            self.persist_probabilistic_blob(PROB_SKETCH_STATE_PREFIX, &name, &bytes)?;
+            self.append_probabilistic_snapshot_delta(PROB_WAL_KIND_SKETCH, &name, bytes)?;
+        }
+
+        let filter_snapshots: Vec<(String, Vec<u8>)> = {
+            let filters = probabilistic_read(
+                &self.inner.probabilistic.filters,
+                "probabilistic filter store",
+            );
+            filters
+                .iter()
+                .map(|(name, filter)| (name.clone(), filter.as_bytes()))
+                .collect()
+        };
+        for (name, bytes) in filter_snapshots {
+            self.persist_probabilistic_blob(PROB_FILTER_STATE_PREFIX, &name, &bytes)?;
+            self.append_probabilistic_snapshot_delta(PROB_WAL_KIND_FILTER, &name, bytes)?;
+        }
+
+        Ok(())
+    }
+
+    fn append_probabilistic_add_delta(
+        &self,
+        kind: u8,
+        name: &str,
+        operands: Vec<Vec<u8>>,
+    ) -> RedDBResult<()> {
+        self.append_probabilistic_delta(kind, PROB_WAL_OP_ADD, name, operands)
+    }
+
+    fn append_probabilistic_snapshot_delta(
+        &self,
+        kind: u8,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> RedDBResult<()> {
+        self.append_probabilistic_delta(kind, PROB_WAL_OP_SNAPSHOT, name, vec![bytes])
+    }
+
+    fn append_probabilistic_drop_delta(&self, kind: u8, name: &str) -> RedDBResult<()> {
+        self.append_probabilistic_delta(kind, PROB_WAL_OP_DROP, name, Vec::new())
+    }
+
+    fn append_probabilistic_delete_delta(
+        &self,
+        kind: u8,
+        name: &str,
+        operands: Vec<Vec<u8>>,
+    ) -> RedDBResult<()> {
+        self.append_probabilistic_delta(kind, PROB_WAL_OP_DELETE, name, operands)
+    }
+
+    fn append_probabilistic_delta(
+        &self,
+        kind: u8,
+        operation: u8,
+        name: &str,
+        operands: Vec<Vec<u8>>,
+    ) -> RedDBResult<()> {
+        self.inner
+            .db
+            .store()
+            .append_probabilistic_delta_record(kind, operation, name, operands)
+            .map_err(|err| RedDBError::Internal(format!("append probabilistic WAL delta: {err}")))
+    }
+
+    fn apply_replayed_probabilistic_deltas(&self) -> RedDBResult<()> {
+        let deltas = self.inner.db.store().take_replayed_probabilistic_deltas();
+        for (kind, operation, name, operands) in deltas {
+            self.apply_replayed_probabilistic_delta(kind, operation, &name, operands)?;
+        }
+        Ok(())
+    }
+
+    fn apply_replayed_probabilistic_delta(
+        &self,
+        kind: u8,
+        operation: u8,
+        name: &str,
+        operands: Vec<Vec<u8>>,
+    ) -> RedDBResult<()> {
+        match (kind, operation) {
+            (PROB_WAL_KIND_HLL, PROB_WAL_OP_SNAPSHOT) => {
+                let bytes = single_probabilistic_operand(operands, "HLL snapshot")?;
+                let hll = crate::storage::primitives::hyperloglog::HyperLogLog::from_bytes(bytes)
+                    .ok_or_else(|| {
+                    RedDBError::Internal(format!("invalid WAL HLL snapshot for '{name}'"))
+                })?;
+                let mut hlls =
+                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
+                hlls.insert(name.to_string(), hll);
+            }
+            (PROB_WAL_KIND_HLL, PROB_WAL_OP_ADD) => {
+                let mut hlls =
+                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
+                if let Some(hll) = hlls.get_mut(name) {
+                    for element in operands {
+                        hll.add(&element);
+                    }
+                }
+            }
+            (PROB_WAL_KIND_HLL, PROB_WAL_OP_DROP) => {
+                let mut hlls =
+                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
+                hlls.remove(name);
+            }
+            (PROB_WAL_KIND_SKETCH, PROB_WAL_OP_SNAPSHOT) => {
+                let bytes = single_probabilistic_operand(operands, "SKETCH snapshot")?;
+                let sketch =
+                    crate::storage::primitives::count_min_sketch::CountMinSketch::from_bytes(
+                        &bytes,
+                    )
+                    .ok_or_else(|| {
+                        RedDBError::Internal(format!("invalid WAL SKETCH snapshot for '{name}'"))
+                    })?;
+                let mut sketches = probabilistic_write(
+                    &self.inner.probabilistic.sketches,
+                    "probabilistic sketch store",
+                );
+                sketches.insert(name.to_string(), sketch);
+            }
+            (PROB_WAL_KIND_SKETCH, PROB_WAL_OP_ADD) => {
+                let (element, count) = sketch_add_operands(operands)?;
+                let mut sketches = probabilistic_write(
+                    &self.inner.probabilistic.sketches,
+                    "probabilistic sketch store",
+                );
+                if let Some(sketch) = sketches.get_mut(name) {
+                    sketch.add(&element, count);
+                }
+            }
+            (PROB_WAL_KIND_SKETCH, PROB_WAL_OP_DROP) => {
+                let mut sketches = probabilistic_write(
+                    &self.inner.probabilistic.sketches,
+                    "probabilistic sketch store",
+                );
+                sketches.remove(name);
+            }
+            (PROB_WAL_KIND_FILTER, PROB_WAL_OP_SNAPSHOT) => {
+                let bytes = single_probabilistic_operand(operands, "FILTER snapshot")?;
+                let filter =
+                    crate::storage::primitives::cuckoo_filter::CuckooFilter::from_bytes(&bytes)
+                        .ok_or_else(|| {
+                            RedDBError::Internal(format!(
+                                "invalid WAL FILTER snapshot for '{name}'"
+                            ))
+                        })?;
+                let mut filters = probabilistic_write(
+                    &self.inner.probabilistic.filters,
+                    "probabilistic filter store",
+                );
+                filters.insert(name.to_string(), filter);
+            }
+            (PROB_WAL_KIND_FILTER, PROB_WAL_OP_ADD) => {
+                let element = single_probabilistic_operand(operands, "FILTER ADD")?;
+                let mut filters = probabilistic_write(
+                    &self.inner.probabilistic.filters,
+                    "probabilistic filter store",
+                );
+                if let Some(filter) = filters.get_mut(name) {
+                    let _ = filter.insert(&element);
+                }
+            }
+            (PROB_WAL_KIND_FILTER, PROB_WAL_OP_DELETE) => {
+                let element = single_probabilistic_operand(operands, "FILTER DELETE")?;
+                let mut filters = probabilistic_write(
+                    &self.inner.probabilistic.filters,
+                    "probabilistic filter store",
+                );
+                if let Some(filter) = filters.get_mut(name) {
+                    let _ = filter.delete(&element);
+                }
+            }
+            (PROB_WAL_KIND_FILTER, PROB_WAL_OP_DROP) => {
+                let mut filters = probabilistic_write(
+                    &self.inner.probabilistic.filters,
+                    "probabilistic filter store",
+                );
+                filters.remove(name);
+            }
+            _ => {
+                return Err(RedDBError::Internal(format!(
+                    "unknown probabilistic WAL delta kind={kind} operation={operation}"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -533,6 +755,11 @@ impl RedDBRuntime {
                     crate::catalog::CollectionModel::Hll,
                 )?;
                 self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, name, hll.as_bytes())?;
+                self.append_probabilistic_snapshot_delta(
+                    PROB_WAL_KIND_HLL,
+                    name,
+                    hll.as_bytes().to_vec(),
+                )?;
                 hlls.insert(name.clone(), hll);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -549,7 +776,14 @@ impl RedDBRuntime {
                 for elem in elements {
                     hll.add(elem.as_bytes());
                 }
-                self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, name, hll.as_bytes())?;
+                self.append_probabilistic_add_delta(
+                    PROB_WAL_KIND_HLL,
+                    name,
+                    elements
+                        .iter()
+                        .map(|element| element.as_bytes().to_vec())
+                        .collect(),
+                )?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("{} element(s) added to HLL '{}'", elements.len(), name),
@@ -658,6 +892,11 @@ impl RedDBRuntime {
                     merged.merge(hll);
                 }
                 self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, dest, merged.as_bytes())?;
+                self.append_probabilistic_snapshot_delta(
+                    PROB_WAL_KIND_HLL,
+                    dest,
+                    merged.as_bytes().to_vec(),
+                )?;
                 hlls.insert(dest.clone(), merged);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -716,6 +955,7 @@ impl RedDBRuntime {
                 }
                 self.drop_probabilistic_catalog_entry(name)?;
                 self.delete_probabilistic_blob(PROB_HLL_STATE_PREFIX, name)?;
+                self.append_probabilistic_drop_delta(PROB_WAL_KIND_HLL, name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("HLL '{}' dropped", name),
@@ -759,6 +999,11 @@ impl RedDBRuntime {
                     name,
                     &sketch.as_bytes(),
                 )?;
+                self.append_probabilistic_snapshot_delta(
+                    PROB_WAL_KIND_SKETCH,
+                    name,
+                    sketch.as_bytes(),
+                )?;
                 sketches.insert(name.clone(), sketch);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -782,10 +1027,10 @@ impl RedDBRuntime {
                     .get_mut(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("SKETCH '{}' not found", name)))?;
                 sketch.add(element.as_bytes(), *count);
-                self.persist_probabilistic_blob(
-                    PROB_SKETCH_STATE_PREFIX,
+                self.append_probabilistic_add_delta(
+                    PROB_WAL_KIND_SKETCH,
                     name,
-                    &sketch.as_bytes(),
+                    vec![element.as_bytes().to_vec(), count.to_le_bytes().to_vec()],
                 )?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -844,6 +1089,11 @@ impl RedDBRuntime {
                     PROB_SKETCH_STATE_PREFIX,
                     dest,
                     &merged.as_bytes(),
+                )?;
+                self.append_probabilistic_snapshot_delta(
+                    PROB_WAL_KIND_SKETCH,
+                    dest,
+                    merged.as_bytes(),
                 )?;
                 sketches.insert(dest.clone(), merged);
                 Ok(RuntimeQueryResult::ok_message(
@@ -909,6 +1159,7 @@ impl RedDBRuntime {
                 }
                 self.drop_probabilistic_catalog_entry(name)?;
                 self.delete_probabilistic_blob(PROB_SKETCH_STATE_PREFIX, name)?;
+                self.append_probabilistic_drop_delta(PROB_WAL_KIND_SKETCH, name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("SKETCH '{}' dropped", name),
@@ -950,6 +1201,11 @@ impl RedDBRuntime {
                     name,
                     &filter.as_bytes(),
                 )?;
+                self.append_probabilistic_snapshot_delta(
+                    PROB_WAL_KIND_FILTER,
+                    name,
+                    filter.as_bytes(),
+                )?;
                 filters.insert(name.clone(), filter);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -968,10 +1224,10 @@ impl RedDBRuntime {
                 if !filter.insert(element.as_bytes()) {
                     return Err(RedDBError::Query(format!("FILTER '{}' is full", name)));
                 }
-                self.persist_probabilistic_blob(
-                    PROB_FILTER_STATE_PREFIX,
+                self.append_probabilistic_add_delta(
+                    PROB_WAL_KIND_FILTER,
                     name,
-                    &filter.as_bytes(),
+                    vec![element.as_bytes().to_vec()],
                 )?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -1012,10 +1268,10 @@ impl RedDBRuntime {
                     .get_mut(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
                 let removed = filter.delete(element.as_bytes());
-                self.persist_probabilistic_blob(
-                    PROB_FILTER_STATE_PREFIX,
+                self.append_probabilistic_delete_delta(
+                    PROB_WAL_KIND_FILTER,
                     name,
-                    &filter.as_bytes(),
+                    vec![element.as_bytes().to_vec()],
                 )?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -1101,6 +1357,7 @@ impl RedDBRuntime {
                 }
                 self.drop_probabilistic_catalog_entry(name)?;
                 self.delete_probabilistic_blob(PROB_FILTER_STATE_PREFIX, name)?;
+                self.append_probabilistic_drop_delta(PROB_WAL_KIND_FILTER, name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("FILTER '{}' dropped", name),
@@ -1142,6 +1399,33 @@ fn parse_probabilistic_read_projection(
     }
 
     Ok(None)
+}
+
+fn single_probabilistic_operand(mut operands: Vec<Vec<u8>>, context: &str) -> RedDBResult<Vec<u8>> {
+    if operands.len() != 1 {
+        return Err(RedDBError::Internal(format!(
+            "{context} WAL delta expected one operand, got {}",
+            operands.len()
+        )));
+    }
+    Ok(operands.remove(0))
+}
+
+fn sketch_add_operands(mut operands: Vec<Vec<u8>>) -> RedDBResult<(Vec<u8>, u64)> {
+    if operands.len() != 2 {
+        return Err(RedDBError::Internal(format!(
+            "SKETCH ADD WAL delta expected two operands, got {}",
+            operands.len()
+        )));
+    }
+    let count_bytes = operands.remove(1);
+    let count_array: [u8; 8] = count_bytes.as_slice().try_into().map_err(|_| {
+        RedDBError::Internal(format!(
+            "SKETCH ADD WAL delta count expected 8 bytes, got {}",
+            count_bytes.len()
+        ))
+    })?;
+    Ok((operands.remove(0), u64::from_le_bytes(count_array)))
 }
 
 fn validate_probabilistic_read_model(

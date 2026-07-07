@@ -624,6 +624,15 @@ impl StoreCommitCoordinator {
                     let mut map = store.replayed_turbo_inserts.lock();
                     map.entry(collection).or_default().push((entity_id, vector));
                 }
+                WalRecord::ProbabilisticDelta {
+                    kind,
+                    operation,
+                    name,
+                    operands,
+                } => {
+                    let mut deltas = store.replayed_probabilistic_deltas.lock();
+                    deltas.push((kind, operation, name, operands));
+                }
                 WalRecord::FullPageImage { .. } => {
                     // Pager-level FPI (gh-478); store replay ignores.
                 }
@@ -855,6 +864,25 @@ impl UnifiedStore {
             collection: collection.to_string(),
             entity_id,
             vector: vector.to_vec(),
+        };
+        commit.append_single_record(record)
+    }
+
+    pub(crate) fn append_probabilistic_delta_record(
+        &self,
+        kind: u8,
+        operation: u8,
+        name: &str,
+        operands: Vec<Vec<u8>>,
+    ) -> std::io::Result<()> {
+        let Some(commit) = &self.commit else {
+            return Ok(());
+        };
+        let record = WalRecord::ProbabilisticDelta {
+            kind,
+            operation,
+            name: name.to_string(),
+            operands,
         };
         commit.append_single_record(record)
     }
