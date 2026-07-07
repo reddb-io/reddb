@@ -43,6 +43,28 @@ pub struct ForkInfo {
     pub name: String,
     pub parent_store: String,
     pub fork_lsn: u64,
+    pub hydration_state: ForkHydrationState,
+    pub collections_total: u64,
+    pub shared_by_reference: u64,
+    pub hydrating: u64,
+    pub hydrated: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkHydrationState {
+    SharedByReference,
+    Hydrating,
+    Hydrated,
+}
+
+impl ForkHydrationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SharedByReference => "shared_by_reference",
+            Self::Hydrating => "hydrating",
+            Self::Hydrated => "hydrated",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,11 +377,20 @@ impl OperationalManifest {
                 continue;
             }
             let fork = Self { root: entry.path() };
-            if let Some(origin) = fork.fork_origin()? {
+            if let Some(manifest) = fork.load_current()? {
+                let Some(origin) = manifest.fork_origin.as_ref() else {
+                    continue;
+                };
+                let progress = fork.hydration_progress(&manifest);
                 out.push(ForkInfo {
-                    name: origin.name,
-                    parent_store: origin.parent_store,
+                    name: origin.name.clone(),
+                    parent_store: origin.parent_store.clone(),
                     fork_lsn: origin.fork_lsn,
+                    hydration_state: progress.state,
+                    collections_total: progress.collections_total,
+                    shared_by_reference: progress.shared_by_reference,
+                    hydrating: progress.hydrating,
+                    hydrated: progress.hydrated,
                 });
             }
         }
@@ -444,6 +475,33 @@ impl OperationalManifest {
             }
         }
         Ok(paths)
+    }
+
+    fn hydration_progress(&self, manifest: &Manifest) -> ForkHydrationProgress {
+        let mut progress = ForkHydrationProgress::default();
+        for entry in manifest.collections.values() {
+            if entry.state != CollectionState::Active {
+                continue;
+            }
+            progress.collections_total += 1;
+            if entry.source.is_none() {
+                progress.hydrated += 1;
+                continue;
+            }
+            if self.collections_dir().join(&entry.path).exists() {
+                progress.hydrating += 1;
+            } else {
+                progress.shared_by_reference += 1;
+            }
+        }
+        progress.state = if progress.hydrating > 0 {
+            ForkHydrationState::Hydrating
+        } else if progress.shared_by_reference > 0 {
+            ForkHydrationState::SharedByReference
+        } else {
+            ForkHydrationState::Hydrated
+        };
+        progress
     }
 
     pub fn read_generation_for_test(&self) -> io::Result<u64> {
@@ -560,6 +618,27 @@ impl OperationalManifest {
         }
         out.push_str(".rcol");
         out
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ForkHydrationProgress {
+    state: ForkHydrationState,
+    collections_total: u64,
+    shared_by_reference: u64,
+    hydrating: u64,
+    hydrated: u64,
+}
+
+impl Default for ForkHydrationProgress {
+    fn default() -> Self {
+        Self {
+            state: ForkHydrationState::Hydrated,
+            collections_total: 0,
+            shared_by_reference: 0,
+            hydrating: 0,
+            hydrated: 0,
+        }
     }
 }
 
