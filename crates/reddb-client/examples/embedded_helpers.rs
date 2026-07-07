@@ -8,7 +8,7 @@
 //! cargo run -p reddb-io-client --example embedded_helpers
 //! ```
 
-use reddb_client::{JsonValue, ListOptions, Reddb, HELPER_SPEC_VERSION};
+use reddb_client::{JsonValue, ListOptions, QueuePushOptions, Reddb, HELPER_SPEC_VERSION};
 
 #[tokio::main]
 async fn main() -> reddb_client::Result<()> {
@@ -95,6 +95,7 @@ async fn main() -> reddb_client::Result<()> {
         .push(
             "jobs",
             &JsonValue::object([("kind", JsonValue::string("email"))]),
+            QueuePushOptions::new(),
         )
         .await?;
     let popped = queue.pop("jobs").await?;

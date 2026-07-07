@@ -272,10 +272,25 @@ where a single-handle method name reads more naturally in the singular
 
 - **Output**: `QueryResult`; idempotent (uses `IF NOT EXISTS`).
 
-### 6.2 `queues.push(name, payload)`
+### 6.2 `queues.push(name, payload, options?)`
 
 - **Input**: `name: string`, `payload: JsonValue`.
+- **Options**:
+  - `priority?: integer` — renders `PRIORITY <n>`.
+  - `key?: string` — renders `KEY '<key>'` for FIFO-per-entity grouped delivery.
+  - `dedup?: string` — renders `DEDUP '<id>'` for producer idempotency.
+  - `delay?: string` — renders `DELAY <duration>` where exposed by the driver.
+  - `at?: integer` — renders `AVAILABLE AT <unix_ms>` where exposed by the driver.
 - **Output**: `QueryResult`. Drivers SHOULD expose `affected` (always 1).
+- **Validation**: helpers MUST reject `key` combined with `delay` or `at` locally
+  using `INVALID_ARGUMENT` and the engine message `QUEUE PUSH KEY cannot be
+  combined with DELAY / AVAILABLE AT`. Other semantic validation is left to the
+  engine.
+- **Recipes**:
+  - Outbox idempotency: push inside the same transaction as the business write
+    with `dedup: "outbox:<event-id>"`.
+  - FIFO per entity: use one stable `key` per entity, for example
+    `key: "acct_123"` for all account-mutating jobs.
 
 ### 6.3 `queues.peek(name, limit?)`
 

@@ -95,8 +95,8 @@ always) and a live client (`red://` gRPC, gated):
   the wire SQL surface is stable (spec §§8–11). First-class helpers land in
   v1.1.
 - **`kv.expire` / TTL helper** — reach via `WITH TTL` on the underlying put.
-- **Queue priority / consumer groups / dead-letter** — reach via raw
-  `CREATE QUEUE … PRIORITY` / `QUEUE POP … GROUP`.
+- **Queue consumer groups / dead-letter** — reach via raw `QUEUE READ`,
+  `QUEUE ACK`, and `QUEUE NACK` statements.
 - **Callback `tx.run`, isolation-level `begin`, cross-shard tx** — deferred.
 
 #### Running the conformance harness
@@ -114,7 +114,7 @@ cargo run -p reddb-io-client --example embedded_helpers
 ```
 
 ```rust,no_run
-use reddb_client::{JsonValue, ListOptions, Reddb};
+use reddb_client::{JsonValue, ListOptions, QueuePushOptions, Reddb};
 
 # async fn run() -> reddb_client::Result<()> {
 let db = Reddb::connect("memory://").await?;
@@ -141,7 +141,23 @@ let _value = kv.get("characters:hansel").await?;
 
 let queue = db.queue();
 queue.create("jobs").await?;
-queue.push("jobs", &JsonValue::object([("kind", JsonValue::string("email"))])).await?;
+queue
+    .push(
+        "jobs",
+        &JsonValue::object([("kind", JsonValue::string("email"))]),
+        QueuePushOptions::new().dedup("outbox:email:42"),
+    )
+    .await?;
+queue
+    .push(
+        "jobs",
+        &JsonValue::object([
+            ("kind", JsonValue::string("rebuild_account")),
+            ("account_id", JsonValue::string("acct_123")),
+        ]),
+        QueuePushOptions::new().key("acct_123"),
+    )
+    .await?;
 let _jobs = queue.pop("jobs").await?;
 # Ok(())
 # }

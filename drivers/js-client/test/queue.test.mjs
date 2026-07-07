@@ -14,16 +14,18 @@ function fakeQueue(responder) {
   return { queue: new QueueClient(client), calls }
 }
 
-test('queue exposes push SQL for string number JSON object and priority', async () => {
+test('queue exposes push SQL for string number JSON object priority key and dedup', async () => {
   const { queue, calls } = fakeQueue()
   await queue.push('jobs', 'hello')
   await queue.push('jobs', 42)
   await queue.push('jobs', { task: 'ship', retries: 2 }, { priority: 7 })
+  await queue.push('jobs', { task: 'settle' }, { key: "acct'42", dedup: "retry'1" })
 
   assert.deepEqual(calls.map((call) => call.params.sql), [
     "QUEUE PUSH jobs 'hello'",
     'QUEUE PUSH jobs 42',
     'QUEUE PUSH jobs {"task":"ship","retries":2} PRIORITY 7',
+    `QUEUE PUSH jobs {"task":"settle"} KEY 'acct''42' DEDUP 'retry''1'`,
   ])
 })
 
@@ -70,5 +72,27 @@ test('queue rejects invalid names counts and priorities before query', async () 
   })
   await assert.rejects(() => queue.pop('jobs', -1), /non-negative integer/)
   assert.throws(() => queue.push('jobs', 'x', { priority: 1.5 }), /priority must be an integer/)
+  assert.equal(calls.length, 0)
+})
+
+test('queue rejects ordering key with delayed availability before query', () => {
+  const { queue, calls } = fakeQueue()
+  assert.throws(
+    () => queue.push('jobs', 'x', { key: 'acct-1', delay: '1s' }),
+    (err) => {
+      assert.ok(err instanceof RedDBError)
+      assert.equal(err.code, 'INVALID_ARGUMENT')
+      assert.match(err.message, /QUEUE PUSH KEY cannot be combined with DELAY \/ AVAILABLE AT/)
+      return true
+    },
+  )
+  assert.throws(
+    () => queue.push('jobs', 'x', { key: 'acct-1', at: 1735689600000 }),
+    (err) => {
+      assert.ok(err instanceof RedDBError)
+      assert.equal(err.code, 'INVALID_ARGUMENT')
+      return true
+    },
+  )
   assert.equal(calls.length, 0)
 })
