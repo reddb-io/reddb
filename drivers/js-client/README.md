@@ -58,6 +58,14 @@ const kv = db.kv('settings')
 await kv.put('characters:hansel', 'crumbs')
 console.log(await kv.get('characters:hansel'))
 
+await db.queues.create('jobs')
+await db.queues.push('jobs', { task: 'email', orderId: 42 }, { dedup: 'outbox:email:42' })
+await db.queues.push(
+  'jobs',
+  { task: 'rebuild_account', accountId: 'acct_123' },
+  { key: 'acct_123' },
+)
+
 await db.close()
 ```
 
