@@ -1036,12 +1036,11 @@ fn select_spread_replacement(
                 && !range.replicas().contains(id)
                 && !selected_replacements.contains(id)
         })
-        .filter(|id| {
+        .find(|id| {
             signals
                 .member_attribute(id, domain_key)
                 .is_some_and(|domain| !retained_domains.contains(domain))
         })
-        .next()
         .cloned()
 }
 
