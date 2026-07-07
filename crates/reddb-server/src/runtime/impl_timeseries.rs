@@ -335,7 +335,7 @@ impl RedDBRuntime {
                         .write_column_block_page(&bytes)
                         .map_err(|err| {
                             RedDBError::Internal(format!("columnar page write failed: {err}"))
-                    })?;
+                        })?;
                     registry.seal_chunk_columnar(&meta.id, page, bytes);
                     outcome.columnar_chunks_sealed += 1;
                     outcome.chunks_sealed += 1;
