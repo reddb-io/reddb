@@ -996,6 +996,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let lean_select_star = select_cols.is_empty();
 
         let mut records: Vec<UnifiedRecord> = Vec::new();
+        let hydrate_store = db.store();
         if use_parallel {
             // Parallel scan spawns worker threads that don't inherit the
             // main thread's CURRENT_SNAPSHOT thread-local. Capture the
@@ -1004,44 +1005,58 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
             let table_row_resolver = TableRowMvccReadResolver::captured(snap_ctx);
             let matching = manager.query_all_zoned(&zone_preds, |entity| {
+                let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+                    hydrate_store.as_ref(),
+                    entity,
+                );
                 table_row_resolver.resolve_read_candidate(entity).is_some()
                     && db.replica_allows_entity_at_read(&query.table, entity)
-                    && compiled.evaluate(entity)
+                    && compiled.evaluate(&hydrated)
             });
             for entity in &matching {
+                let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+                    hydrate_store.as_ref(),
+                    entity,
+                );
                 let record = if !select_cols.is_empty() {
                     if let Some(ref idx_map) = schema_col_indices {
                         super::super::record_search::runtime_table_record_with_col_indices(
-                            entity, &select_cols, idx_map,
+                            &hydrated,
+                            &select_cols,
+                            idx_map,
                         )
                         .or_else(|| {
                             super::super::record_search::runtime_table_record_from_entity_ref_projected(
-                                entity, &select_cols,
+                                &hydrated, &select_cols,
                             )
                         })
                         .or_else(|| {
-                            runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                            runtime_table_record_from_entity_projected(hydrated.clone(), &select_cols)
                         })
                     } else {
                         super::super::record_search::runtime_table_record_from_entity_ref_projected(
-                            entity,
+                            &hydrated,
                             &select_cols,
                         )
                         .or_else(|| {
-                            runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                            runtime_table_record_from_entity_projected(
+                                hydrated.clone(),
+                                &select_cols,
+                            )
                         })
                     }
                 } else if lean_select_star {
                     super::super::record_search::runtime_table_record_lean_in_collection(
-                        entity.clone(),
+                        hydrated.clone(),
                         &query.table,
                     )
                 } else {
-                    runtime_table_record_from_entity(entity.clone())
+                    runtime_table_record_from_entity(hydrated.clone())
                 };
                 if let Some(record) = record {
                     if requires_filter_recheck {
-                        let Some(filter_record) = runtime_table_record_from_entity(entity.clone())
+                        let Some(filter_record) =
+                            runtime_table_record_from_entity(hydrated.clone())
                         else {
                             continue;
                         };
@@ -1071,42 +1086,48 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 if !db.replica_allows_entity_at_read(&query.table, entity) {
                     return true;
                 }
-                if compiled.evaluate(entity) {
+                let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+                    hydrate_store.as_ref(),
+                    entity,
+                );
+                if compiled.evaluate(&hydrated) {
                     let record = if !select_cols.is_empty() {
                         // Fast columnar path: use pre-computed schema indices when available.
                         if let Some(ref idx_map) = schema_col_indices {
                             super::super::record_search::runtime_table_record_with_col_indices(
-                                entity, &select_cols, idx_map,
+                                &hydrated,
+                                &select_cols,
+                                idx_map,
                             )
                             .or_else(|| {
                                 super::super::record_search::runtime_table_record_from_entity_ref_projected(
-                                    entity, &select_cols,
+                                    &hydrated, &select_cols,
                                 )
                             })
                             .or_else(|| {
-                                runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                                runtime_table_record_from_entity_projected(hydrated.clone(), &select_cols)
                             })
                         } else {
                             super::super::record_search::runtime_table_record_from_entity_ref_projected(
-                                entity,
+                                &hydrated,
                                 &select_cols,
                             )
                             .or_else(|| {
-                                runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                                runtime_table_record_from_entity_projected(hydrated.clone(), &select_cols)
                             })
                         }
                     } else if lean_select_star {
                         super::super::record_search::runtime_table_record_lean_in_collection(
-                            entity.clone(),
+                            hydrated.clone(),
                             &query.table,
                         )
                         } else {
-                            runtime_table_record_from_entity(entity.clone())
+                            runtime_table_record_from_entity(hydrated.clone())
                         };
                     if let Some(record) = record {
                         if requires_filter_recheck {
                             let Some(filter_record) =
-                                runtime_table_record_from_entity(entity.clone())
+                                runtime_table_record_from_entity(hydrated.clone())
                             else {
                                 return true;
                             };
