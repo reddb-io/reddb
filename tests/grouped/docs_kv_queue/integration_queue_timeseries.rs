@@ -21,21 +21,6 @@ fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
 }
 
-/// Decode an internally-stored time-series tag value. Issue #543
-/// changed the SQL INSERT path to prepend `\x01` + compact JSON to
-/// each tag value so non-string types (numbers, bools, nested
-/// objects) survive the `HashMap<String, String>` storage shape.
-/// Tests that inspect `TimeSeriesData::tags` directly need to undo
-/// that encoding before comparing against the user-facing value.
-fn decoded_string_tag(tags: &HashMap<String, String>, key: &str) -> Option<String> {
-    let raw = tags.get(key)?;
-    let Some(suffix) = raw.strip_prefix('\u{1}') else {
-        return Some(raw.clone());
-    };
-    let json: reddb::json::Value = reddb::json::from_str(suffix).ok()?;
-    json.as_str().map(|s| s.to_string())
-}
-
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
     QueryUseCases::new(rt)
         .execute(ExecuteQueryInput {
@@ -850,13 +835,10 @@ fn test_timeseries_persistent_reopen_retains_tags() {
     assert_eq!(entities.len(), 1);
     match &entities[0].data {
         EntityData::TimeSeries(ts) => {
-            assert_eq!(
-                decoded_string_tag(&ts.tags, "host").as_deref(),
-                Some("srv1")
-            );
-            assert_eq!(
-                decoded_string_tag(&ts.tags, "region").as_deref(),
-                Some("us-east")
+            assert_eq!(ts.series_id, Some(0));
+            assert!(
+                ts.tags.is_empty(),
+                "tags must be resolved through the dictionary"
             );
         }
         other => panic!("expected native timeseries entity, got {other:?}"),
@@ -984,19 +966,112 @@ fn test_insert_into_timeseries_uses_native_point_entities() {
     match &entities[0].data {
         EntityData::TimeSeries(ts) => {
             assert_eq!(ts.metric, "cpu.idle");
+            assert_eq!(ts.series_id, Some(0));
             assert_eq!(ts.timestamp_ns, explicit_timestamp);
             assert_eq!(ts.value, 94.8);
-            assert_eq!(
-                decoded_string_tag(&ts.tags, "host").as_deref(),
-                Some("srv1")
-            );
-            assert_eq!(
-                decoded_string_tag(&ts.tags, "region").as_deref(),
-                Some("us-east")
+            assert!(
+                ts.tags.is_empty(),
+                "tags must be resolved through the dictionary"
             );
         }
         other => panic!("expected native timeseries entity, got {other:?}"),
     }
+}
+
+#[test]
+fn test_timeseries_series_dictionary_interns_canonical_tags() {
+    let path = PersistentDbPath::new("timeseries_series_dictionary");
+    let rt = path.open_runtime();
+
+    exec(&rt, "CREATE TIMESERIES cpu_metrics RETENTION 7 d");
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 94.8, {region: 'us-east', host: 'srv1'}, 1)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 95.2, '{\"host\":\"srv1\",\"region\":\"us-east\"}', 2)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 96.0, '{\"host\":\"old\",\"host\":\"srv1\",\"region\":\"us-east\"}', 3)",
+    );
+
+    let selected = exec(
+        &rt,
+        "SELECT metric, value, timestamp, tags FROM cpu_metrics WHERE tags.host = 'srv1' ORDER BY timestamp ASC",
+    );
+    assert_eq!(
+        selected.result.records.len(),
+        3,
+        "tag filtering must resolve interned tags"
+    );
+    assert_eq!(uint(&selected.result.records[0], "timestamp"), 1);
+    match selected.result.records[0].get("tags") {
+        Some(Value::Json(bytes)) => {
+            let json: reddb::json::Value =
+                reddb::json::from_slice(bytes).expect("tags json should decode");
+            assert_eq!(
+                json.as_object()
+                    .expect("tags should be an object")
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec!["host".to_string(), "region".to_string()],
+                "tag projection order is canonical"
+            );
+            assert_eq!(
+                json.get("host").and_then(reddb::json::Value::as_str),
+                Some("srv1"),
+                "duplicate tag keys are last-writer-wins before canonicalization"
+            );
+        }
+        other => panic!("expected json tags in query result, got {other:?}"),
+    }
+
+    {
+        let store = rt.db().store();
+        let dictionary = store
+            .get_collection("red_timeseries_series")
+            .expect("series dictionary collection should exist");
+        let rows = dictionary.query_all(|entity| {
+            entity.data.as_row().is_some_and(|row| {
+                row.get_field("collection").is_some_and(
+                    |value| matches!(value, Value::Text(name) if &**name == "cpu_metrics"),
+                )
+            })
+        });
+        assert_eq!(rows.len(), 1, "same canonical series must intern once");
+
+        let manager = store
+            .get_collection("cpu_metrics")
+            .expect("cpu_metrics collection should exist");
+        let points = manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+        assert_eq!(points.len(), 3);
+        for point in points {
+            match point.data {
+                EntityData::TimeSeries(ts) => {
+                    assert_eq!(ts.series_id, Some(0));
+                    assert!(
+                        ts.tags.is_empty(),
+                        "new timeseries points must not persist inline tag maps"
+                    );
+                }
+                other => panic!("expected native timeseries point, got {other:?}"),
+            }
+        }
+    }
+
+    let rt = checkpoint_and_reopen(&path, rt);
+    let reopened = exec(
+        &rt,
+        "SELECT timestamp, tags FROM cpu_metrics WHERE tags.region = 'us-east' ORDER BY timestamp ASC",
+    );
+    assert_eq!(
+        reopened.result.records.len(),
+        3,
+        "reopened reads must resolve tags through the series dictionary"
+    );
 }
 
 #[test]
@@ -1018,6 +1093,7 @@ fn test_timeseries_time_bucket_aggregate_query() {
             })),
             EntityData::TimeSeries(TimeSeriesData {
                 metric: "cpu.usage".to_string(),
+                series_id: None,
                 timestamp_ns,
                 value,
                 tags: HashMap::new(),
