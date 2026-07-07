@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
 use crate::runtime::impl_core::{
-    clear_current_auth_identity, clear_current_tenant, current_auth_identity, current_tenant,
-    set_current_auth_identity, set_current_tenant,
+    clear_current_auth_identity, clear_current_tenant, current_auth_identity,
+    current_connection_id, current_tenant, set_current_auth_identity, set_current_tenant,
 };
 use crate::runtime::queue_telemetry::NackOutcomeLabel;
 use crate::storage::queue::QueueMode;
@@ -166,8 +166,8 @@ const OUTBOX_MAX_BYTES: u64 = 10 * (1 << 30);
 /// Running estimate of bytes pending in event queues (approximate; not decremented on consume).
 static OUTBOX_APPROX_BYTES: AtomicU64 = AtomicU64::new(0);
 
-const QUEUE_META_COLLECTION: &str = "red_queue_meta";
-const KIND_QUEUE_PUSH_DEDUP: &str = "queue_push_dedup";
+pub(super) const QUEUE_META_COLLECTION: &str = "red_queue_meta";
+pub(super) const KIND_QUEUE_PUSH_DEDUP: &str = "queue_push_dedup";
 const QUEUE_POSITION_CENTER: u64 = u64::MAX / 2;
 const WORK_DEFAULT_GROUP: &str = "_work_default";
 const FANOUT_GROUP_PREFIX: &str = "_fanout_";
@@ -1038,7 +1038,17 @@ impl RedDBRuntime {
                         .unwrap_or(crate::storage::query::DEFAULT_QUEUE_DEDUP_WINDOW_MS);
                     let expires_at_ns =
                         now_ns().saturating_add(window_ms.saturating_mul(1_000_000));
-                    record_queue_dedup(store.as_ref(), queue, dedup_key, id, expires_at_ns)?;
+                    let metadata_id =
+                        record_queue_dedup(store.as_ref(), queue, dedup_key, id, expires_at_ns)?;
+                    self.stamp_xmin_if_in_txn(QUEUE_META_COLLECTION, metadata_id);
+                    if self.current_xid().is_some() {
+                        self.record_pending_queue_dedup(
+                            current_connection_id(),
+                            queue,
+                            dedup_key,
+                            metadata_id,
+                        );
+                    }
                 }
                 // Resolve per-message availability (issue #722): DELAY is
                 // relative to the push instant, AVAILABLE AT carries an
@@ -2075,7 +2085,7 @@ fn save_queue_config(
             .map(Value::UnsignedInteger)
             .unwrap_or(Value::Null),
     );
-    insert_meta_row(store, fields)
+    insert_meta_row(store, fields).map(|_| ())
 }
 
 fn remove_queue_metadata(store: &UnifiedStore, queue: &str) {
@@ -2165,7 +2175,7 @@ fn save_queue_group(store: &UnifiedStore, queue: &str, group: &str) -> RedDBResu
         "created_at_ns".to_string(),
         Value::UnsignedInteger(now_ns()),
     );
-    insert_meta_row(store, fields)
+    insert_meta_row(store, fields).map(|_| ())
 }
 
 pub(super) fn load_pending_entries(
@@ -2281,7 +2291,7 @@ pub(super) fn save_queue_pending(
         "delivery_count".to_string(),
         Value::UnsignedInteger(u64::from(delivery_count)),
     );
-    insert_meta_row(store, fields)
+    insert_meta_row(store, fields).map(|_| ())
 }
 
 pub(super) fn require_pending_entry(
@@ -2357,7 +2367,7 @@ pub(super) fn save_queue_ack(
         Value::UnsignedInteger(message_id.raw()),
     );
     fields.insert("acked_at_ns".to_string(), Value::UnsignedInteger(now_ns()));
-    insert_meta_row(store, fields)
+    insert_meta_row(store, fields).map(|_| ())
 }
 
 pub(super) fn queue_message_completed_for_all_groups(
@@ -2969,9 +2979,9 @@ pub(super) fn queue_message_data(
     }
 }
 
-fn insert_meta_row(store: &UnifiedStore, fields: HashMap<String, Value>) -> RedDBResult<()> {
+fn insert_meta_row(store: &UnifiedStore, fields: HashMap<String, Value>) -> RedDBResult<EntityId> {
     let _ = store.get_or_create_collection(QUEUE_META_COLLECTION);
-    store
+    let id = store
         .insert_auto(
             QUEUE_META_COLLECTION,
             UnifiedEntity::new(
@@ -2988,7 +2998,7 @@ fn insert_meta_row(store: &UnifiedStore, fields: HashMap<String, Value>) -> RedD
             ),
         )
         .map_err(|err| RedDBError::Internal(err.to_string()))?;
-    Ok(())
+    Ok(id)
 }
 
 pub(super) fn remove_meta_rows(store: &UnifiedStore, predicate: impl Fn(&RowData) -> bool + Sync) {
@@ -3037,8 +3047,12 @@ pub(super) fn find_queue_dedup(
     let manager = store.get_collection(QUEUE_META_COLLECTION)?;
     let queue = queue.to_string();
     let dedup_key = dedup_key.to_string();
+    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     manager
         .query_all(|entity| {
+            if !crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity) {
+                return false;
+            }
             entity.data.as_row().is_some_and(|row| {
                 row_text(row, "kind").as_deref() == Some(KIND_QUEUE_PUSH_DEDUP)
                     && row_text(row, "queue").as_deref() == Some(&queue)
@@ -3062,15 +3076,7 @@ pub(super) fn record_queue_dedup(
     dedup_key: &str,
     message_id: EntityId,
     expires_at_ns: u64,
-) -> RedDBResult<()> {
-    let queue_owned = queue.to_string();
-    let key_owned = dedup_key.to_string();
-    remove_meta_rows(store, |row| {
-        row_text(row, "kind").as_deref() == Some(KIND_QUEUE_PUSH_DEDUP)
-            && row_text(row, "queue").as_deref() == Some(&queue_owned)
-            && row_text(row, "dedup_key").as_deref() == Some(&key_owned)
-    });
-
+) -> RedDBResult<EntityId> {
     let mut fields = HashMap::new();
     fields.insert(
         "kind".to_string(),

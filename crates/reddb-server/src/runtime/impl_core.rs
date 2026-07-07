@@ -1472,6 +1472,27 @@ impl RedDBRuntime {
                                     self.release_pending_claim_locks(conn_id);
                                     return Err(err);
                                 }
+                                if let Err(err) = self.check_queue_dedup_write_conflicts(
+                                    conn_id,
+                                    &ctx.snapshot,
+                                    &own_xids,
+                                ) {
+                                    for (_, sub) in &ctx.savepoints {
+                                        self.inner.snapshot_manager.rollback(*sub);
+                                    }
+                                    for sub in &ctx.released_sub_xids {
+                                        self.inner.snapshot_manager.rollback(*sub);
+                                    }
+                                    self.inner.snapshot_manager.rollback(ctx.xid);
+                                    self.revive_pending_versioned_updates(conn_id);
+                                    self.revive_pending_tombstones(conn_id);
+                                    self.discard_pending_queue_dedup(conn_id);
+                                    self.discard_pending_kv_watch_events(conn_id);
+                                    self.discard_pending_queue_wakes(conn_id);
+                                    self.discard_pending_store_wal_actions(conn_id);
+                                    self.release_pending_claim_locks(conn_id);
+                                    return Err(err);
+                                }
                                 self.restore_pending_write_stamps(conn_id);
                                 if let Err(err) = self.flush_pending_store_wal_actions(conn_id) {
                                     for (_, sub) in &ctx.savepoints {
@@ -1483,6 +1504,7 @@ impl RedDBRuntime {
                                     self.inner.snapshot_manager.rollback(ctx.xid);
                                     self.revive_pending_versioned_updates(conn_id);
                                     self.revive_pending_tombstones(conn_id);
+                                    self.discard_pending_queue_dedup(conn_id);
                                     self.discard_pending_kv_watch_events(conn_id);
                                     self.discard_pending_queue_wakes(conn_id);
                                     self.release_pending_claim_locks(conn_id);
@@ -1502,6 +1524,7 @@ impl RedDBRuntime {
                                 self.inner.snapshot_manager.commit(ctx.xid);
                                 self.finalize_pending_versioned_updates(conn_id);
                                 self.finalize_pending_tombstones(conn_id);
+                                self.finalize_pending_queue_dedup(conn_id);
                                 self.finalize_pending_kv_watch_events(conn_id);
                                 self.finalize_pending_queue_wakes(conn_id);
                                 self.release_pending_claim_locks(conn_id);
@@ -1532,6 +1555,7 @@ impl RedDBRuntime {
                                 // back to 0 so later snapshots see them.
                                 self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
+                                self.discard_pending_queue_dedup(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.discard_pending_store_wal_actions(conn_id);

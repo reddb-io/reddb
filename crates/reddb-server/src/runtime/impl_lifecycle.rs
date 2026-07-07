@@ -296,6 +296,7 @@ impl RedDBRuntime {
                 foreign_tables: Arc::new(crate::storage::fdw::ForeignTableRegistry::with_builtins()),
                 pending_tombstones: parking_lot::RwLock::new(HashMap::new()),
                 pending_versioned_updates: parking_lot::RwLock::new(HashMap::new()),
+                pending_queue_dedup: parking_lot::RwLock::new(HashMap::new()),
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
                 pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
                 pending_claim_locks: parking_lot::RwLock::new(HashMap::new()),
