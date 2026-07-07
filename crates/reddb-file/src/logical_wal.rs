@@ -11,11 +11,12 @@
 //! [magic     4 bytes  = b"RDLW"]
 //! [version   1 byte   = 0x03]
 //! [term      8 bytes  little-endian u64]
+//! [ownership_epoch 8 bytes little-endian u64, 0 when absent]
 //! [lsn       8 bytes  little-endian u64]
 //! [timestamp 8 bytes  little-endian u64, wall-clock millis since UNIX epoch]
 //! [payload_len 4 bytes little-endian u32]
 //! [payload   payload_len bytes]
-//! [crc32     4 bytes  little-endian u32 over version, term, lsn, timestamp, len, payload]
+//! [crc32     4 bytes  little-endian u32 over version, term, ownership_epoch, lsn, timestamp, len, payload]
 //! ```
 //!
 //! ## Version 2, legacy read-only
@@ -49,7 +50,7 @@ pub const LOGICAL_WAL_SPOOL_VERSION_V1: u8 = 1;
 pub const LOGICAL_WAL_SPOOL_VERSION_V2: u8 = 2;
 pub const LOGICAL_WAL_SPOOL_VERSION_V3: u8 = 3;
 pub const LOGICAL_WAL_SPOOL_VERSION_CURRENT: u8 = LOGICAL_WAL_SPOOL_VERSION_V3;
-pub const LOGICAL_WAL_V3_HEADER_LEN: u64 = 4 + 1 + 8 + 8 + 8 + 4;
+pub const LOGICAL_WAL_V3_HEADER_LEN: u64 = 4 + 1 + 8 + 8 + 8 + 8 + 4;
 pub const LOGICAL_WAL_CRC_LEN: u64 = 4;
 pub const LOGICAL_WAL_SEEK_INDEX_INTERVAL: u64 = 64;
 
@@ -58,6 +59,7 @@ const MAX_PLAUSIBLE_PAYLOAD: usize = 256 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalWalEntry {
     pub term: u64,
+    pub ownership_epoch: Option<u64>,
     pub lsn: u64,
     pub timestamp_ms: u64,
     pub data: Vec<u8>,
@@ -66,6 +68,7 @@ pub struct LogicalWalEntry {
 
 pub fn encode_logical_wal_v3(
     term: u64,
+    ownership_epoch: Option<u64>,
     lsn: u64,
     timestamp_ms: u64,
     data: &[u8],
@@ -86,6 +89,7 @@ pub fn encode_logical_wal_v3(
     frame.extend_from_slice(LOGICAL_WAL_SPOOL_MAGIC);
     frame.push(LOGICAL_WAL_SPOOL_VERSION_CURRENT);
     frame.extend_from_slice(&term.to_le_bytes());
+    frame.extend_from_slice(&ownership_epoch.unwrap_or(0).to_le_bytes());
     frame.extend_from_slice(&lsn.to_le_bytes());
     frame.extend_from_slice(&timestamp_ms.to_le_bytes());
     frame.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -93,6 +97,7 @@ pub fn encode_logical_wal_v3(
     let crc = compute_logical_v3_crc(
         LOGICAL_WAL_SPOOL_VERSION_CURRENT,
         term,
+        ownership_epoch,
         lsn,
         timestamp_ms,
         data,
@@ -245,7 +250,13 @@ pub fn rewrite_logical_wal_entries(
     let mut temp = File::create(temp_path)?;
     let mut current_lsn = 0;
     for entry in entries {
-        let frame = encode_logical_wal_v3(entry.term, entry.lsn, entry.timestamp_ms, &entry.data)?;
+        let frame = encode_logical_wal_v3(
+            entry.term,
+            entry.ownership_epoch,
+            entry.lsn,
+            entry.timestamp_ms,
+            &entry.data,
+        )?;
         temp.write_all(&frame)?;
         current_lsn = current_lsn.max(entry.lsn);
     }
@@ -284,6 +295,7 @@ fn read_logical_wal_frame(
 
 fn read_one_v3(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, String> {
     let term = read_u64(file, "term", record_start)?;
+    let ownership_epoch = read_u64(file, "ownership epoch", record_start)?;
     let lsn = read_u64(file, "lsn", record_start)?;
     let timestamp_ms = read_u64(file, "timestamp", record_start)?;
     let payload_len = read_u32(file, "payload length", record_start)? as usize;
@@ -292,6 +304,11 @@ fn read_one_v3(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     let expected_crc = compute_logical_v3_crc(
         LOGICAL_WAL_SPOOL_VERSION_V3,
         term,
+        if ownership_epoch == 0 {
+            None
+        } else {
+            Some(ownership_epoch)
+        },
         lsn,
         timestamp_ms,
         &payload,
@@ -303,6 +320,11 @@ fn read_one_v3(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     }
     Ok(LogicalWalEntry {
         term,
+        ownership_epoch: if ownership_epoch == 0 {
+            None
+        } else {
+            Some(ownership_epoch)
+        },
         lsn,
         timestamp_ms,
         data: payload,
@@ -325,6 +347,7 @@ fn read_one_v2(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     }
     Ok(LogicalWalEntry {
         term: 0,
+        ownership_epoch: None,
         lsn,
         timestamp_ms,
         data: payload,
@@ -338,6 +361,7 @@ fn read_one_v1(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     let payload = read_payload(file, payload_len, record_start)?;
     Ok(LogicalWalEntry {
         term: 0,
+        ownership_epoch: None,
         lsn,
         timestamp_ms: 0,
         data: payload,
@@ -385,6 +409,7 @@ fn compute_logical_v2_crc(version: u8, lsn: u64, timestamp_ms: u64, payload: &[u
 fn compute_logical_v3_crc(
     version: u8,
     term: u64,
+    ownership_epoch: Option<u64>,
     lsn: u64,
     timestamp_ms: u64,
     payload: &[u8],
@@ -392,6 +417,7 @@ fn compute_logical_v3_crc(
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&[version]);
     hasher.update(&term.to_le_bytes());
+    hasher.update(&ownership_epoch.unwrap_or(0).to_le_bytes());
     hasher.update(&lsn.to_le_bytes());
     hasher.update(&timestamp_ms.to_le_bytes());
     hasher.update(&(payload.len() as u32).to_le_bytes());
@@ -415,7 +441,7 @@ mod tests {
     #[test]
     fn v3_roundtrip_preserves_framing_term_and_timestamp() {
         let path = temp_path("v3");
-        let frame = encode_logical_wal_v3(7, 42, 99, b"payload").expect("encode");
+        let frame = encode_logical_wal_v3(7, None, 42, 99, b"payload").expect("encode");
         std::fs::write(&path, frame).expect("write");
 
         let entries = read_and_repair_logical_wal_entries(&path).expect("read");
@@ -432,9 +458,11 @@ mod tests {
     #[test]
     fn repair_truncates_torn_tail_to_last_valid_record() {
         let path = temp_path("repair");
-        let first = encode_logical_wal_v3(1, 1, 10, b"ok").expect("first");
+        let first = encode_logical_wal_v3(1, None, 1, 10, b"ok").expect("first");
         let mut bytes = first.clone();
-        bytes.extend_from_slice(&encode_logical_wal_v3(1, 2, 11, b"torn").expect("second")[..12]);
+        bytes.extend_from_slice(
+            &encode_logical_wal_v3(1, None, 2, 11, b"torn").expect("second")[..12],
+        );
         std::fs::write(&path, bytes).expect("write");
 
         let entries = read_and_repair_logical_wal_entries(&path).expect("repair");
@@ -465,6 +493,29 @@ mod tests {
     }
 
     #[test]
+    fn mixed_v2_v3_readback_surfaces_framing_term_and_epoch() {
+        let path = temp_path("mixed-v2-v3-authority");
+        let mut frames = encode_logical_wal_v2_for_compat(3, 44, b"legacy").expect("encode v2");
+        frames.extend_from_slice(
+            &encode_logical_wal_v3(7, Some(11), 4, 45, b"current").expect("encode v3"),
+        );
+        std::fs::write(&path, frames).expect("write");
+
+        let entries = read_and_repair_logical_wal_entries(&path).expect("read");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].term, 0);
+        assert_eq!(entries[0].ownership_epoch, None);
+        assert_eq!(entries[0].version, LOGICAL_WAL_SPOOL_VERSION_V2);
+        assert_eq!(entries[1].term, 7);
+        assert_eq!(entries[1].ownership_epoch, Some(11));
+        assert_eq!(entries[1].lsn, 4);
+        assert_eq!(entries[1].data, b"current");
+        assert_eq!(entries[1].version, LOGICAL_WAL_SPOOL_VERSION_V3);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn missing_paths_read_as_empty_wal() {
         let path = temp_path("missing");
         assert!(read_and_repair_logical_wal_entries(&path)
@@ -487,7 +538,8 @@ mod tests {
                 offset_64 = bytes.len() as u64;
             }
             bytes.extend_from_slice(
-                &encode_logical_wal_v3(2, lsn, 1_000 + lsn, format!("p{lsn}").as_bytes()).unwrap(),
+                &encode_logical_wal_v3(2, None, lsn, 1_000 + lsn, format!("p{lsn}").as_bytes())
+                    .unwrap(),
             );
         }
         std::fs::write(&path, bytes).unwrap();
@@ -534,7 +586,7 @@ mod tests {
 
     #[test]
     fn corruption_modes_truncate_to_last_good_record() {
-        let valid = encode_logical_wal_v3(1, 1, 1, b"ok").unwrap();
+        let valid = encode_logical_wal_v3(1, None, 1, 1, b"ok").unwrap();
 
         for (name, tail) in [
             ("bad-magic", b"NOPE".to_vec()),
@@ -557,11 +609,11 @@ mod tests {
 
     #[test]
     fn checksum_and_implausible_payload_are_repaired_away() {
-        let valid = encode_logical_wal_v3(1, 1, 1, b"ok").unwrap();
+        let valid = encode_logical_wal_v3(1, None, 1, 1, b"ok").unwrap();
 
         let path = temp_path("bad-crc");
         let mut bad_crc = valid.clone();
-        let mut corrupt = encode_logical_wal_v3(1, 2, 2, b"bad").unwrap();
+        let mut corrupt = encode_logical_wal_v3(1, None, 2, 2, b"bad").unwrap();
         let last = corrupt.len() - 1;
         corrupt[last] ^= 0xff;
         bad_crc.extend_from_slice(&corrupt);
@@ -576,6 +628,7 @@ mod tests {
         implausible.extend_from_slice(LOGICAL_WAL_SPOOL_MAGIC);
         implausible.push(LOGICAL_WAL_SPOOL_VERSION_V3);
         implausible.extend_from_slice(&1u64.to_le_bytes());
+        implausible.extend_from_slice(&0u64.to_le_bytes());
         implausible.extend_from_slice(&2u64.to_le_bytes());
         implausible.extend_from_slice(&3u64.to_le_bytes());
         implausible.extend_from_slice(&(MAX_PLAUSIBLE_PAYLOAD as u32 + 1).to_le_bytes());

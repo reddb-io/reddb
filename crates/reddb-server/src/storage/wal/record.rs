@@ -1,11 +1,12 @@
 use reddb_file::{
-    decode_main_wal_record_frame, encode_main_wal_record_frame_into, MainWalRecordFrame,
-    WAL_FILE_VERSION,
+    decode_main_wal_record_frame_with_authority, encode_main_wal_record_frame_into,
+    encode_main_wal_record_frame_with_authority_into, MainWalRecordFrame, WAL_FILE_VERSION,
 };
 use std::io::{self, Read};
 
 pub const WAL_DEFAULT_TERM: u64 = crate::replication::DEFAULT_REPLICATION_TERM;
 
+pub use reddb_file::MainWalRecordAuthority as WalRecordAuthority;
 pub use reddb_file::MainWalRecordType as RecordType;
 
 /// A single entry in the write-ahead log
@@ -97,6 +98,11 @@ impl WalRecord {
             .expect("main WAL record cannot be encoded");
     }
 
+    pub fn encode_with_authority_into(&self, out: &mut Vec<u8>, authority: WalRecordAuthority) {
+        encode_main_wal_record_frame_with_authority_into(&self.to_file_frame(), authority, out)
+            .expect("main WAL record cannot be encoded");
+    }
+
     /// Read a record from a reader.
     ///
     /// Handles both v1 (`PageWrite`) and v2 (`PageWriteCompressed`) record
@@ -110,14 +116,37 @@ impl WalRecord {
         Self::read_with_format_version(reader, WAL_FILE_VERSION)
     }
 
+    /// Read a record and return the term + ownership epoch stamped into
+    /// its physical envelope.
+    pub fn read_with_authority<R: Read>(
+        reader: &mut R,
+    ) -> io::Result<Option<(WalRecordAuthority, WalRecord)>> {
+        Self::read_with_authority_format_version(reader, WAL_FILE_VERSION)
+    }
+
     pub(crate) fn read_with_format_version<R: Read>(
         reader: &mut R,
         format_version: u8,
     ) -> io::Result<Option<(u64, WalRecord)>> {
         Ok(
-            decode_main_wal_record_frame(reader, format_version, WAL_DEFAULT_TERM)?
-                .map(|(term, frame)| (term, WalRecord::from_file_frame(frame))),
+            Self::read_with_authority_format_version(reader, format_version)?
+                .map(|(authority, record)| (authority.term, record)),
         )
+    }
+
+    pub(crate) fn read_with_authority_format_version<R: Read>(
+        reader: &mut R,
+        format_version: u8,
+    ) -> io::Result<Option<(WalRecordAuthority, WalRecord)>> {
+        Ok(decode_main_wal_record_frame_with_authority(
+            reader,
+            format_version,
+            WalRecordAuthority {
+                term: WAL_DEFAULT_TERM,
+                ownership_epoch: None,
+            },
+        )?
+        .map(|(authority, frame)| (authority, WalRecord::from_file_frame(frame))))
     }
 }
 
@@ -319,6 +348,25 @@ mod tests {
         let (term, decoded) = WalRecord::read_with_term(&mut cursor).unwrap().unwrap();
 
         assert_eq!(term, 9);
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_read_begin_roundtrip_preserves_authority_epoch() {
+        let original = WalRecord::Begin { tx_id: 42 };
+        let authority = WalRecordAuthority {
+            term: 9,
+            ownership_epoch: Some(12),
+        };
+        let mut encoded = Vec::new();
+        original.encode_with_authority_into(&mut encoded, authority);
+
+        let mut cursor = Cursor::new(encoded);
+        let (decoded_authority, decoded) = WalRecord::read_with_authority(&mut cursor)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(decoded_authority, authority);
         assert_eq!(decoded, original);
     }
 
