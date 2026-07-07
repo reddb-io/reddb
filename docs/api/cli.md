@@ -150,6 +150,7 @@ red query "SELECT * FROM users WHERE age > 21" --path ./data.rdb
 | `--path` | | (in-memory) | Open a local `.rdb` file |
 | `--param` | `-p` | | Positional parameter for `$1`, `$2`, … (repeatable) |
 | `--param-type` | | (auto) | Type override for the preceding `--param` |
+| `--format` | | `table` | Row output format: `table`, `json`, `ndjson`, `csv`, `tsv`, `toon` |
 | `--json` | | `false` | Emit a JSON envelope on stdout |
 
 ### Ephemeral file queries
@@ -223,6 +224,29 @@ red query "INSERT INTO articles (title, body) VALUES ($1, $2)" \
 Parameter binding goes through the same `user_params` binder the
 HTTP `/query` and `POST { "query": ..., "params": [...] }` paths
 use, so semantics are identical across surfaces.
+
+### Agent output
+
+Use `--format toon` when query rows are headed into an agent or LLM
+context. TOON (Token-Oriented Object Notation) keeps a single column
+header and emits comma-delimited row values, so repeated object keys are
+not duplicated per row:
+
+```bash
+red query data.csv "SELECT id, name FROM t ORDER BY id" --format toon
+```
+
+```toon
+[2]{id,name}:
+  1,Ada
+  2,Linus
+```
+
+For that representative two-row shape, the equivalent compact JSON is
+48 bytes, while TOON is 32 bytes, a 33% reduction in the text that
+tokenizers must consume. The exact token reduction depends on row width,
+column names, and the target tokenizer; wider rowsets tend to benefit
+more because the column names are not repeated for every row.
 
 Examples:
 

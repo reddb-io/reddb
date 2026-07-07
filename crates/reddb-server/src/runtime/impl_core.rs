@@ -3163,7 +3163,7 @@ impl RedDBRuntime {
     /// `RuntimeQueryResult` so callers over the SQL interface see the
     /// plan tree in the same shape a SELECT produces.
     ///
-    /// Columns: `op`, `source`, `est_rows`, `est_cost`, `depth`.
+    /// Columns: `op`, `source`, `estimated_rows`, `estimated_cost`, `depth`.
     /// Nodes are walked depth-first; `depth` counts from 0 at the
     /// root so a text renderer can indent without re-walking.
     fn explain_as_rows(&self, raw_query: &str, inner_sql: &str) -> RedDBResult<RuntimeQueryResult> {
@@ -3172,8 +3172,8 @@ impl RedDBRuntime {
         let columns = vec![
             "op".to_string(),
             "source".to_string(),
-            "est_rows".to_string(),
-            "est_cost".to_string(),
+            "estimated_rows".to_string(),
+            "estimated_cost".to_string(),
             "depth".to_string(),
         ];
 
@@ -3189,8 +3189,8 @@ impl RedDBRuntime {
             let mut rec = crate::storage::query::unified::UnifiedRecord::default();
             rec.set_arc(Arc::from("op"), Value::text("CteScan".to_string()));
             rec.set_arc(Arc::from("source"), Value::text(name.clone()));
-            rec.set_arc(Arc::from("est_rows"), Value::Float(0.0));
-            rec.set_arc(Arc::from("est_cost"), Value::Float(0.0));
+            rec.set_arc(Arc::from("estimated_rows"), Value::Float(0.0));
+            rec.set_arc(Arc::from("estimated_cost"), Value::Float(0.0));
             rec.set_arc(Arc::from("depth"), Value::Integer(0));
             records.push(rec);
         }
@@ -3229,8 +3229,14 @@ fn walk_plan_node(
         Arc::from("source"),
         node.source.clone().map(Value::text).unwrap_or(Value::Null),
     );
-    rec.set_arc(Arc::from("est_rows"), Value::Float(node.estimated_rows));
-    rec.set_arc(Arc::from("est_cost"), Value::Float(node.operator_cost));
+    rec.set_arc(
+        Arc::from("estimated_rows"),
+        Value::Float(node.estimated_rows),
+    );
+    rec.set_arc(
+        Arc::from("estimated_cost"),
+        Value::Float(node.operator_cost),
+    );
     rec.set_arc(Arc::from("depth"), Value::Integer(depth as i64));
     out.push(rec);
     for child in &node.children {

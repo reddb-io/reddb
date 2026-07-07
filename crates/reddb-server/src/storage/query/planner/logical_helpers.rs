@@ -426,6 +426,7 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         QueryExpr::Vector(query) => query.alias.as_deref() == Some(table) || table == "vector",
         QueryExpr::Hybrid(query) => query.alias.as_deref() == Some(table) || table == "hybrid",
         QueryExpr::Join(query) => join_query_exposes_field_table(query, table),
+        QueryExpr::Explain(query) => join_expr_exposes_field_table(&query.inner, table),
         QueryExpr::Insert(_)
         | QueryExpr::Update(_)
         | QueryExpr::Delete(_)
@@ -893,6 +894,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::ApplyMigration(_) => "apply_migration",
         QueryExpr::RollbackMigration(_) => "rollback_migration",
         QueryExpr::ExplainMigration(_) => "explain_migration",
+        QueryExpr::Explain(_) => "explain",
         QueryExpr::EventsBackfill(_) => "events_backfill",
         QueryExpr::EventsBackfillStatus { .. } => "events_backfill_status",
     }

@@ -345,7 +345,7 @@ const USAGE: &str = "\
 red_client — thin RedDB client (remote-only)
 
 USAGE:
-    red_client <URI> [--token TOKEN] [--command SQL] [--repl]
+    red_client <URI> [--token TOKEN] [--format FORMAT] [--command SQL] [--repl]
 
 EXAMPLES:
     red_client red://reddb.example.com:5050 --token sk-abc
@@ -354,6 +354,9 @@ EXAMPLES:
 
 ACCEPTED SCHEMES:
     red://, reds://, grpc://, grpcs://
+
+ROW FORMATS:
+    table, json, ndjson, csv, tsv, toon
 
 REJECTED SCHEMES (use the full `red` binary):
     memory://, file:///path, red:///path, red://:memory:

@@ -7,6 +7,7 @@ pub enum RowFormat {
     Ndjson,
     Csv,
     Tsv,
+    Toon,
 }
 
 impl RowFormat {
@@ -17,12 +18,13 @@ impl RowFormat {
             "ndjson" => Some(Self::Ndjson),
             "csv" => Some(Self::Csv),
             "tsv" => Some(Self::Tsv),
+            "toon" => Some(Self::Toon),
             _ => None,
         }
     }
 
     pub fn vocabulary() -> &'static str {
-        "table, json, ndjson, csv, tsv"
+        "table, json, ndjson, csv, tsv, toon"
     }
 }
 
@@ -33,6 +35,7 @@ pub fn format_query_result(result: &QueryResult, format: RowFormat) -> Vec<u8> {
         RowFormat::Ndjson => format_ndjson(result).into_bytes(),
         RowFormat::Csv => format_delimited(result, b','),
         RowFormat::Tsv => format_delimited(result, b'\t'),
+        RowFormat::Toon => format_toon(result).into_bytes(),
     }
 }
 
@@ -125,6 +128,36 @@ fn format_ndjson(result: &QueryResult) -> String {
     out
 }
 
+fn format_toon(result: &QueryResult) -> String {
+    let columns = columns(result);
+    let mut out = String::new();
+    out.push('[');
+    out.push_str(&result.rows.len().to_string());
+    out.push_str("]{");
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        write_toon_key(&mut out, column);
+    }
+    out.push_str("}:\n");
+    for row in &result.rows {
+        out.push_str("  ");
+        for (index, column) in columns.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            if let Some(value) = value_at(row, column) {
+                write_toon_value(&mut out, value);
+            } else {
+                out.push_str("null");
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn write_json_row(out: &mut String, row: &[(String, ValueOut)], columns: &[String]) {
     out.push('{');
     for (index, column) in columns.iter().enumerate() {
@@ -140,6 +173,70 @@ fn write_json_row(out: &mut String, row: &[(String, ValueOut)], columns: &[Strin
         }
     }
     out.push('}');
+}
+
+fn write_toon_key(out: &mut String, value: &str) {
+    if is_toon_bare_key(value) {
+        out.push_str(value);
+    } else {
+        write_toon_string(out, value);
+    }
+}
+
+fn write_toon_value(out: &mut String, value: &ValueOut) {
+    match value {
+        ValueOut::Null => out.push_str("null"),
+        ValueOut::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        ValueOut::Integer(value) => out.push_str(&value.to_string()),
+        ValueOut::Float(value) => out.push_str(&value.to_string()),
+        ValueOut::String(value) => {
+            if is_toon_bare_string(value) {
+                out.push_str(value);
+            } else {
+                write_toon_string(out, value);
+            }
+        }
+    }
+}
+
+fn is_toon_bare_key(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c == '-' || c == '.' || c.is_ascii_alphanumeric())
+}
+
+fn is_toon_bare_string(value: &str) -> bool {
+    !value.is_empty()
+        && !matches!(value, "true" | "false" | "null")
+        && value.parse::<f64>().is_err()
+        && !value.starts_with('-')
+        && !value.chars().any(|c| {
+            matches!(
+                c,
+                ',' | ':' | '{' | '}' | '[' | ']' | '"' | '\\' | '\n' | '\r' | '\t'
+            )
+        })
+}
+
+fn write_toon_string(out: &mut String, value: &str) {
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 fn format_delimited(result: &QueryResult, delimiter: u8) -> Vec<u8> {
@@ -299,6 +396,50 @@ mod tests {
         assert_eq!(
             format_query_result(&sample(), RowFormat::Tsv),
             b"id\tname\tnote\n1\tAda\t\"quote \"\" comma ,\"\n2\tLinus\t\"tab\tline\nend\"\n"
+        );
+    }
+
+    #[test]
+    fn formats_toon_byte_exact() {
+        assert_eq!(
+            format_query_result(&sample(), RowFormat::Toon),
+            br#"[2]{id,name,note}:
+  1,Ada,"quote \" comma ,"
+  2,Linus,"tab\tline\nend"
+"#
+        );
+    }
+
+    #[test]
+    fn formats_toon_quotes_delimiters_and_scalar_like_strings() {
+        let result = QueryResult {
+            statement: "select".to_string(),
+            affected: 0,
+            columns: vec![
+                "label".to_string(),
+                "empty".to_string(),
+                "dash".to_string(),
+                "truthy".to_string(),
+                "nullable".to_string(),
+                "count".to_string(),
+                "enabled".to_string(),
+            ],
+            rows: vec![vec![
+                ("label".to_string(), ValueOut::String("a,b".to_string())),
+                ("empty".to_string(), ValueOut::String(String::new())),
+                ("dash".to_string(), ValueOut::String("-x".to_string())),
+                ("truthy".to_string(), ValueOut::String("true".to_string())),
+                ("nullable".to_string(), ValueOut::Null),
+                ("count".to_string(), ValueOut::Integer(7)),
+                ("enabled".to_string(), ValueOut::Bool(false)),
+            ]],
+        };
+
+        assert_eq!(
+            format_query_result(&result, RowFormat::Toon),
+            br#"[1]{label,empty,dash,truthy,nullable,count,enabled}:
+  "a,b","","-x","true",null,7,false
+"#
         );
     }
 
