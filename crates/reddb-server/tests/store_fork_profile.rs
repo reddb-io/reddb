@@ -1,4 +1,6 @@
+use reddb_file::OperationalManifest;
 use reddb_server::{RedDBError, RedDBOptions, RedDBRuntime, StorageDeployPreset};
+use reddb_types::Value;
 
 fn temp_data_path(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::Builder::new()
@@ -85,4 +87,44 @@ fn operational_directory_fork_uses_exported_layout() {
     assert!(!runtime
         .detach_fork_store("experiment")
         .expect("detach missing fork is idempotent"));
+}
+
+#[test]
+fn promote_fork_sql_installs_fork_as_primary_and_archives_parent() {
+    let (_dir, path) = temp_data_path("promote-fork-sql");
+    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE users (id INT)")
+        .expect("create table");
+    runtime
+        .execute_query("FORK STORE AS experiment")
+        .expect("fork store");
+
+    let manifest = OperationalManifest::for_db_path(&path);
+    let fork = manifest.fork_handle("experiment");
+    fork.hydrate_collection("users").expect("hydrate fork");
+    std::fs::write(fork.collection_path_for_test("users"), b"fork-side-write")
+        .expect("write fork collection");
+
+    let promoted = runtime
+        .execute_query("PROMOTE FORK experiment")
+        .expect("promote fork");
+    let message = match promoted.result.records[0].get("message") {
+        Some(Value::Text(text)) => text.as_ref(),
+        other => panic!("unexpected promotion message: {other:?}"),
+    };
+
+    assert!(
+        message.contains("retired parent archived at"),
+        "promotion must report explicit retired-parent disposition: {:?}",
+        message
+    );
+    assert_eq!(
+        std::fs::read(manifest.collection_path_for_test("users")).expect("read primary"),
+        b"fork-side-write"
+    );
+    assert!(
+        manifest.list_forks().expect("list forks").is_empty(),
+        "promoted fork must no longer remain a live child fork"
+    );
 }
