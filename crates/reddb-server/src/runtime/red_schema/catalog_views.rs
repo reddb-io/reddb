@@ -494,8 +494,8 @@ const STATS_MCV_LIMIT: usize = 10;
 /// * `null_count` / `distinct_count` / `most_common_values` — one row
 ///   per column, `entity` is the column name.
 ///
-/// This slice profiles row (`TABLE`) collections only; other models
-/// share the same contract in later slices.
+/// Document collections reuse the row-table metric set for their top-level
+/// body fields and add document-only `coverage` / `type_histogram` rows.
 pub(super) fn stats_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
@@ -574,13 +574,27 @@ pub(super) fn stats_snapshot(
             Value::UnsignedInteger(checkpoint_stats.last_checkpoint_duration_ms),
         ));
 
-        if collection.model != CollectionModel::Table {
-            continue;
-        }
-        let Some(analyzed) = crate::storage::query::planner::stats_catalog::analyze_collection(
-            store.as_ref(),
-            &collection.name,
-        ) else {
+        let analyzed = match collection.model {
+            CollectionModel::Table => {
+                crate::storage::query::planner::stats_catalog::analyze_collection(
+                    store.as_ref(),
+                    &collection.name,
+                )
+            }
+            CollectionModel::Document => analyze_document_collection(runtime, &collection.name)
+                .map(|stats| {
+                    emit_document_metric_rows(
+                        &mut rows,
+                        &schema,
+                        &collection.name,
+                        stats.document_count,
+                        stats.fields,
+                    );
+                    stats.analyzed
+                }),
+            _ => None,
+        };
+        let Some(analyzed) = analyzed else {
             continue;
         };
 
@@ -616,6 +630,121 @@ pub(super) fn stats_snapshot(
         }
     }
     rows
+}
+
+struct DocumentStats {
+    document_count: u64,
+    analyzed: crate::storage::query::planner::stats_catalog::AnalyzedTableStats,
+    fields: BTreeMap<String, DocumentFieldStats>,
+}
+
+#[derive(Default)]
+struct DocumentFieldStats {
+    present_count: u64,
+    type_counts: BTreeMap<String, u64>,
+}
+
+fn analyze_document_collection(runtime: &RedDBRuntime, collection: &str) -> Option<DocumentStats> {
+    let mut fields = BTreeMap::<String, DocumentFieldStats>::new();
+    let mut entities = Vec::new();
+
+    for (_, entity) in runtime
+        .db()
+        .store()
+        .query_all(|entity| entity.kind.collection() == collection)
+    {
+        let EntityData::Row(row) = &entity.data else {
+            continue;
+        };
+
+        let Some(body) = row.get_field("body") else {
+            continue;
+        };
+        let Some(body_fields) = document_body_fields(body) else {
+            continue;
+        };
+
+        let mut analyzed_fields = vec![("body".to_string(), body.clone())];
+        for (name, value) in body_fields {
+            let field = fields.entry(name.clone()).or_default();
+            field.present_count += 1;
+            *field
+                .type_counts
+                .entry(value.data_type().to_string())
+                .or_insert(0) += 1;
+            analyzed_fields.push((name, value));
+        }
+        entities.push((entity.id, analyzed_fields));
+    }
+
+    if entities.is_empty() {
+        return None;
+    }
+
+    Some(DocumentStats {
+        document_count: entities.len() as u64,
+        analyzed: crate::storage::query::planner::stats_catalog::analyze_entity_fields(
+            collection, &entities,
+        ),
+        fields,
+    })
+}
+
+fn document_body_fields(body: &Value) -> Option<Vec<(String, Value)>> {
+    match body {
+        Value::Json(bytes) => crate::document_body::body_fields(bytes)
+            .or_else(|| json_object_fields(crate::json::from_slice(bytes).ok()?)),
+        Value::Text(text) => json_object_fields(crate::json::from_str(text.as_ref()).ok()?),
+        _ => None,
+    }
+}
+
+fn json_object_fields(value: crate::json::Value) -> Option<Vec<(String, Value)>> {
+    let crate::json::Value::Object(map) = value else {
+        return None;
+    };
+    Some(
+        map.iter()
+            .map(|(key, value)| {
+                crate::application::entity::json_to_storage_value(value)
+                    .ok()
+                    .map(|value| (key.clone(), value))
+            })
+            .collect::<Option<Vec<_>>>()?,
+    )
+}
+
+fn emit_document_metric_rows(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    collection: &str,
+    document_count: u64,
+    fields: BTreeMap<String, DocumentFieldStats>,
+) {
+    for (name, field) in fields {
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(name.clone()),
+            "coverage",
+            Value::Float(field.present_count as f64 / document_count as f64),
+        ));
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(name),
+            "type_histogram",
+            Value::Array(
+                field
+                    .type_counts
+                    .into_iter()
+                    .map(|(data_type, count)| {
+                        Value::Array(vec![Value::text(data_type), Value::UnsignedInteger(count)])
+                    })
+                    .collect(),
+            ),
+        ));
+    }
 }
 
 fn stats_row(
