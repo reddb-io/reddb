@@ -149,6 +149,8 @@ pub enum ResolutionSource {
     ClusterDefault,
     /// The collection's own override applied.
     CollectionOverride,
+    /// A per-request override strengthened the already-resolved floor.
+    RequestOverride,
 }
 
 impl ResolutionSource {
@@ -156,6 +158,7 @@ impl ResolutionSource {
         match self {
             Self::ClusterDefault => "cluster_default",
             Self::CollectionOverride => "collection_override",
+            Self::RequestOverride => "request_override",
         }
     }
 }
@@ -228,6 +231,11 @@ pub enum CommitPolicyViolation {
         model: CollectionDataModel,
         source: ResolutionSource,
     },
+    /// A per-request override attempted to weaken the already-resolved floor.
+    RequestBelowResolvedFloor {
+        floor: CommitPolicy,
+        requested: CommitPolicy,
+    },
 }
 
 impl CommitPolicyViolation {
@@ -239,6 +247,18 @@ impl CommitPolicyViolation {
                 model.label(),
                 source.label()
             ),
+            Self::RequestBelowResolvedFloor { floor, requested } => format!(
+                "per-request commit policy '{}' is weaker than resolved floor '{}'",
+                requested.detail_label(),
+                floor.detail_label()
+            ),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::DurableLocalUnderHa { .. } => "DURABLE_LOCAL_UNDER_HA",
+            Self::RequestBelowResolvedFloor { .. } => "COMMIT_POLICY_BELOW_FLOOR",
         }
     }
 }
@@ -255,6 +275,42 @@ impl std::error::Error for CommitPolicyViolation {}
 /// `Local`, or the degenerate `AckN(0)` the policy docs define as equivalent.
 pub fn is_local_ack(policy: CommitPolicy) -> bool {
     matches!(policy, CommitPolicy::Local | CommitPolicy::AckN(0))
+}
+
+fn durability_rank(policy: CommitPolicy) -> u64 {
+    match policy {
+        CommitPolicy::Local | CommitPolicy::AckN(0) => 0,
+        CommitPolicy::RemoteWal => 10,
+        CommitPolicy::AckN(n) => 100 + u64::from(n),
+        CommitPolicy::Quorum => 10_000,
+    }
+}
+
+/// Apply an optional per-request override to an already-resolved floor.
+///
+/// The request may strengthen durability for one write, but it may not weaken
+/// the floor chosen by collection/HA resolution. Weakening is rejected rather
+/// than clamped so callers can surface a typed client error.
+pub fn resolve_request_commit_policy(
+    floor: CommitPolicyResolution,
+    request_override: Option<CommitPolicy>,
+) -> Result<CommitPolicyResolution, CommitPolicyViolation> {
+    let Some(requested) = request_override else {
+        return Ok(floor);
+    };
+
+    if durability_rank(requested) < durability_rank(floor.effective) {
+        return Err(CommitPolicyViolation::RequestBelowResolvedFloor {
+            floor: floor.effective,
+            requested,
+        });
+    }
+
+    Ok(CommitPolicyResolution {
+        effective: requested,
+        source: ResolutionSource::RequestOverride,
+        guardrail: floor.guardrail,
+    })
 }
 
 /// Deterministically resolve the effective commit policy for one collection.
@@ -365,6 +421,44 @@ mod tests {
         assert_eq!(r.effective, CommitPolicy::Quorum);
         assert_eq!(r.source, ResolutionSource::CollectionOverride);
         assert_eq!(r.guardrail, GuardrailDisposition::Satisfied);
+    }
+
+    #[test]
+    fn request_override_can_strengthen_above_resolved_floor() {
+        let floor = resolve_commit_policy(
+            CommitPolicy::Local,
+            None,
+            CollectionDataModel::Transactional,
+            HaIntent::None,
+        )
+        .expect("non-HA local floor resolves");
+
+        let r = resolve_request_commit_policy(floor, Some(CommitPolicy::Quorum))
+            .expect("request may strengthen local floor to quorum");
+        assert_eq!(r.effective, CommitPolicy::Quorum);
+        assert_eq!(r.source, ResolutionSource::RequestOverride);
+    }
+
+    #[test]
+    fn request_override_rejects_weaker_than_resolved_floor() {
+        let floor = resolve_commit_policy(
+            CommitPolicy::Quorum,
+            None,
+            CollectionDataModel::Transactional,
+            HaIntent::Declared,
+        )
+        .expect("quorum floor resolves");
+
+        let err = resolve_request_commit_policy(floor, Some(CommitPolicy::AckN(1)))
+            .expect_err("request may not weaken quorum floor");
+        assert_eq!(
+            err,
+            CommitPolicyViolation::RequestBelowResolvedFloor {
+                floor: CommitPolicy::Quorum,
+                requested: CommitPolicy::AckN(1),
+            }
+        );
+        assert_eq!(err.code(), "COMMIT_POLICY_BELOW_FLOOR");
     }
 
     // AC: local commit allowed for ephemeral/cache-like data under HA intent.

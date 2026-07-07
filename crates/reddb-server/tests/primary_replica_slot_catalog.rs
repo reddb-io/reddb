@@ -77,14 +77,27 @@ impl Drop for EnvGuard {
 }
 
 fn post_query_once(runtime: &RedDBRuntime, sql: &str) -> (u16, String) {
+    post_query_once_with_commit_policy(runtime, sql, None)
+}
+
+fn post_query_once_with_commit_policy(
+    runtime: &RedDBRuntime,
+    sql: &str,
+    commit_policy: Option<&str>,
+) -> (u16, String) {
     let server = RedDBServer::new(runtime.clone());
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind query listener");
     let addr = listener.local_addr().expect("query addr");
     let handle = thread::spawn(move || server.serve_one_on(listener));
-    let body = format!(
-        "{{\"query\":\"{}\"}}",
-        sql.replace('\\', "\\\\").replace('"', "\\\"")
-    );
+    let escaped_sql = sql.replace('\\', "\\\\").replace('"', "\\\"");
+    let body = match commit_policy {
+        Some(policy) => format!(
+            "{{\"query\":\"{}\",\"commit_policy\":\"{}\"}}",
+            escaped_sql,
+            policy.replace('\\', "\\\\").replace('"', "\\\"")
+        ),
+        None => format!("{{\"query\":\"{}\"}}", escaped_sql),
+    };
     let request = format!(
         "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
@@ -361,6 +374,57 @@ fn http_mutation_ack_n_commit_policy_fails_closed_without_replica_ack() {
     assert!(
         runtime.cdc_current_lsn() > 0,
         "local mutation should have advanced CDC before the response failed"
+    );
+}
+
+#[test]
+fn http_request_commit_policy_can_strengthen_and_wait_for_ack() {
+    let _env_lock = env_lock().lock().expect("env lock");
+    let _env = EnvGuard::set(&[
+        ("RED_PRIMARY_COMMIT_POLICY", "local"),
+        ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
+        ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+    ]);
+    let data_path = temp_data_path("primary_replica_http_request_ack_n_timeout");
+
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(&data_path).with_replication(ReplicationConfig::primary()),
+    )
+    .expect("runtime boots");
+
+    let (status, body) = post_query_once_with_commit_policy(
+        &runtime,
+        "INSERT INTO request_ack_items (id, name) VALUES (1, 'alpha')",
+        Some("ack_n=1"),
+    );
+    assert_eq!(
+        status, 504,
+        "request ack_n without replica ack must fail closed, body={body}"
+    );
+    assert!(
+        body.contains("commit policy timed out") && body.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+        "error body should identify request commit wait, got {body}"
+    );
+}
+
+#[test]
+fn http_request_commit_policy_rejects_weaker_than_floor() {
+    let _env_lock = env_lock().lock().expect("env lock");
+    let _env = EnvGuard::set(&[("RED_PRIMARY_COMMIT_POLICY", "quorum")]);
+    let runtime = RedDBRuntime::in_memory().expect("runtime boots");
+
+    let (status, body) = post_query_once_with_commit_policy(
+        &runtime,
+        "INSERT INTO request_floor_items (id, name) VALUES (1, 'alpha')",
+        Some("local"),
+    );
+    assert_eq!(
+        status, 422,
+        "weaker request policy must be rejected: {body}"
+    );
+    assert!(
+        body.contains("COMMIT_POLICY_BELOW_FLOOR"),
+        "typed floor violation should be surfaced, got {body}"
     );
 }
 

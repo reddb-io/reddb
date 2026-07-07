@@ -151,6 +151,18 @@ impl RedDBRuntime {
         )
     }
 
+    pub fn resolve_request_commit_policy(
+        &self,
+        request_override: Option<crate::replication::CommitPolicy>,
+    ) -> Result<crate::cluster::CommitPolicyResolution, crate::cluster::CommitPolicyViolation> {
+        let floor = crate::cluster::CommitPolicyResolution {
+            effective: self.commit_policy(),
+            source: crate::cluster::ResolutionSource::ClusterDefault,
+            guardrail: crate::cluster::GuardrailDisposition::NotApplicable,
+        };
+        crate::cluster::resolve_request_commit_policy(floor, request_override)
+    }
+
     pub fn primary_replica_durability(&self) -> reddb_file::ReplicationDurability {
         Self::primary_replica_durability_for_policy(self.commit_policy())
     }
@@ -285,7 +297,25 @@ impl RedDBRuntime {
         &self,
         post_lsn: u64,
     ) -> RedDBResult<crate::replication::AwaitOutcome> {
-        let policy = self.commit_policy();
+        self.enforce_commit_policy_for_policy(post_lsn, self.commit_policy())
+    }
+
+    pub fn enforce_commit_policy_for_request(
+        &self,
+        post_lsn: u64,
+        request_override: Option<crate::replication::CommitPolicy>,
+    ) -> RedDBResult<crate::replication::AwaitOutcome> {
+        let resolution = self
+            .resolve_request_commit_policy(request_override)
+            .map_err(commit_policy_violation_error)?;
+        self.enforce_commit_policy_for_policy(post_lsn, resolution.effective)
+    }
+
+    fn enforce_commit_policy_for_policy(
+        &self,
+        post_lsn: u64,
+        policy: crate::replication::CommitPolicy,
+    ) -> RedDBResult<crate::replication::AwaitOutcome> {
         if matches!(policy, crate::replication::CommitPolicy::Quorum) {
             return match self.inner.db.wait_for_replication_quorum(post_lsn) {
                 Ok(()) => Ok(crate::replication::AwaitOutcome::Reached(0)),
@@ -410,5 +440,23 @@ impl RedDBRuntime {
             }
         }
         Ok(outcome)
+    }
+}
+
+fn commit_policy_violation_error(violation: crate::cluster::CommitPolicyViolation) -> RedDBError {
+    let code = violation.code();
+    let detail = violation.message();
+    let mut validation = crate::json::Map::new();
+    validation.insert(
+        "code".to_string(),
+        crate::json::Value::String(code.to_string()),
+    );
+    validation.insert(
+        "message".to_string(),
+        crate::json::Value::String(detail.clone()),
+    );
+    RedDBError::Validation {
+        message: format!("{code}: {detail}"),
+        validation: crate::json::Value::Object(validation),
     }
 }

@@ -20,7 +20,7 @@ use crate::auth::Role;
 use crate::runtime::RedDBRuntime;
 use crate::serde_json::{self, Value as JsonValue};
 use reddb_wire::query_with_params::{
-    decode_query_with_params, ParamValue as RedWireParamValue, FEATURE_PARAMS,
+    decode_query_with_params_request, ParamValue as RedWireParamValue, FEATURE_PARAMS,
 };
 use reddb_wire::redwire::operations::{
     decode_delete_payload, decode_get_payload, decode_insert_dispatch_payload,
@@ -1152,20 +1152,27 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 }
 
 fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
-    let (sql, params) = match decode_query_with_params(&frame.payload) {
+    let request = match decode_query_with_params_request(&frame.payload) {
         Ok(decoded) => decoded,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
-    let params = params
+    let commit_policy = match parse_redwire_commit_policy(request.options.commit_policy.as_deref())
+    {
+        Ok(policy) => policy,
+        Err(err) => return build_error_frame_lossy(frame.correlation_id, &err),
+    };
+    let params = request
+        .params
         .into_iter()
         .map(param_to_schema_value)
         .collect::<Vec<_>>();
-    match runtime.execute_query_with_params(&sql, &params) {
+    match runtime.execute_query_with_params(&request.sql, &params) {
         Ok(result) => {
             let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
             if is_mutation {
                 let post_lsn = runtime.cdc_current_lsn();
-                if let Err(err) = runtime.enforce_commit_policy(post_lsn) {
+                if let Err(err) = runtime.enforce_commit_policy_for_request(post_lsn, commit_policy)
+                {
                     return build_error_frame_lossy(frame.correlation_id, &err.to_string());
                 }
             }
@@ -1177,6 +1184,17 @@ fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         }
         Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     }
+}
+
+fn parse_redwire_commit_policy(
+    value: Option<&str>,
+) -> Result<Option<crate::replication::CommitPolicy>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    crate::replication::CommitPolicy::parse_strict(value)
+        .map(Some)
+        .ok_or_else(|| format!("invalid commit_policy value '{value}'"))
 }
 
 fn param_to_schema_value(value: RedWireParamValue) -> crate::storage::schema::Value {
@@ -1426,7 +1444,52 @@ mod tests {
     use super::*;
 
     use crate::runtime::RedDBRuntime;
+    use std::sync::{Mutex, OnceLock};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvGuard {
+        previous: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &'static str)]) -> Self {
+            let previous = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var(key).ok()))
+                .collect();
+            for (key, value) in vars {
+                std::env::set_var(key, value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.previous.iter().rev() {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn temp_data_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "reddb-redwire-{name}-{}-{}.rdb",
+            std::process::id(),
+            crate::utils::now_unix_millis()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
 
     fn bulk_insert_frame(correlation_id: u64, payload: Vec<u8>) -> Frame {
         reddb_wire::redwire::build_bulk_insert_frame(correlation_id, payload)
@@ -1578,6 +1641,68 @@ mod tests {
                 .and_then(|b| b.get("e"))
                 .and_then(JsonValue::as_str),
             Some("x")
+        );
+    }
+
+    #[test]
+    fn redwire_query_with_params_request_policy_strengthens_to_ack_n() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _env = EnvGuard::set(&[
+            ("RED_PRIMARY_COMMIT_POLICY", "local"),
+            ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ]);
+        let data_path = temp_data_path("request-ack-n");
+        let runtime = RedDBRuntime::with_options(
+            crate::api::RedDBOptions::persistent(&data_path)
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .expect("runtime");
+
+        let payload = reddb_wire::query_with_params::encode_query_with_params_request(
+            "INSERT INTO redwire_request_ack (id, name) VALUES (1, 'alpha')",
+            &[],
+            &reddb_wire::query_with_params::QueryWithParamsOptions {
+                commit_policy: Some("ack_n=1".to_string()),
+            },
+        )
+        .expect("encode query with request policy");
+        let frame = reddb_wire::redwire::build_query_with_params_frame(100, payload)
+            .expect("query-with-params frame");
+        let reply = run_query_with_params(&runtime, &frame);
+
+        assert_eq!(reply.kind, MessageKind::Error);
+        let body = String::from_utf8_lossy(&reply.payload);
+        assert!(
+            body.contains("commit policy timed out") && body.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+            "request ack_n should wait for replica ack, got {body}"
+        );
+        let _ = std::fs::remove_file(data_path);
+    }
+
+    #[test]
+    fn redwire_query_with_params_rejects_request_policy_below_floor() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _env = EnvGuard::set(&[("RED_PRIMARY_COMMIT_POLICY", "quorum")]);
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+
+        let payload = reddb_wire::query_with_params::encode_query_with_params_request(
+            "INSERT INTO redwire_request_floor (id, name) VALUES (1, 'alpha')",
+            &[],
+            &reddb_wire::query_with_params::QueryWithParamsOptions {
+                commit_policy: Some("local".to_string()),
+            },
+        )
+        .expect("encode query with request policy");
+        let frame = reddb_wire::redwire::build_query_with_params_frame(101, payload)
+            .expect("query-with-params frame");
+        let reply = run_query_with_params(&runtime, &frame);
+
+        assert_eq!(reply.kind, MessageKind::Error);
+        let body = String::from_utf8_lossy(&reply.payload);
+        assert!(
+            body.contains("COMMIT_POLICY_BELOW_FLOOR"),
+            "typed floor violation should be surfaced, got {body}"
         );
     }
 

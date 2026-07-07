@@ -31,8 +31,9 @@ pub use bootstrap_authority::{
     plan_vault_bootstrap, AuthBootstrapInput, BootstrapDisposition, VaultBootstrapPlan,
 };
 pub use commit_resolution::{
-    is_local_ack, resolve_commit_policy, CollectionDataModel, CommitPolicyResolution,
-    CommitPolicyViolation, FailoverEligibility, GuardrailDisposition, HaIntent, ResolutionSource,
+    is_local_ack, resolve_commit_policy, resolve_request_commit_policy, CollectionDataModel,
+    CommitPolicyResolution, CommitPolicyViolation, FailoverEligibility, GuardrailDisposition,
+    HaIntent, ResolutionSource,
 };
 pub use control_plane::{
     ControlPlaneConsensus, ControlPlaneEntry, ControlPlaneError, ControlPlaneIndex,

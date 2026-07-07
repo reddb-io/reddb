@@ -8,6 +8,8 @@ use std::fmt;
 pub const FEATURE_PARAMS: u32 = 0x0000_0001;
 pub const MAX_PARAM_COUNT: usize = 65_536;
 
+const OPTIONS_MAGIC: &[u8; 4] = b"RQP1";
+
 const TAG_NULL: u8 = 0x00;
 const TAG_BOOL: u8 = 0x01;
 const TAG_INT: u8 = 0x02;
@@ -41,6 +43,7 @@ pub enum ParamCodecError {
     InvalidUtf8(&'static str),
     InvalidBool(u8),
     UnknownTag(u8),
+    InvalidOptionsMagic,
     TrailingBytes(usize),
 }
 
@@ -55,6 +58,7 @@ impl fmt::Display for ParamCodecError {
             Self::InvalidUtf8(field) => write!(f, "{field} must be valid UTF-8"),
             Self::InvalidBool(byte) => write!(f, "invalid bool payload byte {byte}"),
             Self::UnknownTag(tag) => write!(f, "unknown parameter value tag 0x{tag:02x}"),
+            Self::InvalidOptionsMagic => write!(f, "invalid QueryWithParams options extension"),
             Self::TrailingBytes(count) => write!(f, "{count} trailing bytes after payload"),
         }
     }
@@ -62,9 +66,29 @@ impl fmt::Display for ParamCodecError {
 
 impl std::error::Error for ParamCodecError {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QueryWithParamsOptions {
+    pub commit_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryWithParamsRequest {
+    pub sql: String,
+    pub params: Vec<ParamValue>,
+    pub options: QueryWithParamsOptions,
+}
+
 pub fn encode_query_with_params(
     sql: &str,
     params: &[ParamValue],
+) -> Result<Vec<u8>, ParamCodecError> {
+    encode_query_with_params_request(sql, params, &QueryWithParamsOptions::default())
+}
+
+pub fn encode_query_with_params_request(
+    sql: &str,
+    params: &[ParamValue],
+    options: &QueryWithParamsOptions,
 ) -> Result<Vec<u8>, ParamCodecError> {
     if sql.len() > u32::MAX as usize {
         return Err(ParamCodecError::LengthOverflow("sql"));
@@ -83,12 +107,26 @@ pub fn encode_query_with_params(
     for value in params {
         encode_value(value, &mut out)?;
     }
+    if let Some(policy) = &options.commit_policy {
+        if policy.len() > u32::MAX as usize {
+            return Err(ParamCodecError::LengthOverflow("commit_policy"));
+        }
+        out.extend_from_slice(OPTIONS_MAGIC);
+        write_len_prefixed(policy.as_bytes(), &mut out, "commit_policy")?;
+    }
     Ok(out)
 }
 
 pub fn decode_query_with_params(
     payload: &[u8],
 ) -> Result<(String, Vec<ParamValue>), ParamCodecError> {
+    let request = decode_query_with_params_request(payload)?;
+    Ok((request.sql, request.params))
+}
+
+pub fn decode_query_with_params_request(
+    payload: &[u8],
+) -> Result<QueryWithParamsRequest, ParamCodecError> {
     let mut pos = 0;
     let sql_len = read_u32(payload, &mut pos, "sql_len")? as usize;
     let sql_bytes = read_bytes(payload, &mut pos, sql_len, "sql")?;
@@ -103,10 +141,37 @@ pub fn decode_query_with_params(
     for _ in 0..param_count {
         params.push(decode_value(payload, &mut pos)?);
     }
+    let options = if pos == payload.len() {
+        QueryWithParamsOptions::default()
+    } else {
+        decode_options(payload, &mut pos)?
+    };
     if pos != payload.len() {
         return Err(ParamCodecError::TrailingBytes(payload.len() - pos));
     }
-    Ok((sql, params))
+    Ok(QueryWithParamsRequest {
+        sql,
+        params,
+        options,
+    })
+}
+
+fn decode_options(
+    payload: &[u8],
+    pos: &mut usize,
+) -> Result<QueryWithParamsOptions, ParamCodecError> {
+    let magic = read_bytes(payload, pos, OPTIONS_MAGIC.len(), "options_magic")?;
+    if magic != OPTIONS_MAGIC {
+        return Err(ParamCodecError::InvalidOptionsMagic);
+    }
+    let len = read_u32(payload, pos, "commit_policy_len")? as usize;
+    let bytes = read_bytes(payload, pos, len, "commit_policy")?;
+    let commit_policy = std::str::from_utf8(bytes)
+        .map_err(|_| ParamCodecError::InvalidUtf8("commit_policy"))?
+        .to_string();
+    Ok(QueryWithParamsOptions {
+        commit_policy: Some(commit_policy),
+    })
 }
 
 pub fn encode_value(value: &ParamValue, out: &mut Vec<u8>) -> Result<(), ParamCodecError> {
