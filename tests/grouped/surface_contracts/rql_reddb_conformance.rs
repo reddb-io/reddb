@@ -48,6 +48,7 @@ use sqllogictest::{DBOutput, DefaultColumnType, Runner, DB};
 /// comparison. A surface that yields none of these columns is treated as
 /// accepted-but-unprojected and pinned with `statement ok` (characterization).
 const KEEP: &[&str] = &[
+    "op",
     "label",
     "name",
     "content",
@@ -62,6 +63,7 @@ const KEEP: &[&str] = &[
     "json_column_name",
     "json_column_visits",
     "json_computed_name",
+    "actual_rows",
 ];
 
 use super::support::PersistentRuntime;
