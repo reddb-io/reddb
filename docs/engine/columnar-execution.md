@@ -120,10 +120,11 @@ pruned), and row-sealed chunks fall back to the row materializer, so a
 collection can mix both chunk formats and still read back correctly.
 
 > **Activation status.** The typed columnar read-back is live for the
-> time-series / hypertable read path on collections sealed with `COLUMNAR`. The
+> time-series / hypertable read path on automatically projected chunks. The
 > general SQL planner does **not** yet route arbitrary `SELECT` execution
 > through the batch path — the batch-vs-row picker (table below) is still
-> planned. Columnar storage is opt-in per collection and off by default; see
+> planned. Columnar storage is automatic for in-scope collections once chunks
+> cross the configured size floor; use `NO COLUMNAR` to opt out. See
 > [When to use columnar vs row](../data-models/timeseries.md#when-to-use-columnar-vs-row).
 
 ## Benchmarks
