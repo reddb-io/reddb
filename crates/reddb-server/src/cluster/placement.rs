@@ -60,7 +60,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::identity::NodeIdentity;
 use super::membership::MembershipCatalog;
-use super::ownership::{CollectionId, RangeId, ShardOwnershipCatalog};
+use super::ownership::{CollectionId, PlacementMetadata, RangeId, ShardOwnershipCatalog};
 
 /// The neutral operator weight: a member with this weight is placed strictly by
 /// its usable disk. The weight is expressed in hundredths, so `100` means a 1.0×
@@ -314,6 +314,14 @@ pub trait PlacementSignals {
     /// makes it un-placeable rather than a div-by-zero hazard.
     fn member_capacity(&self, member: &NodeIdentity) -> MemberCapacity;
 
+    /// Placement attribute advertised by `member`, such as a `zone` or `region`.
+    /// Implementations that do not track topology attributes can leave this
+    /// absent; spread rules then degrade through operator warnings instead of
+    /// inventing topology.
+    fn member_attribute(&self, _member: &NodeIdentity, _key: &str) -> Option<&str> {
+        None
+    }
+
     /// The current load on `(collection, range_id)` — its bytes and its recent
     /// read/write traffic.
     fn range_load(&self, collection: &CollectionId, range_id: RangeId) -> RangeLoad;
@@ -354,6 +362,20 @@ pub struct PlannedMove {
     pub reason: MoveReason,
 }
 
+/// One proposed replica-list transition to restore failure-domain spread without
+/// moving write authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedReplicaReplacement {
+    pub collection: CollectionId,
+    pub range_id: RangeId,
+    /// The current replica whose domain duplicates another copy of the range.
+    pub replace: NodeIdentity,
+    /// The eligible member in a distinct failure domain.
+    pub with: NodeIdentity,
+    pub domain_key: String,
+    pub domain_value: String,
+}
+
 /// A range the **secondary** signal flagged as a read/write hotspot: it serves
 /// traffic well above the cluster mean. Surfaced whether or not a relief move was
 /// possible, so an operator can see a hotspot even when there is no headroom to
@@ -378,8 +400,39 @@ pub struct RebalancePlan {
     /// Proposed moves, in a deterministic order (capacity moves first, then
     /// hotspot-relief moves, each in `(collection, range_id)` order).
     pub moves: Vec<PlannedMove>,
+    /// Proposed replica-list changes that restore failure-domain spread without
+    /// changing the range owner.
+    pub replica_replacements: Vec<PlannedReplicaReplacement>,
     /// Ranges observed to be hotspots this pass, hottest first.
     pub hotspots: Vec<HotspotRange>,
+    /// Loud operator warnings for placement rules the topology cannot satisfy.
+    pub warnings: Vec<PlacementWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlacementWarning {
+    UnsatisfiedFailureDomainSpread {
+        collection: CollectionId,
+        range_id: RangeId,
+        domain_key: String,
+        domain_value: String,
+    },
+}
+
+impl std::fmt::Display for PlacementWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsatisfiedFailureDomainSpread {
+                collection,
+                range_id,
+                domain_key,
+                domain_value,
+            } => write!(
+                f,
+                "WARNING: range {collection}/{range_id} cannot satisfy failure-domain spread for {domain_key}={domain_value}"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,7 +444,9 @@ pub struct AuthorityScopedPlannedMove {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuthorityScopedRebalancePlan {
     pub moves: Vec<AuthorityScopedPlannedMove>,
+    pub replica_replacements: Vec<PlannedReplicaReplacement>,
     pub hotspots: Vec<HotspotRange>,
+    pub warnings: Vec<PlacementWarning>,
 }
 
 impl RebalancePlan {
@@ -399,14 +454,17 @@ impl RebalancePlan {
     /// cluster. Distinct from [`no_moves`](Self::no_moves): a balanced cluster can
     /// still have an *observed* hotspot it cannot relieve.
     pub fn is_empty(&self) -> bool {
-        self.moves.is_empty() && self.hotspots.is_empty()
+        self.moves.is_empty()
+            && self.replica_replacements.is_empty()
+            && self.hotspots.is_empty()
+            && self.warnings.is_empty()
     }
 
     /// Whether the plan proposes any actual range movement. False on a cluster
     /// that is balanced by capacity and has no relievable hotspot, even if a
     /// hotspot was *observed*.
     pub fn no_moves(&self) -> bool {
-        self.moves.is_empty()
+        self.moves.is_empty() && self.replica_replacements.is_empty()
     }
 
     /// The capacity-balance moves only (the primary signal).
@@ -494,10 +552,17 @@ impl WeightedPlacementPlanner {
         signals: &impl PlacementSignals,
     ) -> RebalancePlan {
         let mut state = ClusterState::observe(membership, ownership, signals, &self.policy);
+        let (replica_replacements, warnings) =
+            state.plan_failure_domain_spread(membership, ownership, signals);
         let mut moves = state.plan_capacity_moves(&self.policy);
         let (hotspots, hotspot_moves) = state.plan_hotspot_moves(&self.policy);
         moves.extend(hotspot_moves);
-        RebalancePlan { moves, hotspots }
+        RebalancePlan {
+            moves,
+            replica_replacements,
+            hotspots,
+            warnings,
+        }
     }
 
     pub fn plan_rebalance_scoped(
@@ -523,7 +588,9 @@ impl WeightedPlacementPlanner {
         }
         Ok(AuthorityScopedRebalancePlan {
             moves,
+            replica_replacements: plan.replica_replacements,
             hotspots: plan.hotspots,
+            warnings: plan.warnings,
         })
     }
 }
@@ -632,6 +699,73 @@ impl ClusterState {
             load,
             moved: std::collections::BTreeSet::new(),
         }
+    }
+
+    fn plan_failure_domain_spread(
+        &self,
+        membership: &MembershipCatalog,
+        ownership: &ShardOwnershipCatalog,
+        signals: &impl PlacementSignals,
+    ) -> (Vec<PlannedReplicaReplacement>, Vec<PlacementWarning>) {
+        let mut replacements = Vec::new();
+        let mut warnings = Vec::new();
+
+        for range in ownership.entries() {
+            let Some(domain_key) = failure_domain_key(range.placement()) else {
+                continue;
+            };
+            let mut used_domains: BTreeMap<String, NodeIdentity> = BTreeMap::new();
+            let owner_domain = signals.member_attribute(range.owner(), domain_key);
+            if let Some(domain) = owner_domain {
+                used_domains.insert(domain.to_string(), range.owner().clone());
+            }
+            let mut selected_replacements = BTreeSet::new();
+
+            for replica in range.replicas() {
+                let Some(domain) = signals.member_attribute(replica, domain_key) else {
+                    continue;
+                };
+                if used_domains.contains_key(domain) {
+                    let mut retained_domains =
+                        copy_domains_except(range, replica, domain_key, signals);
+                    retained_domains.extend(used_domains.keys().cloned());
+                    if let Some(candidate) = select_spread_replacement(
+                        range,
+                        &retained_domains,
+                        &selected_replacements,
+                        domain_key,
+                        membership,
+                        signals,
+                    ) {
+                        if let Some(candidate_domain) =
+                            signals.member_attribute(&candidate, domain_key)
+                        {
+                            used_domains.insert(candidate_domain.to_string(), candidate.clone());
+                        }
+                        selected_replacements.insert(candidate.clone());
+                        replacements.push(PlannedReplicaReplacement {
+                            collection: range.collection().clone(),
+                            range_id: range.range_id(),
+                            replace: replica.clone(),
+                            with: candidate,
+                            domain_key: domain_key.to_string(),
+                            domain_value: domain.to_string(),
+                        });
+                    } else {
+                        warnings.push(PlacementWarning::UnsatisfiedFailureDomainSpread {
+                            collection: range.collection().clone(),
+                            range_id: range.range_id(),
+                            domain_key: domain_key.to_string(),
+                            domain_value: domain.to_string(),
+                        });
+                    }
+                    continue;
+                }
+                used_domains.insert(domain.to_string(), replica.clone());
+            }
+        }
+
+        (replacements, warnings)
     }
 
     fn fair(&self, member: &NodeIdentity) -> u64 {
@@ -857,6 +991,59 @@ impl ClusterState {
     }
 }
 
+fn failure_domain_key(placement: &PlacementMetadata) -> Option<&str> {
+    placement
+        .attribute("failure_domain")
+        .or_else(|| placement.attribute("failure-domain"))
+}
+
+fn copy_domains_except(
+    range: &super::ownership::RangeOwnership,
+    excluded: &NodeIdentity,
+    domain_key: &str,
+    signals: &impl PlacementSignals,
+) -> BTreeSet<String> {
+    let mut domains = BTreeSet::new();
+    if range.owner() != excluded {
+        if let Some(domain) = signals.member_attribute(range.owner(), domain_key) {
+            domains.insert(domain.to_string());
+        }
+    }
+    for replica in range.replicas() {
+        if replica == excluded {
+            continue;
+        }
+        if let Some(domain) = signals.member_attribute(replica, domain_key) {
+            domains.insert(domain.to_string());
+        }
+    }
+    domains
+}
+
+fn select_spread_replacement(
+    range: &super::ownership::RangeOwnership,
+    retained_domains: &BTreeSet<String>,
+    selected_replacements: &BTreeSet<NodeIdentity>,
+    domain_key: &str,
+    membership: &MembershipCatalog,
+    signals: &impl PlacementSignals,
+) -> Option<NodeIdentity> {
+    membership
+        .placement_eligible_members()
+        .map(super::membership::ClusterMember::identity)
+        .filter(|id| {
+            range.owner() != *id
+                && !range.replicas().contains(id)
+                && !selected_replacements.contains(id)
+        })
+        .find(|id| {
+            signals
+                .member_attribute(id, domain_key)
+                .is_some_and(|domain| !retained_domains.contains(domain))
+        })
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,12 +1098,34 @@ mod tests {
         (catalog, orders)
     }
 
+    fn catalog_with_replicas(
+        owner: &str,
+        replicas: &[&str],
+        placement: PlacementMetadata,
+    ) -> (ShardOwnershipCatalog, CollectionId) {
+        let orders = collection("orders");
+        let mut catalog = ShardOwnershipCatalog::new();
+        catalog
+            .apply_update(RangeOwnership::establish(
+                orders.clone(),
+                RangeId::new(1),
+                ShardKeyMode::Hash,
+                RangeBounds::full(),
+                ident(owner),
+                replicas.iter().map(|replica| ident(replica)),
+                placement,
+            ))
+            .unwrap();
+        (catalog, orders)
+    }
+
     /// A scripted [`PlacementSignals`]: per-member capacity (defaulting to a
     /// uniform disk) and per-range load keyed by range id.
     struct FakeSignals {
         default_capacity: MemberCapacity,
         capacity: HashMap<NodeIdentity, MemberCapacity>,
         load: HashMap<u64, RangeLoad>,
+        member_attributes: HashMap<(NodeIdentity, String), String>,
         default_bytes: u64,
     }
 
@@ -926,6 +1135,7 @@ mod tests {
                 default_capacity: MemberCapacity::with_disk(disk),
                 capacity: HashMap::new(),
                 load: HashMap::new(),
+                member_attributes: HashMap::new(),
                 default_bytes,
             }
         }
@@ -937,6 +1147,12 @@ mod tests {
 
         fn with_load(mut self, range_id: u64, load: RangeLoad) -> Self {
             self.load.insert(range_id, load);
+            self
+        }
+
+        fn with_member_attribute(mut self, cn: &str, key: &str, value: &str) -> Self {
+            self.member_attributes
+                .insert((ident(cn), key.to_string()), value.to_string());
             self
         }
     }
@@ -954,6 +1170,12 @@ mod tests {
                 .get(&range_id.value())
                 .copied()
                 .unwrap_or_else(|| RangeLoad::idle(self.default_bytes))
+        }
+
+        fn member_attribute(&self, member: &NodeIdentity, key: &str) -> Option<&str> {
+            self.member_attributes
+                .get(&(member.clone(), key.to_string()))
+                .map(String::as_str)
         }
     }
 
@@ -1109,6 +1331,103 @@ mod tests {
             to_pref >= 2,
             "higher operator weight pulls more ranges, got {to_pref}"
         );
+    }
+
+    #[test]
+    fn failure_domain_spread_wins_over_marginal_weight_difference() {
+        let planner = WeightedPlacementPlanner::default();
+        let members = membership(&["CN=node-a", "CN=node-b", "CN=node-c"]);
+        let placement =
+            PlacementMetadata::with_replication_factor(2).with_attribute("failure_domain", "zone");
+        let (catalog, _orders) = catalog_with_replicas("CN=node-a", &["CN=node-b"], placement);
+        let signals = FakeSignals::uniform(1_000, 100)
+            .with_capacity("CN=node-b", MemberCapacity::new(1_000, 110))
+            .with_capacity("CN=node-c", MemberCapacity::new(1_000, 100))
+            .with_member_attribute("CN=node-a", "zone", "zone-1")
+            .with_member_attribute("CN=node-b", "zone", "zone-1")
+            .with_member_attribute("CN=node-c", "zone", "zone-2");
+
+        let plan = planner.plan_rebalance(&members, &catalog, &signals);
+
+        assert_eq!(plan.replica_replacements.len(), 1);
+        let replacement = &plan.replica_replacements[0];
+        assert_eq!(replacement.collection, collection("orders"));
+        assert_eq!(replacement.range_id, RangeId::new(1));
+        assert_eq!(replacement.replace, ident("CN=node-b"));
+        assert_eq!(replacement.with, ident("CN=node-c"));
+        assert!(
+            plan.warnings.is_empty(),
+            "satisfiable spread is not degraded"
+        );
+    }
+
+    #[test]
+    fn unsatisfiable_failure_domain_spread_warns_and_keeps_coplacement() {
+        let planner = WeightedPlacementPlanner::default();
+        let members = membership(&["CN=node-a", "CN=node-b"]);
+        let placement =
+            PlacementMetadata::with_replication_factor(2).with_attribute("failure_domain", "zone");
+        let (catalog, _orders) = catalog_with_replicas("CN=node-a", &["CN=node-b"], placement);
+        let signals = FakeSignals::uniform(1_000, 100)
+            .with_member_attribute("CN=node-a", "zone", "zone-1")
+            .with_member_attribute("CN=node-b", "zone", "zone-1");
+
+        let plan = planner.plan_rebalance(&members, &catalog, &signals);
+
+        assert!(
+            plan.replica_replacements.is_empty(),
+            "no distinct-domain member exists"
+        );
+        assert_eq!(plan.warnings.len(), 1);
+        assert_eq!(
+            plan.warnings[0],
+            PlacementWarning::UnsatisfiedFailureDomainSpread {
+                collection: collection("orders"),
+                range_id: RangeId::new(1),
+                domain_key: "zone".to_string(),
+                domain_value: "zone-1".to_string(),
+            }
+        );
+        let warning = plan.warnings[0].to_string();
+        assert!(
+            warning.contains("orders/1"),
+            "warning names range: {warning}"
+        );
+        assert!(
+            warning.contains("zone=zone-1"),
+            "warning names violated domain: {warning}"
+        );
+    }
+
+    #[test]
+    fn failure_domain_spread_is_restored_after_distinct_domain_join() {
+        let planner = WeightedPlacementPlanner::default();
+        let placement =
+            PlacementMetadata::with_replication_factor(2).with_attribute("failure_domain", "zone");
+        let (catalog, _orders) = catalog_with_replicas("CN=node-a", &["CN=node-b"], placement);
+        let signals = FakeSignals::uniform(1_000, 100)
+            .with_member_attribute("CN=node-a", "zone", "zone-1")
+            .with_member_attribute("CN=node-b", "zone", "zone-1")
+            .with_member_attribute("CN=node-c", "zone", "zone-2");
+
+        let before_join =
+            planner.plan_rebalance(&membership(&["CN=node-a", "CN=node-b"]), &catalog, &signals);
+        assert!(before_join.replica_replacements.is_empty());
+        assert_eq!(before_join.warnings.len(), 1);
+
+        let after_join = planner.plan_rebalance(
+            &membership(&["CN=node-a", "CN=node-b", "CN=node-c"]),
+            &catalog,
+            &signals,
+        );
+
+        assert!(after_join.warnings.is_empty());
+        assert_eq!(after_join.replica_replacements.len(), 1);
+        assert_eq!(
+            after_join.replica_replacements[0].replace,
+            ident("CN=node-b")
+        );
+        assert_eq!(after_join.replica_replacements[0].with, ident("CN=node-c"));
     }
 
     // --- acceptance scenario: capacity expansion -------------------------

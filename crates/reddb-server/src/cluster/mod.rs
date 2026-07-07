@@ -93,8 +93,9 @@ pub use ownership_transition::{
 };
 pub use placement::{
     AuthorityScopedPlannedMove, AuthorityScopedRebalancePlan, CollectionGroupPlacementAuthority,
-    HotspotRange, MemberCapacity, MoveReason, PlacementPolicy, PlacementSignals, PlannedMove,
-    RangeLoad, RebalancePlan, WeightedPlacementPlanner, NEUTRAL_OPERATOR_WEIGHT,
+    HotspotRange, MemberCapacity, MoveReason, PlacementPolicy, PlacementSignals, PlacementWarning,
+    PlannedMove, PlannedReplicaReplacement, RangeLoad, RebalancePlan, WeightedPlacementPlanner,
+    NEUTRAL_OPERATOR_WEIGHT,
 };
 pub use routing::{
     RedirectReason, RequestOperation, RouteDecision, RoutedRequest, RoutingHint, RoutingPolicy,
