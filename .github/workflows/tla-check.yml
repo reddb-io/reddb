@@ -14,6 +14,9 @@ name: TLA+ Model Check
 #   * SafeReconfig    -- every membership change preserves quorum overlap.
 #   * CommitProtocol  -- optimistic MVCC visibility, FCW, savepoints, and
 #                        SSI dangerous-structure aborts.
+#   * OwnershipTransition
+#                     -- range ownership epochs, write-admission fencing,
+#                        handoff/failover, and no acked-write loss.
 #
 # TLC exits non-zero on a violated invariant, which fails the job (and so
 # the build). The models are sized to finish in CI seconds-to-minutes.
@@ -52,6 +55,7 @@ jobs:
           - ReplicationSafetyEnvelope
           - SafeReconfig
           - CommitProtocol
+          - OwnershipTransition
     name: model-check (${{ matrix.spec }})
     steps:
       - uses: actions/checkout@v7
