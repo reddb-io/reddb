@@ -64,7 +64,7 @@ jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 # `std` which we already rely on elsewhere; pinning to "2" tracks the
 # 2.x line that the rest of the workspace's transitive graph
 # already resolved to in Cargo.lock.
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tonic = { version = "0.14", features = ["transport", "gzip", "zstd", "tls-ring"] }
