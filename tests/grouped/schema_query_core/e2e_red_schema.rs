@@ -530,6 +530,83 @@ fn show_stats_row_table_returns_long_format_metric_set() {
 }
 
 #[test]
+fn show_stats_document_returns_promoted_key_metrics_and_body_key_coverage() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(
+        &rt,
+        r#"INSERT INTO logs DOCUMENT VALUES ({"level":"warn","Level":"upper","score":3,"tags":["ops"],"profile":{"city":"SP"}})"#,
+    );
+    exec(
+        &rt,
+        r#"INSERT INTO logs DOCUMENT VALUES ({"level":"info","score":7,"tags":["web"],"profile":{"city":"RJ"}})"#,
+    );
+    exec(
+        &rt,
+        r#"INSERT INTO logs DOCUMENT VALUES ({"Level":"upper","score":null,"active":true})"#,
+    );
+
+    let (columns, rows) = query_snapshot(&rt, "SHOW STATS logs");
+    assert_eq!(columns, vec!["collection", "entity", "metric", "value"]);
+    assert!(
+        rows.iter().all(|row| row[0] == Value::text("logs")),
+        "every SHOW STATS row is scoped to the document collection: {rows:?}"
+    );
+
+    let row_count = stats_value(&rows, Value::Null, "row_count");
+    assert_eq!(row_count, &Value::UnsignedInteger(3));
+
+    assert_eq!(
+        stats_value(&rows, Value::text("level"), "null_count"),
+        &Value::UnsignedInteger(1),
+        "promoted top-level document keys should use the row-table metric set"
+    );
+    assert_eq!(
+        stats_value(&rows, Value::text("level"), "distinct_count"),
+        &Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stats_value(&rows, Value::text("level"), "coverage"),
+        &Value::Float(2.0 / 3.0)
+    );
+    assert_eq!(
+        stats_value(&rows, Value::text("Level"), "coverage"),
+        &Value::Float(2.0 / 3.0),
+        "body keys differing only by case profile separately"
+    );
+    assert_eq!(
+        stats_value(&rows, Value::text("active"), "coverage"),
+        &Value::Float(1.0 / 3.0)
+    );
+    assert_eq!(
+        stats_value(&rows, Value::text("profile"), "type_histogram"),
+        &Value::Array(vec![Value::Array(vec![
+            Value::text("JSON"),
+            Value::UnsignedInteger(2),
+        ])]),
+        "nested objects count as one top-level JSON value"
+    );
+    assert_eq!(
+        stats_value(&rows, Value::text("tags"), "type_histogram"),
+        &Value::Array(vec![Value::Array(vec![
+            Value::text("JSON"),
+            Value::UnsignedInteger(2),
+        ])]),
+        "nested arrays count as one top-level JSON value"
+    );
+
+    cleanup_scope();
+}
+
+fn stats_value<'a>(rows: &'a [Vec<Value>], entity: Value, metric: &str) -> &'a Value {
+    &rows
+        .iter()
+        .find(|row| row[1] == entity && row[2] == Value::text(metric))
+        .unwrap_or_else(|| panic!("missing stats row entity={entity:?} metric={metric}: {rows:?}"))
+        [3]
+}
+
+#[test]
 fn show_stats_requires_tenant_for_non_admin_identity() {
     cleanup_scope();
     let rt = runtime();
