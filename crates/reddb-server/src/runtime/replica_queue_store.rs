@@ -460,6 +460,27 @@ impl QueueStore for ReplicaQueueStore {
     ) -> Result<usize> {
         Err(QueueStoreError::ReplicaImmutable)
     }
+
+    fn reclaim_expired_dedup(&self, _txn: &QueueTxn, _queue: &str, _now_ns: u64) -> Result<usize> {
+        Err(QueueStoreError::ReplicaImmutable)
+    }
+
+    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Option<MessageId> {
+        let store = self.store();
+        super::impl_queue::find_queue_dedup(store.as_ref(), queue, dedup_key, now_ns)
+            .map(|id| id.raw())
+    }
+
+    fn record_dedup(
+        &self,
+        _txn: &QueueTxn,
+        _queue: &str,
+        _dedup_key: &str,
+        _message_id: MessageId,
+        _expires_at_ns: u64,
+    ) -> Result<()> {
+        Err(QueueStoreError::ReplicaImmutable)
+    }
 }
 
 /// Read attempts as an externally observable counter — used by tests
@@ -633,10 +654,49 @@ mod tests {
             replica.purge_queue(&t, "q").unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
+        assert!(matches!(
+            replica
+                .record_dedup(&t, "q", "retry", 1, now_unix_ns())
+                .unwrap_err(),
+            QueueStoreError::ReplicaImmutable
+        ));
         // Replica txn must remain untouched across reject paths.
         assert!(
             t.recorded_tombstones().is_empty(),
             "rejected mutations must not record tombstones"
+        );
+    }
+
+    #[test]
+    fn replica_replays_push_dedup_outcomes_without_deciding() {
+        let primary_rt = boot();
+        primary_rt
+            .execute_query("CREATE QUEUE qdedup DEDUP_WINDOW 1 s")
+            .expect("create");
+        primary_rt
+            .execute_query("QUEUE PUSH qdedup 'first' DEDUP 'retry-1'")
+            .expect("push");
+
+        let primary_store = PrimaryQueueStore::new(primary_rt.clone());
+        let now = now_unix_ns();
+        let primary_id = primary_store
+            .find_dedup("qdedup", "retry-1", now)
+            .expect("primary dedup outcome");
+
+        let replica_rt = boot();
+        replica_rt
+            .execute_query("CREATE QUEUE qdedup")
+            .expect("replica create");
+        replay_collections(
+            &primary_rt.db().store(),
+            &replica_rt.db(),
+            &["qdedup", QUEUE_META_COLLECTION],
+        );
+        let replica_store = ReplicaQueueStore::new(replica_rt);
+        assert_eq!(
+            replica_store.find_dedup("qdedup", "retry-1", now),
+            Some(primary_id),
+            "replica must observe the primary's replayed dedup outcome",
         );
     }
 
