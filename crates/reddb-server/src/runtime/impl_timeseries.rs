@@ -7,7 +7,6 @@ use super::*;
 
 const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
 const TIMESERIES_SERIES_COLLECTION: &str = "red_timeseries_series";
-const COLUMNAR_PROJECTION_SIZE_FLOOR_ROWS: usize = 4;
 const DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS: u64 = 86_400_000_000_000;
 
 #[derive(Default)]
@@ -308,7 +307,7 @@ impl RedDBRuntime {
             // entity/row reader the read-bridge serves row chunks from.
             let points = materialize_row_points(&manager, &time_col, start, end);
             let columnar_enabled = analytical.as_ref().is_some_and(|cfg| cfg.columnar);
-            if columnar_enabled && points.len() < COLUMNAR_PROJECTION_SIZE_FLOOR_ROWS {
+            if columnar_enabled && points.len() < self.inner.columnar_projection_size_floor_rows {
                 continue;
             }
 
