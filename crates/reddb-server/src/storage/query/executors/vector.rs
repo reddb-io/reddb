@@ -586,6 +586,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::CreateVcsRef(_) => "create_vcs_ref",
         QueryExpr::DropVcsRef(_) => "drop_vcs_ref",
         QueryExpr::ForkStore(_) => "fork_store",
+        QueryExpr::PromoteFork(_) => "promote_fork",
         QueryExpr::DropFork(_) => "drop_fork",
         QueryExpr::VcsCommand(_) => "vcs_command",
         QueryExpr::GraphCommand(_) => "graph_command",
