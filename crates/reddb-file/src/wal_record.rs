@@ -25,6 +25,7 @@ pub enum MainWalRecordType {
     TxCommitBatch = 7,
     FullPageImage = 8,
     VectorInsert = 9,
+    ProbabilisticDelta = 10,
 }
 
 impl MainWalRecordType {
@@ -39,6 +40,7 @@ impl MainWalRecordType {
             7 => Some(Self::TxCommitBatch),
             8 => Some(Self::FullPageImage),
             9 => Some(Self::VectorInsert),
+            10 => Some(Self::ProbabilisticDelta),
             _ => None,
         }
     }
@@ -91,6 +93,12 @@ pub enum MainWalRecordFrame {
         collection: String,
         entity_id: u64,
         vector: Vec<f32>,
+    },
+    ProbabilisticDelta {
+        kind: u8,
+        operation: u8,
+        name: String,
+        operands: Vec<Vec<u8>>,
     },
     Checkpoint {
         lsn: u64,
@@ -183,6 +191,23 @@ pub fn encode_main_wal_record_frame_into(
             write_u32_len(out, vector.len(), "main wal vector length")?;
             for value in vector {
                 out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        MainWalRecordFrame::ProbabilisticDelta {
+            kind,
+            operation,
+            name,
+            operands,
+        } => {
+            write_type_and_term(out, MainWalRecordType::ProbabilisticDelta, term);
+            out.push(*kind);
+            out.push(*operation);
+            write_u32_len(out, name.len(), "main wal probabilistic name length")?;
+            out.extend_from_slice(name.as_bytes());
+            write_u32_len(out, operands.len(), "main wal probabilistic operand count")?;
+            for operand in operands {
+                write_u32_len(out, operand.len(), "main wal probabilistic operand length")?;
+                out.extend_from_slice(operand);
             }
         }
         MainWalRecordFrame::Checkpoint { lsn } => {
@@ -311,6 +336,28 @@ pub fn decode_main_wal_record_frame<R: Read>(
                 vector,
             }
         }
+        MainWalRecordType::ProbabilisticDelta => {
+            let kind = read_u8_tracked(reader, &mut checksum_bytes)?;
+            let operation = read_u8_tracked(reader, &mut checksum_bytes)?;
+            let name = String::from_utf8(read_bytes_tracked(reader, &mut checksum_bytes)?)
+                .map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid probabilistic name utf8: {err}"),
+                    )
+                })?;
+            let count = read_u32_tracked(reader, &mut checksum_bytes)? as usize;
+            let mut operands = Vec::with_capacity(count);
+            for _ in 0..count {
+                operands.push(read_bytes_tracked(reader, &mut checksum_bytes)?);
+            }
+            MainWalRecordFrame::ProbabilisticDelta {
+                kind,
+                operation,
+                name,
+                operands,
+            }
+        }
         MainWalRecordType::Checkpoint => MainWalRecordFrame::Checkpoint {
             lsn: read_u64_tracked(reader, &mut checksum_bytes)?,
         },
@@ -387,6 +434,10 @@ fn read_u32_tracked<R: Read>(reader: &mut R, checksum_bytes: &mut Vec<u8>) -> io
     )?))
 }
 
+fn read_u8_tracked<R: Read>(reader: &mut R, checksum_bytes: &mut Vec<u8>) -> io::Result<u8> {
+    Ok(read_array_tracked::<_, 1>(reader, checksum_bytes)?[0])
+}
+
 fn read_array_tracked<R: Read, const N: usize>(
     reader: &mut R,
     checksum_bytes: &mut Vec<u8>,
@@ -418,7 +469,11 @@ mod tests {
             MainWalRecordType::from_u8(9),
             Some(MainWalRecordType::VectorInsert)
         );
-        assert_eq!(MainWalRecordType::from_u8(10), None);
+        assert_eq!(
+            MainWalRecordType::from_u8(10),
+            Some(MainWalRecordType::ProbabilisticDelta)
+        );
+        assert_eq!(MainWalRecordType::from_u8(11), None);
     }
 
     #[test]
@@ -447,6 +502,12 @@ mod tests {
                 collection: "vectors".into(),
                 entity_id: 11,
                 vector: vec![1.0, -0.5, 0.25],
+            },
+            MainWalRecordFrame::ProbabilisticDelta {
+                kind: 1,
+                operation: 1,
+                name: "visitors".into(),
+                operands: vec![b"alice".to_vec()],
             },
         ];
 
