@@ -167,6 +167,7 @@ const OUTBOX_MAX_BYTES: u64 = 10 * (1 << 30);
 static OUTBOX_APPROX_BYTES: AtomicU64 = AtomicU64::new(0);
 
 const QUEUE_META_COLLECTION: &str = "red_queue_meta";
+const KIND_QUEUE_PUSH_DEDUP: &str = "queue_push_dedup";
 const QUEUE_POSITION_CENTER: u64 = u64::MAX / 2;
 const WORK_DEFAULT_GROUP: &str = "_work_default";
 const FANOUT_GROUP_PREFIX: &str = "_fanout_";
@@ -186,6 +187,9 @@ pub(super) struct QueueRuntimeConfig {
     /// pre-#723 immediate-requeue behaviour. Overridden per-failure by
     /// an authorized `NACK ... WITH DELAY <duration>`.
     pub(super) retry_delay_ms: Option<u64>,
+    /// Queue-scoped push idempotency window. `None` means use the engine
+    /// default from the RQL AST crate.
+    pub(super) dedup_window_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -725,6 +729,7 @@ impl RedDBRuntime {
                 lock_deadline_ms: query.lock_deadline_ms,
                 in_flight_cap_per_group: query.in_flight_cap_per_group,
                 retry_delay_ms: query.retry_delay_ms,
+                dedup_window_ms: query.dedup_window_ms,
             },
         )?;
 
@@ -845,6 +850,10 @@ impl RedDBRuntime {
             };
             summary.push(format!("retry_delay_ms={retry_delay_ms}"));
         }
+        if let Some(dedup_window_ms) = query.dedup_window_ms {
+            config.dedup_window_ms = Some(dedup_window_ms);
+            summary.push(format!("dedup_window_ms={dedup_window_ms}"));
+        }
 
         save_queue_config(store.as_ref(), &query.name, &config)?;
 
@@ -935,6 +944,7 @@ impl RedDBRuntime {
                 priority,
                 key,
                 available,
+                dedup_key,
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
@@ -950,6 +960,41 @@ impl RedDBRuntime {
                         "queue '{}' is not a priority queue",
                         queue
                     )));
+                }
+                if let Some(dedup_key) = dedup_key.as_deref() {
+                    let now = now_ns();
+                    reclaim_expired_queue_dedup(store.as_ref(), queue, now)?;
+                    if let Some(existing_id) =
+                        find_queue_dedup(store.as_ref(), queue, dedup_key, now)
+                    {
+                        let mut result = UnifiedResult::with_columns(vec![
+                            "message_id".into(),
+                            "side".into(),
+                            "queue".into(),
+                        ]);
+                        let mut record = UnifiedRecord::new();
+                        record.set("message_id", Value::text(message_id_string(existing_id)));
+                        record.set(
+                            "side",
+                            Value::text(match side {
+                                QueueSide::Left => "left".to_string(),
+                                QueueSide::Right => "right".to_string(),
+                            }),
+                        );
+                        record.set("queue", Value::text(queue.clone()));
+                        result.push(record);
+
+                        return Ok(RuntimeQueryResult {
+                            query: raw_query.to_string(),
+                            mode: QueryMode::Sql,
+                            statement: "queue_push",
+                            engine: "runtime-queue",
+                            result,
+                            affected_rows: 1,
+                            statement_type: "insert",
+                            bookmark: None,
+                        });
+                    }
                 }
                 if let Some(max_size) = config.max_size {
                     let current_len =
@@ -987,6 +1032,14 @@ impl RedDBRuntime {
                 let id = store
                     .insert_auto(queue, entity)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                if let Some(dedup_key) = dedup_key.as_deref() {
+                    let window_ms = config
+                        .dedup_window_ms
+                        .unwrap_or(crate::storage::query::DEFAULT_QUEUE_DEDUP_WINDOW_MS);
+                    let expires_at_ns =
+                        now_ns().saturating_add(window_ms.saturating_mul(1_000_000));
+                    record_queue_dedup(store.as_ref(), queue, dedup_key, id, expires_at_ns)?;
+                }
                 // Resolve per-message availability (issue #722): DELAY is
                 // relative to the push instant, AVAILABLE AT carries an
                 // absolute unix-ms. Both collapse to a unix-ns timestamp
@@ -1903,6 +1956,7 @@ pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRunti
         lock_deadline_ms: crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS,
         in_flight_cap_per_group: crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP,
         retry_delay_ms: None,
+        dedup_window_ms: None,
     };
 
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
@@ -1936,6 +1990,7 @@ pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRunti
                     .map(|value| value as u32)
                     .unwrap_or(crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
                 retry_delay_ms: row_u64(row, "retry_delay_ms").filter(|v| *v > 0),
+                dedup_window_ms: row_u64(row, "dedup_window_ms"),
             })
         })
         .unwrap_or(default)
@@ -1997,6 +2052,13 @@ fn save_queue_config(
         "retry_delay_ms".to_string(),
         config
             .retry_delay_ms
+            .map(Value::UnsignedInteger)
+            .unwrap_or(Value::Null),
+    );
+    fields.insert(
+        "dedup_window_ms".to_string(),
+        config
+            .dedup_window_ms
             .map(Value::UnsignedInteger)
             .unwrap_or(Value::Null),
     );
@@ -2924,6 +2986,94 @@ pub(super) fn remove_meta_rows(store: &UnifiedStore, predicate: impl Fn(&RowData
     for row in rows {
         let _ = store.delete(QUEUE_META_COLLECTION, row.id);
     }
+}
+
+pub(super) fn reclaim_expired_queue_dedup(
+    store: &UnifiedStore,
+    queue: &str,
+    now_ns: u64,
+) -> RedDBResult<usize> {
+    let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
+        return Ok(0);
+    };
+    let queue = queue.to_string();
+    let rows = manager.query_all(|entity| {
+        entity.data.as_row().is_some_and(|row| {
+            row_text(row, "kind").as_deref() == Some(KIND_QUEUE_PUSH_DEDUP)
+                && row_text(row, "queue").as_deref() == Some(&queue)
+                && row_u64(row, "expires_at_ns")
+                    .map(|expires_at| expires_at <= now_ns)
+                    .unwrap_or(true)
+        })
+    });
+    let count = rows.len();
+    for row in rows {
+        store
+            .delete(QUEUE_META_COLLECTION, row.id)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    }
+    Ok(count)
+}
+
+pub(super) fn find_queue_dedup(
+    store: &UnifiedStore,
+    queue: &str,
+    dedup_key: &str,
+    now_ns: u64,
+) -> Option<EntityId> {
+    let manager = store.get_collection(QUEUE_META_COLLECTION)?;
+    let queue = queue.to_string();
+    let dedup_key = dedup_key.to_string();
+    manager
+        .query_all(|entity| {
+            entity.data.as_row().is_some_and(|row| {
+                row_text(row, "kind").as_deref() == Some(KIND_QUEUE_PUSH_DEDUP)
+                    && row_text(row, "queue").as_deref() == Some(&queue)
+                    && row_text(row, "dedup_key").as_deref() == Some(&dedup_key)
+                    && row_u64(row, "expires_at_ns")
+                        .map(|expires_at| expires_at > now_ns)
+                        .unwrap_or(false)
+            })
+        })
+        .into_iter()
+        .filter_map(|entity| {
+            let row = entity.data.as_row()?;
+            row_u64(row, "message_id").map(EntityId::new)
+        })
+        .next()
+}
+
+pub(super) fn record_queue_dedup(
+    store: &UnifiedStore,
+    queue: &str,
+    dedup_key: &str,
+    message_id: EntityId,
+    expires_at_ns: u64,
+) -> RedDBResult<()> {
+    let queue_owned = queue.to_string();
+    let key_owned = dedup_key.to_string();
+    remove_meta_rows(store, |row| {
+        row_text(row, "kind").as_deref() == Some(KIND_QUEUE_PUSH_DEDUP)
+            && row_text(row, "queue").as_deref() == Some(&queue_owned)
+            && row_text(row, "dedup_key").as_deref() == Some(&key_owned)
+    });
+
+    let mut fields = HashMap::new();
+    fields.insert(
+        "kind".to_string(),
+        Value::text(KIND_QUEUE_PUSH_DEDUP.to_string()),
+    );
+    fields.insert("queue".to_string(), Value::text(queue.to_string()));
+    fields.insert("dedup_key".to_string(), Value::text(dedup_key.to_string()));
+    fields.insert(
+        "message_id".to_string(),
+        Value::UnsignedInteger(message_id.raw()),
+    );
+    fields.insert(
+        "expires_at_ns".to_string(),
+        Value::UnsignedInteger(expires_at_ns),
+    );
+    insert_meta_row(store, fields)
 }
 
 pub(super) fn delete_meta_entity(store: &UnifiedStore, entity_id: EntityId) {
