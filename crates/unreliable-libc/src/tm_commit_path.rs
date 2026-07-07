@@ -354,7 +354,8 @@ pub fn recover_tm_commit_path(dir: &Path) -> io::Result<Vec<TmRecoveredTx>> {
             }
             MainWalRecordFrame::Checkpoint { .. }
             | MainWalRecordFrame::FullPageImage { .. }
-            | MainWalRecordFrame::VectorInsert { .. } => {}
+            | MainWalRecordFrame::VectorInsert { .. }
+            | MainWalRecordFrame::ProbabilisticDelta { .. } => {}
         }
     }
 
