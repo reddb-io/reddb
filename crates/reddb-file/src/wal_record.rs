@@ -105,9 +105,28 @@ pub enum MainWalRecordFrame {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MainWalRecordAuthority {
+    pub term: u64,
+    pub ownership_epoch: Option<u64>,
+}
+
 pub fn encode_main_wal_record_frame(frame: &MainWalRecordFrame, term: u64) -> io::Result<Vec<u8>> {
+    encode_main_wal_record_frame_with_authority(
+        frame,
+        MainWalRecordAuthority {
+            term,
+            ownership_epoch: None,
+        },
+    )
+}
+
+pub fn encode_main_wal_record_frame_with_authority(
+    frame: &MainWalRecordFrame,
+    authority: MainWalRecordAuthority,
+) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
-    encode_main_wal_record_frame_into(frame, term, &mut out)?;
+    encode_main_wal_record_frame_with_authority_into(frame, authority, &mut out)?;
     Ok(out)
 }
 
@@ -116,18 +135,33 @@ pub fn encode_main_wal_record_frame_into(
     term: u64,
     out: &mut Vec<u8>,
 ) -> io::Result<()> {
+    encode_main_wal_record_frame_with_authority_into(
+        frame,
+        MainWalRecordAuthority {
+            term,
+            ownership_epoch: None,
+        },
+        out,
+    )
+}
+
+pub fn encode_main_wal_record_frame_with_authority_into(
+    frame: &MainWalRecordFrame,
+    authority: MainWalRecordAuthority,
+    out: &mut Vec<u8>,
+) -> io::Result<()> {
     let start = out.len();
     match frame {
         MainWalRecordFrame::Begin { tx_id } => {
-            write_type_and_term(out, MainWalRecordType::Begin, term);
+            write_type_and_authority(out, MainWalRecordType::Begin, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
         }
         MainWalRecordFrame::Commit { tx_id } => {
-            write_type_and_term(out, MainWalRecordType::Commit, term);
+            write_type_and_authority(out, MainWalRecordType::Commit, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
         }
         MainWalRecordFrame::Rollback { tx_id } => {
-            write_type_and_term(out, MainWalRecordType::Rollback, term);
+            write_type_and_authority(out, MainWalRecordType::Rollback, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
         }
         MainWalRecordFrame::PageWrite {
@@ -138,7 +172,11 @@ pub fn encode_main_wal_record_frame_into(
             if data.len() >= MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD {
                 if let Ok(compressed) = zstd::bulk::compress(data.as_slice(), 3) {
                     if compressed.len() < data.len() {
-                        write_type_and_term(out, MainWalRecordType::PageWriteCompressed, term);
+                        write_type_and_authority(
+                            out,
+                            MainWalRecordType::PageWriteCompressed,
+                            authority,
+                        );
                         out.extend_from_slice(&tx_id.to_le_bytes());
                         out.extend_from_slice(&page_id.to_le_bytes());
                         out.push(MainWalCompression::Zstd as u8);
@@ -151,14 +189,14 @@ pub fn encode_main_wal_record_frame_into(
                 }
             }
 
-            write_type_and_term(out, MainWalRecordType::PageWrite, term);
+            write_type_and_authority(out, MainWalRecordType::PageWrite, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
             out.extend_from_slice(&page_id.to_le_bytes());
             write_u32_len(out, data.len(), "main wal page length")?;
             out.extend_from_slice(data);
         }
         MainWalRecordFrame::TxCommitBatch { tx_id, actions } => {
-            write_type_and_term(out, MainWalRecordType::TxCommitBatch, term);
+            write_type_and_authority(out, MainWalRecordType::TxCommitBatch, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
             write_u32_len(out, actions.len(), "main wal action count")?;
             for action in actions {
@@ -172,7 +210,7 @@ pub fn encode_main_wal_record_frame_into(
             ckpt_epoch,
             data,
         } => {
-            write_type_and_term(out, MainWalRecordType::FullPageImage, term);
+            write_type_and_authority(out, MainWalRecordType::FullPageImage, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
             out.extend_from_slice(&page_id.to_le_bytes());
             out.extend_from_slice(&ckpt_epoch.to_le_bytes());
@@ -184,7 +222,7 @@ pub fn encode_main_wal_record_frame_into(
             entity_id,
             vector,
         } => {
-            write_type_and_term(out, MainWalRecordType::VectorInsert, term);
+            write_type_and_authority(out, MainWalRecordType::VectorInsert, authority);
             write_u32_len(out, collection.len(), "main wal collection name length")?;
             out.extend_from_slice(collection.as_bytes());
             out.extend_from_slice(&entity_id.to_le_bytes());
@@ -199,7 +237,7 @@ pub fn encode_main_wal_record_frame_into(
             name,
             operands,
         } => {
-            write_type_and_term(out, MainWalRecordType::ProbabilisticDelta, term);
+            write_type_and_authority(out, MainWalRecordType::ProbabilisticDelta, authority);
             out.push(*kind);
             out.push(*operation);
             write_u32_len(out, name.len(), "main wal probabilistic name length")?;
@@ -211,7 +249,7 @@ pub fn encode_main_wal_record_frame_into(
             }
         }
         MainWalRecordFrame::Checkpoint { lsn } => {
-            write_type_and_term(out, MainWalRecordType::Checkpoint, term);
+            write_type_and_authority(out, MainWalRecordType::Checkpoint, authority);
             out.extend_from_slice(&lsn.to_le_bytes());
         }
     }
@@ -225,6 +263,22 @@ pub fn decode_main_wal_record_frame<R: Read>(
     format_version: u8,
     default_term: u64,
 ) -> io::Result<Option<(u64, MainWalRecordFrame)>> {
+    Ok(decode_main_wal_record_frame_with_authority(
+        reader,
+        format_version,
+        MainWalRecordAuthority {
+            term: default_term,
+            ownership_epoch: None,
+        },
+    )?
+    .map(|(authority, frame)| (authority.term, frame)))
+}
+
+pub fn decode_main_wal_record_frame_with_authority<R: Read>(
+    reader: &mut R,
+    format_version: u8,
+    default_authority: MainWalRecordAuthority,
+) -> io::Result<Option<(MainWalRecordAuthority, MainWalRecordFrame)>> {
     let mut checksum_bytes = Vec::new();
     let mut type_buf = [0u8; 1];
     match reader.read_exact(&mut type_buf) {
@@ -236,9 +290,20 @@ pub fn decode_main_wal_record_frame<R: Read>(
     let record_type = MainWalRecordType::from_u8(type_buf[0])
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid record type"))?;
 
-    let term = match format_version {
-        WAL_FILE_VERSION => read_u64_tracked(reader, &mut checksum_bytes)?,
-        WAL_FILE_VERSION_V2 => default_term,
+    let authority = match format_version {
+        WAL_FILE_VERSION => {
+            let term = read_u64_tracked(reader, &mut checksum_bytes)?;
+            let ownership_epoch = read_u64_tracked(reader, &mut checksum_bytes)?;
+            MainWalRecordAuthority {
+                term,
+                ownership_epoch: if ownership_epoch == 0 {
+                    None
+                } else {
+                    Some(ownership_epoch)
+                },
+            }
+        }
+        WAL_FILE_VERSION_V2 => default_authority,
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -371,12 +436,17 @@ pub fn decode_main_wal_record_frame<R: Read>(
         ));
     }
 
-    Ok(Some((term, frame)))
+    Ok(Some((authority, frame)))
 }
 
-fn write_type_and_term(out: &mut Vec<u8>, record_type: MainWalRecordType, term: u64) {
+fn write_type_and_authority(
+    out: &mut Vec<u8>,
+    record_type: MainWalRecordType,
+    authority: MainWalRecordAuthority,
+) {
     out.push(record_type as u8);
-    out.extend_from_slice(&term.to_le_bytes());
+    out.extend_from_slice(&authority.term.to_le_bytes());
+    out.extend_from_slice(&authority.ownership_epoch.unwrap_or(0).to_le_bytes());
 }
 
 fn write_u32_len(out: &mut Vec<u8>, len: usize, label: &'static str) -> io::Result<()> {
@@ -520,6 +590,31 @@ mod tests {
             assert_eq!(term, 42);
             assert_eq!(decoded, frame);
         }
+    }
+
+    #[test]
+    fn main_wal_record_round_trip_current_format_authority_epoch() {
+        let frame = MainWalRecordFrame::Begin { tx_id: 42 };
+        let authority = MainWalRecordAuthority {
+            term: 7,
+            ownership_epoch: Some(11),
+        };
+        let encoded = encode_main_wal_record_frame_with_authority(&frame, authority).unwrap();
+
+        let mut cursor = Cursor::new(encoded);
+        let (decoded_authority, decoded) = decode_main_wal_record_frame_with_authority(
+            &mut cursor,
+            WAL_FILE_VERSION,
+            MainWalRecordAuthority {
+                term: 1,
+                ownership_epoch: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(decoded_authority, authority);
+        assert_eq!(decoded, frame);
     }
 
     #[test]
