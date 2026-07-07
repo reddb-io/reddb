@@ -640,6 +640,12 @@ pub struct QueryStats {
     pub edges_scanned: u64,
     /// Number of rows scanned
     pub rows_scanned: u64,
+    /// Number of queryable segments considered by the scan
+    pub segments_total: u64,
+    /// Number of queryable segments actually scanned
+    pub segments_scanned: u64,
+    /// Number of queryable segments skipped by metadata pruning
+    pub segments_pruned: u64,
     /// Execution time in microseconds
     pub exec_time_us: u64,
 }
