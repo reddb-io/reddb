@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::*;
 
 const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
+const TIMESERIES_SERIES_COLLECTION: &str = "red_timeseries_series";
 const COLUMNAR_PROJECTION_SIZE_FLOOR_ROWS: usize = 4;
 const DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS: u64 = 86_400_000_000_000;
 
@@ -198,6 +199,7 @@ impl RedDBRuntime {
             .remove_collection_contract(&query.name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         remove_timeseries_metadata(store.as_ref(), &query.name);
+        remove_timeseries_series_dictionary(store.as_ref(), &query.name);
         self.invalidate_result_cache();
         self.inner
             .db
@@ -525,6 +527,164 @@ impl RedDBRuntime {
     }
 }
 
+pub(crate) fn intern_timeseries_series(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+    metric: &str,
+    tags: &HashMap<String, String>,
+) -> RedDBResult<u64> {
+    let canonical_tags = canonical_timeseries_tags(tags);
+    let _ = store.get_or_create_collection(TIMESERIES_SERIES_COLLECTION);
+    let manager = store
+        .get_collection(TIMESERIES_SERIES_COLLECTION)
+        .ok_or_else(|| RedDBError::Internal("timeseries series dictionary missing".to_string()))?;
+
+    let rows = manager.query_all(|entity| {
+        entity
+            .data
+            .as_row()
+            .is_some_and(|row| row_text(row, "collection").is_some_and(|value| value == collection))
+    });
+
+    let mut next_id = 0u64;
+    for entity in &rows {
+        let Some(row) = entity.data.as_row() else {
+            continue;
+        };
+        if let Some(existing_id) = row_u64(row, "series_id") {
+            next_id = next_id.max(existing_id.saturating_add(1));
+        }
+        if row_text(row, "metric") == Some(metric)
+            && row_text(row, "canonical_tags") == Some(canonical_tags.as_str())
+        {
+            if let Some(existing_id) = row_u64(row, "series_id") {
+                return Ok(existing_id);
+            }
+        }
+    }
+
+    let series_id = next_id;
+    let mut fields = HashMap::new();
+    fields.insert(
+        "collection".to_string(),
+        Value::text(collection.to_string()),
+    );
+    fields.insert("series_id".to_string(), Value::UnsignedInteger(series_id));
+    fields.insert("metric".to_string(), Value::text(metric.to_string()));
+    fields.insert(
+        "canonical_tags".to_string(),
+        Value::text(canonical_tags.clone()),
+    );
+    fields.insert("tags".to_string(), encoded_timeseries_tags_value(tags));
+
+    store
+        .insert_auto(
+            TIMESERIES_SERIES_COLLECTION,
+            UnifiedEntity::new(
+                EntityId::new(0),
+                EntityKind::TableRow {
+                    table: Arc::from(TIMESERIES_SERIES_COLLECTION),
+                    row_id: 0,
+                },
+                EntityData::Row(crate::storage::RowData {
+                    columns: Vec::new(),
+                    named: Some(fields),
+                    schema: None,
+                }),
+            ),
+        )
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+
+    Ok(series_id)
+}
+
+pub(crate) fn hydrate_timeseries_entity(
+    store: &crate::storage::unified::UnifiedStore,
+    entity: &UnifiedEntity,
+) -> UnifiedEntity {
+    let mut hydrated = entity.clone();
+    let EntityData::TimeSeries(point) = &mut hydrated.data else {
+        return hydrated;
+    };
+    if !point.tags.is_empty() {
+        return hydrated;
+    }
+    let Some(series_id) = point.series_id else {
+        return hydrated;
+    };
+    if let Some(tags) = resolve_timeseries_series_tags(store, entity.kind.collection(), series_id) {
+        point.tags = tags;
+    }
+    hydrated
+}
+
+pub(crate) fn resolve_timeseries_series_tags(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+    series_id: u64,
+) -> Option<HashMap<String, String>> {
+    let manager = store.get_collection(TIMESERIES_SERIES_COLLECTION)?;
+    let rows = manager.query_all(|entity| {
+        entity.data.as_row().is_some_and(|row| {
+            row_text(row, "collection").is_some_and(|value| value == collection)
+                && row_u64(row, "series_id") == Some(series_id)
+        })
+    });
+    rows.iter()
+        .filter_map(|entity| entity.data.as_row())
+        .find_map(|row| row.get_field("tags").and_then(encoded_tags_from_value))
+}
+
+fn canonical_timeseries_tags(tags: &HashMap<String, String>) -> String {
+    match encoded_timeseries_tags_value(tags) {
+        Value::Json(bytes) => String::from_utf8(bytes).unwrap_or_default(),
+        _ => "{}".to_string(),
+    }
+}
+
+fn encoded_timeseries_tags_value(tags: &HashMap<String, String>) -> Value {
+    let object = tags
+        .iter()
+        .map(|(key, value)| (key.clone(), crate::json::Value::String(value.clone())))
+        .collect();
+    let json = crate::json::Value::Object(object);
+    Value::Json(crate::json::to_vec(&json).unwrap_or_default())
+}
+
+fn encoded_tags_from_value(value: &Value) -> Option<HashMap<String, String>> {
+    let Value::Json(bytes) = value else {
+        return None;
+    };
+    let json: crate::json::Value = crate::json::from_slice(bytes).ok()?;
+    let crate::json::Value::Object(object) = json else {
+        return None;
+    };
+    Some(
+        object
+            .into_iter()
+            .filter_map(|(key, value)| match value {
+                crate::json::Value::String(value) => Some((key, value)),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+fn row_text<'a>(row: &'a crate::storage::RowData, field: &str) -> Option<&'a str> {
+    match row.get_field(field) {
+        Some(Value::Text(value)) => Some(value.as_ref()),
+        _ => None,
+    }
+}
+
+fn row_u64(row: &crate::storage::RowData, field: &str) -> Option<u64> {
+    match row.get_field(field) {
+        Some(Value::UnsignedInteger(value)) => Some(*value),
+        Some(Value::Integer(value)) if *value >= 0 => Some(*value as u64),
+        _ => None,
+    }
+}
+
 /// Materialise `(timestamp_ns, value)` rows from the entity/row store for
 /// the half-open chunk window `[start, end)`, timestamp-ordered. This is
 /// the shared row reader: the columnar seal sources its chunk from it, and
@@ -653,6 +813,25 @@ fn remove_timeseries_metadata(store: &crate::storage::unified::UnifiedStore, ser
     });
     for row in rows {
         let _ = store.delete(TIMESERIES_META_COLLECTION, row.id);
+    }
+}
+
+fn remove_timeseries_series_dictionary(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+) {
+    let Some(manager) = store.get_collection(TIMESERIES_SERIES_COLLECTION) else {
+        return;
+    };
+    let rows = manager.query_all(|entity| {
+        entity.data.as_row().is_some_and(|row| {
+            row.get_field("collection").is_some_and(
+                |value| matches!(value, Value::Text(candidate) if &**candidate == collection),
+            )
+        })
+    });
+    for row in rows {
+        let _ = store.delete(TIMESERIES_SERIES_COLLECTION, row.id);
     }
 }
 

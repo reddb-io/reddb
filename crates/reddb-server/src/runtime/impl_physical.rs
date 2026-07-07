@@ -514,6 +514,9 @@ impl RedDBRuntime {
                         timestamp_ns: key.bucket_ns,
                         value: accumulator.value(&policy.aggregation),
                         tags,
+                        // Rollup outputs keep tags inline; they do not intern
+                        // through the series dictionary.
+                        series_id: None,
                     }),
                 );
                 store

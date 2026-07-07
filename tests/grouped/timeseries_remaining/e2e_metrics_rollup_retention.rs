@@ -55,6 +55,7 @@ fn insert_raw_metric(rt: &RedDBRuntime, collection: &str, timestamp_ms: i64, val
             timestamp_ns: (timestamp_ms as u64).saturating_mul(1_000_000),
             value,
             tags,
+            series_id: None,
         }),
     );
     rt.db()

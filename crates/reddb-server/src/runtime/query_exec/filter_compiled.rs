@@ -1218,6 +1218,7 @@ mod tests {
             )),
             crate::storage::EntityData::TimeSeries(crate::storage::TimeSeriesData {
                 metric: "cpu.usage".to_string(),
+                series_id: None,
                 timestamp_ns: 42,
                 value: 10.5,
                 tags: std::collections::HashMap::new(),

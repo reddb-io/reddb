@@ -1207,6 +1207,12 @@ impl RedDBRuntime {
             tags.entry("payload".to_string())
                 .or_insert_with(|| payload.clone());
         }
+        let series_id = super::impl_timeseries::intern_timeseries_series(
+            self.inner.db.store().as_ref(),
+            collection,
+            &metric,
+            &tags,
+        )?;
 
         let mut entity = UnifiedEntity::new(
             EntityId::new(0),
@@ -1216,9 +1222,10 @@ impl RedDBRuntime {
             })),
             EntityData::TimeSeries(crate::storage::TimeSeriesData {
                 metric,
+                series_id: Some(series_id),
                 timestamp_ns,
                 value,
-                tags,
+                tags: HashMap::new(),
             }),
         );
         // MVCC #30: stamp xmin with the active tx xid (inside a tx)

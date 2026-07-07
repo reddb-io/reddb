@@ -2083,6 +2083,7 @@ fn decode_metric_batch(
                 })),
                 EntityData::TimeSeries(crate::storage::TimeSeriesData {
                     metric: metric.clone(),
+                    series_id: None,
                     timestamp_ns,
                     value: sample.value,
                     tags: tags.clone(),
@@ -2240,6 +2241,7 @@ fn materialize_metrics_rollups(
                 })),
                 EntityData::TimeSeries(crate::storage::TimeSeriesData {
                     metric: key.metric,
+                    series_id: None,
                     timestamp_ns: key.bucket_ns,
                     value: accumulator.value(&policy.aggregation),
                     tags,

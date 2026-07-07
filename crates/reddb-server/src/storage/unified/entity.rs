@@ -404,11 +404,13 @@ impl VectorData {
 pub struct TimeSeriesData {
     /// Metric name (e.g., "cpu.idle")
     pub metric: String,
+    /// Interned `(metric, canonical tags)` id for native time-series points.
+    pub series_id: Option<u64>,
     /// Timestamp in nanoseconds since epoch
     pub timestamp_ns: u64,
     /// Metric value
     pub value: f64,
-    /// Dimensional tags (e.g., {"host": "srv1"})
+    /// Legacy/read-through dimensional tags (e.g., {"host": "srv1"}).
     pub tags: std::collections::HashMap<String, String>,
 }
 
