@@ -90,8 +90,8 @@ pub use ast::{
     NodePattern, NodeSelector, OrderByClause, PathQuery, PolicyPrincipalRef, PolicyResourceRef,
     PolicyUserRef, Projection, QueryExpr, QueryWithCte, RevokeStmt, SearchCommand, SelectItem,
     TableQuery, TreeCommand, TreeNodeSpec, TreePosition, UpdateQuery, WithClause,
-    DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP, DEFAULT_QUEUE_LOCK_DEADLINE_MS,
-    DEFAULT_QUEUE_MAX_ATTEMPTS,
+    DEFAULT_QUEUE_DEDUP_WINDOW_MS, DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP,
+    DEFAULT_QUEUE_LOCK_DEADLINE_MS, DEFAULT_QUEUE_MAX_ATTEMPTS,
 };
 pub use engine::{
     Binding, BindingBuilder, BindingIterator, Op, OpBGP, OpDisjunction, OpDistinct, OpExtend,
