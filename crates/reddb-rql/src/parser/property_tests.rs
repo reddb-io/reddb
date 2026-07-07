@@ -166,6 +166,7 @@ fn arb_queue_push() -> impl Strategy<Value = QueryExpr> {
             priority: None,
             key: None,
             available: None,
+            dedup_key: None,
         })
     })
 }
