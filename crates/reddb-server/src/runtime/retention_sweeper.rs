@@ -1,22 +1,25 @@
 //! Issue #584 — DeclarativeRetention slice 12.
 //!
-//! Background sweeper that physically removes rows whose timestamp
-//! column has fallen beyond the collection's retention window. The
+//! Background sweeper that physically removes rows or append-only
+//! segments whose timestamp column has fallen beyond the collection's
+//! retention window. The
 //! lazy-on-scan filter from slice 11 (`retention_filter`) hides
 //! expired rows from reads the moment a policy is set; this slice
 //! complements that filter with a low-priority background task that
 //! reclaims storage in bounded batches.
 //!
-//! The sweeper executes deletes through the standard
+//! Mutable-collection sweeps execute deletes through the standard
 //! `RedDBRuntime::execute_query` chokepoint (`DELETE FROM <collection>
 //! WHERE id IN (...)`) so that WAL participation, snapshot guards and
 //! event emission ride on the same single code path as user-issued
 //! DELETEs — replicas replay sweeper deletes deterministically with
-//! no special handling on the replication side.
+//! no special handling on the replication side. Append-only sweeps
+//! retire whole expired segments through the operational manifest.
 //!
 //! Per-collection runtime state (`last_sweep_at_ms`, `rows_swept_total`,
-//! `last_pending_estimate`) lives on `RuntimeInner::retention_sweeper`
-//! and is surfaced via the three extra columns on `red.retention`.
+//! `segments_retired_total`, `last_pending_estimate`) lives on
+//! `RuntimeInner::retention_sweeper` and is surfaced via the sweeper
+//! columns on `red.retention`.
 //! State is in-memory only — counters reset across restart, mirroring
 //! the existing materialized-view scheduler state.
 
@@ -36,6 +39,8 @@ pub(crate) struct SweeperState {
     pub last_sweep_at_ms: u64,
     /// Cumulative rows reclaimed since boot.
     pub rows_swept_total: u64,
+    /// Cumulative append-only segments retired since boot.
+    pub segments_retired_total: u64,
     /// Number of rows the last tick observed as expired *but not yet
     /// swept* — i.e. either still inside the batch or queued for the
     /// next tick. Surfaced as
@@ -85,6 +90,19 @@ impl RetentionSweeperState {
         entry.last_pending_estimate = pending_estimate;
     }
 
+    pub(crate) fn record_segments_retired(
+        &mut self,
+        collection: &str,
+        segments_retired: u64,
+        at_unix_ms: u64,
+    ) {
+        let entry = self.states.entry(collection.to_string()).or_default();
+        entry.last_sweep_at_ms = at_unix_ms;
+        entry.segments_retired_total = entry
+            .segments_retired_total
+            .saturating_add(segments_retired);
+    }
+
     /// Drop bookkeeping for a collection (DROP TABLE / DROP COLLECTION).
     pub(crate) fn forget(&mut self, collection: &str) {
         self.states.remove(collection);
@@ -102,7 +120,19 @@ mod tests {
         state.record_tick("events", 50, 0, 2_000);
         let s = state.get("events");
         assert_eq!(s.rows_swept_total, 150);
+        assert_eq!(s.segments_retired_total, 0);
         assert_eq!(s.last_pending_estimate, 0);
+        assert_eq!(s.last_sweep_at_ms, 2_000);
+    }
+
+    #[test]
+    fn record_segments_retired_accumulates_without_rows() {
+        let mut state = RetentionSweeperState::new();
+        state.record_segments_retired("events", 1, 1_000);
+        state.record_segments_retired("events", 2, 2_000);
+        let s = state.get("events");
+        assert_eq!(s.rows_swept_total, 0);
+        assert_eq!(s.segments_retired_total, 3);
         assert_eq!(s.last_sweep_at_ms, 2_000);
     }
 

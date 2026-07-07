@@ -342,6 +342,7 @@ pub(super) fn retention_snapshot(
                     Value::UnsignedInteger(expired_count),
                     last_sweep_at,
                     Value::UnsignedInteger(sweeper_state.rows_swept_total),
+                    Value::UnsignedInteger(sweeper_state.segments_retired_total),
                     Value::UnsignedInteger(sweeper_state.last_pending_estimate),
                 ],
             )

@@ -2,7 +2,8 @@ use std::fs;
 
 use reddb_file::{
     decode_append_only_segment, encode_append_only_segment, AppendOnlySegmentCodec,
-    AppendOnlySegmentRow, OperationalManifest, APPEND_ONLY_SEGMENT_CHUNK_BYTES,
+    AppendOnlySegmentRow, AppendOnlySegmentState, OperationalManifest,
+    APPEND_ONLY_SEGMENT_CHUNK_BYTES,
 };
 
 #[test]
@@ -91,4 +92,71 @@ fn unpublished_append_only_segment_files_are_quarantined_on_recover() {
     assert!(manifest
         .quarantine_path_for_test("events-000000000009.raos")
         .exists());
+}
+
+#[test]
+fn interrupted_append_only_segment_retirement_recovers_without_orphaning_live_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("data.rdb");
+    let manifest = OperationalManifest::for_db_path(&db_path);
+    manifest.recover_or_bootstrap(&[]).unwrap();
+
+    let expired = encode_append_only_segment(
+        AppendOnlySegmentCodec::None,
+        &[AppendOnlySegmentRow {
+            primary_key: b"0001".to_vec(),
+            payload: b"{\"id\":1}".to_vec(),
+        }],
+    )
+    .unwrap();
+    let live = encode_append_only_segment(
+        AppendOnlySegmentCodec::None,
+        &[AppendOnlySegmentRow {
+            primary_key: b"0002".to_vec(),
+            payload: b"{\"id\":2}".to_vec(),
+        }],
+    )
+    .unwrap();
+    let expired_segment = manifest
+        .publish_append_only_segment("events", 1, AppendOnlySegmentCodec::None, &expired)
+        .unwrap();
+    let live_segment = manifest
+        .publish_append_only_segment("events", 2, AppendOnlySegmentCodec::None, &live)
+        .unwrap();
+    let expired_path = manifest.append_only_segment_path_for_test(&expired_segment.path);
+    let live_path = manifest.append_only_segment_path_for_test(&live_segment.path);
+
+    assert!(manifest
+        .begin_retire_append_only_segment("events", 1)
+        .unwrap());
+    assert!(
+        expired_path.exists(),
+        "begin phase must not remove bytes yet"
+    );
+    let pending = manifest
+        .append_only_segments_with_pending_for_test()
+        .unwrap();
+    assert_eq!(pending[0].state, AppendOnlySegmentState::PendingDrop);
+    assert_eq!(pending[1].state, AppendOnlySegmentState::Active);
+
+    manifest.recover_or_bootstrap(&[]).unwrap();
+
+    assert!(
+        !expired_path.exists(),
+        "recovery completes pending retirement"
+    );
+    assert!(live_path.exists(), "live segment must not be touched");
+    assert!(!manifest
+        .quarantine_path_for_test(&expired_segment.path)
+        .exists());
+    assert_eq!(
+        manifest.append_only_segments_for_test().unwrap(),
+        vec![live_segment]
+    );
+    assert_eq!(
+        manifest
+            .append_only_published_rows_for_test("events")
+            .unwrap(),
+        2
+    );
 }

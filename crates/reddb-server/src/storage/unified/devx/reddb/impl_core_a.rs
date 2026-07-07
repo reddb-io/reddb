@@ -635,7 +635,6 @@ impl RedDB {
 
     fn publish_append_only_segments(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let manifest = reddb_file::OperationalManifest::for_db_path(path);
-        let published = manifest.append_only_segments()?;
         for contract in self
             .collection_contracts()
             .into_iter()
@@ -646,24 +645,19 @@ impl RedDB {
             };
             let mut entities = manager.query_all(|_| true);
             entities.sort_by_key(|entity| entity.id.raw());
-            let published_rows = published
-                .iter()
-                .filter(|segment| segment.collection == contract.name)
-                .map(|segment| segment.row_count)
-                .sum::<u64>();
+            let published_rows = manifest.append_only_published_rows(&contract.name)?;
             if published_rows >= entities.len() as u64 {
                 continue;
             }
-            let next_segment_id = published
-                .iter()
-                .filter(|segment| segment.collection == contract.name)
-                .map(|segment| segment.segment_id)
-                .max()
-                .unwrap_or(0)
-                .saturating_add(1);
-            let rows = entities
+            let next_segment_id = manifest.next_append_only_segment_id(&contract.name)?;
+            let segment_entities = entities
                 .iter()
                 .skip(published_rows as usize)
+                .collect::<Vec<_>>();
+            let (retention_min_ms, retention_max_ms) =
+                append_only_retention_bounds(&contract, &segment_entities);
+            let rows = segment_entities
+                .iter()
                 .map(|entity| {
                     let metadata = manager.get_metadata(entity.id);
                     reddb_file::AppendOnlySegmentRow {
@@ -684,11 +678,13 @@ impl RedDB {
                 reddb_file::AppendOnlySegmentCodec::Zstd,
                 &rows,
             )?;
-            manifest.publish_append_only_segment(
+            manifest.publish_append_only_segment_with_retention_bounds(
                 &contract.name,
                 next_segment_id,
                 reddb_file::AppendOnlySegmentCodec::Zstd,
                 &bytes,
+                retention_min_ms,
+                retention_max_ms,
             )?;
         }
         Ok(())
@@ -1376,6 +1372,59 @@ impl RedDB {
             && report.state != HealthState::Unhealthy;
 
         (query_allowed, write_allowed, repair_allowed)
+    }
+}
+
+fn append_only_retention_bounds(
+    contract: &crate::physical::CollectionContract,
+    entities: &[&UnifiedEntity],
+) -> (Option<i64>, Option<i64>) {
+    let Some(ts_column) = crate::runtime::retention_filter::resolve_timestamp_column(contract)
+    else {
+        return (None, None);
+    };
+    let mut min_ts: Option<i64> = None;
+    let mut max_ts: Option<i64> = None;
+    for entity in entities {
+        let Some(ts) = append_only_entity_timestamp_ms(entity, &ts_column) else {
+            continue;
+        };
+        min_ts = Some(min_ts.map_or(ts, |min| min.min(ts)));
+        max_ts = Some(max_ts.map_or(ts, |max| max.max(ts)));
+    }
+    (min_ts, max_ts)
+}
+
+fn append_only_entity_timestamp_ms(entity: &UnifiedEntity, ts_column: &str) -> Option<i64> {
+    match ts_column {
+        "created_at" => entity
+            .data
+            .as_row()
+            .and_then(|row| row.get_field("created_at"))
+            .and_then(value_as_retention_ms)
+            .or(Some(entity.created_at as i64)),
+        "updated_at" => entity
+            .data
+            .as_row()
+            .and_then(|row| row.get_field("updated_at"))
+            .and_then(value_as_retention_ms)
+            .or(Some(entity.updated_at as i64)),
+        other => entity
+            .data
+            .as_row()
+            .and_then(|row| row.get_field(other))
+            .and_then(value_as_retention_ms),
+    }
+}
+
+fn value_as_retention_ms(value: &Value) -> Option<i64> {
+    match value {
+        Value::TimestampMs(t) => Some(*t),
+        Value::Timestamp(t) => Some(t.saturating_mul(1_000)),
+        Value::BigInt(t) => Some(*t),
+        Value::UnsignedInteger(t) => i64::try_from(*t).ok(),
+        Value::Integer(t) => Some(*t),
+        _ => None,
     }
 }
 
