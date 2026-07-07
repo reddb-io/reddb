@@ -1,0 +1,4 @@
+input = "EXPLAIN INSERT INTO audit (id, note) VALUES (99, 'boom')"
+expected_kind = "Explain"
+source = "tests/grouped/sql_window/e2e_explain.rs:89"
+kind = "positive"
