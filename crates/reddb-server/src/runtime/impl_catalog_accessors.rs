@@ -54,6 +54,9 @@ impl RedDBRuntime {
         // The remote upload is the side-effect that risks clobbering a
         // peer's state, so it's behind the lease gate.
         let started = std::time::Instant::now();
+        self.seal_hypertable_chunks_for_checkpoint(
+            self.inner.checkpoint_columnar_emission_budget_chunks,
+        )?;
         self.inner.db.flush_local_only().map_err(|err| {
             // Issue #205 — local flush failure is a CheckpointFailed
             // operator-grade event. The local-flush path also covers
