@@ -1041,8 +1041,8 @@ fn select_spread_replacement(
                 .member_attribute(id, domain_key)
                 .is_some_and(|domain| !retained_domains.contains(domain))
         })
-        .cloned()
         .next()
+        .cloned()
 }
 
 #[cfg(test)]
