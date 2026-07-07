@@ -401,7 +401,27 @@ impl UnifiedStore {
                 *pos += 8;
                 let mut tags = HashMap::new();
                 let series_id = if format_version >= STORE_VERSION_V11 {
-                    Some(Self::read_varu64_safe(buf, pos)?)
+                    // Discriminator: interned series id (1) vs inline tag map (0).
+                    // Points interned through the series dictionary carry a series
+                    // id and no inline tags; paths that do not intern (metrics
+                    // remote-write, rollups) keep their tags inline.
+                    let interned = Self::read_varu32_safe(buf, pos)?;
+                    if interned == 1 {
+                        Some(Self::read_varu64_safe(buf, pos)?)
+                    } else {
+                        let tag_count = Self::read_varu32_safe(buf, pos)?;
+                        tags = HashMap::with_capacity(tag_count);
+                        for _ in 0..tag_count {
+                            let key_len = Self::read_varu32_safe(buf, pos)?;
+                            let key = String::from_utf8(buf[*pos..*pos + key_len].to_vec())?;
+                            *pos += key_len;
+                            let value_len = Self::read_varu32_safe(buf, pos)?;
+                            let value = String::from_utf8(buf[*pos..*pos + value_len].to_vec())?;
+                            *pos += value_len;
+                            tags.insert(key, value);
+                        }
+                        None
+                    }
                 } else if format_version >= STORE_VERSION_V5 {
                     let tag_count = Self::read_varu32_safe(buf, pos)?;
                     tags = HashMap::with_capacity(tag_count);
@@ -710,7 +730,29 @@ impl UnifiedStore {
                 write_varu64(buf, ts.timestamp_ns);
                 buf.extend_from_slice(&ts.value.to_le_bytes());
                 if format_version >= STORE_VERSION_V11 {
-                    write_varu64(buf, ts.series_id.unwrap_or(0));
+                    // Discriminator: interned series id (1) vs inline tag map (0).
+                    // Interned points (dictionary path) persist just the id;
+                    // un-interned points (metrics remote-write, rollups) keep
+                    // their tags inline so the metrics read paths, which build
+                    // labels directly from `tags`, survive a reopen.
+                    match ts.series_id {
+                        Some(series_id) => {
+                            write_varu32(buf, 1);
+                            write_varu64(buf, series_id);
+                        }
+                        None => {
+                            write_varu32(buf, 0);
+                            write_varu32(buf, ts.tags.len() as u32);
+                            let mut tag_entries: Vec<_> = ts.tags.iter().collect();
+                            tag_entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                            for (key, value) in tag_entries {
+                                write_varu32(buf, key.len() as u32);
+                                buf.extend_from_slice(key.as_bytes());
+                                write_varu32(buf, value.len() as u32);
+                                buf.extend_from_slice(value.as_bytes());
+                            }
+                        }
+                    }
                 } else if format_version >= STORE_VERSION_V5 {
                     write_varu32(buf, ts.tags.len() as u32);
                     let mut tag_entries: Vec<_> = ts.tags.iter().collect();
