@@ -1,9 +1,8 @@
 # RDCC — Columnar Chunk Format
 
-When a time-series / hypertable collection is created with the
-[`COLUMNAR`](../data-models/timeseries.md#columnar-analytical-storage)
-option, a sealed chunk is written to disk in a column-major envelope
-called **`RDCC`** (RedDB Columnar Chunk) instead of the default row form.
+When a time-series / hypertable collection crosses the configured automatic
+projection size floor, a sealed chunk is written to disk in a column-major
+envelope called **`RDCC`** (RedDB Columnar Chunk) instead of the row form.
 This page documents that on-disk byte contract. It is engine-facing: it
 describes exactly what the writer emits so the format stays auditable and a
 reader can be implemented from this page alone.
@@ -34,7 +33,8 @@ chunk column-major lets the engine:
   equality — without decompressing them;
 - decode only the columns a query references (projection pushdown).
 
-The row engine stays the default for general-purpose collections. See
+General-purpose collections stay on the row engine, and in-scope collections
+can opt out with `NO COLUMNAR`. See
 [When to use columnar vs row](../data-models/timeseries.md#when-to-use-columnar-vs-row).
 
 ## Block layout
@@ -223,8 +223,8 @@ The range and value-eq scans return a `PrunedColumnScan` carrying
 measurable end to end.
 
 Activation note: this read path is live for the time-series / hypertable read
-bridge on `COLUMNAR` collections. Routing general `SELECT` execution through the
-batch decode is not wired yet — see
+bridge on automatically projected chunks. Routing general `SELECT` execution
+through the batch decode is not wired yet — see
 [Columnar Batch Execution](columnar-execution.md#columnar-read-decode).
 
 ## See also
@@ -233,6 +233,6 @@ batch decode is not wired yet — see
   `ColumnBatch` operators that consume decoded columns.
 - [`.rdb` File Format Specification](file-format.md) — the page-based
   container an `RDCC` block lives inside (`PageType::ColumnBlock`).
-- [Time-Series → Columnar analytical storage](../data-models/timeseries.md#columnar-analytical-storage)
-  — how an operator turns this on.
+- [Time-Series → Storage Architecture](../data-models/timeseries.md#storage-architecture)
+  — how automatic projection and `NO COLUMNAR` work.
 - PRD #850 (analytics storage engine); activation shipped in #911.

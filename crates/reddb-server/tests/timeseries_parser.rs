@@ -210,6 +210,26 @@ fn create_timeseries_with_chunk_size_parses() {
 }
 
 #[test]
+fn create_timeseries_rejects_retired_columnar_keyword() {
+    for sql in [
+        "CREATE TIMESERIES m1 COLUMNAR",
+        "CREATE HYPERTABLE m1 TIME_COLUMN ts CHUNK_INTERVAL '1h' COLUMNAR",
+    ] {
+        let err = parser::parse(sql)
+            .expect_err("COLUMNAR is retired; projection is automatic")
+            .to_string();
+        assert!(
+            err.contains("COLUMNAR is no longer accepted"),
+            "unexpected error for {sql}: {err}"
+        );
+        assert!(
+            err.contains("automatic"),
+            "error should point at the automatic posture for {sql}: {err}"
+        );
+    }
+}
+
+#[test]
 fn create_hypertable_minimal_parses_with_required_clauses() {
     let q = parse_query("CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'");
     match q {

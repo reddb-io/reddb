@@ -1,6 +1,6 @@
 //! #861 — columnar migration read-bridge, end-to-end.
 //!
-//! The migration/compat path under the chunk model: when `COLUMNAR` is
+//! The migration/compat path under the chunk model: when columnar projection is
 //! enabled on a collection that ALREADY holds row-stored data, the
 //! pre-existing row chunks keep serving through the row path and only NEW
 //! chunks seal columnar (`RDCC`). The two coexist in one collection,
@@ -32,7 +32,7 @@ const OLD_ROW: &[(u64, i64)] = &[
 /// Post-upgrade data: lands in the SECOND chunk (`[1h, 2h)`), sealed
 /// columnar after columnar projection is turned on. Four rows crosses
 /// the automatic projection size floor.
-const NEW_COLUMNAR: &[(u64, i64)] = &[
+const NEW_PROJECTED: &[(u64, i64)] = &[
     (HOUR_NS + 1_000_000_000, 40),
     (HOUR_NS + 2_000_000_000, 50),
     (HOUR_NS + 3_000_000_000, 60),
@@ -83,8 +83,7 @@ fn open_paged_runtime(path: &std::path::Path) -> RedDBRuntime {
     RedDBRuntime::with_options(options).expect("persistent runtime boots")
 }
 
-/// Flip an existing collection's contract to columnar — the "enable
-/// COLUMNAR on a collection that already has data" operator action.
+/// Flip an existing collection's contract to columnar projection.
 fn enable_columnar(rt: &RedDBRuntime, collection: &str, time_key: &str) {
     let db = rt.db();
     let mut contract = db
@@ -140,11 +139,11 @@ fn read_bridge_serves_row_and_columnar_chunks_after_enabling_columnar() {
         "pre-upgrade chunk is row-stored"
     );
 
-    // --- Enable COLUMNAR on the collection that already holds data ---
+    // --- Enable projection on the collection that already holds data ---
     enable_columnar(&rt, "cpu", "ts");
 
     // New data lands in a NEW chunk and seals columnar.
-    insert(&rt, "cpu", NEW_COLUMNAR);
+    insert(&rt, "cpu", NEW_PROJECTED);
     assert_eq!(
         rt.seal_hypertable_chunks("cpu").expect("seal columnar"),
         1,
@@ -173,7 +172,7 @@ fn read_bridge_serves_row_and_columnar_chunks_after_enabling_columnar() {
         .read_bridge_points("cpu", 0, u64::MAX)
         .expect("read bridge");
     let mut expected = want(OLD_ROW);
-    expected.extend(want(NEW_COLUMNAR));
+    expected.extend(want(NEW_PROJECTED));
     assert_eq!(
         all, expected,
         "every prior + new point is readable, in order"
@@ -189,7 +188,7 @@ fn read_bridge_prunes_chunks_outside_the_query_range() {
     insert(&rt, "cpu", OLD_ROW);
     rt.seal_hypertable_chunks("cpu").expect("seal row");
     enable_columnar(&rt, "cpu", "ts");
-    insert(&rt, "cpu", NEW_COLUMNAR);
+    insert(&rt, "cpu", NEW_PROJECTED);
     rt.seal_hypertable_chunks("cpu").expect("seal columnar");
 
     // A window covering only the first (row) chunk returns only its points.
@@ -203,7 +202,7 @@ fn read_bridge_prunes_chunks_outside_the_query_range() {
     let only_col = rt
         .read_bridge_points("cpu", HOUR_NS, u64::MAX)
         .expect("read bridge");
-    assert_eq!(only_col, want(NEW_COLUMNAR), "columnar chunk served alone");
+    assert_eq!(only_col, want(NEW_PROJECTED), "columnar chunk served alone");
 }
 
 #[test]

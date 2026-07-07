@@ -130,3 +130,22 @@ fn automatic_columnar_skips_tiny_chunks_until_they_cross_the_floor() {
     );
     assert_eq!(rt.columnar_chunk_count("tiny"), 1);
 }
+
+#[test]
+fn automatic_columnar_uses_configured_projection_size_floor() {
+    let options = RedDBOptions::in_memory().with_columnar_projection_size_floor_rows(5);
+    let rt = RedDBRuntime::with_options(options).expect("runtime boots");
+    seed(
+        &rt,
+        "CREATE HYPERTABLE custom_floor TIME_COLUMN ts CHUNK_INTERVAL '1h'",
+        "custom_floor",
+    );
+
+    assert_eq!(
+        rt.seal_hypertable_chunks("custom_floor")
+            .expect("seal at configured floor"),
+        1,
+        "five rows should cross a configured five-row floor"
+    );
+    assert_eq!(rt.columnar_chunk_count("custom_floor"), 1);
+}

@@ -80,7 +80,7 @@
       "source": "docs/query/insert.md",
       "promise": "Timeseries stores timestamped metrics with tags and supports query/readback.",
       "cells": {
-        "sql": { "status": "supported", "tests": ["tests/grouped/timeseries_metrics/e2e_create_hypertable.rs", "tests/grouped/control_feedback/e2e_feedback_regression_pack.rs"] },
+        "sql": { "status": "supported", "tests": ["tests/grouped/timeseries_metrics/e2e_create_hypertable.rs", "tests/grouped/control_feedback/e2e_feedback_regression_pack.rs", "crates/reddb-server/tests/columnar_activation_e2e.rs", "crates/reddb-server/tests/timeseries_parser.rs"] },
         "http": { "status": "partial", "tests": ["tests/grouped/cli_transport/http_batch_insert.rs"] },
         "redwire": { "status": "unsupported" },
         "grpc": { "status": "unsupported" },
