@@ -1,0 +1,4 @@
+input = "EXPLAIN UPDATE audit SET note = 'changed' WHERE id = 1"
+expected_kind = "Explain"
+source = "tests/grouped/sql_window/e2e_explain.rs:90"
+kind = "positive"

@@ -123,6 +123,41 @@ pub(super) fn analytics_sources_snapshot(
         })
         .collect()
 }
+
+pub(super) fn forks_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<UnifiedRecord>> {
+    let db = runtime.db();
+    let Some(path) = db.options().data_path.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let schema = Arc::new(
+        FORK_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let forks = reddb_file::OperationalManifest::for_db_path(path)
+        .list_forks()
+        .map_err(RedDBError::Io)?;
+    Ok(forks
+        .into_iter()
+        .map(|fork| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(fork.name),
+                    Value::text(fork.parent_store),
+                    Value::UnsignedInteger(fork.fork_lsn),
+                    Value::text(fork.hydration_state.as_str()),
+                    Value::UnsignedInteger(fork.collections_total),
+                    Value::UnsignedInteger(fork.shared_by_reference),
+                    Value::UnsignedInteger(fork.hydrating),
+                    Value::UnsignedInteger(fork.hydrated),
+                ],
+            )
+        })
+        .collect())
+}
+
 pub(super) fn subscriptions_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,

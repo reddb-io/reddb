@@ -166,18 +166,13 @@ pub fn normalize_cache_key(sql: &str) -> String {
             {
                 out.push('?');
                 preserve_numeric_literal = false;
-            } else {
-                // Uppercase the word so `select` and `SELECT`
-                // collapse. This over-normalises — it also
-                // uppercases column names — but plan cache
-                // equivalence still holds because the column
-                // names are part of the normalised form and
-                // retain their identity within the query.
-                for c in word.chars() {
-                    out.push(c.to_ascii_uppercase());
-                }
+            } else if is_cache_key_keyword(word) {
+                push_uppercase(&mut out, word);
                 preserve_numeric_literal =
                     word.eq_ignore_ascii_case("limit") || word.eq_ignore_ascii_case("offset");
+            } else {
+                out.push_str(word);
+                preserve_numeric_literal = false;
             }
             last_was_space = false;
             continue;
@@ -343,12 +338,13 @@ pub fn normalize_and_extract(sql: &str) -> (String, Vec<Value>) {
                 out.push('?');
                 binds.push(Value::Null);
                 preserve_numeric_literal = false;
-            } else {
-                for c in word.chars() {
-                    out.push(c.to_ascii_uppercase());
-                }
+            } else if is_cache_key_keyword(word) {
+                push_uppercase(&mut out, word);
                 preserve_numeric_literal =
                     word.eq_ignore_ascii_case("limit") || word.eq_ignore_ascii_case("offset");
+            } else {
+                out.push_str(word);
+                preserve_numeric_literal = false;
             }
             last_was_space = false;
             continue;
@@ -365,6 +361,72 @@ pub fn normalize_and_extract(sql: &str) -> (String, Vec<Value>) {
     }
 
     (out, binds)
+}
+
+fn is_cache_key_keyword(word: &str) -> bool {
+    matches!(
+        word.to_ascii_uppercase().as_str(),
+        "SELECT"
+            | "FROM"
+            | "WHERE"
+            | "AND"
+            | "OR"
+            | "NOT"
+            | "AS"
+            | "IS"
+            | "BETWEEN"
+            | "LIKE"
+            | "IN"
+            | "ORDER"
+            | "BY"
+            | "ASC"
+            | "DESC"
+            | "NULLS"
+            | "FIRST"
+            | "LAST"
+            | "LIMIT"
+            | "OFFSET"
+            | "GROUP"
+            | "HAVING"
+            | "COUNT"
+            | "SUM"
+            | "AVG"
+            | "MIN"
+            | "MAX"
+            | "DISTINCT"
+            | "INSERT"
+            | "INTO"
+            | "VALUES"
+            | "UPDATE"
+            | "SET"
+            | "DELETE"
+            | "CREATE"
+            | "TABLE"
+            | "DOCUMENT"
+            | "KV"
+            | "DROP"
+            | "ALTER"
+            | "INDEX"
+            | "JOIN"
+            | "INNER"
+            | "LEFT"
+            | "RIGHT"
+            | "FULL"
+            | "OUTER"
+            | "ON"
+            | "RETURNING"
+            | "CONTAINS"
+            | "STARTS"
+            | "ENDS"
+            | "WITH"
+            | "EXPLAIN"
+    )
+}
+
+fn push_uppercase(out: &mut String, word: &str) {
+    for c in word.chars() {
+        out.push(c.to_ascii_uppercase());
+    }
 }
 
 pub fn extract_literal_bindings(sql: &str) -> Result<Vec<Value>, String> {
@@ -483,6 +545,18 @@ mod tests {
         assert_ne!(
             normalize_cache_key(r#"SELECT "col" FROM t"#),
             normalize_cache_key(r#"SELECT "other" FROM t"#),
+        );
+    }
+
+    #[test]
+    fn unquoted_identifier_case_is_preserved() {
+        assert_ne!(
+            normalize_cache_key("SELECT name FROM docs WHERE UserId = 1"),
+            normalize_cache_key("SELECT name FROM docs WHERE userid = 1"),
+        );
+        assert_ne!(
+            normalize_and_extract("SELECT name FROM docs WHERE UserId = 1").0,
+            normalize_and_extract("SELECT name FROM docs WHERE userid = 1").0,
         );
     }
 

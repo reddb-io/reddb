@@ -38,6 +38,15 @@ fn read_one_message_id(rt: &RedDBRuntime, sql: &str) -> Option<String> {
         .map(|v| format!("{v:?}"))
 }
 
+fn text_value(record: &reddb_server::storage::query::UnifiedRecord, column: &str) -> String {
+    match record.get(column) {
+        Some(reddb_server::storage::schema::Value::Text(value)) => value.to_string(),
+        Some(reddb_server::storage::schema::Value::UnsignedInteger(value)) => value.to_string(),
+        Some(reddb_server::storage::schema::Value::Integer(value)) => value.to_string(),
+        other => panic!("expected text-like value for {column}, got {other:?}"),
+    }
+}
+
 /// Pull the `message_id` of a single delivered record as the textual
 /// form the wire serializer would produce. The runtime stores message
 /// ids as `EntityId`; we only need a stable handle to NACK against.
@@ -99,6 +108,43 @@ fn default_retry_delay_defers_requeue_after_nack() {
         1,
         "message should be re-delivered after RETRY_DELAY elapses, got {:?}",
         later.result.records
+    );
+}
+
+#[test]
+fn retry_delay_keeps_ordering_key_blocked_after_nack() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE QUEUE qretry_keyed RETRY_DELAY 500ms MAX_ATTEMPTS 5",
+    );
+    exec(&rt, "QUEUE GROUP CREATE qretry_keyed workers");
+    exec(&rt, "QUEUE PUSH qretry_keyed 'payload-1' KEY 'account-7'");
+    exec(&rt, "QUEUE PUSH qretry_keyed 'payload-2' KEY 'account-7'");
+
+    let mid = delivered_message_id(&rt, "qretry_keyed", "workers");
+    exec(
+        &rt,
+        &format!("QUEUE NACK qretry_keyed GROUP workers '{mid}'"),
+    );
+
+    let early = rt
+        .execute_query("QUEUE READ qretry_keyed GROUP workers CONSUMER c1 COUNT 1")
+        .expect("read");
+    assert!(
+        early.result.records.is_empty(),
+        "same-key message must not overtake delayed retry, got {:?}",
+        early.result.records
+    );
+
+    thread::sleep(Duration::from_millis(650));
+    let later = rt
+        .execute_query("QUEUE READ qretry_keyed GROUP workers CONSUMER c1 COUNT 1")
+        .expect("read");
+    assert_eq!(
+        later.result.records.len(),
+        1,
+        "failed message should be re-delivered after RETRY_DELAY elapses",
     );
 }
 
@@ -206,6 +252,50 @@ fn nack_promotes_to_dlq_once_max_attempts_reached() {
         after.result.records
     );
     let _ = read_one_message_id;
+}
+
+#[test]
+fn terminal_nack_carries_ordering_key_to_dlq_and_unblocks_successor() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE QUEUE qretry_keyed_dlq WITH DLQ qretry_keyed_dead MAX_ATTEMPTS 2",
+    );
+    exec(&rt, "QUEUE GROUP CREATE qretry_keyed_dlq workers");
+    exec(
+        &rt,
+        "QUEUE PUSH qretry_keyed_dlq 'payload-1' KEY 'account-7'",
+    );
+    exec(
+        &rt,
+        "QUEUE PUSH qretry_keyed_dlq 'payload-2' KEY 'account-7'",
+    );
+
+    let mid = delivered_message_id(&rt, "qretry_keyed_dlq", "workers");
+    exec(
+        &rt,
+        &format!("QUEUE NACK qretry_keyed_dlq GROUP workers '{mid}'"),
+    );
+
+    let dlq = rt
+        .execute_query("SELECT payload, key FROM QUEUE qretry_keyed_dead")
+        .expect("select dlq");
+    assert_eq!(dlq.result.records.len(), 1);
+    assert_eq!(text_value(&dlq.result.records[0], "payload"), "payload-1");
+    assert_eq!(text_value(&dlq.result.records[0], "key"), "account-7");
+
+    let successor = rt
+        .execute_query("QUEUE READ qretry_keyed_dlq GROUP workers CONSUMER c1 COUNT 1")
+        .expect("read successor");
+    assert_eq!(
+        successor.result.records.len(),
+        1,
+        "DLQ retirement must unblock the same ordering key"
+    );
+    assert_eq!(
+        text_value(&successor.result.records[0], "payload"),
+        "payload-2"
+    );
 }
 
 #[test]

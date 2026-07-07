@@ -92,6 +92,71 @@ fn tsv_materializes_with_tab_delimiter() {
 }
 
 #[test]
+fn ndjson_materializes_as_document_collection() {
+    let dir = temp_dir("ndjson-docs");
+    let path = write_fixture(
+        dir.path(),
+        "events.ndjson",
+        "{\"UserId\":7,\"name\":\"Ada\",\"event_type\":\"login\"}\n\
+         {\"UserId\":8,\"name\":\"Linus\",\"event_type\":\"logout\"}\n",
+    );
+
+    let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+    let table = rt.materialize_data_file(&path).expect("materialize ndjson");
+
+    assert_eq!(table.collection, "events");
+    assert_eq!(table.alias, POSITIONAL_ALIAS);
+    assert_eq!(table.rows_imported, 2);
+
+    let by_stem = rt
+        .execute_query("SELECT name FROM events WHERE UserId = 8")
+        .expect("query ndjson by exact body key");
+    assert_eq!(by_stem.result.records.len(), 1);
+
+    let by_alias = rt
+        .execute_query("SELECT name FROM t WHERE event_type = 'login'")
+        .expect("query ndjson by alias");
+    assert_eq!(by_alias.result.records.len(), 1);
+
+    let wrong_case = rt
+        .execute_query("SELECT name FROM events WHERE userid = 8")
+        .expect("query ndjson wrong case");
+    assert_eq!(
+        wrong_case.result.records.len(),
+        0,
+        "document body keys must keep exact casing"
+    );
+}
+
+#[test]
+fn json_array_materializes_as_document_collection() {
+    let dir = temp_dir("json-docs");
+    let path = write_fixture(
+        dir.path(),
+        "products.json",
+        r#"[{"sku":"A","qty":3},{"sku":"B","qty":10}]"#,
+    );
+
+    let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+    let table = rt
+        .materialize_data_file(&path)
+        .expect("materialize json array");
+
+    assert_eq!(table.collection, "products");
+    assert_eq!(table.rows_imported, 2);
+
+    let rows = rt
+        .execute_query("SELECT sku FROM products WHERE qty > 5")
+        .expect("query json array documents");
+    assert_eq!(rows.result.records.len(), 1);
+
+    let alias_rows = rt
+        .execute_query("SELECT sku FROM t WHERE qty = 3")
+        .expect("query json array alias");
+    assert_eq!(alias_rows.result.records.len(), 1);
+}
+
+#[test]
 fn file_stem_is_sanitized_into_a_collection_name() {
     let dir = temp_dir("sanitize");
     let path = write_fixture(dir.path(), "vendas-2026 (v2).csv", "a,b\n1,2\n");
@@ -122,15 +187,61 @@ fn missing_file_is_a_didactic_error_not_a_panic() {
 #[test]
 fn unsupported_extension_is_a_didactic_error() {
     let dir = temp_dir("unsupported");
-    let path = write_fixture(dir.path(), "data.json", "{}\n");
+    let path = write_fixture(dir.path(), "data.txt", "{}\n");
 
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
     let err = rt
         .materialize_data_file(&path)
-        .expect_err("json is out of scope for this slice");
+        .expect_err("txt is out of scope for this slice");
     let msg = err.to_string();
     assert!(
-        msg.contains("not a CSV or TSV"),
+        msg.contains("not a supported ephemeral data file"),
+        "unexpected message: {msg}"
+    );
+}
+
+#[test]
+fn malformed_ndjson_names_the_offending_line() {
+    let dir = temp_dir("bad-ndjson");
+    let path = write_fixture(
+        dir.path(),
+        "broken.ndjson",
+        "{\"name\":\"ok\"}\n{\"name\":\"broken\"\n",
+    );
+
+    let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+    let err = rt
+        .materialize_data_file(&path)
+        .expect_err("malformed ndjson must error");
+    let msg = err.to_string();
+    assert!(msg.contains("line 2"), "unexpected message: {msg}");
+}
+
+#[test]
+fn json_array_non_object_element_names_the_element() {
+    let dir = temp_dir("bad-json-element");
+    let path = write_fixture(dir.path(), "broken.json", r#"[{"name":"ok"}, 42]"#);
+
+    let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+    let err = rt
+        .materialize_data_file(&path)
+        .expect_err("non-object json array element must error");
+    let msg = err.to_string();
+    assert!(msg.contains("element 2"), "unexpected message: {msg}");
+}
+
+#[test]
+fn non_array_json_top_level_is_rejected() {
+    let dir = temp_dir("bad-json-top");
+    let path = write_fixture(dir.path(), "object.json", r#"{"name":"not an array"}"#);
+
+    let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+    let err = rt
+        .materialize_data_file(&path)
+        .expect_err("non-array json must error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("top-level JSON value must be an array"),
         "unexpected message: {msg}"
     );
 }
