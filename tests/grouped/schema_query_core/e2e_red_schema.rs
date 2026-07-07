@@ -198,6 +198,19 @@ fn query_snapshot(rt: &RedDBRuntime, sql: &str) -> (Vec<String>, Vec<Vec<Value>>
     (result.columns, rows)
 }
 
+fn stat_value(rt: &RedDBRuntime, collection: &str, entity: Value, metric: &str) -> Value {
+    let (_, rows) = query_snapshot(
+        rt,
+        &format!(
+            "SELECT * FROM red.stats WHERE collection = '{collection}' AND metric = '{metric}'"
+        ),
+    );
+    rows.iter().find(|row| row[1] == entity).unwrap_or_else(|| {
+        panic!("missing stat collection={collection} entity={entity:?} metric={metric}: {rows:?}")
+    })[3]
+        .clone()
+}
+
 fn seed_stable_introspection_fixture(rt: &RedDBRuntime) {
     exec(
         rt,
@@ -605,6 +618,157 @@ fn show_stats_row_table_returns_long_format_metric_set() {
             .iter()
             .all(|row| row[2] == Value::text("distinct_count")),
         "metric filter keeps only distinct_count rows: {filtered:?}"
+    );
+
+    cleanup_scope();
+}
+
+#[test]
+fn show_stats_returns_model_specific_metric_sets() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE KV counters");
+    exec(
+        &rt,
+        "INSERT INTO counters KV (key, value) VALUES ('hits', 10)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO counters KV (key, value) VALUES ('label', 'blue')",
+    );
+
+    exec(&rt, "CREATE GRAPH graph_stats");
+    exec(
+        &rt,
+        "INSERT INTO graph_stats NODE (label, node_type, name) VALUES ('alpha', 'Service', 'Alpha')",
+    );
+    exec(
+        &rt,
+        "INSERT INTO graph_stats NODE (label, node_type, name) VALUES ('beta', 'Database', 'Beta')",
+    );
+    exec(
+        &rt,
+        "INSERT INTO graph_stats EDGE (label, from_rid, to_rid, weight) VALUES ('CONNECTS', 'alpha', 'beta', 1.0)",
+    );
+
+    exec(&rt, "CREATE VECTOR embeddings DIM 2 METRIC cosine");
+    exec(
+        &rt,
+        "INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'a')",
+    );
+    exec(
+        &rt,
+        "INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.0, 1.0], 'b')",
+    );
+
+    exec(&rt, "CREATE QUEUE jobs");
+    exec(&rt, "QUEUE PUSH jobs 'one'");
+    exec(&rt, "QUEUE PUSH jobs 'two'");
+    exec(&rt, "QUEUE READ jobs CONSUMER worker1 COUNT 1");
+
+    exec(&rt, "CREATE TIMESERIES cpu_metrics RETENTION 7 d");
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 94.8, {host: 'srv1'}, 1704067200000000000)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.busy', 5.2, {host: 'srv1'}, 1704067201000000000)",
+    );
+
+    let (_, all_stats) = query_snapshot(&rt, "SHOW STATS");
+    for collection in [
+        "counters",
+        "graph_stats",
+        "embeddings",
+        "jobs",
+        "cpu_metrics",
+    ] {
+        assert!(
+            all_stats
+                .iter()
+                .any(|row| row[0] == Value::text(collection)),
+            "SHOW STATS should include {collection}: {all_stats:?}"
+        );
+    }
+
+    assert_eq!(
+        stat_value(&rt, "counters", Value::Null, "entry_count"),
+        Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stat_value(&rt, "counters", Value::text("integer"), "value_type_count"),
+        Value::UnsignedInteger(1)
+    );
+    assert_eq!(
+        stat_value(&rt, "counters", Value::Null, "total_value_bytes"),
+        Value::UnsignedInteger(6)
+    );
+
+    assert_eq!(
+        stat_value(&rt, "graph_stats", Value::Null, "node_count"),
+        Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stat_value(&rt, "graph_stats", Value::Null, "edge_count"),
+        Value::UnsignedInteger(1)
+    );
+    assert_eq!(
+        stat_value(
+            &rt,
+            "graph_stats",
+            Value::text("CONNECTS"),
+            "edge_label_count"
+        ),
+        Value::UnsignedInteger(1)
+    );
+    assert_eq!(
+        stat_value(&rt, "graph_stats", Value::Null, "max_degree"),
+        Value::UnsignedInteger(1)
+    );
+
+    assert_eq!(
+        stat_value(&rt, "embeddings", Value::Null, "vector_count"),
+        Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stat_value(&rt, "embeddings", Value::Null, "dimension"),
+        Value::UnsignedInteger(2)
+    );
+
+    assert_eq!(
+        stat_value(&rt, "jobs", Value::Null, "message_count"),
+        Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stat_value(&rt, "jobs", Value::Null, "pending_count"),
+        Value::UnsignedInteger(1)
+    );
+    assert_eq!(
+        stat_value(&rt, "jobs", Value::Null, "delivered_count"),
+        Value::UnsignedInteger(1)
+    );
+
+    assert_eq!(
+        stat_value(&rt, "cpu_metrics", Value::Null, "point_count"),
+        Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stat_value(&rt, "cpu_metrics", Value::Null, "series_count"),
+        Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stat_value(&rt, "cpu_metrics", Value::Null, "oldest_timestamp_ns"),
+        Value::UnsignedInteger(1_704_067_200_000_000_000)
+    );
+    assert_eq!(
+        stat_value(
+            &rt,
+            "cpu_metrics",
+            Value::text("cpu.busy"),
+            "metric_point_count"
+        ),
+        Value::UnsignedInteger(1)
     );
 
     cleanup_scope();

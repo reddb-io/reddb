@@ -257,10 +257,9 @@ Columns:
 | `collection` | Collection name being profiled. |
 | `entity`     | The sub-entity the metric describes: the column name for per-column metrics, or `NULL` for collection-wide metrics. |
 | `metric`     | The metric name (see below). |
-| `value`      | The metric value. Type varies by metric (integer counts, or an array for `most_common_values`). |
+| `value`      | The metric value. Type varies by metric (integer counts, strings such as `distance_metric`, arrays for `most_common_values`, or `NULL` for empty time ranges). |
 
-Row-table (`TABLE` model) metric set — this slice profiles row tables; other
-models share the same contract in later slices:
+Row-table (`TABLE` model) metric set:
 
 | Metric | Entity | Value |
 |--------|--------|-------|
@@ -274,6 +273,55 @@ models share the same contract in later slices:
 | `null_count` | column name | Number of rows where the column is `NULL` or absent. |
 | `distinct_count` | column name | Number of distinct non-null values in the column. |
 | `most_common_values` | column name | Array of the column's most common values (hottest first, capped). |
+
+KV (`KV` model) metric set:
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `entry_count` | `NULL` | Number of KV entries in the collection. |
+| `total_key_bytes` | `NULL` | Estimated stored key bytes. |
+| `total_value_bytes` | `NULL` | Estimated stored value bytes. |
+| `value_type_count` | value type | Number of values stored with that value type. |
+
+Graph (`GRAPH` model) metric set:
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `node_count` | `NULL` | Number of graph nodes. |
+| `edge_count` | `NULL` | Number of graph edges. |
+| `max_degree` | `NULL` | Largest observed node degree. |
+| `avg_degree` | `NULL` | Integer average degree across nodes. |
+| `node_label_count` | node label/type | Number of nodes with that label/type. |
+| `edge_label_count` | edge label | Number of edges with that label. |
+
+Vector (`VECTOR` model) metric set:
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `vector_count` | `NULL` | Number of vectors in the collection. |
+| `dimension` | `NULL` | Declared vector dimension, or the first observed vector dimension. |
+| `distance_metric` | `NULL` | Declared vector distance metric when present. |
+| `hybrid_vector_count` | `NULL` | Number of vectors with a sparse component. |
+
+Queue (`QUEUE` model) metric set:
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `message_count` | `NULL` | Number of queue messages. |
+| `pending_count` | `NULL` | Number of unacked messages that have not been delivered. |
+| `delivered_count` | `NULL` | Number of unacked messages with at least one delivery attempt. |
+| `acked_count` | `NULL` | Number of acknowledged messages. |
+| `max_attempts_seen` | `NULL` | Highest delivery-attempt count currently observed. |
+
+Timeseries (`TIME_SERIES` model) metric set:
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `point_count` | `NULL` | Number of points in the collection. |
+| `series_count` | `NULL` | Number of distinct metric/tag series. |
+| `oldest_timestamp_ns` | `NULL` | Oldest point timestamp in nanoseconds, or `NULL` when empty. |
+| `newest_timestamp_ns` | `NULL` | Newest point timestamp in nanoseconds, or `NULL` when empty. |
+| `metric_point_count` | metric name | Number of points for that metric. |
 
 ### Freshness tiers
 
