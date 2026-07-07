@@ -40,9 +40,7 @@ impl<'a> Parser<'a> {
                 }
                 columnar = false;
             } else if self.consume_ident_ci("COLUMNAR")? {
-                // `COLUMNAR` is accepted as an explicit spelling of the
-                // automatic default.
-                columnar = true;
+                return Err(retired_columnar_keyword_error(self.position()));
             } else if self.consume_ident_ci("DOWNSAMPLE")? {
                 downsample_policies.push(self.parse_downsample_policy_spec()?);
                 while self.consume(&Token::Comma)? {
@@ -382,9 +380,7 @@ impl<'a> Parser<'a> {
                 }
                 columnar = false;
             } else if self.consume_ident_ci("COLUMNAR")? {
-                // `COLUMNAR` is accepted as an explicit spelling of the
-                // automatic default.
-                columnar = true;
+                return Err(retired_columnar_keyword_error(self.position()));
             } else if self.consume_ident_ci("TTL")? {
                 ttl_ns = Some(self.parse_duration_ns_literal("TTL")?);
             } else if self.consume(&Token::Retention)? {
@@ -554,6 +550,15 @@ impl<'a> Parser<'a> {
     }
 }
 
+fn retired_columnar_keyword_error(position: crate::lexer::Position) -> ParseError {
+    ParseError::new(
+        "COLUMNAR is no longer accepted; columnar projection is automatic for in-scope \
+         collections, use NO COLUMNAR to opt out"
+            .to_string(),
+        position,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn create_timeseries_accepts_clause_order_defaults_and_columnar() {
+    fn create_timeseries_accepts_clause_order_and_defaults_to_columnar() {
         let query = parse_query(
             "CREATE TIMESERIES IF NOT EXISTS readings DOWNSAMPLE 1h:raw \
              RETENTION 2 h CHUNKSIZE 64",
@@ -592,6 +597,23 @@ mod tests {
             panic!("expected create timeseries");
         };
         assert!(!timeseries.columnar);
+    }
+
+    #[test]
+    fn create_timeseries_rejects_retired_columnar_keyword() {
+        for sql in [
+            "CREATE TIMESERIES readings COLUMNAR",
+            "CREATE HYPERTABLE readings TIME_COLUMN ts CHUNK_INTERVAL '1h' COLUMNAR",
+        ] {
+            let err = parse_query(sql)
+                .expect_err("COLUMNAR is retired")
+                .to_string();
+            assert!(
+                err.contains("COLUMNAR is no longer accepted"),
+                "{sql}: {err}"
+            );
+            assert!(err.contains("automatic"), "{sql}: {err}");
+        }
     }
 
     #[test]
