@@ -52,6 +52,7 @@ fn red_query_accepts_each_row_format() {
         ),
         ("csv", "id,name\n1,Ada\n2,Linus\n"),
         ("tsv", "id\tname\n1\tAda\n2\tLinus\n"),
+        ("toon", "[2]{id,name}:\n  1,Ada\n  2,Linus\n"),
     ] {
         let (code, stdout, stderr) = run_query(&path, format);
         assert_eq!(code, 0, "{format} stderr: {stderr}");

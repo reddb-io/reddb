@@ -43,6 +43,28 @@ pub struct ForkInfo {
     pub name: String,
     pub parent_store: String,
     pub fork_lsn: u64,
+    pub hydration_state: ForkHydrationState,
+    pub collections_total: u64,
+    pub shared_by_reference: u64,
+    pub hydrating: u64,
+    pub hydrated: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkHydrationState {
+    SharedByReference,
+    Hydrating,
+    Hydrated,
+}
+
+impl ForkHydrationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SharedByReference => "shared_by_reference",
+            Self::Hydrating => "hydrating",
+            Self::Hydrated => "hydrated",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,11 +377,20 @@ impl OperationalManifest {
                 continue;
             }
             let fork = Self { root: entry.path() };
-            if let Some(origin) = fork.fork_origin()? {
+            if let Some(manifest) = fork.load_current()? {
+                let Some(origin) = manifest.fork_origin.as_ref() else {
+                    continue;
+                };
+                let progress = fork.hydration_progress(&manifest);
                 out.push(ForkInfo {
-                    name: origin.name,
-                    parent_store: origin.parent_store,
+                    name: origin.name.clone(),
+                    parent_store: origin.parent_store.clone(),
                     fork_lsn: origin.fork_lsn,
+                    hydration_state: progress.state,
+                    collections_total: progress.collections_total,
+                    shared_by_reference: progress.shared_by_reference,
+                    hydrating: progress.hydrating,
+                    hydrated: progress.hydrated,
                 });
             }
         }
@@ -383,6 +414,50 @@ impl OperationalManifest {
             self.quarantine_unreferenced_files(&protected_paths)?;
         }
         Ok(true)
+    }
+
+    /// Detach a store fork into an independent operational store root. All
+    /// shared-by-reference collections are hydrated before the fork is moved out
+    /// from under the parent store; the final manifest then drops its
+    /// [`ForkOrigin`], so parent retention and WAL pruning no longer see it as a
+    /// live fork.
+    ///
+    /// The operation is restartable across the two durable phases:
+    /// - if hydration finished but the fork is still nested, rerun hydrates as a
+    ///   no-op and moves it;
+    /// - if the move finished but origin clearing did not, rerun finishes the
+    ///   detached manifest in place.
+    pub fn detach_fork(&self, name: &str) -> io::Result<Option<Self>> {
+        let fork = self.fork_handle(name);
+        let detached = self.detached_fork_handle(name);
+
+        if detached.root.exists() {
+            if fork.root.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("detached store already exists for fork: {name}"),
+                ));
+            }
+            let was_fork = detached.fork_origin()?.is_some();
+            detached.clear_fork_origin()?;
+            return Ok(was_fork.then_some(detached));
+        }
+
+        if !fork.root.exists() {
+            return Ok(None);
+        }
+
+        fork.hydrate_shared_collections()?;
+        if let Some(parent) = detached.root.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&fork.root, &detached.root)?;
+        sync_dir(&self.forks_dir())?;
+        if let Some(parent) = detached.root.parent() {
+            sync_dir(parent)?;
+        }
+        detached.clear_fork_origin()?;
+        Ok(Some(detached))
     }
 
     /// Read this manifest's fork origin, if it is a fork.
@@ -410,6 +485,55 @@ impl OperationalManifest {
             }
         }
         Ok(out)
+    }
+
+    fn detached_fork_handle(&self, name: &str) -> Self {
+        let root_name = self
+            .root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "store.ops".to_string());
+        Self {
+            root: self
+                .root
+                .with_file_name(format!("{root_name}.detached-{}", sanitize_component(name))),
+        }
+    }
+
+    fn hydrate_shared_collections(&self) -> io::Result<()> {
+        let mut manifest = match self.load_current()? {
+            Some(manifest) => manifest,
+            None => return Ok(()),
+        };
+        let mut changed = false;
+        self.ensure_dirs()?;
+        for entry in manifest.collections.values_mut() {
+            let Some(source) = entry.source.clone() else {
+                continue;
+            };
+            let dest = self.collections_dir().join(&entry.path);
+            copy_file_durable(Path::new(&source), &dest)?;
+            entry.source = None;
+            changed = true;
+        }
+        if changed {
+            manifest.generation += 1;
+            self.publish(&manifest)?;
+        }
+        Ok(())
+    }
+
+    fn clear_fork_origin(&self) -> io::Result<()> {
+        let mut manifest = match self.load_current()? {
+            Some(manifest) => manifest,
+            None => return Ok(()),
+        };
+        if manifest.fork_origin.is_none() {
+            return Ok(());
+        }
+        manifest.fork_origin = None;
+        manifest.generation += 1;
+        self.publish(&manifest)
     }
 
     fn protected_collection_paths(&self, manifest: &Manifest) -> io::Result<BTreeSet<String>> {
@@ -444,6 +568,33 @@ impl OperationalManifest {
             }
         }
         Ok(paths)
+    }
+
+    fn hydration_progress(&self, manifest: &Manifest) -> ForkHydrationProgress {
+        let mut progress = ForkHydrationProgress::default();
+        for entry in manifest.collections.values() {
+            if entry.state != CollectionState::Active {
+                continue;
+            }
+            progress.collections_total += 1;
+            if entry.source.is_none() {
+                progress.hydrated += 1;
+                continue;
+            }
+            if self.collections_dir().join(&entry.path).exists() {
+                progress.hydrating += 1;
+            } else {
+                progress.shared_by_reference += 1;
+            }
+        }
+        progress.state = if progress.hydrating > 0 {
+            ForkHydrationState::Hydrating
+        } else if progress.shared_by_reference > 0 {
+            ForkHydrationState::SharedByReference
+        } else {
+            ForkHydrationState::Hydrated
+        };
+        progress
     }
 
     pub fn read_generation_for_test(&self) -> io::Result<u64> {
@@ -560,6 +711,27 @@ impl OperationalManifest {
         }
         out.push_str(".rcol");
         out
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ForkHydrationProgress {
+    state: ForkHydrationState,
+    collections_total: u64,
+    shared_by_reference: u64,
+    hydrating: u64,
+    hydrated: u64,
+}
+
+impl Default for ForkHydrationProgress {
+    fn default() -> Self {
+        Self {
+            state: ForkHydrationState::Hydrated,
+            collections_total: 0,
+            shared_by_reference: 0,
+            hydrating: 0,
+            hydrated: 0,
+        }
     }
 }
 
@@ -1080,6 +1252,73 @@ mod tests {
 
         assert!(!parent.collection_path_for_test("users").exists());
         assert!(parent.quarantine_path_for_test("users.rcol").exists());
+    }
+
+    #[test]
+    fn detach_fork_hydrates_and_survives_parent_removal() {
+        let path = temp_db_path("detach_fork");
+        let parent = OperationalManifest::for_db_path(&path);
+        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
+        write_collection(&parent, "users", b"successful-experiment");
+        parent.create_fork("exp", 21).unwrap();
+
+        let detached = parent.detach_fork("exp").unwrap().unwrap();
+
+        assert!(parent.list_forks().unwrap().is_empty());
+        assert!(detached.fork_origin().unwrap().is_none());
+        assert_eq!(
+            read_collection(&detached, "users"),
+            b"successful-experiment"
+        );
+
+        fs::remove_dir_all(&parent.root).unwrap();
+        assert_eq!(
+            detached.recover_or_bootstrap(&[]).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            read_collection(&detached, "users"),
+            b"successful-experiment"
+        );
+    }
+
+    #[test]
+    fn detach_fork_resumes_after_move_before_origin_clear() {
+        let path = temp_db_path("detach_fork_resume");
+        let parent = OperationalManifest::for_db_path(&path);
+        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
+        write_collection(&parent, "users", b"as-of-fork");
+        parent.create_fork("exp", 34).unwrap();
+
+        let fork = parent.fork_handle("exp");
+        fork.hydrate_shared_collections().unwrap();
+        let detached = parent.detached_fork_handle("exp");
+        fs::rename(&fork.root, &detached.root).unwrap();
+
+        let resumed = parent.detach_fork("exp").unwrap().unwrap();
+
+        assert_eq!(resumed.root, detached.root);
+        assert!(parent.list_forks().unwrap().is_empty());
+        assert!(resumed.fork_origin().unwrap().is_none());
+        assert_eq!(read_collection(&resumed, "users"), b"as-of-fork");
+    }
+
+    #[test]
+    fn detach_fork_releases_parent_retention_pin() {
+        let path = temp_db_path("detach_releases_parent_pin");
+        let parent = OperationalManifest::for_db_path(&path);
+        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
+        write_collection(&parent, "users", b"as-of-fork");
+        parent.create_fork("exp", 55).unwrap();
+        parent.begin_drop_collection("users").unwrap();
+        parent.recover_or_bootstrap(&[]).unwrap();
+        assert!(parent.collection_path_for_test("users").exists());
+
+        let detached = parent.detach_fork("exp").unwrap().unwrap();
+        parent.recover_or_bootstrap(&[]).unwrap();
+
+        assert!(!parent.collection_path_for_test("users").exists());
+        assert_eq!(read_collection(&detached, "users"), b"as-of-fork");
     }
 
     #[test]

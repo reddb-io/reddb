@@ -68,6 +68,10 @@ pub(super) const QUEUE_PENDING_INTERNAL: &str = "__red_schema_queue_pending";
 // `red.collections.internal` contract.
 pub(super) const QUEUES: &str = "red.queues";
 pub(super) const QUEUES_INTERNAL: &str = "__red_schema_queues";
+// Issue #1777 — store-fork observability. One row per fork rooted
+// under the current persistent store's operational manifest.
+pub(super) const FORKS: &str = "red.forks";
+pub(super) const FORKS_INTERNAL: &str = "__red_schema_forks";
 // Issue #577 — AnalyticsSchemaRegistry slice 2. Per-event-name schema
 // versions: `(event_name, version, schema_json, registered_at)`.
 pub(super) const SCHEMA_REGISTRY: &str = "red.schema_registry";
@@ -262,6 +266,17 @@ const QUEUE_COLUMNS: [&str; 8] = [
     "dlq_target",
     "attention",
     "internal",
+];
+
+const FORK_COLUMNS: [&str; 8] = [
+    "name",
+    "parent_store",
+    "fork_lsn",
+    "hydration_state",
+    "collections_total",
+    "shared_by_reference",
+    "hydrating",
+    "hydrated",
 ];
 
 const QUEUE_PENDING_COLUMNS: [&str; 8] = [
@@ -664,6 +679,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (MATERIALIZED_VIEWS, MATERIALIZED_VIEWS_INTERNAL),
         (QUEUE_PENDING, QUEUE_PENDING_INTERNAL),
         (QUEUES, QUEUES_INTERNAL),
+        (FORKS, FORKS_INTERNAL),
         (ANALYTICS_METRICS, ANALYTICS_METRICS_INTERNAL),
         (ANALYTICS_SLOS, ANALYTICS_SLOS_INTERNAL),
         (ANALYTICS_SOURCES, ANALYTICS_SOURCES_INTERNAL),
@@ -752,6 +768,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(QUEUE_PENDING)
         || table.eq_ignore_ascii_case(QUEUES_INTERNAL)
         || table.eq_ignore_ascii_case(QUEUES)
+        || table.eq_ignore_ascii_case(FORKS_INTERNAL)
+        || table.eq_ignore_ascii_case(FORKS)
         || table.eq_ignore_ascii_case(ANALYTICS_METRICS_INTERNAL)
         || table.eq_ignore_ascii_case(ANALYTICS_METRICS)
         || table.eq_ignore_ascii_case(ANALYTICS_SLOS_INTERNAL)
@@ -869,6 +887,7 @@ pub(super) fn red_query(
         VirtualTableKind::Queues => {
             ops_views::queues_snapshot(runtime, tenant, visible_collections)
         }
+        VirtualTableKind::Forks => ops_views::forks_snapshot(runtime)?,
         VirtualTableKind::AnalyticsMetrics => ops_views::analytics_metrics_snapshot(runtime),
         VirtualTableKind::AnalyticsSlos => ops_views::analytics_slos_snapshot(runtime),
         VirtualTableKind::AnalyticsSources => {
@@ -1027,6 +1046,7 @@ enum VirtualTableKind {
     MaterializedViews,
     QueuePending,
     Queues,
+    Forks,
     AnalyticsMetrics,
     AnalyticsSlos,
     AnalyticsSources,
@@ -1072,6 +1092,7 @@ impl VirtualTableKind {
             Self::MaterializedViews => &MATERIALIZED_VIEW_COLUMNS,
             Self::QueuePending => &QUEUE_PENDING_COLUMNS,
             Self::Queues => &QUEUE_COLUMNS,
+            Self::Forks => &FORK_COLUMNS,
             Self::AnalyticsMetrics => &ANALYTICS_METRIC_COLUMNS,
             Self::AnalyticsSlos => &ANALYTICS_SLO_COLUMNS,
             Self::AnalyticsSources => &ANALYTICS_SOURCE_COLUMNS,
@@ -1116,6 +1137,7 @@ impl VirtualTableKind {
             Self::MaterializedViews => MATERIALIZED_VIEWS,
             Self::QueuePending => QUEUE_PENDING,
             Self::Queues => QUEUES,
+            Self::Forks => FORKS,
             Self::AnalyticsMetrics => ANALYTICS_METRICS,
             Self::AnalyticsSlos => ANALYTICS_SLOS,
             Self::AnalyticsSources => ANALYTICS_SOURCES,
@@ -1190,6 +1212,9 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(QUEUES_INTERNAL) || name.eq_ignore_ascii_case(QUEUES) {
         return Ok(VirtualTableKind::Queues);
+    }
+    if name.eq_ignore_ascii_case(FORKS_INTERNAL) || name.eq_ignore_ascii_case(FORKS) {
+        return Ok(VirtualTableKind::Forks);
     }
     if name.eq_ignore_ascii_case(ANALYTICS_METRICS_INTERNAL)
         || name.eq_ignore_ascii_case(ANALYTICS_METRICS)

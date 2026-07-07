@@ -70,15 +70,20 @@ fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
     let _ = rt.checkpoint();
 }
 
-/// Returns `true` when the first `query` positional names a CSV/TSV data
+/// Returns `true` when the first `query` positional names a supported data
 /// file, triggering the ephemeral-store tracer (PRD #1785, issue #1786):
-/// `red query <file.csv> <sql>`.
+/// `red query <file.csv|file.json> <sql>`.
 fn is_ephemeral_data_file(arg: &str) -> bool {
     let lower = arg.to_ascii_lowercase();
-    lower.ends_with(".csv") || lower.ends_with(".tsv") || lower.ends_with(".tab")
+    lower.ends_with(".csv")
+        || lower.ends_with(".tsv")
+        || lower.ends_with(".tab")
+        || lower.ends_with(".json")
+        || lower.ends_with(".jsonl")
+        || lower.ends_with(".ndjson")
 }
 
-/// Run the ephemeral-store tracer: materialize a local CSV/TSV file into
+/// Run the ephemeral-store tracer: materialize a local data file into
 /// a throwaway in-memory embedded store, execute the query against it,
 /// print the result, and discard the store. No server, no pre-existing
 /// store, nothing durable created — the collection is addressable by its
@@ -89,14 +94,18 @@ fn run_ephemeral_query(
     sql: &str,
     json_mode: bool,
     row_format: RowFormat,
+    save_path: Option<String>,
 ) -> ! {
     use std::path::Path;
 
     if sql.is_empty() {
         if json_mode {
-            json_error("query", "Usage: red query <file.csv|file.tsv> <sql>");
+            json_error(
+                "query",
+                "Usage: red query <file.csv|file.tsv|file.json|file.ndjson> <sql>",
+            );
         }
-        eprintln!("Usage: red query <file.csv|file.tsv> <sql>");
+        eprintln!("Usage: red query <file.csv|file.tsv|file.json|file.ndjson> <sql>");
         eprintln!("Example: red query data.csv \"SELECT * FROM t\"");
         std::process::exit(1);
     }
@@ -109,14 +118,42 @@ fn run_ephemeral_query(
         std::process::exit(1);
     });
 
-    // Throwaway in-memory store — nothing durable is written.
-    let rt = reddb::RedDBRuntime::in_memory().unwrap_or_else(|err| {
-        if json_mode {
-            json_error("query", &err.to_string());
+    let rt = match save_path.as_deref() {
+        Some(path) if path.trim().is_empty() => {
+            if json_mode {
+                json_error("query", "--save requires a non-empty path");
+            }
+            eprintln!("query: --save requires a non-empty path");
+            std::process::exit(1);
         }
-        eprintln!("error: {err}");
-        std::process::exit(1);
-    });
+        Some(path) => {
+            if Path::new(path).exists() {
+                if json_mode {
+                    json_error("query", &format!("save target '{path}' already exists"));
+                }
+                eprintln!("query: save target '{path}' already exists");
+                std::process::exit(1);
+            }
+            reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(path))
+                .unwrap_or_else(|err| {
+                    if json_mode {
+                        json_error("query", &err.to_string());
+                    }
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                })
+        }
+        None => {
+            // Throwaway in-memory store — nothing durable is written.
+            reddb::RedDBRuntime::in_memory().unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("query", &err.to_string());
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            })
+        }
+    };
 
     if let Err(err) = rt.materialize_data_file(Path::new(file)) {
         // Missing, unreadable, or malformed files land here as a
@@ -156,6 +193,15 @@ fn run_ephemeral_query(
 
     match exec_result {
         Ok(qr) => {
+            if let Some(path) = save_path.as_deref() {
+                if let Err(err) = rt.checkpoint() {
+                    if json_mode {
+                        json_error("query", &err.to_string());
+                    }
+                    eprintln!("query: failed to save '{path}': {err}");
+                    std::process::exit(1);
+                }
+            }
             if json_mode {
                 json_ok("query", &format_result_json(&qr));
             } else {
@@ -1394,7 +1440,7 @@ fn main() {
                 std::process::exit(1);
             });
             // Ephemeral-store tracer (PRD #1785, issue #1786):
-            // `red query <file.csv|file.tsv> <sql>` materializes the file
+            // `red query <file.csv|file.tsv|file.json|file.ndjson> <sql>` materializes the file
             // into a throwaway in-memory store and queries it. Detected
             // when a second positional is present and the first names a
             // CSV/TSV data file.
@@ -1405,6 +1451,7 @@ fn main() {
                     remaining[1].as_str(),
                     json_mode,
                     row_format,
+                    flag_string(&result.flags, "save"),
                 );
             }
             let sql = remaining.first().map(|s| s.as_str()).unwrap_or("");
@@ -3817,7 +3864,10 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                              (text|int|float|bool|null|vec|json).",
                 ));
                 flags.push(cli::types::FlagSchema::new("format").with_description(
-                    "Row output format for query results (table|json|ndjson|csv|tsv).",
+                    "Row output format for query results (table|json|ndjson|csv|tsv|toon).",
+                ));
+                flags.push(cli::types::FlagSchema::new("save").with_description(
+                    "Persist an ephemeral data-file query session as a new embedded .rdb file",
                 ));
             }
         }

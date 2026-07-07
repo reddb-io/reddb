@@ -8,9 +8,9 @@ use crate::ast::{
     DropDocumentQuery, DropForeignTableQuery, DropGraphQuery, DropIndexQuery, DropKvQuery,
     DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery, DropServerQuery,
     DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVcsRefQuery, DropVectorQuery,
-    DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef,
-    Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery,
-    IsolationLevel, JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction,
+    DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery, ExplainQuery,
+    Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery,
+    InsertQuery, IsolationLevel, JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction,
     ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery, RankOfQuery, RankRangeQuery,
     RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
     TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VcsCommand,
@@ -54,6 +54,7 @@ pub enum FrontendStatement {
     KvCommand(KvCommand),
     ConfigCommand(ConfigCommand),
     Ranking(QueryExpr),
+    Explain(ExplainQuery),
 }
 
 #[derive(Debug, Clone)]
@@ -1654,6 +1655,7 @@ impl FrontendStatement {
             FrontendStatement::KvCommand(command) => QueryExpr::KvCommand(command),
             FrontendStatement::ConfigCommand(command) => QueryExpr::ConfigCommand(command),
             FrontendStatement::Ranking(expr) => expr,
+            FrontendStatement::Explain(query) => QueryExpr::Explain(query),
         }
     }
 }
@@ -2081,8 +2083,18 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
-                } else {
+                } else if match self.peek_next()? {
+                    Token::Alter => true,
+                    Token::Ident(name) if name.eq_ignore_ascii_case("MIGRATION") => true,
+                    _ => false,
+                } {
                     self.parse_sql_statement().map(FrontendStatement::Sql)
+                } else {
+                    self.advance()?; // EXPLAIN
+                    let inner = self.parse_sql_statement()?.into_query_expr();
+                    Ok(FrontendStatement::Explain(ExplainQuery {
+                        inner: Box::new(inner),
+                    }))
                 }
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {

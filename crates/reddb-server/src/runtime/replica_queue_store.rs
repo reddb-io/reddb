@@ -315,6 +315,8 @@ impl QueueStore for ReplicaQueueStore {
             attempts: self.read_attempts(&row.queue, row.message_id, &row.group),
             queue: row.queue,
             message_id: row.message_id,
+            group: row.group,
+            consumer: String::new(),
         })
     }
 
@@ -337,7 +339,13 @@ impl QueueStore for ReplicaQueueStore {
         }
     }
 
-    fn enqueue_dlq(&self, _txn: &QueueTxn, _dlq_target: &str, _original: Value) -> Result<()> {
+    fn enqueue_dlq(
+        &self,
+        _txn: &QueueTxn,
+        _dlq_target: &str,
+        _original: Value,
+        _ordering_key: Option<&str>,
+    ) -> Result<()> {
         Err(QueueStoreError::ReplicaImmutable)
     }
 
@@ -619,7 +627,7 @@ mod tests {
         ));
         assert!(matches!(
             replica
-                .enqueue_dlq(&t, "dlq", Value::text("x"))
+                .enqueue_dlq(&t, "dlq", Value::text("x"), None)
                 .unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));

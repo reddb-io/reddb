@@ -17,8 +17,11 @@
 //! `SELECT … FROM <stem>` resolve identically for every query shape
 //! (projections, filters, and aggregates alike).
 
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+use crate::application::ports::RuntimeEntityPort;
+use crate::application::CreateDocumentInput;
 use crate::runtime::RedDBRuntime;
 use crate::storage::import::{CsvConfig, CsvImporter};
 
@@ -45,12 +48,16 @@ pub struct EphemeralTable {
 pub enum EphemeralError {
     /// The path does not point at a readable regular file.
     NotAFile { path: String },
-    /// The extension is neither `.csv` nor `.tsv`/`.tab`.
+    /// The extension is not one of the ephemeral data formats.
     UnsupportedExtension { path: String, ext: String },
     /// The file stem sanitized to an empty identifier.
     EmptyStem { path: String },
     /// The CSV import path rejected the file (I/O or parse failure).
     Import { path: String, source: String },
+    /// The JSON or NDJSON document parser rejected the file.
+    Json { path: String, source: String },
+    /// A JSON file parsed successfully but was not an array of objects.
+    JsonShape { path: String, source: String },
 }
 
 impl std::fmt::Display for EphemeralError {
@@ -61,14 +68,20 @@ impl std::fmt::Display for EphemeralError {
             }
             EphemeralError::UnsupportedExtension { path, ext } => write!(
                 f,
-                "unsupported data file '{path}': '.{ext}' is not a CSV or TSV file \
-                 (expected .csv, .tsv, or .tab)"
+                "unsupported data file '{path}': '.{ext}' is not a supported ephemeral data file \
+                 (expected .csv, .tsv, .tab, .json, .jsonl, or .ndjson)"
             ),
             EphemeralError::EmptyStem { path } => write!(
                 f,
                 "cannot derive a table name from '{path}': the file stem is empty"
             ),
             EphemeralError::Import { path, source } => {
+                write!(f, "failed to load '{path}': {source}")
+            }
+            EphemeralError::Json { path, source } => {
+                write!(f, "failed to parse '{path}': {source}")
+            }
+            EphemeralError::JsonShape { path, source } => {
                 write!(f, "failed to load '{path}': {source}")
             }
         }
@@ -108,11 +121,20 @@ pub fn sanitize_stem(stem: &str) -> Option<String> {
     }
 }
 
-/// Field delimiter inferred from a data file's extension.
-fn delimiter_for_extension(ext: &str) -> Option<u8> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EphemeralFormat {
+    Delimited(u8),
+    JsonArray,
+    Ndjson,
+}
+
+/// Data format inferred from a data file's extension.
+fn format_for_extension(ext: &str) -> Option<EphemeralFormat> {
     match ext {
-        "csv" => Some(b','),
-        "tsv" | "tab" => Some(b'\t'),
+        "csv" => Some(EphemeralFormat::Delimited(b',')),
+        "tsv" | "tab" => Some(EphemeralFormat::Delimited(b'\t')),
+        "json" => Some(EphemeralFormat::JsonArray),
+        "jsonl" | "ndjson" => Some(EphemeralFormat::Ndjson),
         _ => None,
     }
 }
@@ -137,8 +159,8 @@ impl RedDBRuntime {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let delimiter =
-            delimiter_for_extension(&ext).ok_or_else(|| EphemeralError::UnsupportedExtension {
+        let format =
+            format_for_extension(&ext).ok_or_else(|| EphemeralError::UnsupportedExtension {
                 path: display.clone(),
                 ext: ext.clone(),
             })?;
@@ -151,7 +173,15 @@ impl RedDBRuntime {
             path: display.clone(),
         })?;
 
-        let rows_imported = self.import_csv_into(path, &collection, delimiter, &display)?;
+        let rows_imported = match format {
+            EphemeralFormat::Delimited(delimiter) => {
+                self.import_csv_into(path, &collection, delimiter, &display)?
+            }
+            EphemeralFormat::JsonArray => {
+                self.import_json_array_into(path, &collection, &display)?
+            }
+            EphemeralFormat::Ndjson => self.import_ndjson_into(path, &collection, &display)?,
+        };
 
         // The single loaded file is also addressable by the positional
         // alias `t`. Rather than a rewrite view — which leaks on
@@ -160,7 +190,17 @@ impl RedDBRuntime {
         // through either name. Skipped when the stem already sanitized to
         // `t` (e.g. `t.csv`), which would collide.
         if collection != POSITIONAL_ALIAS {
-            self.import_csv_into(path, POSITIONAL_ALIAS, delimiter, &display)?;
+            match format {
+                EphemeralFormat::Delimited(delimiter) => {
+                    self.import_csv_into(path, POSITIONAL_ALIAS, delimiter, &display)?;
+                }
+                EphemeralFormat::JsonArray => {
+                    self.import_json_array_into(path, POSITIONAL_ALIAS, &display)?;
+                }
+                EphemeralFormat::Ndjson => {
+                    self.import_ndjson_into(path, POSITIONAL_ALIAS, &display)?;
+                }
+            }
         }
 
         Ok(EphemeralTable {
@@ -207,6 +247,108 @@ impl RedDBRuntime {
 
         Ok(stats.records_imported)
     }
+
+    fn import_json_array_into(
+        &self,
+        path: &Path,
+        collection: &str,
+        display: &str,
+    ) -> Result<usize, EphemeralError> {
+        let raw = std::fs::read_to_string(path).map_err(|e| EphemeralError::Json {
+            path: display.to_string(),
+            source: e.to_string(),
+        })?;
+        let parsed: crate::serde_json::Value =
+            crate::serde_json::from_str(&raw).map_err(|e| EphemeralError::Json {
+                path: display.to_string(),
+                source: e.to_string(),
+            })?;
+        let crate::serde_json::Value::Array(values) = parsed else {
+            return Err(EphemeralError::JsonShape {
+                path: display.to_string(),
+                source: "top-level JSON value must be an array of document objects".to_string(),
+            });
+        };
+
+        for (idx, value) in values.iter().enumerate() {
+            if !matches!(value, crate::serde_json::Value::Object(_)) {
+                return Err(EphemeralError::JsonShape {
+                    path: display.to_string(),
+                    source: format!("element {} is not a JSON object", idx + 1),
+                });
+            }
+        }
+
+        self.insert_documents(collection, values, display)
+    }
+
+    fn import_ndjson_into(
+        &self,
+        path: &Path,
+        collection: &str,
+        display: &str,
+    ) -> Result<usize, EphemeralError> {
+        let file = std::fs::File::open(path).map_err(|e| EphemeralError::Json {
+            path: display.to_string(),
+            source: e.to_string(),
+        })?;
+        let mut values = Vec::new();
+        for (idx, line) in BufReader::new(file).lines().enumerate() {
+            let line_number = idx + 1;
+            let line = line.map_err(|e| EphemeralError::Json {
+                path: display.to_string(),
+                source: format!("line {line_number}: {e}"),
+            })?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: crate::serde_json::Value =
+                crate::serde_json::from_str(trimmed).map_err(|e| EphemeralError::Json {
+                    path: display.to_string(),
+                    source: format!("line {line_number}: {e}"),
+                })?;
+            if !matches!(value, crate::serde_json::Value::Object(_)) {
+                return Err(EphemeralError::JsonShape {
+                    path: display.to_string(),
+                    source: format!("line {line_number} is not a JSON object"),
+                });
+            }
+            values.push(value);
+        }
+
+        self.insert_documents(collection, values, display)
+    }
+
+    fn insert_documents(
+        &self,
+        collection: &str,
+        values: Vec<crate::serde_json::Value>,
+        display: &str,
+    ) -> Result<usize, EphemeralError> {
+        let rows_imported = values.len();
+        self.execute_query(&format!("CREATE DOCUMENT {collection}"))
+            .map_err(|e| EphemeralError::Import {
+                path: display.to_string(),
+                source: e.to_string(),
+            })?;
+
+        for value in values {
+            self.create_document(CreateDocumentInput {
+                collection: collection.to_string(),
+                body: value,
+                metadata: Vec::new(),
+                node_links: Vec::new(),
+                vector_links: Vec::new(),
+            })
+            .map_err(|e| EphemeralError::Import {
+                path: display.to_string(),
+                source: e.to_string(),
+            })?;
+        }
+
+        Ok(rows_imported)
+    }
 }
 
 #[cfg(test)]
@@ -244,9 +386,27 @@ mod tests {
 
     #[test]
     fn delimiter_inference() {
-        assert_eq!(delimiter_for_extension("csv"), Some(b','));
-        assert_eq!(delimiter_for_extension("tsv"), Some(b'\t'));
-        assert_eq!(delimiter_for_extension("tab"), Some(b'\t'));
-        assert_eq!(delimiter_for_extension("json"), None);
+        assert_eq!(
+            format_for_extension("csv"),
+            Some(EphemeralFormat::Delimited(b','))
+        );
+        assert_eq!(
+            format_for_extension("tsv"),
+            Some(EphemeralFormat::Delimited(b'\t'))
+        );
+        assert_eq!(
+            format_for_extension("tab"),
+            Some(EphemeralFormat::Delimited(b'\t'))
+        );
+        assert_eq!(
+            format_for_extension("json"),
+            Some(EphemeralFormat::JsonArray)
+        );
+        assert_eq!(format_for_extension("jsonl"), Some(EphemeralFormat::Ndjson));
+        assert_eq!(
+            format_for_extension("ndjson"),
+            Some(EphemeralFormat::Ndjson)
+        );
+        assert_eq!(format_for_extension("txt"), None);
     }
 }

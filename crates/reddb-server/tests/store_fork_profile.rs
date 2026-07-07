@@ -71,4 +71,18 @@ fn operational_directory_fork_uses_exported_layout() {
     assert_eq!(forks[0].name, "experiment");
     assert_eq!(forks[0].fork_lsn, fork.fork_lsn);
     assert_eq!(forks[0].parent_store, manifest.store_identity());
+
+    assert!(runtime
+        .detach_fork_store("experiment")
+        .expect("detach fork store"));
+    assert!(
+        manifest
+            .list_forks()
+            .expect("list forks after detach")
+            .is_empty(),
+        "detached fork must no longer pin parent retention"
+    );
+    assert!(!runtime
+        .detach_fork_store("experiment")
+        .expect("detach missing fork is idempotent"));
 }

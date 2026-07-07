@@ -1460,18 +1460,31 @@ impl RedDBRuntime {
                 let effective_delay_ms = delay_ms.or(config.retry_delay_ms).unwrap_or(0);
                 let pending_attempt = ps.read_pending_attempt(&did).map_err(map_qse)?;
                 let nack_attempts = pending_attempt.attempts.saturating_add(1);
-                let outcome = lifecycle.nack(&txn, &did).map_err(map_qse)?;
+                let retry_available_at_ns = if effective_delay_ms > 0 {
+                    Some(now_ns().saturating_add(effective_delay_ms.saturating_mul(1_000_000)))
+                } else {
+                    None
+                };
+                let retry_deadline = if effective_delay_ms > 0 {
+                    Some(
+                        std::time::Instant::now()
+                            + std::time::Duration::from_millis(effective_delay_ms),
+                    )
+                } else {
+                    None
+                };
+                let outcome = lifecycle
+                    .nack_with_retry_deadline(&txn, &did, retry_deadline)
+                    .map_err(map_qse)?;
                 // Apply delay only when the message was actually
                 // requeued — DLQ promotion / drop terminate the
                 // retry cycle and a delay would be meaningless.
                 if matches!(outcome, RetirementOutcome::Requeued) && effective_delay_ms > 0 {
-                    let at_ns =
-                        now_ns().saturating_add(effective_delay_ms.saturating_mul(1_000_000));
                     set_message_available_at_ns(
                         store.as_ref(),
                         queue,
                         message_entity,
-                        Some(at_ns),
+                        retry_available_at_ns,
                         config.ttl_ms,
                     )?;
                 }

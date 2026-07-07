@@ -257,6 +257,7 @@ impl UnifiedExecutor {
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)
             | QueryExpr::ExplainMigration(_)
+            | QueryExpr::Explain(_)
             | QueryExpr::EventsBackfill(_)
             | QueryExpr::EventsBackfillStatus { .. } => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
@@ -505,6 +506,7 @@ impl UnifiedExecutor {
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)
             | QueryExpr::ExplainMigration(_)
+            | QueryExpr::Explain(_)
             | QueryExpr::EventsBackfill(_)
             | QueryExpr::EventsBackfillStatus { .. } => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",

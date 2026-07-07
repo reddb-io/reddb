@@ -139,6 +139,17 @@ const POLICY_ACTION_COLUMNS: [&str; 6] = [
     "gates_description",
 ];
 
+const FORK_COLUMNS: [&str; 8] = [
+    "name",
+    "parent_store",
+    "fork_lsn",
+    "hydration_state",
+    "collections_total",
+    "shared_by_reference",
+    "hydrating",
+    "hydrated",
+];
+
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
 }
@@ -309,6 +320,76 @@ fn uint_field(record: &reddb::storage::query::unified::UnifiedRecord, field: &st
         Some(Value::UnsignedInteger(value)) => *value,
         other => panic!("expected unsigned integer field {field}, got {other:?}"),
     }
+}
+
+#[test]
+fn red_forks_surfaces_parent_lsn_and_hydration_progress() {
+    cleanup_scope();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("forks.rdb");
+    let rt =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).expect("persistent runtime");
+
+    let manifest = reddb_file::OperationalManifest::for_db_path(&db_path);
+    manifest
+        .recover_or_bootstrap(&["users".to_string(), "orders".to_string()])
+        .expect("bootstrap operational manifest");
+    manifest
+        .create_fork("migration-test", 42)
+        .expect("create fork");
+
+    let result = rt
+        .execute_query("SELECT * FROM red.forks")
+        .expect("red.forks select");
+    assert_eq!(result.result.columns, FORK_COLUMNS.map(str::to_string));
+    assert_eq!(result.result.records.len(), 1);
+    let row = &result.result.records[0];
+    assert_eq!(text_field(row, "name"), "migration-test");
+    assert_eq!(text_field(row, "parent_store"), manifest.store_identity());
+    assert_eq!(uint_field(row, "fork_lsn"), 42);
+    assert_eq!(text_field(row, "hydration_state"), "shared_by_reference");
+    assert_eq!(uint_field(row, "collections_total"), 2);
+    assert_eq!(uint_field(row, "shared_by_reference"), 2);
+    assert_eq!(uint_field(row, "hydrating"), 0);
+    assert_eq!(uint_field(row, "hydrated"), 0);
+
+    let fork = manifest.fork_handle("migration-test");
+    std::fs::write(fork.collection_path_for_test("users"), b"partial copy")
+        .expect("simulate in-progress hydration");
+    let hydrating = rt
+        .execute_query(
+            "SELECT hydration_state, shared_by_reference, hydrating, hydrated FROM red.forks",
+        )
+        .expect("red.forks hydrating select");
+    let row = &hydrating.result.records[0];
+    assert_eq!(text_field(row, "hydration_state"), "hydrating");
+    assert_eq!(uint_field(row, "shared_by_reference"), 1);
+    assert_eq!(uint_field(row, "hydrating"), 1);
+    assert_eq!(uint_field(row, "hydrated"), 0);
+
+    fork.hydrate_collection("users").expect("hydrate users");
+    let hydrated = rt
+        .execute_query(
+            "SELECT hydration_state, shared_by_reference, hydrating, hydrated FROM red.forks",
+        )
+        .expect("red.forks hydrated select");
+    let row = &hydrated.result.records[0];
+    assert_eq!(text_field(row, "hydration_state"), "shared_by_reference");
+    assert_eq!(uint_field(row, "shared_by_reference"), 1);
+    assert_eq!(uint_field(row, "hydrating"), 0);
+    assert_eq!(uint_field(row, "hydrated"), 1);
+
+    fork.hydrate_collection("orders").expect("hydrate orders");
+    let hydrated = rt
+        .execute_query(
+            "SELECT hydration_state, shared_by_reference, hydrating, hydrated FROM red.forks",
+        )
+        .expect("red.forks fully hydrated select");
+    let row = &hydrated.result.records[0];
+    assert_eq!(text_field(row, "hydration_state"), "hydrated");
+    assert_eq!(uint_field(row, "shared_by_reference"), 0);
+    assert_eq!(uint_field(row, "hydrating"), 0);
+    assert_eq!(uint_field(row, "hydrated"), 2);
 }
 
 #[test]
