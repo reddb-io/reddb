@@ -386,8 +386,11 @@ pub use wal_header::{
     WAL_FILE_VERSION_V2,
 };
 pub use wal_record::{
-    decode_main_wal_record_frame, encode_main_wal_record_frame, encode_main_wal_record_frame_into,
-    MainWalCompression, MainWalRecordFrame, MainWalRecordType, MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD,
+    decode_main_wal_record_frame, decode_main_wal_record_frame_with_authority,
+    encode_main_wal_record_frame, encode_main_wal_record_frame_into,
+    encode_main_wal_record_frame_with_authority, encode_main_wal_record_frame_with_authority_into,
+    MainWalCompression, MainWalRecordAuthority, MainWalRecordFrame, MainWalRecordType,
+    MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD,
 };
 pub use zone_map::{
     read_zone_map_sidecar, write_zone_map_sidecar, PersistedZone, ZoneMapPersistError,
