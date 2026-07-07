@@ -569,6 +569,8 @@ fn query_flags() -> Vec<FlagSchema> {
             .with_short('p')
             .with_description("Positional parameter for $1, $2, ... (repeatable)"),
         FlagSchema::new("param-type").with_description("Type override for the preceding --param"),
+        FlagSchema::boolean("dry-run")
+            .with_description("Preview the statement via EXPLAIN without executing it"),
     ]
 }
 

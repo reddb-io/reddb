@@ -95,6 +95,7 @@ fn run_ephemeral_query(
     json_mode: bool,
     row_format: RowFormat,
     save_path: Option<String>,
+    dry_run: bool,
 ) -> ! {
     use std::path::Path;
 
@@ -127,6 +128,16 @@ fn run_ephemeral_query(
             }
             eprintln!("query: --save requires a non-empty path");
             std::process::exit(1);
+        }
+        Some(_) if dry_run => {
+            // Preview the statement only; do not create the requested save target.
+            reddb::RedDBRuntime::in_memory().unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("query", &err.to_string());
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            })
         }
         Some(path) => {
             if Path::new(path).exists() {
@@ -168,12 +179,15 @@ fn run_ephemeral_query(
         std::process::exit(1);
     }
 
+    let preview_sql = dry_run.then(|| format!("EXPLAIN {sql}"));
+    let sql_to_run = preview_sql.as_deref().unwrap_or(sql);
+
     let exec_result = if params.is_empty() {
-        rt.execute_query(sql)
+        rt.execute_query(sql_to_run)
     } else {
         use reddb::storage::query::modes::parse_multi;
         use reddb::storage::query::user_params;
-        match parse_multi(sql) {
+        match parse_multi(sql_to_run) {
             Ok(expr) => match user_params::bind(&expr, &params) {
                 Ok(bound) => rt.execute_query_expr(bound),
                 Err(err) => {
@@ -196,7 +210,7 @@ fn run_ephemeral_query(
 
     match exec_result {
         Ok(qr) => {
-            if let Some(path) = save_path.as_deref() {
+            if let Some(path) = save_path.as_deref().filter(|_| !dry_run) {
                 if let Err(err) = rt.checkpoint() {
                     if json_mode {
                         json_error("query", &err.to_string());
@@ -206,8 +220,16 @@ fn run_ephemeral_query(
                 }
             }
             if json_mode {
-                json_ok("query", &format_result_json(&qr));
+                if let Some(preview_sql) = preview_sql.as_deref() {
+                    json_ok("query", &format_dry_run_result_json(sql, preview_sql, &qr));
+                } else {
+                    json_ok("query", &format_result_json(&qr));
+                }
             } else {
+                if let Some(preview_sql) = preview_sql.as_deref() {
+                    println!("dry-run: {sql}");
+                    println!("preview: {preview_sql}");
+                }
                 print_row_result(&qr, row_format);
             }
             std::process::exit(0);
@@ -1143,6 +1165,19 @@ fn format_result_json(result: &reddb::runtime::RuntimeQueryResult) -> String {
     out
 }
 
+fn format_dry_run_result_json(
+    statement: &str,
+    preview_statement: &str,
+    result: &reddb::runtime::RuntimeQueryResult,
+) -> String {
+    format!(
+        "{{\"statement\":\"explain\",\"dry_run\":true,\"would_run\":\"{}\",\"preview_statement\":\"{}\",\"preview\":{}}}",
+        json_escape(statement),
+        json_escape(preview_statement),
+        format_result_json(result),
+    )
+}
+
 /// Print an error JSON envelope to **stderr** and exit with code 1.
 fn json_error(command: &str, error: &str) -> ! {
     eprintln!(
@@ -1462,6 +1497,7 @@ fn main() {
                     json_mode,
                     row_format,
                     flag_string(&result.flags, "save"),
+                    flag_bool(&result.flags, "dry-run"),
                 );
             }
             let sql = remaining.first().map(|s| s.as_str()).unwrap_or("");
@@ -1487,12 +1523,15 @@ fn main() {
                 eprintln!("error: {err}");
                 std::process::exit(1);
             });
+            let dry_run = flag_bool(&result.flags, "dry-run");
+            let preview_sql = dry_run.then(|| format!("EXPLAIN {sql}"));
+            let sql_to_run = preview_sql.as_deref().unwrap_or(sql);
             let exec_result = if params.is_empty() {
-                rt.execute_query(sql)
+                rt.execute_query(sql_to_run)
             } else {
                 use reddb::storage::query::modes::parse_multi;
                 use reddb::storage::query::user_params;
-                match parse_multi(sql) {
+                match parse_multi(sql_to_run) {
                     Ok(expr) => match user_params::bind(&expr, &params) {
                         Ok(bound) => rt.execute_query_expr(bound),
                         Err(err) => {
@@ -1514,10 +1553,20 @@ fn main() {
             };
             match exec_result {
                 Ok(qr) => {
-                    checkpoint_local_runtime(&rt);
+                    if !dry_run {
+                        checkpoint_local_runtime(&rt);
+                    }
                     if json_mode {
-                        json_ok("query", &format_result_json(&qr));
+                        if let Some(preview_sql) = preview_sql.as_deref() {
+                            json_ok("query", &format_dry_run_result_json(sql, preview_sql, &qr));
+                        } else {
+                            json_ok("query", &format_result_json(&qr));
+                        }
                     } else {
+                        if let Some(preview_sql) = preview_sql.as_deref() {
+                            println!("dry-run: {sql}");
+                            println!("preview: {preview_sql}");
+                        }
                         print_row_result(&qr, row_format);
                     }
                 }
@@ -3879,6 +3928,10 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 flags.push(cli::types::FlagSchema::new("save").with_description(
                     "Persist an ephemeral data-file query session as a new embedded .rdb file",
                 ));
+                flags
+                    .push(cli::types::FlagSchema::boolean("dry-run").with_description(
+                        "Preview the statement via EXPLAIN without executing it",
+                    ));
             }
         }
         Some("admin") => {

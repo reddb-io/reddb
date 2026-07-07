@@ -1,0 +1,25 @@
+# ADR 0071 (#1797) — EXPLAIN never commits, including ANALYZE over DML.
+#
+# TRUTH is hand-authored (a pinned RedDB-vs-Postgres divergence): PostgreSQL
+# commits EXPLAIN ANALYZE DML, while RedDB executes it inside a transaction that
+# always aborts. The golden pins the deterministic result shape projected by
+# the harness: plan operator, depth, and actual affected rows. The volatile
+# timing counter and source column are covered by e2e column-shape tests, not by
+# this golden value.
+
+statement ok
+CREATE TABLE explain_analyze_accounts (id INTEGER, name TEXT)
+
+statement ok
+INSERT INTO explain_analyze_accounts (id, name) VALUES (1, 'open'), (2, 'open'), (3, 'closed')
+
+query TII rowsort
+EXPLAIN ANALYZE UPDATE explain_analyze_accounts SET name = 'archived' WHERE name = 'open'
+----
+dml_ddl 0 2
+
+query T rowsort
+SELECT name FROM explain_analyze_accounts WHERE id IN (1, 2)
+----
+open
+open

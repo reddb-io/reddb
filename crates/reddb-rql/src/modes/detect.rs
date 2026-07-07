@@ -74,6 +74,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
             | "cherry"
             | "revert"
             | "resolve"
+            | "fork"
             | "copy"
             | "refresh"
             | "explain"

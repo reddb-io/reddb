@@ -553,6 +553,13 @@ impl RedDBRuntime {
             Err(msg) => return Err(RedDBError::Query(msg)),
         }
 
+        // `EXPLAIN ANALYZE <dml>` — paid truth tier. Executes the
+        // mutating statement inside a transaction that is always
+        // rolled back, then reports the actual affected row count.
+        if let Some(inner) = strip_explain_analyze_prefix(query) {
+            return self.explain_analyze_as_rows(query, inner);
+        }
+
         // `EXPLAIN <stmt>` — introspection. Runs the planner on the
         // inner statement (WITHOUT executing it) and returns the
         // CanonicalLogicalNode tree as rows so the caller can see the
@@ -1024,6 +1031,8 @@ impl RedDBRuntime {
             QueryExpr::AlterTable(ref alter) => self.execute_alter_table(query, alter),
             QueryExpr::CreateVcsRef(ref create) => self.execute_create_vcs_ref(query, create),
             QueryExpr::DropVcsRef(ref drop_ref) => self.execute_drop_vcs_ref(query, drop_ref),
+            QueryExpr::ForkStore(ref fork) => self.execute_fork_store(query, fork),
+            QueryExpr::DropFork(ref drop_fork) => self.execute_drop_fork(query, drop_fork),
             QueryExpr::ExplainAlter(ref explain) => self.execute_explain_alter(query, explain),
             // Graph analytics commands
             QueryExpr::GraphCommand(ref cmd) => self.execute_graph_command(query, cmd),
@@ -3215,6 +3224,111 @@ impl RedDBRuntime {
             bookmark: None,
         })
     }
+
+    fn explain_analyze_as_rows(
+        &self,
+        raw_query: &str,
+        inner_sql: &str,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        if !starts_with_dml_keyword(inner_sql) {
+            return Err(RedDBError::Query(
+                "EXPLAIN ANALYZE currently supports INSERT, UPDATE, and DELETE".to_string(),
+            ));
+        }
+
+        let explain = self.explain_query(inner_sql)?;
+        let conn_id = current_connection_id();
+        if self.inner.tx_contexts.read().contains_key(&conn_id) {
+            return Err(RedDBError::Query(
+                "EXPLAIN ANALYZE requires no active transaction".to_string(),
+            ));
+        }
+
+        self.execute_query_inner("BEGIN")?;
+        let started = std::time::Instant::now();
+        let execution = self.execute_query_inner(inner_sql);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let rollback = self.execute_query_inner("ROLLBACK");
+
+        let affected_rows = match execution {
+            Ok(result) => result.affected_rows,
+            Err(err) => {
+                rollback?;
+                return Err(err);
+            }
+        };
+        rollback?;
+
+        let columns = vec![
+            "op".to_string(),
+            "source".to_string(),
+            "estimated_rows".to_string(),
+            "estimated_cost".to_string(),
+            "actual_rows".to_string(),
+            "actual_ms".to_string(),
+            "depth".to_string(),
+        ];
+        let mut records = Vec::new();
+        walk_analyze_plan_node(
+            &explain.logical_plan.root,
+            0,
+            affected_rows,
+            elapsed_ms,
+            &mut records,
+        );
+
+        let result = crate::storage::query::unified::UnifiedResult {
+            columns,
+            records,
+            stats: Default::default(),
+            pre_serialized_json: None,
+        };
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: explain.mode,
+            statement: "explain_analyze",
+            engine: "runtime-explain-analyze",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+        })
+    }
+}
+
+fn strip_explain_analyze_prefix(sql: &str) -> Option<&str> {
+    let rest = strip_keyword_ci(sql.trim_start(), "EXPLAIN")?.trim_start();
+    Some(strip_keyword_ci(rest, "ANALYZE")?.trim_start()).filter(|inner| !inner.is_empty())
+}
+
+fn strip_keyword_ci<'a>(sql: &'a str, keyword: &str) -> Option<&'a str> {
+    if sql.len() < keyword.len() {
+        return None;
+    }
+    let (head, rest) = sql.split_at(keyword.len());
+    if !head.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| !ch.is_ascii_whitespace())
+    {
+        return None;
+    }
+    Some(rest)
+}
+
+fn starts_with_dml_keyword(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let head_end = trimmed
+        .find(|ch: char| ch.is_ascii_whitespace())
+        .unwrap_or(trimmed.len());
+    let head = &trimmed[..head_end];
+    head.eq_ignore_ascii_case("INSERT")
+        || head.eq_ignore_ascii_case("UPDATE")
+        || head.eq_ignore_ascii_case("DELETE")
 }
 
 fn walk_plan_node(
@@ -3241,6 +3355,44 @@ fn walk_plan_node(
     out.push(rec);
     for child in &node.children {
         walk_plan_node(child, depth + 1, out);
+    }
+}
+
+fn walk_analyze_plan_node(
+    node: &crate::storage::query::planner::CanonicalLogicalNode,
+    depth: usize,
+    affected_rows: u64,
+    elapsed_ms: f64,
+    out: &mut Vec<crate::storage::query::unified::UnifiedRecord>,
+) {
+    use std::sync::Arc;
+    let mut rec = crate::storage::query::unified::UnifiedRecord::default();
+    rec.set_arc(Arc::from("op"), Value::text(node.operator.clone()));
+    rec.set_arc(
+        Arc::from("source"),
+        node.source.clone().map(Value::text).unwrap_or(Value::Null),
+    );
+    rec.set_arc(
+        Arc::from("estimated_rows"),
+        Value::Float(node.estimated_rows),
+    );
+    rec.set_arc(
+        Arc::from("estimated_cost"),
+        Value::Float(node.operator_cost),
+    );
+    rec.set_arc(
+        Arc::from("actual_rows"),
+        Value::UnsignedInteger(if depth == 0 { affected_rows } else { 0 }),
+    );
+    rec.set_arc(
+        Arc::from("actual_ms"),
+        Value::Float(if depth == 0 { elapsed_ms } else { 0.0 }),
+    );
+    rec.set_arc(Arc::from("depth"), Value::Integer(depth as i64));
+    out.push(rec);
+
+    for child in &node.children {
+        walk_analyze_plan_node(child, depth + 1, 0, 0.0, out);
     }
 }
 

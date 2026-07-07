@@ -9,9 +9,39 @@ use super::*;
 use crate::catalog::CollectionModel;
 use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
 use crate::runtime::ddl::polymorphic_resolver;
-use crate::storage::query::ast::{CreateVcsRefQuery, DropVcsRefQuery, VcsRefKind};
+use crate::storage::query::ast::{
+    CreateVcsRefQuery, DropForkQuery, DropVcsRefQuery, ForkStoreQuery, VcsRefKind,
+};
 use crate::storage::query::{analyze_create_table, resolve_declared_data_type, CreateColumnDef};
 use std::collections::{BTreeSet, HashMap, HashSet};
+
+fn operational_wal_retention_floor(durable_lsn: u64) -> u64 {
+    if durable_lsn == 0 {
+        0
+    } else {
+        1
+    }
+}
+
+fn validate_store_fork_lsn(
+    fork_lsn: u64,
+    retention_floor: u64,
+    durable_lsn: u64,
+) -> RedDBResult<()> {
+    if fork_lsn < retention_floor {
+        return Err(RedDBError::Query(format!(
+            "cannot fork store at LSN {fork_lsn}: below operational WAL retention floor \
+             {retention_floor}; restore from backup for older recovery points"
+        )));
+    }
+    if fork_lsn > durable_lsn {
+        return Err(RedDBError::Query(format!(
+            "cannot fork store at LSN {fork_lsn}: current durable LSN is {durable_lsn}; \
+             restore from backup for recovery points outside the retained WAL window"
+        )));
+    }
+    Ok(())
+}
 
 fn vault_master_key_ref(collection: &str) -> String {
     format!("red.vault.{collection}.master_key")
@@ -1350,6 +1380,59 @@ impl RedDBRuntime {
             raw_query.to_string(),
             &format!("{kind} '{}' dropped", query.name),
             "drop",
+        ))
+    }
+
+    pub fn execute_fork_store(
+        &self,
+        raw_query: &str,
+        query: &ForkStoreQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let path = self.inner.db.path().ok_or_else(|| {
+            RedDBError::Query("FORK STORE requires a persistent store".to_string())
+        })?;
+        let durable_lsn = self.cdc_current_lsn();
+        let fork_lsn = query.at_lsn.unwrap_or(durable_lsn);
+        let retention_floor = operational_wal_retention_floor(durable_lsn);
+        validate_store_fork_lsn(fork_lsn, retention_floor, durable_lsn)?;
+
+        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let mut collections = self.inner.db.store().list_collections();
+        collections.sort();
+        manifest.recover_or_bootstrap(&collections).map_err(|err| {
+            RedDBError::Query(format!("failed to prepare store fork manifest: {err}"))
+        })?;
+        manifest
+            .create_fork(&query.name, fork_lsn)
+            .map_err(|err| RedDBError::Query(format!("failed to create store fork: {err}")))?;
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("store fork '{}' created at LSN {fork_lsn}", query.name),
+            "fork_store",
+        ))
+    }
+
+    pub fn execute_drop_fork(
+        &self,
+        raw_query: &str,
+        query: &DropForkQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let path = self.inner.db.path().ok_or_else(|| {
+            RedDBError::Query("DROP FORK requires a persistent store".to_string())
+        })?;
+        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let dropped = manifest
+            .drop_fork(&query.name)
+            .map_err(|err| RedDBError::Query(format!("failed to drop store fork: {err}")))?;
+        if !dropped && !query.if_exists {
+            return Err(RedDBError::NotFound(format!("store fork '{}'", query.name)));
+        }
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("store fork '{}' dropped", query.name),
+            "drop_fork",
         ))
     }
 

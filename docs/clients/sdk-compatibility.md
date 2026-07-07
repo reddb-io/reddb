@@ -53,6 +53,11 @@ Stable enough that off-the-shelf PostgreSQL clients connect and run common workl
 
 If your application relies on a feature in the second list, prefer the gRPC or HTTP transport — those expose first-class APIs (vector search, graph traversal, time-series).
 
+For DML, RedDB's `EXPLAIN ANALYZE` is a pinned PostgreSQL-wire divergence:
+RedDB executes the mutating statement to get real counters, then always aborts
+the transaction. PostgreSQL commits that DML; RedDB never commits under
+`EXPLAIN`.
+
 ## gRPC
 
 Schema in [`proto/reddb.proto`](../../proto/reddb.proto). Code-gen with `tonic-build` for Rust or your favourite gRPC compiler for Go/Java/Python/etc.

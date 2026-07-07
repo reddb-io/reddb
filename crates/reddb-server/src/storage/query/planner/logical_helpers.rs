@@ -443,6 +443,8 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::AlterTable(_)
         | QueryExpr::CreateVcsRef(_)
         | QueryExpr::DropVcsRef(_)
+        | QueryExpr::ForkStore(_)
+        | QueryExpr::DropFork(_)
         | QueryExpr::VcsCommand(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
@@ -826,6 +828,8 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::AlterTable(_) => "alter_table",
         QueryExpr::CreateVcsRef(_) => "create_vcs_ref",
         QueryExpr::DropVcsRef(_) => "drop_vcs_ref",
+        QueryExpr::ForkStore(_) => "fork_store",
+        QueryExpr::DropFork(_) => "drop_fork",
         QueryExpr::VcsCommand(_) => "vcs_command",
         QueryExpr::GraphCommand(_) => "graph_command",
         QueryExpr::SearchCommand(_) => "search_command",
