@@ -181,6 +181,10 @@ impl RewriteRule for NormalizeRule {
                 hq.structured = Box::new(self.apply(*hq.structured, ctx));
                 QueryExpr::Hybrid(hq)
             }
+            QueryExpr::Explain(mut explain) => {
+                explain.inner = Box::new(self.apply(*explain.inner, ctx));
+                QueryExpr::Explain(explain)
+            }
             // DML/DDL/Command statements pass through without normalization
             other @ (QueryExpr::Insert(_)
             | QueryExpr::Update(_)
@@ -320,6 +324,10 @@ impl RewriteRule for SimplifyFiltersRule {
                 hq.structured = Box::new(self.apply(*hq.structured, ctx));
                 QueryExpr::Hybrid(hq)
             }
+            QueryExpr::Explain(mut explain) => {
+                explain.inner = Box::new(self.apply(*explain.inner, ctx));
+                QueryExpr::Explain(explain)
+            }
             // DML/DDL/Command statements pass through without filter simplification
             other @ (QueryExpr::Insert(_)
             | QueryExpr::Update(_)
@@ -418,6 +426,7 @@ impl RewriteRule for SimplifyFiltersRule {
             QueryExpr::Path(_) => false,
             QueryExpr::Vector(vq) => effective_vector_filter(vq).is_some(),
             QueryExpr::Hybrid(_) => true, // May have filters in structured part
+            QueryExpr::Explain(explain) => self.is_applicable(&explain.inner),
             // DML/DDL/Command statements are not applicable for filter simplification
             QueryExpr::Insert(_)
             | QueryExpr::Update(_)
