@@ -253,6 +253,11 @@ grpcurl -plaintext \
   127.0.0.1:55055 reddb.v1.RedDb/ExplainQuery
 ```
 
+For mutating statements, `EXPLAIN <dml>` is plan-only. `EXPLAIN ANALYZE <dml>`
+executes the statement inside a transaction that always aborts and returns real
+counters such as `actual_rows` and `actual_ms`. RedDB never commits under
+`EXPLAIN`, including over the PostgreSQL wire protocol.
+
 > [!NOTE]
 > Row results include the public RedDB ID envelope fields `rid`, `collection`,
 > `kind`, `tenant`, `created_at`, and `updated_at`. For ordinary table rows,
