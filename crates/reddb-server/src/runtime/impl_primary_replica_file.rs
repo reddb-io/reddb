@@ -28,11 +28,12 @@ impl RedDBRuntime {
         manifest
             .create_fork(name, fork_lsn)
             .map_err(|err| RedDBError::InvalidOperation(err.to_string()))?;
-        Ok(reddb_file::ForkInfo {
-            name: name.to_string(),
-            parent_store: manifest.store_identity(),
-            fork_lsn,
-        })
+        manifest
+            .list_forks()
+            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))?
+            .into_iter()
+            .find(|fork| fork.name == name)
+            .ok_or_else(|| RedDBError::Internal(format!("created store fork {name} is missing")))
     }
 
     pub fn replica_relay_manifest_path(&self, replica_id: &str) -> Option<std::path::PathBuf> {
