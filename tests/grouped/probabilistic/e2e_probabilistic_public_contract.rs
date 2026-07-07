@@ -5,10 +5,12 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
+use reddb::api::DurabilityMode;
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::server::RedDBServer;
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::schema::Value;
+use reddb::storage::wal::{WalReader, WalRecord};
 use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, StorageDeployPreset};
 use serde_json::{json, Value as JsonValue};
@@ -149,6 +151,20 @@ fn open_persistent_runtime(path: &std::path::Path) -> Result<RedDBRuntime, Strin
     let options = RedDBOptions::persistent(&path)
         .with_storage_profile(StorageDeployPreset::Serverless.selection())?;
     RedDBRuntime::with_options(options).map_err(|err| format!("{err:?}"))
+}
+
+fn open_wal_durable_runtime(path: &std::path::Path) -> RedDBRuntime {
+    let options = RedDBOptions::persistent(path)
+        .with_durability_mode(DurabilityMode::WalDurableGrouped)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+        .expect("primary-replica operational profile");
+    RedDBRuntime::with_options(options).expect("open WAL-durable runtime")
+}
+
+fn wal_file_len(path: &std::path::Path) -> u64 {
+    std::fs::metadata(reddb_file::unified_wal_path(path))
+        .expect("WAL metadata")
+        .len()
 }
 
 fn spawn_http_server() -> (support::TempDbFile, String) {
@@ -328,12 +344,46 @@ fn probabilistic_state_writes_raw_blobs_and_compacts_superseded_rows() {
 }
 
 #[test]
+fn hll_add_persists_delta_bytes_and_recovers_from_wal_tail() {
+    let db = support::temp_db_file("probabilistic-hll-delta-wal");
+    let rt = open_wal_durable_runtime(db.path());
+
+    exec(&rt, "CREATE HLL visitors");
+    let before_add_len = wal_file_len(db.path());
+    exec(&rt, "HLL ADD visitors 'alice'");
+    let add_bytes = wal_file_len(db.path()) - before_add_len;
+
+    assert!(
+        add_bytes < 4096,
+        "single HLL ADD should persist a delta, not the full 16 KiB sketch; wrote {add_bytes} bytes"
+    );
+
+    drop(rt);
+    let reopened = open_wal_durable_runtime(db.path());
+    let hll_command = exec(&reopened, "HLL COUNT visitors");
+    assert_eq!(uint_value(only_record(&hll_command), "count"), 1);
+
+    let records: Vec<_> = WalReader::open(reddb_file::unified_wal_path(db.path()))
+        .expect("open WAL")
+        .iter()
+        .map(|record| record.expect("valid WAL record").1)
+        .collect();
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record, WalRecord::ProbabilisticDelta { .. })),
+        "WAL should carry a dedicated probabilistic delta record"
+    );
+}
+
+#[test]
 fn probabilistic_legacy_hex_state_migrates_once_to_raw_blob() {
     let path = PersistentDbPath::new("probabilistic_legacy_migration");
     let rt = path.open_runtime();
 
     exec(&rt, "CREATE HLL visitors");
     exec(&rt, "HLL ADD visitors 'alice' 'bob'");
+    rt.checkpoint().expect("checkpoint full HLL snapshot");
     let key = state_key(PROB_HLL_STATE_PREFIX, "visitors");
     let raw = match config_values(&rt, &key).pop() {
         Some(Value::Blob(bytes)) => bytes,
@@ -343,7 +393,8 @@ fn probabilistic_legacy_hex_state_migrates_once_to_raw_blob() {
     delete_config_key(&rt, &key);
     insert_config_value(&rt, &key, Value::text(hex_encode(&raw)));
 
-    let reopened = checkpoint_and_reopen(&path, rt);
+    drop(rt);
+    let reopened = path.open_runtime();
     let hll_command = exec(&reopened, "HLL COUNT visitors");
     assert_eq!(uint_value(only_record(&hll_command), "count"), 2);
 
@@ -377,16 +428,13 @@ fn probabilistic_legacy_hex_state_is_rejected_after_raw_marker() {
 
     exec(&rt, "CREATE HLL visitors");
     exec(&rt, "HLL ADD visitors 'alice'");
+    rt.checkpoint().expect("checkpoint full HLL snapshot");
     let key = state_key(PROB_HLL_STATE_PREFIX, "visitors");
     let raw = match config_values(&rt, &key).pop() {
         Some(Value::Blob(bytes)) => bytes,
         other => panic!("expected raw HLL state before legacy append, got {other:?}"),
     };
     insert_config_value(&rt, &key, Value::text(hex_encode(&raw)));
-
-    let native = reddb::NativeUseCases::new(&rt);
-    native.create_snapshot().expect("snapshot");
-    native.checkpoint().expect("checkpoint");
     drop(rt);
 
     let message = match open_persistent_runtime(&path) {

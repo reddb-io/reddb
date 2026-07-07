@@ -619,6 +619,7 @@ impl RedDB {
             } else {
                 self.store.save_to_file(path)?;
             }
+            self.publish_append_only_segments(path)?;
             self.persist_metadata()?;
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
             // the WAL checkpoint cycle. Each turbo collection with a
@@ -628,6 +629,67 @@ impl RedDB {
             // (`StorageLayout::Minimal`) has no snapshot path and is
             // a no-op.
             self.dump_turbo_snapshots(0);
+        }
+        Ok(())
+    }
+
+    fn publish_append_only_segments(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let published = manifest.append_only_segments()?;
+        for contract in self
+            .collection_contracts()
+            .into_iter()
+            .filter(|contract| contract.append_only)
+        {
+            let Some(manager) = self.store.get_collection(&contract.name) else {
+                continue;
+            };
+            let mut entities = manager.query_all(|_| true);
+            entities.sort_by_key(|entity| entity.id.raw());
+            let published_rows = published
+                .iter()
+                .filter(|segment| segment.collection == contract.name)
+                .map(|segment| segment.row_count)
+                .sum::<u64>();
+            if published_rows >= entities.len() as u64 {
+                continue;
+            }
+            let next_segment_id = published
+                .iter()
+                .filter(|segment| segment.collection == contract.name)
+                .map(|segment| segment.segment_id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            let rows = entities
+                .iter()
+                .skip(published_rows as usize)
+                .map(|entity| {
+                    let metadata = manager.get_metadata(entity.id);
+                    reddb_file::AppendOnlySegmentRow {
+                        primary_key: entity.id.raw().to_be_bytes().to_vec(),
+                        payload:
+                            crate::storage::unified::store::UnifiedStore::serialize_entity_record(
+                                entity,
+                                metadata.as_ref(),
+                                reddb_file::STORE_VERSION_CURRENT,
+                            ),
+                    }
+                })
+                .collect::<Vec<_>>();
+            if rows.is_empty() {
+                continue;
+            }
+            let bytes = reddb_file::encode_append_only_segment(
+                reddb_file::AppendOnlySegmentCodec::Zstd,
+                &rows,
+            )?;
+            manifest.publish_append_only_segment(
+                &contract.name,
+                next_segment_id,
+                reddb_file::AppendOnlySegmentCodec::Zstd,
+                &bytes,
+            )?;
         }
         Ok(())
     }

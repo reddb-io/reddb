@@ -2,9 +2,12 @@
 mod support;
 
 use reddb::catalog::CollectionModel;
-use reddb::storage::EntityData;
+use reddb::storage::{
+    EntityData, EntityId, EntityKind, TimeSeriesData, TimeSeriesPointKind, UnifiedEntity,
+};
 use reddb::RedDBRuntime;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use support::prometheus::{
     encode_query_value, get, label, post_remote_write, sample, TimeSeries, WriteRequest,
 };
@@ -31,6 +34,33 @@ fn ingest(rt: &RedDBRuntime, collection: &str, samples: Vec<(f64, i64)>) {
     };
     let (status, body) = post_remote_write(rt.clone(), collection, &request);
     assert_eq!(status, 204, "remote_write should ingest: {body}");
+}
+
+fn insert_raw_metric(rt: &RedDBRuntime, collection: &str, timestamp_ms: i64, value: f64) {
+    let tags = HashMap::from([
+        ("__tenant_id".to_string(), "default".to_string()),
+        ("__namespace".to_string(), "default".to_string()),
+        ("job".to_string(), "api".to_string()),
+        ("instance".to_string(), "i1".to_string()),
+        ("service".to_string(), "checkout".to_string()),
+    ]);
+    let entity = UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::TimeSeriesPoint(Box::new(TimeSeriesPointKind {
+            series: collection.to_string(),
+            metric: "http_requests_total".to_string(),
+        })),
+        EntityData::TimeSeries(TimeSeriesData {
+            metric: "http_requests_total".to_string(),
+            timestamp_ns: (timestamp_ms as u64).saturating_mul(1_000_000),
+            value,
+            tags,
+        }),
+    );
+    rt.db()
+        .store()
+        .insert_auto(collection, entity)
+        .expect("raw metric insert should succeed");
 }
 
 fn query_range(rt: &RedDBRuntime, promql: &str, start: &str, end: &str, step: &str) -> JsonValue {
@@ -182,5 +212,102 @@ fn expired_raw_metrics_are_removed_without_removing_rollups() {
     assert_eq!(
         only_values(&response),
         &serde_json::json!([[bucket_ms / 1000, "150"]])
+    );
+}
+
+#[test]
+fn retention_sweep_materializes_rollup_before_retiring_raw_and_is_idempotent() {
+    let rt = RedDBRuntime::in_memory().expect("runtime");
+    exec(
+        &rt,
+        "CREATE METRICS sre RETENTION 1 s DOWNSAMPLE 60s:raw:avg",
+    );
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let bucket_ms = ((now_ms / 60_000) - 2) * 60_000;
+    insert_raw_metric(&rt, "sre", bucket_ms, 120.0);
+    insert_raw_metric(&rt, "sre", bucket_ms + 10_000, 180.0);
+
+    rt.apply_retention_policy()
+        .expect("metrics retention sweep should succeed");
+    rt.apply_retention_policy()
+        .expect("second metrics retention sweep should be idempotent");
+
+    let raw = rt
+        .db()
+        .store()
+        .get_collection("sre")
+        .expect("raw metrics collection should exist")
+        .query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+    assert!(raw.is_empty(), "expired raw samples should be retired");
+
+    let rollup = rt
+        .db()
+        .store()
+        .get_collection("red_metrics_rollup_sre_60s")
+        .expect("retention sweep should create the rollup collection")
+        .query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+    assert_eq!(
+        rollup.len(),
+        1,
+        "re-running the sweep must not duplicate rollups"
+    );
+
+    let bucket_seconds = (bucket_ms / 1000).to_string();
+    let response = query_range(
+        &rt,
+        "http_requests_total",
+        &bucket_seconds,
+        &bucket_seconds,
+        "60s",
+    );
+    assert_eq!(
+        only_values(&response),
+        &serde_json::json!([[bucket_ms / 1000, "150"]])
+    );
+}
+
+#[test]
+fn query_range_spanning_retention_boundary_merges_rollup_and_recent_raw() {
+    let rt = RedDBRuntime::in_memory().expect("runtime");
+    exec(
+        &rt,
+        "CREATE METRICS sre RETENTION 1 h DOWNSAMPLE 60s:raw:avg",
+    );
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let old_bucket_ms = ((now_ms / 60_000) - 120) * 60_000;
+    let recent_bucket_ms = (now_ms / 60_000) * 60_000;
+    insert_raw_metric(&rt, "sre", old_bucket_ms, 100.0);
+    insert_raw_metric(&rt, "sre", old_bucket_ms + 10_000, 200.0);
+    insert_raw_metric(&rt, "sre", recent_bucket_ms, 300.0);
+
+    rt.apply_retention_policy()
+        .expect("metrics retention sweep should succeed");
+
+    let response = query_range(
+        &rt,
+        "http_requests_total",
+        &(old_bucket_ms / 1000).to_string(),
+        &(recent_bucket_ms / 1000).to_string(),
+        "60s",
+    );
+    let values = only_values(&response)
+        .as_array()
+        .expect("query_range values should be an array");
+    assert!(values.len() >= 2, "expected a range crossing the boundary");
+    assert_eq!(
+        values.first(),
+        Some(&serde_json::json!([old_bucket_ms / 1000, "150"]))
+    );
+    assert_eq!(
+        values.last(),
+        Some(&serde_json::json!([recent_bucket_ms / 1000, "300"]))
     );
 }

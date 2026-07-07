@@ -70,9 +70,9 @@ fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
     let _ = rt.checkpoint();
 }
 
-/// Returns `true` when the first `query` positional names a supported data
-/// file, triggering the ephemeral-store tracer (PRD #1785, issue #1786):
-/// `red query <file.csv|file.json> <sql>`.
+/// Returns `true` when a `query` positional names a supported data file,
+/// triggering the ephemeral-store tracer (PRD #1785, issues #1786/#1792):
+/// `red query <file.csv|file.json> [more.csv ...] <sql>`.
 fn is_ephemeral_data_file(arg: &str) -> bool {
     let lower = arg.to_ascii_lowercase();
     lower.ends_with(".csv")
@@ -83,14 +83,14 @@ fn is_ephemeral_data_file(arg: &str) -> bool {
         || lower.ends_with(".ndjson")
 }
 
-/// Run the ephemeral-store tracer: materialize a local data file into
-/// a throwaway in-memory embedded store, execute the query against it,
+/// Run the ephemeral-store tracer: materialize local data files into
+/// a throwaway in-memory embedded store, execute the query against them,
 /// print the result, and discard the store. No server, no pre-existing
-/// store, nothing durable created — the collection is addressable by its
-/// sanitized file-stem name and by the positional alias `t`.
+/// store, nothing durable created — each collection is addressable by its
+/// sanitized file-stem name and by its positional alias.
 fn run_ephemeral_query(
     args: &[String],
-    file: &str,
+    files: &[String],
     sql: &str,
     json_mode: bool,
     row_format: RowFormat,
@@ -102,11 +102,13 @@ fn run_ephemeral_query(
         if json_mode {
             json_error(
                 "query",
-                "Usage: red query <file.csv|file.tsv|file.json|file.ndjson> <sql>",
+                "Usage: red query <file.csv|file.tsv|file.json|file.ndjson> [more files ...] <sql>",
             );
         }
-        eprintln!("Usage: red query <file.csv|file.tsv|file.json|file.ndjson> <sql>");
-        eprintln!("Example: red query data.csv \"SELECT * FROM t\"");
+        eprintln!(
+            "Usage: red query <file.csv|file.tsv|file.json|file.ndjson> [more files ...] <sql>"
+        );
+        eprintln!("Example: red query users.csv orders.csv \"SELECT * FROM t1 JOIN t2 ON ...\"");
         std::process::exit(1);
     }
 
@@ -155,7 +157,8 @@ fn run_ephemeral_query(
         }
     };
 
-    if let Err(err) = rt.materialize_data_file(Path::new(file)) {
+    let paths: Vec<&Path> = files.iter().map(|file| Path::new(file.as_str())).collect();
+    if let Err(err) = rt.materialize_data_files(&paths) {
         // Missing, unreadable, or malformed files land here as a
         // didactic message rather than a panic.
         if json_mode {
@@ -1439,16 +1442,23 @@ fn main() {
                 eprintln!("query: {err}");
                 std::process::exit(1);
             });
-            // Ephemeral-store tracer (PRD #1785, issue #1786):
-            // `red query <file.csv|file.tsv|file.json|file.ndjson> <sql>` materializes the file
-            // into a throwaway in-memory store and queries it. Detected
-            // when a second positional is present and the first names a
-            // CSV/TSV data file.
+            // Ephemeral-store tracer (PRD #1785, issues #1786/#1792):
+            // `red query <file.csv|file.tsv|file.json|file.ndjson> [more files ...] <sql>`
+            // materializes all leading data-file positionals into a throwaway
+            // in-memory store and queries them. The SQL is the first non-file
+            // positional.
             if remaining.len() >= 2 && is_ephemeral_data_file(remaining[0].as_str()) {
+                let file_count = remaining
+                    .iter()
+                    .take_while(|arg| is_ephemeral_data_file(arg.as_str()))
+                    .count();
                 run_ephemeral_query(
                     &args,
-                    remaining[0].as_str(),
-                    remaining[1].as_str(),
+                    &remaining[..file_count],
+                    remaining
+                        .get(file_count)
+                        .map(|sql| sql.as_str())
+                        .unwrap_or(""),
                     json_mode,
                     row_format,
                     flag_string(&result.flags, "save"),

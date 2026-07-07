@@ -422,45 +422,48 @@ impl RedDBServer {
             .into_iter()
             .filter(|contract| contract.declared_model == CollectionModel::Metrics)
         {
-            let source_collection =
-                select_metrics_range_collection(store.as_ref(), &contract, range);
-            let Some(manager) = store.get_collection(&source_collection) else {
-                continue;
-            };
-            let entities =
-                manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
-            for entity in entities {
-                let EntityData::TimeSeries(point) = entity.data else {
+            for source in metrics_range_sources(store.as_ref(), &contract, range) {
+                let Some(manager) = store.get_collection(&source.collection) else {
                     continue;
                 };
-                if point.metric != selector.metric {
-                    continue;
+                let entities =
+                    manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+                for entity in entities {
+                    let EntityData::TimeSeries(point) = entity.data else {
+                        continue;
+                    };
+                    if !source.contains(point.timestamp_ns) {
+                        continue;
+                    }
+                    if point.metric != selector.metric {
+                        continue;
+                    }
+                    if point.timestamp_ns < range.start_ns || point.timestamp_ns > range.end_ns {
+                        continue;
+                    }
+                    if !point_in_metrics_scope(&point, scope) {
+                        continue;
+                    }
+                    let labels = prometheus_labels_for_point(&point);
+                    if !selector_matches(&selector, &labels) {
+                        continue;
+                    }
+                    let series_key = labels
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect::<Vec<_>>();
+                    samples_by_series
+                        .entry(series_key)
+                        .or_insert_with(|| PromRangeSeries {
+                            labels,
+                            values: Vec::new(),
+                        })
+                        .values
+                        .push(PromRangeValue {
+                            timestamp_ns: point.timestamp_ns,
+                            value: point.value,
+                        });
                 }
-                if point.timestamp_ns < range.start_ns || point.timestamp_ns > range.end_ns {
-                    continue;
-                }
-                if !point_in_metrics_scope(&point, scope) {
-                    continue;
-                }
-                let labels = prometheus_labels_for_point(&point);
-                if !selector_matches(&selector, &labels) {
-                    continue;
-                }
-                let series_key = labels
-                    .iter()
-                    .map(|(name, value)| (name.clone(), value.clone()))
-                    .collect::<Vec<_>>();
-                samples_by_series
-                    .entry(series_key)
-                    .or_insert_with(|| PromRangeSeries {
-                        labels,
-                        values: Vec::new(),
-                    })
-                    .values
-                    .push(PromRangeValue {
-                        timestamp_ns: point.timestamp_ns,
-                        value: point.value,
-                    });
             }
         }
 
@@ -2255,24 +2258,70 @@ fn materialize_metrics_rollups(
     Ok(())
 }
 
-fn select_metrics_range_collection(
+#[derive(Debug, Clone)]
+struct MetricsRangeSource {
+    collection: String,
+    min_inclusive_ns: Option<u64>,
+    max_exclusive_ns: Option<u64>,
+}
+
+impl MetricsRangeSource {
+    fn contains(&self, timestamp_ns: u64) -> bool {
+        self.min_inclusive_ns.is_none_or(|min| timestamp_ns >= min)
+            && self.max_exclusive_ns.is_none_or(|max| timestamp_ns < max)
+    }
+}
+
+fn metrics_range_sources(
     store: &crate::storage::unified::UnifiedStore,
     contract: &crate::physical::CollectionContract,
     range: PromQueryRange,
-) -> String {
+) -> Vec<MetricsRangeSource> {
     let Some(policy) = metrics_rollup_policies(contract)
         .into_iter()
         .filter(|policy| policy.bucket_ns <= range.step_ns)
         .max_by_key(|policy| policy.bucket_ns)
     else {
-        return contract.name.clone();
+        return vec![MetricsRangeSource {
+            collection: contract.name.clone(),
+            min_inclusive_ns: None,
+            max_exclusive_ns: None,
+        }];
     };
     let rollup_collection = metrics_rollup_collection(&contract.name, &policy.target);
-    if store.get_collection(&rollup_collection).is_some() {
-        rollup_collection
-    } else {
-        contract.name.clone()
+    if store.get_collection(&rollup_collection).is_none() {
+        return vec![MetricsRangeSource {
+            collection: contract.name.clone(),
+            min_inclusive_ns: None,
+            max_exclusive_ns: None,
+        }];
     }
+
+    let Some(raw_retention_ms) = contract.metrics_raw_retention_ms else {
+        return vec![MetricsRangeSource {
+            collection: rollup_collection,
+            min_inclusive_ns: None,
+            max_exclusive_ns: None,
+        }];
+    };
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64;
+    let cutoff_ns = now_ns.saturating_sub(raw_retention_ms.saturating_mul(1_000_000));
+    vec![
+        MetricsRangeSource {
+            collection: rollup_collection,
+            min_inclusive_ns: None,
+            max_exclusive_ns: Some(cutoff_ns),
+        },
+        MetricsRangeSource {
+            collection: contract.name.clone(),
+            min_inclusive_ns: Some(cutoff_ns),
+            max_exclusive_ns: None,
+        },
+    ]
 }
 
 fn metrics_rollup_policies(

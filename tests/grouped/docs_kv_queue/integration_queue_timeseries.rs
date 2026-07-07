@@ -481,6 +481,66 @@ fn test_queue_persistent_reopen_retains_messages_and_recovers_pending() {
 }
 
 #[test]
+fn test_queue_push_dedup_suppresses_retry_until_window_expires() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE dedup_jobs DEDUP_WINDOW 1 s");
+    let first = exec(&rt, "QUEUE PUSH dedup_jobs 'first' DEDUP 'retry-1'");
+    let first_id = text(&first.result.records[0], "message_id");
+
+    let duplicate = exec(&rt, "QUEUE PUSH dedup_jobs 'duplicate' DEDUP 'retry-1'");
+    assert_eq!(text(&duplicate.result.records[0], "message_id"), first_id);
+    let len = exec(&rt, "QUEUE LEN dedup_jobs");
+    assert_eq!(uint(&len.result.records[0], "len"), 1);
+
+    let popped = exec(&rt, "QUEUE POP dedup_jobs COUNT 1");
+    assert_eq!(payloads(&popped), vec!["first"]);
+    let duplicate_after_consume = exec(&rt, "QUEUE PUSH dedup_jobs 'after' DEDUP 'retry-1'");
+    assert_eq!(
+        text(&duplicate_after_consume.result.records[0], "message_id"),
+        first_id,
+        "consuming the original message must not reopen the dedup window",
+    );
+    let len = exec(&rt, "QUEUE LEN dedup_jobs");
+    assert_eq!(uint(&len.result.records[0], "len"), 0);
+
+    exec(&rt, "ALTER QUEUE dedup_jobs SET DEDUP_WINDOW 50 ms");
+    let second = exec(&rt, "QUEUE PUSH dedup_jobs 'second' DEDUP 'retry-2'");
+    let second_id = text(&second.result.records[0], "message_id");
+    let second_duplicate = exec(&rt, "QUEUE PUSH dedup_jobs 'second-dup' DEDUP 'retry-2'");
+    assert_eq!(
+        text(&second_duplicate.result.records[0], "message_id"),
+        second_id,
+        "ALTER QUEUE SET DEDUP_WINDOW must apply to later pushes",
+    );
+
+    sleep(Duration::from_millis(80));
+    let after_expiry = exec(&rt, "QUEUE PUSH dedup_jobs 'new-window' DEDUP 'retry-2'");
+    assert_ne!(
+        text(&after_expiry.result.records[0], "message_id"),
+        second_id
+    );
+    let len = exec(&rt, "QUEUE LEN dedup_jobs");
+    assert_eq!(uint(&len.result.records[0], "len"), 2);
+}
+
+#[test]
+fn test_queue_push_dedup_survives_persistent_reopen() {
+    let path = PersistentDbPath::new("queue_dedup_reopen");
+    let rt = path.open_runtime();
+
+    exec(&rt, "CREATE QUEUE durable_dedup DEDUP_WINDOW 1 s");
+    let first = exec(&rt, "QUEUE PUSH durable_dedup 'first' DEDUP 'retry-1'");
+    let first_id = text(&first.result.records[0], "message_id");
+
+    let rt = checkpoint_and_reopen(&path, rt);
+    let duplicate = exec(&rt, "QUEUE PUSH durable_dedup 'duplicate' DEDUP 'retry-1'");
+    assert_eq!(text(&duplicate.result.records[0], "message_id"), first_id);
+    let len = exec(&rt, "QUEUE LEN durable_dedup");
+    assert_eq!(uint(&len.result.records[0], "len"), 1);
+}
+
+#[test]
 fn test_queue_mode_persists_and_defaults_to_work() {
     let path = PersistentDbPath::new("queue_mode_catalog");
     let rt = path.open_runtime();

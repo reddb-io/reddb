@@ -11,10 +11,16 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use crate::append_only_segment::{
+    append_only_segment_chunk_checksums, decode_append_only_segment,
+    AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec, APPEND_ONLY_SEGMENT_CHUNK_BYTES,
+};
+
 const FORMAT_VERSION: u32 = 1;
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const NEXT_MANIFEST_FILE: &str = "manifest.json.next";
 pub const COLLECTIONS_DIR: &str = "collections";
+pub const APPEND_ONLY_SEGMENTS_DIR: &str = "segments";
 pub const QUARANTINE_DIR: &str = "quarantine";
 /// Directory (under a parent store's operational root) that holds store forks.
 ///
@@ -107,8 +113,22 @@ struct CollectionEntry {
 struct Manifest {
     generation: u64,
     collections: BTreeMap<String, CollectionEntry>,
+    append_only_segments: Vec<AppendOnlySegmentManifestEntry>,
     /// Present only for a store fork's own manifest; `None` for a parent store.
     fork_origin: Option<ForkOrigin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendOnlySegmentManifestEntry {
+    pub collection: String,
+    pub segment_id: u64,
+    pub path: String,
+    pub codec: AppendOnlySegmentCodec,
+    pub chunk_size: u32,
+    pub row_count: u64,
+    pub primary_min: Option<String>,
+    pub primary_max: Option<String>,
+    pub chunk_checksums: Vec<AppendOnlySegmentChunkChecksum>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +153,7 @@ impl OperationalManifest {
                 let mut manifest = Manifest {
                     generation: 0,
                     collections: BTreeMap::new(),
+                    append_only_segments: Vec::new(),
                     fork_origin: None,
                 };
                 for collection in existing_collections {
@@ -153,7 +174,8 @@ impl OperationalManifest {
         };
 
         let protected_paths = self.protected_collection_paths(&manifest)?;
-        self.quarantine_unreferenced_files(&protected_paths)?;
+        self.quarantine_unreferenced_collection_files(&protected_paths)?;
+        self.quarantine_unreferenced_append_only_segments(&manifest)?;
 
         let pending_drops = manifest
             .collections
@@ -178,7 +200,8 @@ impl OperationalManifest {
             manifest.generation += 1;
             self.publish(&manifest)?;
             let protected_paths = self.protected_collection_paths(&manifest)?;
-            self.quarantine_unreferenced_files(&protected_paths)?;
+            self.quarantine_unreferenced_collection_files(&protected_paths)?;
+            self.quarantine_unreferenced_append_only_segments(&manifest)?;
         }
 
         Ok(completed_pending_drops)
@@ -296,6 +319,7 @@ impl OperationalManifest {
         let manifest = Manifest {
             generation: 0,
             collections,
+            append_only_segments: Vec::new(),
             fork_origin: Some(ForkOrigin {
                 name: name.to_string(),
                 parent_store: self.store_identity(),
@@ -411,9 +435,72 @@ impl OperationalManifest {
         let _ = sync_dir(&self.forks_dir());
         if let Some(manifest) = self.load_current()? {
             let protected_paths = self.protected_collection_paths(&manifest)?;
-            self.quarantine_unreferenced_files(&protected_paths)?;
+            self.quarantine_unreferenced_collection_files(&protected_paths)?;
+            self.quarantine_unreferenced_append_only_segments(&manifest)?;
         }
         Ok(true)
+    }
+
+    pub fn publish_append_only_segment(
+        &self,
+        collection: &str,
+        segment_id: u64,
+        codec: AppendOnlySegmentCodec,
+        bytes: &[u8],
+    ) -> io::Result<AppendOnlySegmentManifestEntry> {
+        self.ensure_dirs()?;
+        let decoded = decode_append_only_segment(bytes).map_err(invalid_data)?;
+        if decoded.codec != codec {
+            return Err(invalid_data("append-only segment codec metadata mismatch"));
+        }
+        let mut manifest = self.load_current()?.unwrap_or_else(empty_manifest);
+        if manifest
+            .append_only_segments
+            .iter()
+            .any(|entry| entry.collection == collection && entry.segment_id == segment_id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("append-only segment already published: {collection}/{segment_id}"),
+            ));
+        }
+
+        let path = self.append_only_segment_file_name(collection, segment_id);
+        let segment_path = self.append_only_segments_dir().join(&path);
+        if segment_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("closed append-only segment already exists: {path}"),
+            ));
+        }
+        {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&segment_path)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+        }
+        sync_dir(&self.append_only_segments_dir())?;
+
+        let entry = AppendOnlySegmentManifestEntry {
+            collection: collection.to_string(),
+            segment_id,
+            path,
+            codec,
+            chunk_size: APPEND_ONLY_SEGMENT_CHUNK_BYTES,
+            row_count: decoded.rows.len() as u64,
+            primary_min: decoded.primary_min.as_ref().map(hex::encode),
+            primary_max: decoded.primary_max.as_ref().map(hex::encode),
+            chunk_checksums: append_only_segment_chunk_checksums(bytes),
+        };
+        manifest.append_only_segments.push(entry.clone());
+        manifest
+            .append_only_segments
+            .sort_by(|a, b| (&a.collection, a.segment_id).cmp(&(&b.collection, b.segment_id)));
+        manifest.generation += 1;
+        self.publish(&manifest)?;
+        Ok(entry)
     }
 
     /// Detach a store fork into an independent operational store root. All
@@ -615,6 +702,21 @@ impl OperationalManifest {
         self.quarantine_dir().join(file_name)
     }
 
+    pub fn append_only_segment_path_for_test(&self, file_name: &str) -> PathBuf {
+        self.append_only_segments_dir().join(file_name)
+    }
+
+    pub fn append_only_segments_for_test(&self) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
+        self.append_only_segments()
+    }
+
+    pub fn append_only_segments(&self) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
+        Ok(self
+            .load_current()?
+            .map(|manifest| manifest.append_only_segments)
+            .unwrap_or_default())
+    }
+
     pub fn write_next_manifest_for_test(&self, name: &str) -> io::Result<()> {
         self.ensure_dirs()?;
         let mut manifest = self.load_current()?.unwrap_or_else(empty_manifest);
@@ -633,6 +735,7 @@ impl OperationalManifest {
 
     fn ensure_dirs(&self) -> io::Result<()> {
         fs::create_dir_all(self.collections_dir())?;
+        fs::create_dir_all(self.append_only_segments_dir())?;
         fs::create_dir_all(self.quarantine_dir())?;
         sync_dir(&self.root)?;
         Ok(())
@@ -672,8 +775,31 @@ impl OperationalManifest {
         sync_dir(&self.collections_dir())
     }
 
-    fn quarantine_unreferenced_files(&self, active_paths: &BTreeSet<String>) -> io::Result<()> {
-        for entry in fs::read_dir(self.collections_dir())? {
+    fn quarantine_unreferenced_collection_files(
+        &self,
+        active_paths: &BTreeSet<String>,
+    ) -> io::Result<()> {
+        self.quarantine_unreferenced_files_in(&self.collections_dir(), active_paths)
+    }
+
+    fn quarantine_unreferenced_append_only_segments(&self, manifest: &Manifest) -> io::Result<()> {
+        let active_paths = manifest
+            .append_only_segments
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<BTreeSet<_>>();
+        self.quarantine_unreferenced_files_in(&self.append_only_segments_dir(), &active_paths)
+    }
+
+    fn quarantine_unreferenced_files_in(
+        &self,
+        dir: &Path,
+        active_paths: &BTreeSet<String>,
+    ) -> io::Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let file_type = entry.file_type()?;
             if !file_type.is_file() {
@@ -687,12 +813,16 @@ impl OperationalManifest {
             let to = unique_quarantine_path(&self.quarantine_dir(), &file_name);
             fs::rename(from, to)?;
         }
-        sync_dir(&self.collections_dir())?;
+        sync_dir(dir)?;
         sync_dir(&self.quarantine_dir())
     }
 
     fn collections_dir(&self) -> PathBuf {
         self.root.join(COLLECTIONS_DIR)
+    }
+
+    fn append_only_segments_dir(&self) -> PathBuf {
+        self.root.join(APPEND_ONLY_SEGMENTS_DIR)
     }
 
     fn quarantine_dir(&self) -> PathBuf {
@@ -711,6 +841,10 @@ impl OperationalManifest {
         }
         out.push_str(".rcol");
         out
+    }
+
+    fn append_only_segment_file_name(&self, collection: &str, segment_id: u64) -> String {
+        format!("{}-{segment_id:012}.raos", sanitize_component(collection))
     }
 }
 
@@ -739,6 +873,7 @@ fn empty_manifest() -> Manifest {
     Manifest {
         generation: 0,
         collections: BTreeMap::new(),
+        append_only_segments: Vec::new(),
         fork_origin: None,
     }
 }
@@ -827,6 +962,18 @@ fn manifest_from_object(object: &Map<String, Value>) -> io::Result<Manifest> {
             },
         );
     }
+    let append_only_segments = match object.get("append_only_segments") {
+        Some(Value::Array(entries)) => entries
+            .iter()
+            .map(append_only_segment_from_value)
+            .collect::<io::Result<Vec<_>>>()?,
+        Some(Value::Null) | None => Vec::new(),
+        Some(_) => {
+            return Err(invalid_data(
+                "manifest append_only_segments must be an array",
+            ))
+        }
+    };
     let fork_origin = match object.get("fork_origin") {
         Some(Value::Object(origin)) => Some(fork_origin_from_object(origin)?),
         Some(Value::Null) | None => None,
@@ -835,7 +982,101 @@ fn manifest_from_object(object: &Map<String, Value>) -> io::Result<Manifest> {
     Ok(Manifest {
         generation,
         collections,
+        append_only_segments,
         fork_origin,
+    })
+}
+
+fn append_only_segment_from_value(value: &Value) -> io::Result<AppendOnlySegmentManifestEntry> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_data("append-only segment entry must be an object"))?;
+    let collection = object
+        .get("collection")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("append-only segment collection is missing"))?
+        .to_string();
+    let segment_id = object
+        .get("segment_id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("append-only segment id is missing"))?;
+    let path = object
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("append-only segment path is missing"))?
+        .to_string();
+    let codec = match object
+        .get("codec")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("append-only segment codec is missing"))?
+    {
+        "zstd" => AppendOnlySegmentCodec::Zstd,
+        "none" => AppendOnlySegmentCodec::None,
+        other => {
+            return Err(invalid_data(format!(
+                "unknown append-only segment codec: {other}"
+            )))
+        }
+    };
+    let chunk_size = object
+        .get("chunk_size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("append-only segment chunk_size is missing"))
+        .and_then(u32_from_u64)?;
+    let row_count = object
+        .get("row_count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("append-only segment row_count is missing"))?;
+    let primary_min = object
+        .get("primary_min")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let primary_max = object
+        .get("primary_max")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let chunk_checksums = object
+        .get("chunk_checksums")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_data("append-only segment chunk_checksums are missing"))?
+        .iter()
+        .map(chunk_checksum_from_value)
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(AppendOnlySegmentManifestEntry {
+        collection,
+        segment_id,
+        path,
+        codec,
+        chunk_size,
+        row_count,
+        primary_min,
+        primary_max,
+        chunk_checksums,
+    })
+}
+
+fn chunk_checksum_from_value(value: &Value) -> io::Result<AppendOnlySegmentChunkChecksum> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_data("append-only segment chunk checksum must be an object"))?;
+    let offset = object
+        .get("offset")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("append-only segment chunk offset is missing"))?;
+    let len = object
+        .get("len")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("append-only segment chunk len is missing"))
+        .and_then(u32_from_u64)?;
+    let checksum = object
+        .get("checksum")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("append-only segment chunk checksum is missing"))?
+        .to_string();
+    Ok(AppendOnlySegmentChunkChecksum {
+        offset,
+        len,
+        checksum,
     })
 }
 
@@ -883,11 +1124,22 @@ fn manifest_body_json(manifest: &Manifest) -> Map<String, Value> {
         }
         collections.insert(name.clone(), Value::Object(entry_object));
     }
+    let append_only_segments = manifest
+        .append_only_segments
+        .iter()
+        .map(append_only_segment_to_value)
+        .collect::<Vec<_>>();
 
     let mut object = Map::new();
     object.insert("format_version".to_string(), Value::from(FORMAT_VERSION));
     object.insert("generation".to_string(), Value::from(manifest.generation));
     object.insert("collections".to_string(), Value::Object(collections));
+    if !append_only_segments.is_empty() {
+        object.insert(
+            "append_only_segments".to_string(),
+            Value::Array(append_only_segments),
+        );
+    }
     // Only emit `fork_origin` for a fork's own manifest, so a parent manifest is
     // unchanged from the pre-fork format.
     if let Some(origin) = &manifest.fork_origin {
@@ -901,6 +1153,60 @@ fn manifest_body_json(manifest: &Manifest) -> Map<String, Value> {
         object.insert("fork_origin".to_string(), Value::Object(origin_object));
     }
     object
+}
+
+fn append_only_segment_to_value(entry: &AppendOnlySegmentManifestEntry) -> Value {
+    let mut object = Map::new();
+    object.insert(
+        "collection".to_string(),
+        Value::String(entry.collection.clone()),
+    );
+    object.insert("segment_id".to_string(), Value::from(entry.segment_id));
+    object.insert("path".to_string(), Value::String(entry.path.clone()));
+    object.insert(
+        "codec".to_string(),
+        Value::String(entry.codec.as_str().to_string()),
+    );
+    object.insert("chunk_size".to_string(), Value::from(entry.chunk_size));
+    object.insert("row_count".to_string(), Value::from(entry.row_count));
+    if let Some(primary_min) = &entry.primary_min {
+        object.insert(
+            "primary_min".to_string(),
+            Value::String(primary_min.clone()),
+        );
+    }
+    if let Some(primary_max) = &entry.primary_max {
+        object.insert(
+            "primary_max".to_string(),
+            Value::String(primary_max.clone()),
+        );
+    }
+    object.insert(
+        "chunk_checksums".to_string(),
+        Value::Array(
+            entry
+                .chunk_checksums
+                .iter()
+                .map(chunk_checksum_to_value)
+                .collect(),
+        ),
+    );
+    Value::Object(object)
+}
+
+fn chunk_checksum_to_value(chunk: &AppendOnlySegmentChunkChecksum) -> Value {
+    let mut object = Map::new();
+    object.insert("offset".to_string(), Value::from(chunk.offset));
+    object.insert("len".to_string(), Value::from(chunk.len));
+    object.insert(
+        "checksum".to_string(),
+        Value::String(chunk.checksum.clone()),
+    );
+    Value::Object(object)
+}
+
+fn u32_from_u64(value: u64) -> io::Result<u32> {
+    u32::try_from(value).map_err(|_| invalid_data(format!("value does not fit u32: {value}")))
 }
 
 fn unique_quarantine_path(dir: &Path, file_name: &str) -> PathBuf {

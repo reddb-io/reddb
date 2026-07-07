@@ -919,13 +919,6 @@ impl GrowingSegment {
         }
     }
 
-    /// Check if an entity ID might exist in this segment via bloom filter.
-    /// Returns `false` means *definitely not here*. `true` means *maybe here*.
-    pub fn bloom_might_contain_id(&self, id: EntityId) -> bool {
-        let id_bytes = id.raw().to_le_bytes();
-        self.bloom.contains(&id_bytes)
-    }
-
     /// Check if a primary key value might exist in this segment via bloom filter.
     pub fn bloom_might_contain_key(&self, key: &[u8]) -> bool {
         self.bloom.contains(key)

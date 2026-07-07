@@ -24,6 +24,7 @@ impl<'a> Parser<'a> {
         let mut lock_deadline_ms = DEFAULT_QUEUE_LOCK_DEADLINE_MS;
         let mut in_flight_cap_per_group = DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP;
         let mut retry_delay_ms: Option<u64> = None;
+        let mut dedup_window_ms: Option<u64> = None;
 
         // Parse optional clauses in any order
         loop {
@@ -45,6 +46,10 @@ impl<'a> Parser<'a> {
                 let value = self.parse_float()?;
                 let unit = self.parse_queue_duration_unit()?;
                 retry_delay_ms = Some((value * unit).max(0.0) as u64);
+            } else if self.consume_ident_ci("DEDUP_WINDOW")? {
+                let value = self.parse_float()?;
+                let unit = self.parse_queue_duration_unit()?;
+                dedup_window_ms = Some((value * unit).max(0.0) as u64);
             } else if self.consume(&Token::With)? {
                 if self.consume_ident_ci("EVENTS")? {
                     return Err(ParseError::new(
@@ -75,6 +80,7 @@ impl<'a> Parser<'a> {
             in_flight_cap_per_group,
             if_not_exists,
             retry_delay_ms,
+            dedup_window_ms,
         }))
     }
 
@@ -115,6 +121,10 @@ impl<'a> Parser<'a> {
             let value = self.parse_float()?;
             let unit = self.parse_queue_duration_unit()?;
             alter.retry_delay_ms = Some((value * unit).max(0.0) as u64);
+        } else if self.consume_ident_ci("DEDUP_WINDOW")? {
+            let value = self.parse_float()?;
+            let unit = self.parse_queue_duration_unit()?;
+            alter.dedup_window_ms = Some((value * unit).max(0.0) as u64);
         } else {
             return Err(ParseError::expected(
                 vec![
@@ -124,6 +134,7 @@ impl<'a> Parser<'a> {
                     "IN_FLIGHT_CAP_PER_GROUP",
                     "DLQ",
                     "RETRY_DELAY",
+                    "DEDUP_WINDOW",
                 ],
                 self.peek(),
                 self.position(),
@@ -149,7 +160,7 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let queue = self.expect_ident()?;
                 let value = self.parse_value()?;
-                let (priority, key, available) = self.parse_push_tail_clauses()?;
+                let (priority, key, available, dedup_key) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
@@ -157,6 +168,7 @@ impl<'a> Parser<'a> {
                     priority,
                     key,
                     available,
+                    dedup_key,
                 }))
             }
             Token::Pop => {
@@ -251,7 +263,7 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let queue = self.expect_ident()?;
                 let value = self.parse_value()?;
-                let (_priority, key, available) = self.parse_push_tail_clauses()?;
+                let (_priority, key, available, dedup_key) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
@@ -259,13 +271,14 @@ impl<'a> Parser<'a> {
                     priority: None,
                     key,
                     available,
+                    dedup_key,
                 }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("RPUSH") => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
                 let value = self.parse_value()?;
-                let (priority, key, available) = self.parse_push_tail_clauses()?;
+                let (priority, key, available, dedup_key) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
@@ -273,6 +286,7 @@ impl<'a> Parser<'a> {
                     priority,
                     key,
                     available,
+                    dedup_key,
                 }))
             }
             Token::Group => {
@@ -461,7 +475,7 @@ impl<'a> Parser<'a> {
         Ok((group, message_id, delivery_id, delay_ms))
     }
 
-    /// Parse the optional `PRIORITY <int>`, `KEY '<key>'`,
+    /// Parse the optional `PRIORITY <int>`, `KEY '<key>'`, `DEDUP '<key>'`,
     /// `DELAY <duration>`, and `AVAILABLE AT <unix_ms>` tail of a
     /// `QUEUE PUSH` / `RPUSH` / `LPUSH`
     /// (issue #722). Clauses may appear in any order; each may appear at
@@ -470,10 +484,19 @@ impl<'a> Parser<'a> {
     /// would force the parser to pick a winner silently.
     fn parse_push_tail_clauses(
         &mut self,
-    ) -> Result<(Option<i32>, Option<String>, Option<QueueAvailability>), ParseError> {
+    ) -> Result<
+        (
+            Option<i32>,
+            Option<String>,
+            Option<QueueAvailability>,
+            Option<String>,
+        ),
+        ParseError,
+    > {
         let mut priority: Option<i32> = None;
         let mut key: Option<String> = None;
         let mut available: Option<QueueAvailability> = None;
+        let mut dedup_key: Option<String> = None;
         loop {
             if self.consume(&Token::Priority)? {
                 if priority.is_some() {
@@ -497,6 +520,14 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 key = Some(self.parse_string()?);
+            } else if self.consume_ident_ci("DEDUP")? {
+                if dedup_key.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate DEDUP clause".to_string(),
+                        self.position(),
+                    ));
+                }
+                dedup_key = Some(self.parse_string()?);
             } else if self.peek_ident_ci("DELAY") {
                 self.advance()?;
                 if available.is_some() {
@@ -541,7 +572,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok((priority, key, available))
+        Ok((priority, key, available, dedup_key))
     }
 
     /// Parse an optional `WAIT <duration>` tail (slice A of PRD #718).
@@ -609,6 +640,10 @@ impl<'a> Parser<'a> {
     /// Parse duration unit for queue TTL
     fn parse_queue_duration_unit(&mut self) -> Result<f64, ParseError> {
         match self.peek().clone() {
+            Token::Min => {
+                self.advance()?;
+                Ok(60_000.0)
+            }
             Token::Ident(ref unit) => {
                 let mult = match unit.to_ascii_lowercase().as_str() {
                     "ms" => 1.0,

@@ -11,12 +11,15 @@
 //! becomes a real row table with header-derived columns and inferred
 //! types.
 //!
-//! The loaded collection is named by its sanitized file stem and — as the
-//! single loaded file — is also materialized under the positional file
-//! alias [`POSITIONAL_ALIAS`] (`t`), so `SELECT … FROM t` and
-//! `SELECT … FROM <stem>` resolve identically for every query shape
-//! (projections, filters, and aggregates alike).
+//! Loaded collections are named by their sanitized file stems and by
+//! positional file aliases. A single loaded file also gets the legacy
+//! alias [`POSITIONAL_ALIAS`] (`t`). Multi-file loads get `t1`, `t2`, …
+//! in argument order. When multiple stems sanitize to the same name, the
+//! first keeps the base name and later collisions receive `_2`, `_3`, …
+//! suffixes in argument order; the positional aliases are therefore the
+//! guaranteed-unambiguous handles.
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -37,6 +40,12 @@ pub struct EphemeralTable {
     pub alias: String,
     /// Number of data rows imported (header excluded).
     pub rows_imported: usize,
+}
+
+struct DataFileSpec {
+    display: String,
+    base_collection: String,
+    format: EphemeralFormat,
 }
 
 /// A didactic error explaining why a file could not be materialized.
@@ -148,66 +157,70 @@ impl RedDBRuntime {
     /// both ways. Intended for the in-memory ephemeral store — nothing
     /// durable is written beyond what this runtime already persists.
     pub fn materialize_data_file(&self, path: &Path) -> Result<EphemeralTable, EphemeralError> {
-        let display = path.display().to_string();
+        let mut tables = self.materialize_data_files(&[path])?;
+        Ok(tables.remove(0))
+    }
 
-        if !path.is_file() {
-            return Err(EphemeralError::NotAFile { path: display });
+    /// Materialize local CSV/TSV files as row tables in this runtime.
+    ///
+    /// Each file is auto-created from its sanitized file stem and from
+    /// its positional alias. In the single-file case the alias is `t`.
+    /// In the multi-file case aliases are `t1`, `t2`, … in argument
+    /// order. Stem collisions are deterministic: the first file keeps
+    /// the sanitized base name, later collisions get `_2`, `_3`, …
+    /// suffixes in argument order.
+    pub fn materialize_data_files(
+        &self,
+        paths: &[&Path],
+    ) -> Result<Vec<EphemeralTable>, EphemeralError> {
+        let specs = paths
+            .iter()
+            .map(|path| data_file_spec(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut used_collections = BTreeSet::new();
+        let mut tables = Vec::with_capacity(specs.len());
+
+        for (index, spec) in specs.iter().enumerate() {
+            let collection = unique_collection_name(&spec.base_collection, &mut used_collections);
+            let alias = positional_alias(index, specs.len());
+            let rows_imported = self.import_data_file(paths[index], &collection, spec)?;
+
+            // Positional aliases are materialized as their own real
+            // collections rather than rewrite views — views leak on
+            // aggregates and other non-trivial shapes, so every query
+            // resolves identically through either name. Skipped when the
+            // stem already sanitized to the alias, which would collide.
+            if alias != collection {
+                self.import_data_file(paths[index], &alias, spec)?;
+            }
+
+            tables.push(EphemeralTable {
+                collection,
+                alias,
+                rows_imported,
+            });
         }
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let format =
-            format_for_extension(&ext).ok_or_else(|| EphemeralError::UnsupportedExtension {
-                path: display.clone(),
-                ext: ext.clone(),
-            })?;
+        Ok(tables)
+    }
 
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        let collection = sanitize_stem(stem).ok_or_else(|| EphemeralError::EmptyStem {
-            path: display.clone(),
-        })?;
-
-        let rows_imported = match format {
+    /// Import `path` into `collection` using the importer for the spec's
+    /// inferred format.
+    fn import_data_file(
+        &self,
+        path: &Path,
+        collection: &str,
+        spec: &DataFileSpec,
+    ) -> Result<usize, EphemeralError> {
+        match spec.format {
             EphemeralFormat::Delimited(delimiter) => {
-                self.import_csv_into(path, &collection, delimiter, &display)?
+                self.import_csv_into(path, collection, delimiter, &spec.display)
             }
             EphemeralFormat::JsonArray => {
-                self.import_json_array_into(path, &collection, &display)?
+                self.import_json_array_into(path, collection, &spec.display)
             }
-            EphemeralFormat::Ndjson => self.import_ndjson_into(path, &collection, &display)?,
-        };
-
-        // The single loaded file is also addressable by the positional
-        // alias `t`. Rather than a rewrite view — which leaks on
-        // aggregates and other non-trivial shapes — `t` is materialized
-        // as its own real collection so every query resolves identically
-        // through either name. Skipped when the stem already sanitized to
-        // `t` (e.g. `t.csv`), which would collide.
-        if collection != POSITIONAL_ALIAS {
-            match format {
-                EphemeralFormat::Delimited(delimiter) => {
-                    self.import_csv_into(path, POSITIONAL_ALIAS, delimiter, &display)?;
-                }
-                EphemeralFormat::JsonArray => {
-                    self.import_json_array_into(path, POSITIONAL_ALIAS, &display)?;
-                }
-                EphemeralFormat::Ndjson => {
-                    self.import_ndjson_into(path, POSITIONAL_ALIAS, &display)?;
-                }
-            }
+            EphemeralFormat::Ndjson => self.import_ndjson_into(path, collection, &spec.display),
         }
-
-        Ok(EphemeralTable {
-            collection,
-            alias: POSITIONAL_ALIAS.to_string(),
-            rows_imported,
-        })
     }
 
     /// Import `path` into `collection` via the shared [`CsvImporter`],
@@ -349,6 +362,60 @@ impl RedDBRuntime {
 
         Ok(rows_imported)
     }
+}
+
+fn data_file_spec(path: &Path) -> Result<DataFileSpec, EphemeralError> {
+    let display = path.display().to_string();
+
+    if !path.is_file() {
+        return Err(EphemeralError::NotAFile { path: display });
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let format =
+        format_for_extension(&ext).ok_or_else(|| EphemeralError::UnsupportedExtension {
+            path: display.clone(),
+            ext: ext.clone(),
+        })?;
+
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let collection = sanitize_stem(stem).ok_or_else(|| EphemeralError::EmptyStem {
+        path: display.clone(),
+    })?;
+
+    Ok(DataFileSpec {
+        display,
+        base_collection: collection,
+        format,
+    })
+}
+
+fn positional_alias(index: usize, total: usize) -> String {
+    if total == 1 {
+        POSITIONAL_ALIAS.to_string()
+    } else {
+        format!("t{}", index + 1)
+    }
+}
+
+fn unique_collection_name(base: &str, used: &mut BTreeSet<String>) -> String {
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    for suffix in 2usize.. {
+        let candidate = format!("{base}_{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search must eventually find an unused collection name")
 }
 
 #[cfg(test)]

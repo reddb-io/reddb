@@ -353,6 +353,11 @@ pub struct UnifiedStore {
     /// rebuilt state is byte-deterministic against the pre-restart
     /// state under a fixed codec seed.
     pub(crate) replayed_turbo_inserts: parking_lot::Mutex<HashMap<String, Vec<(u64, Vec<f32>)>>>,
+    /// WAL-replayed probabilistic mutation deltas captured at open time.
+    /// Runtime recovery drains these after loading the latest full
+    /// probabilistic snapshot from store state.
+    pub(crate) replayed_probabilistic_deltas:
+        parking_lot::Mutex<Vec<(u8, u8, String, Vec<Vec<u8>>)>>,
     /// Opaque store-level auxiliary metadata persisted inside the binary dump
     /// (store format V10+). RedDB uses this to carry collection contracts
     /// through the single-file artifact so a collection's `declared_model`
