@@ -223,6 +223,36 @@ await test('queues.purge_resets_len', async (db) => {
   assertEqual(await db.queues.len('conf_q_purge'), 0, 'len after purge')
 })
 
+await test('queues.push_key_dedup_and_combined', async (db) => {
+  await db.queues.create('conf_q_push_ids')
+  await db.queues.push('conf_q_push_ids', 'keyed', { key: 'account-a' })
+  const keyed = await db.query('SELECT payload, key FROM QUEUE conf_q_push_ids')
+  assertEqual(keyed.rows[0].payload, 'keyed', 'keyed payload')
+  assertEqual(keyed.rows[0].key, 'account-a', 'keyed ordering key')
+
+  await db.queues.create('conf_q_push_dedup')
+  await db.query('ALTER QUEUE conf_q_push_dedup SET DEDUP_WINDOW 1 min')
+  const first = await db.queues.push('conf_q_push_dedup', 'first', { dedup: 'retry-1' })
+  const duplicate = await db.queues.push('conf_q_push_dedup', 'duplicate', { dedup: 'retry-1' })
+  assertEqual(first.rows[0].message_id, duplicate.rows[0].message_id, 'dedup returns first id')
+  assertEqual(await db.queues.len('conf_q_push_dedup'), 1, 'dedup suppresses duplicate row')
+
+  await db.queues.push('conf_q_push_ids', 'combined', { key: 'account-b', dedup: 'retry-2' })
+  const combined = await db.query(
+    "SELECT payload, key FROM QUEUE conf_q_push_ids WHERE payload = 'combined'",
+  )
+  assertEqual(combined.rows[0].key, 'account-b', 'combined ordering key')
+})
+
+await test('queues.push_key_rejects_delay', async (db) => {
+  await db.queues.create('conf_q_push_key_delay')
+  await expectCode(
+    () => db.queues.push('conf_q_push_key_delay', 'delayed', { key: 'account-a', delay: '1s' }),
+    'INVALID_ARGUMENT',
+    'key plus delay rejects locally',
+  )
+})
+
 // --- tx.* -------------------------------------------------------------
 
 await test('tx.commit_persists', async (db) => {
