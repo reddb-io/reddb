@@ -157,30 +157,34 @@ Time-series data uses a chunked storage model for efficiency:
 - **Gorilla XOR compression** compresses sealed float values
 - **Retention policies** run in the maintenance cycle, dropping expired chunks
 
-Sealed chunks are stored in the column-major
+Sealed chunks are automatically eligible for the column-major
 [RDCC format](../engine/columnar-chunk-format.md): each column is compressed
 with a codec matched to its shape (delta-of-delta for timestamps, Gorilla
 XOR for float values) and carries skip indexes so the reader prunes data it
-cannot need. `NO COLUMNAR` is the explicit opt-out for workloads that need
-row-sealed chunks instead.
+cannot need. The projection has a configurable size floor, so tiny chunks
+below the floor stay row-backed until enough rows accumulate. `NO COLUMNAR`
+is the explicit per-collection opt-out for workloads that need row-sealed
+chunks instead.
 
 ```sql
--- Columnar is the default; this spelling is accepted for clarity.
-CREATE TIMESERIES cpu_cold COLUMNAR RETENTION 365 d
+-- Columnar projection is automatic for in-scope collections.
+CREATE TIMESERIES cpu_cold RETENTION 365 d
 
 -- Opt out of RDCC sealing while keeping native chunk routing.
 CREATE TIMESERIES cpu_recent NO COLUMNAR RETENTION 7 d
 ```
 
-`COLUMNAR` is a standalone keyword and composes with the other clauses in any
-order (`RETENTION`, `CHUNK_SIZE`, `DOWNSAMPLE`, …). It is also accepted on
-`CREATE HYPERTABLE` — see [Hypertables → Columnar storage](./hypertables.md#columnar-storage).
+The old `COLUMNAR` keyword is rejected at parse time. Use the plain
+`CREATE TIMESERIES` form for automatic projection, or `NO COLUMNAR` to opt
+out. The same posture applies to `CREATE HYPERTABLE` — see
+[Hypertables → Columnar storage](./hypertables.md#columnar-storage).
 
 ### Columnar Seal Example
 
 ```sql
--- 1. Create a columnar hypertable: sealed chunks land in RDCC form.
-CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h' COLUMNAR;
+-- 1. Create a hypertable: sealed chunks land in RDCC form once they cross
+-- the configured projection floor.
+CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h';
 
 -- 2. Ingest normally — writes are buffered in the open (row) chunk.
 INSERT INTO cpu (ts, value) VALUES (1000000000, 10);
