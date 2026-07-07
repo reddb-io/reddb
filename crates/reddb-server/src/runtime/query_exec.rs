@@ -42,7 +42,7 @@ pub(super) use vector::execute_runtime_vector_query;
 use aggregate::{execute_aggregate_query, has_aggregate_projections};
 use table::{
     execute_runtime_canonical_table_node, execute_runtime_canonical_table_query_indexed,
-    RuntimeTableExecutionContext,
+    take_last_segment_scan_stats, RuntimeTableExecutionContext,
 };
 
 pub(crate) use row_stream::{RowBufferArena, RowStream, DEFAULT_HIGH_WATER_MARK};
@@ -213,7 +213,9 @@ fn execute_runtime_table_query_materialized(
         }
     }
 
+    let _ = take_last_segment_scan_stats();
     let mut records = execute_runtime_canonical_table_query_indexed(db, query, index_store)?;
+    let segment_scan_stats = take_last_segment_scan_stats();
     // Issue #580 — DeclarativeRetention slice 1. Lazy-on-scan: drop
     // rows older than `now - retention_duration_ms` after the scan
     // assembles them, before the result reaches the caller. No-op for
@@ -244,7 +246,12 @@ fn execute_runtime_table_query_materialized(
     Ok(UnifiedResult {
         columns,
         records,
-        stats: Default::default(),
+        stats: crate::storage::query::unified::QueryStats {
+            segments_total: segment_scan_stats.segments_total,
+            segments_scanned: segment_scan_stats.segments_scanned,
+            segments_pruned: segment_scan_stats.segments_pruned,
+            ..Default::default()
+        },
         pre_serialized_json: None,
     })
 }
