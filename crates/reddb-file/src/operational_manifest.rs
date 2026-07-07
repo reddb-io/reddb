@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::append_only_segment::{
-    append_only_segment_chunk_checksums, decode_append_only_segment,
+    append_only_segment_chunk_checksums, decode_append_only_segment, AppendOnlySegmentBloom,
     AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec, APPEND_ONLY_SEGMENT_CHUNK_BYTES,
 };
 
@@ -128,6 +128,7 @@ pub struct AppendOnlySegmentManifestEntry {
     pub row_count: u64,
     pub primary_min: Option<String>,
     pub primary_max: Option<String>,
+    pub primary_bloom: Option<AppendOnlySegmentBloom>,
     pub chunk_checksums: Vec<AppendOnlySegmentChunkChecksum>,
 }
 
@@ -492,6 +493,7 @@ impl OperationalManifest {
             row_count: decoded.rows.len() as u64,
             primary_min: decoded.primary_min.as_ref().map(hex::encode),
             primary_max: decoded.primary_max.as_ref().map(hex::encode),
+            primary_bloom: decoded.primary_bloom.clone(),
             chunk_checksums: append_only_segment_chunk_checksums(bytes),
         };
         manifest.append_only_segments.push(entry.clone());
@@ -1035,6 +1037,10 @@ fn append_only_segment_from_value(value: &Value) -> io::Result<AppendOnlySegment
         .get("primary_max")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let primary_bloom = object
+        .get("primary_bloom")
+        .map(append_only_segment_bloom_from_value)
+        .transpose()?;
     let chunk_checksums = object
         .get("chunk_checksums")
         .and_then(Value::as_array)
@@ -1051,7 +1057,40 @@ fn append_only_segment_from_value(value: &Value) -> io::Result<AppendOnlySegment
         row_count,
         primary_min,
         primary_max,
+        primary_bloom,
         chunk_checksums,
+    })
+}
+
+fn append_only_segment_bloom_from_value(value: &Value) -> io::Result<AppendOnlySegmentBloom> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_data("append-only segment bloom must be an object"))?;
+    let num_hashes = object
+        .get("num_hashes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("append-only segment bloom num_hashes is missing"))
+        .and_then(u8_from_u64)?;
+    let bit_size = object
+        .get("bit_size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("append-only segment bloom bit_size is missing"))
+        .and_then(u32_from_u64)?;
+    let inserted = object
+        .get("inserted")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("append-only segment bloom inserted is missing"))
+        .and_then(u32_from_u64)?;
+    let bits_hex = object
+        .get("bits_hex")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("append-only segment bloom bits_hex is missing"))?
+        .to_string();
+    Ok(AppendOnlySegmentBloom {
+        num_hashes,
+        bit_size,
+        inserted,
+        bits_hex,
     })
 }
 
@@ -1181,6 +1220,12 @@ fn append_only_segment_to_value(entry: &AppendOnlySegmentManifestEntry) -> Value
             Value::String(primary_max.clone()),
         );
     }
+    if let Some(primary_bloom) = &entry.primary_bloom {
+        object.insert(
+            "primary_bloom".to_string(),
+            append_only_segment_bloom_to_value(primary_bloom),
+        );
+    }
     object.insert(
         "chunk_checksums".to_string(),
         Value::Array(
@@ -1190,6 +1235,18 @@ fn append_only_segment_to_value(entry: &AppendOnlySegmentManifestEntry) -> Value
                 .map(chunk_checksum_to_value)
                 .collect(),
         ),
+    );
+    Value::Object(object)
+}
+
+fn append_only_segment_bloom_to_value(bloom: &AppendOnlySegmentBloom) -> Value {
+    let mut object = Map::new();
+    object.insert("num_hashes".to_string(), Value::from(bloom.num_hashes));
+    object.insert("bit_size".to_string(), Value::from(bloom.bit_size));
+    object.insert("inserted".to_string(), Value::from(bloom.inserted));
+    object.insert(
+        "bits_hex".to_string(),
+        Value::String(bloom.bits_hex.clone()),
     );
     Value::Object(object)
 }
@@ -1207,6 +1264,10 @@ fn chunk_checksum_to_value(chunk: &AppendOnlySegmentChunkChecksum) -> Value {
 
 fn u32_from_u64(value: u64) -> io::Result<u32> {
     u32::try_from(value).map_err(|_| invalid_data(format!("value does not fit u32: {value}")))
+}
+
+fn u8_from_u64(value: u64) -> io::Result<u8> {
+    u8::try_from(value).map_err(|_| invalid_data(format!("value does not fit u8: {value}")))
 }
 
 fn unique_quarantine_path(dir: &Path, file_name: &str) -> PathBuf {
