@@ -110,6 +110,12 @@ fn logical_wal_spool_preserves_range_authority() {
     assert_eq!(derived.ownership_epoch, Some(4));
     assert_eq!(derived.term, 5);
 
+    let framed =
+        reddb_file::read_and_repair_logical_wal_entries(&spool_path).expect("read framed entries");
+    assert_eq!(framed[0].term, 5);
+    assert_eq!(framed[0].ownership_epoch, Some(4));
+    assert_eq!(framed[0].version, reddb_file::LOGICAL_WAL_SPOOL_VERSION_V3);
+
     let _ = fs::remove_file(spool_path);
 }
 
@@ -136,6 +142,7 @@ fn logical_wal_spool_reads_v2_without_term() {
     let framed = reddb_file::read_and_repair_logical_wal_entries(&spool_path)
         .expect("read framed v2 entries");
     assert_eq!(framed[0].term, 0);
+    assert_eq!(framed[0].ownership_epoch, None);
 
     let _ = fs::remove_file(spool_path);
 }
