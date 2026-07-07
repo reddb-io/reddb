@@ -24,11 +24,13 @@ pub(crate) fn extract_query_request(body: &[u8]) -> Result<ParsedQueryRequest, H
             let (entity_types, capabilities) =
                 crate::application::query_payload::parse_json_search_selection(&json)
                     .map_err(|err| json_error(400, err.to_string()))?;
+            let commit_policy = parse_commit_policy_field(&json)?;
             let params = parse_params_field(&json)?;
             return Ok(ParsedQueryRequest {
                 query: query.to_string(),
                 entity_types,
                 capabilities,
+                commit_policy,
                 params,
             });
         }
@@ -42,8 +44,31 @@ pub(crate) fn extract_query_request(body: &[u8]) -> Result<ParsedQueryRequest, H
         query: trimmed.to_string(),
         entity_types: None,
         capabilities: None,
+        commit_policy: None,
         params: None,
     })
+}
+
+fn parse_commit_policy_field(
+    json: &JsonValue,
+) -> Result<Option<crate::replication::CommitPolicy>, HttpResponse> {
+    match json.get("commit_policy") {
+        None => Ok(None),
+        Some(JsonValue::String(value)) => crate::replication::CommitPolicy::parse_strict(value)
+            .map(Some)
+            .ok_or_else(|| {
+                json_error_code(
+                    400,
+                    "INVALID_COMMIT_POLICY",
+                    format!("invalid commit_policy value '{value}'"),
+                )
+            }),
+        Some(_) => Err(json_error_code(
+            400,
+            "INVALID_COMMIT_POLICY",
+            "'commit_policy' must be a string",
+        )),
+    }
 }
 
 /// Parse the optional `params` JSON array on a query request body.
