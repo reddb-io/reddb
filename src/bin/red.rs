@@ -70,15 +70,20 @@ fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
     let _ = rt.checkpoint();
 }
 
-/// Returns `true` when the first `query` positional names a CSV/TSV data
+/// Returns `true` when the first `query` positional names a supported data
 /// file, triggering the ephemeral-store tracer (PRD #1785, issue #1786):
-/// `red query <file.csv> <sql>`.
+/// `red query <file.csv|file.json> <sql>`.
 fn is_ephemeral_data_file(arg: &str) -> bool {
     let lower = arg.to_ascii_lowercase();
-    lower.ends_with(".csv") || lower.ends_with(".tsv") || lower.ends_with(".tab")
+    lower.ends_with(".csv")
+        || lower.ends_with(".tsv")
+        || lower.ends_with(".tab")
+        || lower.ends_with(".json")
+        || lower.ends_with(".jsonl")
+        || lower.ends_with(".ndjson")
 }
 
-/// Run the ephemeral-store tracer: materialize a local CSV/TSV file into
+/// Run the ephemeral-store tracer: materialize a local data file into
 /// a throwaway in-memory embedded store, execute the query against it,
 /// print the result, and discard the store. No server, no pre-existing
 /// store, nothing durable created — the collection is addressable by its
@@ -94,9 +99,12 @@ fn run_ephemeral_query(
 
     if sql.is_empty() {
         if json_mode {
-            json_error("query", "Usage: red query <file.csv|file.tsv> <sql>");
+            json_error(
+                "query",
+                "Usage: red query <file.csv|file.tsv|file.json|file.ndjson> <sql>",
+            );
         }
-        eprintln!("Usage: red query <file.csv|file.tsv> <sql>");
+        eprintln!("Usage: red query <file.csv|file.tsv|file.json|file.ndjson> <sql>");
         eprintln!("Example: red query data.csv \"SELECT * FROM t\"");
         std::process::exit(1);
     }
@@ -1394,7 +1402,7 @@ fn main() {
                 std::process::exit(1);
             });
             // Ephemeral-store tracer (PRD #1785, issue #1786):
-            // `red query <file.csv|file.tsv> <sql>` materializes the file
+            // `red query <file.csv|file.tsv|file.json|file.ndjson> <sql>` materializes the file
             // into a throwaway in-memory store and queries it. Detected
             // when a second positional is present and the first names a
             // CSV/TSV data file.
