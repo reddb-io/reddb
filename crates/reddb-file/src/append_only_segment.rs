@@ -8,17 +8,12 @@ pub const APPEND_ONLY_SEGMENT_CHUNK_BYTES: u32 = 512 * 1024;
 const MAGIC: &[u8; 8] = b"RDBAOS01";
 const FIXED_HEADER_LEN: usize = 8 + 4 + 8 + 4 + 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppendOnlySegmentCodec {
+    #[default]
     Zstd,
     None,
-}
-
-impl Default for AppendOnlySegmentCodec {
-    fn default() -> Self {
-        Self::Zstd
-    }
 }
 
 impl AppendOnlySegmentCodec {

@@ -9,6 +9,12 @@ const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
 const COLUMNAR_PROJECTION_SIZE_FLOOR_ROWS: usize = 4;
 const DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS: u64 = 86_400_000_000_000;
 
+#[derive(Default)]
+struct SealHypertableChunksOutcome {
+    chunks_sealed: usize,
+    columnar_chunks_sealed: usize,
+}
+
 impl RedDBRuntime {
     pub fn execute_create_timeseries(
         &self,
@@ -223,6 +229,41 @@ impl RedDBRuntime {
     /// Opted-out chunks fall to the row seal and `columnar_page` stays
     /// `None`. Returns the number of chunks sealed columnar.
     pub fn seal_hypertable_chunks(&self, collection: &str) -> RedDBResult<usize> {
+        self.seal_hypertable_chunks_internal(collection, usize::MAX, true)
+            .map(|outcome| outcome.columnar_chunks_sealed)
+    }
+
+    pub(crate) fn seal_hypertable_chunks_for_checkpoint(
+        &self,
+        max_chunks: usize,
+    ) -> RedDBResult<usize> {
+        if max_chunks == 0 {
+            return Ok(0);
+        }
+
+        let mut remaining = max_chunks;
+        let mut sealed = 0usize;
+        for collection in self.inner.db.hypertables().names() {
+            if remaining == 0 {
+                break;
+            }
+            let outcome = self.seal_hypertable_chunks_internal(&collection, remaining, false)?;
+            remaining = remaining.saturating_sub(outcome.chunks_sealed);
+            sealed += outcome.chunks_sealed;
+        }
+        Ok(sealed)
+    }
+
+    fn seal_hypertable_chunks_internal(
+        &self,
+        collection: &str,
+        max_chunks: usize,
+        include_tail_chunk: bool,
+    ) -> RedDBResult<SealHypertableChunksOutcome> {
+        if max_chunks == 0 {
+            return Ok(SealHypertableChunksOutcome::default());
+        }
+
         let analytical = self
             .inner
             .db
@@ -230,18 +271,31 @@ impl RedDBRuntime {
             .and_then(|c| c.analytical_storage.clone());
         let registry = self.inner.db.hypertables();
         let Some(spec) = registry.get(collection) else {
-            return Ok(0);
+            return Ok(SealHypertableChunksOutcome::default());
         };
         let time_col = spec.time_column.clone();
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
-            return Ok(0);
+            return Ok(SealHypertableChunksOutcome::default());
         };
 
-        let mut sealed_columnar = 0usize;
+        let chunks = registry.show_chunks(collection);
+        let tail_chunk_start = if include_tail_chunk {
+            None
+        } else {
+            chunks.iter().map(|meta| meta.id.start_ns).max()
+        };
+
+        let mut outcome = SealHypertableChunksOutcome::default();
         let mut changed = false;
-        for meta in registry.show_chunks(collection) {
+        for meta in chunks {
+            if outcome.chunks_sealed >= max_chunks {
+                break;
+            }
             if meta.sealed {
+                continue;
+            }
+            if Some(meta.id.start_ns) == tail_chunk_start {
                 continue;
             }
             let start = meta.id.start_ns;
@@ -283,11 +337,13 @@ impl RedDBRuntime {
                             RedDBError::Internal(format!("columnar page write failed: {err}"))
                         })?;
                     registry.seal_chunk_columnar(&meta.id, page, bytes);
-                    sealed_columnar += 1;
+                    outcome.columnar_chunks_sealed += 1;
+                    outcome.chunks_sealed += 1;
                     changed = true;
                 }
                 crate::storage::timeseries::chunk::SealedChunkStorage::Row => {
                     registry.seal_chunk(&meta.id);
+                    outcome.chunks_sealed += 1;
                     changed = true;
                 }
             }
@@ -298,7 +354,7 @@ impl RedDBRuntime {
                 .persist_metadata()
                 .map_err(|e| RedDBError::Internal(e.to_string()))?;
         }
-        Ok(sealed_columnar)
+        Ok(outcome)
     }
 
     /// Count this hypertable's chunks that were sealed columnar — i.e.

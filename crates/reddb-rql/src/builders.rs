@@ -337,6 +337,7 @@ impl JoinQueryBuilder {
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)
             | QueryExpr::ExplainMigration(_)
+            | QueryExpr::Explain(_)
             | QueryExpr::EventsBackfill(_)
             | QueryExpr::EventsBackfillStatus { .. } => {}
         }

@@ -188,6 +188,9 @@ pub struct RedDBOptions {
     pub durability_mode: DurabilityMode,
     pub group_commit: GroupCommitOptions,
     pub auto_checkpoint_pages: u32,
+    /// Maximum hypertable chunks the checkpoint path may seal into derived
+    /// columnar artifacts per checkpoint. `usize::MAX` means no practical cap.
+    pub checkpoint_columnar_emission_budget_chunks: usize,
     pub cache_pages: usize,
     pub snapshot_retention: usize,
     pub export_retention: usize,
@@ -253,6 +256,10 @@ impl fmt::Debug for RedDBOptions {
             .field("durability_mode", &self.durability_mode)
             .field("group_commit", &self.group_commit)
             .field("auto_checkpoint_pages", &self.auto_checkpoint_pages)
+            .field(
+                "checkpoint_columnar_emission_budget_chunks",
+                &self.checkpoint_columnar_emission_budget_chunks,
+            )
             .field("cache_pages", &self.cache_pages)
             .field("snapshot_retention", &self.snapshot_retention)
             .field("export_retention", &self.export_retention)
@@ -283,6 +290,8 @@ impl Clone for RedDBOptions {
             durability_mode: self.durability_mode,
             group_commit: self.group_commit,
             auto_checkpoint_pages: self.auto_checkpoint_pages,
+            checkpoint_columnar_emission_budget_chunks: self
+                .checkpoint_columnar_emission_budget_chunks,
             cache_pages: self.cache_pages,
             snapshot_retention: self.snapshot_retention,
             export_retention: self.export_retention,
@@ -321,6 +330,7 @@ impl Default for RedDBOptions {
             durability_mode: DurabilityMode::WalDurableGrouped,
             group_commit: GroupCommitOptions::default(),
             auto_checkpoint_pages: 1000,
+            checkpoint_columnar_emission_budget_chunks: usize::MAX,
             cache_pages: 10_000,
             snapshot_retention: DEFAULT_SNAPSHOT_RETENTION,
             export_retention: DEFAULT_EXPORT_RETENTION,
@@ -397,6 +407,7 @@ impl RedDBOptions {
             mode: StorageMode::Persistent,
             data_path: Some(path),
             auto_checkpoint_pages: 0,
+            checkpoint_columnar_emission_budget_chunks: usize::MAX,
             cache_pages: 2_000,
             snapshot_retention: DEFAULT_SNAPSHOT_RETENTION,
             export_retention: DEFAULT_EXPORT_RETENTION,
@@ -442,6 +453,11 @@ impl RedDBOptions {
 
     pub fn with_auto_checkpoint(mut self, pages: u32) -> Self {
         self.auto_checkpoint_pages = pages;
+        self
+    }
+
+    pub fn with_checkpoint_columnar_emission_budget_chunks(mut self, chunks: usize) -> Self {
+        self.checkpoint_columnar_emission_budget_chunks = chunks;
         self
     }
 

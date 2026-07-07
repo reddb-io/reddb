@@ -222,6 +222,8 @@ impl RedDBRuntime {
                 index_store: super::index_store::IndexStore::new(),
                 cdc: crate::replication::cdc::CdcBuffer::new(100_000),
                 checkpoint_projection_stats: super::CheckpointProjectionStats::default(),
+                checkpoint_columnar_emission_budget_chunks: options
+                    .checkpoint_columnar_emission_budget_chunks,
                 backup_scheduler: crate::replication::scheduler::BackupScheduler::new(3600),
                 query_cache: parking_lot::RwLock::new(
                     crate::storage::query::planner::cache::PlanCache::new(1000),

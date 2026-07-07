@@ -11,8 +11,8 @@
 //! ```
 
 use crate::ast::{
-    BinOp, CompareOp, Expr, FieldRef, Filter, InsertQuery, Projection, QueryExpr, QueueCommand,
-    TableQuery, UpdateQuery, UpdateTarget,
+    BinOp, CompareOp, DeleteQuery, Expr, FieldRef, Filter, InsertQuery, Projection, QueryExpr,
+    QueueCommand, TableQuery, UpdateQuery, UpdateTarget,
 };
 use reddb_types::types::Value;
 
@@ -24,8 +24,19 @@ pub fn render(expr: &QueryExpr) -> String {
         QueryExpr::Table(tq) => render_table(tq),
         QueryExpr::Insert(iq) => render_insert(iq),
         QueryExpr::Update(uq) => render_update(uq),
+        QueryExpr::Delete(dq) => render_delete(dq),
         QueryExpr::QueueCommand(qc) => render_queue_command(qc),
+        QueryExpr::Explain(explain) => render_explain(explain.inner.as_ref()),
         _ => String::new(),
+    }
+}
+
+fn render_explain(inner: &QueryExpr) -> String {
+    let rendered = render(inner);
+    if rendered.is_empty() {
+        String::new()
+    } else {
+        format!("EXPLAIN {rendered}")
     }
 }
 
@@ -104,6 +115,15 @@ fn render_update(uq: &UpdateQuery) -> String {
             sql.push_str(" CLAIM LIMIT ");
         }
         sql.push_str(&claim_limit.to_string());
+    }
+    sql
+}
+
+fn render_delete(dq: &DeleteQuery) -> String {
+    let mut sql = format!("DELETE FROM {}", dq.table);
+    if let Some(filter) = &dq.filter {
+        sql.push_str(" WHERE ");
+        sql.push_str(&render_filter(filter));
     }
     sql
 }

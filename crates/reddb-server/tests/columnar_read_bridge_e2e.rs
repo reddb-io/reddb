@@ -15,6 +15,7 @@
 //!   3. No data is lost or stranded across the upgrade.
 
 use reddb_server::catalog::AnalyticalStorageConfig;
+use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 /// 1-hour chunk interval, in nanoseconds — matches `CHUNK_INTERVAL '1h'`.
@@ -61,6 +62,20 @@ fn insert_many(rt: &RedDBRuntime, collection: &str, row_count: u64) {
     }
 }
 
+fn insert_chunk_rows(
+    rt: &RedDBRuntime,
+    collection: &str,
+    chunk_index: u64,
+    row_count: u64,
+) -> Vec<(u64, i64)> {
+    let start = chunk_index * HOUR_NS;
+    let rows = (0..row_count)
+        .map(|i| (start + i + 1, (chunk_index * 100 + i) as i64))
+        .collect::<Vec<_>>();
+    insert(rt, collection, &rows);
+    rows
+}
+
 fn open_paged_runtime(path: &std::path::Path) -> RedDBRuntime {
     let options = RedDBOptions::persistent(path)
         .with_storage_profile(StorageDeployPreset::Serverless.selection())
@@ -86,6 +101,22 @@ fn enable_columnar(rt: &RedDBRuntime, collection: &str, time_key: &str) {
 
 fn want(rows: &[(u64, i64)]) -> Vec<(u64, f64)> {
     rows.iter().map(|(ts, v)| (*ts, *v as f64)).collect()
+}
+
+fn assert_recent_sql_rows(rt: &RedDBRuntime, collection: &str, start_ns: u64, want_rows: usize) {
+    let result = rt
+        .execute_query(&format!(
+            "SELECT ts, value FROM {collection} WHERE ts >= {start_ns} ORDER BY ts ASC"
+        ))
+        .expect("recent row query");
+    assert_eq!(result.result.records.len(), want_rows);
+    if let Some(row) = result.result.records.first() {
+        let ts = match row.get("ts") {
+            Some(Value::Integer(n)) if *n >= 0 => *n as u64,
+            other => panic!("unexpected ts value: {other:?}"),
+        };
+        assert!(ts >= start_ns);
+    }
 }
 
 #[test]
@@ -187,19 +218,35 @@ fn durable_columnar_blocks_survive_restart_and_keep_pruning() {
         rt.execute_query("CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h'")
             .expect("create hypertable");
         insert_many(&rt, "cpu", GRANULE_ROWS_PLUS_ONE);
+        insert(&rt, "cpu", &[(HOUR_NS + 1, 99)]);
 
-        assert_eq!(
-            rt.seal_hypertable_chunks("cpu").expect("seal columnar"),
-            1,
-            "single chunk seals columnar"
-        );
-        let chunk = rt.db().hypertables().show_chunks("cpu")[0].clone();
+        rt.checkpoint().expect("checkpoint seals closed chunk");
+        assert_eq!(rt.columnar_chunk_count("cpu"), 1);
+        let chunks = rt.db().hypertables().show_chunks("cpu");
+        assert_eq!(chunks.len(), 2, "closed chunk plus open row tail");
+        let chunk = chunks
+            .iter()
+            .find(|chunk| chunk.id.start_ns == 0)
+            .expect("closed chunk")
+            .clone();
         assert!(
             chunk.columnar_page.is_some_and(|loc| loc.page_id != 0),
             "columnar seal must record a real engine page location"
         );
+        let tail = chunks
+            .iter()
+            .find(|chunk| chunk.id.start_ns == HOUR_NS)
+            .expect("tail chunk");
+        assert!(
+            !tail.sealed && tail.columnar_page.is_none(),
+            "checkpoint must leave the newest chunk on the row tail"
+        );
         let metadata = rt.db().physical_metadata().expect("physical metadata");
-        let persisted_chunk = &metadata.hypertables[0].chunks[0];
+        let persisted_chunk = metadata.hypertables[0]
+            .chunks
+            .iter()
+            .find(|chunk| chunk.start_ns == 0)
+            .expect("persisted closed chunk");
         assert!(
             persisted_chunk.columnar_derived,
             "persisted metadata must mark columnar blocks derived"
@@ -216,8 +263,7 @@ fn durable_columnar_blocks_survive_restart_and_keep_pruning() {
             .columnar_chunk_value_eq_scan("cpu", 0, 42.0)
             .expect("pre-restart equality scan");
 
-        rt.create_snapshot().expect("snapshot before restart");
-        rt.checkpoint().expect("checkpoint before restart");
+        assert_recent_sql_rows(&rt, "cpu", HOUR_NS, 1);
     }
 
     let rt = open_paged_runtime(&path);
@@ -238,4 +284,57 @@ fn durable_columnar_blocks_survive_restart_and_keep_pruning() {
     assert_eq!(after_eq.points, before_eq.points);
     assert_eq!(after_eq.granules_total, before_eq.granules_total);
     assert_eq!(after_eq.granules_scanned, before_eq.granules_scanned);
+}
+
+#[test]
+fn checkpoint_columnar_budget_defers_closed_chunks_and_keeps_row_tail_fresh() {
+    let options = RedDBOptions::in_memory().with_checkpoint_columnar_emission_budget_chunks(1);
+    let rt = RedDBRuntime::with_options(options).expect("runtime boots");
+    rt.execute_query("CREATE HYPERTABLE cpu TIME_COLUMN ts CHUNK_INTERVAL '1h'")
+        .expect("create hypertable");
+
+    let mut expected = Vec::new();
+    for chunk_index in 0..4 {
+        expected.extend(insert_chunk_rows(&rt, "cpu", chunk_index, 4));
+    }
+    expected.extend(insert_chunk_rows(&rt, "cpu", 4, 1));
+
+    rt.checkpoint().expect("first checkpoint");
+    assert_eq!(
+        rt.columnar_chunk_count("cpu"),
+        1,
+        "budget allows one closed chunk per checkpoint"
+    );
+    assert_eq!(
+        rt.read_bridge_points("cpu", 0, u64::MAX).unwrap(),
+        want(&expected)
+    );
+
+    rt.checkpoint().expect("second checkpoint");
+    assert_eq!(
+        rt.columnar_chunk_count("cpu"),
+        2,
+        "deferred chunks are picked up on the next checkpoint"
+    );
+
+    rt.checkpoint().expect("third checkpoint");
+    rt.checkpoint().expect("fourth checkpoint");
+    assert_eq!(
+        rt.columnar_chunk_count("cpu"),
+        4,
+        "all closed chunks eventually seal"
+    );
+
+    let tail = rt
+        .db()
+        .hypertables()
+        .show_chunks("cpu")
+        .into_iter()
+        .find(|chunk| chunk.id.start_ns == 4 * HOUR_NS)
+        .expect("open tail chunk");
+    assert!(
+        !tail.sealed && tail.columnar_page.is_none(),
+        "the newest chunk remains row-backed"
+    );
+    assert_recent_sql_rows(&rt, "cpu", 4 * HOUR_NS, 1);
 }

@@ -148,6 +148,11 @@ pub enum QueryExpr {
     RollbackMigration(RollbackMigrationQuery),
     /// EXPLAIN MIGRATION name
     ExplainMigration(ExplainMigrationQuery),
+    /// EXPLAIN <statement>
+    ///
+    /// Plan-only wrapper: the executor must inspect the wrapped statement
+    /// without executing it.
+    Explain(ExplainQuery),
     /// `EVENTS BACKFILL collection [WHERE pred] TO queue [LIMIT n]`.
     EventsBackfill(EventsBackfillQuery),
     /// `EVENTS BACKFILL STATUS collection` placeholder for the status slice.
@@ -782,6 +787,11 @@ pub struct RollbackMigrationQuery {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExplainMigrationQuery {
     pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExplainQuery {
+    pub inner: Box<QueryExpr>,
 }
 
 /// Probabilistic data structure commands

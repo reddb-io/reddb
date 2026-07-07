@@ -736,6 +736,8 @@ impl QueueStore for PrimaryQueueStore {
             attempts: next,
             queue: row.queue,
             message_id: row.message_id,
+            group: row.group,
+            consumer: row.consumer,
         })
     }
 
@@ -747,6 +749,8 @@ impl QueueStore for PrimaryQueueStore {
             attempts: self.read_attempts(&row.queue, row.message_id, &row.group),
             queue: row.queue,
             message_id: row.message_id,
+            group: row.group,
+            consumer: row.consumer,
         })
     }
 
@@ -770,7 +774,13 @@ impl QueueStore for PrimaryQueueStore {
         }
     }
 
-    fn enqueue_dlq(&self, _txn: &QueueTxn, dlq_target: &str, original: Value) -> Result<()> {
+    fn enqueue_dlq(
+        &self,
+        _txn: &QueueTxn,
+        dlq_target: &str,
+        original: Value,
+        ordering_key: Option<&str>,
+    ) -> Result<()> {
         let store = self.store();
         if store.get_collection(dlq_target).is_none() {
             store
@@ -793,9 +803,18 @@ impl QueueStore for PrimaryQueueStore {
                 acked: false,
             }),
         );
-        store
+        let id = store
             .insert_auto(dlq_target, entity)
             .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
+        if ordering_key.is_some() {
+            store
+                .set_metadata(
+                    dlq_target,
+                    id,
+                    super::impl_queue::queue_message_metadata(None, None, ordering_key),
+                )
+                .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
+        }
         Ok(())
     }
 
