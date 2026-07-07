@@ -45,20 +45,20 @@ impl RedDBRuntime {
     /// path — failures are captured in `last_error` and the prior
     /// content stays intact. Issue #583 slice 10.
     /// Snapshot of every tracked retention sweeper state — feeds the
-    /// three extra columns on `red.retention`. Issue #584 slice 12.
+    /// sweeper observability columns on `red.retention`.
     pub(crate) fn retention_sweeper_snapshot(
         &self,
     ) -> Vec<(String, crate::runtime::retention_sweeper::SweeperState)> {
         self.inner.retention_sweeper.read().snapshot()
     }
 
-    /// Drive one tick of the retention sweeper. Iterates collections
-    /// with a retention policy set, physically deletes at most
-    /// `batch_size` expired rows per collection, and records the
-    /// `last_sweep_at_ms` / `rows_swept_total` / pending estimate that
-    /// `red.retention` exposes. Called from the background sweeper
-    /// thread; safe to invoke directly from tests with a small batch
-    /// size to drain rows deterministically. Issue #584 slice 12.
+    /// Drive one tick of the retention sweeper. Mutable collections
+    /// physically delete at most `batch_size` expired rows; append-only
+    /// collections retire whole expired segments through the operational
+    /// manifest. Records the counters that `red.retention` exposes.
+    /// Called from the background sweeper thread; safe to invoke directly
+    /// from tests with a small batch size to drain rows deterministically.
+    /// Issue #584 slice 12.
     ///
     /// Deletes are issued as `DELETE FROM <collection> WHERE
     /// <ts_column> < <cutoff>` through the standard `execute_query`
@@ -91,6 +91,10 @@ impl RedDBRuntime {
             let Some(retention_ms) = contract.retention_duration_ms else {
                 continue;
             };
+            if contract.append_only {
+                let _ = self.retire_expired_append_only_segments(now_ms);
+                continue;
+            }
             let Some(ts_column) =
                 crate::runtime::retention_filter::resolve_timestamp_column(&contract)
             else {
