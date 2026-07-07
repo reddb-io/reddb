@@ -464,6 +464,46 @@ pub struct QueueClient<'a> {
     db: &'a Reddb,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct QueuePushOptions {
+    pub priority: Option<i32>,
+    pub key: Option<String>,
+    pub dedup: Option<String>,
+    pub delay: Option<String>,
+    pub at: Option<u64>,
+}
+
+impl QueuePushOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn priority(mut self, priority: i32) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    pub fn dedup(mut self, dedup: impl Into<String>) -> Self {
+        self.dedup = Some(dedup.into());
+        self
+    }
+
+    pub fn delay(mut self, delay: impl Into<String>) -> Self {
+        self.delay = Some(delay.into());
+        self
+    }
+
+    pub fn at(mut self, at: u64) -> Self {
+        self.at = Some(at);
+        self
+    }
+}
+
 impl<'a> QueueClient<'a> {
     pub async fn create(&self, queue: &str) -> Result<QueryResult> {
         self.db
@@ -474,12 +514,24 @@ impl<'a> QueueClient<'a> {
             .await
     }
 
-    pub async fn push(&self, queue: &str, value: &JsonValue) -> Result<QueryResult> {
+    pub async fn push(
+        &self,
+        queue: &str,
+        value: &JsonValue,
+        options: QueuePushOptions,
+    ) -> Result<QueryResult> {
+        if options.key.is_some() && (options.delay.is_some() || options.at.is_some()) {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "QUEUE PUSH KEY cannot be combined with DELAY / AVAILABLE AT",
+            ));
+        }
         self.db
             .query(&format!(
-                "QUEUE PUSH {} {}",
+                "QUEUE PUSH {} {}{}",
                 sql_identifier(queue)?,
-                json_value_literal(value)
+                json_value_literal(value),
+                queue_push_options_sql(&options)
             ))
             .await
     }
@@ -876,6 +928,26 @@ fn json_value_literal(value: &JsonValue) -> String {
         JsonValue::String(value) => sql_string_literal(value),
         JsonValue::Array(_) | JsonValue::Object(_) => value.to_json_string(),
     }
+}
+
+fn queue_push_options_sql(options: &QueuePushOptions) -> String {
+    let mut sql = String::new();
+    if let Some(priority) = options.priority {
+        sql.push_str(&format!(" PRIORITY {priority}"));
+    }
+    if let Some(key) = &options.key {
+        sql.push_str(&format!(" KEY {}", sql_string_literal(key)));
+    }
+    if let Some(dedup) = &options.dedup {
+        sql.push_str(&format!(" DEDUP {}", sql_string_literal(dedup)));
+    }
+    if let Some(delay) = &options.delay {
+        sql.push_str(&format!(" DELAY {delay}"));
+    }
+    if let Some(at) = options.at {
+        sql.push_str(&format!(" AVAILABLE AT {at}"));
+    }
+    sql
 }
 
 /// ADR 0067 (#1709): a document body is emitted as an inline strict-JSON

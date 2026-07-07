@@ -66,6 +66,21 @@ impl RedDBRuntime {
             ));
     }
 
+    pub(crate) fn record_pending_queue_dedup(
+        &self,
+        conn_id: u64,
+        queue: &str,
+        dedup_key: &str,
+        metadata_id: crate::storage::unified::entity::EntityId,
+    ) {
+        self.inner
+            .pending_queue_dedup
+            .write()
+            .entry(conn_id)
+            .or_default()
+            .push((queue.to_string(), dedup_key.to_string(), metadata_id));
+    }
+
     pub(crate) fn with_deferred_store_wal_if_transaction<T>(
         &self,
         f: impl FnOnce() -> RedDBResult<T>,
@@ -321,6 +336,56 @@ impl RedDBRuntime {
         Ok(())
     }
 
+    pub(crate) fn check_queue_dedup_write_conflicts(
+        &self,
+        conn_id: u64,
+        snapshot: &crate::storage::transaction::snapshot::Snapshot,
+        own_xids: &std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
+    ) -> RedDBResult<()> {
+        let pending = self
+            .inner
+            .pending_queue_dedup
+            .read()
+            .get(&conn_id)
+            .cloned()
+            .unwrap_or_default();
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(crate::runtime::impl_queue::QUEUE_META_COLLECTION)
+        else {
+            return Ok(());
+        };
+
+        for (queue, dedup_key, metadata_id) in pending {
+            for candidate in manager.query_all(|entity| {
+                entity.data.as_row().is_some_and(|row| {
+                    crate::runtime::impl_queue::row_text(row, "kind").as_deref()
+                        == Some(crate::runtime::impl_queue::KIND_QUEUE_PUSH_DEDUP)
+                        && crate::runtime::impl_queue::row_text(row, "queue").as_deref()
+                            == Some(&queue)
+                        && crate::runtime::impl_queue::row_text(row, "dedup_key").as_deref()
+                            == Some(&dedup_key)
+                })
+            }) {
+                if candidate.id == metadata_id
+                    || self.inner.snapshot_manager.is_aborted(candidate.xmin)
+                {
+                    continue;
+                }
+                if self.xid_conflicts_with_snapshot(candidate.xmin, snapshot, own_xids) {
+                    return Err(RedDBError::Query(format!(
+                        "serialization conflict: queue dedup key {queue}/{dedup_key} was modified by concurrent transaction {}",
+                        candidate.xmin
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn restore_pending_write_stamps(&self, conn_id: u64) {
         let versioned_updates = self
             .inner
@@ -361,6 +426,23 @@ impl RedDBRuntime {
             .pending_versioned_updates
             .write()
             .remove(&conn_id);
+    }
+
+    pub(crate) fn finalize_pending_queue_dedup(&self, conn_id: u64) {
+        self.inner.pending_queue_dedup.write().remove(&conn_id);
+    }
+
+    pub(crate) fn discard_pending_queue_dedup(&self, conn_id: u64) {
+        let Some(pending) = self.inner.pending_queue_dedup.write().remove(&conn_id) else {
+            return;
+        };
+        let store = self.inner.db.store();
+        for (_queue, _dedup_key, metadata_id) in pending {
+            let _ = store.delete(
+                crate::runtime::impl_queue::QUEUE_META_COLLECTION,
+                metadata_id,
+            );
+        }
     }
 
     pub(crate) fn revive_pending_versioned_updates(&self, conn_id: u64) {

@@ -541,6 +541,145 @@ fn test_queue_push_dedup_survives_persistent_reopen() {
 }
 
 #[test]
+fn test_queue_move_bypasses_push_dedup_but_preserves_producer_guard() {
+    let rt = rt();
+
+    exec(
+        &rt,
+        "CREATE QUEUE jobs WITH DLQ failed_jobs MAX_ATTEMPTS 1 DEDUP_WINDOW 1 s",
+    );
+    let pushed = exec(&rt, "QUEUE PUSH jobs 'first' DEDUP 'push-key'");
+    let original_id = text(&pushed.result.records[0], "message_id");
+
+    let read = exec(&rt, "QUEUE READ jobs CONSUMER worker1 COUNT 1");
+    let delivery_id = text(&read.result.records[0], "message_id");
+    exec(
+        &rt,
+        &format!("QUEUE NACK jobs GROUP _work_default '{}'", delivery_id),
+    );
+    assert_eq!(
+        payloads(&exec(&rt, "QUEUE PEEK failed_jobs 10")),
+        vec!["first"]
+    );
+
+    let moved = exec(&rt, "QUEUE MOVE FROM failed_jobs TO jobs LIMIT 1");
+    assert_eq!(uint(&moved.result.records[0], "committed"), 1);
+    assert_eq!(
+        payloads(&exec(&rt, "QUEUE PEEK jobs 10")),
+        vec!["first"],
+        "QUEUE MOVE must replay even while the original push dedup key is live",
+    );
+
+    let duplicate = exec(&rt, "QUEUE PUSH jobs 'duplicate' DEDUP 'push-key'");
+    assert_eq!(
+        text(&duplicate.result.records[0], "message_id"),
+        original_id,
+        "moving the message must not clear or replace the producer dedup guard",
+    );
+    assert_eq!(
+        payloads(&exec(&rt, "QUEUE PEEK jobs 10")),
+        vec!["first"],
+        "producer retry should still be suppressed after operator replay",
+    );
+}
+
+#[test]
+fn test_dlq_promotion_bypasses_target_push_dedup_index() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE failed_consult DEDUP_WINDOW 1 s");
+    exec(
+        &rt,
+        "CREATE QUEUE source_consult WITH DLQ failed_consult MAX_ATTEMPTS 1 DEDUP_WINDOW 1 s",
+    );
+    exec(
+        &rt,
+        "QUEUE PUSH failed_consult 'target-original' DEDUP 'shared-key'",
+    );
+    exec(
+        &rt,
+        "QUEUE PUSH source_consult 'source-job' DEDUP 'shared-key'",
+    );
+
+    let read = exec(&rt, "QUEUE READ source_consult CONSUMER worker1 COUNT 1");
+    let delivery_id = text(&read.result.records[0], "message_id");
+    exec(
+        &rt,
+        &format!(
+            "QUEUE NACK source_consult GROUP _work_default '{}'",
+            delivery_id
+        ),
+    );
+    assert_eq!(
+        payloads(&exec(&rt, "QUEUE PEEK failed_consult 10")),
+        vec!["target-original", "source-job"],
+        "DLQ promotion must not be suppressed by the DLQ target's dedup index",
+    );
+
+    exec(&rt, "CREATE QUEUE failed_write DEDUP_WINDOW 1 s");
+    exec(
+        &rt,
+        "CREATE QUEUE source_write WITH DLQ failed_write MAX_ATTEMPTS 1 DEDUP_WINDOW 1 s",
+    );
+    exec(
+        &rt,
+        "QUEUE PUSH source_write 'source-only' DEDUP 'source-only-key'",
+    );
+    let read = exec(&rt, "QUEUE READ source_write CONSUMER worker1 COUNT 1");
+    let delivery_id = text(&read.result.records[0], "message_id");
+    exec(
+        &rt,
+        &format!(
+            "QUEUE NACK source_write GROUP _work_default '{}'",
+            delivery_id
+        ),
+    );
+    exec(
+        &rt,
+        "QUEUE PUSH failed_write 'target-producer' DEDUP 'source-only-key'",
+    );
+    assert_eq!(
+        payloads(&exec(&rt, "QUEUE PEEK failed_write 10")),
+        vec!["source-only", "target-producer"],
+        "DLQ promotion must not arm a dedup key on the DLQ target",
+    );
+}
+
+#[test]
+fn test_retry_retiming_does_not_rearm_push_dedup() {
+    let rt = rt();
+
+    exec(
+        &rt,
+        "CREATE QUEUE retry_dedup RETRY_DELAY 500ms MAX_ATTEMPTS 5 DEDUP_WINDOW 50 ms",
+    );
+    exec(&rt, "QUEUE GROUP CREATE retry_dedup workers");
+    let pushed = exec(&rt, "QUEUE PUSH retry_dedup 'original' DEDUP 'retry-key'");
+    let original_id = text(&pushed.result.records[0], "message_id");
+
+    let read = exec(
+        &rt,
+        "QUEUE READ retry_dedup GROUP workers CONSUMER worker1 COUNT 1",
+    );
+    let delivery_id = text(&read.result.records[0], "message_id");
+    sleep(Duration::from_millis(80));
+    exec(
+        &rt,
+        &format!("QUEUE NACK retry_dedup GROUP workers '{}'", delivery_id),
+    );
+
+    let producer_retry = exec(
+        &rt,
+        "QUEUE PUSH retry_dedup 'after-window' DEDUP 'retry-key'",
+    );
+    assert_ne!(
+        text(&producer_retry.result.records[0], "message_id"),
+        original_id,
+        "retry re-timing must not rearm an expired producer dedup key",
+    );
+}
+
+#[test]
 fn test_queue_mode_persists_and_defaults_to_work() {
     let path = PersistentDbPath::new("queue_mode_catalog");
     let rt = path.open_runtime();

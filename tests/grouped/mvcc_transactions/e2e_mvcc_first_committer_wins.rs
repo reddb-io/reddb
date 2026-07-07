@@ -44,6 +44,22 @@ fn label_for(rt: &RedDBRuntime, table: &str, rid: u64) -> Option<String> {
         })
 }
 
+fn text(record: &reddb::storage::query::UnifiedRecord, column: &str) -> String {
+    match record.get(column) {
+        Some(Value::Text(value)) => value.to_string(),
+        Some(Value::UnsignedInteger(value)) => value.to_string(),
+        other => panic!("expected text-like value for {column}, got {other:?}"),
+    }
+}
+
+fn uint(record: &reddb::storage::query::UnifiedRecord, column: &str) -> u64 {
+    match record.get(column) {
+        Some(Value::UnsignedInteger(value)) => *value,
+        Some(Value::Integer(value)) if *value >= 0 => *value as u64,
+        other => panic!("expected unsigned integer for {column}, got {other:?}"),
+    }
+}
+
 fn assert_conflict(message: &str) {
     assert!(
         message.contains("serialization conflict"),
@@ -239,6 +255,73 @@ fn stale_transaction_conflicts_with_autocommit_update() {
         label_for(&rt, "fcw_autocommit", eid).as_deref(),
         Some("auto")
     );
+    clear_current_connection_id();
+}
+
+#[test]
+fn queue_push_dedup_key_is_first_committer_wins_under_transactions() {
+    let rt = rt();
+    set_current_connection_id(43961);
+    exec(&rt, "CREATE QUEUE fcw_dedup DEDUP_WINDOW 1 s");
+
+    set_current_connection_id(43962);
+    exec(&rt, "BEGIN");
+    let first = rt
+        .execute_query("QUEUE PUSH fcw_dedup 'first' DEDUP 'producer-1'")
+        .expect("first transactional dedup push");
+    let first_id = text(&first.result.records[0], "message_id");
+
+    set_current_connection_id(43963);
+    exec(&rt, "BEGIN");
+    let second = rt
+        .execute_query("QUEUE PUSH fcw_dedup 'second' DEDUP 'producer-1'")
+        .expect("second transactional dedup push");
+    let second_id = text(&second.result.records[0], "message_id");
+    assert_ne!(
+        second_id, first_id,
+        "concurrent transaction must not observe the uncommitted dedup outcome"
+    );
+
+    set_current_connection_id(43962);
+    exec(&rt, "COMMIT");
+    set_current_connection_id(43963);
+    assert_conflict(&exec_err(&rt, "COMMIT"));
+
+    set_current_connection_id(43964);
+    exec(&rt, "BEGIN");
+    let retry = rt
+        .execute_query("QUEUE PUSH fcw_dedup 'retry' DEDUP 'producer-1'")
+        .expect("retry observes committed dedup outcome");
+    assert_eq!(text(&retry.result.records[0], "message_id"), first_id);
+    exec(&rt, "COMMIT");
+
+    let len = rt
+        .execute_query("QUEUE LEN fcw_dedup")
+        .expect("queue len after retry");
+    assert_eq!(uint(&len.result.records[0], "len"), 1);
+
+    set_current_connection_id(43965);
+    exec(&rt, "BEGIN");
+    let rolled_back = rt
+        .execute_query("QUEUE PUSH fcw_dedup 'rolled-back' DEDUP 'producer-rollback'")
+        .expect("rolled-back dedup push");
+    let rolled_back_id = text(&rolled_back.result.records[0], "message_id");
+    exec(&rt, "ROLLBACK");
+
+    set_current_connection_id(43966);
+    let after_rollback = rt
+        .execute_query("QUEUE PUSH fcw_dedup 'after-rollback' DEDUP 'producer-rollback'")
+        .expect("dedup key should be reusable after rollback");
+    assert_ne!(
+        text(&after_rollback.result.records[0], "message_id"),
+        rolled_back_id,
+        "rolled-back dedup outcome must not be reused"
+    );
+    let len = rt
+        .execute_query("QUEUE LEN fcw_dedup")
+        .expect("queue len after rollback reuse");
+    assert_eq!(uint(&len.result.records[0], "len"), 2);
+
     clear_current_connection_id();
 }
 

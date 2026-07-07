@@ -1167,6 +1167,12 @@ struct RuntimeInner {
             )>,
         >,
     >,
+    /// Per-connection push idempotency keys written by an open transaction.
+    /// Each entry is `(queue, dedup_key, metadata_entity_id)`. COMMIT checks
+    /// the queue/key subject for first-committer-wins conflicts; ROLLBACK
+    /// removes the uncommitted metadata row so later producer retries enqueue
+    /// normally.
+    pending_queue_dedup: parking_lot::RwLock<HashMap<u64, Vec<(String, String, EntityId)>>>,
     pending_kv_watch_events:
         parking_lot::RwLock<HashMap<u64, Vec<crate::replication::cdc::KvWatchEvent>>>,
     pending_store_wal_actions:

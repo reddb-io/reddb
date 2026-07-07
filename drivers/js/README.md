@@ -358,6 +358,12 @@ is the plural `db.queues`; `db.queue` remains as an alias.
 ```js
 await db.queues.create('jobs')           // CREATE QUEUE IF NOT EXISTS (idempotent)
 await db.queues.push('jobs', { task: 'ship' })
+await db.queues.push('jobs', { task: 'email', orderId: 42 }, { dedup: 'outbox:email:42' })
+await db.queues.push(
+  'jobs',
+  { task: 'rebuild_account', accountId: 'acct_123' },
+  { key: 'acct_123' },
+)
 await db.queues.peek('jobs')             // does NOT decrement length
 await db.queues.pop('jobs')              // empty queue → [] (never NOT_FOUND)
 await db.queues.len('jobs')

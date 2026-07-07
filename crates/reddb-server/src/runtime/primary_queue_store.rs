@@ -27,6 +27,7 @@ use crate::storage::schema::Value;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::{EntityData, EntityId, EntityKind, UnifiedEntity, UnifiedStore};
 
+use super::impl_core::current_connection_id;
 use super::queue_lifecycle::LifecycleConfig;
 use super::RedDBRuntime;
 
@@ -1073,14 +1074,25 @@ impl QueueStore for PrimaryQueueStore {
         expires_at_ns: u64,
     ) -> Result<()> {
         let store = self.runtime.db().store();
-        super::impl_queue::record_queue_dedup(
+        let metadata_id = super::impl_queue::record_queue_dedup(
             store.as_ref(),
             queue,
             dedup_key,
             EntityId::new(message_id),
             expires_at_ns,
         )
-        .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))
+        .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
+        self.runtime
+            .stamp_xmin_if_in_txn(super::impl_queue::QUEUE_META_COLLECTION, metadata_id);
+        if self.runtime.current_xid().is_some() {
+            self.runtime.record_pending_queue_dedup(
+                current_connection_id(),
+                queue,
+                dedup_key,
+                metadata_id,
+            );
+        }
+        Ok(())
     }
 }
 

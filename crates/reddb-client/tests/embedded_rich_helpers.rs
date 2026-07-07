@@ -1,6 +1,6 @@
 #![cfg(feature = "embedded")]
 
-use reddb_client::{ErrorCode, JsonValue, ListOptions, Reddb, ValueOut};
+use reddb_client::{ErrorCode, JsonValue, ListOptions, QueuePushOptions, Reddb, ValueOut};
 
 fn field<'a>(row: &'a [(String, ValueOut)], name: &str) -> &'a ValueOut {
     row.iter()
@@ -124,6 +124,7 @@ async fn queue_and_transaction_helpers_use_engine_contracts() {
                 ("job", JsonValue::string("process")),
                 ("retries", JsonValue::number(3.0)),
             ]),
+            QueuePushOptions::new(),
         )
         .await
         .expect("push queue");

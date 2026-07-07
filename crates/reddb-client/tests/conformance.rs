@@ -19,7 +19,7 @@
 //!
 //! Other-language drivers MUST port the same case IDs verbatim.
 
-use reddb_client::{ErrorCode, JsonValue, ListOptions, Reddb, ValueOut};
+use reddb_client::{ErrorCode, JsonValue, ListOptions, QueuePushOptions, Reddb, ValueOut};
 
 fn field<'a>(row: &'a [(String, ValueOut)], name: &str) -> &'a ValueOut {
     row.iter()
@@ -259,12 +259,14 @@ async fn case_queues_fifo_peek_pop_len(db: &Reddb) {
     q.push(
         "conf_q",
         &JsonValue::object([("n", JsonValue::number(1.0))]),
+        QueuePushOptions::new(),
     )
     .await
     .expect("push 1");
     q.push(
         "conf_q",
         &JsonValue::object([("n", JsonValue::number(2.0))]),
+        QueuePushOptions::new(),
     )
     .await
     .expect("push 2");
@@ -301,6 +303,7 @@ async fn case_queues_purge_resets_len(db: &Reddb) {
         q.push(
             "conf_q_purge",
             &JsonValue::object([("i", JsonValue::number(i as f64))]),
+            QueuePushOptions::new(),
         )
         .await
         .expect("push");
@@ -308,6 +311,92 @@ async fn case_queues_purge_resets_len(db: &Reddb) {
     assert_eq!(q.len("conf_q_purge").await.expect("len"), 3);
     q.purge("conf_q_purge").await.expect("purge");
     assert_eq!(q.len("conf_q_purge").await.expect("len after purge"), 0);
+}
+
+async fn case_queues_push_key_dedup_and_combined(db: &Reddb) {
+    let q = db.queue();
+    q.create("conf_q_push_ids").await.expect("create");
+
+    q.push(
+        "conf_q_push_ids",
+        &JsonValue::string("keyed"),
+        QueuePushOptions::new().key("account-a"),
+    )
+    .await
+    .expect("keyed push");
+    let keyed = db
+        .query("SELECT payload, key FROM QUEUE conf_q_push_ids")
+        .await
+        .expect("inspect keyed push");
+    assert_eq!(
+        field(&keyed.rows[0], "payload"),
+        &ValueOut::String("keyed".into())
+    );
+    assert_eq!(
+        field(&keyed.rows[0], "key"),
+        &ValueOut::String("account-a".into())
+    );
+
+    q.create("conf_q_push_dedup").await.expect("create dedup");
+    db.query("ALTER QUEUE conf_q_push_dedup SET DEDUP_WINDOW 1 min")
+        .await
+        .expect("set dedup window");
+    let first = q
+        .push(
+            "conf_q_push_dedup",
+            &JsonValue::string("first"),
+            QueuePushOptions::new().dedup("retry-1"),
+        )
+        .await
+        .expect("first dedup push");
+    let duplicate = q
+        .push(
+            "conf_q_push_dedup",
+            &JsonValue::string("duplicate"),
+            QueuePushOptions::new().dedup("retry-1"),
+        )
+        .await
+        .expect("duplicate dedup push");
+    assert_eq!(
+        field(&first.rows[0], "message_id"),
+        field(&duplicate.rows[0], "message_id")
+    );
+    assert_eq!(q.len("conf_q_push_dedup").await.expect("dedup len"), 1);
+
+    q.push(
+        "conf_q_push_ids",
+        &JsonValue::string("combined"),
+        QueuePushOptions::new().key("account-b").dedup("retry-2"),
+    )
+    .await
+    .expect("combined push");
+    let combined = db
+        .query("SELECT payload, key FROM QUEUE conf_q_push_ids WHERE payload = 'combined'")
+        .await
+        .expect("inspect combined push");
+    assert_eq!(
+        field(&combined.rows[0], "key"),
+        &ValueOut::String("account-b".into())
+    );
+}
+
+async fn case_queues_push_key_rejects_delay(db: &Reddb) {
+    let q = db.queue();
+    q.create("conf_q_push_key_delay").await.expect("create");
+    let err = q
+        .push(
+            "conf_q_push_key_delay",
+            &JsonValue::string("delayed"),
+            QueuePushOptions::new().key("account-a").delay("1s"),
+        )
+        .await
+        .expect_err("key plus delay must fail client-side");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(
+        err.message
+            .contains("QUEUE PUSH KEY cannot be combined with DELAY / AVAILABLE AT"),
+        "unexpected error: {err:?}"
+    );
 }
 
 // --------------------------------------------------------------------- tx.*
@@ -516,6 +605,8 @@ mod embedded {
     embedded_case!(case_queues_fifo_peek_pop_len);
     embedded_case!(case_queues_empty_pop_returns_empty);
     embedded_case!(case_queues_purge_resets_len);
+    embedded_case!(case_queues_push_key_dedup_and_combined);
+    embedded_case!(case_queues_push_key_rejects_delay);
     embedded_case!(case_tx_commit_persists);
     embedded_case!(case_tx_rollback_discards);
     embedded_case!(case_errors_invalid_argument_empty_sql);
@@ -604,6 +695,8 @@ mod client_transport {
         case_queues_fifo_peek_pop_len(&db).await;
         case_queues_empty_pop_returns_empty(&db).await;
         case_queues_purge_resets_len(&db).await;
+        case_queues_push_key_dedup_and_combined(&db).await;
+        case_queues_push_key_rejects_delay(&db).await;
         case_tx_commit_persists(&db).await;
         case_tx_rollback_discards(&db).await;
         case_errors_invalid_argument_empty_sql(&db).await;

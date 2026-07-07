@@ -6,9 +6,9 @@ export class QueueClient {
   }
 
   push(queue, value, options = {}) {
-    const priority = options.priority != null ? ` PRIORITY ${queuePriority(options.priority)}` : ''
+    const suffix = queuePushOptions(options)
     return this.client.call('query', {
-      sql: `QUEUE PUSH ${queueIdentifier(queue)} ${queueValueLiteral(value)}${priority}`,
+      sql: `QUEUE PUSH ${queueIdentifier(queue)} ${queueValueLiteral(value)}${suffix}`,
     })
   }
 
@@ -90,11 +90,31 @@ function queuePriority(priority) {
   return String(priority)
 }
 
+function queuePushOptions(options) {
+  if (options.key != null && (options.delay != null || options.at != null)) {
+    throw new RedDBError(
+      'INVALID_ARGUMENT',
+      'QUEUE PUSH KEY cannot be combined with DELAY / AVAILABLE AT',
+    )
+  }
+  let suffix = ''
+  if (options.priority != null) suffix += ` PRIORITY ${queuePriority(options.priority)}`
+  if (options.key != null) suffix += ` KEY ${queueStringLiteral(options.key)}`
+  if (options.dedup != null) suffix += ` DEDUP ${queueStringLiteral(options.dedup)}`
+  if (options.delay != null) suffix += ` DELAY ${options.delay}`
+  if (options.at != null) suffix += ` AVAILABLE AT ${options.at}`
+  return suffix
+}
+
 function queueValueLiteral(value) {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (value == null) return 'NULL'
-  if (typeof value === 'string') return `'${value.replace(/'/g, "''")}'`
+  if (typeof value === 'string') return queueStringLiteral(value)
   return JSON.stringify(value)
+}
+
+function queueStringLiteral(value) {
+  return `'${String(value).replace(/'/g, "''")}'`
 }
 
 function queuePayloads(result) {
