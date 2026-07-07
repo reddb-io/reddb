@@ -128,7 +128,9 @@ fn logical_wal_entry_term(entry: &reddb_file::LogicalWalEntry) -> u64 {
 fn logical_wal_data_with_framing_term(entry: &reddb_file::LogicalWalEntry) -> Vec<u8> {
     let term = logical_wal_entry_term(entry);
     match crate::replication::cdc::ChangeRecord::decode(&entry.data) {
-        Ok(mut record) if record.term != term || record.ownership_epoch != entry.ownership_epoch => {
+        Ok(mut record)
+            if record.term != term || record.ownership_epoch != entry.ownership_epoch =>
+        {
             record.term = term;
             if entry.ownership_epoch.is_some() {
                 record.ownership_epoch = entry.ownership_epoch;
@@ -288,7 +290,8 @@ impl LogicalWalSpool {
         //   (b) crc32 is computed exactly once over the same bytes the
         //       reader will checksum, with zero risk of header/payload
         //       drift from a partial flush.
-        let frame = reddb_file::encode_logical_wal_v3(term, ownership_epoch, lsn, timestamp_ms, data)?;
+        let frame =
+            reddb_file::encode_logical_wal_v3(term, ownership_epoch, lsn, timestamp_ms, data)?;
 
         file.write_all(&frame)?;
         // PLAN.md Phase 2 mandates `sync_all` for logical WAL durability.
