@@ -12,6 +12,9 @@ mod e2e_advisory_locks;
 #[path = "schema_query_core/e2e_composite_index.rs"]
 mod e2e_composite_index;
 
+#[path = "sql_window/e2e_explain.rs"]
+mod e2e_explain;
+
 #[path = "mvcc_transactions/e2e_cross_model_tx.rs"]
 mod e2e_cross_model_tx;
 
