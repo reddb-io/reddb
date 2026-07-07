@@ -740,11 +740,11 @@ fn append_graph_stats(
     }
 
     let max_degree = degree.values().copied().max().unwrap_or(0);
-    let avg_degree = if node_count == 0 {
-        0
-    } else {
-        degree.values().sum::<u64>() / node_count
-    };
+    let avg_degree = degree
+        .values()
+        .sum::<u64>()
+        .checked_div(node_count)
+        .unwrap_or(0);
 
     rows.push(stats_row(
         schema,
