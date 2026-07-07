@@ -408,6 +408,18 @@ pub(crate) fn query_stats_json(stats: &QueryStats) -> JsonValue {
         JsonValue::Number(stats.rows_scanned as f64),
     );
     object.insert(
+        "segments_total".to_string(),
+        JsonValue::Number(stats.segments_total as f64),
+    );
+    object.insert(
+        "segments_scanned".to_string(),
+        JsonValue::Number(stats.segments_scanned as f64),
+    );
+    object.insert(
+        "segments_pruned".to_string(),
+        JsonValue::Number(stats.segments_pruned as f64),
+    );
+    object.insert(
         "exec_time_us".to_string(),
         JsonValue::Number(stats.exec_time_us as f64),
     );
