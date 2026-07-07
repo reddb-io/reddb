@@ -14,10 +14,11 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::RwLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::connector::RedDBClient;
 
+use crate::bookmark_routing::{BookmarkTarget, BookmarkWaiter, CausalReadOptions, RoutingTable};
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::params::Value as ParamValue;
 use crate::router::{HealthAwareRouter, Outcome};
@@ -63,6 +64,9 @@ pub struct GrpcClient {
     /// endpoint. Behind an `RwLock` so [`update_membership`] can
     /// swap the membership snapshot without poisoning hot reads.
     router: RwLock<HealthAwareRouter>,
+    /// Latest topology snapshot, including each replica's contiguous
+    /// applied frontier for causal-read routing.
+    membership: RwLock<ClusterMembership>,
 }
 
 /// One remote endpoint plus a fixed pool of `RedDBClient` clones.
@@ -137,7 +141,10 @@ impl GrpcClient {
     pub async fn connect_with_pool_size(endpoint: String, pool_size: usize) -> Result<Self> {
         let primary = Endpoint::connect(endpoint, pool_size).await?;
         let membership = ClusterMembership::from_uri_addresses(primary.url.clone(), Vec::new());
-        let router = RwLock::new(HealthAwareRouter::with_force_primary(membership, true));
+        let router = RwLock::new(HealthAwareRouter::with_force_primary(
+            membership.clone(),
+            true,
+        ));
         Ok(Self {
             primary,
             replicas: RwLock::new(Vec::new()),
@@ -145,6 +152,7 @@ impl GrpcClient {
             force_primary: true,
             pool_size,
             router,
+            membership: RwLock::new(membership),
         })
     }
 
@@ -179,7 +187,7 @@ impl GrpcClient {
             replica_eps.iter().map(|e| e.url.clone()).collect(),
         );
         let router = RwLock::new(HealthAwareRouter::with_force_primary(
-            membership,
+            membership.clone(),
             force_primary,
         ));
         Ok(Self {
@@ -189,6 +197,7 @@ impl GrpcClient {
             force_primary,
             pool_size,
             router,
+            membership: RwLock::new(membership),
         })
     }
 
@@ -232,12 +241,24 @@ impl GrpcClient {
         }
     }
 
+    fn endpoint_by_addr(&self, addr: &str) -> (RedDBClient, usize) {
+        if addr == self.primary.url {
+            return (self.primary.pick(), 0);
+        }
+        let replicas = self.replicas.read().unwrap();
+        match replicas.iter().enumerate().find(|(_, ep)| ep.url == addr) {
+            Some((idx, ep)) => (ep.pick(), idx + 1),
+            None => (self.primary.pick(), 0),
+        }
+    }
+
     /// Refresh routing state from a new canonical cluster membership.
     pub fn update_membership(&self, new_membership: ClusterMembership) {
         self.router
             .write()
             .unwrap()
-            .update_membership(new_membership);
+            .update_membership(new_membership.clone());
+        *self.membership.write().unwrap() = new_membership;
     }
 
     /// Refresh the live replica pool from a topology advertisement.
@@ -306,6 +327,7 @@ impl GrpcClient {
             .write()
             .unwrap()
             .update_membership(membership.clone());
+        *self.membership.write().unwrap() = membership.clone();
         Ok(())
     }
 
@@ -342,6 +364,29 @@ impl GrpcClient {
 
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
         let (mut client, idx) = self.read_endpoint();
+        self.query_on_endpoint(&mut client, idx, sql).await
+    }
+
+    pub async fn query_causal(
+        &self,
+        sql: &str,
+        bookmark: BookmarkTarget,
+        opts: CausalReadOptions,
+    ) -> Result<QueryResult> {
+        let membership = self.membership.read().unwrap().clone();
+        let table = RoutingTable::from_membership(membership, bookmark.term());
+        let mut waiter = MembershipFrontierWaiter::new(&self.membership);
+        let decision = table.route_causal_read(bookmark, &opts, &mut waiter);
+        let (mut client, idx) = self.endpoint_by_addr(&decision.endpoint.addr);
+        self.query_on_endpoint(&mut client, idx, sql).await
+    }
+
+    async fn query_on_endpoint(
+        &self,
+        client: &mut RedDBClient,
+        idx: usize,
+        sql: &str,
+    ) -> Result<QueryResult> {
         let started = Instant::now();
         let reply = match client.query_reply(sql).await {
             Ok(r) => {
@@ -508,6 +553,38 @@ impl GrpcClient {
     ) -> std::result::Result<crate::topology::ClusterMembership, crate::topology::ConsumeError>
     {
         crate::topology::TopologyConsumer::consume_bytes(bytes, uri_seed)
+    }
+}
+
+struct MembershipFrontierWaiter<'a> {
+    membership: &'a RwLock<ClusterMembership>,
+    started: Instant,
+}
+
+impl<'a> MembershipFrontierWaiter<'a> {
+    fn new(membership: &'a RwLock<ClusterMembership>) -> Self {
+        Self {
+            membership,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl BookmarkWaiter for MembershipFrontierWaiter<'_> {
+    fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    fn poll(&mut self, target_addr: &str) -> u64 {
+        std::thread::sleep(Duration::from_millis(1));
+        self.membership
+            .read()
+            .unwrap()
+            .replicas
+            .iter()
+            .find(|replica| replica.addr == target_addr)
+            .map(|replica| replica.last_applied_lsn)
+            .unwrap_or(0)
     }
 }
 
