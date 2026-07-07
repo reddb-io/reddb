@@ -12,6 +12,8 @@ use crate::{WAL_FILE_VERSION, WAL_FILE_VERSION_V2};
 use std::io::{self, Read};
 
 pub const MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD: usize = 256;
+const MAX_MAIN_WAL_PAYLOAD: usize = 256 * 1024 * 1024;
+const MAX_MAIN_WAL_ITEMS: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -337,6 +339,7 @@ pub fn decode_main_wal_record_frame_with_authority<R: Read>(
             let page_id = read_u32_tracked(reader, &mut checksum_bytes)?;
             let compression = read_compression_tracked(reader, &mut checksum_bytes)?;
             let original_len = read_u32_tracked(reader, &mut checksum_bytes)? as usize;
+            validate_len(original_len, "main WAL original page length")?;
             let compressed = read_bytes_tracked(reader, &mut checksum_bytes)?;
             let data = match compression {
                 MainWalCompression::Zstd => {
@@ -360,6 +363,7 @@ pub fn decode_main_wal_record_frame_with_authority<R: Read>(
         MainWalRecordType::TxCommitBatch => {
             let tx_id = read_u64_tracked(reader, &mut checksum_bytes)?;
             let count = read_u32_tracked(reader, &mut checksum_bytes)? as usize;
+            validate_count(count, "main WAL action count")?;
             let mut actions = Vec::with_capacity(count);
             for _ in 0..count {
                 actions.push(read_bytes_tracked(reader, &mut checksum_bytes)?);
@@ -388,6 +392,7 @@ pub fn decode_main_wal_record_frame_with_authority<R: Read>(
                 })?;
             let entity_id = read_u64_tracked(reader, &mut checksum_bytes)?;
             let count = read_u32_tracked(reader, &mut checksum_bytes)? as usize;
+            validate_count(count, "main WAL vector length")?;
             let mut vector = Vec::with_capacity(count);
             for _ in 0..count {
                 vector.push(f32::from_le_bytes(read_array_tracked(
@@ -412,6 +417,7 @@ pub fn decode_main_wal_record_frame_with_authority<R: Read>(
                     )
                 })?;
             let count = read_u32_tracked(reader, &mut checksum_bytes)? as usize;
+            validate_count(count, "main WAL probabilistic operand count")?;
             let mut operands = Vec::with_capacity(count);
             for _ in 0..count {
                 operands.push(read_bytes_tracked(reader, &mut checksum_bytes)?);
@@ -484,10 +490,31 @@ fn read_bytes_tracked<R: Read>(
     checksum_bytes: &mut Vec<u8>,
 ) -> io::Result<Vec<u8>> {
     let len = read_u32_tracked(reader, checksum_bytes)? as usize;
+    validate_len(len, "main WAL payload length")?;
     let mut bytes = vec![0u8; len];
     reader.read_exact(&mut bytes)?;
     checksum_bytes.extend_from_slice(&bytes);
     Ok(bytes)
+}
+
+fn validate_len(len: usize, label: &'static str) -> io::Result<()> {
+    if len > MAX_MAIN_WAL_PAYLOAD {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("implausible {label}: {len}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_count(count: usize, label: &'static str) -> io::Result<()> {
+    if count > MAX_MAIN_WAL_ITEMS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("implausible {label}: {count}"),
+        ));
+    }
+    Ok(())
 }
 
 fn read_u64_tracked<R: Read>(reader: &mut R, checksum_bytes: &mut Vec<u8>) -> io::Result<u64> {
@@ -646,6 +673,53 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "WAL record checksum mismatch"
+        );
+    }
+
+    #[test]
+    fn main_wal_record_rejects_implausible_payload_before_allocating() {
+        let mut encoded = Vec::new();
+        write_type_and_authority(
+            &mut encoded,
+            MainWalRecordType::PageWrite,
+            MainWalRecordAuthority {
+                term: 1,
+                ownership_epoch: None,
+            },
+        );
+        encoded.extend_from_slice(&7u64.to_le_bytes());
+        encoded.extend_from_slice(&3u32.to_le_bytes());
+        encoded.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let mut cursor = Cursor::new(encoded);
+        assert_eq!(
+            decode_main_wal_record_frame(&mut cursor, WAL_FILE_VERSION, 1)
+                .unwrap_err()
+                .to_string(),
+            "implausible main WAL payload length: 4294967295"
+        );
+    }
+
+    #[test]
+    fn main_wal_record_rejects_implausible_count_before_allocating() {
+        let mut encoded = Vec::new();
+        write_type_and_authority(
+            &mut encoded,
+            MainWalRecordType::TxCommitBatch,
+            MainWalRecordAuthority {
+                term: 1,
+                ownership_epoch: None,
+            },
+        );
+        encoded.extend_from_slice(&7u64.to_le_bytes());
+        encoded.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let mut cursor = Cursor::new(encoded);
+        assert_eq!(
+            decode_main_wal_record_frame(&mut cursor, WAL_FILE_VERSION, 1)
+                .unwrap_err()
+                .to_string(),
+            "implausible main WAL action count: 4294967295"
         );
     }
 
