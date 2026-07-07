@@ -172,6 +172,10 @@ name = "blob_cache_bench"
 harness = false
 
 [[bench]]
+name = "bloom_byte_key_bench"
+harness = false
+
+[[bench]]
 name = "column_policy_gate_bench"
 harness = false
 

@@ -74,6 +74,19 @@ impl SplitBlockBloom {
         }
     }
 
+    /// Insert an arbitrary byte key into the filter using one stable hash pass.
+    #[inline]
+    pub fn insert_bytes(&mut self, key: &[u8]) {
+        let h = stable_hash64(key);
+        let block_idx = ((h >> 32) as usize) & self.mask;
+        let probe_word = h as u32;
+        let block = &mut self.blocks[block_idx];
+        for (i, &salt) in SALTS.iter().enumerate() {
+            let bit = probe_word.wrapping_mul(salt) >> 27;
+            block.words[i] |= 1u32 << bit;
+        }
+    }
+
     /// Return `true` if `key` **may** be in the set (false positives possible).
     /// Return `false` if `key` is **definitely absent** (no false negatives).
     #[inline]
@@ -82,6 +95,23 @@ impl SplitBlockBloom {
         let block = &self.blocks[block_idx];
         for (i, &salt) in SALTS.iter().enumerate() {
             let bit = key.wrapping_mul(salt) >> 27;
+            if block.words[i] & (1u32 << bit) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Return `true` if `key` **may** be in the set (false positives possible).
+    /// Return `false` if `key` is **definitely absent** (no false negatives).
+    #[inline]
+    pub fn probe_bytes(&self, key: &[u8]) -> bool {
+        let h = stable_hash64(key);
+        let block_idx = ((h >> 32) as usize) & self.mask;
+        let probe_word = h as u32;
+        let block = &self.blocks[block_idx];
+        for (i, &salt) in SALTS.iter().enumerate() {
+            let bit = probe_word.wrapping_mul(salt) >> 27;
             if block.words[i] & (1u32 << bit) == 0 {
                 return false;
             }
@@ -140,6 +170,25 @@ impl SplitBlockBloom {
             mask: num_blocks - 1,
         })
     }
+}
+
+/// Hash a raw byte slice to a stable `u64` for byte-key bloom-filter use.
+///
+/// This hasher is seedless, dependency-free, and deterministic across
+/// processes and restarts. Persisted filters that store byte-key bloom bits
+/// MUST use this same function for both writers and readers so the stored
+/// bloom and probe key agree bit-for-bit across the persisted boundary.
+pub fn stable_hash64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^ (hash >> 33)
 }
 
 /// Hash a raw byte slice to a `u32` for bloom-filter use. The writer and the
@@ -242,5 +291,81 @@ mod tests {
         let fpr = fp as f64 / probes as f64;
         // Allow up to 5% FPR — the theoretical ~1% varies with data patterns.
         assert!(fpr < 0.05, "FPR too high: {fpr:.3}");
+    }
+
+    #[test]
+    fn insert_bytes_has_no_false_negatives() {
+        const N: usize = 10_000;
+        let mut bloom = SplitBlockBloom::with_capacity(N);
+        for i in 0..N as u64 {
+            bloom.insert_bytes(&byte_key(i));
+        }
+        for i in 0..N as u64 {
+            assert!(
+                bloom.probe_bytes(&byte_key(i)),
+                "false negative for key {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn insert_bytes_false_positive_rate_stays_below_two_percent() {
+        const N: usize = 10_000;
+        let mut bloom = SplitBlockBloom::with_capacity(N);
+        for i in 0..N as u64 {
+            bloom.insert_bytes(&byte_key(i));
+        }
+        let mut fp = 0usize;
+        let probes = 10_000usize;
+        for i in N as u64..(N + probes) as u64 {
+            if bloom.probe_bytes(&byte_key(i)) {
+                fp += 1;
+            }
+        }
+        let fpr = fp as f64 / probes as f64;
+        assert!(fpr < 0.02, "FPR too high: {fpr:.3}");
+    }
+
+    #[test]
+    fn bytes_round_trip_keeps_no_false_negatives() {
+        const N: usize = 10_000;
+        let mut bloom = SplitBlockBloom::with_capacity(N);
+        for i in 0..N as u64 {
+            bloom.insert_bytes(&byte_key(i));
+        }
+        let blob = bloom.to_bytes();
+        let restored = SplitBlockBloom::from_bytes(&blob).expect("round-trips");
+        assert_eq!(restored, bloom);
+        for i in 0..N as u64 {
+            assert!(
+                restored.probe_bytes(&byte_key(i)),
+                "false negative for key {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn bytes_hashing_agrees_across_filters() {
+        const N: usize = 10_000;
+        let mut a = SplitBlockBloom::with_capacity(N);
+        let mut b = SplitBlockBloom::with_capacity(N);
+        for i in 0..N as u64 {
+            let key = byte_key(i);
+            a.insert_bytes(&key);
+            b.insert_bytes(&key);
+        }
+        assert_eq!(a, b);
+        for i in 0..N as u64 {
+            let key = byte_key(i);
+            assert_eq!(a.probe_bytes(&key), b.probe_bytes(&key));
+            assert!(a.probe_bytes(&key), "false negative for key {i}");
+        }
+    }
+
+    fn byte_key(i: u64) -> [u8; 16] {
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&i.to_le_bytes());
+        key[8..].copy_from_slice(&i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_le_bytes());
+        key
     }
 }
