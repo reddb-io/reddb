@@ -341,6 +341,7 @@ impl UnifiedStore {
             commit: None,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
+            replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             aux_metadata: RwLock::new(Vec::new()),
         }
     }
@@ -415,6 +416,7 @@ impl UnifiedStore {
             commit,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
+            replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             aux_metadata: RwLock::new(Vec::new()),
         };
 
