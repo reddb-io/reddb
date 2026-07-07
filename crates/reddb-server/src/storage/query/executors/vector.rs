@@ -147,6 +147,7 @@ impl VectorExecutor {
             edges_scanned: 0,
             rows_scanned: result.len() as u64,
             exec_time_us: start.elapsed().as_micros() as u64,
+            ..Default::default()
         };
 
         Ok(result)
@@ -409,6 +410,7 @@ impl InMemoryVectorExecutor {
             edges_scanned: 0,
             rows_scanned: self.vectors.len() as u64,
             exec_time_us: start.elapsed().as_micros() as u64,
+            ..Default::default()
         };
 
         Ok(result)
