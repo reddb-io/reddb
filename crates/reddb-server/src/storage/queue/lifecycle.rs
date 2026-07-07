@@ -349,6 +349,23 @@ pub(crate) trait QueueStore {
         side: QueueSide,
         count: usize,
     ) -> Result<usize>;
+
+    /// Remove expired push-idempotency entries for `queue`. Called on
+    /// producer push; there is no background sweeper.
+    fn reclaim_expired_dedup(&self, txn: &QueueTxn, queue: &str, now_ns: u64) -> Result<usize>;
+
+    /// Look up a live push-idempotency key.
+    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Option<MessageId>;
+
+    /// Record the first producer push outcome for `dedup_key`.
+    fn record_dedup(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        dedup_key: &str,
+        message_id: MessageId,
+        expires_at_ns: u64,
+    ) -> Result<()>;
 }
 
 /// Read-only view of a pending delivery, returned by
@@ -421,7 +438,15 @@ struct State {
     max_attempts: HashMap<(QueueId, MessageId), u32>,
     /// Optional ordering keys keyed by `(queue, message_id)`.
     ordering_keys: HashMap<(QueueId, MessageId), String>,
+    /// Queue-scoped push idempotency entries keyed by `(queue, dedup_key)`.
+    dedup: HashMap<(QueueId, String), DedupEntry>,
     dlq: Vec<DlqRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct DedupEntry {
+    message_id: MessageId,
+    expires_at_ns: u64,
 }
 
 /// In-memory fake for unit tests. Thread-safe via a single Mutex — the
@@ -954,6 +979,46 @@ impl QueueStore for InMemoryQueueStore {
         }
         Ok(moved)
     }
+
+    fn reclaim_expired_dedup(&self, _txn: &QueueTxn, queue: &str, now_ns: u64) -> Result<usize> {
+        let mut state = self.state.lock().expect("state poisoned");
+        let before = state.dedup.len();
+        state
+            .dedup
+            .retain(|(q, _), entry| q != queue || entry.expires_at_ns > now_ns);
+        Ok(before.saturating_sub(state.dedup.len()))
+    }
+
+    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Option<MessageId> {
+        let state = self.state.lock().expect("state poisoned");
+        state
+            .dedup
+            .get(&(queue.to_string(), dedup_key.to_string()))
+            .filter(|entry| entry.expires_at_ns > now_ns)
+            .map(|entry| entry.message_id)
+    }
+
+    fn record_dedup(
+        &self,
+        _txn: &QueueTxn,
+        queue: &str,
+        dedup_key: &str,
+        message_id: MessageId,
+        expires_at_ns: u64,
+    ) -> Result<()> {
+        let mut state = self.state.lock().expect("state poisoned");
+        if !state.queues.contains_key(queue) {
+            return Err(QueueStoreError::UnknownQueue(queue.to_string()));
+        }
+        state.dedup.insert(
+            (queue.to_string(), dedup_key.to_string()),
+            DedupEntry {
+                message_id,
+                expires_at_ns,
+            },
+        );
+        Ok(())
+    }
 }
 
 /// RFC 4648 base32 (lowercase, no padding). Hand-rolled — no `base32`
@@ -1078,6 +1143,32 @@ mod tests {
         // Tombstone recorded for each source id.
         let stones = t.recorded_tombstones();
         assert_eq!(stones.len(), 2);
+    }
+
+    #[test]
+    fn dedup_key_lookup_survives_message_retirement_until_window_expires() {
+        let store = InMemoryQueueStore::new();
+        store.seed_queue("q", vec![10]);
+        store.seed_payload("q", 10, Value::text("first"));
+        let t = txn();
+
+        store
+            .record_dedup(&t, "q", "retry-1", 10, 2_000)
+            .expect("record dedup");
+        assert_eq!(store.find_dedup("q", "retry-1", 1_000), Some(10));
+
+        let delivery = store
+            .mark_pending(&t, "q", 10, "workers", "alice", deadline_in(1000))
+            .expect("mark pending");
+        store.ack_pending(&t, &delivery).expect("ack original");
+        assert_eq!(
+            store.find_dedup("q", "retry-1", 1_500),
+            Some(10),
+            "consuming the original message must not remove the dedup outcome",
+        );
+
+        assert_eq!(store.reclaim_expired_dedup(&t, "q", 2_000).unwrap(), 1);
+        assert_eq!(store.find_dedup("q", "retry-1", 2_001), None);
     }
 
     #[test]
