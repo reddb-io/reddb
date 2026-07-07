@@ -213,6 +213,10 @@ impl Checkpointer {
                         crate::runtime::turbo_crash_inject::InjectionPoint::MidCheckpoint,
                     );
                 }
+                WalRecord::ProbabilisticDelta { .. } => {
+                    // Probabilistic sidecar deltas are replayed by the
+                    // runtime after loading the latest full snapshot.
+                }
                 WalRecord::FullPageImage { tx_id, .. } => {
                     result_observe_tx_id(&mut max_transaction_id, tx_id);
                     // FPI records (gh-478) are consumed by the pager
