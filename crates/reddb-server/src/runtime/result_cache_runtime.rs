@@ -192,6 +192,9 @@ fn encode_result_cache_payload(entry: &RuntimeResultCacheEntry) -> Option<Vec<u8
     out.extend_from_slice(&result.result.stats.nodes_scanned.to_le_bytes());
     out.extend_from_slice(&result.result.stats.edges_scanned.to_le_bytes());
     out.extend_from_slice(&result.result.stats.rows_scanned.to_le_bytes());
+    out.extend_from_slice(&result.result.stats.segments_total.to_le_bytes());
+    out.extend_from_slice(&result.result.stats.segments_scanned.to_le_bytes());
+    out.extend_from_slice(&result.result.stats.segments_pruned.to_le_bytes());
     out.extend_from_slice(&result.result.stats.exec_time_us.to_le_bytes());
 
     write_u32(&mut out, result.result.records.len())?;
@@ -236,6 +239,9 @@ fn decode_result_cache_payload(mut input: &[u8]) -> Option<(RuntimeQueryResult, 
         nodes_scanned: read_u64(&mut input)?,
         edges_scanned: read_u64(&mut input)?,
         rows_scanned: read_u64(&mut input)?,
+        segments_total: read_u64(&mut input)?,
+        segments_scanned: read_u64(&mut input)?,
+        segments_pruned: read_u64(&mut input)?,
         exec_time_us: read_u64(&mut input)?,
     };
 
