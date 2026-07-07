@@ -1031,6 +1031,8 @@ impl RedDBRuntime {
             QueryExpr::AlterTable(ref alter) => self.execute_alter_table(query, alter),
             QueryExpr::CreateVcsRef(ref create) => self.execute_create_vcs_ref(query, create),
             QueryExpr::DropVcsRef(ref drop_ref) => self.execute_drop_vcs_ref(query, drop_ref),
+            QueryExpr::ForkStore(ref fork) => self.execute_fork_store(query, fork),
+            QueryExpr::DropFork(ref drop_fork) => self.execute_drop_fork(query, drop_fork),
             QueryExpr::ExplainAlter(ref explain) => self.execute_explain_alter(query, explain),
             // Graph analytics commands
             QueryExpr::GraphCommand(ref cmd) => self.execute_graph_command(query, cmd),
