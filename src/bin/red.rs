@@ -105,7 +105,9 @@ fn run_ephemeral_query(
                 "Usage: red query <file.csv|file.tsv|file.json|file.ndjson> [more files ...] <sql>",
             );
         }
-        eprintln!("Usage: red query <file.csv|file.tsv|file.json|file.ndjson> [more files ...] <sql>");
+        eprintln!(
+            "Usage: red query <file.csv|file.tsv|file.json|file.ndjson> [more files ...] <sql>"
+        );
         eprintln!("Example: red query users.csv orders.csv \"SELECT * FROM t1 JOIN t2 ON ...\"");
         std::process::exit(1);
     }
