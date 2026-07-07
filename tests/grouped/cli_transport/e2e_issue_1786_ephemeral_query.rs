@@ -27,6 +27,18 @@ fn run_query(file: &str, sql: &str, extra: &[&str]) -> (i32, String, String) {
     )
 }
 
+fn run_red(args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(red_binary())
+        .args(args)
+        .output()
+        .expect("spawn red");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 fn temp_dir(label: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(&format!("reddb-test-cli-ephemeral-{label}-"))
@@ -62,6 +74,107 @@ fn red_query_csv_file_no_server_no_store() {
     assert!(!stdout.contains("\"Bob\""), "Bob leaked: {stdout}");
 
     // The ephemeral store leaves no durable artifacts next to the file.
+    let mut names: Vec<String> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["people.csv".to_string()]);
+}
+
+#[test]
+fn red_query_csv_write_save_reopen_embedded_store() {
+    let dir = temp_dir("save");
+    let fixture = dir.path().join("people.csv");
+    let update_saved = dir.path().join("people-update.rdb");
+    let insert_saved = dir.path().join("people-insert.rdb");
+    let delete_saved = dir.path().join("people-delete.rdb");
+    fs::write(&fixture, "id,name,age\n1,Alice,30\n2,Bob,9\n").expect("write fixture");
+    let fixture_str = fixture.display().to_string();
+    let update_saved_str = update_saved.display().to_string();
+    let insert_saved_str = insert_saved.display().to_string();
+    let delete_saved_str = delete_saved.display().to_string();
+
+    let (code, _stdout, stderr) = run_query(
+        &fixture_str,
+        "UPDATE people SET age = 31 WHERE name = 'Alice'",
+        &["--save", &update_saved_str],
+    );
+    assert_eq!(code, 0, "update/save failed; stderr: {stderr}");
+    assert!(
+        update_saved.exists(),
+        "--save should create an embedded store"
+    );
+
+    let (code, stdout, stderr) = run_red(&[
+        "query",
+        "--path",
+        &update_saved_str,
+        "SELECT name, age FROM people WHERE name = 'Alice'",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "reopen query failed; stderr: {stderr}");
+    assert!(stdout.contains("\"Alice\""), "stdout: {stdout}");
+    assert!(stdout.contains("\"age\":31"), "stdout: {stdout}");
+
+    let (code, _stdout, stderr) = run_query(
+        &fixture_str,
+        "INSERT INTO people (id, name, age) VALUES (3, 'Cara', 44)",
+        &["--save", &insert_saved_str],
+    );
+    assert_eq!(code, 0, "insert/save failed; stderr: {stderr}");
+    let (code, stdout, stderr) = run_red(&[
+        "query",
+        "--path",
+        &insert_saved_str,
+        "SELECT count(*) AS n FROM people",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "reopen inserted store failed; stderr: {stderr}");
+    assert!(stdout.contains("\"n\":3"), "stdout: {stdout}");
+
+    let (code, _stdout, stderr) = run_query(
+        &fixture_str,
+        "DELETE FROM people WHERE name = 'Bob'",
+        &["--save", &delete_saved_str],
+    );
+    assert_eq!(code, 0, "delete/save failed; stderr: {stderr}");
+    let (code, stdout, stderr) = run_red(&[
+        "query",
+        "--path",
+        &delete_saved_str,
+        "SELECT count(*) AS n FROM people",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "reopen deleted store failed; stderr: {stderr}");
+    assert!(stdout.contains("\"n\":1"), "stdout: {stdout}");
+
+    let (code, _stdout, stderr) = run_query(
+        &fixture_str,
+        "INSERT INTO people (id, name, age) VALUES (3, 'Cara', 44)",
+        &["--save", &update_saved_str],
+    );
+    assert_ne!(code, 0, "existing save target must be refused");
+    assert!(
+        stderr.contains("already exists"),
+        "expected overwrite refusal; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn red_query_csv_writes_without_save_leave_no_durable_artifact() {
+    let dir = temp_dir("write-nosave");
+    let path = dir.path().join("people.csv");
+    fs::write(&path, "id,name,age\n1,Alice,30\n2,Bob,9\n").expect("write fixture");
+    let path_str = path.display().to_string();
+
+    let (code, _stdout, stderr) = run_query(
+        &path_str,
+        "DELETE FROM people WHERE name = 'Bob'",
+        &["--json"],
+    );
+    assert_eq!(code, 0, "delete failed; stderr: {stderr}");
+
     let mut names: Vec<String> = fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
