@@ -1436,6 +1436,34 @@ impl RedDBRuntime {
         ))
     }
 
+    pub fn execute_promote_fork(
+        &self,
+        raw_query: &str,
+        query: &PromoteForkQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let path = self.inner.db.path().ok_or_else(|| {
+            RedDBError::Query("PROMOTE FORK requires a persistent store".to_string())
+        })?;
+        self.flush()?;
+        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let outcome = manifest
+            .promote_fork(&query.name)
+            .map_err(|err| RedDBError::Query(format!("failed to promote store fork: {err}")))?;
+        let outcome =
+            outcome.ok_or_else(|| RedDBError::NotFound(format!("store fork '{}'", query.name)))?;
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!(
+                "store fork '{}' promoted at LSN {}; retired parent archived at {}",
+                outcome.name,
+                outcome.fork_lsn,
+                outcome.archived_parent.store_identity()
+            ),
+            "promote_fork",
+        ))
+    }
+
     /// Execute EXPLAIN ALTER FOR CREATE TABLE
     ///
     /// Pure read: computes the schema diff between the target table's
