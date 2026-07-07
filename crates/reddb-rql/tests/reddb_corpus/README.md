@@ -32,11 +32,11 @@ run-varying columns: auto-assigned entity ids (`entity_id`, `node_id`,
 numbers, `red_*` capability metadata, and raw distance/score floats whose exact
 value is engine-defined rather than oracle-defined. The harness projects every
 result down to a fixed allowlist of **semantic, deterministic** columns
-(`label`, `name`, `content`, `depth`, `path_found`, `hop_count`,
-`total_weight`, `nodes_visited`, `negative_cycle_detected`, and focused scalar
-test aliases) in a canonical order. A golden therefore asserts the *meaning* of
-a result and stays silent about engine bookkeeping, so it never freezes
-non-determinism.
+(`op`, `label`, `name`, `content`, `depth`, `path_found`, `hop_count`,
+`total_weight`, `nodes_visited`, `negative_cycle_detected`, `actual_rows`, and
+focused scalar test aliases) in a canonical order. A golden therefore asserts
+the *meaning* of a result and stays silent about engine bookkeeping, so it never
+freezes non-determinism.
 
 ## Characterization is clearly marked regression-only
 
@@ -57,6 +57,9 @@ semantic columns for it.
 - `graph_commands.slt` — TRUTH: `GRAPH NEIGHBORHOOD` / `TRAVERSE` /
   `PROPERTIES` / `SHORTEST_PATH` / `CENTRALITY` over a directed chain.
 - `json_builtins.slt` — TRUTH: RedDB-specific JSON scalar builtin semantics.
+- `explain_analyze_dml.slt` — TRUTH: ADR 0071's pinned RedDB-vs-Postgres
+  divergence where `EXPLAIN ANALYZE` over DML reports real affected counts but
+  never commits.
 - `characterization_unprojected_surfaces.slt` — REGRESSION-ONLY: Gremlin,
   Cypher, SPARQL, Path, natural-language, and the `SEARCH SIMILAR … COLLECTION`
   form, each pinned with `statement ok`.

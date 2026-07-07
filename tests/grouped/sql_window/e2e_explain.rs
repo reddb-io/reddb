@@ -13,6 +13,15 @@ use reddb::{RedDBOptions, RedDBRuntime};
 
 const EXPLAIN_PLAN_COLUMNS: &[&str] =
     &["op", "source", "estimated_rows", "estimated_cost", "depth"];
+const EXPLAIN_ANALYZE_COLUMNS: &[&str] = &[
+    "op",
+    "source",
+    "estimated_rows",
+    "estimated_cost",
+    "actual_rows",
+    "actual_ms",
+    "depth",
+];
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
@@ -21,6 +30,34 @@ fn rt() -> RedDBRuntime {
 fn exec(rt: &RedDBRuntime, sql: &str) {
     rt.execute_query(sql)
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+}
+
+fn uint_value(row: &reddb::storage::query::unified::UnifiedRecord, column: &str) -> u64 {
+    match row.get(column) {
+        Some(Value::UnsignedInteger(value)) => *value,
+        Some(Value::Integer(value)) => *value as u64,
+        other => panic!("{column} must be an integer count, got {other:?}"),
+    }
+}
+
+fn analyze_dml(rt: &RedDBRuntime, sql: &str, expected_rows: u64) {
+    let analyzed = rt.execute_query(sql).expect(sql);
+    assert_eq!(analyzed.statement, "explain_analyze", "{sql}");
+    assert_eq!(analyzed.statement_type, "select", "{sql}");
+    assert_eq!(analyzed.affected_rows, 0, "{sql}");
+    assert_eq!(analyzed.result.columns, EXPLAIN_ANALYZE_COLUMNS, "{sql}");
+    assert_eq!(analyzed.result.records.len(), 1, "{sql}");
+
+    let root = &analyzed.result.records[0];
+    assert!(
+        matches!(root.get("op"), Some(Value::Text(op)) if op.as_ref() == "dml_ddl"),
+        "{sql}: {root:?}"
+    );
+    assert_eq!(uint_value(root, "actual_rows"), expected_rows, "{sql}");
+    assert!(
+        matches!(root.get("actual_ms"), Some(Value::Float(ms)) if *ms >= 0.0),
+        "{sql}: {root:?}"
+    );
 }
 
 #[test]
@@ -134,6 +171,105 @@ fn explain_dml_returns_plan_rows_without_executing_inner_statement() {
     assert!(after.result.records.iter().any(|row| {
         matches!(row.get("id"), Some(Value::Integer(2)))
             && matches!(row.get("note"), Some(Value::Text(note)) if note.as_ref() == "remove")
+    }));
+}
+
+#[test]
+fn explain_analyze_dml_reports_real_counts_and_always_aborts() {
+    let rt = rt();
+    exec(&rt, "CREATE TABLE audit_analyze (id INT, note TEXT)");
+    exec(
+        &rt,
+        "INSERT INTO audit_analyze (id, note) VALUES (1, 'keep'), (2, 'update'), (3, 'delete')",
+    );
+    exec(
+        &rt,
+        "ALTER TABLE audit_analyze ENABLE EVENTS TO audit_analyze_events",
+    );
+    exec(&rt, "QUEUE GROUP CREATE audit_analyze_events readers");
+
+    analyze_dml(
+        &rt,
+        "EXPLAIN ANALYZE UPDATE audit_analyze SET note = 'changed' WHERE id IN (1, 2)",
+        2,
+    );
+    analyze_dml(
+        &rt,
+        "EXPLAIN ANALYZE DELETE FROM audit_analyze WHERE id = 3",
+        1,
+    );
+    analyze_dml(
+        &rt,
+        "EXPLAIN ANALYZE INSERT INTO audit_analyze (id, note) VALUES (4, 'inserted')",
+        1,
+    );
+
+    let after = rt
+        .execute_query("SELECT id, note FROM audit_analyze")
+        .expect("SELECT after EXPLAIN ANALYZE");
+    assert_eq!(
+        after.result.records.len(),
+        3,
+        "EXPLAIN ANALYZE must not materialise INSERT, UPDATE, or DELETE"
+    );
+    assert!(after.result.records.iter().any(|row| {
+        matches!(row.get("id"), Some(Value::Integer(1)))
+            && matches!(row.get("note"), Some(Value::Text(note)) if note.as_ref() == "keep")
+    }));
+    assert!(after.result.records.iter().any(|row| {
+        matches!(row.get("id"), Some(Value::Integer(2)))
+            && matches!(row.get("note"), Some(Value::Text(note)) if note.as_ref() == "update")
+    }));
+    assert!(after.result.records.iter().any(|row| {
+        matches!(row.get("id"), Some(Value::Integer(3)))
+            && matches!(row.get("note"), Some(Value::Text(note)) if note.as_ref() == "delete")
+    }));
+
+    let events = rt
+        .execute_query("QUEUE READ audit_analyze_events GROUP readers CONSUMER c1 COUNT 10")
+        .expect("read event queue after EXPLAIN ANALYZE");
+    assert_eq!(
+        events.result.records.len(),
+        0,
+        "EXPLAIN ANALYZE DML must not leak commit-time effects"
+    );
+}
+
+#[test]
+fn explain_analyze_dml_error_path_aborts_staged_writes() {
+    let rt = rt();
+    exec(
+        &rt,
+        "CREATE TABLE analyze_error_path (id INT PRIMARY KEY, note TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO analyze_error_path (id, note) VALUES (1, 'base')",
+    );
+
+    let err = rt
+        .execute_query(
+            "EXPLAIN ANALYZE INSERT INTO analyze_error_path (id, note) \
+             VALUES (2, 'staged'), (1, 'duplicate')",
+        )
+        .expect_err("duplicate insert under EXPLAIN ANALYZE should fail");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("duplicate") || message.contains("unique") || message.contains("violated"),
+        "error should name the uniqueness failure: {err:?}"
+    );
+
+    let after = rt
+        .execute_query("SELECT id, note FROM analyze_error_path")
+        .expect("SELECT after failed EXPLAIN ANALYZE");
+    assert_eq!(
+        after.result.records.len(),
+        1,
+        "failed EXPLAIN ANALYZE must roll back any staged rows"
+    );
+    assert!(after.result.records.iter().any(|row| {
+        matches!(row.get("id"), Some(Value::Integer(1)))
+            && matches!(row.get("note"), Some(Value::Text(note)) if note.as_ref() == "base")
     }));
 }
 

@@ -309,6 +309,19 @@ The canonical RedDB-native contract for notifications is the runtime API in
 interoperability layer for existing client libraries, not the source of
 truth.
 
+## `EXPLAIN ANALYZE` DML Never Commits
+
+RedDB deliberately diverges from PostgreSQL for mutating `EXPLAIN ANALYZE`.
+PostgreSQL executes and commits DML under `EXPLAIN ANALYZE`; RedDB executes the
+statement inside a snapshot-isolation transaction that always aborts. The result
+reports real counters such as `actual_rows` and `actual_ms`, but no INSERT,
+UPDATE, DELETE, subscription event, queue message, or trigger effect is
+committed.
+
+Use `EXPLAIN <dml>` for the cheap plan-only tier and `EXPLAIN ANALYZE <dml>` for
+paid truth counts. In both cases, the invariant is the same: RedDB never commits
+under `EXPLAIN`.
+
 ## Limitations
 
 - Binary format output is not yet emitted — everything returns in
