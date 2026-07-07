@@ -1,7 +1,7 @@
 //! End-to-end CLI tests for the ephemeral-store tracer (issue #1786).
 //!
 //! Spawns the real `red` binary via `CARGO_BIN_EXE_red` so the full
-//! `main()` path is exercised: `red query <file.csv|file.tsv> <sql>`
+//! `main()` path is exercised: `red query <file.csv|file.tsv|file.json|file.ndjson> <sql>`
 //! materializes the file into a throwaway in-memory store, runs the
 //! query, prints the result, and leaves nothing durable behind.
 
@@ -85,6 +85,44 @@ fn red_query_tsv_file_by_alias() {
     assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
     assert!(stdout.contains("\"Porto\""), "stdout: {stdout}");
     assert!(!stdout.contains("\"Lisbon\""), "Lisbon leaked: {stdout}");
+}
+
+#[test]
+fn red_query_ndjson_file_as_documents() {
+    let dir = temp_dir("ndjson");
+    let path = dir.path().join("events.ndjson");
+    fs::write(
+        &path,
+        "{\"UserId\":7,\"name\":\"Ada\"}\n{\"UserId\":8,\"name\":\"Linus\"}\n",
+    )
+    .expect("write fixture");
+    let path_str = path.display().to_string();
+
+    let (code, stdout, stderr) = run_query(
+        &path_str,
+        "SELECT name FROM t WHERE UserId = 8",
+        &["--json"],
+    );
+    assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
+    assert!(stdout.contains("\"Linus\""), "stdout: {stdout}");
+    assert!(!stdout.contains("\"Ada\""), "Ada leaked: {stdout}");
+}
+
+#[test]
+fn red_query_json_array_file_as_documents() {
+    let dir = temp_dir("json");
+    let path = dir.path().join("products.json");
+    fs::write(&path, r#"[{"sku":"A","qty":3},{"sku":"B","qty":10}]"#).expect("write fixture");
+    let path_str = path.display().to_string();
+
+    let (code, stdout, stderr) = run_query(
+        &path_str,
+        "SELECT sku FROM products WHERE qty > 5",
+        &["--json"],
+    );
+    assert_eq!(code, 0, "exit != 0; stderr: {stderr}");
+    assert!(stdout.contains("\"B\""), "stdout: {stdout}");
+    assert!(!stdout.contains("\"A\""), "A leaked: {stdout}");
 }
 
 #[test]
