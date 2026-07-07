@@ -125,6 +125,7 @@ fn variant_name(q: &QueryExpr) -> &'static str {
         QueryExpr::ApplyMigration(_) => "ApplyMigration",
         QueryExpr::RollbackMigration(_) => "RollbackMigration",
         QueryExpr::ExplainMigration(_) => "ExplainMigration",
+        QueryExpr::Explain(_) => "Explain",
         QueryExpr::TransactionControl(_) => "TransactionControl",
         QueryExpr::MaintenanceCommand(_) => "MaintenanceCommand",
         QueryExpr::CreateSchema(_) => "CreateSchema",
