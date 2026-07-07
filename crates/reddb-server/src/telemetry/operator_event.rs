@@ -188,6 +188,13 @@ pub enum OperatorEvent {
         /// The term the node now follows.
         new_term: u64,
     },
+    /// A durable write was rejected by the ownership admission gate below
+    /// routing (ADR 0037). This is auditable fencing evidence for stale owners.
+    OwnershipFenced {
+        reason: String,
+        ownership_epoch: u64,
+        range_identity: String,
+    },
 }
 
 impl OperatorEvent {
@@ -212,6 +219,7 @@ impl OperatorEvent {
             "OutboxDlqActivated",
             "QueueDlqPromoted",
             "DeposedPrimaryRollback",
+            "OwnershipFenced",
         ]
     }
 
@@ -236,6 +244,7 @@ impl OperatorEvent {
             Self::OutboxDlqActivated { .. } => "OutboxDlqActivated",
             Self::QueueDlqPromoted { .. } => "QueueDlqPromoted",
             Self::DeposedPrimaryRollback { .. } => "DeposedPrimaryRollback",
+            Self::OwnershipFenced { .. } => "OwnershipFenced",
         }
     }
 
@@ -520,6 +529,21 @@ impl OperatorEvent {
                     AuditFieldEscaper::field("new_term", new_term),
                 ];
                 ("operator/deposed_primary_rollback", fields, summary)
+            }
+            Self::OwnershipFenced {
+                reason,
+                ownership_epoch,
+                range_identity,
+            } => {
+                let summary = format!(
+                    "ownership fenced: reason={reason} ownership_epoch={ownership_epoch} range={range_identity}"
+                );
+                let fields = vec![
+                    AuditFieldEscaper::field("reason", reason),
+                    AuditFieldEscaper::field("ownership_epoch", ownership_epoch),
+                    AuditFieldEscaper::field("range_identity", range_identity),
+                ];
+                ("operator/ownership_fenced", fields, summary)
             }
         }
     }
@@ -875,6 +899,36 @@ mod tests {
             .and_then(|d| d.get("rollback_file"))
             .and_then(|x| x.as_str());
         assert_eq!(file, Some("/data/rollback/term7-lsn200-230.rbk"));
+    }
+
+    #[test]
+    fn ownership_fenced_emits_reason_epoch_and_range() {
+        let (logger, path) = make_logger();
+        OperatorEvent::OwnershipFenced {
+            reason: "stale_ownership".into(),
+            ownership_epoch: 2,
+            range_identity: "system.global/0".into(),
+        }
+        .emit(&logger);
+        drain(&logger);
+        let v = read_last_line(&path);
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/ownership_fenced")
+        );
+        let detail = v.get("detail").expect("event detail");
+        assert_eq!(
+            detail.get("reason").and_then(|x| x.as_str()),
+            Some("stale_ownership")
+        );
+        assert_eq!(
+            detail.get("ownership_epoch").and_then(|x| x.as_i64()),
+            Some(2)
+        );
+        assert_eq!(
+            detail.get("range_identity").and_then(|x| x.as_str()),
+            Some("system.global/0")
+        );
     }
 
     // ------------------------------------------------------------------
