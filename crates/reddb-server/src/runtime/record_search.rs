@@ -164,6 +164,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
     if go_parallel {
         let schema = manager.column_schema();
         let table_name = table.to_string();
+        let hydrate_store = db.store();
         let table_row_resolver = TableRowMvccReadResolver::current_statement();
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
@@ -181,8 +182,14 @@ pub(super) fn scan_runtime_table_source_records_limited(
                 chunk
                     .iter()
                     .filter_map(|e| {
-                        let mut record =
-                            runtime_table_record_from_entity_ref_with_schema(e, schema.as_ref())?;
+                        let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
+                            hydrate_store.as_ref(),
+                            e,
+                        );
+                        let mut record = runtime_table_record_from_entity_ref_with_schema(
+                            &hydrated,
+                            schema.as_ref(),
+                        )?;
                         set_source_collection(&mut record, &table_name);
                         Some(record)
                     })
@@ -225,8 +232,10 @@ pub(super) fn scan_runtime_table_source_records_limited(
         if !db.replica_allows_entity_at_read(table, entity) {
             return true;
         }
+        let hydrated =
+            crate::runtime::impl_timeseries::hydrate_timeseries_entity(db.store().as_ref(), entity);
         if let Some(mut record) = runtime_table_record_from_entity_ref_with_schema(
-            entity,
+            &hydrated,
             manager.column_schema().as_ref(),
         ) {
             set_source_collection(&mut record, table);
@@ -274,7 +283,11 @@ pub(super) fn scan_runtime_universal_source_records_limited(
                 if !db.replica_allows_entity_at_read(collection, entity) {
                     return true;
                 }
-                if let Some(mut record) = runtime_any_record_from_entity_ref(entity) {
+                let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
+                    store.as_ref(),
+                    entity,
+                );
+                if let Some(mut record) = runtime_any_record_from_entity_ref(&hydrated) {
                     set_source_collection(&mut record, collection);
                     records.push(record);
                 }
@@ -292,7 +305,11 @@ pub(super) fn scan_runtime_universal_source_records_limited(
             if !db.replica_allows_entity_at_read(&collection, &entity) {
                 return None;
             }
-            let mut record = runtime_any_record_from_entity(entity)?;
+            let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
+                db.store().as_ref(),
+                &entity,
+            );
+            let mut record = runtime_any_record_from_entity(hydrated)?;
             set_source_collection(&mut record, &collection);
             Some(record)
         })
@@ -346,7 +363,11 @@ pub(crate) fn stream_runtime_table_source_scan(
     let columns: Vec<String> = entities
         .first()
         .and_then(|entity| {
-            runtime_table_record_from_entity_ref_with_schema(entity, schema.as_ref())
+            let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
+                db.store().as_ref(),
+                entity,
+            );
+            runtime_table_record_from_entity_ref_with_schema(&hydrated, schema.as_ref())
         })
         .map(|mut record| {
             set_source_collection(&mut record, &table_name);
@@ -360,9 +381,14 @@ pub(crate) fn stream_runtime_table_source_scan(
 
     let map_schema = schema.clone();
     let map_table = table_name.clone();
+    let hydrate_store = db.store();
     let source = entities.into_iter().filter_map(move |entity| {
+        let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
+            hydrate_store.as_ref(),
+            &entity,
+        );
         let mut record =
-            runtime_table_record_from_entity_ref_with_schema(&entity, map_schema.as_ref())?;
+            runtime_table_record_from_entity_ref_with_schema(&hydrated, map_schema.as_ref())?;
         set_source_collection(&mut record, &map_table);
         Some(Ok(record))
     });
