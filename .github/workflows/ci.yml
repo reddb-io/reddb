@@ -31,6 +31,14 @@ on:
 
 # Cost guard: new pushes cancel older runs on the same ref. Release-grade
 # validation lives in release.yml; CI push runs should stay quick.
+#
+# Cost policy (July 2026, Blacksmith bill): expensive jobs (feature matrix,
+# cross-platform, driver conformance, containers, fuzz smoke, packaging) run
+# POST-MERGE on push to main/develop — never on an open PR. PRs keep the fast
+# correctness lane: gate, lints, contract gates, quality, tests, RQL
+# conformance. `workflow_dispatch` with full_ci=true still runs everything
+# on demand. rust-cache saves are restricted to non-PR runs (save-if) so PR
+# branches never persist multi-GB caches.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -76,7 +84,7 @@ jobs:
     #      issue, same as clippy.
     name: Lint (no untyped serialization)
     needs: gate
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     continue-on-error: true
     steps:
@@ -117,7 +125,7 @@ jobs:
     # (fetch-depth: 0) so the drift guard can see the published tags.
     name: Version integrity
     needs: gate
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -137,7 +145,7 @@ jobs:
     # .github/CODEOWNERS for docs/conformance/ and scripts/verify-contract-matrix.mjs).
     name: Contract Matrix Gate
     needs: gate
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -162,7 +170,7 @@ jobs:
     # matrix does not mark supported. Run `--write` locally to regenerate.
     name: Docs Match Contract Matrix
     needs: gate
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -177,7 +185,7 @@ jobs:
   helm-chart:
     name: Helm Chart
     needs: gate
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -191,7 +199,7 @@ jobs:
     # check activates when an AFK/CI caller supplies RED_AFK_VALIDATION_SIDECAR.
     name: AFK Validation Sidecar
     needs: gate
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -235,6 +243,7 @@ jobs:
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --all
       - run: cargo clippy --locked --all -- -D warnings
@@ -268,6 +277,7 @@ jobs:
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Run sqllogictest conformance corpus against the server engine
         run: cargo test --locked --test grouped_surface_contracts rql_
       - name: Show sccache stats
@@ -298,6 +308,7 @@ jobs:
         with:
           shared-key: drivers-python-rust-1.91.0
           cache-on-failure: "true"
+          save-if: ${{ github.event_name != 'pull_request' }}
           workspaces: drivers/python -> target
       - name: cargo check --no-default-features (slim grpc/wire client only)
         working-directory: drivers/python
@@ -311,7 +322,7 @@ jobs:
     # operators may select for release artifacts.
     name: Feature Matrix (${{ matrix.features.label }})
     needs: gate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
@@ -363,6 +374,7 @@ jobs:
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
+          save-if: ${{ github.event_name != 'pull_request' }}
           workspaces: |
             . -> target
             . -> target/persistent-tests
@@ -415,7 +427,7 @@ jobs:
   driver-param-conformance:
     name: Driver Param Conformance
     needs: gate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
@@ -489,7 +501,7 @@ jobs:
     # statically links the engine, so `maturin develop` is self-contained.
     name: Driver Runnable Examples
     needs: gate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 35
     env:
@@ -538,7 +550,7 @@ jobs:
     # tarball, so this also exercises the include manifest end-to-end.
     name: Publish Dry-Run (crates.io)
     needs: gate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     env:
@@ -565,7 +577,7 @@ jobs:
   containers:
     name: Container Stack
     needs: gate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
@@ -625,6 +637,7 @@ jobs:
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Run chaos, drill, and persistence tests
         run: cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast
 
@@ -655,6 +668,7 @@ jobs:
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Start Floci
         run: |
           docker run -d --name reddb-ci-floci \
@@ -702,7 +716,7 @@ jobs:
     # (systemd install, mmap, Unix sockets) via cfg gates in the source.
     name: Windows (build + unit tests)
     needs: gate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-8vcpu-windows-2025
     timeout-minutes: 30
     steps:
@@ -727,7 +741,7 @@ jobs:
     # story complete. Same scope — library build + unit tests.
     name: macOS (build + unit tests)
     needs: gate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 30
     steps:
@@ -746,12 +760,11 @@ jobs:
         run: cargo test --locked --lib
 
   fuzz-parsers:
-    # Required status-check name expected by main's branch protection.
-    # Keep the per-PR path as a bounded smoke window; the long exploration
-    # window lives in parser-fuzz-nightly.yml.
+    # Post-merge bounded smoke window (cost policy above); the long
+    # exploration window lives in parser-fuzz-nightly.yml.
     name: Fuzz Parsers
     needs: gate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
@@ -806,7 +819,7 @@ jobs:
   package:
     name: cargo package dry-run
     needs: gate
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:

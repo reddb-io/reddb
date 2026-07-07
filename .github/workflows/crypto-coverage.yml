@@ -11,10 +11,6 @@ on:
     paths:
       - 'crates/reddb-crypto/**'
       - '.github/workflows/crypto-coverage.yml'
-  pull_request:
-    paths:
-      - 'crates/reddb-crypto/**'
-      - '.github/workflows/crypto-coverage.yml'
   workflow_dispatch:
 
 concurrency:

@@ -10,10 +10,6 @@ on:
     paths:
       - 'crates/reddb-wire/**'
       - '.github/workflows/wire-coverage.yml'
-  pull_request:
-    paths:
-      - 'crates/reddb-wire/**'
-      - '.github/workflows/wire-coverage.yml'
   workflow_dispatch:
 
 concurrency:

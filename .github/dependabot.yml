@@ -9,6 +9,7 @@ updates:
       day: monday
       time: "06:00"
       timezone: America/Sao_Paulo
+    rebase-strategy: disabled
     open-pull-requests-limit: 5
     groups:
       tokio-stack:
@@ -27,32 +28,39 @@ updates:
   - package-ecosystem: cargo
     directory: /drivers/python
     schedule: { interval: weekly }
+    rebase-strategy: disabled
     open-pull-requests-limit: 2
   - package-ecosystem: pip
     directory: /drivers/python
     schedule: { interval: weekly }
+    rebase-strategy: disabled
     open-pull-requests-limit: 2
   - package-ecosystem: pip
     directory: /drivers/python-asyncio
     schedule: { interval: weekly }
+    rebase-strategy: disabled
     open-pull-requests-limit: 2
   - package-ecosystem: npm
     directory: /drivers/js
     schedule: { interval: weekly }
+    rebase-strategy: disabled
     open-pull-requests-limit: 2
   - package-ecosystem: gomod
     directory: /drivers/go
     schedule: { interval: weekly }
+    rebase-strategy: disabled
     open-pull-requests-limit: 2
   - package-ecosystem: composer
     directory: /drivers/php
     schedule: { interval: weekly }
+    rebase-strategy: disabled
     open-pull-requests-limit: 2
 
   # GitHub Actions — keep workflow base images / actions current.
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    rebase-strategy: disabled
     open-pull-requests-limit: 5
     groups:
       actions:
@@ -68,4 +76,5 @@ updates:
   - package-ecosystem: docker
     directory: /
     schedule: { interval: weekly }
+    rebase-strategy: disabled
     open-pull-requests-limit: 2
