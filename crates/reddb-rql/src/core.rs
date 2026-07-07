@@ -57,6 +57,8 @@ pub enum QueryExpr {
     DropVcsRef(DropVcsRefQuery),
     /// FORK STORE AS name [AT LSN n]
     ForkStore(ForkStoreQuery),
+    /// PROMOTE FORK name
+    PromoteFork(PromoteForkQuery),
     /// DROP FORK name
     DropFork(DropForkQuery),
     /// GRAPH subcommand (NEIGHBORHOOD, SHORTEST_PATH, etc.)
@@ -2285,6 +2287,12 @@ pub struct DropVcsRefQuery {
 pub struct ForkStoreQuery {
     pub name: String,
     pub at_lsn: Option<u64>,
+}
+
+/// PROMOTE FORK name
+#[derive(Debug, Clone)]
+pub struct PromoteForkQuery {
+    pub name: String,
 }
 
 /// DROP FORK name
