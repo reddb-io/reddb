@@ -191,6 +191,9 @@ pub struct RedDBOptions {
     /// Maximum hypertable chunks the checkpoint path may seal into derived
     /// columnar artifacts per checkpoint. `usize::MAX` means no practical cap.
     pub checkpoint_columnar_emission_budget_chunks: usize,
+    /// Minimum rows a sealed in-scope chunk must carry before the derived
+    /// columnar projection is materialized.
+    pub columnar_projection_size_floor_rows: usize,
     pub cache_pages: usize,
     pub snapshot_retention: usize,
     pub export_retention: usize,
@@ -260,6 +263,10 @@ impl fmt::Debug for RedDBOptions {
                 "checkpoint_columnar_emission_budget_chunks",
                 &self.checkpoint_columnar_emission_budget_chunks,
             )
+            .field(
+                "columnar_projection_size_floor_rows",
+                &self.columnar_projection_size_floor_rows,
+            )
             .field("cache_pages", &self.cache_pages)
             .field("snapshot_retention", &self.snapshot_retention)
             .field("export_retention", &self.export_retention)
@@ -292,6 +299,7 @@ impl Clone for RedDBOptions {
             auto_checkpoint_pages: self.auto_checkpoint_pages,
             checkpoint_columnar_emission_budget_chunks: self
                 .checkpoint_columnar_emission_budget_chunks,
+            columnar_projection_size_floor_rows: self.columnar_projection_size_floor_rows,
             cache_pages: self.cache_pages,
             snapshot_retention: self.snapshot_retention,
             export_retention: self.export_retention,
@@ -331,6 +339,7 @@ impl Default for RedDBOptions {
             group_commit: GroupCommitOptions::default(),
             auto_checkpoint_pages: 1000,
             checkpoint_columnar_emission_budget_chunks: usize::MAX,
+            columnar_projection_size_floor_rows: 4,
             cache_pages: 10_000,
             snapshot_retention: DEFAULT_SNAPSHOT_RETENTION,
             export_retention: DEFAULT_EXPORT_RETENTION,
@@ -408,6 +417,7 @@ impl RedDBOptions {
             data_path: Some(path),
             auto_checkpoint_pages: 0,
             checkpoint_columnar_emission_budget_chunks: usize::MAX,
+            columnar_projection_size_floor_rows: 4,
             cache_pages: 2_000,
             snapshot_retention: DEFAULT_SNAPSHOT_RETENTION,
             export_retention: DEFAULT_EXPORT_RETENTION,
@@ -458,6 +468,11 @@ impl RedDBOptions {
 
     pub fn with_checkpoint_columnar_emission_budget_chunks(mut self, chunks: usize) -> Self {
         self.checkpoint_columnar_emission_budget_chunks = chunks;
+        self
+    }
+
+    pub fn with_columnar_projection_size_floor_rows(mut self, rows: usize) -> Self {
+        self.columnar_projection_size_floor_rows = rows;
         self
     }
 
