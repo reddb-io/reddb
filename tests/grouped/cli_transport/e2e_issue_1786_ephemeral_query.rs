@@ -234,7 +234,10 @@ fn red_query_dry_run_delete_prints_explain_and_keeps_rows() {
     ]);
     assert_eq!(code, 0, "dry-run failed; stderr: {stderr}");
     assert!(stdout.contains("\"ok\":true"), "stdout: {stdout}");
-    assert!(stdout.contains("\"statement\":\"explain\""), "stdout: {stdout}");
+    assert!(
+        stdout.contains("\"statement\":\"explain\""),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("DELETE FROM people"), "stdout: {stdout}");
 
     let (code, stdout, stderr) = run_red(&[
@@ -245,7 +248,10 @@ fn red_query_dry_run_delete_prints_explain_and_keeps_rows() {
         "--json",
     ]);
     assert_eq!(code, 0, "count failed; stderr: {stderr}");
-    assert!(stdout.contains("\"n\":2"), "dry-run deleted a row: {stdout}");
+    assert!(
+        stdout.contains("\"n\":2"),
+        "dry-run deleted a row: {stdout}"
+    );
 }
 
 #[test]
