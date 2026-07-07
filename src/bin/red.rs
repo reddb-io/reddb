@@ -3864,7 +3864,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                              (text|int|float|bool|null|vec|json).",
                 ));
                 flags.push(cli::types::FlagSchema::new("format").with_description(
-                    "Row output format for query results (table|json|ndjson|csv|tsv).",
+                    "Row output format for query results (table|json|ndjson|csv|tsv|toon).",
                 ));
                 flags.push(cli::types::FlagSchema::new("save").with_description(
                     "Persist an ephemeral data-file query session as a new embedded .rdb file",
