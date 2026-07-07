@@ -14,7 +14,9 @@
 //! term and ownership epoch. If the Supervisor loses majority, owners may continue
 //! only until their valid lease expires."* The lease is the owner's *positive*
 //! permission to write — without a currently-valid one it must stop, even if the
-//! catalog still names it owner and nothing has explicitly deposed it.
+//! catalog still names it owner and nothing has explicitly deposed it. The lease
+//! is never the sole safety guard: every durable write also passes the ownership
+//! epoch/catalog gate below.
 //!
 //! ## What a lease binds together
 //!
@@ -32,9 +34,12 @@
 //!   If ownership moves (the epoch bumps via a [transition](super::ownership_transition)),
 //!   the lease no longer matches the catalog and the owner self-fences.
 //!
-//! plus a `[granted_at_ms, expires_at_ms)` validity window — the *time-bounded*
-//! part. Time is passed in explicitly (`now_ms`) so the whole module stays a pure,
-//! deterministic data model with no clock I/O, just like its siblings.
+//! plus a `[granted_at_monotonic_ms, granted_at_monotonic_ms + ttl_ms)` validity
+//! window measured on the holder's monotonic clock — the *time-bounded* part.
+//! Time is passed in explicitly (`now_monotonic_ms`) so the whole module stays a
+//! pure, deterministic data model with no clock I/O, just like its siblings. Wall
+//! clock changes are not inputs to lease expiry and therefore cannot extend or
+//! shorten durable-write authority.
 //!
 //! ## Self-fence and read-only mode
 //!
@@ -109,14 +114,90 @@ impl std::fmt::Display for SupervisorTerm {
     }
 }
 
+/// Validated timing knobs for ownership leases.
+///
+/// The safety margin is operator-configured slack reserved for inter-node clock
+/// uncertainty around lease handoff and renewal decisions. It must be at least
+/// the configured maximum clock drift; otherwise a node could treat a lease as
+/// safely renewable/promotable while another node is still inside the tolerated
+/// drift envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnershipLeaseTiming {
+    lease_ttl_ms: u64,
+    safety_margin_ms: u64,
+    max_clock_drift_ms: u64,
+}
+
+impl OwnershipLeaseTiming {
+    pub fn new(
+        lease_ttl_ms: u64,
+        safety_margin_ms: u64,
+        max_clock_drift_ms: u64,
+    ) -> Result<Self, OwnershipLeaseTimingError> {
+        if lease_ttl_ms == 0 {
+            return Err(OwnershipLeaseTimingError::ZeroLeaseTtl);
+        }
+        if safety_margin_ms < max_clock_drift_ms {
+            return Err(OwnershipLeaseTimingError::SafetyMarginBelowMaxClockDrift {
+                safety_margin_ms,
+                max_clock_drift_ms,
+            });
+        }
+        Ok(Self {
+            lease_ttl_ms,
+            safety_margin_ms,
+            max_clock_drift_ms,
+        })
+    }
+
+    pub fn lease_ttl_ms(self) -> u64 {
+        self.lease_ttl_ms
+    }
+
+    pub fn safety_margin_ms(self) -> u64 {
+        self.safety_margin_ms
+    }
+
+    pub fn max_clock_drift_ms(self) -> u64 {
+        self.max_clock_drift_ms
+    }
+}
+
+/// Invalid ownership lease timing configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnershipLeaseTimingError {
+    ZeroLeaseTtl,
+    SafetyMarginBelowMaxClockDrift {
+        safety_margin_ms: u64,
+        max_clock_drift_ms: u64,
+    },
+}
+
+impl std::fmt::Display for OwnershipLeaseTimingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroLeaseTtl => write!(f, "ownership lease TTL must be greater than zero"),
+            Self::SafetyMarginBelowMaxClockDrift {
+                safety_margin_ms,
+                max_clock_drift_ms,
+            } => write!(
+                f,
+                "ownership lease safety margin {safety_margin_ms} ms is below configured max clock drift {max_clock_drift_ms} ms"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OwnershipLeaseTimingError {}
+
 /// Time-bounded write authority for one range owner, issued under a Supervisor
 /// term and ownership epoch.
 ///
 /// A lease is the owner's *positive* permission to take durable writes. It is
 /// per-range (it names its [`CollectionId`] + [`RangeId`]), bound to the owner it
-/// was issued to, and valid only on the `[granted_at_ms, expires_at_ms)` window
-/// and only while the Supervisor term and ownership epoch it carries still match
-/// the live cluster. The owner re-validates it on every durable write through
+/// was issued to, and valid only on the holder-monotonic lease window and only
+/// while the Supervisor term and ownership epoch it carries still match the live
+/// cluster. The owner re-validates it on every durable write through
 /// [`LeasedOwner::evaluate`]; once any binding no longer holds, the owner
 /// self-fences.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,12 +207,14 @@ pub struct OwnershipLease {
     range_id: RangeId,
     owner: NodeIdentity,
     epoch: OwnershipEpoch,
-    granted_at_ms: u64,
-    expires_at_ms: u64,
+    granted_at_monotonic_ms: u64,
+    ttl_ms: u64,
+    safety_margin_ms: u64,
 }
 
 impl OwnershipLease {
-    /// Grant a lease valid for `ttl_ms` from `granted_at_ms`, under
+    /// Grant a lease valid for `timing.lease_ttl_ms()` from
+    /// `granted_at_monotonic_ms`, under
     /// `supervisor_term` and ownership `epoch`, for `owner`'s authority over
     /// `(collection, range_id)`.
     #[allow(clippy::too_many_arguments)]
@@ -141,8 +224,8 @@ impl OwnershipLease {
         range_id: RangeId,
         owner: NodeIdentity,
         epoch: OwnershipEpoch,
-        granted_at_ms: u64,
-        ttl_ms: u64,
+        granted_at_monotonic_ms: u64,
+        timing: OwnershipLeaseTiming,
     ) -> Self {
         Self {
             supervisor_term,
@@ -150,8 +233,9 @@ impl OwnershipLease {
             range_id,
             owner,
             epoch,
-            granted_at_ms,
-            expires_at_ms: granted_at_ms.saturating_add(ttl_ms),
+            granted_at_monotonic_ms,
+            ttl_ms: timing.lease_ttl_ms(),
+            safety_margin_ms: timing.safety_margin_ms(),
         }
     }
 
@@ -175,25 +259,35 @@ impl OwnershipLease {
         self.epoch
     }
 
-    pub fn granted_at_ms(&self) -> u64 {
-        self.granted_at_ms
+    pub fn granted_at_monotonic_ms(&self) -> u64 {
+        self.granted_at_monotonic_ms
     }
 
-    pub fn expires_at_ms(&self) -> u64 {
-        self.expires_at_ms
+    pub fn ttl_ms(&self) -> u64 {
+        self.ttl_ms
     }
 
-    /// Has the lease's validity window closed at `now_ms`? The window is
-    /// half-open: the instant `now_ms == expires_at_ms` is already expired, so a
-    /// lease never grants authority at or past its stated end.
-    pub fn is_expired(&self, now_ms: u64) -> bool {
-        now_ms >= self.expires_at_ms
+    pub fn safety_margin_ms(&self) -> u64 {
+        self.safety_margin_ms
     }
 
-    /// Milliseconds of authority left at `now_ms`, saturating to zero once
-    /// expired. The owner's keep-alive uses this to decide when to renew.
-    pub fn remaining_ms(&self, now_ms: u64) -> u64 {
-        self.expires_at_ms.saturating_sub(now_ms)
+    pub fn expires_at_monotonic_ms(&self) -> u64 {
+        self.granted_at_monotonic_ms.saturating_add(self.ttl_ms)
+    }
+
+    /// Has the lease's validity window closed at `now_monotonic_ms`? The window
+    /// is half-open: the instant `now_monotonic_ms == expires_at_monotonic_ms` is
+    /// already expired, so a lease never grants authority at or past its stated
+    /// end.
+    pub fn is_expired(&self, now_monotonic_ms: u64) -> bool {
+        now_monotonic_ms >= self.expires_at_monotonic_ms()
+    }
+
+    /// Milliseconds of authority left at `now_monotonic_ms`, saturating to zero
+    /// once expired. The owner's keep-alive uses this to decide when to renew.
+    pub fn remaining_ms(&self, now_monotonic_ms: u64) -> u64 {
+        self.expires_at_monotonic_ms()
+            .saturating_sub(now_monotonic_ms)
     }
 
     /// Does this lease cover the range `(collection, range_id)` for `owner`? A
@@ -415,7 +509,7 @@ impl LeasedOwner {
         if lease.is_expired(now_ms) {
             return OwnerWriteMode::Fenced(FenceReason::Expired {
                 now_ms,
-                expires_at_ms: lease.expires_at_ms,
+                expires_at_ms: lease.expires_at_monotonic_ms(),
             });
         }
         OwnerWriteMode::Durable
@@ -664,7 +758,7 @@ mod tests {
             ident(owner),
             OwnershipEpoch::initial(),
             0,
-            ttl_ms,
+            OwnershipLeaseTiming::new(ttl_ms, 0, 0).unwrap(),
         )
     }
 
@@ -676,8 +770,8 @@ mod tests {
     fn lease_window_is_half_open() {
         let orders = collection("orders");
         let lease = lease_for(&orders, "CN=node-a", 1_000);
-        assert_eq!(lease.granted_at_ms(), 0);
-        assert_eq!(lease.expires_at_ms(), 1_000);
+        assert_eq!(lease.granted_at_monotonic_ms(), 0);
+        assert_eq!(lease.expires_at_monotonic_ms(), 1_000);
         assert!(!lease.is_expired(0));
         assert!(!lease.is_expired(999));
         // The boundary instant is already expired — authority never extends to or
@@ -698,6 +792,50 @@ mod tests {
         assert_eq!(lease.range_id(), RangeId::new(1));
         assert_eq!(lease.owner(), &ident("CN=node-a"));
         assert_eq!(lease.epoch(), OwnershipEpoch::initial());
+    }
+
+    #[test]
+    fn lease_timing_config_enforces_margin_at_the_drift_boundary() {
+        let at_boundary = OwnershipLeaseTiming::new(10_000, 250, 250)
+            .expect("margin exactly equal to max drift is allowed");
+        assert_eq!(at_boundary.lease_ttl_ms(), 10_000);
+        assert_eq!(at_boundary.safety_margin_ms(), 250);
+        assert_eq!(at_boundary.max_clock_drift_ms(), 250);
+
+        let below_boundary = OwnershipLeaseTiming::new(10_000, 249, 250)
+            .expect_err("margin below configured max drift is invalid");
+        assert_eq!(
+            below_boundary,
+            OwnershipLeaseTimingError::SafetyMarginBelowMaxClockDrift {
+                safety_margin_ms: 249,
+                max_clock_drift_ms: 250,
+            }
+        );
+    }
+
+    #[test]
+    fn lease_expiry_uses_holder_monotonic_elapsed_time_not_wall_clock() {
+        let orders = collection("orders");
+        let timing = OwnershipLeaseTiming::new(1_000, 100, 100).unwrap();
+        let lease = OwnershipLease::grant(
+            SupervisorTerm::genesis(),
+            orders,
+            RangeId::new(1),
+            ident("CN=node-a"),
+            OwnershipEpoch::initial(),
+            10_000,
+            timing,
+        );
+
+        assert_eq!(lease.granted_at_monotonic_ms(), 10_000);
+        assert_eq!(lease.expires_at_monotonic_ms(), 11_000);
+        assert_eq!(lease.ttl_ms(), 1_000);
+        assert!(!lease.is_expired(10_999));
+        assert!(lease.is_expired(11_000));
+
+        // A wall-clock jump backward or forward is not an input to the model; only
+        // holder-monotonic elapsed time from grant changes the decision.
+        assert_eq!(lease.remaining_ms(10_250), 750);
     }
 
     // ---------------------------------------------------------------
@@ -817,10 +955,37 @@ mod tests {
             ident("CN=node-a"),
             OwnershipEpoch::initial(),
             900,
-            1_000,
+            OwnershipLeaseTiming::new(1_000, 0, 0).unwrap(),
         ));
         let mode = owner.evaluate(SupervisorTerm::genesis(), OwnershipEpoch::initial(), 1_500);
         assert_eq!(mode, OwnerWriteMode::Durable);
+    }
+
+    #[test]
+    fn renewal_race_at_expiry_boundary_fences_until_new_grant_is_installed() {
+        let orders = collection("orders");
+        let mut owner = LeasedOwner::with_lease(lease_for(&orders, "CN=node-a", 1_000));
+        let term = SupervisorTerm::genesis();
+        let epoch = OwnershipEpoch::initial();
+
+        assert_eq!(
+            owner.evaluate(term, epoch, 1_000),
+            OwnerWriteMode::Fenced(FenceReason::Expired {
+                now_ms: 1_000,
+                expires_at_ms: 1_000,
+            })
+        );
+
+        owner.grant(OwnershipLease::grant(
+            term,
+            orders,
+            RangeId::new(1),
+            ident("CN=node-a"),
+            epoch,
+            1_000,
+            OwnershipLeaseTiming::new(1_000, 0, 0).unwrap(),
+        ));
+        assert_eq!(owner.evaluate(term, epoch, 1_000), OwnerWriteMode::Durable);
     }
 
     // ---------------------------------------------------------------
@@ -1034,7 +1199,7 @@ mod tests {
             ident("CN=node-b"),
             current.epoch(),
             0,
-            100_000,
+            OwnershipLeaseTiming::new(100_000, 0, 0).unwrap(),
         ));
 
         let err = admit_durable_write(
@@ -1088,7 +1253,7 @@ mod tests {
             ident("CN=node-a"),
             OwnershipEpoch::initial(),
             0,
-            1_000,
+            OwnershipLeaseTiming::new(1_000, 0, 0).unwrap(),
         );
         let owner = LeasedOwner::with_lease(wrong_range_lease);
         let err = admit_durable_write(
@@ -1154,7 +1319,7 @@ mod tests {
             ident("CN=node-a"),
             OwnershipEpoch::initial(),
             2_000,
-            1_000,
+            OwnershipLeaseTiming::new(1_000, 0, 0).unwrap(),
         ));
         assert!(admit_durable_write(
             &catalog,
