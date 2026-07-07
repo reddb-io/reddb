@@ -526,7 +526,14 @@ fn delete_message_with_state(
 
 fn remove_message_state(store: &UnifiedStore, queue: &str, message_id: MessageId) {
     super::impl_queue::remove_meta_rows(store, |row| {
-        super::impl_queue::row_text(row, "queue").as_deref() == Some(queue)
+        let kind = super::impl_queue::row_text(row, "kind");
+        matches!(
+            kind.as_deref(),
+            Some(KIND_PENDING_LC)
+                | Some(KIND_ACKED_LC)
+                | Some(KIND_ATTEMPTS_LC)
+                | Some(KIND_PENDING_LEGACY)
+        ) && super::impl_queue::row_text(row, "queue").as_deref() == Some(queue)
             && super::impl_queue::row_u64(row, "message_id") == Some(message_id)
     });
 }
@@ -1043,6 +1050,37 @@ impl QueueStore for PrimaryQueueStore {
             }
         }
         Ok(popped.len())
+    }
+
+    fn reclaim_expired_dedup(&self, _txn: &QueueTxn, queue: &str, now_ns: u64) -> Result<usize> {
+        let store = self.runtime.db().store();
+        super::impl_queue::reclaim_expired_queue_dedup(store.as_ref(), queue, now_ns)
+            .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))
+    }
+
+    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Option<MessageId> {
+        let store = self.runtime.db().store();
+        super::impl_queue::find_queue_dedup(store.as_ref(), queue, dedup_key, now_ns)
+            .map(|id| id.raw())
+    }
+
+    fn record_dedup(
+        &self,
+        _txn: &QueueTxn,
+        queue: &str,
+        dedup_key: &str,
+        message_id: MessageId,
+        expires_at_ns: u64,
+    ) -> Result<()> {
+        let store = self.runtime.db().store();
+        super::impl_queue::record_queue_dedup(
+            store.as_ref(),
+            queue,
+            dedup_key,
+            EntityId::new(message_id),
+            expires_at_ns,
+        )
+        .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))
     }
 }
 

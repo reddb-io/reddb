@@ -153,6 +153,29 @@ red query "SELECT * FROM users WHERE age > 21" --path ./data.rdb
 | `--format` | | `table` | Row output format: `table`, `json`, `ndjson`, `csv`, `tsv`, `toon` |
 | `--json` | | `false` | Emit a JSON envelope on stdout |
 
+### Ephemeral file queries
+
+`red query` can load one or more local CSV/TSV files into a throwaway
+in-memory store before running the SQL. Every leading data-file
+argument is loaded; the first non-file positional is the SQL.
+
+```bash
+red query users.csv orders.csv \
+  "SELECT t1.name, t2.total FROM t1 JOIN t2 ON t1.id = t2.user_id"
+```
+
+Each file is addressable by its sanitized file-stem collection name and
+by its positional alias. With one file, `t` remains the alias. With
+multiple files, aliases are `t1`, `t2`, and so on in argument order.
+
+Stem collisions are deterministic: the first file keeps the sanitized
+stem, and later collisions receive `_2`, `_3`, and later suffixes in
+argument order. For example, `items.csv` and `items!!.csv` load as
+`items` and `items_2`; `t1` and `t2` remain the guaranteed-unambiguous
+handles. The aliases and stem names are real collections in the
+ephemeral store, so they work in queries and catalog commands such as
+`SHOW STATS t1`.
+
 ### Parameterized queries
 
 `--param <value>` (or `-p <value>`) binds positionally — the first

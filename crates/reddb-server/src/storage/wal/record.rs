@@ -43,6 +43,15 @@ pub enum WalRecord {
         entity_id: u64,
         vector: Vec<f32>,
     },
+    /// Logical probabilistic-structure mutation delta. Checkpoints carry
+    /// full snapshots through the regular store state; crash recovery
+    /// replays these deltas after loading the latest snapshot.
+    ProbabilisticDelta {
+        kind: u8,
+        operation: u8,
+        name: String,
+        operands: Vec<Vec<u8>>,
+    },
     /// Checkpoint marker (indicates up to which LSN pages are flushed)
     Checkpoint { lsn: u64 },
 }
@@ -151,6 +160,17 @@ impl WalRecord {
                 entity_id: *entity_id,
                 vector: vector.clone(),
             },
+            WalRecord::ProbabilisticDelta {
+                kind,
+                operation,
+                name,
+                operands,
+            } => MainWalRecordFrame::ProbabilisticDelta {
+                kind: *kind,
+                operation: *operation,
+                name: name.clone(),
+                operands: operands.clone(),
+            },
             WalRecord::Checkpoint { lsn } => MainWalRecordFrame::Checkpoint { lsn: *lsn },
         }
     }
@@ -191,6 +211,17 @@ impl WalRecord {
                 collection,
                 entity_id,
                 vector,
+            },
+            MainWalRecordFrame::ProbabilisticDelta {
+                kind,
+                operation,
+                name,
+                operands,
+            } => WalRecord::ProbabilisticDelta {
+                kind,
+                operation,
+                name,
+                operands,
             },
             MainWalRecordFrame::Checkpoint { lsn } => WalRecord::Checkpoint { lsn },
         }

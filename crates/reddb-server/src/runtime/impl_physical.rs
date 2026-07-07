@@ -1,5 +1,94 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+struct MetricsRetentionRollupPolicy {
+    target: String,
+    aggregation: String,
+    bucket_ns: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct MetricsRollupKey {
+    metric: String,
+    bucket_ns: u64,
+    tags: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+struct MetricsRollupAccumulator {
+    count: u64,
+    sum: f64,
+    min: f64,
+    max: f64,
+}
+
+impl MetricsRollupAccumulator {
+    fn new(value: f64) -> Self {
+        Self {
+            count: 1,
+            sum: value,
+            min: value,
+            max: value,
+        }
+    }
+
+    fn push(&mut self, value: f64) {
+        self.count = self.count.saturating_add(1);
+        self.sum += value;
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+    }
+
+    fn value(&self, aggregation: &str) -> f64 {
+        match aggregation {
+            "sum" => self.sum,
+            "min" => self.min,
+            "max" => self.max,
+            "count" => self.count as f64,
+            _ => self.sum / self.count.max(1) as f64,
+        }
+    }
+}
+
+fn metrics_rollup_policies_for_retention(
+    contract: &crate::physical::CollectionContract,
+) -> Vec<MetricsRetentionRollupPolicy> {
+    contract
+        .metrics_rollup_policies
+        .iter()
+        .filter_map(|spec| {
+            let parsed = crate::storage::timeseries::retention::DownsamplePolicy::parse(spec)?;
+            if parsed.source != "raw"
+                || !matches!(
+                    parsed.aggregation.as_str(),
+                    "avg" | "sum" | "min" | "max" | "count"
+                )
+            {
+                return None;
+            }
+            Some(MetricsRetentionRollupPolicy {
+                target: parsed.target,
+                aggregation: parsed.aggregation,
+                bucket_ns: parsed.bucket_ns,
+            })
+        })
+        .collect()
+}
+
+fn metrics_rollup_collection_for_retention(raw_collection: &str, target: &str) -> String {
+    let sanitized = target
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("red_metrics_rollup_{raw_collection}_{sanitized}")
+}
+
 impl RedDBRuntime {
     pub fn create_export(&self, name: impl Into<String>) -> RedDBResult<ExportDescriptor> {
         self.inner
@@ -329,6 +418,7 @@ impl RedDBRuntime {
                 crate::storage::EntityData::TimeSeries(point) => point.timestamp_ns < cutoff_ns,
                 _ => false,
             });
+            self.materialize_metrics_rollups_for_retention(&contract, &expired)?;
             for entity in expired {
                 let deleted = store
                     .delete(&contract.name, entity.id)
@@ -342,6 +432,93 @@ impl RedDBRuntime {
                         "entity",
                     );
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn materialize_metrics_rollups_for_retention(
+        &self,
+        contract: &crate::physical::CollectionContract,
+        raw_points: &[crate::storage::UnifiedEntity],
+    ) -> RedDBResult<()> {
+        if raw_points.is_empty() {
+            return Ok(());
+        }
+        let policies = metrics_rollup_policies_for_retention(contract);
+        if policies.is_empty() {
+            return Ok(());
+        }
+
+        let store = self.inner.db.store();
+        for policy in policies {
+            let rollup_collection =
+                metrics_rollup_collection_for_retention(&contract.name, &policy.target);
+            if store.get_collection(&rollup_collection).is_none() {
+                store
+                    .create_collection(&rollup_collection)
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            }
+
+            let mut buckets = BTreeMap::<MetricsRollupKey, MetricsRollupAccumulator>::new();
+            for entity in raw_points {
+                let crate::storage::EntityData::TimeSeries(point) = &entity.data else {
+                    continue;
+                };
+                let bucket_ns = (point.timestamp_ns / policy.bucket_ns) * policy.bucket_ns;
+                let mut tags = point
+                    .tags
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect::<Vec<_>>();
+                tags.sort();
+                let key = MetricsRollupKey {
+                    metric: point.metric.clone(),
+                    bucket_ns,
+                    tags,
+                };
+                buckets
+                    .entry(key)
+                    .and_modify(|acc| acc.push(point.value))
+                    .or_insert_with(|| MetricsRollupAccumulator::new(point.value));
+            }
+
+            for (key, accumulator) in buckets {
+                let tags = key.tags.into_iter().collect::<HashMap<_, _>>();
+                if let Some(manager) = store.get_collection(&rollup_collection) {
+                    for entity in manager.query_all(|entity| match &entity.data {
+                        crate::storage::EntityData::TimeSeries(point) => {
+                            point.metric == key.metric
+                                && point.timestamp_ns == key.bucket_ns
+                                && point.tags == tags
+                        }
+                        _ => false,
+                    }) {
+                        store
+                            .delete(&rollup_collection, entity.id)
+                            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                    }
+                }
+
+                let entity = crate::storage::UnifiedEntity::new(
+                    crate::storage::EntityId::new(0),
+                    crate::storage::EntityKind::TimeSeriesPoint(Box::new(
+                        crate::storage::TimeSeriesPointKind {
+                            series: rollup_collection.clone(),
+                            metric: key.metric.clone(),
+                        },
+                    )),
+                    crate::storage::EntityData::TimeSeries(crate::storage::TimeSeriesData {
+                        metric: key.metric,
+                        timestamp_ns: key.bucket_ns,
+                        value: accumulator.value(&policy.aggregation),
+                        tags,
+                    }),
+                );
+                store
+                    .insert_auto(&rollup_collection, entity)
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
             }
         }
 

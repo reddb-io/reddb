@@ -57,6 +57,7 @@ impl RedDBRuntime {
         self.seal_hypertable_chunks_for_checkpoint(
             self.inner.checkpoint_columnar_emission_budget_chunks,
         )?;
+        self.persist_probabilistic_snapshots()?;
         self.inner.db.flush_local_only().map_err(|err| {
             // Issue #205 — local flush failure is a CheckpointFailed
             // operator-grade event. The local-flush path also covers

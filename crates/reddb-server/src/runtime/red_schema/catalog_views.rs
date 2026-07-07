@@ -487,15 +487,12 @@ const STATS_MCV_LIMIT: usize = 10;
 
 /// Long-format `red.stats` profiling view (issue #1787). This is the
 /// **computed** freshness tier: every read runs an on-demand profiling
-/// scan over the target row tables rather than serving a cached
+/// scan over the target collections rather than serving a cached
 /// snapshot. Emitted rows are `(collection, entity, metric, value)`:
 ///
 /// * `row_count` — one row per collection, `entity` is `NULL`.
 /// * `null_count` / `distinct_count` / `most_common_values` — one row
 ///   per column, `entity` is the column name.
-///
-/// This slice profiles row (`TABLE`) collections only; other models
-/// share the same contract in later slices.
 pub(super) fn stats_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
@@ -574,48 +571,421 @@ pub(super) fn stats_snapshot(
             Value::UnsignedInteger(checkpoint_stats.last_checkpoint_duration_ms),
         ));
 
-        if collection.model != CollectionModel::Table {
-            continue;
-        }
-        let Some(analyzed) = crate::storage::query::planner::stats_catalog::analyze_collection(
-            store.as_ref(),
-            &collection.name,
-        ) else {
-            continue;
-        };
-
-        rows.push(stats_row(
-            &schema,
-            &collection.name,
-            Value::Null,
-            "row_count",
-            Value::UnsignedInteger(analyzed.row_count),
-        ));
-        for column in &analyzed.columns {
-            rows.push(stats_row(
-                &schema,
-                &collection.name,
-                Value::text(column.name.clone()),
-                "null_count",
-                Value::UnsignedInteger(column.null_count),
-            ));
-            rows.push(stats_row(
-                &schema,
-                &collection.name,
-                Value::text(column.name.clone()),
-                "distinct_count",
-                Value::UnsignedInteger(column.distinct_count),
-            ));
-            rows.push(stats_row(
-                &schema,
-                &collection.name,
-                Value::text(column.name.clone()),
-                "most_common_values",
-                Value::Array(most_common_values(column.mcv.as_ref())),
-            ));
+        match collection.model {
+            CollectionModel::Table => {
+                append_table_stats(&mut rows, &schema, store.as_ref(), &collection.name);
+            }
+            CollectionModel::Kv => {
+                append_kv_stats(&mut rows, &schema, store.as_ref(), &collection.name);
+            }
+            CollectionModel::Graph => {
+                append_graph_stats(&mut rows, &schema, store.as_ref(), &collection.name);
+            }
+            CollectionModel::Vector => {
+                append_vector_stats(
+                    &mut rows,
+                    &schema,
+                    store.as_ref(),
+                    &collection.name,
+                    collection.vector_dimension,
+                    collection.vector_metric,
+                );
+            }
+            CollectionModel::Queue => {
+                append_queue_stats(&mut rows, &schema, store.as_ref(), &collection.name);
+            }
+            CollectionModel::TimeSeries => {
+                append_timeseries_stats(&mut rows, &schema, store.as_ref(), &collection.name);
+            }
+            _ => {}
         }
     }
     rows
+}
+
+fn append_table_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    store: &UnifiedStore,
+    collection: &str,
+) {
+    let Some(analyzed) =
+        crate::storage::query::planner::stats_catalog::analyze_collection(store, collection)
+    else {
+        return;
+    };
+
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "row_count",
+        Value::UnsignedInteger(analyzed.row_count),
+    ));
+    for column in &analyzed.columns {
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(column.name.clone()),
+            "null_count",
+            Value::UnsignedInteger(column.null_count),
+        ));
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(column.name.clone()),
+            "distinct_count",
+            Value::UnsignedInteger(column.distinct_count),
+        ));
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(column.name.clone()),
+            "most_common_values",
+            Value::Array(most_common_values(column.mcv.as_ref())),
+        ));
+    }
+}
+
+fn append_kv_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    store: &UnifiedStore,
+    collection: &str,
+) {
+    let mut entry_count = 0u64;
+    let mut total_key_bytes = 0u64;
+    let mut total_value_bytes = 0u64;
+    let mut type_counts = BTreeMap::<&'static str, u64>::new();
+
+    for (name, entity) in store.query_all(|_| true) {
+        if name != collection {
+            continue;
+        }
+        let EntityData::Row(row) = entity.data else {
+            continue;
+        };
+        entry_count += 1;
+        if let Some(Value::Text(key)) = row.get_field("key") {
+            total_key_bytes += key.len() as u64;
+        }
+        if let Some(value) = row.get_field("value") {
+            total_value_bytes += value_estimated_bytes(value);
+            *type_counts.entry(value_type_name(value)).or_default() += 1;
+        }
+    }
+
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "entry_count",
+        Value::UnsignedInteger(entry_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "total_key_bytes",
+        Value::UnsignedInteger(total_key_bytes),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "total_value_bytes",
+        Value::UnsignedInteger(total_value_bytes),
+    ));
+    for (value_type, count) in type_counts {
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(value_type),
+            "value_type_count",
+            Value::UnsignedInteger(count),
+        ));
+    }
+}
+
+fn append_graph_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    store: &UnifiedStore,
+    collection: &str,
+) {
+    let mut node_count = 0u64;
+    let mut edge_count = 0u64;
+    let mut degree = BTreeMap::<String, u64>::new();
+    let mut node_labels = BTreeMap::<String, u64>::new();
+    let mut edge_labels = BTreeMap::<String, u64>::new();
+
+    for (name, entity) in store.query_all(|_| true) {
+        if name != collection {
+            continue;
+        }
+        match &entity.kind {
+            crate::storage::unified::EntityKind::GraphNode(node) => {
+                node_count += 1;
+                *node_labels.entry(node.node_type.clone()).or_default() += 1;
+                degree.entry(node.label.clone()).or_default();
+            }
+            crate::storage::unified::EntityKind::GraphEdge(edge) => {
+                edge_count += 1;
+                *edge_labels.entry(edge.label.clone()).or_default() += 1;
+                *degree.entry(edge.from_node.clone()).or_default() += 1;
+                *degree.entry(edge.to_node.clone()).or_default() += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let max_degree = degree.values().copied().max().unwrap_or(0);
+    let avg_degree = degree
+        .values()
+        .sum::<u64>()
+        .checked_div(node_count)
+        .unwrap_or(0);
+
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "node_count",
+        Value::UnsignedInteger(node_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "edge_count",
+        Value::UnsignedInteger(edge_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "max_degree",
+        Value::UnsignedInteger(max_degree),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "avg_degree",
+        Value::UnsignedInteger(avg_degree),
+    ));
+    for (label, count) in node_labels {
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(label),
+            "node_label_count",
+            Value::UnsignedInteger(count),
+        ));
+    }
+    for (label, count) in edge_labels {
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(label),
+            "edge_label_count",
+            Value::UnsignedInteger(count),
+        ));
+    }
+}
+
+fn append_vector_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    store: &UnifiedStore,
+    collection: &str,
+    declared_dimension: Option<usize>,
+    declared_metric: Option<crate::storage::engine::distance::DistanceMetric>,
+) {
+    let mut vector_count = 0u64;
+    let mut observed_dimension = None;
+    let mut hybrid_count = 0u64;
+
+    for (name, entity) in store.query_all(|_| true) {
+        if name != collection {
+            continue;
+        }
+        let EntityData::Vector(vector) = entity.data else {
+            continue;
+        };
+        vector_count += 1;
+        observed_dimension.get_or_insert_with(|| vector.dimension());
+        if vector.is_hybrid() {
+            hybrid_count += 1;
+        }
+    }
+
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "vector_count",
+        Value::UnsignedInteger(vector_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "dimension",
+        Value::UnsignedInteger(declared_dimension.or(observed_dimension).unwrap_or(0) as u64),
+    ));
+    if let Some(metric) = declared_metric {
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::Null,
+            "distance_metric",
+            Value::text(distance_metric_name(metric)),
+        ));
+    }
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "hybrid_vector_count",
+        Value::UnsignedInteger(hybrid_count),
+    ));
+}
+
+fn append_queue_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    store: &UnifiedStore,
+    collection: &str,
+) {
+    let mut message_count = 0u64;
+    let mut pending_count = 0u64;
+    let mut delivered_count = 0u64;
+    let mut acked_count = 0u64;
+    let mut max_attempts_seen = 0u64;
+
+    for (name, entity) in store.query_all(|_| true) {
+        if name != collection {
+            continue;
+        }
+        let EntityData::QueueMessage(message) = entity.data else {
+            continue;
+        };
+        message_count += 1;
+        max_attempts_seen = max_attempts_seen.max(message.attempts as u64);
+        if message.acked {
+            acked_count += 1;
+        } else if message.attempts == 0 {
+            pending_count += 1;
+        } else {
+            delivered_count += 1;
+        }
+    }
+
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "message_count",
+        Value::UnsignedInteger(message_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "pending_count",
+        Value::UnsignedInteger(pending_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "delivered_count",
+        Value::UnsignedInteger(delivered_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "acked_count",
+        Value::UnsignedInteger(acked_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "max_attempts_seen",
+        Value::UnsignedInteger(max_attempts_seen),
+    ));
+}
+
+fn append_timeseries_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    store: &UnifiedStore,
+    collection: &str,
+) {
+    let mut point_count = 0u64;
+    let mut series_keys = std::collections::BTreeSet::<String>::new();
+    let mut metric_counts = BTreeMap::<String, u64>::new();
+    let mut oldest = None::<u64>;
+    let mut newest = None::<u64>;
+
+    for (name, entity) in store.query_all(|_| true) {
+        if name != collection {
+            continue;
+        }
+        let EntityData::TimeSeries(point) = entity.data else {
+            continue;
+        };
+        point_count += 1;
+        series_keys.insert(timeseries_series_key(&point.metric, &point.tags));
+        *metric_counts.entry(point.metric.clone()).or_default() += 1;
+        oldest = Some(oldest.map_or(point.timestamp_ns, |current| {
+            current.min(point.timestamp_ns)
+        }));
+        newest = Some(newest.map_or(point.timestamp_ns, |current| {
+            current.max(point.timestamp_ns)
+        }));
+    }
+
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "point_count",
+        Value::UnsignedInteger(point_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "series_count",
+        Value::UnsignedInteger(series_keys.len() as u64),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "oldest_timestamp_ns",
+        oldest.map(Value::UnsignedInteger).unwrap_or(Value::Null),
+    ));
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "newest_timestamp_ns",
+        newest.map(Value::UnsignedInteger).unwrap_or(Value::Null),
+    ));
+    for (metric, count) in metric_counts {
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(metric),
+            "metric_point_count",
+            Value::UnsignedInteger(count),
+        ));
+    }
 }
 
 fn stats_row(
@@ -629,6 +999,52 @@ fn stats_row(
         Arc::clone(schema),
         vec![Value::text(collection), entity, Value::text(metric), value],
     )
+}
+
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Integer(_) => "integer",
+        Value::UnsignedInteger(_) => "unsigned_integer",
+        Value::Float(_) => "float",
+        Value::Text(_) => "text",
+        Value::Blob(_) => "blob",
+        Value::Boolean(_) => "boolean",
+        Value::Timestamp(_) => "timestamp",
+        Value::Duration(_) => "duration",
+        Value::IpAddr(_) => "ipaddr",
+        Value::MacAddr(_) => "macaddr",
+        Value::Vector(_) => "vector",
+        Value::Json(_) => "json",
+        Value::Array(_) => "array",
+        _ => "other",
+    }
+}
+
+fn value_estimated_bytes(value: &Value) -> u64 {
+    match value {
+        Value::Null => 0,
+        Value::Integer(value) => value.to_string().len() as u64,
+        Value::UnsignedInteger(value) => value.to_string().len() as u64,
+        Value::Float(value) => value.to_string().len() as u64,
+        Value::Boolean(value) => value.to_string().len() as u64,
+        Value::Text(value) => value.len() as u64,
+        Value::Blob(value) | Value::Json(value) => value.len() as u64,
+        Value::Vector(value) => (value.len() * std::mem::size_of::<f32>()) as u64,
+        Value::Array(values) => values.iter().map(value_estimated_bytes).sum(),
+        _ => format!("{value:?}").len() as u64,
+    }
+}
+
+fn timeseries_series_key(metric: &str, tags: &std::collections::HashMap<String, String>) -> String {
+    let mut key = metric.to_string();
+    for (name, value) in tags.iter().collect::<BTreeMap<_, _>>() {
+        key.push('|');
+        key.push_str(name);
+        key.push('=');
+        key.push_str(value);
+    }
+    key
 }
 
 /// Extract the single collection targeted by a `collection = '<name>'`
