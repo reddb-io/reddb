@@ -6,8 +6,8 @@ use std::io::{self, Read};
 
 pub const WAL_DEFAULT_TERM: u64 = crate::replication::DEFAULT_REPLICATION_TERM;
 
-pub use reddb_file::MainWalRecordType as RecordType;
 pub use reddb_file::MainWalRecordAuthority as WalRecordAuthority;
+pub use reddb_file::MainWalRecordType as RecordType;
 
 /// A single entry in the write-ahead log
 #[derive(Debug, Clone, PartialEq)]
@@ -128,25 +128,25 @@ impl WalRecord {
         reader: &mut R,
         format_version: u8,
     ) -> io::Result<Option<(u64, WalRecord)>> {
-        Ok(Self::read_with_authority_format_version(reader, format_version)?
-            .map(|(authority, record)| (authority.term, record)))
+        Ok(
+            Self::read_with_authority_format_version(reader, format_version)?
+                .map(|(authority, record)| (authority.term, record)),
+        )
     }
 
     pub(crate) fn read_with_authority_format_version<R: Read>(
         reader: &mut R,
         format_version: u8,
     ) -> io::Result<Option<(WalRecordAuthority, WalRecord)>> {
-        Ok(
-            decode_main_wal_record_frame_with_authority(
-                reader,
-                format_version,
-                WalRecordAuthority {
-                    term: WAL_DEFAULT_TERM,
-                    ownership_epoch: None,
-                },
-            )?
-            .map(|(authority, frame)| (authority, WalRecord::from_file_frame(frame))),
-        )
+        Ok(decode_main_wal_record_frame_with_authority(
+            reader,
+            format_version,
+            WalRecordAuthority {
+                term: WAL_DEFAULT_TERM,
+                ownership_epoch: None,
+            },
+        )?
+        .map(|(authority, frame)| (authority, WalRecord::from_file_frame(frame))))
     }
 }
 
@@ -362,8 +362,9 @@ mod tests {
         original.encode_with_authority_into(&mut encoded, authority);
 
         let mut cursor = Cursor::new(encoded);
-        let (decoded_authority, decoded) =
-            WalRecord::read_with_authority(&mut cursor).unwrap().unwrap();
+        let (decoded_authority, decoded) = WalRecord::read_with_authority(&mut cursor)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(decoded_authority, authority);
         assert_eq!(decoded, original);
