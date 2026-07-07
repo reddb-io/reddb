@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 use reddb_client::bookmark_routing::{BookmarkTarget, CausalReadOptions};
 use reddb_client::grpc::GrpcClient;
 use reddb_client::topology::ClusterMembership;
-use reddb_client::ValueOut;
 use reddb_client::RedDBClient;
+use reddb_client::ValueOut;
 use reddb_grpc_proto::red_db_server::{RedDb, RedDbServer};
 use reddb_grpc_proto::*;
 use tokio::sync::{oneshot, Mutex};
@@ -472,7 +472,10 @@ async fn causal_query_falls_back_to_primary_when_replica_is_stale_but_tokenless_
         vec![replica_url.clone()],
     ));
 
-    let tokenless = client.query("select endpoint").await.expect("tokenless read");
+    let tokenless = client
+        .query("select endpoint")
+        .await
+        .expect("tokenless read");
     assert_eq!(
         endpoint_label(&tokenless),
         "replica",
