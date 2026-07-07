@@ -56,6 +56,13 @@ pub struct ForkInfo {
     pub hydrated: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct PromoteForkOutcome {
+    pub name: String,
+    pub fork_lsn: u64,
+    pub archived_parent: OperationalManifest,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForkHydrationState {
     SharedByReference,
@@ -690,6 +697,70 @@ impl OperationalManifest {
         Ok(Some(detached))
     }
 
+    /// Promote a store fork to the primary operational root.
+    ///
+    /// The promoted fork is first hydrated through the same materialization path
+    /// used by restore/fork detach. The superseded primary is then moved to a
+    /// deterministic retired root, so its disposition is explicit and cannot be
+    /// mistaken for the active store.
+    pub fn promote_fork(&self, name: &str) -> io::Result<Option<PromoteForkOutcome>> {
+        let fork = self.fork_handle(name);
+        if !fork.root.exists() {
+            return Ok(None);
+        }
+        let origin = fork
+            .fork_origin()?
+            .ok_or_else(|| invalid_data(format!("store fork is missing origin: {name}")))?;
+        if origin.parent_store != self.store_identity() {
+            return Err(invalid_data(format!(
+                "store fork {name} belongs to {}, not {}",
+                origin.parent_store,
+                self.store_identity()
+            )));
+        }
+
+        let staging = self.promoting_fork_handle(name);
+        if staging.root.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("store fork promotion staging path already exists: {name}"),
+            ));
+        }
+        let archived_parent = self.archived_parent_handle(name);
+        if archived_parent.root.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("retired parent store already exists for promoted fork: {name}"),
+            ));
+        }
+
+        fork.hydrate_shared_collections()?;
+        if let Some(parent) = staging.root.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&fork.root, &staging.root)?;
+        sync_dir(&self.forks_dir())?;
+        if let Some(parent) = staging.root.parent() {
+            sync_dir(parent)?;
+        }
+
+        fs::rename(&self.root, &archived_parent.root)?;
+        if let Some(parent) = self.root.parent() {
+            sync_dir(parent)?;
+        }
+        fs::rename(&staging.root, &self.root)?;
+        if let Some(parent) = self.root.parent() {
+            sync_dir(parent)?;
+        }
+        self.clear_fork_origin()?;
+
+        Ok(Some(PromoteForkOutcome {
+            name: origin.name,
+            fork_lsn: origin.fork_lsn,
+            archived_parent,
+        }))
+    }
+
     /// Read this manifest's fork origin, if it is a fork.
     pub fn fork_origin(&self) -> io::Result<Option<ForkOrigin>> {
         Ok(self
@@ -727,6 +798,34 @@ impl OperationalManifest {
             root: self
                 .root
                 .with_file_name(format!("{root_name}.detached-{}", sanitize_component(name))),
+        }
+    }
+
+    fn archived_parent_handle(&self, name: &str) -> Self {
+        let root_name = self
+            .root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "store.ops".to_string());
+        Self {
+            root: self.root.with_file_name(format!(
+                "{root_name}.retired-by-promote-{}",
+                sanitize_component(name)
+            )),
+        }
+    }
+
+    fn promoting_fork_handle(&self, name: &str) -> Self {
+        let root_name = self
+            .root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "store.ops".to_string());
+        Self {
+            root: self.root.with_file_name(format!(
+                "{root_name}.promoting-{}",
+                sanitize_component(name)
+            )),
         }
     }
 
@@ -1888,6 +1987,30 @@ mod tests {
         assert_eq!(
             read_collection(&detached, "users"),
             b"successful-experiment"
+        );
+    }
+
+    #[test]
+    fn promote_fork_replaces_primary_and_archives_parent() {
+        let path = temp_db_path("promote_fork");
+        let parent = OperationalManifest::for_db_path(&path);
+        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
+        write_collection(&parent, "users", b"old-primary");
+        parent.create_fork("exp", 21).unwrap();
+        let fork = parent.fork_handle("exp");
+        fork.hydrate_collection("users").unwrap();
+        write_collection(&fork, "users", b"new-primary");
+
+        let outcome = parent.promote_fork("exp").unwrap().unwrap();
+
+        assert_eq!(outcome.name, "exp");
+        assert_eq!(outcome.fork_lsn, 21);
+        assert_eq!(read_collection(&parent, "users"), b"new-primary");
+        assert!(parent.fork_origin().unwrap().is_none());
+        assert!(parent.list_forks().unwrap().is_empty());
+        assert_eq!(
+            read_collection(&outcome.archived_parent, "users"),
+            b"old-primary"
         );
     }
 
