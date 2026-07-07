@@ -305,7 +305,10 @@ fn checkpoint_columnar_budget_defers_closed_chunks_and_keeps_row_tail_fresh() {
         1,
         "budget allows one closed chunk per checkpoint"
     );
-    assert_eq!(rt.read_bridge_points("cpu", 0, u64::MAX).unwrap(), want(&expected));
+    assert_eq!(
+        rt.read_bridge_points("cpu", 0, u64::MAX).unwrap(),
+        want(&expected)
+    );
 
     rt.checkpoint().expect("second checkpoint");
     assert_eq!(
