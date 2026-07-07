@@ -26,6 +26,24 @@ use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections,
 };
+use crate::storage::unified::manager::SegmentScanStats;
+
+thread_local! {
+    static LAST_SEGMENT_SCAN_STATS: std::cell::Cell<SegmentScanStats> =
+        std::cell::Cell::new(SegmentScanStats {
+            segments_total: 0,
+            segments_scanned: 0,
+            segments_pruned: 0,
+        });
+}
+
+pub(crate) fn take_last_segment_scan_stats() -> SegmentScanStats {
+    LAST_SEGMENT_SCAN_STATS.with(|stats| stats.replace(SegmentScanStats::default()))
+}
+
+fn record_segment_scan_stats(stats: SegmentScanStats) {
+    LAST_SEGMENT_SCAN_STATS.with(|slot| slot.set(stats));
+}
 
 /// Build the JSON result from a set of entity IDs (from index lookup).
 /// Scan entities sequentially but only process those in the candidate set (from hash index).
@@ -1004,15 +1022,17 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // the same MVCC visibility gate.
             let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
             let table_row_resolver = TableRowMvccReadResolver::captured(snap_ctx);
-            let matching = manager.query_all_zoned(&zone_preds, |entity| {
-                let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
-                    hydrate_store.as_ref(),
-                    entity,
-                );
-                table_row_resolver.resolve_read_candidate(entity).is_some()
-                    && db.replica_allows_entity_at_read(&query.table, entity)
-                    && compiled.evaluate(&hydrated)
-            });
+            let (matching, scan_stats) =
+                manager.query_all_zoned_with_stats(&zone_preds, |entity| {
+                    let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+                        hydrate_store.as_ref(),
+                        entity,
+                    );
+                    table_row_resolver.resolve_read_candidate(entity).is_some()
+                        && db.replica_allows_entity_at_read(&query.table, entity)
+                        && compiled.evaluate(&hydrated)
+                });
+            record_segment_scan_stats(scan_stats);
             for entity in &matching {
                 let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
                     hydrate_store.as_ref(),
@@ -1076,7 +1096,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             }
         } else {
             let table_row_resolver = TableRowMvccReadResolver::current_statement();
-            manager.for_each_entity_zoned(&zone_preds, |entity| {
+            let scan_stats = manager.for_each_entity_zoned_with_stats(&zone_preds, |entity| {
                 if records.len() >= limit {
                     return false; // stop iteration
                 }
@@ -1147,6 +1167,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 }
                 true // continue
             });
+            record_segment_scan_stats(scan_stats);
         }
 
         // Apply ORDER BY — Schwartzian transform extracts keys once (O(n))
