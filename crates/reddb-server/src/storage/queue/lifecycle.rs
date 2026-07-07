@@ -261,7 +261,13 @@ pub(crate) trait QueueStore {
     fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32;
 
     /// Move `original` onto the DLQ at `dlq_target`.
-    fn enqueue_dlq(&self, txn: &QueueTxn, dlq_target: &str, original: Value) -> Result<()>;
+    fn enqueue_dlq(
+        &self,
+        txn: &QueueTxn,
+        dlq_target: &str,
+        original: Value,
+        ordering_key: Option<&str>,
+    ) -> Result<()>;
 
     /// Pending deadline for `delivery_id`, if it is currently held.
     fn read_lock_deadline(&self, delivery_id: &str) -> Option<Instant>;
@@ -381,6 +387,8 @@ pub(crate) struct BumpedAttempt {
     pub(crate) attempts: u32,
     pub(crate) queue: QueueId,
     pub(crate) message_id: MessageId,
+    pub(crate) group: ConsumerGroupId,
+    pub(crate) consumer: String,
 }
 
 /// Crate-wide fallback when a `read_max_attempts` caller hits a tuple
@@ -394,6 +402,7 @@ pub(crate) const DEFAULT_READ_MAX_ATTEMPTS: u32 = 3;
 pub(crate) struct DlqRecord {
     pub target: DlqTarget,
     pub original: Value,
+    pub ordering_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -666,12 +675,16 @@ impl QueueStore for InMemoryQueueStore {
         let count = entry.attempts;
         let queue = entry.queue.clone();
         let message_id = entry.message_id;
-        let key = (queue.clone(), message_id, entry.group.clone());
+        let group = entry.group.clone();
+        let consumer = entry.consumer.clone();
+        let key = (queue.clone(), message_id, group.clone());
         state.attempts.insert(key, count);
         Ok(BumpedAttempt {
             attempts: count,
             queue,
             message_id,
+            group,
+            consumer,
         })
     }
 
@@ -685,6 +698,8 @@ impl QueueStore for InMemoryQueueStore {
             attempts: entry.attempts,
             queue: entry.queue.clone(),
             message_id: entry.message_id,
+            group: entry.group.clone(),
+            consumer: entry.consumer.clone(),
         })
     }
 
@@ -697,11 +712,18 @@ impl QueueStore for InMemoryQueueStore {
             .unwrap_or(DEFAULT_READ_MAX_ATTEMPTS)
     }
 
-    fn enqueue_dlq(&self, _txn: &QueueTxn, dlq_target: &str, original: Value) -> Result<()> {
+    fn enqueue_dlq(
+        &self,
+        _txn: &QueueTxn,
+        dlq_target: &str,
+        original: Value,
+        ordering_key: Option<&str>,
+    ) -> Result<()> {
         let mut state = self.state.lock().expect("state poisoned");
         state.dlq.push(DlqRecord {
             target: dlq_target.to_string(),
             original,
+            ordering_key: ordering_key.map(str::to_string),
         });
         Ok(())
     }
@@ -1269,16 +1291,23 @@ mod tests {
         let store = InMemoryQueueStore::new();
         let t = txn();
         store
-            .enqueue_dlq(&t, "orders.dlq", Value::text("payload-1"))
+            .enqueue_dlq(
+                &t,
+                "orders.dlq",
+                Value::text("payload-1"),
+                Some("account-7"),
+            )
             .unwrap();
         store
-            .enqueue_dlq(&t, "orders.dlq", Value::Integer(42))
+            .enqueue_dlq(&t, "orders.dlq", Value::Integer(42), None)
             .unwrap();
         let snap = store.dlq_snapshot();
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].target, "orders.dlq");
         assert_eq!(snap[0].original, Value::text("payload-1"));
+        assert_eq!(snap[0].ordering_key.as_deref(), Some("account-7"));
         assert_eq!(snap[1].original, Value::Integer(42));
+        assert_eq!(snap[1].ordering_key, None);
     }
 
     #[test]
