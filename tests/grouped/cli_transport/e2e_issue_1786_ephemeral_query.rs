@@ -202,6 +202,53 @@ fn red_query_csv_writes_without_save_leave_no_durable_artifact() {
 }
 
 #[test]
+fn red_query_dry_run_delete_prints_explain_and_keeps_rows() {
+    let dir = temp_dir("dry-run-delete");
+    let db = dir.path().join("people.rdb");
+    let db_str = db.display().to_string();
+
+    let (code, _stdout, stderr) = run_red(&[
+        "query",
+        "--path",
+        &db_str,
+        "CREATE TABLE people (id INT, name TEXT)",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "create failed; stderr: {stderr}");
+    let (code, _stdout, stderr) = run_red(&[
+        "query",
+        "--path",
+        &db_str,
+        "INSERT INTO people (id, name) VALUES (1, 'Alice'), (2, 'Bob')",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "insert failed; stderr: {stderr}");
+
+    let (code, stdout, stderr) = run_red(&[
+        "query",
+        "--path",
+        &db_str,
+        "DELETE FROM people WHERE name = 'Bob'",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "dry-run failed; stderr: {stderr}");
+    assert!(stdout.contains("\"ok\":true"), "stdout: {stdout}");
+    assert!(stdout.contains("\"statement\":\"explain\""), "stdout: {stdout}");
+    assert!(stdout.contains("DELETE FROM people"), "stdout: {stdout}");
+
+    let (code, stdout, stderr) = run_red(&[
+        "query",
+        "--path",
+        &db_str,
+        "SELECT count(*) AS n FROM people",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "count failed; stderr: {stderr}");
+    assert!(stdout.contains("\"n\":2"), "dry-run deleted a row: {stdout}");
+}
+
+#[test]
 fn red_query_tsv_file_by_alias() {
     let dir = temp_dir("tsv");
     let path = dir.path().join("places.tsv");
