@@ -292,7 +292,7 @@ export class QueueClient {
   push(
     queue: string,
     value: unknown,
-    options?: { priority?: number },
+    options?: { priority?: number; key?: string; dedup?: string; delay?: string; at?: number },
   ): Promise<QueryResult>
   pop(queue: string, count?: number): Promise<unknown[]>
   peek(queue: string, count?: number): Promise<unknown[]>
