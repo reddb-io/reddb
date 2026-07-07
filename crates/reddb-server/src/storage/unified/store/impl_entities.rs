@@ -314,6 +314,11 @@ impl UnifiedStore {
         map.remove(collection)
     }
 
+    pub(crate) fn take_replayed_probabilistic_deltas(&self) -> Vec<(u8, u8, String, Vec<Vec<u8>>)> {
+        let mut deltas = self.replayed_probabilistic_deltas.lock();
+        std::mem::take(&mut *deltas)
+    }
+
     /// Set multiple config KV pairs at once from a JSON tree.
     /// Keys are flattened with dot-notation: `{"a":{"b":1}}` → `a.b = 1`.
     pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {
