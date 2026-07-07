@@ -236,7 +236,8 @@ fn validate_frame(
         MainWalRecordFrame::Rollback { .. }
         | MainWalRecordFrame::TxCommitBatch { .. }
         | MainWalRecordFrame::FullPageImage { .. }
-        | MainWalRecordFrame::VectorInsert { .. } => {}
+        | MainWalRecordFrame::VectorInsert { .. }
+        | MainWalRecordFrame::ProbabilisticDelta { .. } => {}
     }
     Ok(())
 }
