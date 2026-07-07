@@ -74,6 +74,13 @@ pub struct ManagerStats {
     pub compact_ops: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SegmentScanStats {
+    pub segments_total: u64,
+    pub segments_scanned: u64,
+    pub segments_pruned: u64,
+}
+
 /// Lifecycle events for monitoring
 #[derive(Debug, Clone)]
 pub enum LifecycleEvent {
@@ -1190,33 +1197,51 @@ impl SegmentManager {
     where
         F: FnMut(&UnifiedEntity) -> bool,
     {
+        let _ = self.for_each_entity_zoned_with_stats(zone_preds, &mut callback);
+    }
+
+    pub fn for_each_entity_zoned_with_stats<F>(
+        &self,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        mut callback: F,
+    ) -> SegmentScanStats
+    where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        let mut scan_stats = SegmentScanStats::default();
         // Growing segment — never skip (it's receiving writes, zones are partial).
         // Try a non-blocking read first: if a writer is currently inserting
         // (holding the write lock), try_read() returns None and we fall back to
         // the blocking read.  In low-contention workloads (reads far outnumber
         // writes) the try_read() almost always succeeds and readers never stall.
         if let Some(growing_arc) = self.growing.read().as_ref() {
+            scan_stats.segments_total += 1;
+            scan_stats.segments_scanned += 1;
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
                 growing_arc.read()
             };
             if !growing.for_each_fast(&mut callback) {
-                return;
+                return scan_stats;
             }
         }
 
         // Sealed segments — check zone maps before iterating
         let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
+            scan_stats.segments_total += 1;
             let segment = segment_arc.read();
             if !zone_preds.is_empty() && segment.can_skip_zone_preds(zone_preds) {
+                scan_stats.segments_pruned += 1;
                 continue; // entire segment pruned
             }
+            scan_stats.segments_scanned += 1;
             if !segment.for_each_fast(&mut callback) {
-                return;
+                return scan_stats;
             }
         }
+        scan_stats
     }
 
     /// Zone-map-aware parallel query.
@@ -1236,11 +1261,25 @@ impl SegmentManager {
     where
         F: Fn(&UnifiedEntity) -> bool + Sync,
     {
+        self.query_all_zoned_with_stats(zone_preds, filter).0
+    }
+
+    pub fn query_all_zoned_with_stats<F>(
+        &self,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        filter: F,
+    ) -> (Vec<UnifiedEntity>, SegmentScanStats)
+    where
+        F: Fn(&UnifiedEntity) -> bool + Sync,
+    {
         let mut results = Vec::new();
+        let mut scan_stats = SegmentScanStats::default();
 
         // Growing segment — always scan, no zone skip (zones are partial).
         // Non-blocking try_read() avoids stalling behind in-progress inserts.
         if let Some(growing_arc) = self.growing.read().as_ref() {
+            scan_stats.segments_total += 1;
+            scan_stats.segments_scanned += 1;
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
@@ -1255,11 +1294,19 @@ impl SegmentManager {
         let surviving: Vec<_> = sealed
             .iter()
             .filter(|seg_arc| {
+                scan_stats.segments_total += 1;
                 if zone_preds.is_empty() {
+                    scan_stats.segments_scanned += 1;
                     return true;
                 }
                 let seg = seg_arc.read();
-                !seg.can_skip_zone_preds(zone_preds)
+                if seg.can_skip_zone_preds(zone_preds) {
+                    scan_stats.segments_pruned += 1;
+                    false
+                } else {
+                    scan_stats.segments_scanned += 1;
+                    true
+                }
             })
             .collect();
 
@@ -1295,7 +1342,7 @@ impl SegmentManager {
             }
         }
 
-        results
+        (results, scan_stats)
     }
 
     /// Query across all segments. Uses parallel scanning for sealed segments
@@ -1575,6 +1622,7 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
 mod tests {
     use super::*;
     use crate::storage::schema::Value;
+    use crate::storage::unified::entity::{EntityData, EntityKind, RowData};
 
     #[test]
     fn test_manager_basic() {
@@ -1650,6 +1698,52 @@ mod tests {
 
         let stats = manager.stats();
         assert_eq!(stats.total_entities, 3);
+    }
+
+    #[test]
+    fn zoned_scan_reports_pruned_segments_and_preserves_results() {
+        let config = ManagerConfig {
+            segment_config: SegmentConfig {
+                max_entities: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let manager = SegmentManager::with_config("events", config);
+
+        for (idx, value) in [10, 20, 100, 110, 200].into_iter().enumerate() {
+            let row = RowData::with_names(vec![Value::Integer(value)], vec!["ts".to_string()]);
+            let entity = UnifiedEntity::new(
+                manager.next_entity_id(),
+                EntityKind::TableRow {
+                    table: "events".into(),
+                    row_id: (idx + 1) as u64,
+                },
+                EntityData::Row(row),
+            );
+            manager.insert(entity).unwrap();
+        }
+
+        let full = manager.query_all(|entity| match &entity.data {
+            EntityData::Row(row) => matches!(row.get_field("ts"), Some(Value::Integer(100))),
+            _ => false,
+        });
+        let probe = Value::Integer(100);
+        let (pruned, stats) =
+            manager.query_all_zoned_with_stats(&[("ts", ZoneColPred::Eq(&probe))], |entity| {
+                match &entity.data {
+                    EntityData::Row(row) => {
+                        matches!(row.get_field("ts"), Some(Value::Integer(100)))
+                    }
+                    _ => false,
+                }
+            });
+
+        assert_eq!(pruned.len(), full.len());
+        assert_eq!(pruned[0].id, full[0].id);
+        assert_eq!(stats.segments_total, 3);
+        assert_eq!(stats.segments_scanned, 2);
+        assert_eq!(stats.segments_pruned, 1);
     }
 
     #[test]
