@@ -17,7 +17,6 @@ use std::sync::RwLock;
 
 use super::LabelId;
 use crate::storage::index::{BloomSegment, HasBloom, IndexBase, IndexKind, IndexStats};
-use crate::storage::primitives::BloomFilter;
 
 /// Inverted secondary indexes on graph nodes.
 ///
@@ -208,8 +207,7 @@ impl Default for NodeSecondaryIndex {
 ///
 /// Note: this returns `None` because the underlying bloom is behind a
 /// `RwLock`. See [`NodeSecondaryIndex::may_contain_label`] for the actual
-/// fast-path. The impl exists so call-sites that only know `dyn HasBloom`
-/// can still reach the index via `IndexBase::definitely_absent`.
+/// fast-path.
 impl HasBloom for NodeSecondaryIndex {
     fn bloom_segment(&self) -> Option<&BloomSegment> {
         None
@@ -251,12 +249,6 @@ impl IndexBase for NodeSecondaryIndex {
             has_bloom: true,
             index_correlation: 0.0,
         }
-    }
-
-    fn bloom(&self) -> Option<&BloomFilter> {
-        // RwLock precludes handing out a raw reference to the inner bloom.
-        // `definitely_absent` above routes around it.
-        None
     }
 
     fn definitely_absent(&self, key_bytes: &[u8]) -> bool {
