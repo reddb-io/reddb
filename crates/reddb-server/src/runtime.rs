@@ -61,6 +61,20 @@ use crate::storage::{
     UnifiedStore,
 };
 
+static TIMESERIES_TAG_INDEX_OBSERVED_POINTS: AtomicU64 = AtomicU64::new(0);
+
+pub fn reset_timeseries_tag_index_observability() {
+    TIMESERIES_TAG_INDEX_OBSERVED_POINTS.store(0, AtomicOrdering::Relaxed);
+}
+
+pub fn timeseries_tag_index_observed_points() -> u64 {
+    TIMESERIES_TAG_INDEX_OBSERVED_POINTS.load(AtomicOrdering::Relaxed)
+}
+
+pub(crate) fn observe_timeseries_tag_index_point() {
+    TIMESERIES_TAG_INDEX_OBSERVED_POINTS.fetch_add(1, AtomicOrdering::Relaxed);
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectionPoolConfig {
     pub max_connections: usize,
