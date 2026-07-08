@@ -2,22 +2,24 @@
 //!
 //! `CREATE INDEX … USING H3 (col [, resolution])` encodes a GeoPoint
 //! column to its H3 cell-id `u64` and stores it in the existing
-//! disk-paged sorted (B-tree) index — NOT the in-RAM rstar R-tree.
+//! disk-paged sorted (B-tree) index — NOT the retired in-RAM R-tree.
 //! These tests assert:
 //!   1. the index builds from existing rows and surfaces through normal
 //!      index introspection (`red.show_indexes`),
 //!   2. it survives a restart, rebuilt from the catalog like any other
 //!      B-tree index,
 //!   3. the write path (insert / update) maintains the sorted index
-//!      with no per-point resident structure — the rstar R-tree is never
-//!      touched, and a point move is a single B-tree key update.
+//!      with no per-point resident structure, and a point move is a
+//!      single B-tree key update.
 
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
 mod support;
 
 use reddb::storage::schema::Value;
+use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, RedDBRuntime};
+use std::sync::Arc;
 
 /// Pull a single index row from `red.show_indexes` for `table` + `name`.
 /// Returns `(kind, entries_indexed)`.
@@ -50,6 +52,20 @@ fn show_index(rt: &RedDBRuntime, table: &str, name: &str) -> Option<(String, u64
     })
 }
 
+fn show_index_kinds(rt: &RedDBRuntime) -> Vec<String> {
+    let res = rt
+        .execute_query("SELECT kind FROM red.show_indexes")
+        .expect("red.show_indexes must be queryable");
+    res.result
+        .records
+        .iter()
+        .filter_map(|r| match r.get("kind") {
+            Some(Value::Text(t)) => Some(t.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn seed_places(rt: &RedDBRuntime) {
     rt.execute_query("CREATE TABLE places (id INT, loc GEOPOINT)")
         .unwrap();
@@ -66,6 +82,38 @@ fn seed_places(rt: &RedDBRuntime) {
     }
 }
 
+fn insert_legacy_index_descriptor(rt: &RedDBRuntime, name: &str, method: &str) {
+    let store = rt.db().store();
+    let _ = store.get_or_create_collection("red_index_registry");
+    let entity = UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::TableRow {
+            table: Arc::from("red_index_registry"),
+            row_id: 0,
+        },
+        EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(
+                [
+                    ("collection".to_string(), Value::text("places")),
+                    ("name".to_string(), Value::text(name)),
+                    ("columns".to_string(), Value::text("loc")),
+                    ("method".to_string(), Value::text(method)),
+                    ("resolution".to_string(), Value::Integer(0)),
+                    ("unique".to_string(), Value::Boolean(false)),
+                    ("dropped".to_string(), Value::Boolean(false)),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            schema: None,
+        }),
+    );
+    store
+        .insert_auto("red_index_registry", entity)
+        .expect("legacy descriptor fixture insert must succeed");
+}
+
 #[test]
 fn h3_index_builds_and_surfaces_in_introspection() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
@@ -80,12 +128,9 @@ fn h3_index_builds_and_surfaces_in_introspection() {
     assert_eq!(kind, "H3", "index kind must render as H3");
     assert_eq!(entries, 3, "H3 index must cover all 3 existing geo rows");
 
-    // It is the disk B-tree (sorted) index — the in-RAM rstar R-tree is
-    // never touched by an H3 index (that is slice 4's concern).
-    let store = rt.index_store_ref();
     assert!(
-        store.spatial.index_stats("places", "loc").is_err(),
-        "H3 index must NOT create a resident rstar R-tree for the column"
+        !show_index_kinds(&rt).iter().any(|kind| kind == "RTREE"),
+        "catalog views must not advertise the retired RTREE method"
     );
 }
 
@@ -130,11 +175,8 @@ fn h3_index_write_path_is_single_btree_key_update() {
     );
 
     assert!(
-        rt.index_store_ref()
-            .spatial
-            .index_stats("places", "loc")
-            .is_err(),
-        "no resident rstar R-tree may be allocated by the H3 write path"
+        !show_index_kinds(&rt).iter().any(|kind| kind == "RTREE"),
+        "H3 write-path maintenance must not surface a retired RTREE index"
     );
 }
 
@@ -172,13 +214,9 @@ fn h3_index_survives_restart_rebuilt_from_catalog() {
         "rehydrated H3 index must be rebuilt over all 3 rows from the catalog"
     );
 
-    // Still purely a disk B-tree after rehydrate — no rstar R-tree.
     assert!(
-        rt.index_store_ref()
-            .spatial
-            .index_stats("places", "loc")
-            .is_err(),
-        "rehydrated H3 index must not allocate a resident R-tree"
+        !show_index_kinds(&rt).iter().any(|kind| kind == "RTREE"),
+        "rehydrated catalog must not advertise RTREE"
     );
 }
 
@@ -323,8 +361,7 @@ fn h3_bbox_parity_with_full_scan() {
 // ── Slice 4 (PRD #1574 / #1578): H3 is the DEFAULT spatial index ─────────────
 //
 // A generic spatial index request (`USING SPATIAL`) resolves to the
-// disk-resident H3 index, NOT the unbounded in-RAM rstar R-tree. The R-tree is
-// reachable only via the explicit `USING RTREE` opt-in (and is memory-capped).
+// disk-resident H3 index, NOT the retired in-RAM R-tree.
 
 #[test]
 fn bare_spatial_index_defaults_to_h3() {
@@ -335,7 +372,7 @@ fn bare_spatial_index_defaults_to_h3() {
     rt.execute_query("CREATE INDEX idx_loc ON places (loc) USING SPATIAL")
         .unwrap();
 
-    // It resolves to the H3 disk index, not the rstar R-tree.
+    // It resolves to the H3 disk index.
     let (kind, entries) = show_index(&rt, "places", "idx_loc")
         .expect("generic spatial index must appear in red.show_indexes");
     assert_eq!(
@@ -347,13 +384,9 @@ fn bare_spatial_index_defaults_to_h3() {
         "the H3 default must build over all existing rows"
     );
 
-    // No resident rstar R-tree is allocated for the column.
     assert!(
-        rt.index_store_ref()
-            .spatial
-            .index_stats("places", "loc")
-            .is_err(),
-        "the default spatial index must NOT allocate an in-RAM rstar R-tree"
+        !show_index_kinds(&rt).iter().any(|kind| kind == "RTREE"),
+        "the default spatial index must not advertise the retired RTREE method"
     );
 
     // SEARCH SPATIAL works unchanged against the defaulted index: a radius
@@ -375,33 +408,30 @@ fn bare_spatial_index_defaults_to_h3() {
 }
 
 #[test]
-fn explicit_rtree_is_opt_in_and_allocates_resident_rtree() {
+fn explicit_rtree_is_rejected_with_didactic_message() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     seed_places(&rt);
 
-    // The in-RAM rstar R-tree is reachable ONLY via the explicit opt-in.
-    rt.execute_query("CREATE INDEX idx_r ON places (loc) USING RTREE")
-        .unwrap();
-
-    let (kind, _entries) =
-        show_index(&rt, "places", "idx_r").expect("RTREE index must appear in introspection");
-    assert_eq!(kind, "RTREE", "USING RTREE must stay the rstar R-tree");
-
-    // The opt-in path is the one (and only) path that allocates the
-    // resident rstar structure for the column.
+    let err = rt
+        .execute_query("CREATE INDEX idx_r ON places (loc) USING RTREE")
+        .expect_err("USING RTREE must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("USING RTREE was removed"), "{msg}");
+    assert!(msg.contains("Use USING H3"), "{msg}");
     assert!(
-        rt.index_store_ref()
-            .spatial
-            .index_stats("places", "loc")
-            .is_ok(),
-        "USING RTREE must allocate the resident rstar R-tree it opts into"
+        msg.contains("CREATE INDEX idx_loc ON events (gpsLocation) USING H3"),
+        "{msg}"
+    );
+    assert!(
+        show_index(&rt, "places", "idx_r").is_none(),
+        "rejected RTREE DDL must not register a catalog entry"
     );
 }
 
 #[test]
 fn h3_radius_uses_disk_btree_not_rtree() {
     // The H3 radius path must run off the sorted disk B-tree cell index and
-    // never allocate the in-RAM rstar R-tree for the column.
+    // never surface the retired in-RAM R-tree for the column.
     let rt = seed_geo_corpus("places");
     rt.execute_query("CREATE INDEX idx ON places (loc) USING H3")
         .unwrap();
@@ -409,10 +439,37 @@ fn h3_radius_uses_disk_btree_not_rtree() {
         .execute_query("SEARCH SPATIAL RADIUS 48.8566 2.3522 5.0 COLLECTION places COLUMN loc")
         .unwrap();
     assert!(
-        rt.index_store_ref()
-            .spatial
-            .index_stats("places", "loc")
-            .is_err(),
-        "an H3 radius query must not create a resident rstar R-tree"
+        !show_index_kinds(&rt).iter().any(|kind| kind == "RTREE"),
+        "an H3 radius query must not create or advertise a retired RTREE index"
+    );
+}
+
+#[test]
+fn retired_rtree_descriptors_are_dropped_on_load() {
+    let dir = support::temp_data_dir("e2e-retired-rtree-descriptor");
+    let path = dir.join("data.rdb");
+    {
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+        seed_places(&rt);
+        insert_legacy_index_descriptor(&rt, "idx_legacy_spatial", "spatial");
+        insert_legacy_index_descriptor(&rt, "idx_legacy_rtree", "rtree");
+    }
+
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+    assert!(
+        show_index(&rt, "places", "idx_legacy_spatial").is_none(),
+        "legacy spatial descriptor must be dropped during load"
+    );
+    assert!(
+        show_index(&rt, "places", "idx_legacy_rtree").is_none(),
+        "legacy rtree descriptor must be dropped during load"
+    );
+    assert!(
+        rt.execute_query("SELECT * FROM places")
+            .expect("store must open and serve queries after dropping descriptors")
+            .result
+            .records
+            .len()
+            == 3
     );
 }
