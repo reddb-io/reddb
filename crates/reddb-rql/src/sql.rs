@@ -11,11 +11,11 @@ use crate::ast::{
     DropVectorQuery, DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery,
     ExplainQuery, Expr, FieldRef, Filter, ForeignColumnDef, ForkStoreQuery, GrantStmt,
     GraphCommand, GraphQuery, HybridQuery, InsertQuery, IsolationLevel, JoinQuery, KvCommand,
-    MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
-    QueueSelectQuery, RankOfQuery, RankRangeQuery, RefreshMaterializedViewQuery, RevokeStmt,
-    RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand, TruncateQuery,
-    TxnControl, UpdateQuery, VcsCommand, VcsConflictResolution, VcsRefKind, VcsResetMode,
-    VectorQuery,
+    MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, PromoteForkQuery, QueryExpr,
+    QueueCommand, QueueSelectQuery, RankOfQuery, RankRangeQuery, RefreshMaterializedViewQuery,
+    RevokeStmt, RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand,
+    TruncateQuery, TxnControl, UpdateQuery, VcsCommand, VcsConflictResolution, VcsRefKind,
+    VcsResetMode, VectorQuery,
 };
 use crate::lexer::Token;
 use crate::parser::{ParseError, Parser, SafeTokenDisplay};
@@ -123,6 +123,7 @@ pub enum SqlCommand {
     Maintenance(MaintenanceCommand),
     Vcs(VcsCommand),
     ForkStore(ForkStoreQuery),
+    PromoteFork(PromoteForkQuery),
     DropFork(DropForkQuery),
     CreateSchema(CreateSchemaQuery),
     DropSchema(DropSchemaQuery),
@@ -1302,6 +1303,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_sql_command_covers_store_fork_promotion() {
+        let SqlCommand::PromoteFork(query) = sql_command("PROMOTE FORK exp") else {
+            panic!("PROMOTE FORK should parse as a store fork promotion");
+        };
+        assert_eq!(query.name, "exp");
+    }
+
+    #[test]
     fn parse_sql_command_covers_iam_and_hypertable_dispatch_edges() {
         assert!(matches!(
             expr("CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'"),
@@ -1477,6 +1486,7 @@ pub enum SqlAdminCommand {
     CreateUser(CreateUserStmt),
     IamPolicy(QueryExpr),
     ForkStore(ForkStoreQuery),
+    PromoteFork(PromoteForkQuery),
     DropFork(DropForkQuery),
 }
 
@@ -1590,6 +1600,7 @@ impl SqlStatement {
             SqlStatement::Admin(SqlAdminCommand::Maintenance(cmd)) => SqlCommand::Maintenance(cmd),
             SqlStatement::Admin(SqlAdminCommand::Vcs(cmd)) => SqlCommand::Vcs(cmd),
             SqlStatement::Admin(SqlAdminCommand::ForkStore(q)) => SqlCommand::ForkStore(q),
+            SqlStatement::Admin(SqlAdminCommand::PromoteFork(q)) => SqlCommand::PromoteFork(q),
             SqlStatement::Admin(SqlAdminCommand::DropFork(q)) => SqlCommand::DropFork(q),
             SqlStatement::Schema(SqlSchemaCommand::CreateSchema(q)) => SqlCommand::CreateSchema(q),
             SqlStatement::Schema(SqlSchemaCommand::DropSchema(q)) => SqlCommand::DropSchema(q),
@@ -1742,6 +1753,7 @@ impl SqlCommand {
             SqlCommand::Maintenance(cmd) => QueryExpr::MaintenanceCommand(cmd),
             SqlCommand::Vcs(cmd) => QueryExpr::VcsCommand(cmd),
             SqlCommand::ForkStore(q) => QueryExpr::ForkStore(q),
+            SqlCommand::PromoteFork(q) => QueryExpr::PromoteFork(q),
             SqlCommand::DropFork(q) => QueryExpr::DropFork(q),
             SqlCommand::CreateSchema(q) => QueryExpr::CreateSchema(q),
             SqlCommand::DropSchema(q) => QueryExpr::DropSchema(q),
@@ -1878,6 +1890,7 @@ impl SqlCommand {
             SqlCommand::Maintenance(cmd) => SqlStatement::Admin(SqlAdminCommand::Maintenance(cmd)),
             SqlCommand::Vcs(cmd) => SqlStatement::Admin(SqlAdminCommand::Vcs(cmd)),
             SqlCommand::ForkStore(q) => SqlStatement::Admin(SqlAdminCommand::ForkStore(q)),
+            SqlCommand::PromoteFork(q) => SqlStatement::Admin(SqlAdminCommand::PromoteFork(q)),
             SqlCommand::DropFork(q) => SqlStatement::Admin(SqlAdminCommand::DropFork(q)),
             SqlCommand::CreateSchema(q) => SqlStatement::Schema(SqlSchemaCommand::CreateSchema(q)),
             SqlCommand::DropSchema(q) => SqlStatement::Schema(SqlSchemaCommand::DropSchema(q)),
@@ -2114,7 +2127,9 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("RESET") => {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
-            Token::Ident(name) if name.eq_ignore_ascii_case("FORK") => {
+            Token::Ident(name)
+                if name.eq_ignore_ascii_case("FORK") || name.eq_ignore_ascii_case("PROMOTE") =>
+            {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
             Token::Ident(name)
@@ -2848,6 +2863,19 @@ impl<'a> Parser<'a> {
         Ok(SqlCommand::ForkStore(ForkStoreQuery { name, at_lsn }))
     }
 
+    fn parse_promote_fork_command(&mut self) -> Result<SqlCommand, ParseError> {
+        self.advance()?; // PROMOTE
+        if !self.consume_ident_ci("FORK")? {
+            return Err(ParseError::expected(
+                vec!["FORK"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let name = self.expect_ident()?;
+        Ok(SqlCommand::PromoteFork(PromoteForkQuery { name }))
+    }
+
     fn parse_dotted_admin_path(&mut self, lowercase: bool) -> Result<String, ParseError> {
         let mut path = self.expect_ident()?;
         while self.consume(&Token::Dot)? {
@@ -3451,6 +3479,9 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Token::Ident(name) if name.eq_ignore_ascii_case("FORK") => {
                 self.parse_fork_store_command()
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("PROMOTE") => {
+                self.parse_promote_fork_command()
             }
             Token::Select => match self.parse_select_query()? {
                 QueryExpr::Table(query) => Ok(SqlCommand::Select(query)),

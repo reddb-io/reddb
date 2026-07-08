@@ -623,6 +623,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::CreateVcsRef(_)
         | QueryExpr::DropVcsRef(_)
         | QueryExpr::ForkStore(_)
+        | QueryExpr::PromoteFork(_)
         | QueryExpr::DropFork(_)
         | QueryExpr::VcsCommand(_)
         | QueryExpr::GraphCommand(_)

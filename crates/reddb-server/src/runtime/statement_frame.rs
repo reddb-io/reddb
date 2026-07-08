@@ -216,7 +216,7 @@ fn statement_kind(query: &str) -> &'static str {
         | b"APPROX" | b"APPROXIMATE" | b"ZRANK" | b"ZRANGE" | b"LIST" | b"WATCH" | b"GET"
         | b"HISTORY" => "read",
         b"INSERT" | b"UPDATE" | b"DELETE" | b"UPSERT" | b"MERGE" | b"COPY" | b"TRUNCATE" => "write",
-        b"CREATE" | b"ALTER" | b"DROP" | b"REINDEX" | b"VACUUM" | b"ANALYZE" => "ddl",
+        b"CREATE" | b"ALTER" | b"DROP" | b"PROMOTE" | b"REINDEX" | b"VACUUM" | b"ANALYZE" => "ddl",
         b"GRANT" | b"REVOKE" => "admin",
         b"BEGIN" | b"START" | b"COMMIT" | b"ROLLBACK" | b"SAVEPOINT" | b"RELEASE" | b"END"
         | b"SET" | b"RESET" | b"PREPARE" | b"EXECUTE" | b"DEALLOCATE" | b"USE" => "control",

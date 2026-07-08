@@ -301,6 +301,7 @@ impl JoinReorderingPass {
             | QueryExpr::CreateVcsRef(_)
             | QueryExpr::DropVcsRef(_)
             | QueryExpr::ForkStore(_)
+            | QueryExpr::PromoteFork(_)
             | QueryExpr::DropFork(_)
             | QueryExpr::GraphCommand(_)
             | QueryExpr::SearchCommand(_)
