@@ -2140,6 +2140,10 @@ fn geo_args(args: &[Value]) -> Option<(f64, f64, f64, f64)> {
             let (lat2, lon2) = geo_point(right)?;
             Some((lat1, lon1, lat2, lon2))
         }
+        [left, lat2, lon2] => {
+            let (lat1, lon1) = geo_point(left)?;
+            Some((lat1, lon1, value_as_f64(lat2)?, value_as_f64(lon2)?))
+        }
         [lat1, lon1, lat2, lon2] => Some((
             value_as_f64(lat1)?,
             value_as_f64(lon1)?,
@@ -2151,13 +2155,7 @@ fn geo_args(args: &[Value]) -> Option<(f64, f64, f64, f64)> {
 }
 
 fn geo_point(value: &Value) -> Option<(f64, f64)> {
-    match value {
-        Value::GeoPoint(lat, lon) => Some((
-            crate::geo::micro_to_deg(*lat),
-            crate::geo::micro_to_deg(*lon),
-        )),
-        _ => None,
-    }
+    crate::geo::recognize_geo_value(value)
 }
 
 fn value_as_f64(value: &Value) -> Option<f64> {
