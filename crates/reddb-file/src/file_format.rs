@@ -444,8 +444,8 @@ pub const COLUMN_BLOCK_MAGIC: [u8; 4] = *b"RDCC";
 /// Column block on-disk format version.
 pub const COLUMN_BLOCK_VERSION_V1: u16 = 1;
 
-/// Reusable segment-level bloom header magic.
-pub const BLOOM_SEGMENT_MAGIC: u8 = 0xBF;
+/// Reusable segment-level bloom frame v2 magic.
+pub const BLOOM_SEGMENT_V2_MAGIC: u8 = 0xC0;
 
 /// Legacy vector B-tree on-disk page format.
 pub const VECTOR_BTREE_FORMAT_VERSION_V1: u16 = 1;
