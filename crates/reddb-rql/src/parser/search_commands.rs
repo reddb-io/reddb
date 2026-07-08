@@ -419,7 +419,7 @@ impl<'a> Parser<'a> {
                 let collection = self.expect_ident()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
-                let column = self.expect_ident()?;
+                let column = self.parse_search_spatial_column()?;
 
                 let mut limit_param: Option<usize> = None;
                 let limit = if self.consume(&Token::Limit)? {
@@ -486,7 +486,7 @@ impl<'a> Parser<'a> {
                 let collection = self.expect_ident()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
-                let column = self.expect_ident()?;
+                let column = self.parse_search_spatial_column()?;
 
                 let mut limit_param: Option<usize> = None;
                 let limit = if self.consume(&Token::Limit)? {
@@ -546,7 +546,7 @@ impl<'a> Parser<'a> {
                 let collection = self.expect_ident()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
-                let column = self.expect_ident()?;
+                let column = self.parse_search_spatial_column()?;
 
                 Ok(QueryExpr::SearchCommand(SearchCommand::SpatialNearest {
                     lat,
@@ -563,6 +563,14 @@ impl<'a> Parser<'a> {
                 self.position(),
             )),
         }
+    }
+
+    fn parse_search_spatial_column(&mut self) -> Result<String, ParseError> {
+        let mut segments = vec![self.expect_ident_or_keyword()?];
+        while self.consume(&Token::Dot)? {
+            segments.push(self.expect_ident_or_keyword()?);
+        }
+        Ok(segments.join("."))
     }
 
     /// Parse a vector literal: [0.1, 0.2, 0.3]
