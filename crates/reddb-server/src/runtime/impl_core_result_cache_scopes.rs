@@ -155,6 +155,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             | SearchCommand::Hybrid { collection, .. }
             | SearchCommand::SpatialRadius { collection, .. }
             | SearchCommand::SpatialBbox { collection, .. }
+            | SearchCommand::SpatialWithinPolygon { collection, .. }
             | SearchCommand::SpatialNearest { collection, .. } => {
                 cache_scope_insert(scopes, collection);
             }
