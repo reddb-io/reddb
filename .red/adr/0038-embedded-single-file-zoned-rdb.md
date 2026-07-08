@@ -1,82 +1,105 @@
-# Embedded Single-file Zoned RDB
+# Storage Packaging by Profile — Single-file Zoned RDB and Its Siblings
 
-Status: proposed
+Status: accepted
+Date: 2026-07-08 (rewritten; originally proposed as "Embedded Single-file Zoned RDB")
 
-RedDB's embedded storage profile uses a single `.rdb` file as the operator-visible
-durable artifact. The file is internally zoned so it can carry all required
-storage-engine state without mandatory sidecars.
+RedDB's physical storage packaging is a **per-profile contract**. This ADR is the
+umbrella: it names each profile's packaging and scale contract, fixes the zoned
+single-file layout as the embedded target, and — the part the original version
+lacked — attaches **phases with auditable exit criteria** so the distance between
+the promised layout and the shipped sidecars is tracked, never assumed.
+
+The 2026-07-08 rewrite was triggered by an architecture review against Cassandra
+and TigerBeetle which found the original ADR aspirational: `Status: proposed`
+while `reddb-file/src/layout.rs` carries ~15 sidecar extensions that ARE the
+shipped reality. An ADR whose status diverges from the code misleads exactly the
+way a dead syntax does; this rewrite applies the same remedy (a plan with owners
+and exit criteria, or an honest status).
 
 ## Decisions
 
-**Embedded RedDB is single-file by contract.** Embedded, local, test, plugin, and
-prototype use cases must be able to create, copy, move, back up, and delete one
-`.rdb` file containing all required durable state.
+### 1. Packaging and scale are contracted per profile
 
-**The single file is zoned internally.** The target `.rdb` layout has explicit
-zones for superblock copies, manifest/catalog state, WAL records, page/grid
-storage, free-space metadata, checksums, and future overflow/blob extents. The
-file should feel SQLite-like to users while borrowing TigerBeetle's internal
-discipline around superblocks, manifests, checksummed block references, and
-replayable state.
+- **Embedded (standalone)** — one `.rdb` file as the operator-visible durable
+  artifact: create, copy, move, back up, delete one file. **Scale contract:
+  working set ≤ the memory budget (ADR 0073).** The budget is detected or
+  declared at boot and enforced didactically; exceeding it is an operating
+  error with a named limit, never an OOM kill.
+- **Server** — same zoned grid, plus the **disk-resident roadmap**: zones for
+  entity/segment state that exceed RAM, paged through the budget-governed
+  cache hierarchy. Dataset > RAM is a committed direction for this profile
+  only; it is explicitly NOT promised for embedded.
+- **Serverless** — bounded-everything posture: strict memory/CPU budget
+  (ADR 0073), fast-boot snapshot/segment packaging (see `context/serverless.md`),
+  cold-start-aware layout. Boundedness here is a survival contract (billing,
+  host kill), not hygiene.
+- **Primary-replica / cluster** — may choose directory or segmented layouts
+  when boot speed, replication streaming, snapshot distribution, or repair
+  make them more appropriate. The single-file contract binds embedded, not
+  the fleet.
 
-**The embedded manifest is internal and authoritative.** The `.rdb` contains an
-internal manifest rooted by the file superblock. It maps internal zones and
-logical objects such as collections, indexes, WAL region, free-space state, and
-checkpoint boundary without requiring an external `red.manifest`.
+### 2. The embedded single file is zoned internally
 
-**The embedded WAL lives inside the file.** Embedded single-file storage uses a
-circular internal WAL region. WAL entries may be overwritten only after the
-checkpoint/superblock boundary proves they are no longer needed for recovery.
+Unchanged from the original decision: explicit zones for superblock copies
+(ping-pong pair with generation + checksum), internal manifest/catalog, a
+circular WAL region, page/grid storage, free-space metadata, checksums, and
+overflow/blob extents. SQLite-like to users, TigerBeetle-like inside. The
+embedded manifest is internal and authoritative; sidecars are not part of the
+promoted embedded contract.
 
-**The embedded superblock uses two ping-pong copies.** The first target design
-uses a pair of superblock copies with generation and checksum metadata. Open
-chooses the newest valid copy to root the embedded internal manifest.
+### 3. Maintenance is paced, never bursty
 
-**Embedded storage is checksummed at its recovery boundaries.** Mutable pages
-carry checksums in their page headers. Immutable internal blocks or segment-like
-regions are verified against checksums stored in manifest/index metadata.
-Superblocks, embedded manifest state, and checkpoint metadata are checksummed.
+All storage maintenance — segment consolidation (ADR 0073), scrub (ADR 0074),
+future append-only compaction (#1808 lane), archival — runs as **incremental,
+tick-paced work with a bounded per-tick cost**. Background maintenance threads
+with unbounded bursts (the Cassandra compaction model) are prohibited across
+every profile. Rationale: bursty maintenance destroys p99 on embedded, billing
+on serverless, and replica lag on the fleet; the TigerBeetle-style paced model
+is strictly more predictable and composes with the memory/CPU budget.
 
-**Sidecars are not the embedded target contract.** Existing sidecars such as WAL,
-metadata, and double-write files may remain as legacy or transitional
-implementation details while the zoned format is introduced, but the promoted
-embedded profile must not require them for normal operation.
+### 4. Phases with exit criteria (the honesty mechanism)
 
-**This does not constrain every deployment profile.** Serverless, primary-replica,
-and cluster profiles may choose different physical packaging when boot speed,
-replication streaming, snapshot distribution, range movement, or cluster repair
-make a directory or segmented layout more appropriate.
+Each sidecar family retires only when its phase's exit criteria hold. A phase
+is DONE when: (a) the promoted embedded profile creates **no** sidecar of that
+family on a fresh store, (b) the in-file zone replacing it is covered by a DST
+crash campaign with the `recover_and_check` oracle, and (c) `layout.rs` drops
+the extension (clean break — no dual-read window beyond one minor release).
+
+| Phase | Scope | Retires |
+|---|---|---|
+| 0 (now) | This rewrite: sidecar reality is documented as transitional, tracked here | — |
+| 1 | Superblock ping-pong pair + internal manifest in-file | `rdb-hdr`, `rdb-meta` (+ shadows) |
+| 2 | Circular WAL region in-file | `rdb-uwal`, `redwal`, `rdb-wal`, legacy `wal` |
+| 3 | Double-write/recovery state in-file | `rdb-dwb` (+ shadow), `shm` review |
+| 4 | Server-profile disk-resident entity/segment zones (dataset > RAM) | — (new capability, not a retirement) |
+
+Ordering within phases 1–3 may be re-sequenced by an ADR amendment with one
+line of rationale; silently skipping a phase is not allowed. Phase 4 is gated
+on ADR 0073 landing first (the cache hierarchy it pages through is
+budget-governed).
 
 ## Considered Options
 
-- **Single zoned `.rdb`.** Chosen because it preserves the embedded/SQLite-like
-  user experience while giving the engine room for formal recovery, checksums,
-  checkpointing, and future format evolution.
-- **External manifest or WAL sidecars.** Rejected for the promoted embedded
-  contract because the `.rdb` must remain self-contained.
-- **Four superblock copies.** Deferred because a two-copy ping-pong design is a
-  smaller first target while still avoiding a single fixed root copy.
-- **Manifest-only checksums.** Rejected because localized page/block corruption
-  must be detectable during reads, backup validation, and future repair.
-- **Primary `.rdb` plus mandatory sidecars.** Rejected as the embedded target
-  because it weakens copy/delete/backup ergonomics and makes local/plugin usage
-  easier to corrupt operationally.
-- **Current layout only.** Rejected as the target because it does not encode the
-  storage/deploy profile distinction and keeps embedded ergonomics tied to
-  transitional pager implementation details.
+- **Single zoned `.rdb` for embedded** — kept (unchanged rationale: ergonomics
+  + formal recovery room).
+- **Sidecars as the permanent embedded contract** — rejected again; weakens
+  copy/delete/backup ergonomics and multiplies partial-file failure modes.
+- **One packaging for all profiles** — rejected; replication/serverless have
+  structurally different boot/streaming needs (original ADR already carved
+  this out; the rewrite makes each profile's contract explicit).
+- **Keeping the ADR `proposed` with no phase plan** — rejected by this rewrite;
+  status must either be executable or say "vision".
 
 ## Consequences
 
-- The embedded storage roadmap needs a real file-level manifest/superblock model
-  rather than relying only on external path conventions.
-- WAL, metadata, DWB, and future recovery state need an in-file home before the
-  embedded profile can be considered promoted.
-- Embedded open/recovery must validate superblock generations/checksums, load the
-  internal manifest, and replay the internal WAL region from the checkpoint
-  boundary.
-- Read and validation paths must check mutable page checksums and immutable
-  block/segment checksums against their expected metadata.
-- Migration must distinguish legacy sidecar-backed databases from zoned embedded
-  `.rdb` databases.
-- Cluster and replication work must not assume the embedded single-file packaging
-  is the only valid physical store layout.
+- ADR 0073 (memory budget) and ADR 0074 (storage fault model) are companions:
+  0073 owns the scale contract enforcement, 0074 owns per-zone corruption
+  behavior. This ADR owns packaging and pacing.
+- Embedded open/recovery must validate superblock generations/checksums, load
+  the internal manifest, and replay the internal WAL region from the
+  checkpoint boundary (unchanged).
+- Every phase completion is provable in CI: fresh-store sidecar census + DST
+  campaign green. "0 sidecars created" is asserted, not eyeballed.
+- Migration must distinguish legacy sidecar-backed stores from zoned `.rdb`
+  stores; per the house no-backcompat posture, a major zoned bump reads the
+  old form only through the explicit offline migration tool, never silently.
