@@ -1210,84 +1210,30 @@ fn parse_components_mode(s: &str) -> RedDBResult<RuntimeGraphComponentsMode> {
 fn extract_geo_from_entity(entity: &UnifiedEntity) -> Option<(f64, f64)> {
     match &entity.data {
         EntityData::Row(row) => {
-            // Search named columns for GeoPoint or lat/lon pairs
             if let Some(ref named) = row.named {
-                // Direct GeoPoint value
                 for value in named.values() {
-                    if let Value::GeoPoint(lat_micro, lon_micro) = value {
-                        return Some((
-                            *lat_micro as f64 / 1_000_000.0,
-                            *lon_micro as f64 / 1_000_000.0,
-                        ));
+                    if let Some(point) = crate::geo::recognize_geo_value(value) {
+                        return Some(point);
                     }
                 }
-                // Try lat/lon or latitude/longitude named fields
-                let lat =
-                    named
-                        .get("lat")
-                        .or_else(|| named.get("latitude"))
-                        .and_then(|v| match v {
-                            Value::Float(f) => Some(*f),
-                            Value::Integer(i) => Some(*i as f64),
-                            _ => None,
-                        });
-                let lon = named
-                    .get("lon")
-                    .or_else(|| named.get("lng"))
-                    .or_else(|| named.get("longitude"))
-                    .and_then(|v| match v {
-                        Value::Float(f) => Some(*f),
-                        Value::Integer(i) => Some(*i as f64),
-                        _ => None,
-                    });
-                if let (Some(la), Some(lo)) = (lat, lon) {
-                    return Some((la, lo));
+                if let Some(point) = crate::geo::recognize_geo_fields(|key| named.get(key)) {
+                    return Some(point);
                 }
             }
-            // Search positional columns for GeoPoint
             for value in &row.columns {
-                if let Value::GeoPoint(lat_micro, lon_micro) = value {
-                    return Some((
-                        *lat_micro as f64 / 1_000_000.0,
-                        *lon_micro as f64 / 1_000_000.0,
-                    ));
+                if let Some(point) = crate::geo::recognize_geo_value(value) {
+                    return Some(point);
                 }
             }
             None
         }
         EntityData::Node(node) => {
-            // Search node properties
             for value in node.properties.values() {
-                if let Value::GeoPoint(lat_micro, lon_micro) = value {
-                    return Some((
-                        *lat_micro as f64 / 1_000_000.0,
-                        *lon_micro as f64 / 1_000_000.0,
-                    ));
+                if let Some(point) = crate::geo::recognize_geo_value(value) {
+                    return Some(point);
                 }
             }
-            let lat = node
-                .properties
-                .get("lat")
-                .or_else(|| node.properties.get("latitude"))
-                .and_then(|v| match v {
-                    Value::Float(f) => Some(*f),
-                    Value::Integer(i) => Some(*i as f64),
-                    _ => None,
-                });
-            let lon = node
-                .properties
-                .get("lon")
-                .or_else(|| node.properties.get("lng"))
-                .or_else(|| node.properties.get("longitude"))
-                .and_then(|v| match v {
-                    Value::Float(f) => Some(*f),
-                    Value::Integer(i) => Some(*i as f64),
-                    _ => None,
-                });
-            if let (Some(la), Some(lo)) = (lat, lon) {
-                return Some((la, lo));
-            }
-            None
+            crate::geo::recognize_geo_fields(|key| node.properties.get(key))
         }
         _ => None,
     }
