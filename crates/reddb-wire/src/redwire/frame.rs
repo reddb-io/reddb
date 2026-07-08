@@ -128,6 +128,9 @@ pub enum MessageKind {
     // outcome is unambiguous on the wire: not a `QueueEventPush`
     // (delivery), not a `StreamError` (cancellation / failure).
     QueueWaitTimeout = 0x30,
+    // Stale-ownership redirect. Carries a MOVED payload naming the current
+    // range owner, ownership epoch, and catalog version.
+    MovedRedirect = 0x31,
 }
 
 /// Coarse routing class for a `MessageKind`.
@@ -184,7 +187,8 @@ impl MessageKind {
             | Self::DeleteOk
             | Self::VectorSearch
             | Self::GraphTraverse
-            | Self::QueryWithParams => MessageClass::DataPlane,
+            | Self::QueryWithParams
+            | Self::MovedRedirect => MessageClass::DataPlane,
 
             // BulkStream* + RowDescription/StreamEnd describe an
             // in-flight stream rather than a single round trip.
@@ -329,7 +333,8 @@ impl MessageKind {
             // Server pushes the delivered queue message (issue #917)
             // and the distinct wait-timeout outcome (issue #919).
             | Self::QueueEventPush
-            | Self::QueueWaitTimeout => MessageDirection::ServerToClient,
+            | Self::QueueWaitTimeout
+            | Self::MovedRedirect => MessageDirection::ServerToClient,
 
             // Symmetric — either peer may initiate. (`StreamChunk` is
             // also symmetric but has its own arm above — see issue
@@ -384,6 +389,7 @@ impl MessageKind {
             0x2E => Some(Self::QueueWaitOpen),
             0x2F => Some(Self::QueueEventPush),
             0x30 => Some(Self::QueueWaitTimeout),
+            0x31 => Some(Self::MovedRedirect),
             _ => None,
         }
     }
@@ -476,6 +482,7 @@ mod catalog_tests {
         MessageKind::QueueWaitOpen,
         MessageKind::QueueEventPush,
         MessageKind::QueueWaitTimeout,
+        MessageKind::MovedRedirect,
     ];
 
     #[test]
@@ -505,6 +512,7 @@ mod catalog_tests {
             MessageKind::QueryWithParams.class(),
             MessageClass::DataPlane
         );
+        assert_eq!(MessageKind::MovedRedirect.class(), MessageClass::DataPlane);
 
         // Streamed envelopes.
         assert_eq!(MessageKind::BulkStreamStart.class(), MessageClass::Streamed);
