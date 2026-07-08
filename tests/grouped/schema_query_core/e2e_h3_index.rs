@@ -19,6 +19,7 @@ mod support;
 use reddb::storage::schema::Value;
 use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, RedDBRuntime};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Pull a single index row from `red.show_indexes` for `table` + `name`.
@@ -442,6 +443,259 @@ fn h3_radius_uses_disk_btree_not_rtree() {
         !show_index_kinds(&rt).iter().any(|kind| kind == "RTREE"),
         "an H3 radius query must not create or advertise a retired RTREE index"
     );
+}
+
+fn spatial_hit_keys(rt: &RedDBRuntime, collection: &str, query: &str) -> HashSet<String> {
+    let res = rt.execute_query(query).expect("spatial query must execute");
+    let store = rt.db().store();
+    res.result
+        .records
+        .iter()
+        .map(|r| {
+            let id = match r.get("entity_id") {
+                Some(Value::UnsignedInteger(n)) => EntityId::new(*n),
+                other => panic!("missing entity_id: {other:?}"),
+            };
+            let entity = store
+                .get(collection, id)
+                .unwrap_or_else(|| panic!("spatial hit entity {id:?} must exist"));
+            stable_spatial_key(&entity)
+        })
+        .collect()
+}
+
+fn stable_spatial_key(entity: &UnifiedEntity) -> String {
+    match &entity.data {
+        EntityData::Row(row) => {
+            if let Some(named) = &row.named {
+                return named
+                    .get("id")
+                    .map(stable_value_key)
+                    .unwrap_or_else(|| format!("row:{}", entity.id.raw()));
+            }
+            if let Some(schema) = &row.schema {
+                if let Some(pos) = schema.iter().position(|name| name == "id") {
+                    return stable_value_key(&row.columns[pos]);
+                }
+            }
+            format!("row:{}", entity.id.raw())
+        }
+        EntityData::Node(node) => node
+            .properties
+            .get("name")
+            .map(stable_value_key)
+            .unwrap_or_else(|| format!("node:{}", entity.id.raw())),
+        _ => format!("entity:{}", entity.id.raw()),
+    }
+}
+
+fn stable_value_key(value: &Value) -> String {
+    match value {
+        Value::Integer(n) => n.to_string(),
+        Value::UnsignedInteger(n) => n.to_string(),
+        Value::Text(text) => text.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn assert_subset(full_scan: &HashSet<String>, indexed: &HashSet<String>, label: &str) {
+    assert!(
+        full_scan.is_subset(indexed),
+        "{label}: full-scan hits {full_scan:?} must be a subset of indexed-route hits {indexed:?}"
+    );
+}
+
+#[test]
+fn graph_node_h3_index_is_maintained_after_public_insert_update_delete() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE GRAPH places").unwrap();
+    rt.execute_query("CREATE INDEX idx_node_loc ON places (loc) USING H3")
+        .unwrap();
+
+    rt.execute_query(
+        "INSERT INTO places NODE (label, node_type, name, loc) \
+         VALUES ('city', 'city', 'paris', {lat: 48.8566, lon: 2.3522})",
+    )
+    .unwrap();
+    assert!(
+        spatial_hit_keys(
+            &rt,
+            "places",
+            "SEARCH SPATIAL RADIUS 48.8566 2.3522 0.1 COLLECTION places COLUMN loc"
+        )
+        .contains("paris"),
+        "single-row INSERT NODE after CREATE INDEX must be searchable through H3"
+    );
+
+    rt.execute_query(
+        "INSERT INTO places NODE (label, node_type, name, loc) VALUES \
+         ('city', 'city', 'rome', {lat: 41.9028, lon: 12.4964}), \
+         ('city', 'city', 'singapore', {lat: 1.3521, lon: 103.8198})",
+    )
+    .unwrap();
+    assert!(
+        spatial_hit_keys(
+            &rt,
+            "places",
+            "SEARCH SPATIAL RADIUS 41.9028 12.4964 0.1 COLLECTION places COLUMN loc"
+        )
+        .contains("rome"),
+        "multi-row INSERT NODE after CREATE INDEX must be searchable through H3"
+    );
+
+    rt.execute_query(
+        "UPDATE places NODES SET loc = {lat: 35.6895, lon: 139.6917} WHERE name = 'rome'",
+    )
+    .unwrap();
+    let old_rome = spatial_hit_keys(
+        &rt,
+        "places",
+        "SEARCH SPATIAL RADIUS 41.9028 12.4964 0.1 COLLECTION places COLUMN loc",
+    );
+    assert!(
+        !old_rome.contains("rome"),
+        "UPDATE NODES must remove the old H3 cell"
+    );
+    assert!(
+        spatial_hit_keys(
+            &rt,
+            "places",
+            "SEARCH SPATIAL RADIUS 35.6895 139.6917 0.1 COLLECTION places COLUMN loc"
+        )
+        .contains("rome"),
+        "UPDATE NODES must insert the new H3 cell"
+    );
+
+    rt.execute_query("DELETE FROM places WHERE name = 'paris'")
+        .unwrap();
+    assert!(
+        !spatial_hit_keys(
+            &rt,
+            "places",
+            "SEARCH SPATIAL RADIUS 48.8566 2.3522 0.1 COLLECTION places COLUMN loc"
+        )
+        .contains("paris"),
+        "DELETE must remove the node from the H3 index"
+    );
+}
+
+#[derive(Clone, Copy)]
+enum SpatialEntityKind {
+    Row,
+    Node,
+}
+
+#[derive(Clone, Copy)]
+enum IndexTiming {
+    BeforeData,
+    AfterSeedData,
+}
+
+fn setup_spatial_collection(rt: &RedDBRuntime, kind: SpatialEntityKind) {
+    match kind {
+        SpatialEntityKind::Row => rt
+            .execute_query("CREATE TABLE spatial_items (id INT, name TEXT, loc GEOPOINT)")
+            .unwrap(),
+        SpatialEntityKind::Node => rt.execute_query("CREATE GRAPH spatial_items").unwrap(),
+    };
+}
+
+fn create_spatial_index(rt: &RedDBRuntime) {
+    rt.execute_query("CREATE INDEX idx_loc ON spatial_items (loc) USING H3")
+        .unwrap();
+}
+
+fn insert_spatial_item(rt: &RedDBRuntime, kind: SpatialEntityKind, id: i64, name: &str, loc: &str) {
+    match kind {
+        SpatialEntityKind::Row => rt
+            .execute_query(&format!(
+                "INSERT INTO spatial_items (id, name, loc) VALUES ({id}, '{name}', '{loc}')"
+            ))
+            .unwrap(),
+        SpatialEntityKind::Node => rt
+            .execute_query(&format!(
+                "INSERT INTO spatial_items NODE (label, node_type, name, loc) \
+                 VALUES ('site', 'site', '{name}', {})",
+                geo_json_expr(loc)
+            ))
+            .unwrap(),
+    };
+}
+
+fn update_spatial_item(rt: &RedDBRuntime, kind: SpatialEntityKind, name: &str, loc: &str) {
+    match kind {
+        SpatialEntityKind::Row => rt
+            .execute_query(&format!(
+                "UPDATE spatial_items SET loc = '{loc}' WHERE name = '{name}'"
+            ))
+            .unwrap(),
+        SpatialEntityKind::Node => rt
+            .execute_query(&format!(
+                "UPDATE spatial_items NODES SET loc = {} WHERE name = '{name}'",
+                geo_json_expr(loc)
+            ))
+            .unwrap(),
+    };
+}
+
+fn geo_json_expr(loc: &str) -> String {
+    let (lat, lon) = loc
+        .split_once(',')
+        .unwrap_or_else(|| panic!("invalid test coordinate: {loc}"));
+    format!("{{lat: {lat}, lon: {lon}}}")
+}
+
+fn delete_spatial_item(rt: &RedDBRuntime, name: &str) {
+    rt.execute_query(&format!("DELETE FROM spatial_items WHERE name = '{name}'"))
+        .unwrap();
+}
+
+fn apply_spatial_seed(rt: &RedDBRuntime, kind: SpatialEntityKind) {
+    insert_spatial_item(rt, kind, 1, "paris", "48.8566,2.3522");
+    insert_spatial_item(rt, kind, 2, "louvre", "48.8606,2.3376");
+    insert_spatial_item(rt, kind, 3, "rome", "41.9028,12.4964");
+}
+
+fn apply_spatial_tail_mutations(rt: &RedDBRuntime, kind: SpatialEntityKind) {
+    update_spatial_item(rt, kind, "rome", "35.6895,139.6917");
+    delete_spatial_item(rt, "louvre");
+    insert_spatial_item(rt, kind, 4, "eiffel", "48.8584,2.2945");
+    insert_spatial_item(rt, kind, 5, "singapore", "1.3521,103.8198");
+}
+
+fn build_spatial_case(kind: SpatialEntityKind, timing: IndexTiming, indexed: bool) -> RedDBRuntime {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    setup_spatial_collection(&rt, kind);
+    if indexed && matches!(timing, IndexTiming::BeforeData) {
+        create_spatial_index(&rt);
+    }
+    apply_spatial_seed(&rt, kind);
+    if indexed && matches!(timing, IndexTiming::AfterSeedData) {
+        create_spatial_index(&rt);
+    }
+    apply_spatial_tail_mutations(&rt, kind);
+    rt
+}
+
+#[test]
+fn h3_index_route_superset_invariant_generated_mutation_sequences() {
+    let queries = [
+        "SEARCH SPATIAL RADIUS 48.8566 2.3522 5.0 COLLECTION spatial_items COLUMN loc",
+        "SEARCH SPATIAL BBOX 48.80 2.25 48.90 2.40 COLLECTION spatial_items COLUMN loc",
+        "SEARCH SPATIAL NEAREST 48.8566 2.3522 K 3 COLLECTION spatial_items COLUMN loc",
+    ];
+
+    for kind in [SpatialEntityKind::Row, SpatialEntityKind::Node] {
+        for timing in [IndexTiming::BeforeData, IndexTiming::AfterSeedData] {
+            let full_scan = build_spatial_case(kind, timing, false);
+            let indexed = build_spatial_case(kind, timing, true);
+            for query in queries {
+                let full_scan_keys = spatial_hit_keys(&full_scan, "spatial_items", query);
+                let indexed_keys = spatial_hit_keys(&indexed, "spatial_items", query);
+                assert_subset(&full_scan_keys, &indexed_keys, query);
+            }
+        }
+    }
 }
 
 #[test]

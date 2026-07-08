@@ -54,27 +54,37 @@ fn refresh_context_index(
     Ok(())
 }
 
-/// Pull `(name, value)` pairs for every named column on a row entity.
-/// Returns empty if the entity is not a row, or if the row carries
-/// neither a `named` map nor a `schema` Arc — both of those mean the
-/// names aren't recoverable here, so secondary-index maintenance has
-/// nothing to act on. Used by the delete + update paths.
+/// Pull `(name, value)` pairs for every indexable field on an entity.
+/// Returns empty if field names are not recoverable here, so secondary-index
+/// maintenance has nothing to act on. Used by the delete + update paths.
 pub(crate) fn entity_row_fields_snapshot(
     entity: &crate::storage::UnifiedEntity,
 ) -> Vec<(String, Value)> {
-    let crate::storage::EntityData::Row(row) = &entity.data else {
-        return Vec::new();
-    };
-    let mut fields = if let Some(named) = &row.named {
-        named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-    } else if let Some(schema) = &row.schema {
-        schema
+    let mut fields = match &entity.data {
+        crate::storage::EntityData::Row(row) => {
+            if let Some(named) = &row.named {
+                named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            } else if let Some(schema) = &row.schema {
+                schema
+                    .iter()
+                    .zip(row.columns.iter())
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        crate::storage::EntityData::Node(node) => node
+            .properties
             .iter()
-            .zip(row.columns.iter())
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect()
-    } else {
-        Vec::new()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        crate::storage::EntityData::Edge(edge) => edge
+            .properties
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        _ => Vec::new(),
     };
     expand_binary_document_body_snapshot(&mut fields);
     fields

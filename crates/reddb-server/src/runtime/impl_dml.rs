@@ -757,12 +757,15 @@ impl RedDBRuntime {
 
                 ensure_graph_insert_contract(self, &query.table)?;
                 let mut batch = self.inner.db.batch();
+                let mut graph_index_fields: Vec<Vec<(String, Value)>> =
+                    Vec::with_capacity(prepared.len());
                 for item in prepared {
                     match item {
                         PreparedGraphInsert::Node { fields, input } => {
                             if query.returning.is_some() {
-                                returning_field_snaps.push(fields);
+                                returning_field_snaps.push(fields.clone());
                             }
+                            graph_index_fields.push(fields);
                             let node_type = input.node_type.unwrap_or_else(|| input.label.clone());
                             batch = batch.add_node_with_type(
                                 input.collection,
@@ -774,8 +777,9 @@ impl RedDBRuntime {
                         }
                         PreparedGraphInsert::Edge { fields, input } => {
                             if query.returning.is_some() {
-                                returning_field_snaps.push(fields);
+                                returning_field_snaps.push(fields.clone());
                             }
+                            graph_index_fields.push(fields);
                             batch = batch.add_edge(
                                 input.collection,
                                 input.label,
@@ -798,6 +802,17 @@ impl RedDBRuntime {
                 };
                 for id in &ids {
                     self.stamp_xmin_if_in_txn(&query.table, *id);
+                }
+                if !graph_index_fields.is_empty() {
+                    let index_rows: Vec<_> = ids
+                        .iter()
+                        .zip(graph_index_fields)
+                        .map(|(id, fields)| (*id, fields))
+                        .collect();
+                    self.inner
+                        .index_store
+                        .index_entity_insert_batch(&query.table, &index_rows)
+                        .map_err(RedDBError::Internal)?;
                 }
                 if query.returning.is_some() {
                     returning_field_snaps = graph_insert_returning_snapshots(
