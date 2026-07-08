@@ -48,6 +48,20 @@ plugins:
         ci_aware: true
 
       # ----------------------------------------------------------------
+      # PR review gate (ADR 0064 §10, #749). A completed NON-mechanical
+      # attempt (classified tier at/above `threshold`) gets
+      # `ready-for-review` on its PR and the merge is HELD for a
+      # fresh-agent review — a different agent than the one that
+      # implemented it reviews the diff and posts inline comments.
+      # Mechanical/trivial work (fmt, bumps, one-liners) keeps the
+      # fast-merge path. Only affects PR landings (worktree_launches_
+      # pull_request: true, the default).
+      # ----------------------------------------------------------------
+      review_gate:
+        enabled: true
+        threshold: complex
+
+      # ----------------------------------------------------------------
       # Backpressure — shell gates that run AFTER the agent's automatic
       # feedback loop (`pnpm test`/cargo check/etc. on touched packages)
       # and BEFORE the merge. If any command exits non-zero, the merge
