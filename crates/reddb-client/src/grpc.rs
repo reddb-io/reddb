@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use crate::connector::RedDBClient;
 
-use crate::bookmark_routing::{BookmarkTarget, BookmarkWaiter, CausalReadOptions, RoutingTable};
+use crate::bookmark_routing::{
+    BookmarkTarget, BookmarkWaiter, CausalReadOptions, QueryOptions, RoutingTable,
+};
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::params::Value as ParamValue;
 use crate::router::{HealthAwareRouter, Outcome};
@@ -367,6 +369,23 @@ impl GrpcClient {
         self.query_on_endpoint(&mut client, idx, sql).await
     }
 
+    pub async fn query_with_options(
+        &self,
+        sql: &str,
+        options: QueryOptions,
+    ) -> Result<QueryResult> {
+        let membership = self.membership.read().unwrap().clone();
+        let term = match &options.consistency {
+            crate::bookmark_routing::ReadConsistency::Causal { bookmark, .. } => bookmark.term(),
+            _ => 0,
+        };
+        let table = RoutingTable::from_membership(membership, term);
+        let mut waiter = MembershipFrontierWaiter::new(&self.membership);
+        let decision = table.route_read(&options, &mut waiter);
+        let (mut client, idx) = self.endpoint_by_addr(&decision.endpoint.addr);
+        self.query_on_endpoint(&mut client, idx, sql).await
+    }
+
     pub async fn query_causal(
         &self,
         sql: &str,
@@ -376,7 +395,8 @@ impl GrpcClient {
         let membership = self.membership.read().unwrap().clone();
         let table = RoutingTable::from_membership(membership, bookmark.term());
         let mut waiter = MembershipFrontierWaiter::new(&self.membership);
-        let decision = table.route_causal_read(bookmark, &opts, &mut waiter);
+        let options = QueryOptions::causal(bookmark, opts);
+        let decision = table.route_read(&options, &mut waiter);
         let (mut client, idx) = self.endpoint_by_addr(&decision.endpoint.addr);
         self.query_on_endpoint(&mut client, idx, sql).await
     }
