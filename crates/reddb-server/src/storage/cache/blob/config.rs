@@ -16,9 +16,9 @@ pub const METRIC_CACHE_BLOB_SYNOPSIS_METADATA_READS_TOTAL: &str =
 pub const METRIC_CACHE_BLOB_SYNOPSIS_BYTES: &str = "cache_blob_synopsis_bytes";
 
 /// Default per-namespace Bloom synopsis sizing target. The filter is sized
-/// for ~10K entries at ~1% false-positive rate.
+/// for ~10K entries at ~1% false-positive rate by the canonical split-block
+/// Bloom primitive.
 pub const DEFAULT_BLOB_SYNOPSIS_CAPACITY: usize = 10_000;
-pub const DEFAULT_BLOB_SYNOPSIS_FPR: f64 = 0.01;
 
 /// Switch for L2 zstd compression (issue #192, lane 2/5).
 ///
