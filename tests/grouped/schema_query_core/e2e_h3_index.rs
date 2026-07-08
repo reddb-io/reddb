@@ -285,6 +285,20 @@ fn spatial_rows(rt: &RedDBRuntime, query: &str) -> Vec<(u64, u64)> {
         .collect()
 }
 
+fn text_field<'a>(record: &'a reddb::storage::query::UnifiedRecord, field: &str) -> &'a str {
+    match record.get(field) {
+        Some(Value::Text(value)) => value.as_ref(),
+        other => panic!("expected {field} text field, got {other:?} in {record:?}"),
+    }
+}
+
+fn float_field(record: &reddb::storage::query::UnifiedRecord, field: &str) -> f64 {
+    match record.get(field) {
+        Some(Value::Float(value)) => *value,
+        other => panic!("expected {field} float field, got {other:?} in {record:?}"),
+    }
+}
+
 /// For each query: run the full scan (no index), create the H3 index, run
 /// the ring scan, and assert the two are byte-identical.
 fn assert_h3_parity(create_index: &str, queries: &[String]) {
@@ -377,6 +391,94 @@ fn spatial_full_scan_reads_document_body_column() {
         nearest[0].1,
         0.0_f64.to_bits(),
         "exact centre nearest hit must report zero distance"
+    );
+}
+
+#[test]
+fn geo_distance_predicate_projects_and_orders_row_geopoint() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query(
+        "CREATE TABLE events (id INT, name TEXT, event_kind TEXT, gpsLocation GEOPOINT)",
+    )
+    .unwrap();
+    rt.execute_query(
+        "INSERT INTO events (id, name, event_kind, gpsLocation) VALUES \
+         (1, 'centre', 'signup', '38.760000,-77.150000'), \
+         (2, 'near', 'signup', '38.770000,-77.150000'), \
+         (3, 'wrong-kind', 'purchase', '38.760000,-77.150000'), \
+         (4, 'far', 'signup', '39.200000,-77.150000'), \
+         (5, 'missing', 'signup', NULL)",
+    )
+    .unwrap();
+
+    let res = rt
+        .execute_query(
+            "SELECT name, GEO_DISTANCE(gpsLocation, 38.76, -77.15) AS dist \
+             FROM events \
+             WHERE GEO_DISTANCE(gpsLocation, 38.76, -77.15) < 10.0 \
+               AND event_kind = 'signup' \
+             ORDER BY dist \
+             LIMIT 2",
+        )
+        .expect("GEO_DISTANCE predicate query over row GEOPOINT should execute");
+
+    assert_eq!(res.result.records.len(), 2);
+    assert_eq!(text_field(&res.result.records[0], "name"), "centre");
+    assert_eq!(float_field(&res.result.records[0], "dist"), 0.0);
+    assert_eq!(text_field(&res.result.records[1], "name"), "near");
+    assert!(
+        (float_field(&res.result.records[1], "dist") - 1.111_949_266).abs() < 0.000_001,
+        "near distance should be the worked haversine value"
+    );
+}
+
+#[test]
+fn geo_distance_predicate_resolves_document_body_and_dotted_path() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT doc_events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO doc_events DOCUMENT VALUES
+        ({"name":"centre","category":"signup","gpsLocation":{"lat":38.76,"lon":-77.15},"location":{"gps":{"lat":38.76,"lon":-77.15}}}),
+        ({"name":"near","category":"signup","gpsLocation":{"lat":38.77,"lon":-77.15},"location":{"gps":{"lat":38.77,"lon":-77.15}}}),
+        ({"name":"wrong-category","category":"purchase","gpsLocation":{"lat":38.76,"lon":-77.15},"location":{"gps":{"lat":38.76,"lon":-77.15}}}),
+        ({"name":"far","category":"signup","gpsLocation":{"lat":39.20,"lon":-77.15},"location":{"gps":{"lat":39.20,"lon":-77.15}}}),
+        ({"name":"missing","category":"signup"}),
+        ({"name":"not-geo","category":"signup","gpsLocation":"not-geo","location":{"gps":"not-geo"}})"#,
+    )
+    .unwrap();
+
+    let bare = rt
+        .execute_query(
+            "SELECT name, GEO_DISTANCE(gpsLocation, 38.76, -77.15) AS dist \
+             FROM doc_events \
+             WHERE GEO_DISTANCE(gpsLocation, 38.76, -77.15) < 10.0 \
+               AND category = 'signup' \
+             ORDER BY dist \
+             LIMIT 2",
+        )
+        .expect("GEO_DISTANCE should resolve a bare document body field");
+    assert_eq!(bare.result.records.len(), 2);
+    assert_eq!(text_field(&bare.result.records[0], "name"), "centre");
+    assert_eq!(text_field(&bare.result.records[1], "name"), "near");
+
+    let dotted = rt
+        .execute_query(
+            "SELECT name, GEO_DISTANCE(body.location.gps, 38.76, -77.15) AS dist \
+             FROM doc_events \
+             WHERE (GEO_DISTANCE(body.location.gps, 38.76, -77.15) = 0.0 \
+                    OR GEO_DISTANCE(body.location.gps, 38.76, -77.15) < 2.0) \
+               AND category = 'signup' \
+             ORDER BY dist \
+             LIMIT 2",
+        )
+        .expect("GEO_DISTANCE should resolve a dotted document body field");
+    assert_eq!(dotted.result.records.len(), 2);
+    assert_eq!(text_field(&dotted.result.records[0], "name"), "centre");
+    assert_eq!(float_field(&dotted.result.records[0], "dist"), 0.0);
+    assert_eq!(text_field(&dotted.result.records[1], "name"), "near");
+    assert!(
+        (float_field(&dotted.result.records[1], "dist") - 1.111_949_266).abs() < 0.000_001,
+        "near dotted-path distance should be the worked haversine value"
     );
 }
 
