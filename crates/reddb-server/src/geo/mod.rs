@@ -5,6 +5,8 @@
 
 use std::f64::consts::PI;
 
+use crate::storage::schema::Value;
+
 pub mod h3;
 
 const EARTH_RADIUS_KM: f64 = 6_371.0;
@@ -35,6 +37,69 @@ pub fn micro_to_deg(micro: i32) -> f64 {
 #[inline]
 pub fn deg_to_micro(deg: f64) -> i32 {
     (deg * 1_000_000.0).round() as i32
+}
+
+/// Recognize a storage value as a geographic point in `(lat, lon)` degrees.
+pub fn recognize_geo_value(value: &Value) -> Option<(f64, f64)> {
+    match value {
+        Value::GeoPoint(lat_micro, lon_micro) => {
+            recognize_geo_degrees(micro_to_deg(*lat_micro), micro_to_deg(*lon_micro))
+        }
+        Value::Json(bytes) => recognize_geo_json(bytes),
+        _ => None,
+    }
+}
+
+/// Recognize an object-shaped value from row/node fields as `(lat, lon)` degrees.
+pub fn recognize_geo_fields<'a>(field: impl Fn(&str) -> Option<&'a Value>) -> Option<(f64, f64)> {
+    let lat = field("lat")
+        .or_else(|| field("latitude"))
+        .and_then(numeric_value_to_f64)?;
+    let lon = field("lon")
+        .or_else(|| field("lng"))
+        .or_else(|| field("longitude"))
+        .and_then(numeric_value_to_f64)?;
+    recognize_geo_degrees(lat, lon)
+}
+
+fn recognize_geo_degrees(lat: f64, lon: f64) -> Option<(f64, f64)> {
+    if lat.is_finite()
+        && lon.is_finite()
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lon)
+    {
+        Some((lat, lon))
+    } else {
+        None
+    }
+}
+
+fn numeric_value_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Float(value) => Some(*value),
+        Value::Integer(value) => Some(*value as f64),
+        Value::UnsignedInteger(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn recognize_geo_json(bytes: &[u8]) -> Option<(f64, f64)> {
+    let json = crate::json::from_slice::<crate::json::Value>(bytes).ok()?;
+    let object = json.as_object()?;
+    let lat = object
+        .get("lat")
+        .or_else(|| object.get("latitude"))
+        .and_then(json_number_to_f64)?;
+    let lon = object
+        .get("lon")
+        .or_else(|| object.get("lng"))
+        .or_else(|| object.get("longitude"))
+        .and_then(json_number_to_f64)?;
+    recognize_geo_degrees(lat, lon)
+}
+
+fn json_number_to_f64(value: &crate::json::Value) -> Option<f64> {
+    value.as_f64()
 }
 
 // ── Haversine (spherical model) ─────────────────────────────────────────────
@@ -250,6 +315,19 @@ pub fn polygon_area_km2(vertices: &[(f64, f64)]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+
+    fn json_value(json: &str) -> Value {
+        Value::Json(json.as_bytes().to_vec())
+    }
+
+    fn fields(values: &[(&str, Value)]) -> HashMap<String, Value> {
+        values
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), value.clone()))
+            .collect()
+    }
 
     #[test]
     fn test_haversine_paris_london() {
@@ -328,5 +406,109 @@ mod tests {
         let micro = deg_to_micro(lat);
         let back = micro_to_deg(micro);
         assert!((lat - back).abs() < 0.000001);
+    }
+
+    #[test]
+    fn recognize_geo_value_accepts_geopoint_and_json_aliases() {
+        assert_eq!(
+            recognize_geo_value(&Value::GeoPoint(38_760_000, -77_150_000)),
+            Some((38.76, -77.15))
+        );
+        assert_eq!(
+            recognize_geo_value(&json_value(r#"{"lat":38.76,"lon":-77.15}"#)),
+            Some((38.76, -77.15))
+        );
+        assert_eq!(
+            recognize_geo_value(&json_value(r#"{"latitude":38,"lng":-77}"#)),
+            Some((38.0, -77.0))
+        );
+        assert_eq!(
+            recognize_geo_value(&json_value(r#"{"latitude":38.76,"longitude":-77.15}"#)),
+            Some((38.76, -77.15))
+        );
+    }
+
+    #[test]
+    fn recognize_geo_fields_accepts_numeric_aliases() {
+        let row = fields(&[
+            ("latitude", Value::Integer(38)),
+            ("longitude", Value::Float(-77.15)),
+        ]);
+        assert_eq!(
+            recognize_geo_fields(|key| row.get(key)),
+            Some((38.0, -77.15))
+        );
+
+        let node = fields(&[("lat", Value::Float(38.76)), ("lng", Value::Integer(-77))]);
+        assert_eq!(
+            recognize_geo_fields(|key| node.get(key)),
+            Some((38.76, -77.0))
+        );
+    }
+
+    #[test]
+    fn recognize_geo_rejects_non_geo_shapes() {
+        for value in [
+            json_value(r#"{"lat":"38.76","lon":"-77.15"}"#),
+            json_value(r#"{"type":"Point","coordinates":[-77.15,38.76]}"#),
+            json_value(r#"{"lat":38.76}"#),
+            json_value(r#"{"lat":91.0,"lon":0.0}"#),
+            json_value(r#"{"lat":0.0,"lon":181.0}"#),
+            json_value(r#"{"lat":null,"lon":0.0}"#),
+            json_value(r#"not json"#),
+            Value::text("38.76,-77.15".to_string()),
+        ] {
+            assert_eq!(recognize_geo_value(&value), None, "{value:?}");
+        }
+
+        let string_fields = fields(&[
+            ("lat", Value::text("38.76".to_string())),
+            ("lon", Value::Float(-77.15)),
+        ]);
+        assert_eq!(recognize_geo_fields(|key| string_fields.get(key)), None);
+
+        let missing_fields = fields(&[("lat", Value::Float(38.76))]);
+        assert_eq!(recognize_geo_fields(|key| missing_fields.get(key)), None);
+
+        let non_finite_fields = fields(&[
+            ("lat", Value::Float(f64::NAN)),
+            ("lon", Value::Float(-77.15)),
+        ]);
+        assert_eq!(recognize_geo_fields(|key| non_finite_fields.get(key)), None);
+
+        let out_of_range_fields =
+            fields(&[("lat", Value::Float(38.76)), ("lon", Value::Float(-181.0))]);
+        assert_eq!(
+            recognize_geo_fields(|key| out_of_range_fields.get(key)),
+            None
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn recognize_geo_json_and_field_maps_do_not_drift(
+            lat in -90.0f64..=90.0,
+            lon in -180.0f64..=180.0,
+        ) {
+            prop_assume!(lat.is_finite());
+            prop_assume!(lon.is_finite());
+            let json = json_value(&format!(r#"{{"lat":{lat},"lon":{lon}}}"#));
+            let fields = fields(&[("lat", Value::Float(lat)), ("lon", Value::Float(lon))]);
+            prop_assert_eq!(
+                recognize_geo_value(&json),
+                recognize_geo_fields(|key| fields.get(key))
+            );
+        }
+
+        #[test]
+        fn recognize_geo_rejects_generated_out_of_range_values(
+            lat in prop_oneof![-1000.0f64..-90.000_001, 90.000_001f64..1000.0],
+            lon in -180.0f64..=180.0,
+        ) {
+            let json = json_value(&format!(r#"{{"lat":{lat},"lon":{lon}}}"#));
+            let fields = fields(&[("lat", Value::Float(lat)), ("lon", Value::Float(lon))]);
+            prop_assert_eq!(recognize_geo_value(&json), None);
+            prop_assert_eq!(recognize_geo_fields(|key| fields.get(key)), None);
+        }
     }
 }
