@@ -33,8 +33,7 @@ pub trait IndexBase: Send + Sync {
     fn name(&self) -> &str;
     fn kind(&self) -> IndexKind;
     fn stats(&self) -> IndexStats;
-    fn bloom(&self) -> Option<&BloomFilter> { None }
-    fn definitely_absent(&self, key_bytes: &[u8]) -> bool { ... }
+    fn definitely_absent(&self, key_bytes: &[u8]) -> bool { false }
 }
 ```
 
@@ -56,8 +55,8 @@ The caller must follow up with a real lookup.
 **guaranteed absent**. The caller may skip the real lookup entirely.
 
 This is the only safe pruning direction. **Never** use a bloom hit as proof
-of presence. The `IndexBase::definitely_absent` default routes through the
-attached bloom; concrete impls may override with tighter signals (e.g. zone
+of presence. The `IndexBase::definitely_absent` default is conservative;
+concrete impls may override with bloom-backed or tighter signals (e.g. zone
 map min/max for range indexes — see `ZoneMap::block_skip`).
 
 ### 3. Zone maps prune iff the filter is provably disjoint
