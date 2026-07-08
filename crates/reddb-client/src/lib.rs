@@ -89,6 +89,7 @@ pub use types::{
 // crate. Workspace consumers (`reddb-server::rpc_stdio`, the `red`
 // bin's REPL launcher, the `red_client` bin) import these paths
 // directly.
+pub use bookmark_routing::{CausalReadOptions, QueryOptions, ReadConsistency};
 pub use connector::{
     repl, BulkCreateStatus, CreatedEntity, HealthStatus, OperationStatus, QueryResponse,
     RedDBClient,
@@ -200,6 +201,34 @@ impl Reddb {
             Reddb::Grpc(c) => c.query(sql).await,
             #[cfg(feature = "http")]
             Reddb::Http(c) => c.query(sql).await,
+            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
+        }
+    }
+
+    pub async fn query_with_options(
+        &self,
+        sql: &str,
+        options: QueryOptions,
+    ) -> Result<QueryResult> {
+        if sql.trim().is_empty() {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "query SQL must not be empty",
+            ));
+        }
+        match self {
+            #[cfg(feature = "embedded")]
+            Reddb::Embedded(c) => {
+                let _ = options;
+                c.query(sql)
+            }
+            #[cfg(feature = "grpc")]
+            Reddb::Grpc(c) => c.query_with_options(sql, options).await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => {
+                let _ = options;
+                c.query(sql).await
+            }
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
     }
