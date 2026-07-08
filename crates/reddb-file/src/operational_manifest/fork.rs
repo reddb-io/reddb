@@ -411,7 +411,7 @@ impl OperationalManifest {
         }
     }
 
-    fn archived_parent_handle(&self, name: &str) -> Self {
+    pub(super) fn archived_parent_handle(&self, name: &str) -> Self {
         let root_name = self
             .root
             .file_name()
@@ -425,7 +425,7 @@ impl OperationalManifest {
         }
     }
 
-    fn promoting_fork_handle(&self, name: &str) -> Self {
+    pub(super) fn promoting_fork_handle(&self, name: &str) -> Self {
         let root_name = self
             .root
             .file_name()
@@ -462,6 +462,65 @@ impl OperationalManifest {
         Ok(())
     }
 
+    pub(super) fn recover_interrupted_fork_promotions(&self) -> io::Result<()> {
+        let Some(staging) = self.interrupted_promotion_staging()? else {
+            self.clear_promoted_primary_origin()?;
+            return Ok(());
+        };
+        let origin = staging
+            .fork_origin()?
+            .ok_or_else(|| invalid_data("promoting store fork is missing origin"))?;
+        if origin.parent_store != self.store_identity() {
+            return Err(invalid_data(format!(
+                "promoting store fork {} belongs to {}, not {}",
+                origin.name,
+                origin.parent_store,
+                self.store_identity()
+            )));
+        }
+
+        let fork = self.fork_handle(&origin.name);
+        if fork.root.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "store fork exists alongside promotion staging: {}",
+                    origin.name
+                ),
+            ));
+        }
+
+        let archived_parent = self.archived_parent_handle(&origin.name);
+        if archived_parent.root.exists() {
+            if self.root.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "active store and retired parent both exist during fork promotion: {}",
+                        origin.name
+                    ),
+                ));
+            }
+        } else {
+            if !self.root.exists() {
+                return Err(invalid_data(format!(
+                    "store fork promotion lost active parent before archive: {}",
+                    origin.name
+                )));
+            }
+            fs::rename(&self.root, &archived_parent.root)?;
+            if let Some(parent) = self.root.parent() {
+                sync_dir(parent)?;
+            }
+        }
+
+        fs::rename(&staging.root, &self.root)?;
+        if let Some(parent) = self.root.parent() {
+            sync_dir(parent)?;
+        }
+        self.clear_fork_origin()
+    }
+
     fn clear_fork_origin(&self) -> io::Result<()> {
         let mut manifest = match self.load_current()? {
             Some(manifest) => manifest,
@@ -473,6 +532,49 @@ impl OperationalManifest {
         manifest.fork_origin = None;
         manifest.generation += 1;
         self.publish(&manifest)
+    }
+
+    fn clear_promoted_primary_origin(&self) -> io::Result<()> {
+        let Some(origin) = self.fork_origin()? else {
+            return Ok(());
+        };
+        if origin.parent_store == self.store_identity()
+            && self.archived_parent_handle(&origin.name).root.exists()
+        {
+            self.clear_fork_origin()?;
+        }
+        Ok(())
+    }
+
+    fn interrupted_promotion_staging(&self) -> io::Result<Option<Self>> {
+        let Some(parent) = self.root.parent() else {
+            return Ok(None);
+        };
+        let Some(root_name) = self.root.file_name() else {
+            return Ok(None);
+        };
+        let prefix = format!("{}.promoting-", root_name.to_string_lossy());
+        let entries = match fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let mut staging = None;
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if !file_name.starts_with(&prefix) {
+                continue;
+            }
+            if staging.is_some() {
+                return Err(invalid_data("multiple interrupted store fork promotions"));
+            }
+            staging = Some(Self { root: entry.path() });
+        }
+        Ok(staging)
     }
 
     pub(super) fn fork_referenced_collection_paths(&self) -> io::Result<BTreeSet<String>> {
