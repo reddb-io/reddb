@@ -23,13 +23,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use reddb_client::bookmark_routing::{BookmarkTarget, CausalReadOptions};
+use reddb_client::bookmark_routing::{BookmarkTarget, CausalReadOptions, QueryOptions};
 use reddb_client::grpc::GrpcClient;
 use reddb_client::topology::ClusterMembership;
 use reddb_client::RedDBClient;
 use reddb_client::ValueOut;
 use reddb_grpc_proto::red_db_server::{RedDb, RedDbServer};
 use reddb_grpc_proto::*;
+use reddb_wire::topology::{Endpoint as WireEndpoint, ReplicaInfo};
 use tokio::sync::{oneshot, Mutex};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{transport::Server, Request, Response, Status};
@@ -498,4 +499,101 @@ async fn causal_query_falls_back_to_primary_when_replica_is_stale_but_tokenless_
 
     let _ = primary_shutdown.send(());
     let _ = replica_shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn query_options_route_each_read_consistency_level_with_lagging_replica() {
+    let (primary_addr, primary_shutdown) = spawn_labeled_mock("primary").await;
+    let (stale_addr, stale_shutdown) = spawn_labeled_mock("stale").await;
+    let (fresh_addr, fresh_shutdown) = spawn_labeled_mock("fresh").await;
+    let primary_url = format!("http://{primary_addr}");
+    let stale_url = format!("http://{stale_addr}");
+    let fresh_url = format!("http://{fresh_addr}");
+
+    let client = GrpcClient::connect_cluster_with_pool_size(
+        primary_url.clone(),
+        vec![stale_url.clone(), fresh_url.clone()],
+        false,
+        1,
+    )
+    .await
+    .expect("connect cluster");
+    client.update_membership(ClusterMembership {
+        primary: WireEndpoint {
+            addr: primary_url.clone(),
+            region: "us-east-1".into(),
+        },
+        replicas: vec![
+            ReplicaInfo {
+                addr: stale_url.clone(),
+                region: "us-east-1".into(),
+                healthy: true,
+                lag_ms: 500,
+                last_applied_lsn: 0,
+                rebootstrapping: false,
+            },
+            ReplicaInfo {
+                addr: fresh_url.clone(),
+                region: "us-east-1".into(),
+                healthy: true,
+                lag_ms: 40,
+                last_applied_lsn: 40,
+                rebootstrapping: false,
+            },
+        ],
+        epoch: 1,
+    });
+
+    let strong = client
+        .query_with_options("select endpoint", QueryOptions::strong())
+        .await
+        .expect("strong read");
+    assert_eq!(
+        endpoint_label(&strong),
+        "primary",
+        "strong reads must route to the primary/range-owner path"
+    );
+
+    let causal = client
+        .query_with_options(
+            "select endpoint",
+            QueryOptions::causal(
+                BookmarkTarget::new(1, 100),
+                CausalReadOptions::with_deadline(Duration::from_millis(1)),
+            ),
+        )
+        .await
+        .expect("causal read");
+    assert_eq!(
+        endpoint_label(&causal),
+        "primary",
+        "causal reads must not use replicas behind the session token"
+    );
+
+    let bounded = client
+        .query_with_options(
+            "select endpoint",
+            QueryOptions::bounded_staleness(Duration::from_millis(50)),
+        )
+        .await
+        .expect("bounded-staleness read");
+    assert_eq!(
+        endpoint_label(&bounded),
+        "fresh",
+        "bounded-staleness reads must skip replicas outside the lag bound"
+    );
+
+    let local = client
+        .query_with_options("select endpoint", QueryOptions::local())
+        .await
+        .expect("local read");
+    assert_eq!(
+        endpoint_label(&local),
+        "stale",
+        "local reads may use any healthy replica without blocking on freshness"
+    );
+
+    let _ = primary_shutdown.send(());
+    let _ = stale_shutdown.send(());
+    let _ = fresh_shutdown.send(());
 }
