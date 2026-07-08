@@ -37,6 +37,12 @@ path = "src/bin/typed_workload.rs"
 name = "tm_commit_path_workload"
 path = "src/bin/tm_commit_path_workload.rs"
 
+# Store-fork lifecycle workload (#1784), driven under the shim after the test
+# harness prepares the operation-specific pre-state.
+[[bin]]
+name = "store_fork_workload"
+path = "src/bin/store_fork_workload.rs"
+
 [dependencies]
 reddb-file = { workspace = true }
 reddb-types = { workspace = true }
