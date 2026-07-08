@@ -265,15 +265,15 @@ impl IndexBase for ZoneMap {
         IndexStats {
             entries: self.total_count as usize,
             distinct_keys: self.distinct_estimate() as usize,
-            approx_bytes: self.bloom.filter().byte_size() + 16 * 1024, // HLL fixed
+            approx_bytes: self.bloom.byte_size() + 16 * 1024, // HLL fixed
             kind: IndexKind::ZoneMap,
             has_bloom: true,
             index_correlation: 0.0,
         }
     }
 
-    fn bloom(&self) -> Option<&crate::storage::primitives::BloomFilter> {
-        Some(self.bloom.filter())
+    fn definitely_absent(&self, key_bytes: &[u8]) -> bool {
+        <Self as HasBloom>::definitely_absent(self, key_bytes)
     }
 }
 
