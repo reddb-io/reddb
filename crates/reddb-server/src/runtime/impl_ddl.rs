@@ -1543,8 +1543,6 @@ impl RedDBRuntime {
             IndexMethod::Hash => super::index_store::IndexMethodKind::Hash,
             IndexMethod::BTree => super::index_store::IndexMethodKind::BTree,
             IndexMethod::Bitmap => super::index_store::IndexMethodKind::Bitmap,
-            // Explicit opt-in to the in-RAM, memory-capped rstar R-tree.
-            IndexMethod::RTree => super::index_store::IndexMethodKind::Spatial,
             // Generic spatial request → engine default spatial backend
             // (disk-resident H3 as of PRD #1574 slice 4, #1578).
             IndexMethod::Spatial => super::index_store::IndexMethodKind::default_spatial(),
