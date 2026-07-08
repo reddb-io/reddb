@@ -360,11 +360,7 @@ impl BlobCacheL2 {
     }
 
     pub(super) fn stats_synopsis_bytes(&self) -> u64 {
-        self.synopsis
-            .read()
-            .values()
-            .map(synopsis_heap_bytes)
-            .sum()
+        self.synopsis.read().values().map(synopsis_heap_bytes).sum()
     }
 
     pub(super) fn stats_compression_original_bytes(&self) -> u64 {
