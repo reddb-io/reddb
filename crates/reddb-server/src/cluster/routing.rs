@@ -37,6 +37,10 @@ use super::ownership::{
     CatalogVersion, CollectionId, OwnershipEpoch, RangeId, RangeOwnership, RangeRole,
     ShardOwnershipCatalog,
 };
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 /// Default ceiling on the payload a non-owner will relay internally.
 ///
@@ -45,6 +49,9 @@ use super::ownership::{
 /// directly to the owner. The MVP budget is 1 MiB; operators can widen or narrow
 /// it per [`RoutingPolicy`].
 pub const DEFAULT_MAX_FORWARD_PAYLOAD: usize = 1024 * 1024;
+pub const DEFAULT_MAX_FORWARD_HOPS: u8 = 1;
+pub const DEFAULT_FORWARD_IN_FLIGHT_LIMIT: usize = 64;
+pub const DEFAULT_FORWARD_PER_HOP_BUDGET_MS: u64 = 50;
 
 /// What a request asks the cluster to do, reduced to just what routing needs to
 /// decide forward-vs-redirect.
@@ -142,6 +149,9 @@ impl RoutedRequest {
 pub struct RoutingPolicy {
     forwarding_enabled: bool,
     max_forward_payload: usize,
+    max_forward_hops: u8,
+    forward_in_flight_limit: usize,
+    forward_per_hop_budget_ms: u64,
 }
 
 impl RoutingPolicy {
@@ -151,6 +161,9 @@ impl RoutingPolicy {
         Self {
             forwarding_enabled: true,
             max_forward_payload: DEFAULT_MAX_FORWARD_PAYLOAD,
+            max_forward_hops: DEFAULT_MAX_FORWARD_HOPS,
+            forward_in_flight_limit: DEFAULT_FORWARD_IN_FLIGHT_LIMIT,
+            forward_per_hop_budget_ms: DEFAULT_FORWARD_PER_HOP_BUDGET_MS,
         }
     }
 
@@ -160,12 +173,30 @@ impl RoutingPolicy {
         Self {
             forwarding_enabled: false,
             max_forward_payload: 0,
+            max_forward_hops: DEFAULT_MAX_FORWARD_HOPS,
+            forward_in_flight_limit: DEFAULT_FORWARD_IN_FLIGHT_LIMIT,
+            forward_per_hop_budget_ms: DEFAULT_FORWARD_PER_HOP_BUDGET_MS,
         }
     }
 
     /// Override the maximum payload eligible for internal forwarding.
     pub fn with_max_forward_payload(mut self, max_forward_payload: usize) -> Self {
         self.max_forward_payload = max_forward_payload;
+        self
+    }
+
+    pub fn with_max_forward_hops(mut self, max_forward_hops: u8) -> Self {
+        self.max_forward_hops = max_forward_hops;
+        self
+    }
+
+    pub fn with_forward_in_flight_limit(mut self, forward_in_flight_limit: usize) -> Self {
+        self.forward_in_flight_limit = forward_in_flight_limit;
+        self
+    }
+
+    pub fn with_forward_per_hop_budget_ms(mut self, forward_per_hop_budget_ms: u64) -> Self {
+        self.forward_per_hop_budget_ms = forward_per_hop_budget_ms;
         self
     }
 
@@ -176,11 +207,302 @@ impl RoutingPolicy {
     pub fn max_forward_payload(&self) -> usize {
         self.max_forward_payload
     }
+
+    pub fn max_forward_hops(&self) -> u8 {
+        self.max_forward_hops
+    }
+
+    pub fn forward_in_flight_limit(&self) -> usize {
+        self.forward_in_flight_limit
+    }
+
+    pub fn forward_per_hop_budget_ms(&self) -> u64 {
+        self.forward_per_hop_budget_ms
+    }
 }
 
 impl Default for RoutingPolicy {
     fn default() -> Self {
         Self::forwarding()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForwardError {
+    NotForwarded,
+    HopLimitExceeded { attempted_hop: u8, max_hops: u8 },
+    BudgetExhausted { required_ms: u64, remaining_ms: u64 },
+    Overloaded { in_flight: usize, limit: usize },
+}
+
+impl std::fmt::Display for ForwardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotForwarded => write!(f, "request was not selected for forwarding"),
+            Self::HopLimitExceeded {
+                attempted_hop,
+                max_hops,
+            } => write!(
+                f,
+                "forward hop {attempted_hop} exceeds the {max_hops}-hop guard"
+            ),
+            Self::BudgetExhausted {
+                required_ms,
+                remaining_ms,
+            } => write!(
+                f,
+                "forward hop needs {required_ms}ms but only {remaining_ms}ms remains"
+            ),
+            Self::Overloaded { in_flight, limit } => write!(
+                f,
+                "forward path overloaded: {in_flight} in-flight requests at limit {limit}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ForwardError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardContext {
+    hop: u8,
+    target_owner: NodeIdentity,
+    range_id: RangeId,
+    budget_ms: u64,
+}
+
+impl ForwardContext {
+    pub fn hop(&self) -> u8 {
+        self.hop
+    }
+
+    pub fn target_owner(&self) -> &NodeIdentity {
+        &self.target_owner
+    }
+
+    pub fn range_id(&self) -> RangeId {
+        self.range_id
+    }
+
+    pub fn budget_ms(&self) -> u64 {
+        self.budget_ms
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardMetadata {
+    hop: u8,
+    target_owner: NodeIdentity,
+    range_id: RangeId,
+    budget_ms: u64,
+    payload_len: usize,
+}
+
+impl ForwardMetadata {
+    fn from_context(context: &ForwardContext, payload_len: usize) -> Self {
+        Self {
+            hop: context.hop,
+            target_owner: context.target_owner.clone(),
+            range_id: context.range_id,
+            budget_ms: context.budget_ms,
+            payload_len,
+        }
+    }
+
+    pub fn hop(&self) -> u8 {
+        self.hop
+    }
+
+    pub fn target_owner(&self) -> &NodeIdentity {
+        &self.target_owner
+    }
+
+    pub fn range_id(&self) -> RangeId {
+        self.range_id
+    }
+
+    pub fn budget_ms(&self) -> u64 {
+        self.budget_ms
+    }
+
+    pub fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardMetricsSnapshot {
+    attempted: u64,
+    succeeded: u64,
+    shed_overloaded: u64,
+    shed_hop_limit: u64,
+    shed_budget: u64,
+}
+
+impl ForwardMetricsSnapshot {
+    pub fn attempted(&self) -> u64 {
+        self.attempted
+    }
+
+    pub fn succeeded(&self) -> u64 {
+        self.succeeded
+    }
+
+    pub fn shed_overloaded(&self) -> u64 {
+        self.shed_overloaded
+    }
+
+    pub fn shed_hop_limit(&self) -> u64 {
+        self.shed_hop_limit
+    }
+
+    pub fn shed_budget(&self) -> u64 {
+        self.shed_budget
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardOutcome<T> {
+    response: T,
+    metadata: ForwardMetadata,
+    metrics: ForwardMetricsSnapshot,
+}
+
+impl<T> ForwardOutcome<T> {
+    pub fn response(&self) -> &T {
+        &self.response
+    }
+
+    pub fn into_response(self) -> T {
+        self.response
+    }
+
+    pub fn metadata(&self) -> &ForwardMetadata {
+        &self.metadata
+    }
+
+    pub fn metrics(&self) -> &ForwardMetricsSnapshot {
+        &self.metrics
+    }
+}
+
+#[derive(Debug, Default)]
+struct ForwardMetrics {
+    attempted: AtomicUsize,
+    succeeded: AtomicUsize,
+    shed_overloaded: AtomicUsize,
+    shed_hop_limit: AtomicUsize,
+    shed_budget: AtomicUsize,
+}
+
+impl ForwardMetrics {
+    fn snapshot(&self) -> ForwardMetricsSnapshot {
+        ForwardMetricsSnapshot {
+            attempted: self.attempted.load(Ordering::Relaxed) as u64,
+            succeeded: self.succeeded.load(Ordering::Relaxed) as u64,
+            shed_overloaded: self.shed_overloaded.load(Ordering::Relaxed) as u64,
+            shed_hop_limit: self.shed_hop_limit.load(Ordering::Relaxed) as u64,
+            shed_budget: self.shed_budget.load(Ordering::Relaxed) as u64,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ForwardCoordinator {
+    policy: RoutingPolicy,
+    in_flight: Arc<AtomicUsize>,
+    metrics: Arc<ForwardMetrics>,
+}
+
+impl ForwardCoordinator {
+    pub fn new(policy: RoutingPolicy) -> Self {
+        Self {
+            policy,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            metrics: Arc::new(ForwardMetrics::default()),
+        }
+    }
+
+    pub fn execute<T>(
+        &self,
+        decision: &RouteDecision,
+        request: &RoutedRequest,
+        incoming_hops: u8,
+        remaining_budget_ms: u64,
+        owner_call: impl FnOnce(&ForwardContext) -> T,
+    ) -> Result<ForwardOutcome<T>, ForwardError> {
+        let RouteDecision::Forward { hint } = decision else {
+            return Err(ForwardError::NotForwarded);
+        };
+
+        self.metrics.attempted.fetch_add(1, Ordering::Relaxed);
+        let hop = incoming_hops.saturating_add(1);
+        if hop > self.policy.max_forward_hops() {
+            self.metrics.shed_hop_limit.fetch_add(1, Ordering::Relaxed);
+            return Err(ForwardError::HopLimitExceeded {
+                attempted_hop: hop,
+                max_hops: self.policy.max_forward_hops(),
+            });
+        }
+        if remaining_budget_ms < self.policy.forward_per_hop_budget_ms() {
+            self.metrics.shed_budget.fetch_add(1, Ordering::Relaxed);
+            return Err(ForwardError::BudgetExhausted {
+                required_ms: self.policy.forward_per_hop_budget_ms(),
+                remaining_ms: remaining_budget_ms,
+            });
+        }
+
+        let _permit = self.acquire_permit()?;
+        let context = ForwardContext {
+            hop,
+            target_owner: hint.owner().clone(),
+            range_id: hint.range_id(),
+            budget_ms: self.policy.forward_per_hop_budget_ms(),
+        };
+        let response = owner_call(&context);
+        self.metrics.succeeded.fetch_add(1, Ordering::Relaxed);
+        Ok(ForwardOutcome {
+            response,
+            metadata: ForwardMetadata::from_context(&context, request.payload_len()),
+            metrics: self.metrics.snapshot(),
+        })
+    }
+
+    pub fn metrics(&self) -> ForwardMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    fn acquire_permit(&self) -> Result<ForwardPermit<'_>, ForwardError> {
+        let limit = self.policy.forward_in_flight_limit();
+        loop {
+            let current = self.in_flight.load(Ordering::Acquire);
+            if current >= limit {
+                self.metrics.shed_overloaded.fetch_add(1, Ordering::Relaxed);
+                return Err(ForwardError::Overloaded {
+                    in_flight: current,
+                    limit,
+                });
+            }
+            if self
+                .in_flight
+                .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(ForwardPermit {
+                    in_flight: &self.in_flight,
+                });
+            }
+        }
+    }
+}
+
+struct ForwardPermit<'a> {
+    in_flight: &'a AtomicUsize,
+}
+
+impl Drop for ForwardPermit<'_> {
+    fn drop(&mut self) {
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -745,6 +1067,133 @@ mod tests {
             }
             other => panic!("expected Forward to new owner, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn coordinator_forwards_safe_op_with_metadata_and_metrics() {
+        let orders = collection("orders");
+        let catalog = catalog_with(range_with(&orders, 1, "CN=node-a", &["CN=node-b"]));
+        let request =
+            RoutedRequest::new(orders.clone(), b"k".to_vec(), RequestOperation::SafePointOp)
+                .with_payload_len(32);
+        let decision =
+            catalog.plan_route(&ident("CN=node-b"), &request, &RoutingPolicy::forwarding());
+        let coordinator =
+            ForwardCoordinator::new(RoutingPolicy::forwarding().with_forward_per_hop_budget_ms(25));
+
+        let outcome = coordinator
+            .execute(&decision, &request, 0, 50, |ctx| {
+                assert_eq!(ctx.hop(), 1);
+                assert_eq!(ctx.target_owner(), &ident("CN=node-a"));
+                "owner response"
+            })
+            .expect("safe op forwards");
+
+        assert_eq!(outcome.response(), &"owner response");
+        assert_eq!(outcome.metadata().hop(), 1);
+        assert_eq!(outcome.metadata().target_owner(), &ident("CN=node-a"));
+        assert_eq!(outcome.metadata().range_id(), RangeId::new(1));
+        assert_eq!(outcome.metadata().budget_ms(), 25);
+        assert_eq!(outcome.metadata().payload_len(), 32);
+        assert_eq!(outcome.metrics().attempted(), 1);
+        assert_eq!(outcome.metrics().succeeded(), 1);
+        assert_eq!(outcome.metrics().shed_overloaded(), 0);
+    }
+
+    #[test]
+    fn coordinator_refuses_redirect_decisions_without_calling_owner() {
+        let orders = collection("orders");
+        let catalog = catalog_with(range_with(&orders, 1, "CN=node-a", &["CN=node-b"]));
+        let request =
+            RoutedRequest::new(orders.clone(), b"k".to_vec(), RequestOperation::Transaction);
+        let decision =
+            catalog.plan_route(&ident("CN=node-b"), &request, &RoutingPolicy::forwarding());
+        assert!(matches!(decision, RouteDecision::Redirect { .. }));
+
+        let err = ForwardCoordinator::new(RoutingPolicy::forwarding())
+            .execute(&decision, &request, 0, 50, |_| {
+                panic!("owner must not be called")
+            })
+            .expect_err("redirects are not forwarded");
+        assert_eq!(err, ForwardError::NotForwarded);
+    }
+
+    #[test]
+    fn coordinator_sheds_when_hop_guard_or_budget_is_exhausted() {
+        let orders = collection("orders");
+        let catalog = catalog_with(range_with(&orders, 1, "CN=node-a", &["CN=node-b"]));
+        let request =
+            RoutedRequest::new(orders.clone(), b"k".to_vec(), RequestOperation::SafePointOp);
+        let decision =
+            catalog.plan_route(&ident("CN=node-b"), &request, &RoutingPolicy::forwarding());
+        let coordinator = ForwardCoordinator::new(
+            RoutingPolicy::forwarding()
+                .with_max_forward_hops(1)
+                .with_forward_per_hop_budget_ms(20),
+        );
+
+        let hop_err = coordinator
+            .execute(&decision, &request, 1, 50, |_| {
+                panic!("owner must not be called")
+            })
+            .expect_err("second hop is rejected");
+        assert_eq!(
+            hop_err,
+            ForwardError::HopLimitExceeded {
+                attempted_hop: 2,
+                max_hops: 1,
+            }
+        );
+
+        let budget_err = coordinator
+            .execute(&decision, &request, 0, 19, |_| {
+                panic!("owner must not be called")
+            })
+            .expect_err("under-budget hop is rejected");
+        assert_eq!(
+            budget_err,
+            ForwardError::BudgetExhausted {
+                required_ms: 20,
+                remaining_ms: 19,
+            }
+        );
+        let metrics = coordinator.metrics();
+        assert_eq!(metrics.attempted(), 2);
+        assert_eq!(metrics.shed_hop_limit(), 1);
+        assert_eq!(metrics.shed_budget(), 1);
+        assert_eq!(metrics.succeeded(), 0);
+    }
+
+    #[test]
+    fn coordinator_sheds_overload_instead_of_cascading() {
+        let orders = collection("orders");
+        let catalog = catalog_with(range_with(&orders, 1, "CN=node-a", &["CN=node-b"]));
+        let request =
+            RoutedRequest::new(orders.clone(), b"k".to_vec(), RequestOperation::SafePointOp);
+        let decision =
+            catalog.plan_route(&ident("CN=node-b"), &request, &RoutingPolicy::forwarding());
+        let coordinator =
+            ForwardCoordinator::new(RoutingPolicy::forwarding().with_forward_in_flight_limit(1));
+        let nested = coordinator.clone();
+
+        let outcome = coordinator
+            .execute(&decision, &request, 0, 50, |_| {
+                nested.execute(&decision, &request, 0, 50, |_| "unexpected")
+            })
+            .expect("outer request holds the only forward slot");
+        let inner = outcome.response();
+        assert_eq!(
+            inner.as_ref().expect_err("inner request sheds"),
+            &ForwardError::Overloaded {
+                in_flight: 1,
+                limit: 1,
+            }
+        );
+
+        let metrics = coordinator.metrics();
+        assert_eq!(metrics.attempted(), 2);
+        assert_eq!(metrics.succeeded(), 1);
+        assert_eq!(metrics.shed_overloaded(), 1);
     }
 
     #[test]

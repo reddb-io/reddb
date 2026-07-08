@@ -98,8 +98,10 @@ pub use placement::{
     NEUTRAL_OPERATOR_WEIGHT,
 };
 pub use routing::{
-    RedirectReason, RequestOperation, RouteDecision, RoutedRequest, RoutingHint, RoutingPolicy,
-    DEFAULT_MAX_FORWARD_PAYLOAD,
+    ForwardContext, ForwardCoordinator, ForwardError, ForwardMetadata, ForwardMetricsSnapshot,
+    ForwardOutcome, RedirectReason, RequestOperation, RouteDecision, RoutedRequest, RoutingHint,
+    RoutingPolicy, DEFAULT_FORWARD_IN_FLIGHT_LIMIT, DEFAULT_FORWARD_PER_HOP_BUDGET_MS,
+    DEFAULT_MAX_FORWARD_HOPS, DEFAULT_MAX_FORWARD_PAYLOAD,
 };
 pub use slot::{
     hash_shard_key_to_range_key, hash_shard_key_to_slot, HashSlot, HashSlotError,
