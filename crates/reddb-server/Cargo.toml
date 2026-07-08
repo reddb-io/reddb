@@ -88,7 +88,6 @@ parking_lot = "0.12"
 # BufWriter under the WAL file mutex. Preserves on-disk format.
 crossbeam-queue = "0.3"
 rayon = "1.12"
-rstar = "0.13"
 # Pure-Rust H3 hexagonal geospatial index (no C FFI; ADR 0061
 # source-consumable). Wrapped behind `crate::geo::h3` so no other
 # module depends on h3o directly (PRD #1574 slice 1, #1575).
