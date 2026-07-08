@@ -195,6 +195,16 @@ pub enum OperatorEvent {
         ownership_epoch: u64,
         range_identity: String,
     },
+    /// Replica apply rejected a stamped record because its range authority
+    /// term/ownership epoch conflicts with the current ownership state.
+    ReplicaAuthorityDivergence {
+        range_identity: String,
+        expected_term: u64,
+        expected_ownership_epoch: u64,
+        observed_term: u64,
+        observed_ownership_epoch: u64,
+        lsn: u64,
+    },
 }
 
 impl OperatorEvent {
@@ -220,6 +230,7 @@ impl OperatorEvent {
             "QueueDlqPromoted",
             "DeposedPrimaryRollback",
             "OwnershipFenced",
+            "ReplicaAuthorityDivergence",
         ]
     }
 
@@ -245,6 +256,7 @@ impl OperatorEvent {
             Self::QueueDlqPromoted { .. } => "QueueDlqPromoted",
             Self::DeposedPrimaryRollback { .. } => "DeposedPrimaryRollback",
             Self::OwnershipFenced { .. } => "OwnershipFenced",
+            Self::ReplicaAuthorityDivergence { .. } => "ReplicaAuthorityDivergence",
         }
     }
 
@@ -544,6 +556,29 @@ impl OperatorEvent {
                     AuditFieldEscaper::field("range_identity", range_identity),
                 ];
                 ("operator/ownership_fenced", fields, summary)
+            }
+            Self::ReplicaAuthorityDivergence {
+                range_identity,
+                expected_term,
+                expected_ownership_epoch,
+                observed_term,
+                observed_ownership_epoch,
+                lsn,
+            } => {
+                let summary = format!(
+                    "replica authority divergence: range={range_identity} lsn={lsn} \
+                     expected=({expected_term},{expected_ownership_epoch}) \
+                     observed=({observed_term},{observed_ownership_epoch})"
+                );
+                let fields = vec![
+                    AuditFieldEscaper::field("range_identity", range_identity),
+                    AuditFieldEscaper::field("expected_term", expected_term),
+                    AuditFieldEscaper::field("expected_ownership_epoch", expected_ownership_epoch),
+                    AuditFieldEscaper::field("observed_term", observed_term),
+                    AuditFieldEscaper::field("observed_ownership_epoch", observed_ownership_epoch),
+                    AuditFieldEscaper::field("lsn", lsn),
+                ];
+                ("operator/replica_authority_divergence", fields, summary)
             }
         }
     }
@@ -929,6 +964,52 @@ mod tests {
             detail.get("range_identity").and_then(|x| x.as_str()),
             Some("system.global/0")
         );
+    }
+
+    #[test]
+    fn replica_authority_divergence_emits_range_and_term_epoch_pairs() {
+        let (logger, path) = make_logger();
+        OperatorEvent::ReplicaAuthorityDivergence {
+            range_identity: "system.global/0".into(),
+            expected_term: 8,
+            expected_ownership_epoch: 2,
+            observed_term: 7,
+            observed_ownership_epoch: 1,
+            lsn: 42,
+        }
+        .emit(&logger);
+        drain(&logger);
+        let v = read_last_line(&path);
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/replica_authority_divergence")
+        );
+        let detail = v.get("detail").expect("event detail");
+        assert_eq!(
+            detail.get("range_identity").and_then(|x| x.as_str()),
+            Some("system.global/0")
+        );
+        assert_eq!(
+            detail.get("expected_term").and_then(|x| x.as_i64()),
+            Some(8)
+        );
+        assert_eq!(
+            detail
+                .get("expected_ownership_epoch")
+                .and_then(|x| x.as_i64()),
+            Some(2)
+        );
+        assert_eq!(
+            detail.get("observed_term").and_then(|x| x.as_i64()),
+            Some(7)
+        );
+        assert_eq!(
+            detail
+                .get("observed_ownership_epoch")
+                .and_then(|x| x.as_i64()),
+            Some(1)
+        );
+        assert_eq!(detail.get("lsn").and_then(|x| x.as_i64()), Some(42));
     }
 
     // ------------------------------------------------------------------
