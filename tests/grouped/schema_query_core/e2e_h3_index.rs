@@ -301,6 +301,168 @@ fn assert_h3_parity(create_index: &str, queries: &[String]) {
 }
 
 #[test]
+fn spatial_full_scan_reads_document_body_column() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":38.76,"lon":-77.15}})"#,
+    )
+    .unwrap();
+
+    let radius = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(
+        radius.len(),
+        1,
+        "RADIUS must read gpsLocation from the document body"
+    );
+    assert_eq!(
+        radius[0].1,
+        0.0_f64.to_bits(),
+        "exact centre hit must report zero distance"
+    );
+
+    let bbox = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL BBOX 38.75 -77.16 38.77 -77.14 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(
+        bbox.len(),
+        1,
+        "BBOX must read gpsLocation from the document body"
+    );
+
+    let nearest = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL NEAREST 38.76 -77.15 K 5 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(
+        nearest.len(),
+        1,
+        "NEAREST must read gpsLocation from the document body"
+    );
+    assert_eq!(
+        nearest[0].1,
+        0.0_f64.to_bits(),
+        "exact centre nearest hit must report zero distance"
+    );
+}
+
+#[test]
+fn spatial_full_scan_document_column_discriminates_geo_fields() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT couriers").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO couriers DOCUMENT VALUES ({"home":{"lat":38.7,"lon":-77.1},"current":{"lat":40.7,"lon":-74.0}})"#,
+    )
+    .unwrap();
+
+    let current = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 40.7 -74.0 1.0 COLLECTION couriers COLUMN current",
+    );
+    assert_eq!(current.len(), 1, "COLUMN current must hit the near field");
+
+    let home = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 40.7 -74.0 1.0 COLLECTION couriers COLUMN home",
+    );
+    assert!(
+        home.is_empty(),
+        "COLUMN home must not be overridden by the near current field"
+    );
+}
+
+#[test]
+fn spatial_full_scan_document_column_resolves_dotted_path() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES ({"location":{"gps":{"lat":38.76,"lon":-77.15}}})"#,
+    )
+    .unwrap();
+
+    let nearest = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL NEAREST 38.76 -77.15 K 5 COLLECTION events COLUMN location.gps",
+    );
+    assert_eq!(
+        nearest.len(),
+        1,
+        "dotted COLUMN path must resolve into the document body"
+    );
+    assert_eq!(
+        nearest[0].1,
+        0.0_f64.to_bits(),
+        "exact dotted-path hit must report zero distance"
+    );
+}
+
+#[test]
+fn spatial_full_scan_skips_non_geo_named_document_values() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"gpsLocation":"not-geo","fallback":{"lat":38.76,"lon":-77.15}}),
+        ({"fallback":{"lat":38.76,"lon":-77.15}}),
+        ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+    )
+    .unwrap();
+
+    let hits = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert!(
+        hits.is_empty(),
+        "non-geo, missing, and GeoJSON named document values must be skipped"
+    );
+}
+
+#[test]
+fn spatial_row_named_column_wins_and_missing_column_uses_legacy_fallback() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE TABLE vehicles (id INT, home GEOPOINT, live_loc GEOPOINT)")
+        .unwrap();
+    rt.execute_query(
+        "INSERT INTO vehicles (id, home, live_loc) VALUES (1, '38.76,-77.15', '40.7,-74.0')",
+    )
+    .unwrap();
+
+    let home = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 1.0 COLLECTION vehicles COLUMN home",
+    );
+    assert_eq!(home.len(), 1, "resolvable named row column must hit");
+
+    let current = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 1.0 COLLECTION vehicles COLUMN live_loc",
+    );
+    assert!(
+        current.is_empty(),
+        "legacy any-geo fallback must not override a resolvable row column"
+    );
+
+    rt.execute_query("CREATE TABLE fallback_places (id INT, loc GEOPOINT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO fallback_places (id, loc) VALUES (1, '38.76,-77.15')")
+        .unwrap();
+    let missing = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 1.0 COLLECTION fallback_places COLUMN missing_geo",
+    );
+    assert_eq!(
+        missing.len(),
+        1,
+        "legacy any-geo fallback must remain for row entities when COLUMN is absent"
+    );
+}
+
+#[test]
 fn h3_radius_parity_with_full_scan() {
     // Tight radii land on res-9 cell boundaries (the +1 ring margin must
     // still find the neighbouring in-radius points); large radii exceed the
