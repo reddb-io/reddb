@@ -248,6 +248,12 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Optional,
         default: || num(32.0),
     },
+    // storage.time_series.*
+    ConfigDefault {
+        key: "storage.time_series.max_series_per_collection",
+        tier: Tier::Optional,
+        default: || num(1_000_000.0),
+    },
     // storage.btree.*
     ConfigDefault {
         key: "storage.btree.lehman_yao",
@@ -440,6 +446,7 @@ mod tests {
             "storage.bulk_insert.max_buffered_rows",
             "storage.bulk_insert.max_buffered_bytes",
             "storage.hot_update.max_chain_hops",
+            "storage.time_series.max_series_per_collection",
         ];
         for key in must_be_optional {
             assert_eq!(tier_for(key), Some(Tier::Optional), "{key} tier mismatch");
