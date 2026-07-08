@@ -3,23 +3,20 @@
 //! Segments (table pages, vector segments, timeseries chunks, graph
 //! partitions) all benefit from the same question: "is key X *possibly* in
 //! this segment?". Rather than reimplementing bloom wiring in every storage
-//! engine, wrap [`crate::storage::primitives::BloomFilter`] here with a
-//! serialisation header and a small trait `HasBloom` for owners to plug in.
+//! engine, wrap [`crate::storage::primitives::split_block_bloom::SplitBlockBloom`]
+//! here with a serialisation header and a small trait `HasBloom` for owners to
+//! plug in.
 //!
 //! Layout on disk / inside a segment header is:
 //!
 //! ```text
 //! [ u8  magic       ]
-//! [ u8  num_hashes   ]
-//! [ u32 bit_size     ]   // big-endian
+//! [ u8  reserved    ]   // zero
 //! [ u32 inserted     ]   // monotonic counter, best-effort
-//! [ bytes...          ]   // bit array
+//! [ bytes...          ]   // SplitBlockBloom::to_bytes()
 //! ```
-//!
-//! Readers that don't care about bloom can skip `4 + (bit_size + 7) / 8`
-//! bytes after the 10-byte header.
 
-use crate::storage::primitives::BloomFilter;
+use crate::storage::primitives::split_block_bloom::SplitBlockBloom;
 
 pub use reddb_file::BloomSegmentFrameError as BloomSegmentError;
 
@@ -42,58 +39,51 @@ pub trait HasBloom {
 
 /// Owning bloom header that can be embedded in a segment.
 pub struct BloomSegment {
-    filter: BloomFilter,
+    filter: SplitBlockBloom,
     inserted: u32,
 }
 
 impl std::fmt::Debug for BloomSegment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BloomSegment")
-            .field("bit_size", &self.filter.bit_size())
-            .field("num_hashes", &self.filter.num_hashes())
+            .field("num_blocks", &self.filter.num_blocks())
             .field("inserted", &self.inserted)
             .finish()
     }
 }
 
 impl BloomSegment {
-    /// Build a bloom sized for `expected` elements at a 1% false-positive
-    /// rate. Cheap — allocates `~9.6 * expected / 8` bytes.
+    /// Build a bloom sized for `expected` elements at the split-block
+    /// primitive's fixed ~1% false-positive rate.
     pub fn with_capacity(expected: usize) -> Self {
         Self {
-            filter: BloomFilter::with_capacity(expected.max(16), 0.01),
-            inserted: 0,
-        }
-    }
-
-    /// Custom false-positive rate.
-    pub fn with_rate(expected: usize, fp_rate: f64) -> Self {
-        Self {
-            filter: BloomFilter::with_capacity(expected.max(16), fp_rate),
+            filter: SplitBlockBloom::with_capacity(expected.max(16)),
             inserted: 0,
         }
     }
 
     /// Record `key` as possibly present.
     pub fn insert(&mut self, key: &[u8]) {
-        self.filter.insert(key);
+        self.filter.insert_bytes(key);
         self.inserted = self.inserted.saturating_add(1);
     }
 
     /// Might `key` be present? (May return a false positive, never a false
     /// negative.)
     pub fn contains(&self, key: &[u8]) -> bool {
-        self.filter.contains(key)
+        self.filter.probe_bytes(key)
     }
 
     /// Inverse of `contains` — the thing callers usually want.
     pub fn definitely_absent(&self, key: &[u8]) -> bool {
-        !self.filter.contains(key)
+        !self.filter.probe_bytes(key)
     }
 
-    /// Estimated current false-positive rate given the number of insertions.
+    /// Approximate current false-positive rate from word fill. Split-block
+    /// bloom probes require all eight salted words to match, so this is a
+    /// stats/debug estimate rather than a contract.
     pub fn estimated_fp_rate(&self) -> f64 {
-        self.filter.estimate_fp_rate(self.inserted as usize)
+        self.filter.fill_ratio().powi(8)
     }
 
     /// Number of elements recorded so far (best-effort).
@@ -101,10 +91,9 @@ impl BloomSegment {
         self.inserted
     }
 
-    /// Access the underlying bloom filter (e.g. to pass to
-    /// [`crate::storage::index::IndexBase::bloom`]).
-    pub fn filter(&self) -> &BloomFilter {
-        &self.filter
+    /// Bytes used by the underlying split-block payload.
+    pub fn byte_size(&self) -> usize {
+        self.filter.byte_size()
     }
 
     /// Merge another bloom segment into this one. Both must have the same
@@ -120,43 +109,27 @@ impl BloomSegment {
 
     /// Serialise into the header layout documented at module level.
     pub fn encode(&self) -> Vec<u8> {
-        reddb_file::encode_bloom_segment_frame(&reddb_file::BloomSegmentFrame {
-            num_hashes: self.filter.num_hashes(),
-            bit_size: self.filter.bit_size(),
-            inserted: self.inserted,
-            bits: self.filter.as_bytes().to_vec(),
-        })
+        reddb_file::encode_bloom_segment_frame(self.inserted, &self.filter.to_bytes())
     }
 
     /// Parse a previously encoded header. Returns a fresh `BloomSegment` and
     /// the number of bytes consumed.
     pub fn decode(bytes: &[u8]) -> Result<(Self, usize), BloomSegmentError> {
-        let (frame, consumed) = reddb_file::decode_bloom_segment_frame(bytes)?;
+        let (inserted, bloom_blob, consumed) = reddb_file::decode_bloom_segment_frame(bytes)?;
         let filter =
-            BloomFilter::from_bytes_with_size(frame.bits, frame.num_hashes, frame.bit_size);
-        Ok((
-            Self {
-                filter,
-                inserted: frame.inserted,
-            },
-            consumed,
-        ))
+            SplitBlockBloom::from_bytes(&bloom_blob).ok_or(BloomSegmentError::LengthMismatch)?;
+        Ok((Self { filter, inserted }, consumed))
     }
 }
 
-/// Fluent builder that mirrors `BloomFilterBuilder` but produces a
-/// `BloomSegment`.
+/// Fluent builder that produces a `BloomSegment`.
 pub struct BloomSegmentBuilder {
     expected: usize,
-    fp_rate: f64,
 }
 
 impl BloomSegmentBuilder {
     pub fn new() -> Self {
-        Self {
-            expected: 1024,
-            fp_rate: 0.01,
-        }
+        Self { expected: 1024 }
     }
 
     pub fn expected(mut self, n: usize) -> Self {
@@ -164,13 +137,8 @@ impl BloomSegmentBuilder {
         self
     }
 
-    pub fn false_positive_rate(mut self, rate: f64) -> Self {
-        self.fp_rate = rate;
-        self
-    }
-
     pub fn build(self) -> BloomSegment {
-        BloomSegment::with_rate(self.expected, self.fp_rate)
+        BloomSegment::with_capacity(self.expected)
     }
 }
 
@@ -226,7 +194,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_short_buffer() {
-        let bytes = [reddb_file::BLOOM_SEGMENT_MAGIC, 3, 0, 0];
+        let bytes = [reddb_file::BLOOM_SEGMENT_V2_MAGIC, 0, 0, 0];
         assert_eq!(
             BloomSegment::decode(&bytes).unwrap_err(),
             BloomSegmentError::TooShort
@@ -245,8 +213,8 @@ mod tests {
 
     #[test]
     fn union_merges_populations() {
-        let mut a = BloomSegment::with_rate(1024, 0.01);
-        let mut b = BloomSegment::with_rate(1024, 0.01);
+        let mut a = BloomSegment::with_capacity(1024);
+        let mut b = BloomSegment::with_capacity(1024);
         a.insert(b"one");
         b.insert(b"two");
         assert!(a.union_inplace(&b));
@@ -257,8 +225,8 @@ mod tests {
 
     #[test]
     fn union_rejects_incompatible() {
-        let mut a = BloomSegment::with_rate(1024, 0.01);
-        let b = BloomSegment::with_rate(4096, 0.01);
+        let mut a = BloomSegment::with_capacity(1024);
+        let b = BloomSegment::with_capacity(4096);
         assert!(!a.union_inplace(&b));
     }
 
