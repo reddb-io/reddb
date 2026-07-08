@@ -124,6 +124,42 @@ impl SplitBlockBloom {
         self.blocks.len()
     }
 
+    /// Number of bytes used by the block payload, excluding the serialized
+    /// block-count prefix.
+    pub fn byte_size(&self) -> usize {
+        self.blocks.len() * 32
+    }
+
+    /// OR-merge another split-block bloom into this filter. Returns `false`
+    /// when the filters have different block counts, because their block
+    /// routing masks are incompatible.
+    pub fn union_inplace(&mut self, other: &SplitBlockBloom) -> bool {
+        if self.blocks.len() != other.blocks.len() {
+            return false;
+        }
+        for (left, right) in self.blocks.iter_mut().zip(&other.blocks) {
+            for (left_word, right_word) in left.words.iter_mut().zip(right.words) {
+                *left_word |= right_word;
+            }
+        }
+        true
+    }
+
+    /// Fraction of block words that have at least one bit set.
+    pub fn fill_ratio(&self) -> f64 {
+        let total_words = self.blocks.len() * 8;
+        if total_words == 0 {
+            return 0.0;
+        }
+        let filled_words = self
+            .blocks
+            .iter()
+            .flat_map(|block| block.words)
+            .filter(|word| *word != 0)
+            .count();
+        filled_words as f64 / total_words as f64
+    }
+
     /// Serialize to a self-describing blob: a 4-byte LE block count followed
     /// by `num_blocks × 8` little-endian `u32` words. The block count is
     /// always a power of two, so [`from_bytes`](Self::from_bytes) can rebuild
@@ -360,6 +396,26 @@ mod tests {
             assert_eq!(a.probe_bytes(&key), b.probe_bytes(&key));
             assert!(a.probe_bytes(&key), "false negative for key {i}");
         }
+    }
+
+    #[test]
+    fn union_inplace_merges_matching_block_counts() {
+        let mut a = SplitBlockBloom::with_capacity(1024);
+        let mut b = SplitBlockBloom::with_capacity(1024);
+        a.insert_bytes(b"one");
+        b.insert_bytes(b"two");
+
+        assert!(a.union_inplace(&b));
+        assert!(a.probe_bytes(b"one"));
+        assert!(a.probe_bytes(b"two"));
+    }
+
+    #[test]
+    fn union_inplace_rejects_mismatched_block_counts() {
+        let mut a = SplitBlockBloom::with_capacity(1024);
+        let b = SplitBlockBloom::with_capacity(4096);
+
+        assert!(!a.union_inplace(&b));
     }
 
     fn byte_key(i: u64) -> [u8; 16] {
