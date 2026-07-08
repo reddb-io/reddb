@@ -35,6 +35,7 @@ impl RedDBRuntime {
         let mut tombstoned_ids = Vec::new();
         let mut tombstoned_entities = Vec::new();
         let mut physical_delete_ids = Vec::new();
+        let mut index_delete_fields: Vec<(EntityId, Vec<(String, Value)>)> = Vec::new();
         let table_row_resolver =
             crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
         // Phase 3: versioned graph collections tombstone node/edge
@@ -96,15 +97,22 @@ impl RedDBRuntime {
                         }
                     },
                 };
+                let pre_delete_fields = entity_row_fields_snapshot(&entity);
                 entity.set_xmax(xid);
                 if manager.update(entity.clone()).is_ok() {
                     if active_xid.is_some() {
                         self.record_pending_tombstone(conn_id, collection, id, xid, previous_xmax);
+                    } else if !pre_delete_fields.is_empty() {
+                        index_delete_fields.push((id, pre_delete_fields));
                     }
                     tombstoned_entities.push(entity);
                     tombstoned_ids.push(id);
                 }
             } else {
+                let pre_delete_fields = entity_row_fields_snapshot(&entity);
+                if !pre_delete_fields.is_empty() {
+                    index_delete_fields.push((id, pre_delete_fields));
+                }
                 physical_delete_ids.push(id);
             }
         }
@@ -124,6 +132,14 @@ impl RedDBRuntime {
                 .persist_entities_to_pager(collection, &tombstoned_entities)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
             for id in &tombstoned_ids {
+                if let Some((_, fields)) = index_delete_fields
+                    .iter()
+                    .find(|(indexed_id, _)| indexed_id == id)
+                {
+                    self.index_store_ref()
+                        .index_entity_delete(collection, *id, fields)
+                        .map_err(RedDBError::Internal)?;
+                }
                 store.context_index().remove_entity(*id);
                 let lsn = self.cdc_emit(
                     crate::replication::cdc::ChangeOperation::Delete,
@@ -140,6 +156,14 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         affected += deleted_ids.len() as u64;
         for id in &deleted_ids {
+            if let Some((_, fields)) = index_delete_fields
+                .iter()
+                .find(|(indexed_id, _)| indexed_id == id)
+            {
+                self.index_store_ref()
+                    .index_entity_delete(collection, *id, fields)
+                    .map_err(RedDBError::Internal)?;
+            }
             store.context_index().remove_entity(*id);
             let lsn = self.cdc_emit(
                 crate::replication::cdc::ChangeOperation::Delete,

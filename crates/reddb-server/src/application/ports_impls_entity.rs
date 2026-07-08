@@ -3337,6 +3337,9 @@ impl RuntimeEntityPort for RedDBRuntime {
         let id = builder.save()?;
         // Phase 1.1 MVCC universal: stamp xmin on the document.
         self.stamp_xmin_if_in_txn(&input.collection, id);
+        self.index_store_ref()
+            .index_entity_insert(&input.collection, id, &fields)
+            .map_err(crate::RedDBError::Internal)?;
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
