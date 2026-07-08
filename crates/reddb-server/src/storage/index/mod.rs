@@ -78,23 +78,14 @@ pub trait IndexBase: Send + Sync {
     /// Current statistics (cardinality, estimated selectivity, memory).
     fn stats(&self) -> IndexStats;
 
-    /// Optional bloom filter for fast negative lookups. Cross-structure
-    /// pruning relies on this.
-    fn bloom(&self) -> Option<&crate::storage::primitives::BloomFilter> {
-        None
-    }
-
     /// Returns `true` iff the key is *guaranteed* to be absent from this
-    /// index. Default implementation consults [`IndexBase::bloom`] and falls
-    /// back to `false` when no bloom is available (meaning "don't know —
+    /// index. Default implementation returns `false` (meaning "don't know —
     /// caller must probe").
     ///
     /// Concrete indexes may override with tighter signals (e.g. zone map
     /// min/max for range indexes).
-    fn definitely_absent(&self, key_bytes: &[u8]) -> bool {
-        self.bloom()
-            .map(|b| !b.contains(key_bytes))
-            .unwrap_or(false)
+    fn definitely_absent(&self, _key_bytes: &[u8]) -> bool {
+        false
     }
 }
 
@@ -129,14 +120,14 @@ pub trait RangeIndex<K: ?Sized, V>: PointIndex<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::primitives::BloomFilter;
+    use crate::storage::index::BloomSegment;
     use std::collections::BTreeMap;
 
     /// Tiny in-memory btree to exercise the traits end-to-end.
     struct TestBTree {
         name: String,
         map: BTreeMap<Vec<u8>, Vec<u64>>,
-        bloom: BloomFilter,
+        bloom: BloomSegment,
     }
 
     impl TestBTree {
@@ -144,7 +135,7 @@ mod tests {
             Self {
                 name: name.to_string(),
                 map: BTreeMap::new(),
-                bloom: BloomFilter::with_capacity(1024, 0.01),
+                bloom: BloomSegment::with_capacity(1024),
             }
         }
     }
@@ -166,8 +157,8 @@ mod tests {
                 index_correlation: 0.0,
             }
         }
-        fn bloom(&self) -> Option<&BloomFilter> {
-            Some(&self.bloom)
+        fn definitely_absent(&self, key_bytes: &[u8]) -> bool {
+            self.bloom.definitely_absent(key_bytes)
         }
     }
 
