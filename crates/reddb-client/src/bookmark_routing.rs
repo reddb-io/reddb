@@ -123,6 +123,9 @@ impl ReadEndpoint {
 /// Why a causal read landed on the endpoint it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteKind {
+    /// The request required a strong read, so it routed to the
+    /// primary/range-owner path.
+    StrongPrimary,
     /// The chosen target replica's snapshot frontier already covered
     /// the bookmark — no wait was needed.
     EligibleTarget,
@@ -135,6 +138,12 @@ pub enum RouteKind {
     /// No replica was past the bookmark; routed to the primary, which
     /// is always past every committed bookmark.
     FallbackPrimary,
+    /// Bounded-staleness routing found a healthy replica within the
+    /// caller's declared lag bound.
+    BoundedStalenessReplica,
+    /// Local routing selected a healthy replica without making any
+    /// freshness claim.
+    LocalReplica,
 }
 
 impl RouteKind {
@@ -176,7 +185,7 @@ pub trait BookmarkWaiter {
 }
 
 /// Options for a causal read route.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CausalReadOptions {
     /// Region the caller prefers to read from (locality). When set, a
     /// healthy replica in this region is chosen as the wait target
@@ -185,6 +194,62 @@ pub struct CausalReadOptions {
     /// Upper bound on how long to wait for the target to catch up
     /// before falling back.
     pub deadline: Duration,
+}
+
+/// Per-request read consistency level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadConsistency {
+    /// Route to the primary/range owner so the read never observes
+    /// state before the commit watermark.
+    Strong,
+    /// Route using the session bookmark path.
+    Causal {
+        bookmark: BookmarkTarget,
+        opts: CausalReadOptions,
+    },
+    /// Allow any healthy replica whose advertised lag is within
+    /// `max_lag`.
+    BoundedStaleness { max_lag: Duration },
+    /// Allow any healthy member; does not block or claim freshness.
+    Local,
+}
+
+/// Per-request query routing options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryOptions {
+    pub consistency: ReadConsistency,
+}
+
+impl QueryOptions {
+    pub fn strong() -> Self {
+        Self {
+            consistency: ReadConsistency::Strong,
+        }
+    }
+
+    pub fn causal(bookmark: BookmarkTarget, opts: CausalReadOptions) -> Self {
+        Self {
+            consistency: ReadConsistency::Causal { bookmark, opts },
+        }
+    }
+
+    pub fn bounded_staleness(max_lag: Duration) -> Self {
+        Self {
+            consistency: ReadConsistency::BoundedStaleness { max_lag },
+        }
+    }
+
+    pub fn local() -> Self {
+        Self {
+            consistency: ReadConsistency::Local,
+        }
+    }
+}
+
+impl Default for QueryOptions {
+    fn default() -> Self {
+        Self::local()
+    }
 }
 
 impl CausalReadOptions {
@@ -329,6 +394,70 @@ impl RoutingTable {
         self.fall_back(bookmark, None, waiter.elapsed())
     }
 
+    /// Resolve a read for the requested per-request consistency
+    /// level. Causal delegates to the bookmark route. Strong and
+    /// fallback routes use the primary, which is the range-owner path
+    /// at the current client routing layer.
+    pub fn route_read(
+        &self,
+        options: &QueryOptions,
+        waiter: &mut dyn BookmarkWaiter,
+    ) -> RouteDecision {
+        match &options.consistency {
+            ReadConsistency::Strong => RouteDecision {
+                endpoint: self.write.endpoint(),
+                kind: RouteKind::StrongPrimary,
+                waited: Duration::ZERO,
+            },
+            ReadConsistency::Causal { bookmark, opts } => {
+                self.route_causal_read(*bookmark, opts, waiter)
+            }
+            ReadConsistency::BoundedStaleness { max_lag } => self.route_bounded_staleness(*max_lag),
+            ReadConsistency::Local => self.route_local(),
+        }
+    }
+
+    fn route_bounded_staleness(&self, max_lag: Duration) -> RouteDecision {
+        let max_lag_ms = max_lag.as_millis().min(u32::MAX as u128) as u32;
+        match self
+            .replicas
+            .iter()
+            .find(|r| r.healthy && !r.rebootstrapping && r.lag_ms <= max_lag_ms)
+        {
+            Some(r) => RouteDecision {
+                endpoint: Endpoint {
+                    addr: r.addr.clone(),
+                    region: r.region.clone(),
+                },
+                kind: RouteKind::BoundedStalenessReplica,
+                waited: Duration::ZERO,
+            },
+            None => RouteDecision {
+                endpoint: self.write.endpoint(),
+                kind: RouteKind::FallbackPrimary,
+                waited: Duration::ZERO,
+            },
+        }
+    }
+
+    fn route_local(&self) -> RouteDecision {
+        match self.replicas.iter().find(|r| r.healthy) {
+            Some(r) => RouteDecision {
+                endpoint: Endpoint {
+                    addr: r.addr.clone(),
+                    region: r.region.clone(),
+                },
+                kind: RouteKind::LocalReplica,
+                waited: Duration::ZERO,
+            },
+            None => RouteDecision {
+                endpoint: self.write.endpoint(),
+                kind: RouteKind::FallbackPrimary,
+                waited: Duration::ZERO,
+            },
+        }
+    }
+
     /// Fallback selection: a healthy replica (other than `exclude`)
     /// already past the bookmark, else the primary.
     fn fall_back(
@@ -376,6 +505,23 @@ mod tests {
             region: region.into(),
             healthy,
             lag_ms: if healthy { 5 } else { u32::MAX },
+            last_applied_lsn: frontier,
+            rebootstrapping: false,
+        }
+    }
+
+    fn lagging_replica(
+        addr: &str,
+        region: &str,
+        healthy: bool,
+        frontier: u64,
+        lag_ms: u32,
+    ) -> ReplicaInfo {
+        ReplicaInfo {
+            addr: addr.into(),
+            region: region.into(),
+            healthy,
+            lag_ms,
             last_applied_lsn: frontier,
             rebootstrapping: false,
         }
@@ -759,5 +905,64 @@ mod tests {
             );
             assert!(!decision.endpoint.addr.is_empty());
         }
+    }
+
+    #[test]
+    fn route_read_strong_uses_primary_without_polling() {
+        let table = RoutingTable::from_membership(
+            membership(vec![replica("r-ok:5050", "us-east-1", true, 150)]),
+            1,
+        );
+        let mut waiter = ScriptedWaiter::new(vec![150], Duration::from_millis(10));
+        let decision = table.route_read(&QueryOptions::strong(), &mut waiter);
+        assert_eq!(decision.kind, RouteKind::StrongPrimary);
+        assert_eq!(decision.endpoint.addr, "primary:5050");
+        assert!(waiter.polled_addrs.is_empty());
+    }
+
+    #[test]
+    fn route_read_bounded_staleness_respects_declared_lag_bound() {
+        let table = RoutingTable::from_membership(
+            membership(vec![
+                lagging_replica("too-stale:5050", "us-east-1", true, 500, 250),
+                lagging_replica("fresh-enough:5050", "us-east-1", true, 90, 40),
+            ]),
+            1,
+        );
+        let mut waiter = ScriptedWaiter::new(vec![], Duration::from_millis(10));
+        let decision = table.route_read(
+            &QueryOptions::bounded_staleness(Duration::from_millis(50)),
+            &mut waiter,
+        );
+        assert_eq!(decision.kind, RouteKind::BoundedStalenessReplica);
+        assert_eq!(decision.endpoint.addr, "fresh-enough:5050");
+        assert!(waiter.polled_addrs.is_empty());
+
+        let fallback = table.route_read(
+            &QueryOptions::bounded_staleness(Duration::from_millis(10)),
+            &mut waiter,
+        );
+        assert_eq!(fallback.kind, RouteKind::FallbackPrimary);
+        assert_eq!(fallback.endpoint.addr, "primary:5050");
+    }
+
+    #[test]
+    fn route_read_local_never_blocks_on_freshness() {
+        let table = RoutingTable::from_membership(
+            membership(vec![lagging_replica(
+                "very-stale:5050",
+                "us-east-1",
+                true,
+                0,
+                u32::MAX,
+            )]),
+            1,
+        );
+        let mut waiter = ScriptedWaiter::new(vec![0, 0, 0], Duration::from_millis(10));
+        let decision = table.route_read(&QueryOptions::local(), &mut waiter);
+        assert_eq!(decision.kind, RouteKind::LocalReplica);
+        assert_eq!(decision.endpoint.addr, "very-stale:5050");
+        assert_eq!(decision.waited, Duration::ZERO);
+        assert!(waiter.polled_addrs.is_empty());
     }
 }
