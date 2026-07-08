@@ -51,7 +51,6 @@ pub mod metadata;
 pub mod segment;
 pub mod segment_codec;
 pub mod skiplist;
-pub mod spatial_index;
 pub mod store;
 pub mod tokenization;
 
@@ -109,9 +108,6 @@ pub use segment::{
     ZoneColPred, ZoneColPredKind,
 };
 pub use segment_codec::{select_codecs, ColumnSemantics};
-pub use spatial_index::{
-    SpatialIndex, SpatialIndexManager, SpatialIndexStats, SpatialSearchResult,
-};
 pub(crate) use store::DeferredStoreWalActions;
 pub use store::{StoreError, StoreStats, UnifiedStore, UnifiedStoreConfig};
 // Query DSL for fluent multi-modal queries
