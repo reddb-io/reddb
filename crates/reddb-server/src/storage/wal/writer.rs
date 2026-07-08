@@ -506,8 +506,9 @@ mod tests {
         assert_eq!(lsn, 8);
 
         // Next record should start after encoded size
-        // Begin record: 1 (type) + 8 (term) + 8 (tx_id) + 4 (checksum) = 21 bytes
-        assert_eq!(writer.current_lsn(), 8 + 21);
+        // Begin record (v3 framing): 1 (type) + 8 (term) + 8 (ownership_epoch)
+        //   + 8 (tx_id) + 4 (checksum) = 29 bytes
+        assert_eq!(writer.current_lsn(), 8 + 29);
     }
 
     #[test]
@@ -526,8 +527,8 @@ mod tests {
             .expect("append() should succeed");
 
         assert_eq!(lsn1, 8);
-        assert_eq!(lsn2, 8 + 21);
-        assert_eq!(lsn3, 8 + 21 + 21);
+        assert_eq!(lsn2, 8 + 29);
+        assert_eq!(lsn3, 8 + 29 + 29);
     }
 
     #[test]
@@ -541,7 +542,7 @@ mod tests {
             .expect("append() should succeed");
         assert_eq!(lsn1, 8);
 
-        // PageWrite record: 1 + 8 + 4 + 4 + data_len + 4 = 21 + data_len
+        // PageWrite record (v3 framing): +8 bytes for ownership_epoch vs v2
         let data = vec![1, 2, 3, 4, 5];
         let lsn2 = writer
             .append(&WalRecord::PageWrite {
@@ -551,10 +552,10 @@ mod tests {
             })
             .expect("value is present");
 
-        assert_eq!(lsn2, 8 + 21); // after Begin
+        assert_eq!(lsn2, 8 + 29); // after Begin
 
-        // Next LSN = lsn2 + (1 + 8 + 8 + 4 + 4 + 5 + 4) = lsn2 + 34
-        assert_eq!(writer.current_lsn(), 8 + 21 + 34);
+        // Next LSN = lsn2 + (1 + 8 + 8 + 8 + 4 + 4 + 5 + 4) = lsn2 + 42
+        assert_eq!(writer.current_lsn(), 8 + 29 + 42);
     }
 
     #[test]
@@ -637,12 +638,12 @@ mod tests {
         let (_guard, path) = temp_wal("checkpoint");
         let mut writer = WalWriter::open(&path).expect("open() should succeed");
 
-        // Checkpoint is same size as Begin (1 + 8 + 8 + 4 = 21)
+        // Checkpoint is same size as Begin (v3: 1 + 8 + 8 + 8 + 4 = 29)
         let lsn = writer
             .append(&WalRecord::Checkpoint { lsn: 12345 })
             .expect("value is present");
         assert_eq!(lsn, 8);
-        assert_eq!(writer.current_lsn(), 8 + 21);
+        assert_eq!(writer.current_lsn(), 8 + 29);
     }
 
     // -----------------------------------------------------------------
@@ -875,8 +876,10 @@ mod tests {
                 .append(&WalRecord::Begin { tx_id: tx })
                 .expect("append() should succeed");
         }
-        // current_lsn reflects the in-buffer position.
-        assert_eq!(writer.current_lsn(), 8 + 100 * 21);
+        // current_lsn reflects the in-buffer position. Each v3 Begin record is
+        // 29 bytes: 1 (type) + 8 (term) + 8 (ownership_epoch) + 8 (tx_id)
+        //   + 4 (checksum).
+        assert_eq!(writer.current_lsn(), 8 + 100 * 29);
         // But the file on disk only has the header.
         let on_disk = std::fs::metadata(&path)
             .expect("metadata() should succeed")
@@ -967,7 +970,7 @@ mod tests {
             std::fs::metadata(&path)
                 .expect("metadata() should succeed")
                 .len(),
-            8 + 21
+            8 + 29
         );
     }
 
@@ -1089,7 +1092,7 @@ mod tests {
         let logical = std::fs::metadata(&path)
             .expect("metadata() should succeed")
             .len();
-        assert_eq!(logical, 8 + 50 * 21, "preallocation inflated i_size");
+        assert_eq!(logical, 8 + 50 * 29, "preallocation inflated i_size");
         assert_eq!(writer.current_lsn(), logical);
     }
 

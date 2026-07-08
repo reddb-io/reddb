@@ -90,6 +90,9 @@ mod e2e_probabilistic_public_contract;
 #[path = "timeseries_remaining/e2e_sessionize_operator.rs"]
 mod e2e_sessionize_operator;
 
+#[path = "timeseries_remaining/e2e_timeseries_series_cardinality_guard.rs"]
+mod e2e_timeseries_series_cardinality_guard;
+
 #[path = "sql_window/e2e_window_aggregate.rs"]
 mod e2e_window_aggregate;
 

@@ -8,6 +8,8 @@ use super::*;
 const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
 const TIMESERIES_SERIES_COLLECTION: &str = "red_timeseries_series";
 const DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS: u64 = 86_400_000_000_000;
+const TIMESERIES_MAX_SERIES_GLOBAL_CONFIG: &str = "storage.time_series.max_series_per_collection";
+const DEFAULT_TIMESERIES_MAX_SERIES_PER_COLLECTION: usize = 1_000_000;
 
 #[derive(Default)]
 struct SealHypertableChunksOutcome {
@@ -562,6 +564,13 @@ pub(crate) fn intern_timeseries_series(
         }
     }
 
+    let ceiling = timeseries_max_series_per_collection(store, collection);
+    if rows.len() >= ceiling {
+        return Err(RedDBError::Query(format!(
+            "timeseries collection '{collection}' has reached its distinct series ceiling of {ceiling}"
+        )));
+    }
+
     let series_id = next_id;
     let mut fields = HashMap::new();
     fields.insert(
@@ -682,6 +691,49 @@ fn row_u64(row: &crate::storage::RowData, field: &str) -> Option<u64> {
         Some(Value::Integer(value)) if *value >= 0 => Some(*value as u64),
         _ => None,
     }
+}
+
+fn timeseries_max_series_per_collection(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+) -> usize {
+    let collection_key = format!("storage.time_series.collections.{collection}.max_series");
+    latest_usize_config(store, &collection_key)
+        .or_else(|| latest_usize_config(store, TIMESERIES_MAX_SERIES_GLOBAL_CONFIG))
+        .unwrap_or(DEFAULT_TIMESERIES_MAX_SERIES_PER_COLLECTION)
+}
+
+fn latest_usize_config(store: &crate::storage::unified::UnifiedStore, key: &str) -> Option<usize> {
+    let manager = store.get_collection("red_config")?;
+    let mut newest: Option<(u64, usize)> = None;
+    manager.for_each_entity(|entity| {
+        let Some(row) = entity.data.as_row() else {
+            return true;
+        };
+        if !row_text(row, "key").is_some_and(|value| value.eq_ignore_ascii_case(key)) {
+            return true;
+        }
+        let Some(value) = row.get_field("value").and_then(value_as_usize) else {
+            return true;
+        };
+        let id = entity.id.raw();
+        if newest.is_none_or(|(best_id, _)| id >= best_id) {
+            newest = Some((id, value));
+        }
+        true
+    });
+    newest.map(|(_, value)| value)
+}
+
+fn value_as_usize(value: &Value) -> Option<usize> {
+    let value = match value {
+        Value::UnsignedInteger(value) => *value,
+        Value::Integer(value) if *value >= 0 => *value as u64,
+        Value::Float(value) if *value >= 0.0 => *value as u64,
+        Value::Text(value) => value.trim().parse().ok()?,
+        _ => return None,
+    };
+    usize::try_from(value).ok()
 }
 
 /// Materialise `(timestamp_ns, value)` rows from the entity/row store for
