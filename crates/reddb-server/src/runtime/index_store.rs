@@ -2016,18 +2016,12 @@ fn derive_index_entities_for_column(
 /// (slice 1), which also yields an `UnsignedInteger`, so the index key
 /// family matches the query side.
 ///
-/// Returns `None` when the value is not a `GeoPoint`, or when the
+/// Returns `None` when the value is not a recognized geo value, or when the
 /// coordinate fails to encode (`lat_lng_to_cell` returns the `0`
 /// sentinel) — those rows are simply absent from the index, exactly as
 /// an `Unsupported` value is absent from a BTree index.
 fn h3_cell_value(value: &Value, resolution: u8) -> Option<Value> {
-    let (lat, lon) = match value {
-        Value::GeoPoint(lat_micro, lon_micro) => (
-            crate::geo::micro_to_deg(*lat_micro),
-            crate::geo::micro_to_deg(*lon_micro),
-        ),
-        _ => return None,
-    };
+    let (lat, lon) = crate::geo::recognize_geo_value(value)?;
     let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, resolution);
     if cell == 0 {
         return None;
@@ -2104,6 +2098,28 @@ mod tests {
     fn h3_cell_value_rejects_non_geopoint() {
         assert!(h3_cell_value(&Value::Integer(5), 9).is_none());
         assert!(h3_cell_value(&Value::text("48.8,2.3".to_string()), 9).is_none());
+    }
+
+    #[test]
+    fn h3_cell_value_uses_shared_geo_recognition_for_json_objects() {
+        let value = Value::Json(br#"{"latitude":48.8566,"longitude":2.3522}"#.to_vec());
+        let cell = h3_cell_value(&value, 9).expect("json object coordinate must encode");
+        assert_eq!(
+            cell,
+            Value::UnsignedInteger(crate::geo::h3::lat_lng_to_cell(48.8566, 2.3522, 9))
+        );
+    }
+
+    #[test]
+    fn h3_cell_value_rejects_shared_geo_non_goals() {
+        for value in [
+            Value::Json(br#"{"lat":"48.8566","lon":"2.3522"}"#.to_vec()),
+            Value::Json(br#"{"type":"Point","coordinates":[2.3522,48.8566]}"#.to_vec()),
+            Value::Json(br#"{"lat":48.8566}"#.to_vec()),
+            Value::Json(br#"{"lat":91.0,"lon":2.3522}"#.to_vec()),
+        ] {
+            assert_eq!(h3_cell_value(&value, 9), None, "{value:?}");
+        }
     }
 
     #[test]
