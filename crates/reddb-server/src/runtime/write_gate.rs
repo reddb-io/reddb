@@ -29,6 +29,7 @@ use crate::cluster::{
     OwnershipEpoch, OwnershipLease, PlacementMetadata, RangeBounds, RangeId, RangeOwnership,
     ShardKeyMode, ShardOwnershipCatalog, SupervisorTerm,
 };
+use crate::replication::cdc::RangeAuthority;
 use crate::replication::flow_control::{Admission, FlowController};
 use crate::replication::ReplicationRole;
 use crate::telemetry::operator_event::OperatorEvent;
@@ -158,11 +159,13 @@ impl WriteGate {
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .unwrap_or(0);
         let ownership = match options.replication.role {
-            ReplicationRole::Primary => Some(OwnershipAdmissionGate::primary_replica(
-                DEFAULT_PRIMARY_REPLICA_OWNER,
-                options.replication.term,
-            )),
-            ReplicationRole::Standalone | ReplicationRole::Replica { .. } => None,
+            ReplicationRole::Primary | ReplicationRole::Replica { .. } => {
+                Some(OwnershipAdmissionGate::primary_replica(
+                    DEFAULT_PRIMARY_REPLICA_OWNER,
+                    options.replication.term,
+                ))
+            }
+            ReplicationRole::Standalone => None,
         };
         Self {
             read_only: AtomicBool::new(options.read_only),
@@ -415,6 +418,13 @@ impl WriteGate {
         };
         gate.promote_to(new_owner, new_term)
     }
+
+    pub fn primary_replica_range_authority(&self) -> Option<RangeAuthority> {
+        self.ownership
+            .read()
+            .as_ref()
+            .map(OwnershipAdmissionGate::range_authority)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -485,6 +495,19 @@ impl OwnershipAdmissionGate {
 
     fn is_fenced(&self) -> bool {
         self.admit().is_err()
+    }
+
+    fn range_authority(&self) -> RangeAuthority {
+        let epoch = self
+            .catalog
+            .range(&self.collection, self.range_id)
+            .map(|range| range.epoch().value())
+            .unwrap_or(0);
+        RangeAuthority {
+            range_id: self.range_id.value(),
+            min_term: self.current_term.value(),
+            min_ownership_epoch: epoch,
+        }
     }
 
     fn promote_to(&mut self, new_owner: NodeIdentity, new_term: u64) -> RedDBResult<()> {
@@ -904,6 +927,27 @@ mod tests {
     }
 
     #[test]
+    fn replica_role_carries_apply_authority_but_stays_public_read_only() {
+        let options = RedDBOptions::in_memory().with_replication(
+            crate::replication::ReplicationConfig::replica("http://primary:55055").with_term(8),
+        );
+        let g = WriteGate::from_options(&options);
+
+        let authority = g
+            .primary_replica_range_authority()
+            .expect("replica apply authority");
+        assert_eq!(authority.range_id, RESERVED_GLOBAL_SYSTEM_RANGE_ID);
+        assert_eq!(authority.min_term, 8);
+        assert_eq!(authority.min_ownership_epoch, 1);
+
+        let err = g.check(WriteKind::Dml).unwrap_err();
+        match err {
+            RedDBError::ReadOnly(msg) => assert!(msg.contains("replica"), "{msg}"),
+            other => panic!("expected replica read-only, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ownership_admission_fences_deposed_primary() {
         let g = gate(false, ReplicationRole::Primary);
         g.install_primary_replica_ownership_gate_for_test("CN=node-a,O=reddb", 7);
@@ -921,5 +965,19 @@ mod tests {
             }
             other => panic!("expected ownership fencing ReadOnly, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn primary_replica_authority_reports_current_term_epoch_and_range() {
+        let g = gate(false, ReplicationRole::Primary);
+        g.install_primary_replica_ownership_gate_for_test("CN=node-a,O=reddb", 7);
+        g.promote_primary_replica_owner_for_test("CN=node-b,O=reddb", 8);
+
+        let authority = g
+            .primary_replica_range_authority()
+            .expect("primary-replica authority");
+        assert_eq!(authority.range_id, RESERVED_GLOBAL_SYSTEM_RANGE_ID);
+        assert_eq!(authority.min_term, 8);
+        assert_eq!(authority.min_ownership_epoch, 2);
     }
 }
