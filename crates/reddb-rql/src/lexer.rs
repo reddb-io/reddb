@@ -641,6 +641,13 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
+    /// Raw source text. Lets parsers recover a keyword-colliding
+    /// identifier's typed spelling from its token span (keywords are
+    /// matched case-insensitively, so the token alone has lost it).
+    pub(crate) fn source(&self) -> &'a str {
+        self.input
+    }
+
     /// Create a new lexer for the given input
     pub fn new(input: &'a str) -> Self {
         Self::with_limits(input, crate::limits::ParserLimits::default())

@@ -1944,14 +1944,27 @@ impl IndexStore {
 }
 
 fn index_field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<Cow<'a, Value>> {
-    if let Some((_, body)) = fields.iter().find(|(field, _)| field == "body") {
+    if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
         // Single-source document: an index on a bare or dotted document field
         // (`score`, `location.gps`) is backed by the body, not a stored column.
-        let path = super::join_filter::parse_runtime_document_path(column);
-        if let Some(value) =
-            super::join_filter::resolve_runtime_document_path_from_value(body, &path)
-        {
-            return Some(Cow::Owned(value));
+        // The ROOT segment must be offset-read from the binary `body`
+        // container (`read_body_field` is the binary-container-aware,
+        // storage-typed read); the generic document-path resolver does not
+        // decode binary containers, so resolving the whole path against the
+        // raw `body` value silently yields nothing and builds an empty
+        // index. Descend into nested structure only AFTER the offset-read.
+        let segments = super::join_filter::parse_runtime_document_path(column);
+        if let Some((root, tail)) = segments.split_first() {
+            if let Some(root_value) = crate::document_body::read_body_field(bytes, root) {
+                if tail.is_empty() {
+                    return Some(Cow::Owned(root_value));
+                }
+                if let Some(value) =
+                    super::join_filter::resolve_runtime_document_path_from_value(&root_value, tail)
+                {
+                    return Some(Cow::Owned(value));
+                }
+            }
         }
     }
     if let Some((_, value)) = fields.iter().find(|(field, _)| field == column) {
