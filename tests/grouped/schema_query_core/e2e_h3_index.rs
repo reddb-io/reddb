@@ -300,6 +300,36 @@ fn assert_h3_parity(create_index: &str, queries: &[String]) {
     }
 }
 
+fn seed_document_geo_corpus(collection: &str) -> RedDBRuntime {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query(&format!("CREATE DOCUMENT {collection}"))
+        .unwrap();
+    for (id, loc) in GEO_CORPUS {
+        let (lat, lon) = loc
+            .split_once(',')
+            .unwrap_or_else(|| panic!("invalid test coordinate: {loc}"));
+        rt.execute_query(&format!(
+            r#"INSERT INTO {collection} DOCUMENT VALUES
+               ({{"id":{id},"gpsLocation":{{"lat":{lat},"lon":{lon}}}}})"#
+        ))
+        .unwrap();
+    }
+    rt
+}
+
+fn assert_h3_document_parity(create_index: &str, queries: &[String]) {
+    let rt = seed_document_geo_corpus("events");
+    let baseline: Vec<Vec<(u64, u64)>> = queries.iter().map(|q| spatial_rows(&rt, q)).collect();
+    rt.execute_query(create_index).unwrap();
+    for (q, expected) in queries.iter().zip(&baseline) {
+        assert_eq!(
+            &spatial_rows(&rt, q),
+            expected,
+            "document H3 route diverged from full scan for: {q}"
+        );
+    }
+}
+
 #[test]
 fn spatial_full_scan_reads_document_body_column() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
@@ -459,6 +489,210 @@ fn spatial_row_named_column_wins_and_missing_column_uses_legacy_fallback() {
         missing.len(),
         1,
         "legacy any-geo fallback must remain for row entities when COLUMN is absent"
+    );
+}
+
+#[test]
+fn h3_document_body_repro_backfills_existing_documents() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":38.76,"lon":-77.15}})"#,
+    )
+    .unwrap();
+
+    rt.execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
+        .unwrap();
+
+    let (kind, entries) = show_index(&rt, "events", "idx_loc")
+        .expect("document H3 index must appear in red.show_indexes");
+    assert_eq!(kind, "H3");
+    assert_eq!(
+        entries, 1,
+        "document H3 backfill must index the existing body field"
+    );
+
+    let hits = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(hits.len(), 1, "the #1866 document repro must return a hit");
+    assert_eq!(
+        hits[0].1,
+        0.0_f64.to_bits(),
+        "exact document hit must report zero distance"
+    );
+}
+
+#[test]
+fn h3_document_body_indexes_live_inserts() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
+        .unwrap();
+
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":38.76,"lon":-77.15}})"#,
+    )
+    .unwrap();
+
+    let (_, entries) = show_index(&rt, "events", "idx_loc").unwrap();
+    assert_eq!(
+        entries, 1,
+        "document H3 live maintenance must index inserts after CREATE INDEX"
+    );
+    let hits = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].1, 0.0_f64.to_bits());
+}
+
+#[test]
+fn h3_document_body_update_delete_and_missing_value_lifecycle() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+           ({"name":"moving","gpsLocation":{"lat":38.76,"lon":-77.15}}),
+           ({"name":"missing"}),
+           ({"name":"bad","gpsLocation":"not-geo"})"#,
+    )
+    .unwrap();
+    rt.execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
+        .unwrap();
+
+    let (_, entries) = show_index(&rt, "events", "idx_loc").unwrap();
+    assert_eq!(
+        entries, 1,
+        "missing and non-geo document values must be absent from H3"
+    );
+
+    rt.execute_query(
+        r#"UPDATE events SET gpsLocation = JSON_PARSE('{"lat":40.7,"lon":-74.0}') WHERE name = 'moving'"#,
+    )
+    .unwrap();
+    assert!(
+        spatial_rows(
+            &rt,
+            "SEARCH SPATIAL RADIUS 38.76 -77.15 1.0 COLLECTION events COLUMN gpsLocation",
+        )
+        .is_empty(),
+        "document UPDATE must remove the old H3 cell"
+    );
+    assert_eq!(
+        spatial_rows(
+            &rt,
+            "SEARCH SPATIAL RADIUS 40.7 -74.0 1.0 COLLECTION events COLUMN gpsLocation",
+        )
+        .len(),
+        1,
+        "document UPDATE must insert the new H3 cell"
+    );
+
+    rt.execute_query(
+        r#"UPDATE events SET gpsLocation = JSON_PARSE('{"lat":38.76,"lon":-77.15}') WHERE name = 'missing'"#,
+    )
+    .unwrap();
+    assert_eq!(
+        spatial_rows(
+            &rt,
+            "SEARCH SPATIAL RADIUS 38.76 -77.15 1.0 COLLECTION events COLUMN gpsLocation",
+        )
+        .len(),
+        1,
+        "a document that gains a valid geo field must appear in H3"
+    );
+
+    rt.execute_query("DELETE FROM events WHERE name = 'moving'")
+        .unwrap();
+    assert!(
+        spatial_rows(
+            &rt,
+            "SEARCH SPATIAL RADIUS 40.7 -74.0 1.0 COLLECTION events COLUMN gpsLocation",
+        )
+        .is_empty(),
+        "document DELETE must remove the H3 index entry"
+    );
+}
+
+#[test]
+fn h3_document_body_dotted_path_backfills_and_searches() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+           ({"location":{"gps":{"lat":38.76,"lon":-77.15}}})"#,
+    )
+    .unwrap();
+
+    rt.execute_query("CREATE INDEX idx_loc ON events (location.gps) USING H3")
+        .unwrap();
+
+    let (_, entries) = show_index(&rt, "events", "idx_loc").unwrap();
+    assert_eq!(entries, 1, "dotted document H3 path must backfill");
+    let hits = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 1.0 COLLECTION events COLUMN location.gps",
+    );
+    assert_eq!(hits.len(), 1, "dotted document H3 path must search");
+    assert_eq!(hits[0].1, 0.0_f64.to_bits());
+}
+
+#[test]
+fn h3_document_radius_parity_with_full_scan() {
+    let queries: Vec<String> = [
+        (48.8566, 2.3522, 0.5),
+        (48.8566, 2.3522, 5.0),
+        (48.8566, 2.3522, 50.0),
+    ]
+    .iter()
+    .map(|(clat, clon, r)| {
+        format!("SEARCH SPATIAL RADIUS {clat} {clon} {r} COLLECTION events COLUMN gpsLocation")
+    })
+    .collect();
+    assert_h3_document_parity(
+        "CREATE INDEX idx_loc ON events (gpsLocation) USING H3",
+        &queries,
+    );
+}
+
+#[test]
+fn h3_document_nearest_parity_with_full_scan() {
+    let queries: Vec<String> = [
+        (48.8566, 2.3522, 1),
+        (48.8566, 2.3522, 4),
+        (48.8584, 2.2945, 3),
+    ]
+    .iter()
+    .map(|(lat, lon, k)| {
+        format!("SEARCH SPATIAL NEAREST {lat} {lon} K {k} COLLECTION events COLUMN gpsLocation")
+    })
+    .collect();
+    assert_h3_document_parity(
+        "CREATE INDEX idx_loc ON events (gpsLocation) USING H3 (9)",
+        &queries,
+    );
+}
+
+#[test]
+fn h3_document_bbox_parity_with_full_scan() {
+    let queries: Vec<String> = [
+        (48.84, 2.33, 48.87, 2.36),
+        (48.80, 2.25, 48.90, 2.40),
+        (-90.0, -180.0, 90.0, 180.0),
+    ]
+    .iter()
+    .map(|(min_lat, min_lon, max_lat, max_lon)| {
+        format!(
+            "SEARCH SPATIAL BBOX {min_lat} {min_lon} {max_lat} {max_lon} COLLECTION events COLUMN gpsLocation"
+        )
+    })
+    .collect();
+    assert_h3_document_parity(
+        "CREATE INDEX idx_loc ON events (gpsLocation) USING H3",
+        &queries,
     );
 }
 
