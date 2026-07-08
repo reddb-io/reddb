@@ -490,13 +490,26 @@ pub(in crate::runtime::join_filter) fn resolve_two_geo_points(
     args: &[Projection],
     source: &UnifiedRecord,
 ) -> Option<(f64, f64, f64, f64)> {
-    if args.len() < 2 {
-        return None;
+    match args {
+        [left, right] => {
+            let (lat1, lon1) = resolve_geo_arg(left, source)?;
+            let (lat2, lon2) = resolve_geo_arg(right, source)?;
+            Some((lat1, lon1, lat2, lon2))
+        }
+        [left, lat, lon] => {
+            let (lat1, lon1) = resolve_geo_arg(left, source)?;
+            let lat2 = resolve_geo_number(lat, source)?;
+            let lon2 = resolve_geo_number(lon, source)?;
+            Some((lat1, lon1, lat2, lon2))
+        }
+        [lat1, lon1, lat2, lon2] => Some((
+            resolve_geo_number(lat1, source)?,
+            resolve_geo_number(lon1, source)?,
+            resolve_geo_number(lat2, source)?,
+            resolve_geo_number(lon2, source)?,
+        )),
+        _ => None,
     }
-
-    let (lat1, lon1) = resolve_geo_arg(&args[0], source)?;
-    let (lat2, lon2) = resolve_geo_arg(&args[1], source)?;
-    Some((lat1, lon1, lat2, lon2))
 }
 
 /// Resolve a single geo argument — either a column (GeoPoint/Latitude/Longitude) or POINT literal.
@@ -516,12 +529,14 @@ pub(in crate::runtime::join_filter) fn resolve_geo_arg(
                 }
             }
             // Column reference → look up in record values
-            let val = source.get(col.as_str())?;
-            match val {
-                Value::GeoPoint(lat_micro, lon_micro) => Some((
-                    crate::geo::micro_to_deg(*lat_micro),
-                    crate::geo::micro_to_deg(*lon_micro),
-                )),
+            let val = source
+                .get(col.as_str())
+                .cloned()
+                .or_else(|| resolve_runtime_document_path(source, col))?;
+            match &val {
+                value if crate::geo::recognize_geo_value(value).is_some() => {
+                    crate::geo::recognize_geo_value(value)
+                }
                 Value::Float(f) => {
                     // Could be a lat or lon — check for "lat"/"lon" sibling columns
                     let lat_keys = ["lat", "latitude"];
@@ -544,6 +559,14 @@ pub(in crate::runtime::join_filter) fn resolve_geo_arg(
                 _ => None,
             }
         }
-        _ => None,
+        _ => {
+            let value = eval_projection_value(arg, source)?;
+            crate::geo::recognize_geo_value(&value)
+        }
     }
+}
+
+fn resolve_geo_number(arg: &Projection, source: &UnifiedRecord) -> Option<f64> {
+    let value = eval_projection_value(arg, source)?;
+    value_as_number(&value).map(NumOperand::as_f64)
 }
