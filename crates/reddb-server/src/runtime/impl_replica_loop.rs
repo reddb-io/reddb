@@ -660,10 +660,13 @@ impl RedDBRuntime {
                                     );
                                     continue;
                                 };
-                                match applier.apply(
+                                let range_authority =
+                                    self.inner.write_gate.primary_replica_range_authority();
+                                match applier.apply_fenced(
                                     self.inner.db.as_ref(),
                                     &change,
                                     ApplyMode::Replica,
+                                    range_authority.as_ref(),
                                 ) {
                                     Ok(crate::replication::logical::ApplyOutcome::Applied) => {
                                         self.invalidate_result_cache_for_table(&change.collection);
@@ -701,6 +704,19 @@ impl RedDBRuntime {
                                                 }
                                                 .emit_global();
                                             }
+                                            crate::replication::logical::LogicalApplyError::RangeFenced { range_id, lsn, .. } => {
+                                                if let Some(authority) = range_authority {
+                                                    crate::telemetry::operator_event::OperatorEvent::ReplicaAuthorityDivergence {
+                                                        range_identity: format!("system.global/{range_id}"),
+                                                        expected_term: authority.min_term,
+                                                        expected_ownership_epoch: authority.min_ownership_epoch,
+                                                        observed_term: change.term,
+                                                        observed_ownership_epoch: change.ownership_epoch.unwrap_or(0),
+                                                        lsn: *lsn,
+                                                    }
+                                                    .emit_global();
+                                                }
+                                            }
                                             _ => {}
                                         }
                                         let kind = match &err {
@@ -712,6 +728,7 @@ impl RedDBRuntime {
                                             // advance) until the legitimate primary's
                                             // current-term stream resumes.
                                             crate::replication::logical::LogicalApplyError::StaleTermFenced { .. } => "stale_term_fenced",
+                                            crate::replication::logical::LogicalApplyError::RangeFenced { .. } => "authority_divergence",
                                             _ => "apply_error",
                                         };
                                         self.persist_replication_health(
