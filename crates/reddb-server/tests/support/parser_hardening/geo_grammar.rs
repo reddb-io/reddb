@@ -11,7 +11,7 @@
 //!   - `SEARCH SPATIAL BBOX min_lat min_lon max_lat max_lon
 //!      COLLECTION c COLUMN col [LIMIT n]`
 //!   - `SEARCH SPATIAL NEAREST lat lon K n COLLECTION c COLUMN col`
-//!   - `CREATE INDEX name ON table (col) USING RTREE`
+//!   - retired `CREATE INDEX name ON table (col) USING RTREE` rejection
 //!   - Distance scalar functions inside SELECT projections:
 //!     `GEO_DISTANCE`, `HAVERSINE`, `VINCENTY`, `GEO_BEARING`
 //!
@@ -148,10 +148,9 @@ pub fn nearest_stmt() -> impl Strategy<Value = String> {
     })
 }
 
-/// `CREATE INDEX name ON table (col) USING RTREE`. The `UNIQUE`
-/// modifier is generated as an optional prefix; spatial indexes are
-/// not semantically unique, but the parser accepts the modifier and
-/// downstream stages reject it — we exercise the parse layer only.
+/// Retired `CREATE INDEX name ON table (col) USING RTREE`. The parser
+/// still recognizes this shape so it can return the didactic removal
+/// message instead of generic syntax noise.
 pub fn rtree_index_stmt() -> impl Strategy<Value = String> {
     (any::<bool>(), ident(), ident(), ident()).prop_map(|(unique, idx, table, col)| {
         let kw = if unique {

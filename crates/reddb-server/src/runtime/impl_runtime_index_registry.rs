@@ -46,7 +46,6 @@ fn index_method_kind_as_str(method: super::index_store::IndexMethodKind) -> &'st
     match method {
         super::index_store::IndexMethodKind::Hash => "hash",
         super::index_store::IndexMethodKind::Bitmap => "bitmap",
-        super::index_store::IndexMethodKind::Spatial => "spatial",
         super::index_store::IndexMethodKind::BTree => "btree",
         // The H3 resolution rides in a sibling `resolution` column of the
         // persisted descriptor; the method tag itself is just "h3".
@@ -70,7 +69,6 @@ fn index_method_kind_from_str(
     match raw {
         "hash" => Some(super::index_store::IndexMethodKind::Hash),
         "bitmap" => Some(super::index_store::IndexMethodKind::Bitmap),
-        "spatial" | "rtree" => Some(super::index_store::IndexMethodKind::Spatial),
         "btree" => Some(super::index_store::IndexMethodKind::BTree),
         "h3" => Some(super::index_store::IndexMethodKind::H3 { resolution }),
         _ => None,
@@ -257,9 +255,20 @@ impl RedDBRuntime {
             let resolution = named_i64(named, "resolution")
                 .and_then(|v| u8::try_from(v).ok())
                 .unwrap_or(0);
-            let Some(method) = named_text(named, "method")
-                .and_then(|raw| index_method_kind_from_str(&raw, resolution))
-            else {
+            let Some(raw_method) = named_text(named, "method") else {
+                continue;
+            };
+            if matches!(raw_method.as_str(), "spatial" | "rtree") {
+                tracing::warn!(
+                    collection = %collection,
+                    index = %name,
+                    method = %raw_method,
+                    "dropping retired RTREE index descriptor during load; the in-RAM R-tree indexed nothing and served no queries"
+                );
+                latest.insert(key, None);
+                continue;
+            }
+            let Some(method) = index_method_kind_from_str(&raw_method, resolution) else {
                 continue;
             };
             latest.insert(

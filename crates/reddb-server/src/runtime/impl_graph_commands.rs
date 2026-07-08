@@ -874,7 +874,7 @@ impl RedDBRuntime {
                             .to_string(),
                     ));
                 }
-                use crate::storage::unified::spatial_index::haversine_km;
+                use crate::geo::haversine_km;
                 // When the geo column carries an H3 index, gather candidates
                 // from a covering kRing over the disk B-tree cell ids; the
                 // ring is a provable superset of the in-radius rows, so the
@@ -990,7 +990,7 @@ impl RedDBRuntime {
                             .to_string(),
                     ));
                 }
-                use crate::storage::unified::spatial_index::haversine_km;
+                use crate::geo::haversine_km;
                 // Expand rings outward off the H3 disk index until the K-th
                 // nearest candidate is provably closer than any unscanned
                 // cell, then post-filter exactly as the full scan does. When

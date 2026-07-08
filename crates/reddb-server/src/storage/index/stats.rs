@@ -26,8 +26,6 @@ pub enum IndexKind {
     IvfFlat,
     /// Product-quantised vector index.
     ProductQuantization,
-    /// Spatial index (R-tree / geo-hash).
-    Spatial,
     /// Adjacency index for graph edges.
     GraphAdjacency,
     /// Temporal BTree for timeseries.
@@ -47,7 +45,7 @@ impl IndexKind {
     pub fn supports_range(self) -> bool {
         matches!(
             self,
-            IndexKind::BTree | IndexKind::Spatial | IndexKind::Temporal | IndexKind::ZoneMap
+            IndexKind::BTree | IndexKind::Temporal | IndexKind::ZoneMap
         )
     }
 
