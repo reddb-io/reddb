@@ -232,6 +232,22 @@ impl RoutingHint {
     pub fn version(&self) -> CatalogVersion {
         self.version
     }
+
+    pub fn to_moved_redirect(
+        &self,
+        slot: Option<u64>,
+        reason: RedirectReason,
+    ) -> reddb_wire::MovedRedirect {
+        reddb_wire::MovedRedirect {
+            slot,
+            collection: self.collection.as_str().to_string(),
+            range_id: self.range_id.value(),
+            owner_addr: self.owner.as_str().to_string(),
+            ownership_epoch: self.epoch.value(),
+            catalog_version: self.version.value(),
+            reason: reason.code().to_string(),
+        }
+    }
 }
 
 impl std::fmt::Display for RoutingHint {
@@ -279,6 +295,18 @@ impl std::fmt::Display for RedirectReason {
             Self::ExplicitlyUnsafe => {
                 write!(f, "operation explicitly marked unsafe to forward")
             }
+        }
+    }
+}
+
+impl RedirectReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ForwardingDisabled => "forwarding_disabled",
+            Self::Transaction => "transaction",
+            Self::Streaming => "streaming",
+            Self::LargePayload { .. } => "large_payload",
+            Self::ExplicitlyUnsafe => "explicitly_unsafe",
         }
     }
 }
@@ -665,6 +693,36 @@ mod tests {
                 epoch: hint.epoch(),
             }
         );
+    }
+
+    #[test]
+    fn redirect_builds_moved_payload_with_owner_epoch_and_catalog_version() {
+        let orders = collection("orders");
+        let mut catalog = catalog_with(range_with(&orders, 1, "node-a:5050", &["node-b:5050"]));
+        let v1 = catalog.range(&orders, RangeId::new(1)).unwrap().clone();
+        catalog
+            .apply_update(v1.transfer_to(ident("node-b:5050"), [ident("node-a:5050")]))
+            .unwrap();
+
+        let request =
+            RoutedRequest::new(orders.clone(), b"k".to_vec(), RequestOperation::Transaction);
+        let (hint, reason) = match catalog.plan_route(
+            &ident("node-a:5050"),
+            &request,
+            &RoutingPolicy::forwarding(),
+        ) {
+            RouteDecision::Redirect { hint, reason } => (hint, reason),
+            other => panic!("expected Redirect, got {other:?}"),
+        };
+        let payload = hint.to_moved_redirect(Some(9), reason);
+
+        assert_eq!(payload.slot, Some(9));
+        assert_eq!(payload.collection, "orders");
+        assert_eq!(payload.range_id, 1);
+        assert_eq!(payload.owner_addr, "node-b:5050");
+        assert_eq!(payload.ownership_epoch, 2);
+        assert_eq!(payload.catalog_version, 2);
+        assert_eq!(payload.reason, "transaction");
     }
 
     // A stale safe-op forward also tracks ownership: after a transfer, a safe op

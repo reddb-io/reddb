@@ -58,6 +58,7 @@ pub mod connect;
 pub mod connector;
 pub mod error;
 pub mod params;
+pub mod routing_cache;
 pub mod topology;
 pub mod types;
 
