@@ -1109,7 +1109,7 @@ fn server_does_not_redeclare_core_file_format_constants() {
             "const DWB_MAGIC",
             "pub const COLUMN_BLOCK_MAGIC",
             "pub const COLUMN_BLOCK_VERSION_V1",
-            "const BLOOM_SEGMENT_MAGIC",
+            "const BLOOM_SEGMENT_V2_MAGIC",
             "pub const FORMAT_VERSION_V1",
             "pub const FORMAT_VERSION_V2",
             "pub const FORMAT_VERSION: u16",
@@ -1147,6 +1147,7 @@ fn server_does_not_redeclare_core_file_format_constants() {
             "[0x52, 0x44, 0x44, 0x57]",
             "*b\"RDCC\"",
             "0xBF",
+            "0xC0",
             "\"reddb-physical-v1\"",
         ] {
             assert!(
@@ -1162,7 +1163,7 @@ fn server_does_not_redeclare_core_file_format_constants() {
         "pub const DWB_MAGIC",
         "pub const COLUMN_BLOCK_MAGIC",
         "pub const COLUMN_BLOCK_VERSION_V1",
-        "pub const BLOOM_SEGMENT_MAGIC",
+        "pub const BLOOM_SEGMENT_V2_MAGIC",
         "pub const VECTOR_BTREE_FORMAT_VERSION_V1",
         "pub const VECTOR_BTREE_FORMAT_VERSION_V2",
         "pub const VECTOR_BTREE_FORMAT_VERSION",
@@ -1209,7 +1210,6 @@ fn server_does_not_redeclare_core_file_format_constants() {
         "reddb-file should own physical metadata protocol version"
     );
     for required in [
-        "pub struct BloomSegmentFrame",
         "pub enum BloomSegmentFrameError",
         "pub fn encode_bloom_segment_frame",
         "pub fn decode_bloom_segment_frame",

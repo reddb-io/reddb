@@ -2,17 +2,9 @@
 
 use std::fmt;
 
-use crate::BLOOM_SEGMENT_MAGIC;
+use crate::BLOOM_SEGMENT_V2_MAGIC;
 
-pub const BLOOM_SEGMENT_HEADER_LEN: usize = 1 + 1 + 4 + 4;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BloomSegmentFrame {
-    pub num_hashes: u8,
-    pub bit_size: u32,
-    pub inserted: u32,
-    pub bits: Vec<u8>,
-}
+pub const BLOOM_SEGMENT_HEADER_LEN: usize = 1 + 1 + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BloomSegmentFrameError {
@@ -33,42 +25,42 @@ impl fmt::Display for BloomSegmentFrameError {
 
 impl std::error::Error for BloomSegmentFrameError {}
 
-pub fn encode_bloom_segment_frame(frame: &BloomSegmentFrame) -> Vec<u8> {
-    let mut out = Vec::with_capacity(BLOOM_SEGMENT_HEADER_LEN + frame.bits.len());
-    out.push(BLOOM_SEGMENT_MAGIC);
-    out.push(frame.num_hashes);
-    out.extend_from_slice(&frame.bit_size.to_be_bytes());
-    out.extend_from_slice(&frame.inserted.to_be_bytes());
-    out.extend_from_slice(&frame.bits);
+pub fn encode_bloom_segment_frame(inserted: u32, bloom_blob: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(BLOOM_SEGMENT_HEADER_LEN + bloom_blob.len());
+    out.push(BLOOM_SEGMENT_V2_MAGIC);
+    out.push(0);
+    out.extend_from_slice(&inserted.to_be_bytes());
+    out.extend_from_slice(bloom_blob);
     out
 }
 
 pub fn decode_bloom_segment_frame(
     bytes: &[u8],
-) -> Result<(BloomSegmentFrame, usize), BloomSegmentFrameError> {
+) -> Result<(u32, Vec<u8>, usize), BloomSegmentFrameError> {
     if bytes.len() < BLOOM_SEGMENT_HEADER_LEN {
         return Err(BloomSegmentFrameError::TooShort);
     }
-    if bytes[0] != BLOOM_SEGMENT_MAGIC {
+    if bytes[0] != BLOOM_SEGMENT_V2_MAGIC {
         return Err(BloomSegmentFrameError::BadMagic);
     }
 
-    let num_hashes = bytes[1];
-    let bit_size = u32::from_be_bytes(bytes[2..6].try_into().expect("len checked"));
-    let inserted = u32::from_be_bytes(bytes[6..10].try_into().expect("len checked"));
-    let byte_len = (bit_size as usize).div_ceil(8);
-    let total = BLOOM_SEGMENT_HEADER_LEN + byte_len;
+    let inserted = u32::from_be_bytes(bytes[2..6].try_into().expect("len checked"));
+    if bytes.len() < BLOOM_SEGMENT_HEADER_LEN + 4 {
+        return Err(BloomSegmentFrameError::LengthMismatch);
+    }
+    let num_blocks = u32::from_le_bytes(bytes[6..10].try_into().expect("len checked")) as usize;
+    if num_blocks == 0 || !num_blocks.is_power_of_two() {
+        return Err(BloomSegmentFrameError::LengthMismatch);
+    }
+    let payload_len = 4 + num_blocks * 32;
+    let total = BLOOM_SEGMENT_HEADER_LEN + payload_len;
     if bytes.len() < total {
         return Err(BloomSegmentFrameError::LengthMismatch);
     }
 
     Ok((
-        BloomSegmentFrame {
-            num_hashes,
-            bit_size,
-            inserted,
-            bits: bytes[BLOOM_SEGMENT_HEADER_LEN..total].to_vec(),
-        },
+        inserted,
+        bytes[BLOOM_SEGMENT_HEADER_LEN..total].to_vec(),
         total,
     ))
 }
@@ -78,23 +70,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bloom_segment_frame_round_trips_big_endian_header() {
-        let frame = BloomSegmentFrame {
-            num_hashes: 7,
-            bit_size: 17,
-            inserted: 42,
-            bits: vec![0b1010_1010, 0b0101_0101, 0xFF],
-        };
+    fn bloom_segment_frame_round_trips_v2_header() {
+        let mut bloom_blob = Vec::new();
+        bloom_blob.extend_from_slice(&1u32.to_le_bytes());
+        bloom_blob.extend_from_slice(&[0xAB; 32]);
 
-        let encoded = encode_bloom_segment_frame(&frame);
+        let encoded = encode_bloom_segment_frame(42, &bloom_blob);
 
-        assert_eq!(encoded[0], BLOOM_SEGMENT_MAGIC);
-        assert_eq!(encoded[1], 7);
-        assert_eq!(&encoded[2..6], &17u32.to_be_bytes());
-        assert_eq!(&encoded[6..10], &42u32.to_be_bytes());
+        assert_eq!(encoded[0], BLOOM_SEGMENT_V2_MAGIC);
+        assert_eq!(encoded[1], 0);
+        assert_eq!(&encoded[2..6], &42u32.to_be_bytes());
 
-        let (decoded, consumed) = decode_bloom_segment_frame(&encoded).expect("decode frame");
-        assert_eq!(decoded, frame);
+        let (inserted, decoded_blob, consumed) =
+            decode_bloom_segment_frame(&encoded).expect("decode frame");
+        assert_eq!(inserted, 42);
+        assert_eq!(decoded_blob, bloom_blob);
         assert_eq!(consumed, encoded.len());
     }
 
@@ -105,24 +95,18 @@ mod tests {
             BloomSegmentFrameError::TooShort
         );
 
-        let mut bad_magic = encode_bloom_segment_frame(&BloomSegmentFrame {
-            num_hashes: 3,
-            bit_size: 8,
-            inserted: 1,
-            bits: vec![1],
-        });
+        let mut bloom_blob = Vec::new();
+        bloom_blob.extend_from_slice(&1u32.to_le_bytes());
+        bloom_blob.extend_from_slice(&[0xAB; 32]);
+
+        let mut bad_magic = encode_bloom_segment_frame(1, &bloom_blob);
         bad_magic[0] = 0;
         assert_eq!(
             decode_bloom_segment_frame(&bad_magic).unwrap_err(),
             BloomSegmentFrameError::BadMagic
         );
 
-        let mut truncated = encode_bloom_segment_frame(&BloomSegmentFrame {
-            num_hashes: 3,
-            bit_size: 16,
-            inserted: 1,
-            bits: vec![1, 2],
-        });
+        let mut truncated = encode_bloom_segment_frame(1, &bloom_blob);
         truncated.pop();
         assert_eq!(
             decode_bloom_segment_frame(&truncated).unwrap_err(),
