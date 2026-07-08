@@ -29,6 +29,9 @@ The lane currently runs these suites:
   scenario families:
   `fcw_before_wal_append`, `wal_append_before_finalize`,
   `savepoint_release_rollback`, and `concurrent_writers`.
+- `store_fork_lifecycle_recovery`: store-fork lifecycle campaign for #1784,
+  injecting power cuts during fork creation, first-touch hydration, and
+  promotion.
 
 ## Documented Seeds
 
@@ -45,6 +48,14 @@ WAL truncation, the in-process `SimVfs` power-cut path, and on Linux the
 then asserts the TM-specific invariant: single-transaction scenarios recover as
 fully absent or fully committed, the concurrent-writer scenario recovers only a
 transaction prefix, and savepoint sub-xids are never orphan-visible.
+
+The store-fork lifecycle campaign prepares the operation-specific parent/fork
+state outside the shim, then runs exactly one lifecycle operation under
+`LD_PRELOAD` while enumerating deterministic kill points. Recovery runs the
+shared WAL oracle and the operational-manifest checks so interrupted create,
+hydrate, and promote stages leave either the pre-crash state or the completed
+state, never a manifest that silently points at a missing or half-hydrated
+artifact.
 
 ## CI Signal
 
