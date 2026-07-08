@@ -22,6 +22,7 @@ pub mod conn_string;
 pub mod jsonrpc;
 pub mod knowledge;
 pub mod legacy;
+pub mod moved;
 pub mod query_with_params;
 pub mod redwire;
 pub mod replication;
@@ -35,6 +36,10 @@ pub use conn_string::{
     SUPPORTED_SCHEMES,
 };
 pub use knowledge::*;
+pub use moved::{
+    build_moved_redirect_frame, decode_moved_redirect, encode_moved_redirect, MovedRedirect,
+    MovedRedirectError, MOVED_CODE,
+};
 pub use redwire::{BuildError, FrameBuilder};
 pub use sanitizer::{
     audit_safe_log_field, Boundary, ConnStringSanitizer, EscapeError, EscapedFor, ParsedConnString,
