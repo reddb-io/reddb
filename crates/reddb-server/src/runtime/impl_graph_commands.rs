@@ -979,6 +979,51 @@ impl RedDBRuntime {
                     bookmark: None,
                 })
             }
+            SearchCommand::SpatialWithinPolygon {
+                vertices,
+                collection,
+                column,
+                limit,
+                limit_param,
+            } => {
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH SPATIAL WITHIN POLYGON LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
+                let h3_candidates = self.h3_polygon_candidate_ids(collection, column, vertices);
+                let store = self.inner.db.store();
+                let entities = scan_collection_with_candidates(&store, collection, &h3_candidates);
+
+                let mut result = UnifiedResult::with_columns(vec!["entity_id".into()]);
+                let mut count = 0;
+                for entity in &entities {
+                    if count >= *limit {
+                        break;
+                    }
+                    if let Some((lat, lon)) =
+                        self.extract_spatial_column(entity, collection, column)
+                    {
+                        if crate::geo::point_in_polygon_even_odd(lat, lon, vertices) {
+                            let mut record = UnifiedRecord::new();
+                            record.set("entity_id", Value::UnsignedInteger(entity.id.raw()));
+                            result.push(record);
+                            count += 1;
+                        }
+                    }
+                }
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "search_spatial_within_polygon",
+                    engine: "runtime-spatial",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                    bookmark: None,
+                })
+            }
             SearchCommand::SpatialNearest {
                 lat,
                 lon,
@@ -1425,6 +1470,23 @@ impl RedDBRuntime {
         .map(|(la, lo)| crate::geo::haversine_km(center_lat, center_lon, la, lo))
         .fold(0.0_f64, f64::max);
         let cells = h3_cover_cells(center_lat, center_lon, radius_km, resolution);
+        self.h3_cell_candidate_ids(collection, column, &cells)
+    }
+
+    /// Native H3 polygon-to-cells candidate ids for a WITHIN POLYGON query.
+    /// The H3 cover is only a pruning superset; exact even-odd
+    /// point-in-polygon filtering decides correctness. `None` falls back to
+    /// the full scan when there is no H3 index or the cover is too large.
+    fn h3_polygon_candidate_ids(
+        &self,
+        collection: &str,
+        column: &str,
+        vertices: &[(f64, f64)],
+    ) -> Option<std::collections::HashSet<u64>> {
+        let resolution = self.h3_index_resolution(collection, column)?;
+        const MAX_POLYGON_COVER_CELLS: usize = 50_000;
+        let cells =
+            crate::geo::h3::polygon_to_cover_cells(vertices, resolution, MAX_POLYGON_COVER_CELLS)?;
         self.h3_cell_candidate_ids(collection, column, &cells)
     }
 
