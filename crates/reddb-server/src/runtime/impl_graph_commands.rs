@@ -893,8 +893,9 @@ impl RedDBRuntime {
 
                 let mut hits: Vec<(u64, f64)> = Vec::new();
                 for entity in &entities {
-                    // Extract lat/lon from GeoPoint values in entity data
-                    if let Some((lat, lon)) = extract_geo_from_entity(entity) {
+                    if let Some((lat, lon)) =
+                        self.extract_spatial_column(entity, collection, column)
+                    {
                         let dist = haversine_km(*center_lat, *center_lon, lat, lon);
                         if dist <= *radius_km {
                             hits.push((entity.id.raw(), dist));
@@ -955,7 +956,9 @@ impl RedDBRuntime {
                     if count >= *limit {
                         break;
                     }
-                    if let Some((lat, lon)) = extract_geo_from_entity(entity) {
+                    if let Some((lat, lon)) =
+                        self.extract_spatial_column(entity, collection, column)
+                    {
                         if lat >= *min_lat && lat <= *max_lat && lon >= *min_lon && lon <= *max_lon
                         {
                             let mut record = UnifiedRecord::new();
@@ -1004,7 +1007,9 @@ impl RedDBRuntime {
 
                 let mut hits: Vec<(u64, f64)> = Vec::new();
                 for entity in &entities {
-                    if let Some((elat, elon)) = extract_geo_from_entity(entity) {
+                    if let Some((elat, elon)) =
+                        self.extract_spatial_column(entity, collection, column)
+                    {
                         let dist = haversine_km(*lat, *lon, elat, elon);
                         hits.push((entity.id.raw(), dist));
                     }
@@ -1239,6 +1244,26 @@ fn extract_geo_from_entity(entity: &UnifiedEntity) -> Option<(f64, f64)> {
     }
 }
 
+fn index_fields_from_entity(entity: &UnifiedEntity) -> Vec<(String, Value)> {
+    match &entity.data {
+        EntityData::Row(row) => row
+            .iter_fields()
+            .map(|(field, value)| (field.to_string(), value.clone()))
+            .collect(),
+        EntityData::Node(node) => node
+            .properties
+            .iter()
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect(),
+        EntityData::Edge(edge) => edge
+            .properties
+            .iter()
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Collect the entities a spatial post-filter runs over. With an H3 cover
 /// (`Some`), the collection scan is restricted to the candidate entity ids
 /// while preserving `query_all` order, so the downstream stable sort and
@@ -1286,6 +1311,38 @@ fn h3_cover_cells(lat: f64, lon: f64, radius_km: f64, resolution: u8) -> Vec<u64
 }
 
 impl RedDBRuntime {
+    fn extract_spatial_column(
+        &self,
+        entity: &UnifiedEntity,
+        collection: &str,
+        column: &str,
+    ) -> Option<(f64, f64)> {
+        let fields = index_fields_from_entity(entity);
+        if let Some(value) = self
+            .inner
+            .index_store
+            .resolve_index_field_value(&fields, column)
+        {
+            return crate::geo::recognize_geo_value(&value);
+        }
+
+        let is_document_collection =
+            self.inner
+                .db
+                .collection_contract(collection)
+                .is_some_and(|contract| {
+                    contract.declared_model == crate::catalog::CollectionModel::Document
+                });
+        if is_document_collection {
+            return None;
+        }
+
+        match entity.data {
+            EntityData::Row(_) | EntityData::Node(_) => extract_geo_from_entity(entity),
+            _ => None,
+        }
+    }
+
     /// Resolution of the H3 index registered on `(collection, column)`, if
     /// the column is covered by one. `None` for any other (or no) index.
     fn h3_index_resolution(&self, collection: &str, column: &str) -> Option<u8> {
