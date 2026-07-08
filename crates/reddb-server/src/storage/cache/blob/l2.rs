@@ -6,133 +6,47 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use super::cache::{BlobCacheKey, CacheError};
-use super::config::{DEFAULT_BLOB_SYNOPSIS_CAPACITY, DEFAULT_BLOB_SYNOPSIS_FPR};
+use super::config::DEFAULT_BLOB_SYNOPSIS_CAPACITY;
 use super::entry::Entry;
 use crate::storage::cache::compressor::{Compressed, L2BlobCompressor};
 use crate::storage::cache::extended_ttl::ExtendedTtlPolicy;
+use crate::storage::primitives::split_block_bloom::SplitBlockBloom;
 use reddb_file::{
     blob_cache_control_path, decode_l2_v2_frame, encode_l2_key, encode_l2_v2_frame, L2BlobFrame,
     L2Control, L2Record, L2_BLOB_MAGIC, L2_FORMAT_V1_RAW, L2_FORMAT_V2_FRAMED,
 };
 
-/// Tiny in-tree Bloom filter for the L2 membership synopsis (#146).
+/// Split-block Bloom filter for the L2 membership synopsis (#146).
 ///
 /// # Sizing
 ///
-/// For a target capacity `n` and false-positive rate `p`, the optimal
-/// parameters are:
-///
-/// - bit array size `m = -n * ln(p) / ln(2)^2`
-/// - hash count `k = (m / n) * ln(2)`
-///
-/// At the cache defaults (`n = 10_000`, `p = 0.01`) this yields
-/// `m ≈ 95_851 bits ≈ 12 KB` and `k = 7`. With
+/// The canonical split-block Bloom primitive sizes itself at about 10 bits
+/// per entry for an approximately 1% false-positive rate. At the cache default
+/// (`n = 10_000`) this allocates 512 split blocks, or 16 KB per namespace.
+/// With
 /// [`super::config::DEFAULT_BLOB_MAX_NAMESPACES`] = 256 the worst-case
-/// synopsis state is ~3 MB — acceptable next to a 256 MB L1 budget.
+/// synopsis state is ~4 MB — acceptable next to a 256 MB L1 budget.
 ///
 /// # Contract
 ///
-/// - `contains(key)` returning `false` ALWAYS means absent (no
+/// - `probe_bytes(key)` returning `false` ALWAYS means absent (no
 ///   false-negatives).
-/// - `contains(key)` returning `true` means MaybePresent — callers MUST verify
-///   against the authoritative L2 metadata B+ tree.
+/// - `probe_bytes(key)` returning `true` means MaybePresent — callers MUST
+///   verify against the authoritative L2 metadata B+ tree.
 /// - Bits cannot be cleared without losing the no-false-negatives guarantee,
 ///   so deletes / expirations leave stale bits behind. Stale bits cause extra
 ///   L2 metadata verifications, never spurious `Present` answers. A periodic
 ///   full rebuild from the metadata B+ tree (currently startup-only) reclaims
 ///   that space.
-mod synopsis_filter {
-    use std::hash::{Hash, Hasher};
-
-    /// Per-namespace Bloom filter. Hashing uses double-hashing
-    /// (`h_i(x) = h1(x) + i * h2(x)`) over two `DefaultHasher` seeds to avoid
-    /// pulling in any new dependency. The filter is never persisted; it is
-    /// rebuilt from the L2 metadata B+ tree at startup, so the per-process
-    /// `RandomState` of `DefaultHasher` is irrelevant to correctness.
-    #[derive(Debug)]
-    pub(super) struct BloomFilter {
-        bits: Vec<u64>,
-        bit_count: usize,
-        hash_count: u32,
-    }
-
-    impl BloomFilter {
-        /// Sized for `capacity` insertions at `target_fpr` false-positive
-        /// rate. `capacity` is clamped to >= 1 and `target_fpr` is clamped to
-        /// `(0.0, 1.0)` to avoid undefined math at the edges.
-        pub(super) fn with_capacity(capacity: usize, target_fpr: f64) -> Self {
-            let n = capacity.max(1) as f64;
-            let p = target_fpr.clamp(f64::MIN_POSITIVE, 0.999_999);
-            let ln2 = std::f64::consts::LN_2;
-            let m_bits = (-(n * p.ln()) / (ln2 * ln2)).ceil() as usize;
-            let bit_count = m_bits.max(64);
-            let k = ((bit_count as f64 / n) * ln2).round() as u32;
-            let hash_count = k.max(1);
-            let words = bit_count.div_ceil(64);
-            Self {
-                bits: vec![0u64; words],
-                bit_count,
-                hash_count,
-            }
-        }
-
-        pub(super) fn insert(&mut self, key: &str) {
-            let (h1, h2) = double_hash(key);
-            for i in 0..self.hash_count {
-                let bit =
-                    (h1.wrapping_add((i as u64).wrapping_mul(h2)) % self.bit_count as u64) as usize;
-                self.bits[bit / 64] |= 1u64 << (bit % 64);
-            }
-        }
-
-        pub(super) fn contains(&self, key: &str) -> bool {
-            let (h1, h2) = double_hash(key);
-            for i in 0..self.hash_count {
-                let bit =
-                    (h1.wrapping_add((i as u64).wrapping_mul(h2)) % self.bit_count as u64) as usize;
-                if self.bits[bit / 64] & (1u64 << (bit % 64)) == 0 {
-                    return false;
-                }
-            }
-            true
-        }
-
-        /// Bytes consumed by the bit array (the heap allocation).
-        pub(super) fn bytes(&self) -> u64 {
-            (self.bits.len() * std::mem::size_of::<u64>()) as u64
-        }
-
-        #[cfg(test)]
-        pub(super) fn bit_count(&self) -> usize {
-            self.bit_count
-        }
-
-        #[cfg(test)]
-        pub(super) fn hash_count(&self) -> u32 {
-            self.hash_count
-        }
-    }
-
-    /// Two independent 64-bit hashes via two seeded `DefaultHasher`s. Only
-    /// used to derive `k` Bloom positions via double-hashing; correctness
-    /// does not depend on the choice of hasher.
-    fn double_hash(key: &str) -> (u64, u64) {
-        let mut h1 = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut h1);
-        let mut h2 = std::collections::hash_map::DefaultHasher::new();
-        0xa5a5_a5a5_a5a5_a5a5u64.hash(&mut h2);
-        key.hash(&mut h2);
-        let v2 = h2.finish();
-        (h1.finish(), v2 | 1)
-    }
-}
-
-use synopsis_filter::BloomFilter;
+/// - The synopsis is never persisted; it is rebuilt from the L2 metadata B+
+///   tree at startup. The canonical byte-key hasher is stable across processes
+///   anyway, so rebuild and probe use the same bit mapping.
+type L2Synopsis = SplitBlockBloom;
 
 pub(super) struct BlobCacheL2 {
     pager: Arc<crate::storage::engine::Pager>,
     metadata: RwLock<crate::storage::engine::BTree>,
-    synopsis: RwLock<HashMap<String, BloomFilter>>,
+    synopsis: RwLock<HashMap<String, L2Synopsis>>,
     control: RwLock<L2Control>,
     control_path: PathBuf,
     bytes_in_use: AtomicU64,
@@ -449,7 +363,7 @@ impl BlobCacheL2 {
         self.synopsis
             .read()
             .values()
-            .map(|filter| filter.bytes())
+            .map(synopsis_heap_bytes)
             .sum()
     }
 
@@ -473,20 +387,15 @@ impl BlobCacheL2 {
         self.synopsis
             .read()
             .get(namespace)
-            .is_some_and(|filter| filter.contains(key))
+            .is_some_and(|filter| filter.probe_bytes(key.as_bytes()))
     }
 
     fn add_synopsis_key(&self, namespace: &str, key: &str) {
         self.synopsis
             .write()
             .entry(namespace.to_string())
-            .or_insert_with(|| {
-                BloomFilter::with_capacity(
-                    DEFAULT_BLOB_SYNOPSIS_CAPACITY,
-                    DEFAULT_BLOB_SYNOPSIS_FPR,
-                )
-            })
-            .insert(key);
+            .or_insert_with(|| L2Synopsis::with_capacity(DEFAULT_BLOB_SYNOPSIS_CAPACITY))
+            .insert_bytes(key.as_bytes());
     }
 
     #[cfg(test)]
@@ -614,8 +523,12 @@ impl BlobCacheL2 {
     }
 }
 
-fn rebuild_l2_synopsis(metadata: &crate::storage::engine::BTree) -> HashMap<String, BloomFilter> {
-    let mut synopsis: HashMap<String, BloomFilter> = HashMap::new();
+fn synopsis_heap_bytes(filter: &L2Synopsis) -> u64 {
+    (filter.num_blocks() * 32) as u64
+}
+
+fn rebuild_l2_synopsis(metadata: &crate::storage::engine::BTree) -> HashMap<String, L2Synopsis> {
+    let mut synopsis: HashMap<String, L2Synopsis> = HashMap::new();
     let Ok(mut cursor) = metadata.cursor_first() else {
         return synopsis;
     };
@@ -623,13 +536,8 @@ fn rebuild_l2_synopsis(metadata: &crate::storage::engine::BTree) -> HashMap<Stri
         if let Ok(record) = L2Record::decode(&value) {
             synopsis
                 .entry(record.namespace)
-                .or_insert_with(|| {
-                    BloomFilter::with_capacity(
-                        DEFAULT_BLOB_SYNOPSIS_CAPACITY,
-                        DEFAULT_BLOB_SYNOPSIS_FPR,
-                    )
-                })
-                .insert(&record.key);
+                .or_insert_with(|| L2Synopsis::with_capacity(DEFAULT_BLOB_SYNOPSIS_CAPACITY))
+                .insert_bytes(record.key.as_bytes());
         }
     }
     synopsis
@@ -672,8 +580,8 @@ mod tests {
         BlobCache, BlobCacheConfig, BlobCachePolicy, BlobCachePut, CachePresence, L1Admission,
         L2Compression,
     };
-    use super::synopsis_filter::BloomFilter;
-    use super::{DEFAULT_BLOB_SYNOPSIS_CAPACITY, DEFAULT_BLOB_SYNOPSIS_FPR};
+    use super::DEFAULT_BLOB_SYNOPSIS_CAPACITY;
+    use crate::storage::primitives::split_block_bloom::SplitBlockBloom;
 
     fn l2_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -731,11 +639,6 @@ mod tests {
         .expect("l2_cache_with_compression test helper")
     }
 
-    fn fpr_for(filter: &BloomFilter, negatives: &[String]) -> f64 {
-        let positives = negatives.iter().filter(|key| filter.contains(key)).count() as f64;
-        positives / negatives.len().max(1) as f64
-    }
-
     fn lorem_4kb() -> Vec<u8> {
         let unit = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
                      Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. \
@@ -786,38 +689,25 @@ mod tests {
     }
 
     #[test]
-    fn bloom_synopsis_filter_no_false_negatives_and_fpr_within_target() {
-        let n = DEFAULT_BLOB_SYNOPSIS_CAPACITY;
-        let p = DEFAULT_BLOB_SYNOPSIS_FPR;
-        let mut filter = BloomFilter::with_capacity(n, p);
+    fn l2_synopsis_reports_split_block_heap_bytes() {
+        let path = l2_path("synopsis-split-block-bytes-l2-module");
+        let cache = l2_cache(&path);
+        cache
+            .put(
+                "n",
+                "known",
+                BlobCachePut::new(b"known".to_vec())
+                    .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+            )
+            .unwrap();
 
-        let inserted: Vec<String> = (0..n).map(|i| format!("present-{i}")).collect();
-        for key in &inserted {
-            filter.insert(key);
-        }
-        for key in &inserted {
-            assert!(
-                filter.contains(key),
-                "Bloom filter must never report false-negatives ({key} missing)"
-            );
-        }
+        let expected =
+            SplitBlockBloom::with_capacity(DEFAULT_BLOB_SYNOPSIS_CAPACITY).num_blocks() as u64 * 32;
+        assert_eq!(expected, 16 * 1024);
+        assert_eq!(cache.stats().synopsis_bytes, expected);
 
-        let negatives: Vec<String> = (0..n * 10).map(|i| format!("absent-{i}")).collect();
-        let observed_fpr = fpr_for(&filter, &negatives);
-        let tolerance = 0.02;
-        assert!(
-            (observed_fpr - p).abs() <= tolerance,
-            "observed FPR {observed_fpr:.4} not within +/-{tolerance} of target {p}"
-        );
-    }
-
-    #[test]
-    fn bloom_synopsis_filter_default_sizing_is_about_twelve_kilobytes() {
-        let filter =
-            BloomFilter::with_capacity(DEFAULT_BLOB_SYNOPSIS_CAPACITY, DEFAULT_BLOB_SYNOPSIS_FPR);
-        assert!(filter.bit_count() >= 95_000 && filter.bit_count() <= 100_000);
-        assert!(filter.bytes() >= 11_500 && filter.bytes() <= 12_500);
-        assert_eq!(filter.hash_count(), 7);
+        drop(cache);
+        cleanup_l2(&path);
     }
 
     #[test]
@@ -876,11 +766,7 @@ mod tests {
                 maybe_or_present += 1;
             }
         }
-        let observed_fpr = maybe_or_present as f64 / negatives.len() as f64;
-        assert!(
-            observed_fpr <= DEFAULT_BLOB_SYNOPSIS_FPR + 0.02,
-            "rebuilt filter FPR {observed_fpr:.4} exceeded target+tolerance"
-        );
+        assert_eq!(maybe_or_present, 0);
 
         drop(cache);
         cleanup_l2(&path);
