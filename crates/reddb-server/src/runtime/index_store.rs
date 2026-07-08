@@ -1944,12 +1944,14 @@ impl IndexStore {
 }
 
 fn index_field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<Cow<'a, Value>> {
-    if !column.contains('.') {
-        // Single-source document: an index on a bare document field (`score`)
-        // is backed by the body.
-        // Offset-read it from the binary `body` container (inert otherwise).
-        if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
-            return crate::document_body::read_body_field(bytes, column).map(Cow::Owned);
+    if let Some((_, body)) = fields.iter().find(|(field, _)| field == "body") {
+        // Single-source document: an index on a bare or dotted document field
+        // (`score`, `location.gps`) is backed by the body, not a stored column.
+        let path = super::join_filter::parse_runtime_document_path(column);
+        if let Some(value) =
+            super::join_filter::resolve_runtime_document_path_from_value(body, &path)
+        {
+            return Some(Cow::Owned(value));
         }
     }
     if let Some((_, value)) = fields.iter().find(|(field, _)| field == column) {
