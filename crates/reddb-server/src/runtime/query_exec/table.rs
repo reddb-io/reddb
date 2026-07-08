@@ -866,10 +866,26 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // Evaluates the filter directly on raw entity data to avoid materializing
     // UnifiedRecord for every entity in the collection.
     // Excludes universal entity sources (e.g. "any") which span all collections.
+    let tag_series_candidates_for_filter = db
+        .collection_contract(&query.table)
+        .filter(|contract| contract.declared_model == crate::catalog::CollectionModel::TimeSeries)
+        .and_then(|_| {
+            effective_filter.as_ref().and_then(|filter| {
+                let store = db.store();
+                super::super::impl_timeseries::timeseries_tag_index_series_candidates(
+                    store.as_ref(),
+                    &query.table,
+                    filter,
+                )
+            })
+        });
+    let tag_index_can_filter = tag_series_candidates_for_filter.is_some();
+
     if effective_filter.is_some()
-        && !effective_filter
+        && (!effective_filter
             .as_ref()
             .is_some_and(|filter| runtime_filter_uses_document_path(filter, query))
+            || tag_index_can_filter)
         && effective_group_by.is_empty()
         && effective_having.is_none()
         && query.expand.is_none()
@@ -881,10 +897,18 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             .store()
             .get_collection(query.table.as_str())
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+        let store = db.store();
 
         let filter = effective_filter.as_ref().ok_or_else(|| {
             RedDBError::Internal("filtered runtime scan selected without a WHERE clause".into())
         })?;
+        let tag_series_candidates = tag_series_candidates_for_filter;
+        if tag_series_candidates
+            .as_ref()
+            .is_some_and(std::collections::HashSet::is_empty)
+        {
+            return Ok(Vec::new());
+        }
         let table_name = query.table.as_str();
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
         let explicit_limit = query.limit;
@@ -911,6 +935,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             }
         }
 
+        let residual_filter = if tag_series_candidates.is_some() {
+            super::super::impl_timeseries::strip_indexed_timeseries_tag_filter(filter)
+        } else {
+            Some(filter.clone())
+        };
+
         // Zone map: extract range/equality predicates for segment-level pruning.
         // Sealed segments whose column min/max proves no row can match are skipped.
         let mut zone_raw: Vec<(
@@ -918,7 +948,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             crate::storage::schema::Value,
             crate::storage::unified::segment::ZoneColPredKind,
         )> = Vec::new();
-        extract_zone_predicates(filter, &mut zone_raw);
+        if let Some(filter) = residual_filter.as_ref() {
+            extract_zone_predicates(filter, &mut zone_raw);
+        }
         // Reconstruct lifetime-bound ZoneColPred refs from the owned Vec.
         let zone_preds: Vec<(&str, crate::storage::unified::segment::ZoneColPred<'_>)> = zone_raw
             .iter()
@@ -943,20 +975,24 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // user column names to positional indices — O(1) access per field
         // per row instead of O(n schema search) for bulk-inserted entities.
         let schema_arc = manager.column_schema();
-        let compiled = match schema_arc.as_ref() {
-            Some(schema) => super::filter_compiled::CompiledEntityFilter::compile_with_schema(
-                filter,
-                table_name,
-                table_alias,
-                schema.as_ref(),
-            ),
-            None => super::filter_compiled::CompiledEntityFilter::compile(
-                filter,
-                table_name,
-                table_alias,
-            ),
-        };
-        let requires_filter_recheck = compiled.has_fallback();
+        let compiled = residual_filter
+            .as_ref()
+            .map(|filter| match schema_arc.as_ref() {
+                Some(schema) => super::filter_compiled::CompiledEntityFilter::compile_with_schema(
+                    filter,
+                    table_name,
+                    table_alias,
+                    schema.as_ref(),
+                ),
+                None => super::filter_compiled::CompiledEntityFilter::compile(
+                    filter,
+                    table_name,
+                    table_alias,
+                ),
+            });
+        let requires_filter_recheck = compiled
+            .as_ref()
+            .is_some_and(|filter| filter.has_fallback());
 
         // Pre-filter at entity level, only materialize records that pass.
         // Uses zone-map-aware iteration: sealed segments whose column zones
@@ -996,7 +1032,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let lean_select_star = select_cols.is_empty();
 
         let mut records: Vec<UnifiedRecord> = Vec::new();
-        let hydrate_store = db.store();
+        let hydrate_store = store;
         if use_parallel {
             // Parallel scan spawns worker threads that don't inherit the
             // main thread's CURRENT_SNAPSHOT thread-local. Capture the
@@ -1005,13 +1041,24 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
             let table_row_resolver = TableRowMvccReadResolver::captured(snap_ctx);
             let matching = manager.query_all_zoned(&zone_preds, |entity| {
+                if let Some(candidates) = tag_series_candidates.as_ref() {
+                    let EntityData::TimeSeries(point) = &entity.data else {
+                        return false;
+                    };
+                    if !point.series_id.is_some_and(|id| candidates.contains(&id)) {
+                        return false;
+                    }
+                    crate::runtime::observe_timeseries_tag_index_point();
+                }
                 let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
                     hydrate_store.as_ref(),
                     entity,
                 );
                 table_row_resolver.resolve_read_candidate(entity).is_some()
                     && db.replica_allows_entity_at_read(&query.table, entity)
-                    && compiled.evaluate(&hydrated)
+                    && compiled
+                        .as_ref()
+                        .is_none_or(|filter| requires_filter_recheck || filter.evaluate(&hydrated))
             });
             for entity in &matching {
                 let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
@@ -1055,6 +1102,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 };
                 if let Some(record) = record {
                     if requires_filter_recheck {
+                        let Some(filter) = residual_filter.as_ref() else {
+                            continue;
+                        };
                         let Some(filter_record) =
                             runtime_table_record_from_entity(hydrated.clone())
                         else {
@@ -1086,11 +1136,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 if !db.replica_allows_entity_at_read(&query.table, entity) {
                     return true;
                 }
+                if let Some(candidates) = tag_series_candidates.as_ref() {
+                    let EntityData::TimeSeries(point) = &entity.data else {
+                        return true;
+                    };
+                    if !point.series_id.is_some_and(|id| candidates.contains(&id)) {
+                        return true;
+                    }
+                    crate::runtime::observe_timeseries_tag_index_point();
+                }
                 let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
                     hydrate_store.as_ref(),
                     entity,
                 );
-                if compiled.evaluate(&hydrated) {
+                if compiled
+                    .as_ref()
+                    .is_none_or(|filter| requires_filter_recheck || filter.evaluate(&hydrated))
+                {
                     let record = if !select_cols.is_empty() {
                         // Fast columnar path: use pre-computed schema indices when available.
                         if let Some(ref idx_map) = schema_col_indices {
@@ -1126,6 +1188,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         };
                     if let Some(record) = record {
                         if requires_filter_recheck {
+                            let Some(filter) = residual_filter.as_ref() else {
+                                return true;
+                            };
                             let Some(filter_record) =
                                 runtime_table_record_from_entity(hydrated.clone())
                             else {
