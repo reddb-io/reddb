@@ -105,8 +105,8 @@ pub use blob_cache::{
     L2_FRAME_TAG_RAW, L2_FRAME_TAG_ZSTD, L2_METADATA_MAGIC,
 };
 pub use bloom_segment::{
-    decode_bloom_segment_frame, encode_bloom_segment_frame, BloomSegmentFrame,
-    BloomSegmentFrameError, BLOOM_SEGMENT_HEADER_LEN,
+    decode_bloom_segment_frame, encode_bloom_segment_frame, BloomSegmentFrameError,
+    BLOOM_SEGMENT_HEADER_LEN,
 };
 pub use btree_value_layout::{
     btree_projected_cell_len, btree_value_pointer_head, decode_btree_inline_payload,
@@ -150,7 +150,7 @@ pub use file_format::{
     set_paged_page_parent_id, set_paged_page_right_child, write_paged_cell,
     write_paged_encryption_marker_and_header, DatabaseHeader, DatabaseHeaderError, PagedDwbEntry,
     PagedDwbFrameError, PagedEncryptionHeader, PagedPageHeader, PhysicalFileHeader,
-    BLOOM_SEGMENT_MAGIC, COLUMN_BLOCK_MAGIC, COLUMN_BLOCK_VERSION_V1, DWB_MAGIC,
+    BLOOM_SEGMENT_V2_MAGIC, COLUMN_BLOCK_MAGIC, COLUMN_BLOCK_VERSION_V1, DWB_MAGIC,
     PAGED_CELL_HEADER_SIZE, PAGED_CELL_POINTER_SIZE, PAGED_DWB_ENTRY_HEADER_SIZE,
     PAGED_DWB_ENTRY_SIZE, PAGED_DWB_HEADER_SIZE, PAGED_ENCRYPTION_HEADER_SIZE,
     PAGED_ENCRYPTION_KEY_CHECK_BLOB_SIZE, PAGED_ENCRYPTION_KEY_CHECK_PLAINTEXT_SIZE,
