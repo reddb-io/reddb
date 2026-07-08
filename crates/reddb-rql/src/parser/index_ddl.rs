@@ -76,7 +76,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse index method identifier: HASH | BTREE | BITMAP | RTREE | SPATIAL | H3.
+    /// Parse index method identifier: HASH | BTREE | BITMAP | SPATIAL | H3.
     /// `HASH` is also a reserved keyword token, so we match both the
     /// keyword form and the ident form — otherwise `USING HASH`
     /// fails with "Unexpected token: HASH" even though the parser
@@ -105,12 +105,17 @@ impl<'a> Parser<'a> {
                     "HASH" => IndexMethod::Hash,
                     "BTREE" => IndexMethod::BTree,
                     "BITMAP" => IndexMethod::Bitmap,
-                    "RTREE" => IndexMethod::RTree,
+                    "RTREE" => {
+                        return Err(ParseError::new(
+                            "USING RTREE was removed: the in-RAM R-tree indexed nothing and served no queries. Use USING H3 — same SEARCH SPATIAL surface, disk-resident, maintained on every write. Example: CREATE INDEX idx_loc ON events (gpsLocation) USING H3",
+                            self.position(),
+                        ));
+                    }
                     "SPATIAL" => IndexMethod::Spatial,
                     _ => {
                         return Err(ParseError::new(
                             format!(
-                                "unknown index method '{}', expected HASH, BTREE, BITMAP, RTREE, SPATIAL, or H3",
+                                "unknown index method '{}', expected HASH, BTREE, BITMAP, SPATIAL, or H3",
                                 name
                             ),
                             self.position(),
@@ -121,7 +126,7 @@ impl<'a> Parser<'a> {
                 Ok(method)
             }
             other => Err(ParseError::expected(
-                vec!["HASH", "BTREE", "BITMAP", "RTREE", "SPATIAL", "H3"],
+                vec!["HASH", "BTREE", "BITMAP", "SPATIAL", "H3"],
                 &other,
                 self.position(),
             )),
@@ -230,7 +235,6 @@ mod tests {
         for (method, expected) in [
             ("BTREE", IndexMethod::BTree),
             ("BITMAP", IndexMethod::Bitmap),
-            ("RTREE", IndexMethod::RTree),
             ("hash", IndexMethod::Hash),
         ] {
             let query = parse_create_index(&format!(
@@ -238,6 +242,20 @@ mod tests {
             ));
             assert_eq!(query.method, expected);
         }
+    }
+
+    #[test]
+    fn parse_create_index_using_rtree_reports_didactic_removal() {
+        let mut p = parser("CREATE INDEX idx_loc ON events (gpsLocation) USING RTREE");
+        p.expect(Token::Create).expect("CREATE");
+        let err = p.parse_create_index_query().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("USING RTREE was removed"), "{msg}");
+        assert!(msg.contains("Use USING H3"), "{msg}");
+        assert!(
+            msg.contains("CREATE INDEX idx_loc ON events (gpsLocation) USING H3"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -301,7 +319,7 @@ mod tests {
         let err = p.parse_create_index_query().unwrap_err();
         assert!(
             err.to_string()
-                .contains("expected: HASH, BTREE, BITMAP, RTREE"),
+                .contains("expected: HASH, BTREE, BITMAP, SPATIAL"),
             "{err}"
         );
     }
