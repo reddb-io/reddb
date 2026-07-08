@@ -143,6 +143,7 @@ impl OperationalManifest {
     }
 
     pub fn recover_or_bootstrap(&self, existing_collections: &[String]) -> io::Result<Vec<String>> {
+        self.recover_interrupted_fork_promotions()?;
         self.ensure_dirs()?;
         let mut manifest = match self.load_current()? {
             Some(manifest) => manifest,
@@ -174,6 +175,7 @@ impl OperationalManifest {
         let protected_paths = self.protected_collection_paths(&manifest)?;
         self.quarantine_unreferenced_collection_files(&protected_paths)?;
         self.quarantine_unreferenced_append_only_segments(&manifest)?;
+        self.validate_manifest_artifacts(&manifest)?;
 
         let pending_drops = manifest
             .collections
@@ -200,6 +202,7 @@ impl OperationalManifest {
             let protected_paths = self.protected_collection_paths(&manifest)?;
             self.quarantine_unreferenced_collection_files(&protected_paths)?;
             self.quarantine_unreferenced_append_only_segments(&manifest)?;
+            self.validate_manifest_artifacts(&manifest)?;
         }
         let pending_segments = manifest
             .append_only_segments
@@ -220,6 +223,7 @@ impl OperationalManifest {
             let protected_paths = self.protected_collection_paths(&manifest)?;
             self.quarantine_unreferenced_collection_files(&protected_paths)?;
             self.quarantine_unreferenced_append_only_segments(&manifest)?;
+            self.validate_manifest_artifacts(&manifest)?;
         }
 
         Ok(completed_pending_drops)
@@ -603,6 +607,44 @@ impl OperationalManifest {
         sync_dir(&self.quarantine_dir())
     }
 
+    fn validate_manifest_artifacts(&self, manifest: &Manifest) -> io::Result<()> {
+        for (name, entry) in &manifest.collections {
+            if entry.state != CollectionState::Active {
+                continue;
+            }
+            if let Some(source) = &entry.source {
+                if !Path::new(source).is_file() {
+                    return Err(invalid_data(format!(
+                        "missing collection artifact for shared fork source {name}: {source}"
+                    )));
+                }
+                continue;
+            }
+            let path = self.collections_dir().join(&entry.path);
+            if !path.is_file() {
+                return Err(invalid_data(format!(
+                    "missing collection artifact for {name}: {}",
+                    path.display()
+                )));
+            }
+        }
+        for entry in &manifest.append_only_segments {
+            if entry.state != AppendOnlySegmentState::Active {
+                continue;
+            }
+            let path = self.append_only_segments_dir().join(&entry.path);
+            if !path.is_file() {
+                return Err(invalid_data(format!(
+                    "missing append-only artifact for {}/{}: {}",
+                    entry.collection,
+                    entry.segment_id,
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn collections_dir(&self) -> PathBuf {
         self.root.join(COLLECTIONS_DIR)
     }
@@ -648,7 +690,7 @@ fn active_collection_paths(manifest: &Manifest) -> BTreeSet<String> {
     manifest
         .collections
         .values()
-        .filter(|entry| entry.state == CollectionState::Active)
+        .filter(|entry| entry.state == CollectionState::Active && entry.source.is_none())
         .map(|entry| entry.path.clone())
         .collect()
 }
@@ -1382,6 +1424,44 @@ mod tests {
     }
 
     #[test]
+    fn fork_recovery_quarantines_partial_hydration_artifact() {
+        let path = temp_db_path("fork_partial_hydration");
+        let parent = OperationalManifest::for_db_path(&path);
+        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
+        write_collection(&parent, "users", b"complete-parent-copy");
+        parent.create_fork("exp", 1).unwrap();
+        let fork = parent.fork_handle("exp");
+
+        write_collection(&fork, "users", b"partial");
+
+        fork.recover_or_bootstrap(&[]).unwrap();
+
+        assert!(
+            !fork.collection_path_for_test("users").exists(),
+            "shared-by-reference fork recovery must not keep half-hydrated local artifacts"
+        );
+        assert_eq!(read_collection(&parent, "users"), b"complete-parent-copy");
+        let forks = parent.list_forks().unwrap();
+        assert_eq!(forks.len(), 1);
+        assert_eq!(
+            forks[0].hydration_state,
+            ForkHydrationState::SharedByReference
+        );
+    }
+
+    #[test]
+    fn recovery_rejects_manifest_referencing_missing_artifact() {
+        let path = temp_db_path("missing_artifact");
+        let parent = OperationalManifest::for_db_path(&path);
+        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
+        fs::remove_file(parent.collection_path_for_test("users")).unwrap();
+
+        let err = parent.recover_or_bootstrap(&[]).unwrap_err();
+
+        assert!(err.to_string().contains("missing collection artifact"));
+    }
+
+    #[test]
     fn parent_writes_after_fork_are_invisible_to_fork() {
         let path = temp_db_path("parent_to_fork");
         let parent = OperationalManifest::for_db_path(&path);
@@ -1506,6 +1586,30 @@ mod tests {
         assert!(parent.list_forks().unwrap().is_empty());
         assert_eq!(
             read_collection(&outcome.archived_parent, "users"),
+            b"old-primary"
+        );
+    }
+
+    #[test]
+    fn promotion_recovery_resumes_after_fork_moves_to_staging() {
+        let path = temp_db_path("promote_fork_resume_staging");
+        let parent = OperationalManifest::for_db_path(&path);
+        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
+        write_collection(&parent, "users", b"old-primary");
+        parent.create_fork("exp", 21).unwrap();
+        let fork = parent.fork_handle("exp");
+        fork.hydrate_collection("users").unwrap();
+        write_collection(&fork, "users", b"new-primary");
+        let staging = parent.promoting_fork_handle("exp");
+        fs::rename(&fork.root, &staging.root).unwrap();
+
+        parent.recover_or_bootstrap(&[]).unwrap();
+
+        assert_eq!(read_collection(&parent, "users"), b"new-primary");
+        assert!(parent.fork_origin().unwrap().is_none());
+        assert!(parent.list_forks().unwrap().is_empty());
+        assert_eq!(
+            read_collection(&parent.archived_parent_handle("exp"), "users"),
             b"old-primary"
         );
     }
