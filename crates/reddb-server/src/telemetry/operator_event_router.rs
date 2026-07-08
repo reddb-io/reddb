@@ -694,6 +694,14 @@ mod tests {
                 dlq: "users_events_outbox_dlq".into(),
                 reason: "queue_full".into(),
             },
+            OperatorEvent::ReplicaAuthorityDivergence {
+                range_identity: "system.global/0".into(),
+                expected_term: 8,
+                expected_ownership_epoch: 2,
+                observed_term: 7,
+                observed_ownership_epoch: 1,
+                lsn: 42,
+            },
         ];
 
         // Verify count matches all_variant_names minus DanglingAdminIntent
@@ -863,6 +871,21 @@ mod tests {
                 reason: reason.clone(),
                 ownership_epoch: *ownership_epoch,
                 range_identity: range_identity.clone(),
+            },
+            OperatorEvent::ReplicaAuthorityDivergence {
+                range_identity,
+                expected_term,
+                expected_ownership_epoch,
+                observed_term,
+                observed_ownership_epoch,
+                lsn,
+            } => OperatorEvent::ReplicaAuthorityDivergence {
+                range_identity: range_identity.clone(),
+                expected_term: *expected_term,
+                expected_ownership_epoch: *expected_ownership_epoch,
+                observed_term: *observed_term,
+                observed_ownership_epoch: *observed_ownership_epoch,
+                lsn: *lsn,
             },
         }
     }
