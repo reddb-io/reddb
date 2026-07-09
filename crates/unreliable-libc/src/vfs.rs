@@ -920,7 +920,10 @@ mod tests {
 
     /// A device with one named class armed at certainty, and nothing else.
     fn armed(seed: u64, class: FaultClass) -> SimVfs {
-        SimVfs::new(seed, SimFaultConfig::none().with_fault_class(class, 1_000_000))
+        SimVfs::new(
+            seed,
+            SimFaultConfig::none().with_fault_class(class, 1_000_000),
+        )
     }
 
     #[test]
