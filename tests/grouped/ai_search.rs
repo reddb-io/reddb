@@ -60,6 +60,9 @@ mod integration_local_embedding_conformance;
 #[path = "ai_local_vector/integration_vector_query_text.rs"]
 mod integration_vector_query_text;
 
+#[path = "ai_local_vector/e2e_vector_geo_filter.rs"]
+mod e2e_vector_geo_filter;
+
 #[path = "ai_local_vector/integration_vector_query_text_local.rs"]
 mod integration_vector_query_text_local;
 
