@@ -354,6 +354,52 @@ it is never silently replaced by a default.
 Because the budget is process-scoped, `SHOW STATS <collection>` never returns
 these rows; the unfiltered `SHOW STATS` does.
 
+### Scrub section
+
+`SCRUB` verifies the current persistent store checksum coverage without repair,
+truncation, or tombstoning. A healthy foreground run returns one summary row;
+findings add one row per corrupt object with these columns:
+
+| Column | Description |
+|--------|-------------|
+| `row_kind` | `finding` or `summary`. |
+| `zone_kind` | `superblock`, `manifest`, `wal`, `page`, `segment-chunk`, or `summary`. |
+| `physical_identity` | Store-local identity for the checked object. |
+| `collection` | Owning collection when derivable, else `NULL`. |
+| `expected_checksum` | Stored checksum authority when available. |
+| `actual_checksum` | Recomputed checksum when available. |
+| `fault_class` | Best-effort attribution such as `bit-rot-evidence`, `torn-write-evidence`, or `in-progress`. |
+| `objects_verified` | Objects verified by this foreground run or background tick. |
+| `superblock_verified` | Superblock copies verified by this foreground run or background tick. |
+| `manifest_verified` | Manifest objects verified by this foreground run or background tick. |
+| `wal_verified` | WAL boundary or record objects verified by this foreground run or background tick. |
+| `page_verified` | Page or snapshot objects verified by this foreground run or background tick. |
+| `segment_chunk_verified` | Append-only segment chunks verified by this foreground run or background tick. |
+| `bytes_read` | Bytes read by this foreground run or background tick. |
+| `duration_ms` | Runtime duration for this foreground run or background tick. |
+
+Use background mode to pace large stores:
+
+```sql
+SCRUB BACKGROUND BUDGET 128;
+```
+
+Scrub observability is process-scoped and is reported under the reserved
+`red.scrub` collection label in `red.stats`:
+
+```sql
+SELECT * FROM red.stats WHERE collection = 'red.scrub';
+```
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `last_run_unix_ms` | `NULL` | Last scrub run timestamp in Unix milliseconds, or `0` before the first run. |
+| `last_findings_count` | `NULL` | Findings reported by the last foreground run or background tick. |
+| `background_status` | `NULL` | `idle`, `running`, or `complete`. |
+| `background_verified_objects` | `NULL` | Number of objects reached by the active or last completed background pass. |
+| `background_total_objects` | `NULL` | Total objects in the current scrub pass. |
+| `verified_objects` | zone kind | Objects verified by the last scrub result for each zone. |
+
 ### Freshness tiers
 
 `red.*` columns and views split across three consistency tiers:
