@@ -298,6 +298,7 @@ pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
         Query(msg) if msg.starts_with("ask_primary_sync_unavailable:") => 503,
         Query(_) => 400,
         Validation { .. } => 422,
+        StorageIntegrity(_) => 500,
         FeatureNotEnabled(_) => 501,
         SchemaVersionMismatch { .. } => 409,
         QuotaExceeded(payload) => {
