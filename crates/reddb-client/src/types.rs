@@ -150,6 +150,7 @@ pub struct QueryResult {
     pub affected: u64,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<(String, ValueOut)>>,
+    pub notice: Option<String>,
 }
 
 pub type Row = Vec<(String, ValueOut)>;
@@ -233,6 +234,7 @@ impl QueryResult {
                 affected: 0,
                 columns: Vec::new(),
                 rows: Vec::new(),
+                notice: None,
             };
         };
         let result_obj = obj.get("result").and_then(|v| v.as_object()).unwrap_or(obj);
@@ -273,6 +275,10 @@ impl QueryResult {
             affected,
             columns,
             rows,
+            notice: obj
+                .get("notice")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned),
         }
     }
 }

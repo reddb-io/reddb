@@ -740,6 +740,7 @@ fn execute_pg_query_result(
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
+                notice: None,
             }),
             Ok(None) => run_runtime_blocking(|| {
                 execute_with_pg_auth_context(auth_context, || runtime.execute_query(sql))
@@ -776,6 +777,7 @@ fn try_execute_pg_scalar_select(
         affected_rows: 0,
         statement_type: "select",
         bookmark: None,
+        notice: None,
     })
 }
 
@@ -1104,6 +1106,7 @@ where
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         }),
         Ok(None) => run_runtime_blocking(|| {
             execute_with_pg_auth_context(auth_context, || runtime.execute_query(sql))
@@ -1943,6 +1946,7 @@ mod tests {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         };
 
         let mut out = Vec::new();

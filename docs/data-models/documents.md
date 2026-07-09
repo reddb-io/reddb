@@ -236,6 +236,68 @@ curl -X POST http://127.0.0.1:5000/query \
   -d '{"query":"SELECT event_type, user_id, body FROM events WHERE event_type = '\''login'\'' LIMIT 20"}'
 ```
 
+## Spatial on documents
+
+Document fields can participate in `SEARCH SPATIAL` when the named field is a
+recognized geographic point. RedDB recognizes the same shapes for full scans,
+H3 indexes, and diagnostics:
+
+| Shape | Example | Indexed by H3 |
+|:------|:--------|:--------------|
+| `GeoPoint` value | A typed `GEOPOINT` value such as `POINT(38.76, -77.15)` | Yes |
+| `{lat, lon}` JSON object | `{"gpsLocation":{"lat":38.76,"lon":-77.15}}` | Yes |
+| Alias object | `{"gpsLocation":{"latitude":38.76,"longitude":-77.15}}` or `{"gpsLocation":{"latitude":38.76,"lng":-77.15}}` | Yes |
+| GeoJSON object | `{"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}}` | No, not yet |
+| String coordinate | `{"gpsLocation":"38.76,-77.15"}` | No |
+| Array coordinate | `{"gpsLocation":[38.76,-77.15]}` | No |
+
+Create the H3 index on the document field you search:
+
+```sql
+CREATE DOCUMENT events
+CREATE INDEX idx_loc ON events (gpsLocation) USING H3
+```
+
+Dotted paths work for nested document bodies:
+
+```sql
+CREATE INDEX idx_nested_loc ON events (location.gps) USING H3
+
+SEARCH SPATIAL RADIUS 38.76 -77.15 10.0
+COLLECTION events
+COLUMN location.gps
+```
+
+You can create the index before data arrives:
+
+```sql
+CREATE DOCUMENT events
+CREATE INDEX idx_loc ON events (gpsLocation) USING H3
+
+INSERT INTO events DOCUMENT VALUES
+  ({"name":"gate","gpsLocation":{"lat":38.76,"lon":-77.15}})
+
+SEARCH SPATIAL RADIUS 38.76 -77.15 10.0
+COLLECTION events
+COLUMN gpsLocation
+```
+
+Or backfill an index after documents already exist:
+
+```sql
+CREATE DOCUMENT events
+
+INSERT INTO events DOCUMENT VALUES
+  ({"name":"gate","gpsLocation":{"lat":38.76,"lon":-77.15}}),
+  ({"name":"bad","gpsLocation":"38.76,-77.15"})
+
+CREATE INDEX idx_loc ON events (gpsLocation) USING H3
+```
+
+The create-index message reports how many existing entities were indexed. If a
+non-empty collection reports `0 of N`, the message names the field and expected
+shape so a document-shape mismatch is visible at index time.
+
 ## Updating Documents
 
 Patch specific nested fields in a document with JSON-pointer-style paths under `body`:

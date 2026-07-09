@@ -59,7 +59,13 @@ fn value_at<'a>(row: &'a [(String, ValueOut)], column: &str) -> Option<&'a Value
 fn format_table(result: &QueryResult) -> String {
     let columns = columns(result);
     if result.rows.is_empty() {
-        return "(no rows)\n".to_string();
+        let mut out = "(no rows)\n".to_string();
+        if let Some(notice) = result.notice.as_deref() {
+            out.push_str("Note: ");
+            out.push_str(notice);
+            out.push('\n');
+        }
+        return out;
     }
 
     let mut widths: Vec<usize> = columns.iter().map(|column| column.len()).collect();
@@ -353,6 +359,7 @@ mod tests {
                     ),
                 ],
             ],
+            notice: None,
         }
     }
 
@@ -433,6 +440,7 @@ mod tests {
                 ("count".to_string(), ValueOut::Integer(7)),
                 ("enabled".to_string(), ValueOut::Bool(false)),
             ]],
+            notice: None,
         };
 
         assert_eq!(
