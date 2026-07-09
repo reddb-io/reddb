@@ -65,7 +65,12 @@ struct GeoDistancePredicate<'a> {
     radius_km: f64,
 }
 
-fn execute_geo_distance_candidate_scan(
+struct GeoWithinPredicate<'a> {
+    column: &'a str,
+    vertices: Vec<(f64, f64)>,
+}
+
+fn execute_geo_h3_candidate_scan(
     db: &RedDB,
     query: &TableQuery,
     filter: &Filter,
@@ -163,20 +168,25 @@ fn execute_geo_distance_candidate_scan(
     Ok(records)
 }
 
-fn geo_distance_h3_candidate_ids(
+fn geo_h3_candidate_ids(
     filter: &Filter,
     table: &str,
     idx_store: &super::index_store::IndexStore,
 ) -> Option<std::collections::HashSet<u64>> {
     match filter {
         Filter::CompareExpr { lhs, op, rhs } => {
-            let predicate = geo_distance_predicate(lhs, *op, rhs)
-                .or_else(|| geo_distance_predicate(rhs, flipped_compare_op_for_geo(*op), lhs))?;
-            geo_distance_predicate_candidate_ids(predicate, table, idx_store)
+            if let Some(predicate) = geo_distance_predicate(lhs, *op, rhs)
+                .or_else(|| geo_distance_predicate(rhs, flipped_compare_op_for_geo(*op), lhs))
+            {
+                return geo_distance_predicate_candidate_ids(predicate, table, idx_store);
+            }
+            let predicate = geo_within_predicate(lhs, *op, rhs)
+                .or_else(|| geo_within_predicate(rhs, flipped_compare_op_for_geo(*op), lhs))?;
+            geo_within_predicate_candidate_ids(predicate, table, idx_store)
         }
         Filter::And(left, right) => {
-            let left_ids = geo_distance_h3_candidate_ids(left, table, idx_store);
-            let right_ids = geo_distance_h3_candidate_ids(right, table, idx_store);
+            let left_ids = geo_h3_candidate_ids(left, table, idx_store);
+            let right_ids = geo_h3_candidate_ids(right, table, idx_store);
             match (left_ids, right_ids) {
                 (Some(mut left), Some(right)) => {
                     left.retain(|id| right.contains(id));
@@ -187,8 +197,8 @@ fn geo_distance_h3_candidate_ids(
             }
         }
         Filter::Or(left, right) => {
-            let mut left_ids = geo_distance_h3_candidate_ids(left, table, idx_store)?;
-            let right_ids = geo_distance_h3_candidate_ids(right, table, idx_store)?;
+            let mut left_ids = geo_h3_candidate_ids(left, table, idx_store)?;
+            let right_ids = geo_h3_candidate_ids(right, table, idx_store)?;
             left_ids.extend(right_ids);
             Some(left_ids)
         }
@@ -230,6 +240,33 @@ fn geo_distance_predicate<'a>(
     })
 }
 
+fn geo_within_predicate<'a>(
+    lhs: &'a Expr,
+    op: CompareOp,
+    rhs: &Expr,
+) -> Option<GeoWithinPredicate<'a>> {
+    if !matches!(op, CompareOp::Eq) || !literal_bool(rhs)? {
+        return None;
+    }
+    let Expr::FunctionCall { name, args, .. } = lhs else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("GEO_WITHIN") {
+        return None;
+    }
+    let [Expr::Column { field, .. }, polygon] = args.as_slice() else {
+        return None;
+    };
+    let column = match field {
+        FieldRef::TableColumn { column, .. } => column.as_str(),
+        _ => return None,
+    };
+    Some(GeoWithinPredicate {
+        column,
+        vertices: polygon_vertices_from_expr(polygon)?,
+    })
+}
+
 fn literal_f64(expr: &Expr) -> Option<f64> {
     match expr {
         Expr::Literal {
@@ -244,6 +281,47 @@ fn literal_f64(expr: &Expr) -> Option<f64> {
             value: Value::UnsignedInteger(value),
             ..
         } => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn literal_bool(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::Literal {
+            value: Value::Boolean(value),
+            ..
+        } => Some(*value),
+        _ => None,
+    }
+}
+
+fn polygon_vertices_from_expr(expr: &Expr) -> Option<Vec<(f64, f64)>> {
+    let Expr::Literal {
+        value: Value::Array(vertices),
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    vertices
+        .iter()
+        .map(|vertex| {
+            let Value::Array(pair) = vertex else {
+                return None;
+            };
+            let [lat, lon] = pair.as_slice() else {
+                return None;
+            };
+            Some((value_f64(lat)?, value_f64(lon)?))
+        })
+        .collect()
+}
+
+fn value_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Float(value) => Some(*value),
+        Value::Integer(value) => Some(*value as f64),
+        Value::UnsignedInteger(value) => Some(*value as f64),
         _ => None,
     }
 }
@@ -274,6 +352,39 @@ fn geo_distance_predicate_candidate_ids(
         predicate.radius_km,
         resolution,
     );
+    if cells.is_empty() {
+        return None;
+    }
+    let keys: Vec<_> = cells
+        .iter()
+        .filter_map(|cell| {
+            crate::storage::schema::value_to_canonical_key(&Value::UnsignedInteger(*cell))
+        })
+        .collect();
+    if keys.is_empty() {
+        return None;
+    }
+    let ids = idx_store
+        .sorted
+        .in_lookup_limited(table, predicate.column, &keys, usize::MAX)?;
+    Some(ids.into_iter().map(|id| id.raw()).collect())
+}
+
+fn geo_within_predicate_candidate_ids(
+    predicate: GeoWithinPredicate<'_>,
+    table: &str,
+    idx_store: &super::index_store::IndexStore,
+) -> Option<std::collections::HashSet<u64>> {
+    let index = idx_store.find_index_for_column(table, predicate.column)?;
+    let super::index_store::IndexMethodKind::H3 { resolution } = index.method else {
+        return None;
+    };
+    const MAX_POLYGON_COVER_CELLS: usize = 50_000;
+    let cells = crate::geo::h3::polygon_to_cover_cells(
+        &predicate.vertices,
+        resolution,
+        MAX_POLYGON_COVER_CELLS,
+    )?;
     if cells.is_empty() {
         return None;
     }
@@ -474,19 +585,16 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let requires_mvcc_index_fallback =
         crate::runtime::impl_core::current_snapshot_requires_index_fallback();
 
-    // ── GEO_DISTANCE H3 CANDIDATE PATH ────────────────────────────────────────
-    // `WHERE GEO_DISTANCE(col, lat, lon) < r` over an H3-indexed column can
-    // use the same covering-ring candidate set as SEARCH SPATIAL RADIUS. The
-    // full WHERE expression is still evaluated after candidate pruning, so
-    // the index remains a pure optimization.
+    // ── GEO H3 CANDIDATE PATH ────────────────────────────────────────────────
+    // Geo predicates over H3-indexed columns can reuse the same candidate
+    // covers as SEARCH SPATIAL. The full WHERE expression is still evaluated
+    // after candidate pruning, so the index remains a pure optimization.
     if let (false, Some(idx_store), Some(ref filter)) =
         (requires_mvcc_index_fallback, index_store, &effective_filter)
     {
         if !is_universal_query_source(&query.table) {
-            if let Some(candidate_ids) =
-                geo_distance_h3_candidate_ids(filter, &query.table, idx_store)
-            {
-                return execute_geo_distance_candidate_scan(
+            if let Some(candidate_ids) = geo_h3_candidate_ids(filter, &query.table, idx_store) {
+                return execute_geo_h3_candidate_scan(
                     db,
                     query,
                     filter,
