@@ -45,8 +45,6 @@ fn remove_l2(path: &Path) {
     let control = reddb_file::blob_cache_control_path(path);
     for sidecar in [
         path.to_path_buf(),
-        reddb_file::layout::pager_header_path(path),
-        reddb_file::layout::pager_meta_path(path),
         reddb_file::layout::pager_dwb_path(path),
         reddb_file::blob_cache_double_write_path(path),
         reddb_file::blob_cache_control_temp_path(&control),
