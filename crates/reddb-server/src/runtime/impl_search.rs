@@ -34,7 +34,7 @@ fn mark_table_scan_as_geo_h3_index_seek(
         node.operator = "geo_h3_index_seek".to_string();
         node.details.insert(
             "reason".to_string(),
-            "GEO_DISTANCE predicate uses H3 covering-ring candidates".to_string(),
+            "geo predicate uses H3 covering candidates".to_string(),
         );
         return true;
     }
@@ -64,6 +64,47 @@ fn explain_literal_f64(expr: &Expr) -> Option<f64> {
     }
 }
 
+fn explain_literal_bool(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::Literal {
+            value: Value::Boolean(value),
+            ..
+        } => Some(*value),
+        _ => None,
+    }
+}
+
+fn explain_polygon_vertices(expr: &Expr) -> Option<Vec<(f64, f64)>> {
+    let Expr::Literal {
+        value: Value::Array(vertices),
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    vertices
+        .iter()
+        .map(|vertex| {
+            let Value::Array(pair) = vertex else {
+                return None;
+            };
+            let [lat, lon] = pair.as_slice() else {
+                return None;
+            };
+            Some((explain_value_f64(lat)?, explain_value_f64(lon)?))
+        })
+        .collect()
+}
+
+fn explain_value_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Float(value) => Some(*value),
+        Value::Integer(value) => Some(*value as f64),
+        Value::UnsignedInteger(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
 fn flip_geo_compare_op(op: CompareOp) -> CompareOp {
     match op {
         CompareOp::Eq => CompareOp::Eq,
@@ -84,6 +125,11 @@ fn explain_h3_cover_is_enumerable(lat: f64, lon: f64, radius_km: f64, resolution
     const MAX_COVER_RING: u32 = 128;
     let k_f = (radius_km / edge_km).ceil() + 1.0;
     k_f.is_finite() && k_f <= f64::from(MAX_COVER_RING)
+}
+
+fn explain_h3_polygon_cover_is_enumerable(vertices: &[(f64, f64)], resolution: u8) -> bool {
+    const MAX_POLYGON_COVER_CELLS: usize = 50_000;
+    crate::geo::h3::polygon_to_cover_cells(vertices, resolution, MAX_POLYGON_COVER_CELLS).is_some()
 }
 
 impl RedDBRuntime {
@@ -218,30 +264,46 @@ impl RedDBRuntime {
     }
 
     fn geo_h3_route_column<'a>(&self, lhs: &'a Expr, op: CompareOp, rhs: &Expr) -> Option<&'a str> {
-        if !matches!(op, CompareOp::Lt | CompareOp::Le) {
-            return None;
-        }
-        let radius_km = explain_literal_f64(rhs)?;
-        if radius_km.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-            return None;
-        }
         let Expr::FunctionCall { name, args, .. } = lhs else {
             return None;
         };
-        if !(name.eq_ignore_ascii_case("GEO_DISTANCE") || name.eq_ignore_ascii_case("HAVERSINE")) {
-            return None;
-        }
-        let [Expr::Column { field, .. }, lat, lon] = args.as_slice() else {
+        let field = if name.eq_ignore_ascii_case("GEO_DISTANCE")
+            || name.eq_ignore_ascii_case("HAVERSINE")
+        {
+            if !matches!(op, CompareOp::Lt | CompareOp::Le) {
+                return None;
+            }
+            let radius_km = explain_literal_f64(rhs)?;
+            if radius_km.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+                return None;
+            }
+            let [Expr::Column { field, .. }, lat, lon] = args.as_slice() else {
+                return None;
+            };
+            if !explain_h3_cover_is_enumerable(
+                explain_literal_f64(lat)?,
+                explain_literal_f64(lon)?,
+                radius_km,
+                9,
+            ) {
+                return None;
+            }
+            field
+        } else if name.eq_ignore_ascii_case("GEO_WITHIN") {
+            if !matches!(op, CompareOp::Eq) || !explain_literal_bool(rhs)? {
+                return None;
+            }
+            let [Expr::Column { field, .. }, polygon] = args.as_slice() else {
+                return None;
+            };
+            let vertices = explain_polygon_vertices(polygon)?;
+            if !explain_h3_polygon_cover_is_enumerable(&vertices, 9) {
+                return None;
+            }
+            field
+        } else {
             return None;
         };
-        if !explain_h3_cover_is_enumerable(
-            explain_literal_f64(lat)?,
-            explain_literal_f64(lon)?,
-            radius_km,
-            9,
-        ) {
-            return None;
-        }
         match field {
             FieldRef::TableColumn { column, .. } => Some(column.as_str()),
             _ => None,
