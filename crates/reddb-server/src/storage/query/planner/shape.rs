@@ -523,6 +523,17 @@ fn parameterize_metadata_filter(filter: &MetadataFilter, next_index: &mut usize)
             },
             format!("{STRING_PARAM_PREFIX}{}", allocate_param_index(next_index)),
         ),
+        MetadataFilter::GeoRadius {
+            key,
+            center_lat,
+            center_lon,
+            radius_km,
+        } => MetadataFilter::GeoRadius {
+            key: key.clone(),
+            center_lat: parameterize_f64(*center_lat, next_index),
+            center_lon: parameterize_f64(*center_lon, next_index),
+            radius_km: parameterize_f64(*radius_km, next_index),
+        },
         MetadataFilter::Exists(key) => MetadataFilter::Exists(key.clone()),
         MetadataFilter::NotExists(key) => MetadataFilter::NotExists(key.clone()),
         MetadataFilter::And(filters) => MetadataFilter::And(
@@ -595,6 +606,17 @@ fn bind_metadata_filter(filter: &MetadataFilter, binds: &[Value]) -> Option<Meta
             key.clone(),
             bind_placeholder_string(value, binds)?.unwrap_or_default(),
         )),
+        MetadataFilter::GeoRadius {
+            key,
+            center_lat,
+            center_lon,
+            radius_km,
+        } => Some(MetadataFilter::GeoRadius {
+            key: key.clone(),
+            center_lat: bind_placeholder_f64(*center_lat, binds)?,
+            center_lon: bind_placeholder_f64(*center_lon, binds)?,
+            radius_km: bind_placeholder_f64(*radius_km, binds)?,
+        }),
         MetadataFilter::Exists(key) => Some(MetadataFilter::Exists(key.clone())),
         MetadataFilter::NotExists(key) => Some(MetadataFilter::NotExists(key.clone())),
         MetadataFilter::And(filters) => Some(MetadataFilter::And(
@@ -1104,6 +1126,35 @@ fn bind_placeholder_f32(value: f32, binds: &[Value]) -> Option<f32> {
     }
 }
 
+fn parameterize_f64(value: f64, next_index: &mut usize) -> f64 {
+    if value.is_finite() {
+        encode_f64_placeholder(allocate_param_index(next_index))
+    } else {
+        value
+    }
+}
+
+fn encode_f64_placeholder(index: usize) -> f64 {
+    f64::from_bits(FLOAT64_PARAM_BITS_BASE | (index as u64 & 0x0007_ffff_ffff_ffff))
+}
+
+fn decode_f64_placeholder(value: f64) -> Option<usize> {
+    let bits = value.to_bits();
+    if bits & FLOAT64_PARAM_BITS_BASE == FLOAT64_PARAM_BITS_BASE {
+        Some((bits & 0x0007_ffff_ffff_ffff) as usize)
+    } else {
+        None
+    }
+}
+
+fn bind_placeholder_f64(value: f64, binds: &[Value]) -> Option<f64> {
+    if let Some(index) = decode_f64_placeholder(value) {
+        bind_value_to_f64(binds.get(index)?)
+    } else {
+        Some(value)
+    }
+}
+
 fn encode_u32_placeholder(index: usize) -> u32 {
     U32_PARAM_BASE | (index as u32 & 0x000f_ffff)
 }
@@ -1130,6 +1181,17 @@ fn bind_value_to_f32(value: &Value) -> Option<f32> {
         Value::Integer(value) => Some(*value as f32),
         Value::UnsignedInteger(value) => Some(*value as f32),
         Value::BigInt(value) => Some(*value as f32),
+        Value::Text(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn bind_value_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Float(value) => Some(*value),
+        Value::Integer(value) => Some(*value as f64),
+        Value::UnsignedInteger(value) => Some(*value as f64),
+        Value::BigInt(value) => Some(*value as f64),
         Value::Text(value) => value.parse().ok(),
         _ => None,
     }
