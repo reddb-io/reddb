@@ -19,6 +19,13 @@ use h3o::{
 pub const MIN_RESOLUTION: i64 = 0;
 pub const MAX_RESOLUTION: i64 = 15;
 
+/// Cap on the polyfill cover of a query polygon. Past it the covering
+/// set costs more to enumerate than a full scan, so every caller —
+/// the `SEARCH SPATIAL WITHIN POLYGON` verb and the `GEO_WITHIN`
+/// predicate alike — falls back to the exact scan. Shared so the two
+/// surfaces prune identically and stay result-identical.
+pub const MAX_POLYGON_COVER_CELLS: usize = 50_000;
+
 pub fn valid_resolution(res: i64) -> Option<u8> {
     if (MIN_RESOLUTION..=MAX_RESOLUTION).contains(&res) {
         Some(res as u8)

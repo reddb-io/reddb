@@ -30,6 +30,21 @@ CREATE TABLE locations (position GeoPoint NOT NULL)
 Value::GeoPoint(40689247, -74044502)  // 40.689247, -74.044502
 ```
 
+## Recognized point shapes
+
+Spatial search and H3 indexes recognize these point values:
+
+| Shape | Example | Coordinate order |
+|:------|:--------|:-----------------|
+| `GEOPOINT` table value | `'40.689247,-74.044502'` | latitude, longitude |
+| JSON object | `{"lat": 40.689247, "lon": -74.044502}` | latitude, longitude |
+| JSON object aliases | `{"latitude": 40.689247, "longitude": -74.044502}` | latitude, longitude |
+| GeoJSON `Point` | `{"type":"Point","coordinates":[-74.044502,40.689247]}` | longitude, latitude |
+
+Other GeoJSON forms such as `Polygon` and `LineString`, malformed
+`coordinates` arrays, non-numeric coordinates, and out-of-range coordinates are
+not recognized as points.
+
 ## Example: Location Tracking
 
 ```sql

@@ -34,6 +34,8 @@
 mod builders;
 #[path = "core.rs"]
 mod core;
+#[path = "geo_predicate.rs"]
+pub mod geo_predicate;
 
 pub use builders::*;
 pub use core::*;

@@ -2179,15 +2179,25 @@ mod tests {
             cell,
             Value::UnsignedInteger(crate::geo::h3::lat_lng_to_cell(48.8566, 2.3522, 9))
         );
+
+        let geojson = Value::Json(br#"{"type":"Point","coordinates":[2.3522,48.8566]}"#.to_vec());
+        let cell = h3_cell_value(&geojson, 9).expect("GeoJSON Point must encode");
+        assert_eq!(
+            cell,
+            Value::UnsignedInteger(crate::geo::h3::lat_lng_to_cell(48.8566, 2.3522, 9))
+        );
     }
 
     #[test]
     fn h3_cell_value_rejects_shared_geo_non_goals() {
         for value in [
             Value::Json(br#"{"lat":"48.8566","lon":"2.3522"}"#.to_vec()),
-            Value::Json(br#"{"type":"Point","coordinates":[2.3522,48.8566]}"#.to_vec()),
+            Value::Json(br#"{"type":"Polygon","coordinates":[[2.3522,48.8566]]}"#.to_vec()),
+            Value::Json(br#"{"type":"Point","coordinates":[2.3522]}"#.to_vec()),
+            Value::Json(br#"{"type":"Point","coordinates":[2.3522,48.8566,0]}"#.to_vec()),
             Value::Json(br#"{"lat":48.8566}"#.to_vec()),
             Value::Json(br#"{"lat":91.0,"lon":2.3522}"#.to_vec()),
+            Value::Json(br#"{"type":"Point","coordinates":[2.3522,91.0]}"#.to_vec()),
         ] {
             assert_eq!(h3_cell_value(&value, 9), None, "{value:?}");
         }

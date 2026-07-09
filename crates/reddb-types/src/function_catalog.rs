@@ -25,7 +25,7 @@
 //! - String: UPPER, LOWER, LENGTH, COALESCE
 //! - Math:   ABS, ROUND, FLOOR, CEIL
 //! - Time:   NOW, CURRENT_TIMESTAMP, CURRENT_DATE, TIME_BUCKET
-//! - Geo:    GEO_DISTANCE, GEO_BEARING, HAVERSINE
+//! - Geo:    GEO_DISTANCE, GEO_BEARING, HAVERSINE, GEO_WITHIN, POLYGON
 //! - Misc:   VERIFY_PASSWORD
 //!
 //! Variadic functions (COALESCE, GREATEST, LEAST, CONCAT) are
@@ -116,6 +116,9 @@ const ARGS_FOUR_FLOATS: &[DataType] = &[
     DataType::Float,
     DataType::Float,
 ];
+// `GEO_WITHIN(point, POLYGON(...))` — the polygon arrives as the flat
+// `[lat0, lon0, …]` array `POLYGON` builds.
+const ARGS_GEO_WITHIN: &[DataType] = &[DataType::GeoPoint, DataType::Array];
 const ARGS_TIME_BUCKET: &[DataType] = &[DataType::Text, DataType::Timestamp];
 // H3 hexagonal index scalars (#1575). Cell ids are u64.
 const ARGS_H3_INDEX: &[DataType] = &[DataType::Float, DataType::Float, DataType::Integer];
@@ -778,6 +781,24 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         "VINCENTY",
         ARGS_FOUR_FLOATS,
         DataType::Float,
+        FunctionKind::Scalar,
+        false,
+    ),
+    // Geofencing (PRD #1939, #1945). `POLYGON` is variadic over its
+    // coordinate list and yields the flat `[lat0, lon0, …]` array that
+    // `GEO_WITHIN` tests a point against, returning a plain boolean so
+    // the predicate composes with the rest of the WHERE clause.
+    entry(
+        "POLYGON",
+        ARGS_FLOAT,
+        DataType::Array,
+        FunctionKind::Scalar,
+        true,
+    ),
+    entry(
+        "GEO_WITHIN",
+        ARGS_GEO_WITHIN,
+        DataType::Boolean,
         FunctionKind::Scalar,
         false,
     ),

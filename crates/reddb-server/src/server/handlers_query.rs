@@ -1791,6 +1791,7 @@ pub(crate) fn ndjson_error_code(err: &crate::api::RedDBError) -> &'static str {
         Validation { .. } => "validation_failed",
         FeatureNotEnabled(_) => "feature_not_enabled",
         SchemaVersionMismatch { .. } => "schema_version_mismatch",
+        StorageIntegrity(_) => "storage_integrity_failed",
         QuotaExceeded(_) => "quota_exceeded",
         MaterializationLimitExceeded { .. } => "materialization_limit_exceeded",
         Engine(_) | Catalog(_) | Io(_) | VersionUnavailable | Internal(_) => "internal_error",
