@@ -1,5 +1,10 @@
 //! Runtime-backed virtual `red.*` schema tables.
 
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
 use reddb::auth::policies::{EvalContext, Policy};
 use reddb::auth::registry::{ConfigRegistryDraft, EvidenceRequirement, Mutability, Sensitivity};
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
@@ -10,6 +15,7 @@ use reddb::runtime::mvcc::{
 use reddb::storage::schema::Value;
 use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_file::EMBEDDED_RDB_MANIFEST_OFFSET;
 
 const INDEX_COLUMNS: [&str; 10] = [
     "collection",
@@ -209,6 +215,43 @@ fn stat_value(rt: &RedDBRuntime, collection: &str, entity: Value, metric: &str) 
         panic!("missing stat collection={collection} entity={entity:?} metric={metric}: {rows:?}")
     })[3]
         .clone()
+}
+
+const SCRUB_COLUMNS: [&str; 10] = [
+    "row_kind",
+    "zone_kind",
+    "physical_identity",
+    "collection",
+    "expected_checksum",
+    "actual_checksum",
+    "fault_class",
+    "objects_verified",
+    "bytes_read",
+    "duration_ms",
+];
+
+fn persistent_runtime_at(path: &Path) -> RedDBRuntime {
+    RedDBRuntime::with_options(RedDBOptions::persistent(path)).expect("persistent runtime")
+}
+
+fn file_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(dir).expect("read store dir") {
+            let entry = entry.expect("store entry");
+            let path = entry.path();
+            let metadata = entry.metadata().expect("store metadata");
+            if metadata.is_dir() {
+                visit(base, &path, out);
+            } else if metadata.is_file() {
+                let relative = path.strip_prefix(base).expect("relative path").to_path_buf();
+                out.insert(relative, fs::read(&path).expect("read store file"));
+            }
+        }
+    }
+
+    let mut out = BTreeMap::new();
+    visit(root, root, &mut out);
+    out
 }
 
 fn seed_stable_introspection_fixture(rt: &RedDBRuntime) {
@@ -1451,6 +1494,155 @@ fn red_stats_exposes_the_memory_budget_section_with_empty_placeholders() {
             .iter()
             .any(|row| row[0] == Value::text(MEMORY_BUDGET_COLLECTION)),
         "SHOW STATS should include the budget section: {all_stats:?}"
+    );
+
+    cleanup_scope();
+}
+
+#[test]
+fn scrub_healthy_store_returns_summary_and_does_not_mutate_files() {
+    cleanup_scope();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("data.rdb");
+    let rt = persistent_runtime_at(&db_path);
+
+    exec(&rt, "CREATE TABLE events (id INT, name TEXT)");
+    exec(&rt, "INSERT INTO events (id, name) VALUES (1, 'created')");
+    exec(&rt, "INSERT INTO events (id, name) VALUES (2, 'updated')");
+    rt.checkpoint().expect("checkpoint before scrub");
+
+    let before = file_snapshot(dir.path());
+    let scrub = rt.execute_query("SCRUB").expect("SCRUB healthy store");
+    let after = file_snapshot(dir.path());
+
+    assert_eq!(scrub.result.columns, SCRUB_COLUMNS.map(str::to_string));
+    assert_eq!(
+        scrub.result.records.len(),
+        1,
+        "healthy scrub emits one summary row"
+    );
+    let summary = &scrub.result.records[0];
+    assert_eq!(summary.get("row_kind"), Some(&Value::text("summary")));
+    assert_eq!(summary.get("zone_kind"), Some(&Value::text("summary")));
+    assert!(uint_field(summary, "objects_verified") > 0);
+    assert!(uint_field(summary, "bytes_read") > 0);
+    assert_eq!(before, after, "SCRUB must not mutate store bytes");
+
+    let findings = stat_value(&rt, "red.scrub", Value::Null, "last_findings_count");
+    assert_eq!(findings, Value::UnsignedInteger(0));
+    assert!(
+        matches!(
+            stat_value(&rt, "red.scrub", Value::Null, "last_run_unix_ms"),
+            Value::UnsignedInteger(value) if value > 0
+        ),
+        "SCRUB should publish last run timestamp"
+    );
+
+    cleanup_scope();
+}
+
+#[test]
+fn scrub_reports_corrupt_manifest_finding_without_repairing_store() {
+    cleanup_scope();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("data.rdb");
+    {
+        let rt = persistent_runtime_at(&db_path);
+        exec(&rt, "CREATE TABLE events (id INT, name TEXT)");
+        exec(&rt, "INSERT INTO events (id, name) VALUES (1, 'created')");
+        rt.checkpoint().expect("checkpoint before corruption");
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&db_path)
+        .expect("open embedded store");
+    file.seek(SeekFrom::Start(EMBEDDED_RDB_MANIFEST_OFFSET + 20))
+        .expect("seek manifest");
+    let mut byte = [0u8; 1];
+    file.read_exact(&mut byte).expect("read manifest byte");
+    file.seek(SeekFrom::Start(EMBEDDED_RDB_MANIFEST_OFFSET + 20))
+        .expect("seek manifest rewrite");
+    file.write_all(&[byte[0] ^ 0x01])
+        .expect("corrupt manifest byte");
+    file.sync_all().expect("sync corruption");
+    drop(file);
+
+    let rt = persistent_runtime_at(&db_path);
+    let before = file_snapshot(dir.path());
+    let scrub = rt.execute_query("SCRUB").expect("SCRUB corrupt store");
+    let after = file_snapshot(dir.path());
+
+    let finding = scrub
+        .result
+        .records
+        .iter()
+        .find(|row| {
+            row.get("row_kind") == Some(&Value::text("finding"))
+                && row.get("zone_kind") == Some(&Value::text("manifest"))
+        })
+        .unwrap_or_else(|| panic!("manifest finding missing: {:?}", scrub.result.records));
+    assert!(text_field(finding, "physical_identity").contains("manifest"));
+    assert_ne!(finding.get("expected_checksum"), finding.get("actual_checksum"));
+    assert_eq!(before, after, "SCRUB reports corruption without repair");
+
+    cleanup_scope();
+}
+
+#[test]
+fn scrub_background_tick_is_bounded_and_visible_in_red_stats() {
+    cleanup_scope();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("data.rdb");
+    let rt = persistent_runtime_at(&db_path);
+
+    exec(&rt, "CREATE TABLE events (id INT, name TEXT)");
+    for id in 0..8 {
+        exec(
+            &rt,
+            &format!("INSERT INTO events (id, name) VALUES ({id}, 'event-{id}')"),
+        );
+    }
+    rt.checkpoint().expect("checkpoint before background scrub");
+
+    let tick = rt
+        .execute_query("SCRUB BACKGROUND BUDGET 1")
+        .expect("background scrub tick");
+    let summary = tick.result.records.first().expect("background summary");
+    assert_eq!(summary.get("row_kind"), Some(&Value::text("summary")));
+    assert_eq!(uint_field(summary, "objects_verified"), 1);
+
+    assert_eq!(
+        stat_value(&rt, "red.scrub", Value::Null, "background_status"),
+        Value::text("running")
+    );
+    assert_eq!(
+        stat_value(&rt, "red.scrub", Value::Null, "background_verified_objects"),
+        Value::UnsignedInteger(1)
+    );
+    let total = match stat_value(&rt, "red.scrub", Value::Null, "background_total_objects") {
+        Value::UnsignedInteger(value) => value,
+        other => panic!("unexpected background total: {other:?}"),
+    };
+    assert!(total > 1, "small budget should leave work for later ticks");
+
+    for _ in 0..16 {
+        if stat_value(&rt, "red.scrub", Value::Null, "background_status")
+            == Value::text("complete")
+        {
+            break;
+        }
+        rt.execute_query("SCRUB BACKGROUND BUDGET 2")
+            .expect("background scrub follow-up tick");
+    }
+    assert_eq!(
+        stat_value(&rt, "red.scrub", Value::Null, "background_status"),
+        Value::text("complete")
+    );
+    assert_eq!(
+        stat_value(&rt, "red.scrub", Value::Null, "last_findings_count"),
+        Value::UnsignedInteger(0)
     );
 
     cleanup_scope();
