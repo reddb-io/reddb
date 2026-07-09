@@ -1683,6 +1683,30 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             let (lat1, lon1, lat2, lon2) = geo_args(args)?;
             Some(Value::Float(crate::geo::bearing(lat1, lon1, lat2, lon2)))
         }
+        // `POLYGON((lat lon), …)` — a flat `[lat0, lon0, lat1, lon1, …]`
+        // array. The parser guarantees an even argument count of at least
+        // three pairs; a coordinate that does not evaluate to a number
+        // collapses the whole polygon to NULL.
+        "POLYGON" => {
+            let coords = args
+                .iter()
+                .map(|value| value_as_f64(value).map(Value::Float))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Value::Array(coords))
+        }
+        // `GEO_WITHIN(col, POLYGON(...))` — the composable form of the
+        // `SEARCH SPATIAL WITHIN POLYGON` verb, sharing its exact even-odd
+        // inside-test. A row whose column holds no recognizable geo value
+        // is outside every polygon, exactly as the verb skips it.
+        "GEO_WITHIN" => {
+            let vertices = polygon_vertices(args.get(1)?)?;
+            let Some((lat, lon)) = geo_point(args.first()?) else {
+                return Some(Value::Boolean(false));
+            };
+            Some(Value::Boolean(crate::geo::point_in_polygon_even_odd(
+                lat, lon, &vertices,
+            )))
+        }
         // ── H3 hexagonal index scalars (PRD #1574 slice 1, #1575) ──
         // Pure wrappers over `crate::geo::h3`; the engine stays
         // h3o-agnostic. Cell ids are u64 → Value::UnsignedInteger.
@@ -2184,6 +2208,22 @@ fn geo_args(args: &[Value]) -> Option<(f64, f64, f64, f64)> {
 
 fn geo_point(value: &Value) -> Option<(f64, f64)> {
     crate::geo::recognize_geo_value(value)
+}
+
+/// Read a `POLYGON(...)` result back into `(lat, lon)` vertices. `None`
+/// for anything that is not a flat array of at least three coordinate
+/// pairs — the caller then yields NULL rather than guessing a shape.
+fn polygon_vertices(value: &Value) -> Option<Vec<(f64, f64)>> {
+    let Value::Array(coords) = value else {
+        return None;
+    };
+    if coords.len() < 6 || coords.len() % 2 != 0 {
+        return None;
+    }
+    coords
+        .chunks_exact(2)
+        .map(|pair| Some((value_as_f64(&pair[0])?, value_as_f64(&pair[1])?)))
+        .collect()
 }
 
 fn value_as_f64(value: &Value) -> Option<f64> {
