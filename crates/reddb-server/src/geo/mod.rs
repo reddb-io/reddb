@@ -86,6 +86,15 @@ fn numeric_value_to_f64(value: &Value) -> Option<f64> {
 fn recognize_geo_json(bytes: &[u8]) -> Option<(f64, f64)> {
     let json = crate::json::from_slice::<crate::json::Value>(bytes).ok()?;
     let object = json.as_object()?;
+    if object.get("type").and_then(|value| value.as_str()) == Some("Point") {
+        let coordinates = object.get("coordinates")?.as_array()?;
+        if coordinates.len() != 2 {
+            return None;
+        }
+        let lon = &coordinates[0];
+        let lat = &coordinates[1];
+        return recognize_geo_degrees(json_number_to_f64(lat)?, json_number_to_f64(lon)?);
+    }
     let lat = object
         .get("lat")
         .or_else(|| object.get("latitude"))
@@ -409,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn recognize_geo_value_accepts_geopoint_and_json_aliases() {
+    fn recognize_geo_value_accepts_geopoint_json_aliases_and_geojson_point() {
         assert_eq!(
             recognize_geo_value(&Value::GeoPoint(38_760_000, -77_150_000)),
             Some((38.76, -77.15))
@@ -425,6 +434,23 @@ mod tests {
         assert_eq!(
             recognize_geo_value(&json_value(r#"{"latitude":38.76,"longitude":-77.15}"#)),
             Some((38.76, -77.15))
+        );
+        assert_eq!(
+            recognize_geo_value(&json_value(
+                r#"{"type":"Point","coordinates":[-77.15,38.76]}"#
+            )),
+            Some((38.76, -77.15))
+        );
+    }
+
+    #[test]
+    fn recognize_geojson_point_uses_lon_lat_order() {
+        assert_eq!(
+            recognize_geo_value(&json_value(
+                r#"{"type":"Point","coordinates":[103.8198,1.3521]}"#
+            )),
+            Some((1.3521, 103.8198)),
+            "GeoJSON coordinates are [longitude, latitude], not [latitude, longitude]"
         );
     }
 
@@ -450,7 +476,16 @@ mod tests {
     fn recognize_geo_rejects_non_geo_shapes() {
         for value in [
             json_value(r#"{"lat":"38.76","lon":"-77.15"}"#),
-            json_value(r#"{"type":"Point","coordinates":[-77.15,38.76]}"#),
+            json_value(r#"{"type":"Polygon","coordinates":[[-77.15,38.76]]}"#),
+            json_value(r#"{"type":"LineString","coordinates":[[-77.15,38.76]]}"#),
+            json_value(r#"{"type":"Point"}"#),
+            json_value(r#"{"type":"Point","coordinates":[]}"#),
+            json_value(r#"{"type":"Point","coordinates":[-77.15]}"#),
+            json_value(r#"{"type":"Point","coordinates":[-77.15,38.76,0]}"#),
+            json_value(r#"{"type":"Point","coordinates":["-77.15",38.76]}"#),
+            json_value(r#"{"type":"Point","coordinates":[-77.15,"38.76"]}"#),
+            json_value(r#"{"type":"Point","coordinates":[181.0,38.76]}"#),
+            json_value(r#"{"type":"Point","coordinates":[-77.15,91.0]}"#),
             json_value(r#"{"lat":38.76}"#),
             json_value(r#"{"lat":91.0,"lon":0.0}"#),
             json_value(r#"{"lat":0.0,"lon":181.0}"#),
@@ -493,9 +528,14 @@ mod tests {
             prop_assume!(lat.is_finite());
             prop_assume!(lon.is_finite());
             let json = json_value(&format!(r#"{{"lat":{lat},"lon":{lon}}}"#));
+            let geojson = json_value(&format!(r#"{{"type":"Point","coordinates":[{lon},{lat}]}}"#));
             let fields = fields(&[("lat", Value::Float(lat)), ("lon", Value::Float(lon))]);
             prop_assert_eq!(
                 recognize_geo_value(&json),
+                recognize_geo_fields(|key| fields.get(key))
+            );
+            prop_assert_eq!(
+                recognize_geo_value(&geojson),
                 recognize_geo_fields(|key| fields.get(key))
             );
         }
@@ -506,8 +546,10 @@ mod tests {
             lon in -180.0f64..=180.0,
         ) {
             let json = json_value(&format!(r#"{{"lat":{lat},"lon":{lon}}}"#));
+            let geojson = json_value(&format!(r#"{{"type":"Point","coordinates":[{lon},{lat}]}}"#));
             let fields = fields(&[("lat", Value::Float(lat)), ("lon", Value::Float(lon))]);
             prop_assert_eq!(recognize_geo_value(&json), None);
+            prop_assert_eq!(recognize_geo_value(&geojson), None);
             prop_assert_eq!(recognize_geo_fields(|key| fields.get(key)), None);
         }
     }
