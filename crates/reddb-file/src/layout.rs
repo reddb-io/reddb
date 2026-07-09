@@ -16,11 +16,7 @@ pub const ATOMIC_TEMP_EXTENSION: &str = "tmp";
 pub const PRIMARY_WAL_EXTENSION: &str = "redwal";
 pub const PAGER_LEGACY_WAL_EXTENSION: &str = "wal";
 pub const ENGINE_WAL_EXTENSION: &str = "rdb-wal";
-pub const PAGER_HEADER_EXTENSION: &str = "rdb-hdr";
-pub const PAGER_META_EXTENSION: &str = "rdb-meta";
 pub const PAGER_DWB_EXTENSION: &str = "rdb-dwb";
-pub const PAGER_HEADER_SHADOW_SUFFIX: &str = "hdr";
-pub const PAGER_META_SHADOW_SUFFIX: &str = "meta";
 pub const PAGER_DWB_SHADOW_SUFFIX: &str = "dwb";
 pub const SHM_FILE_SUFFIX: &str = "shm";
 pub const PHYSICAL_METADATA_JSON_SUFFIX: &str = "meta.json";
@@ -549,14 +545,6 @@ pub fn engine_wal_path(data_path: &Path) -> PathBuf {
     data_path.with_extension(ENGINE_WAL_EXTENSION)
 }
 
-pub fn pager_header_path(data_path: &Path) -> PathBuf {
-    data_path.with_extension(PAGER_HEADER_EXTENSION)
-}
-
-pub fn pager_meta_path(data_path: &Path) -> PathBuf {
-    data_path.with_extension(PAGER_META_EXTENSION)
-}
-
 pub fn pager_dwb_path(data_path: &Path) -> PathBuf {
     data_path.with_extension(PAGER_DWB_EXTENSION)
 }
@@ -568,24 +556,67 @@ fn path_with_dash_suffix(data_path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-pub fn pager_header_shadow_path(data_path: &Path) -> PathBuf {
-    path_with_dash_suffix(data_path, PAGER_HEADER_SHADOW_SUFFIX)
-}
-
-pub fn pager_meta_shadow_path(data_path: &Path) -> PathBuf {
-    path_with_dash_suffix(data_path, PAGER_META_SHADOW_SUFFIX)
-}
-
 pub fn pager_dwb_shadow_path(data_path: &Path) -> PathBuf {
     path_with_dash_suffix(data_path, PAGER_DWB_SHADOW_SUFFIX)
 }
 
-pub fn pager_shadow_sidecar_paths(data_path: &Path) -> [PathBuf; 3] {
-    [
-        pager_header_shadow_path(data_path),
-        pager_meta_shadow_path(data_path),
-        pager_dwb_shadow_path(data_path),
-    ]
+pub fn pager_shadow_sidecar_paths(data_path: &Path) -> [PathBuf; 1] {
+    [pager_dwb_shadow_path(data_path)]
+}
+
+/// Filenames the live layout contract no longer recognises.
+///
+/// ADR 0038 §4 phase 1 moved the pager header and the internal manifest inside
+/// the `.rdb` file, retiring `rdb-hdr` and `rdb-meta`. Nothing in the engine's
+/// read or write path may derive these paths: they exist here solely so the
+/// offline migration tool can find a legacy store, and so `Pager::open` can
+/// refuse one didactically instead of reading it silently.
+///
+/// A new artifact must never be created at any of these paths.
+pub mod retired {
+    use super::path_with_dash_suffix;
+    use std::path::{Path, PathBuf};
+
+    /// Retired: the pager header sidecar, now superblock copy 0/1 in-file.
+    pub const PAGER_HEADER_EXTENSION_V0: &str = "rdb-hdr";
+    /// Retired: the pager metadata sidecar, now the in-file manifest zone.
+    pub const PAGER_META_EXTENSION_V0: &str = "rdb-meta";
+
+    pub fn pager_header_path_v0(data_path: &Path) -> PathBuf {
+        data_path.with_extension(PAGER_HEADER_EXTENSION_V0)
+    }
+
+    pub fn pager_meta_path_v0(data_path: &Path) -> PathBuf {
+        data_path.with_extension(PAGER_META_EXTENSION_V0)
+    }
+
+    pub fn pager_header_shadow_path_v0(data_path: &Path) -> PathBuf {
+        path_with_dash_suffix(data_path, "hdr")
+    }
+
+    pub fn pager_meta_shadow_path_v0(data_path: &Path) -> PathBuf {
+        path_with_dash_suffix(data_path, "meta")
+    }
+
+    /// Every retired phase-1 artifact path derived from `data_path`. For a
+    /// `.rdb` data file the extension and shadow forms coincide, so the list
+    /// de-duplicates naturally at the filesystem.
+    pub fn phase1_sidecar_paths(data_path: &Path) -> [PathBuf; 4] {
+        [
+            pager_header_path_v0(data_path),
+            pager_meta_path_v0(data_path),
+            pager_header_shadow_path_v0(data_path),
+            pager_meta_shadow_path_v0(data_path),
+        ]
+    }
+
+    /// The first retired phase-1 sidecar that exists next to `data_path`, if
+    /// any. Drives the didactic open-time refusal and the census assertion.
+    pub fn first_present_phase1_sidecar(data_path: &Path) -> Option<PathBuf> {
+        phase1_sidecar_paths(data_path)
+            .into_iter()
+            .find(|path| path.exists())
+    }
 }
 
 pub fn shm_path(data_path: &Path) -> PathBuf {
@@ -848,7 +879,7 @@ mod tests {
             PathBuf::from("/var/lib/reddb/main.rdb-tmp")
         );
         assert_eq!(
-            atomic_temp_path(&pager_meta_path(path)),
+            atomic_temp_path(&pager_dwb_path(path)),
             PathBuf::from("/var/lib/reddb/main.tmp")
         );
         assert_eq!(
@@ -862,14 +893,6 @@ mod tests {
         assert_eq!(
             pager_legacy_wal_path(path),
             PathBuf::from("/var/lib/reddb/main.wal")
-        );
-        assert_eq!(
-            pager_header_shadow_path(path),
-            PathBuf::from("/var/lib/reddb/main.rdb-hdr")
-        );
-        assert_eq!(
-            pager_meta_shadow_path(path),
-            PathBuf::from("/var/lib/reddb/main.rdb-meta")
         );
         assert_eq!(
             pager_dwb_shadow_path(path),
@@ -1003,6 +1026,43 @@ mod tests {
         assert_eq!(
             relay_segment_relative_path(10, 20),
             PathBuf::from("relay-00000000000000000010-00000000000000000020.redwal")
+        );
+    }
+
+    #[test]
+    fn the_live_pager_sidecar_set_is_the_dwb_alone() {
+        // Phase 1 retired `rdb-hdr`/`rdb-meta`; the DWB (phase 3) still ships.
+        let path = Path::new("/var/lib/reddb/main.rdb");
+        assert_eq!(
+            pager_shadow_sidecar_paths(path),
+            [PathBuf::from("/var/lib/reddb/main.rdb-dwb")]
+        );
+    }
+
+    #[test]
+    fn retired_phase1_names_stay_reachable_only_for_migration_and_refusal() {
+        let path = Path::new("/var/lib/reddb/main.rdb");
+        // For a `.rdb` data file the extension and shadow forms coincide,
+        // which is why a single glob catches both on a real store.
+        assert_eq!(
+            retired::phase1_sidecar_paths(path),
+            [
+                PathBuf::from("/var/lib/reddb/main.rdb-hdr"),
+                PathBuf::from("/var/lib/reddb/main.rdb-meta"),
+                PathBuf::from("/var/lib/reddb/main.rdb-hdr"),
+                PathBuf::from("/var/lib/reddb/main.rdb-meta"),
+            ]
+        );
+        // A non-`.rdb` data file (the blob-cache L2 store) shows the two forms
+        // diverging, so both must be probed.
+        let l2 = Path::new("/var/lib/reddb/main.result-cache.l2");
+        assert_eq!(
+            retired::pager_header_path_v0(l2),
+            PathBuf::from("/var/lib/reddb/main.result-cache.rdb-hdr")
+        );
+        assert_eq!(
+            retired::pager_header_shadow_path_v0(l2),
+            PathBuf::from("/var/lib/reddb/main.result-cache.l2-hdr")
         );
     }
 }
