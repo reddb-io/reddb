@@ -300,6 +300,7 @@ fn map_query_result(qr: &reddb_server::runtime::RuntimeQueryResult) -> QueryResu
         affected: qr.affected_rows,
         columns,
         rows,
+        notice: qr.notice.clone(),
     }
 }
 
