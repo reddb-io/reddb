@@ -299,6 +299,16 @@ fn float_field(record: &reddb::storage::query::UnifiedRecord, field: &str) -> f6
     }
 }
 
+fn uint_field(record: &reddb::storage::query::UnifiedRecord, field: &str) -> u64 {
+    match record.get(field) {
+        Some(Value::UnsignedInteger(value)) => *value,
+        Some(Value::Integer(value)) => {
+            u64::try_from(*value).unwrap_or_else(|_| panic!("{field} must be non-negative"))
+        }
+        other => panic!("expected {field} uint field, got {other:?} in {record:?}"),
+    }
+}
+
 /// For each query: run the full scan (no index), create the H3 index, run
 /// the ring scan, and assert the two are byte-identical.
 fn assert_h3_parity(create_index: &str, queries: &[String]) {
@@ -392,6 +402,191 @@ fn spatial_full_scan_reads_document_body_column() {
         0.0_f64.to_bits(),
         "exact centre nearest hit must report zero distance"
     );
+}
+
+#[test]
+fn h3_cell_projects_and_groups_row_geopoints() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE TABLE events (id INT, gpsLocation GEOPOINT, event_kind TEXT)")
+        .unwrap();
+    rt.execute_query(
+        "INSERT INTO events (id, gpsLocation, event_kind) VALUES \
+         (1, '38.760000,-77.150000', 'seen'), \
+         (2, '38.760100,-77.150100', 'seen'), \
+         (3, '40.712800,-74.006000', 'seen'), \
+         (4, NULL, 'seen')",
+    )
+    .unwrap();
+
+    let expected_dc_cell = reddb::geo::h3::lat_lng_to_cell(38.76, -77.15, 7);
+    let expected_ny_cell = reddb::geo::h3::lat_lng_to_cell(40.7128, -74.006, 7);
+
+    let projected = rt
+        .execute_query(
+            "SELECT H3_CELL(gpsLocation, 7) AS cell \
+             FROM events WHERE id = 1",
+        )
+        .expect("H3_CELL should project over row GEOPOINT");
+    assert_eq!(projected.result.records.len(), 1);
+    assert_eq!(
+        uint_field(&projected.result.records[0], "cell"),
+        expected_dc_cell
+    );
+
+    let heatmap = rt
+        .execute_query(
+            "SELECT H3_CELL(gpsLocation, 7) AS cell, COUNT(*) AS events \
+             FROM events \
+             GROUP BY cell \
+             ORDER BY events DESC \
+             LIMIT 50",
+        )
+        .expect("issue heatmap query should run as written over rows");
+    let rows = heatmap
+        .result
+        .records
+        .iter()
+        .map(|record| (uint_field(record, "cell"), uint_field(record, "events")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![(expected_dc_cell, 2), (expected_ny_cell, 1)],
+        "NULL row cells must drop out of GROUP BY"
+    );
+}
+
+#[test]
+fn h3_cell_groups_document_body_and_dotted_path_values() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"id":1,"gpsLocation":{"lat":38.76,"lon":-77.15},"location":{"gps":{"lat":38.76,"lon":-77.15}}}),
+        ({"id":2,"gpsLocation":{"lat":38.7601,"lon":-77.1501},"location":{"gps":{"lat":38.7601,"lon":-77.1501}}}),
+        ({"id":3,"gpsLocation":{"lat":40.7128,"lon":-74.0060},"location":{"gps":{"lat":40.7128,"lon":-74.0060}}}),
+        ({"id":4,"gpsLocation":"not-geo","location":{"gps":"not-geo"}}),
+        ({"id":5})"#,
+    )
+    .unwrap();
+
+    let expected_dc_cell = reddb::geo::h3::lat_lng_to_cell(38.76, -77.15, 7);
+    let expected_ny_cell = reddb::geo::h3::lat_lng_to_cell(40.7128, -74.006, 7);
+
+    let bare = rt
+        .execute_query(
+            "SELECT H3_CELL(gpsLocation, 7) AS cell, COUNT(*) AS events \
+             FROM events \
+             GROUP BY cell \
+             ORDER BY events DESC \
+             LIMIT 50",
+        )
+        .expect("issue heatmap query should run as written over documents");
+    let bare_rows = bare
+        .result
+        .records
+        .iter()
+        .map(|record| (uint_field(record, "cell"), uint_field(record, "events")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bare_rows,
+        vec![(expected_dc_cell, 2), (expected_ny_cell, 1)]
+    );
+
+    let dotted = rt
+        .execute_query(
+            "SELECT H3_CELL(body.location.gps, 7) AS cell, COUNT(*) AS events \
+             FROM events \
+             GROUP BY cell \
+             ORDER BY events DESC \
+             LIMIT 50",
+        )
+        .expect("H3_CELL should resolve dotted document body paths");
+    let dotted_rows = dotted
+        .result
+        .records
+        .iter()
+        .map(|record| (uint_field(record, "cell"), uint_field(record, "events")))
+        .collect::<Vec<_>>();
+    assert_eq!(dotted_rows, bare_rows);
+}
+
+#[test]
+fn h3_parent_rolls_child_cells_up_to_documented_parent() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE TABLE events (id INT, gpsLocation GEOPOINT)")
+        .unwrap();
+    rt.execute_query(
+        "INSERT INTO events (id, gpsLocation) VALUES \
+         (1, '38.760000,-77.150000'), \
+         (2, '38.760100,-77.150100'), \
+         (3, '38.761000,-77.151000'), \
+         (4, '40.712800,-74.006000')",
+    )
+    .unwrap();
+
+    let expected_dc_region =
+        reddb::geo::h3::cell_to_parent(reddb::geo::h3::lat_lng_to_cell(38.76, -77.15, 9), 4);
+    let expected_ny_region =
+        reddb::geo::h3::cell_to_parent(reddb::geo::h3::lat_lng_to_cell(40.7128, -74.006, 9), 4);
+
+    let rollup = rt
+        .execute_query(
+            "SELECT H3_PARENT(H3_CELL(gpsLocation, 9), 4) AS region, COUNT(*) AS events \
+             FROM events \
+             GROUP BY region \
+             ORDER BY events DESC",
+        )
+        .expect("issue rollup query should run as written");
+    let rows = rollup
+        .result
+        .records
+        .iter()
+        .map(|record| (uint_field(record, "region"), uint_field(record, "events")))
+        .collect::<Vec<_>>();
+    assert_eq!(rows, vec![(expected_dc_region, 3), (expected_ny_region, 1)]);
+
+    let fine = rt
+        .execute_query(
+            "SELECT H3_CELL(gpsLocation, 9) AS cell, COUNT(*) AS events \
+             FROM events \
+             GROUP BY cell \
+             ORDER BY events DESC",
+        )
+        .expect("child-cell heatmap should execute");
+    let dc_child_total = fine
+        .result
+        .records
+        .iter()
+        .map(|record| (uint_field(record, "cell"), uint_field(record, "events")))
+        .filter(|(cell, _)| reddb::geo::h3::cell_to_parent(*cell, 4) == expected_dc_region)
+        .map(|(_, count)| count)
+        .sum::<u64>();
+    assert_eq!(
+        dc_child_total, 3,
+        "rollup count should equal the sum of child-cell counts"
+    );
+}
+
+#[test]
+fn h3_cell_and_parent_reject_invalid_resolutions() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE TABLE events (id INT, gpsLocation GEOPOINT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO events (id, gpsLocation) VALUES (1, '38.76,-77.15')")
+        .unwrap();
+
+    for query in [
+        "SELECT H3_CELL(gpsLocation, -1) AS cell, COUNT(*) AS events FROM events GROUP BY cell",
+        "SELECT H3_PARENT(H3_CELL(gpsLocation, 9), 16) AS region, COUNT(*) AS events FROM events GROUP BY region",
+    ] {
+        let err = match rt.execute_query(query) {
+            Ok(_) => panic!("invalid H3 resolution should reject: {query}"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("H3 resolution"), "{msg}");
+        assert!(msg.contains("0..=15"), "{msg}");
+    }
 }
 
 #[test]

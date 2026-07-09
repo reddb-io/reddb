@@ -25,6 +25,7 @@ use crate::storage::query::ast::{
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections, expr_to_projection as lower_expr_to_projection,
+    projection_to_expr,
 };
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
@@ -159,7 +160,7 @@ pub(crate) fn execute_aggregate_query(
 
     let effective_projections = effective_table_projections(query);
     let effective_filter = effective_table_filter(query);
-    let effective_group_by = effective_table_group_by_exprs(query);
+    let effective_group_by = resolve_group_by_aliases(query, effective_table_group_by_exprs(query));
     let runtime_plan = prepare_aggregate_runtime_plan(query);
     let mut all_aggregate_projections = effective_projections
         .iter()
@@ -1401,10 +1402,12 @@ fn aggregate_output_name(projection: &Projection, func_name: &str, column_name: 
 
 fn validate_aggregate_projection_shape(query: &TableQuery) -> RedDBResult<()> {
     let effective_projections = effective_table_projections(query);
-    let effective_group_by = effective_table_group_by_exprs(query);
+    let effective_group_by = resolve_group_by_aliases(query, effective_table_group_by_exprs(query));
     let has_group_by = !effective_group_by.is_empty();
 
     for projection in &effective_projections {
+        validate_h3_projection_resolutions(projection)?;
+
         if matches!(
             projection,
             Projection::Function(name, _)
@@ -1435,7 +1438,168 @@ fn validate_aggregate_projection_shape(query: &TableQuery) -> RedDBResult<()> {
         return Err(RedDBError::Query(message));
     }
 
+    for group_expr in &effective_group_by {
+        validate_h3_expr_resolutions(group_expr)?;
+    }
+
     Ok(())
+}
+
+fn resolve_group_by_aliases(query: &TableQuery, group_by: Vec<Expr>) -> Vec<Expr> {
+    let projections = effective_table_projections(query);
+    group_by
+        .into_iter()
+        .map(|expr| {
+            let Expr::Column {
+                field: FieldRef::TableColumn { table, column },
+                ..
+            } = &expr
+            else {
+                return expr;
+            };
+            if !table.is_empty() {
+                return expr;
+            }
+            projections
+                .iter()
+                .find(|projection| projection_name(projection).eq_ignore_ascii_case(column))
+                .and_then(|projection| projection_to_expr(projection).map(|(expr, _)| expr))
+                .unwrap_or(expr)
+        })
+        .collect()
+}
+
+fn validate_h3_projection_resolutions(projection: &Projection) -> RedDBResult<()> {
+    match projection {
+        Projection::Function(name, args) => {
+            validate_h3_function_projection_resolution(base_function_name(name), args)?;
+            for arg in args {
+                validate_h3_projection_resolutions(arg)?;
+            }
+        }
+        Projection::Expression(filter, _) => validate_h3_filter_resolutions(filter)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_h3_filter_resolutions(filter: &Filter) -> RedDBResult<()> {
+    match filter {
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            validate_h3_filter_resolutions(left)?;
+            validate_h3_filter_resolutions(right)?;
+        }
+        Filter::Not(inner) => validate_h3_filter_resolutions(inner)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_h3_expr_resolutions(expr: &Expr) -> RedDBResult<()> {
+    match expr {
+        Expr::FunctionCall { name, args, .. } => {
+            validate_h3_function_expr_resolution(name, args)?;
+            for arg in args {
+                validate_h3_expr_resolutions(arg)?;
+            }
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            validate_h3_expr_resolutions(lhs)?;
+            validate_h3_expr_resolutions(rhs)?;
+        }
+        Expr::UnaryOp { operand, .. } | Expr::Cast { inner: operand, .. } => {
+            validate_h3_expr_resolutions(operand)?;
+        }
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            for (cond, value) in branches {
+                validate_h3_expr_resolutions(cond)?;
+                validate_h3_expr_resolutions(value)?;
+            }
+            if let Some(else_expr) = else_ {
+                validate_h3_expr_resolutions(else_expr)?;
+            }
+        }
+        Expr::IsNull { operand, .. } => validate_h3_expr_resolutions(operand)?,
+        Expr::InList { target, values, .. } => {
+            validate_h3_expr_resolutions(target)?;
+            for value in values {
+                validate_h3_expr_resolutions(value)?;
+            }
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            validate_h3_expr_resolutions(target)?;
+            validate_h3_expr_resolutions(low)?;
+            validate_h3_expr_resolutions(high)?;
+        }
+        Expr::Literal { .. }
+        | Expr::Column { .. }
+        | Expr::Parameter { .. }
+        | Expr::Subquery { .. }
+        | Expr::WindowFunctionCall { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_h3_function_projection_resolution(name: &str, args: &[Projection]) -> RedDBResult<()> {
+    let Some(res_arg) = h3_resolution_projection_arg(name, args) else {
+        return Ok(());
+    };
+    let Some(res) = literal_projection_i64(res_arg) else {
+        return Ok(());
+    };
+    validate_h3_resolution_value(name, res)
+}
+
+fn validate_h3_function_expr_resolution(name: &str, args: &[Expr]) -> RedDBResult<()> {
+    let upper = name.to_ascii_uppercase();
+    let res_arg = match upper.as_str() {
+        "H3_CELL" | "H3_PARENT" => args.get(1),
+        _ => None,
+    };
+    let Some(Expr::Literal { value, .. }) = res_arg else {
+        return Ok(());
+    };
+    let Some(res) = value_i64(value) else {
+        return Ok(());
+    };
+    validate_h3_resolution_value(&upper, res)
+}
+
+fn h3_resolution_projection_arg<'a>(name: &str, args: &'a [Projection]) -> Option<&'a Projection> {
+    match name.to_ascii_uppercase().as_str() {
+        "H3_CELL" | "H3_PARENT" => args.get(1),
+        _ => None,
+    }
+}
+
+fn literal_projection_i64(projection: &Projection) -> Option<i64> {
+    let record = UnifiedRecord::new();
+    let value = eval_projection_value_with_db(None, projection, &record)?;
+    value_i64(&value).or_else(|| match value {
+        Value::Float(value) if value.fract() == 0.0 => Some(value as i64),
+        _ => None,
+    })
+}
+
+fn value_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) | Value::BigInt(value) => Some(*value),
+        Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn validate_h3_resolution_value(function_name: &str, resolution: i64) -> RedDBResult<()> {
+    if crate::geo::h3::valid_resolution(resolution).is_some() {
+        return Ok(());
+    }
+    Err(RedDBError::Query(format!(
+        "{function_name} H3 resolution {resolution} is invalid; expected H3 resolution in range 0..=15"
+    )))
 }
 
 fn render_aggregate_argument_key(arg: &Projection) -> String {
@@ -1502,6 +1666,7 @@ fn projection_group_key(projection: &Projection) -> Option<String> {
         Projection::Function(name, args) if base_function_name(name) == "TIME_BUCKET" => {
             render_time_bucket_group_expr(args)
         }
+        Projection::Function(_, _) => Some(render_projection_signature(projection)),
         _ => None,
     }
 }
@@ -1543,9 +1708,22 @@ fn resolve_group_by_value(db: &RedDB, group_expr: &Expr, record: &UnifiedRecord)
         Expr::Column { field, .. } => resolve_runtime_field(record, field, None, None),
         _ => {
             let projection = projection_from_expr(group_expr)?;
-            eval_projection_value_with_db(Some(db), &projection, record)
+            let value = eval_projection_value_with_db(Some(db), &projection, record)?;
+            if h3_group_expr_yields_null_drop(group_expr) && matches!(value, Value::Null) {
+                None
+            } else {
+                Some(value)
+            }
         }
     }
+}
+
+fn h3_group_expr_yields_null_drop(group_expr: &Expr) -> bool {
+    matches!(
+        group_expr,
+        Expr::FunctionCall { name, .. }
+            if matches!(name.to_ascii_uppercase().as_str(), "H3_CELL" | "H3_PARENT")
+    )
 }
 
 fn group_expr_key(expr: &Expr) -> Option<String> {
