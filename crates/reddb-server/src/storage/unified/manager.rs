@@ -196,11 +196,35 @@ impl SegmentManager {
     }
 
     /// Get statistics. total_entities is read from the lock-free atomic;
-    /// other fields come from the slow-path stats struct.
+    /// total_memory_bytes is summed from the per-segment atomics; the rest
+    /// comes from the slow-path stats struct.
     pub fn stats(&self) -> ManagerStats {
         let mut s = self.stats.read().clone();
         s.total_entities = self.total_entities_atomic.load(Ordering::Relaxed) as usize;
+        s.total_memory_bytes = usize::try_from(self.memory_bytes()).unwrap_or(usize::MAX);
         s
+    }
+
+    /// Approximate resident bytes across this collection's growing and sealed
+    /// segments — the arena's contribution to the shared accounting pool
+    /// (ADR 0073 §2).
+    ///
+    /// One relaxed load per segment under a read lock; no entity is touched.
+    /// The segments already maintained this counter — before this slice
+    /// `ManagerStats::total_memory_bytes` was declared and never assigned, so
+    /// `StoreStats::total_memory_bytes` reported a permanent zero.
+    pub fn memory_bytes(&self) -> u64 {
+        let growing = self
+            .growing
+            .read()
+            .as_ref()
+            .map_or(0, |segment| segment.read().memory_bytes());
+
+        self.sealed
+            .read()
+            .iter()
+            .map(|segment| segment.read().memory_bytes())
+            .fold(growing, u64::saturating_add)
     }
 
     /// Generate a new entity ID
