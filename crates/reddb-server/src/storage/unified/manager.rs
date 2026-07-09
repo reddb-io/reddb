@@ -2410,7 +2410,9 @@ mod tests {
                 let expected = expected.clone();
                 std::thread::spawn(move || {
                     let mut scans = 0u64;
-                    while !stop.load(Ordering::Relaxed) {
+                    // Do-while: every reader scans at least once even when the
+                    // drain finishes before this thread is first scheduled.
+                    loop {
                         let mut seen: Vec<u64> = manager
                             .query_all(|_| true)
                             .into_iter()
@@ -2421,6 +2423,9 @@ mod tests {
                         // the set equal but change the length.
                         assert_eq!(seen, expected, "reader saw a torn sealed set");
                         scans += 1;
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
                     }
                     scans
                 })
