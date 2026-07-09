@@ -825,6 +825,48 @@ impl SchemaManifest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageIntegrityError {
+    pub zone: String,
+    pub id: String,
+    pub collection: Option<String>,
+    pub detail: String,
+}
+
+impl StorageIntegrityError {
+    pub fn new(
+        zone: impl Into<String>,
+        id: impl Into<String>,
+        collection: Option<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            zone: zone.into(),
+            id: id.into(),
+            collection,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for StorageIntegrityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "storage integrity failure: zone={} id={}",
+            self.zone, self.id
+        )?;
+        if let Some(collection) = &self.collection {
+            write!(f, " collection={collection}")?;
+        }
+        write!(
+            f,
+            ": {}. RedDB refused to serve unverified bytes; run scrub when available, or use salvage to recover trusted rows.",
+            self.detail
+        )
+    }
+}
+
 #[derive(Debug)]
 pub enum RedDBError {
     InvalidConfig(String),
@@ -838,6 +880,7 @@ pub enum RedDBError {
     InvalidOperation(String),
     Engine(String),
     Catalog(String),
+    StorageIntegrity(StorageIntegrityError),
     Query(String),
     Validation {
         message: String,
@@ -883,6 +926,7 @@ impl fmt::Display for RedDBError {
             Self::InvalidOperation(msg) => write!(f, "INVALID_OPERATION: {msg}"),
             Self::Engine(msg) => write!(f, "engine error: {msg}"),
             Self::Catalog(msg) => write!(f, "catalog error: {msg}"),
+            Self::StorageIntegrity(err) => write!(f, "{err}"),
             Self::Query(msg) => write!(f, "query error: {msg}"),
             Self::Validation { message, .. } => write!(f, "validation error: {message}"),
             Self::Io(err) => write!(f, "io error: {err}"),
@@ -923,7 +967,10 @@ impl From<crate::storage::wal::TxError> for RedDBError {
 
 impl From<crate::storage::StoreError> for RedDBError {
     fn from(err: crate::storage::StoreError) -> Self {
-        Self::Catalog(err.to_string())
+        match err {
+            crate::storage::StoreError::StorageIntegrity(err) => Self::StorageIntegrity(err),
+            other => Self::Catalog(other.to_string()),
+        }
     }
 }
 
