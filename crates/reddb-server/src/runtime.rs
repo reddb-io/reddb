@@ -483,6 +483,7 @@ pub struct RuntimeQueryResult {
     /// High-level statement type: "select", "insert", "update", "delete", "create", "drop", "alter"
     pub statement_type: &'static str,
     pub bookmark: Option<String>,
+    pub notice: Option<String>,
 }
 
 impl RuntimeQueryResult {
@@ -502,6 +503,7 @@ impl RuntimeQueryResult {
             affected_rows: affected,
             statement_type,
             bookmark: None,
+            notice: None,
         }
     }
 
@@ -522,6 +524,7 @@ impl RuntimeQueryResult {
             affected_rows: 0,
             statement_type,
             bookmark: None,
+            notice: None,
         }
     }
 
@@ -553,6 +556,7 @@ impl RuntimeQueryResult {
             affected_rows: 0,
             statement_type,
             bookmark: None,
+            notice: None,
         }
     }
 

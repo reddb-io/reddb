@@ -136,6 +136,7 @@ pub(crate) fn show_config_json_result(
         affected_rows: 0,
         statement_type: "select",
         bookmark: None,
+        notice: None,
     }
 }
 

@@ -53,6 +53,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             GraphCommand::ShortestPath {
@@ -111,6 +112,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             GraphCommand::Properties { source } => {
@@ -178,6 +180,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
                 let res = self.graph_properties(None)?;
@@ -206,6 +209,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             GraphCommand::Traverse {
@@ -248,6 +252,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             GraphCommand::Centrality {
@@ -303,6 +308,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             GraphCommand::Community {
@@ -364,6 +370,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             GraphCommand::Components {
@@ -396,6 +403,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             GraphCommand::Cycles { max_length } => {
@@ -417,6 +425,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             GraphCommand::Clustering => {
@@ -448,6 +457,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             GraphCommand::TopologicalSort => {
@@ -473,6 +483,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
         }
@@ -599,6 +610,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             SearchCommand::Text {
@@ -657,6 +669,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             SearchCommand::Hybrid {
@@ -702,6 +715,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             SearchCommand::Multimodal {
@@ -736,6 +750,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             SearchCommand::Index {
@@ -779,6 +794,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             SearchCommand::Context {
@@ -857,6 +873,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             SearchCommand::SpatialRadius {
@@ -892,10 +909,12 @@ impl RedDBRuntime {
                 let entities = scan_collection_with_candidates(&store, collection, &h3_candidates);
 
                 let mut hits: Vec<(u64, f64)> = Vec::new();
+                let mut geo_values_seen = 0usize;
                 for entity in &entities {
                     if let Some((lat, lon)) =
                         self.extract_spatial_column(entity, collection, column)
                     {
+                        geo_values_seen += 1;
                         let dist = haversine_km(*center_lat, *center_lon, lat, lon);
                         if dist <= *radius_km {
                             hits.push((entity.id.raw(), dist));
@@ -913,6 +932,13 @@ impl RedDBRuntime {
                     record.set("distance_km", Value::Float(*dist));
                     result.push(record);
                 }
+                let notice = self.spatial_zero_geo_notice(
+                    collection,
+                    column,
+                    &entities,
+                    geo_values_seen,
+                    result.records.is_empty(),
+                );
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -922,6 +948,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice,
                 })
             }
             SearchCommand::SpatialBbox {
@@ -952,6 +979,7 @@ impl RedDBRuntime {
 
                 let mut result = UnifiedResult::with_columns(vec!["entity_id".into()]);
                 let mut count = 0;
+                let mut geo_values_seen = 0usize;
                 for entity in &entities {
                     if count >= *limit {
                         break;
@@ -959,8 +987,62 @@ impl RedDBRuntime {
                     if let Some((lat, lon)) =
                         self.extract_spatial_column(entity, collection, column)
                     {
+                        geo_values_seen += 1;
                         if lat >= *min_lat && lat <= *max_lat && lon >= *min_lon && lon <= *max_lon
                         {
+                            let mut record = UnifiedRecord::new();
+                            record.set("entity_id", Value::UnsignedInteger(entity.id.raw()));
+                            result.push(record);
+                            count += 1;
+                        }
+                    }
+                }
+                let notice = self.spatial_zero_geo_notice(
+                    collection,
+                    column,
+                    &entities,
+                    geo_values_seen,
+                    result.records.is_empty(),
+                );
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "search_spatial_bbox",
+                    engine: "runtime-spatial",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                    bookmark: None,
+                    notice,
+                })
+            }
+            SearchCommand::SpatialWithinPolygon {
+                vertices,
+                collection,
+                column,
+                limit,
+                limit_param,
+            } => {
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH SPATIAL WITHIN POLYGON LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
+                let h3_candidates = self.h3_polygon_candidate_ids(collection, column, vertices);
+                let store = self.inner.db.store();
+                let entities = scan_collection_with_candidates(&store, collection, &h3_candidates);
+
+                let mut result = UnifiedResult::with_columns(vec!["entity_id".into()]);
+                let mut count = 0;
+                for entity in &entities {
+                    if count >= *limit {
+                        break;
+                    }
+                    if let Some((lat, lon)) =
+                        self.extract_spatial_column(entity, collection, column)
+                    {
+                        if crate::geo::point_in_polygon_even_odd(lat, lon, vertices) {
                             let mut record = UnifiedRecord::new();
                             record.set("entity_id", Value::UnsignedInteger(entity.id.raw()));
                             result.push(record);
@@ -971,12 +1053,13 @@ impl RedDBRuntime {
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
-                    statement: "search_spatial_bbox",
+                    statement: "search_spatial_within_polygon",
                     engine: "runtime-spatial",
                     result,
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             SearchCommand::SpatialNearest {
@@ -1006,10 +1089,12 @@ impl RedDBRuntime {
                 let entities = scan_collection_with_candidates(&store, collection, &h3_candidates);
 
                 let mut hits: Vec<(u64, f64)> = Vec::new();
+                let mut geo_values_seen = 0usize;
                 for entity in &entities {
                     if let Some((elat, elon)) =
                         self.extract_spatial_column(entity, collection, column)
                     {
+                        geo_values_seen += 1;
                         let dist = haversine_km(*lat, *lon, elat, elon);
                         hits.push((entity.id.raw(), dist));
                     }
@@ -1025,6 +1110,13 @@ impl RedDBRuntime {
                     record.set("distance_km", Value::Float(*dist));
                     result.push(record);
                 }
+                let notice = self.spatial_zero_geo_notice(
+                    collection,
+                    column,
+                    &entities,
+                    geo_values_seen,
+                    result.records.is_empty(),
+                );
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -1034,6 +1126,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice,
                 })
             }
         }
@@ -1349,6 +1442,42 @@ impl RedDBRuntime {
         }
     }
 
+    fn spatial_zero_geo_notice(
+        &self,
+        collection: &str,
+        column: &str,
+        scanned_entities: &[UnifiedEntity],
+        geo_values_seen: usize,
+        result_is_empty: bool,
+    ) -> Option<String> {
+        if !result_is_empty || geo_values_seen > 0 {
+            return None;
+        }
+        let (entity_count, geo_count) = if scanned_entities.is_empty() {
+            let store = self.inner.db.store();
+            let entities = scan_collection_with_candidates(&store, collection, &None);
+            let geo_count = entities
+                .iter()
+                .filter(|entity| {
+                    self.extract_spatial_column(entity, collection, column)
+                        .is_some()
+                })
+                .count();
+            (entities.len(), geo_count)
+        } else {
+            (scanned_entities.len(), geo_values_seen)
+        };
+        if entity_count == 0 || geo_count > 0 {
+            return None;
+        }
+        Some(format!(
+            "no entity in '{}' has an indexable geo value in column '{}' (expected {}).",
+            collection,
+            column,
+            crate::geo::RECOGNIZED_GEO_SHAPES
+        ))
+    }
+
     /// Resolution of the H3 index registered on `(collection, column)`, if
     /// the column is covered by one. `None` for any other (or no) index.
     fn h3_index_resolution(&self, collection: &str, column: &str) -> Option<u8> {
@@ -1431,6 +1560,23 @@ impl RedDBRuntime {
         .map(|(la, lo)| crate::geo::haversine_km(center_lat, center_lon, la, lo))
         .fold(0.0_f64, f64::max);
         let cells = h3_cover_cells(center_lat, center_lon, radius_km, resolution);
+        self.h3_cell_candidate_ids(collection, column, &cells)
+    }
+
+    /// Native H3 polygon-to-cells candidate ids for a WITHIN POLYGON query.
+    /// The H3 cover is only a pruning superset; exact even-odd
+    /// point-in-polygon filtering decides correctness. `None` falls back to
+    /// the full scan when there is no H3 index or the cover is too large.
+    fn h3_polygon_candidate_ids(
+        &self,
+        collection: &str,
+        column: &str,
+        vertices: &[(f64, f64)],
+    ) -> Option<std::collections::HashSet<u64>> {
+        let resolution = self.h3_index_resolution(collection, column)?;
+        const MAX_POLYGON_COVER_CELLS: usize = 50_000;
+        let cells =
+            crate::geo::h3::polygon_to_cover_cells(vertices, resolution, MAX_POLYGON_COVER_CELLS)?;
         self.h3_cell_candidate_ids(collection, column, &cells)
     }
 

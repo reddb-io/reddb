@@ -2360,6 +2360,7 @@ mod tests {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         });
 
         let payload = json
@@ -2546,6 +2547,7 @@ mod tests {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         });
 
         assert_eq!(

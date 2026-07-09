@@ -1634,6 +1634,7 @@ impl RedDBRuntime {
                     affected_rows: 1,
                     statement_type: if created { "insert" } else { "update" },
                     bookmark: None,
+                    notice: None,
                 })
             }
             KvCommand::InvalidateTags { collection, tags } => {
@@ -1661,6 +1662,7 @@ impl RedDBRuntime {
                     affected_rows: invalidated as u64,
                     statement_type: "delete",
                     bookmark: None,
+                    notice: None,
                 })
             }
 
@@ -1797,6 +1799,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     })
                 } else {
                     let mut result = UnifiedResult::with_columns(vec![
@@ -1867,6 +1870,7 @@ impl RedDBRuntime {
                             affected_rows: 0,
                             statement_type: "select",
                             bookmark: None,
+                            notice: None,
                         })
                     }
                 }
@@ -1911,6 +1915,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
 
@@ -1981,6 +1986,7 @@ impl RedDBRuntime {
                     affected_rows: purged as u64,
                     statement_type: "delete",
                     bookmark: None,
+                    notice: None,
                 })
             }
 
@@ -2028,6 +2034,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
 
@@ -2077,6 +2084,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             KvCommand::Watch {
@@ -2132,6 +2140,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "stream",
                     bookmark: None,
+                    notice: None,
                 })
             }
 
@@ -2261,6 +2270,7 @@ impl RedDBRuntime {
                             affected_rows: 0,
                             statement_type: "select",
                             bookmark: None,
+                            notice: None,
                         })
                     }
                     Err(err) => {
@@ -2319,6 +2329,7 @@ impl RedDBRuntime {
                     affected_rows: 1,
                     statement_type: "update",
                     bookmark: None,
+                    notice: None,
                 })
             }
 
@@ -2365,6 +2376,7 @@ impl RedDBRuntime {
                     affected_rows: if ok { 1 } else { 0 },
                     statement_type: "update",
                     bookmark: None,
+                    notice: None,
                 })
             }
 
@@ -2436,6 +2448,7 @@ impl RedDBRuntime {
                     affected_rows: if deleted { 1 } else { 0 },
                     statement_type: "delete",
                     bookmark: None,
+                    notice: None,
                 })
             }
         }
@@ -2583,6 +2596,7 @@ fn vault_write_result(
         affected_rows,
         statement_type,
         bookmark: None,
+        notice: None,
     }
 }
 
@@ -2925,6 +2939,7 @@ fn kv_list_json_result(
         affected_rows: 0,
         statement_type: "select",
         bookmark: None,
+        notice: None,
     }
 }
 

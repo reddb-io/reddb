@@ -1,9 +1,11 @@
 # Spatial Search
 
-RedDB supports spatial queries on `GeoPoint` columns, JSON `{lat, lon}` point
-objects, and GeoJSON `Point` values using an H3 index. GeoJSON `Point`
-coordinates are `[longitude, latitude]`. Other GeoJSON shapes are not
-recognized as points.
+RedDB supports spatial queries on `GeoPoint`, `Latitude`, and `Longitude`
+columns, JSON `{lat, lon}` point objects, and GeoJSON `Point` values using an H3
+index. GeoJSON `Point` coordinates are `[longitude, latitude]`; other GeoJSON
+shapes are not recognized as points. Find points within a radius, bounding box,
+polygon, or nearest neighbors. Without an index, RedDB falls back to an exact
+full scan.
 
 ## Prerequisites
 
@@ -67,6 +69,30 @@ SEARCH SPATIAL NEAREST 50.8503 4.3517 K 5 COLLECTION sites COLUMN location
 
 Returns results sorted by distance ascending.
 
+## Polygon Search
+
+Find all points inside a polygon. H3 polygon coverage is used only to prune candidates; an exact even-odd point-in-polygon post-filter decides correctness, so indexed and full-scan results are identical.
+
+```sql
+SEARCH SPATIAL WITHIN POLYGON ((<lat> <lon>), (<lat> <lon>), (<lat> <lon>)[, ...])
+  COLLECTION <collection> COLUMN <column> [LIMIT <n>]
+```
+
+**Example:** Find couriers inside a zone:
+
+```sql
+SEARCH SPATIAL WITHIN POLYGON ((38.70 -77.20), (38.80 -77.20), (38.80 -77.05), (38.70 -77.05))
+  COLLECTION couriers COLUMN current
+```
+
+Polygon rules:
+
+- At least three vertices are required.
+- Latitude must be in `-90..=90`; longitude must be in `-180..=180`.
+- Points exactly on a vertex or edge are treated as inside.
+- Self-intersecting polygons are accepted and resolved with the standard even-odd rule.
+- Polygons crossing the antimeridian are rejected.
+
 ## Distance Calculation
 
 RedDB uses the **Haversine formula** for accurate great-circle distances on the Earth's surface. All distances are in kilometers.
@@ -84,5 +110,5 @@ RedDB uses the **Haversine formula** for accurate great-circle distances on the 
 ## See Also
 
 - [CREATE INDEX](/query/create-index.md) -- Creating H3 indexes
-- [Geo Types](/types/geo.md) -- GeoPoint and recognized JSON point shapes
+- [Geo Types](/types/geo.md) -- GeoPoint, Latitude, Longitude, and recognized JSON/GeoJSON point shapes
 - [Search Commands](/query/search-commands.md) -- Other search types
