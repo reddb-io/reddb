@@ -691,4 +691,21 @@ mod tests {
             assert_eq!(crate::buggify_fault!(class, 0, 64), None);
         }
     }
+
+    /// The `buggify_fault!` posture matches `buggify!`: debug builds consult the
+    /// installed context, release builds compile the call away to `None`, so no
+    /// production write path can be perturbed. Written to hold under both
+    /// profiles, which also type-checks the release arm of the macro.
+    #[test]
+    fn the_fault_macro_is_release_inert() {
+        let _guard = SimulationContext::new(3)
+            .with_fault_class(FaultClass::LostWrite, 1_000_000)
+            .install();
+        let fired = crate::buggify_fault!(FaultClass::LostWrite, 0, 8);
+        if cfg!(debug_assertions) {
+            assert_eq!(fired, Some(FaultDecision::LostWrite));
+        } else {
+            assert_eq!(fired, None, "release builds must never inject a fault");
+        }
+    }
 }
