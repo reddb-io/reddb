@@ -124,7 +124,7 @@ is resolved as `lon`, then `lng`, then `longitude`. Key matching is
 | String coordinates | `{"lat":"38.76","lon":"-77.15"}` | Members must be JSON numbers |
 | String pair | `"38.76,-77.15"` | Not an object |
 | Array coordinates | `[38.76,-77.15]` | Not an object |
-| GeoJSON non-`Point` | `{"type":"LineString","coordinates":[...]}` | Only `Point` is a single coordinate pair — see below |
+| GeoJSON non-`Point` | `{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}` | Only `Point` is a single coordinate pair — see below |
 | Missing member | `{"lat":38.76}` | Both members required |
 | Null member | `{"lat":38.76,"lon":null}` | Members must be JSON numbers |
 | Latitude out of range | `{"lat":91,"lon":0}` | Latitude must be in `-90..=90` |
@@ -230,7 +230,7 @@ CREATE DOCUMENT sensors;
 
 INSERT INTO sensors DOCUMENT VALUES
   ({"id":1,"spot":"38.76,-77.15"}),
-  ({"id":2,"spot":{"type":"Point","coordinates":[-77.15,38.76]}}),
+  ({"id":2,"spot":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}}),
   ({"id":3,"spot":{"lat":38.76}});
 
 CREATE INDEX idx_sensors_spot ON sensors (spot) USING H3;
