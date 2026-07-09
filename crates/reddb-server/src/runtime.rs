@@ -1494,11 +1494,11 @@ pub mod lease_loop;
 pub mod lease_timer_wheel;
 pub mod lifecycle;
 pub mod lock_manager;
+pub mod locking;
+pub(crate) mod materialization_limit;
 /// Samples every governed pool's live usage into the shared accounting
 /// (ADR 0073 §2).
 pub mod memory_accounting;
-pub mod locking;
-pub(crate) mod materialization_limit;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
 pub(crate) mod mvcc_lifecycle;
