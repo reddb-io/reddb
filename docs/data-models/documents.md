@@ -247,7 +247,7 @@ H3 indexes, and diagnostics:
 | `GeoPoint` value | A typed `GEOPOINT` value such as `POINT(38.76, -77.15)` | Yes |
 | `{lat, lon}` JSON object | `{"gpsLocation":{"lat":38.76,"lon":-77.15}}` | Yes |
 | Alias object | `{"gpsLocation":{"latitude":38.76,"longitude":-77.15}}` or `{"gpsLocation":{"latitude":38.76,"lng":-77.15}}` | Yes |
-| GeoJSON object | `{"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}}` | No, not yet |
+| GeoJSON `Point` | `{"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}}` | Yes — coordinates are longitude-first (RFC 7946); other GeoJSON shapes are not recognized |
 | String coordinate | `{"gpsLocation":"38.76,-77.15"}` | No |
 | Array coordinate | `{"gpsLocation":[38.76,-77.15]}` | No |
 

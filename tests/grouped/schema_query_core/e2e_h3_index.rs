@@ -972,11 +972,13 @@ fn h3_create_index_reports_existing_geo_coverage() {
 fn h3_create_index_reports_zero_coverage_shape_hint_for_non_empty_collection() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     rt.execute_query("CREATE DOCUMENT events").unwrap();
+    // A GeoJSON Point would index since gh-1943; LineString stays out of
+    // the recognized-point set, keeping this fixture shape-mismatched.
     rt.execute_query(
         r#"INSERT INTO events DOCUMENT VALUES
            ({"gpsLocation":"not-geo"}),
            ({"name":"missing"}),
-           ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+           ({"gpsLocation":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}})"#,
     )
     .unwrap();
 
@@ -985,7 +987,7 @@ fn h3_create_index_reports_zero_coverage_shape_hint_for_non_empty_collection() {
         .unwrap();
     assert_eq!(
         result_message(&res),
-        "index 'idx_loc' created on 'events' (gpsLocation) using H3 (0 of 3 entities indexed — no indexable geo value in 'gpsLocation'; expected GEO_POINT or {lat, lon} object)"
+        "index 'idx_loc' created on 'events' (gpsLocation) using H3 (0 of 3 entities indexed — no indexable geo value in 'gpsLocation'; expected GEO_POINT, {lat, lon} object, or GeoJSON Point)"
     );
 }
 
@@ -1007,11 +1009,13 @@ fn h3_create_index_reports_plain_zero_for_empty_collection() {
 fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     rt.execute_query("CREATE DOCUMENT events").unwrap();
+    // A GeoJSON Point would match since gh-1943; LineString stays out of
+    // the recognized-point set, keeping this fixture shape-mismatched.
     rt.execute_query(
         r#"INSERT INTO events DOCUMENT VALUES
            ({"gpsLocation":"not-geo"}),
            ({"name":"missing"}),
-           ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+           ({"gpsLocation":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}})"#,
     )
     .unwrap();
 
@@ -1024,7 +1028,7 @@ fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
     assert_eq!(
         res.notice.as_deref(),
         Some(
-            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT or {lat, lon} object)."
+            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT, {lat, lon} object, or GeoJSON Point)."
         )
     );
     rt.execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
@@ -1038,7 +1042,7 @@ fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
     assert_eq!(
         res.notice.as_deref(),
         Some(
-            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT or {lat, lon} object)."
+            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT, {lat, lon} object, or GeoJSON Point)."
         )
     );
 

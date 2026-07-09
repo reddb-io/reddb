@@ -165,7 +165,7 @@ The H3 index is a pure speed optimization. Every result row returned by an index
 
 ## GeoJSON and Recognized Shapes
 
-RedDB recognizes geographic coordinates from two value shapes. Any other shape is silently skipped rather than erroring, so rows with unrecognized coordinates are excluded from spatial results without blocking the query.
+RedDB recognizes geographic coordinates from three value shapes. Any other shape is silently skipped rather than erroring, so rows with unrecognized coordinates are excluded from spatial results without blocking the query.
 
 ### Accepted shapes
 
@@ -173,6 +173,7 @@ RedDB recognizes geographic coordinates from two value shapes. Any other shape i
 |:------|:--------|:------|
 | Native `GeoPoint` column | `'48.8566,2.3522'` | Stored internally as microdegrees |
 | JSON object with numeric lat/lon fields | `{"lat": 48.8566, "lon": 2.3522}` | Also accepts `latitude`, `longitude`, `lng` as field names |
+| GeoJSON `Point` | `{"type":"Point","coordinates":[2.3522, 48.8566]}` | The `coordinates` array is **longitude-first** (GeoJSON RFC 7946 §3.1.1) and is read in that order |
 
 Field names are checked in priority order: `lat`/`latitude` for latitude, `lon`/`lng`/`longitude` for longitude. Values must be numeric (integer or float). String-typed coordinate values are not recognized.
 
@@ -180,13 +181,13 @@ Field names are checked in priority order: `lat`/`latitude` for latitude, `lon`/
 
 | Shape | Reason |
 |:------|:-------|
-| Standard GeoJSON Point `{"type":"Point","coordinates":[-77.15, 38.76]}` | The `coordinates` array uses **longitude-first** order (GeoJSON RFC 7946 §3.1.1). RedDB's recognizer reads `lat`/`lon` named fields only — it does not parse the `coordinates` array. |
+| GeoJSON shapes other than `Point` `{"type":"LineString",...}` | Only `Point` carries a single coordinate pair; other GeoJSON geometries are not recognized as points |
 | JSON with string coordinate values `{"lat":"38.76","lon":"-77.15"}` | Coordinate values must be numeric |
 | Out-of-range coordinates `{"lat":91.0,"lon":0.0}` | Latitude must be in `-90..=90` |
 | Missing fields `{"lat":38.76}` | Both `lat`/`lon` (or equivalent) are required |
 | Plain text `'38.76,-77.15'` | Text strings are not parsed as coordinates |
 
-> **Standard GeoJSON note:** If your data uses the GeoJSON `{"type":"Point","coordinates":[lon,lat]}` format, extract the coordinates into `lat`/`lon` named fields before inserting, or use a document body path that points to the numeric values directly.
+> **GeoJSON order note:** GeoJSON `Point` coordinates are `[longitude, latitude]` — the reverse of RedDB's lat-first literals. RedDB reads the GeoJSON order as the standard demands, so a point that renders correctly on a GeoJSON map lands in the same place here; no manual swapping is needed.
 
 ### Notice on empty spatial results
 
@@ -194,7 +195,7 @@ When a spatial query returns no rows and no geo-valued coordinates are found in 
 
 ```
 no entity in 'couriers' has an indexable geo value in column 'current'
-(expected GEO_POINT or {lat, lon} object).
+(expected GEO_POINT, {lat, lon} object, or GeoJSON Point).
 ```
 
 This notice helps distinguish "no matches in range" from "column has no recognized coordinates."
