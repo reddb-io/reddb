@@ -1,6 +1,8 @@
 # Spatial Search
 
-RedDB supports spatial queries on `GeoPoint`, `Latitude`, and `Longitude` columns using an H3 index. Find points within a radius, bounding box, polygon, or nearest neighbors. Without an index, RedDB falls back to an exact full scan.
+This page is the `SEARCH SPATIAL` grammar reference. For the full picture — how coordinates get in, how to pick a resolution, and what the H3 index does or does not change about your results — read the [Spatial Search guide](/guides/spatial-search.md).
+
+RedDB runs spatial queries over `GEOPOINT` columns and over document fields holding a `{lat, lon}` object, accelerated by an H3 index. Find points within a radius, bounding box, polygon, or nearest neighbors. Without an index, RedDB falls back to an exact full scan that returns identical results.
 
 ## Prerequisites
 
@@ -27,11 +29,11 @@ SEARCH SPATIAL RADIUS <lat> <lon> <radius_km>
 SEARCH SPATIAL RADIUS 48.8566 2.3522 10.0 COLLECTION sites COLUMN location LIMIT 50
 ```
 
-Returns results sorted by distance ascending:
+`LIMIT` defaults to 100. Returns results sorted by distance ascending:
 
 | Column | Description |
 |:-------|:------------|
-| `rid` | RedDB ID of the matching point |
+| `entity_id` | RedDB entity id of the matching point |
 | `distance_km` | Haversine distance in kilometers |
 
 ## Bounding Box Search
@@ -49,6 +51,8 @@ SEARCH SPATIAL BBOX <min_lat> <min_lon> <max_lat> <max_lon>
 SEARCH SPATIAL BBOX 40.0 -10.0 55.0 20.0 COLLECTION sites COLUMN location LIMIT 100
 ```
 
+`LIMIT` defaults to 100. Returns a single `entity_id` column — a box has no centre to measure a distance from.
+
 ## Nearest Neighbor Search
 
 Find the K closest points to a location.
@@ -64,7 +68,7 @@ SEARCH SPATIAL NEAREST <lat> <lon> K <k>
 SEARCH SPATIAL NEAREST 50.8503 4.3517 K 5 COLLECTION sites COLUMN location
 ```
 
-Returns results sorted by distance ascending.
+`K` is required and caps the result; `NEAREST` takes no `LIMIT`. Returns `entity_id` and `distance_km`, sorted by distance ascending.
 
 ## Polygon Search (Geofencing)
 
@@ -81,6 +85,8 @@ SEARCH SPATIAL WITHIN POLYGON ((<lat> <lon>), (<lat> <lon>), (<lat> <lon>)[, ...
 SEARCH SPATIAL WITHIN POLYGON ((38.70 -77.20), (38.80 -77.20), (38.80 -77.05), (38.70 -77.05))
   COLLECTION couriers COLUMN current
 ```
+
+`LIMIT` defaults to 100. Returns a single `entity_id` column.
 
 ### Polygon rules
 
@@ -292,10 +298,18 @@ For sub-millimeter accuracy on long intercontinental distances, use `GEO_DISTANC
 - **Longitude:** -180 to 180 (East positive)
 - RedDB `GeoPoint` values store coordinates in microdegrees internally, converting automatically.
 
+## The `COLUMN` argument
+
+The `COLUMN` keyword is optional; the column name is not. The name resolves as a named column on a row table, a top-level document body field, or a dotted path into a document body (`telemetry.gps`). Values that are not recognized geographic points are skipped. When no entity in the collection has a recognized point in the named column, `RADIUS`, `BBOX`, and `NEAREST` return a `notice` explaining the shape mismatch.
+
+See [Getting coordinates in](/guides/spatial-search.md#getting-coordinates-in) for the full accept/reject matrix.
+
 ## See Also
 
+- [Spatial Search guide](/guides/spatial-search.md) — The complete H3 surface, end to end
 - [CREATE INDEX](/query/create-index.md) — Creating H3 indexes
 - [Geo Types](/types/geo.md) — GeoPoint, Latitude, Longitude types
 - [Scalar Functions](/query/scalar-functions.md) — GEO_DISTANCE, GEO_BEARING, GEO_MIDPOINT
 - [Geographic Operations](/guides/geo-operations.md) — Distance formulas, bearings, bounding boxes
 - [Documents](/data-models/documents.md) — Using geo predicates on document body fields
+- [Search Commands](/query/search-commands.md) — Other search types

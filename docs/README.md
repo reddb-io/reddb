@@ -177,12 +177,12 @@ FILTER DELETE sessions 'sess_abc'
 
 ## Advanced indexes
 
-Hash, Bitmap, R-Tree, and Bloom filter -- the optimizer picks the right one:
+Hash, Bitmap, H3, and Bloom filter -- the optimizer picks the right one:
 
 ```sql
 CREATE INDEX idx_email ON users (email) USING HASH       -- O(1) exact match
 CREATE INDEX idx_status ON orders (status) USING BITMAP   -- instant COUNT/GROUP BY
-CREATE INDEX idx_loc ON sites (location) USING RTREE      -- geo queries
+CREATE INDEX idx_loc ON sites (location) USING H3         -- geo queries
 
 SEARCH SPATIAL RADIUS 48.8566 2.3522 10.0 COLLECTION sites COLUMN location
 SEARCH SPATIAL NEAREST 48.8566 2.3522 K 5 COLLECTION sites COLUMN location
