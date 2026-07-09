@@ -1,6 +1,6 @@
 //! Segment Manager
 //!
-//! Manages the lifecycle of unified segments: creation, sealing, compaction,
+//! Manages the lifecycle of unified segments: creation, sealing, consolidation,
 //! and archival. Coordinates writes to growing segments and queries across
 //! all segments.
 //!
@@ -9,7 +9,7 @@
 //! - Route writes to the active growing segment
 //! - Auto-seal segments when thresholds are met
 //! - Coordinate queries across multiple segments
-//! - Background compaction of sealed segments
+//! - Paced consolidation of sealed segments (ADR 0073 §5)
 //! - Archive old segments to cold storage
 
 use parking_lot::RwLock;
@@ -25,17 +25,40 @@ use super::segment::{
 };
 use crate::storage::btree::visibility_map::VisibilityMap;
 
+/// Fraction of a collection's sealed entities that must be tombstoned before
+/// consolidation is worth its cost.
+///
+/// Tunable implementation constant, not a contract: it is surfaced read-only in
+/// `red.stats` so an operator can see what the engine decided, and it may move
+/// between releases without notice.
+pub const CONSOLIDATION_TOMBSTONE_RATIO: f64 = 0.20;
+
+/// Fraction of a collection's sealed bytes that consolidation would return to
+/// the budget (dead entity payloads plus the tombstone sets that bury them)
+/// before consolidation is worth its cost. See [`CONSOLIDATION_TOMBSTONE_RATIO`]
+/// on tunability.
+pub const CONSOLIDATION_FRAGMENTATION_RATIO: f64 = 0.30;
+
+/// Entities copied into the merged segment per maintenance tick.
+///
+/// ADR 0038 §3: consolidation is paced. A tick copies at most this many
+/// entities and returns; the half-built merged segment is carried to the next
+/// tick. No consolidation ever runs to completion in one unbounded pass.
+pub const CONSOLIDATION_ENTITIES_PER_TICK: usize = 4_096;
+
 /// Configuration for the segment manager
 #[derive(Debug, Clone)]
 pub struct ManagerConfig {
     /// Segment configuration
     pub segment_config: SegmentConfig,
-    /// Maximum number of sealed segments before compaction
+    /// Maximum number of sealed segments before consolidation
     pub max_sealed_segments: usize,
     /// Idle time (seconds) before auto-sealing
     pub idle_seal_secs: u64,
-    /// Enable background compaction
-    pub enable_compaction: bool,
+    /// Enable paced sealed-segment consolidation
+    pub enable_consolidation: bool,
+    /// Entities copied per maintenance tick while a consolidation is running
+    pub consolidation_entities_per_tick: usize,
     /// Enable background archival
     pub enable_archival: bool,
     /// Age threshold for archival (seconds)
@@ -48,11 +71,30 @@ impl Default for ManagerConfig {
             segment_config: SegmentConfig::default(),
             max_sealed_segments: 10,
             idle_seal_secs: 300, // 5 minutes
-            enable_compaction: true,
+            enable_consolidation: true,
+            consolidation_entities_per_tick: CONSOLIDATION_ENTITIES_PER_TICK,
             enable_archival: true,
             archive_age_secs: 86400 * 7, // 7 days
         }
     }
+}
+
+/// Consolidation counters for one collection (ADR 0073 §5).
+///
+/// These replace the `compact_ops` counter, which only ever counted a
+/// do-nothing branch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConsolidationStats {
+    /// Consolidations that crossed a threshold and began copying.
+    pub runs_started: u64,
+    /// Consolidations that finished the swap.
+    pub runs_completed: u64,
+    /// Source segments retired by a completed swap.
+    pub segments_merged: u64,
+    /// Tombstones garbage-collected by completed swaps.
+    pub tombstones_reclaimed: u64,
+    /// Bytes returned to the memory budget by completed swaps.
+    pub bytes_reclaimed: u64,
 }
 
 /// Manager statistics
@@ -70,8 +112,8 @@ pub struct ManagerStats {
     pub total_memory_bytes: usize,
     /// Number of seal operations
     pub seal_ops: u64,
-    /// Number of compaction operations
-    pub compact_ops: u64,
+    /// Consolidation counters
+    pub consolidation: ConsolidationStats,
 }
 
 /// Lifecycle events for monitoring
@@ -79,13 +121,47 @@ pub struct ManagerStats {
 pub enum LifecycleEvent {
     SegmentCreated(SegmentId),
     SegmentSealed(SegmentId),
-    SegmentCompacted {
+    SegmentConsolidated {
         source: Vec<SegmentId>,
         target: SegmentId,
     },
     SegmentArchived(SegmentId),
     EntityInserted(EntityId, SegmentId),
     EntityDeleted(EntityId, SegmentId),
+}
+
+/// A consolidation in flight, carried across maintenance ticks.
+///
+/// The merged segment is built off to the side and is invisible to readers
+/// until the swap. Nothing here is durable: sealed segments are the truth (via
+/// the normal checkpoint path), so a crash mid-consolidation simply drops this
+/// state and the next boot starts over.
+struct Consolidation {
+    /// Source segments, frozen when the run started.
+    sources: Vec<SourceProgress>,
+    /// Id reserved for the merged segment.
+    merged_id: SegmentId,
+    /// The half-built merged segment.
+    merged: GrowingSegment,
+    /// Index into `sources` of the segment currently being copied.
+    cursor: usize,
+    /// Live ids of `sources[cursor]`, snapshotted when that source was opened.
+    pending_ids: Vec<EntityId>,
+    /// How many of `pending_ids` have been consumed.
+    pending_cursor: usize,
+    /// Entities copied so far, across every tick of this run.
+    entities_copied: u64,
+}
+
+/// Per-source bookkeeping for a consolidation in flight.
+struct SourceProgress {
+    id: SegmentId,
+    /// Ids copied out of this source into the merged segment.
+    copied: Vec<EntityId>,
+    /// The source's tombstone count when we finished copying it. A source whose
+    /// count is unchanged at swap time needs no revalidation — nothing was
+    /// deleted from it while the merge ran.
+    tombstones_at_copy: Option<usize>,
 }
 
 /// Segment manager for a collection
@@ -119,6 +195,9 @@ pub struct SegmentManager {
     column_schema: RwLock<Option<Arc<Vec<String>>>>,
     /// Statistics (slow path — not updated on every insert).
     stats: RwLock<ManagerStats>,
+    /// Consolidation in flight, if any. Only `run_maintenance` touches it, so
+    /// at most one consolidation runs per collection at a time.
+    consolidation: RwLock<Option<Consolidation>>,
     /// Event listeners (simplified - would be channels in production)
     events: RwLock<Vec<LifecycleEvent>>,
     /// Visibility map: sealed segment entity ranges marked as all-visible.
@@ -148,6 +227,7 @@ impl SegmentManager {
             entity_segment: RwLock::new(HashMap::new()),
             column_schema: RwLock::new(None),
             stats: RwLock::new(ManagerStats::default()),
+            consolidation: RwLock::new(None),
             events: RwLock::new(Vec::new()),
             visibility_map: VisibilityMap::new(),
         }
@@ -196,11 +276,28 @@ impl SegmentManager {
     }
 
     /// Get statistics. total_entities is read from the lock-free atomic;
-    /// other fields come from the slow-path stats struct.
+    /// `total_memory_bytes` is summed across the live segments so that a
+    /// consolidation's reclamation is visible in the number the budget watches.
+    /// The remaining fields come from the slow-path stats struct.
     pub fn stats(&self) -> ManagerStats {
         let mut s = self.stats.read().clone();
         s.total_entities = self.total_entities_atomic.load(Ordering::Relaxed) as usize;
+        s.total_memory_bytes = self.resident_bytes() as usize;
         s
+    }
+
+    /// Approximate bytes held by this collection's in-memory segments: resident
+    /// entity payloads plus the tombstone sets. This is the number consolidation
+    /// drives down.
+    pub fn resident_bytes(&self) -> u64 {
+        let mut bytes = 0;
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            bytes += growing_arc.read().resident_bytes();
+        }
+        for segment in self.sealed.read().iter() {
+            bytes += segment.read().resident_bytes();
+        }
+        bytes
     }
 
     /// Generate a new entity ID
@@ -1470,16 +1567,336 @@ impl SegmentManager {
         // Auto-seal idle segments
         self.maybe_seal_growing()?;
 
-        // Compact if too many sealed segments
-        if self.config.enable_compaction {
-            let sealed_count = self.sealed.read().len();
-            if sealed_count > self.config.max_sealed_segments {
-                // In production, we'd trigger background compaction here
-                // For now, just log that compaction is needed
-            }
+        if self.config.enable_consolidation {
+            self.consolidation_tick();
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Consolidation — ADR 0073 §5
+    // ========================================================================
+
+    /// One paced step of sealed-segment consolidation.
+    ///
+    /// Starts a run when a threshold has been crossed, copies at most
+    /// `consolidation_entities_per_tick` live entities into the merged segment,
+    /// and swaps once every source has been drained. Returns without finishing
+    /// otherwise — the half-built merged segment waits for the next tick.
+    fn consolidation_tick(&self) {
+        if self.consolidation.read().is_none() && !self.start_consolidation() {
+            return;
+        }
+
+        let finished = {
+            let mut guard = self.consolidation.write();
+            let Some(run) = guard.as_mut() else {
+                return;
+            };
+            self.copy_bounded(run);
+            run.cursor >= run.sources.len()
+        };
+
+        if finished {
+            let run = self.consolidation.write().take();
+            if let Some(run) = run {
+                self.finish_consolidation(run);
+            }
+        }
+    }
+
+    /// Evaluate the trigger and, when it fires, open a consolidation run.
+    ///
+    /// Returns `true` when a run was started.
+    fn start_consolidation(&self) -> bool {
+        let sources = self.select_candidates();
+        if sources.len() < 2 && !self.candidates_carry_tombstones(&sources) {
+            return false;
+        }
+
+        let live_estimate: usize = {
+            let sealed = self.sealed.read();
+            sealed
+                .iter()
+                .filter_map(|segment_arc| {
+                    let segment = segment_arc.read();
+                    sources
+                        .contains(&segment.id())
+                        .then(|| segment.live_entity_count())
+                })
+                .sum()
+        };
+
+        let merged_id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
+        let merged = GrowingSegment::with_bloom_capacity(merged_id, &self.collection, live_estimate);
+
+        *self.consolidation.write() = Some(Consolidation {
+            sources: sources
+                .into_iter()
+                .map(|id| SourceProgress {
+                    id,
+                    copied: Vec::new(),
+                    tombstones_at_copy: None,
+                })
+                .collect(),
+            merged_id,
+            merged,
+            cursor: 0,
+            pending_ids: Vec::new(),
+            pending_cursor: 0,
+            entities_copied: 0,
+        });
+
+        self.stats.write().consolidation.runs_started += 1;
+        true
+    }
+
+    /// Which sealed segments this collection should merge, if any.
+    ///
+    /// Three thresholds, any of which arms consolidation:
+    ///
+    /// * **sealed-segment count** above `max_sealed_segments` — every sealed
+    ///   segment merges, which is what that knob always claimed to do.
+    /// * **tombstone ratio** — dead entities over total entities across the
+    ///   sealed set, past [`CONSOLIDATION_TOMBSTONE_RATIO`].
+    /// * **fragmentation** — reclaimable bytes over held bytes, past
+    ///   [`CONSOLIDATION_FRAGMENTATION_RATIO`].
+    ///
+    /// The count trigger takes every sealed segment; the two budget triggers
+    /// take only the segments that actually carry tombstones, so a clean
+    /// segment is never rewritten for nothing.
+    fn select_candidates(&self) -> Vec<SegmentId> {
+        let sealed = self.sealed.read();
+        if sealed.is_empty() {
+            return Vec::new();
+        }
+
+        if sealed.len() > self.config.max_sealed_segments {
+            return sealed.iter().map(|segment| segment.read().id()).collect();
+        }
+
+        let mut live = 0usize;
+        let mut tombstones = 0usize;
+        let mut held = 0u64;
+        let mut reclaimable = 0u64;
+        let mut dirty = Vec::new();
+
+        for segment_arc in sealed.iter() {
+            let segment = segment_arc.read();
+            live += segment.live_entity_count();
+            tombstones += segment.tombstone_count();
+            held += segment.resident_bytes();
+            reclaimable += segment.reclaimable_bytes();
+            if segment.tombstone_count() > 0 {
+                dirty.push(segment.id());
+            }
+        }
+
+        let total = live + tombstones;
+        let tombstone_ratio = if total == 0 {
+            0.0
+        } else {
+            tombstones as f64 / total as f64
+        };
+        let fragmentation = if held == 0 {
+            0.0
+        } else {
+            reclaimable as f64 / held as f64
+        };
+
+        if tombstone_ratio >= CONSOLIDATION_TOMBSTONE_RATIO
+            || fragmentation >= CONSOLIDATION_FRAGMENTATION_RATIO
+        {
+            return dirty;
+        }
+
+        Vec::new()
+    }
+
+    /// A single candidate is still worth merging when it carries tombstones —
+    /// the merge drops them. A single clean candidate is not.
+    fn candidates_carry_tombstones(&self, sources: &[SegmentId]) -> bool {
+        if sources.is_empty() {
+            return false;
+        }
+        let sealed = self.sealed.read();
+        sealed.iter().any(|segment_arc| {
+            let segment = segment_arc.read();
+            sources.contains(&segment.id()) && segment.tombstone_count() > 0
+        })
+    }
+
+    fn sealed_segment(&self, id: SegmentId) -> Option<Arc<RwLock<GrowingSegment>>> {
+        let sealed = self.sealed.read();
+        sealed
+            .iter()
+            .find(|segment| segment.read().id() == id)
+            .map(Arc::clone)
+    }
+
+    /// Copy at most one tick's worth of live entities into the merged segment.
+    ///
+    /// The per-tick bound is the pacing contract: a tick's cost is O(bound),
+    /// independent of how many entities the run still has to move.
+    fn copy_bounded(&self, run: &mut Consolidation) {
+        let mut budget = self.config.consolidation_entities_per_tick;
+
+        while budget > 0 && run.cursor < run.sources.len() {
+            let source_id = run.sources[run.cursor].id;
+            let Some(source_arc) = self.sealed_segment(source_id) else {
+                // The source vanished (only consolidation removes sealed
+                // segments, and it is single-threaded, so this cannot happen
+                // today). Skip it rather than resurrect its rows.
+                run.sources[run.cursor].tombstones_at_copy = Some(usize::MAX);
+                run.cursor += 1;
+                run.pending_ids.clear();
+                run.pending_cursor = 0;
+                continue;
+            };
+
+            if run.pending_cursor == 0 && run.pending_ids.is_empty() {
+                run.pending_ids = source_arc.read().live_entity_ids();
+            }
+
+            {
+                let source = source_arc.read();
+                while budget > 0 && run.pending_cursor < run.pending_ids.len() {
+                    let id = run.pending_ids[run.pending_cursor];
+                    run.pending_cursor += 1;
+                    budget -= 1;
+
+                    // Tombstoned between the snapshot and now — it must not be
+                    // resurrected into the merged segment.
+                    let Some(entity) = source.get(id) else {
+                        continue;
+                    };
+                    let metadata = source.get_metadata(id);
+                    run.merged.adopt_entity(entity.clone(), metadata);
+                    run.sources[run.cursor].copied.push(id);
+                    run.entities_copied += 1;
+                }
+            }
+
+            if run.pending_cursor >= run.pending_ids.len() {
+                run.sources[run.cursor].tombstones_at_copy =
+                    Some(source_arc.read().tombstone_count());
+                run.cursor += 1;
+                run.pending_ids.clear();
+                run.pending_cursor = 0;
+            }
+        }
+    }
+
+    /// Atomically replace the source segments with the merged one.
+    ///
+    /// The `sealed` write lock is the boundary: a reader holds the read lock
+    /// for the whole of its scan, so it observes either the old set or the new
+    /// set, never a gap and never both copies of a row.
+    fn finish_consolidation(&self, mut run: Consolidation) {
+        let mut sealed = self.sealed.write();
+
+        let mut positions = Vec::with_capacity(run.sources.len());
+        for source in &run.sources {
+            if let Some(index) = sealed
+                .iter()
+                .position(|segment| segment.read().id() == source.id)
+            {
+                positions.push(index);
+            }
+        }
+        if positions.is_empty() {
+            return;
+        }
+        positions.sort_unstable();
+
+        // Rows deleted from a source after we copied them must not come back.
+        // A source whose tombstone count is unchanged saw no deletes while the
+        // merge ran, so its copied rows need no per-row check.
+        let mut stale = Vec::new();
+        for source in &run.sources {
+            let Some(source_arc) = sealed
+                .iter()
+                .find(|segment| segment.read().id() == source.id)
+            else {
+                continue;
+            };
+            let segment = source_arc.read();
+            if source.tombstones_at_copy == Some(segment.tombstone_count()) {
+                continue;
+            }
+            stale.extend(
+                source
+                    .copied
+                    .iter()
+                    .copied()
+                    .filter(|id| !segment.contains(*id)),
+            );
+        }
+        for id in stale {
+            run.merged.evict_entity(id);
+        }
+
+        let reclaimed_bytes: u64 = positions
+            .iter()
+            .map(|&index| sealed[index].read().resident_bytes())
+            .sum();
+        let reclaimed_tombstones: u64 = positions
+            .iter()
+            .map(|&index| sealed[index].read().tombstone_count() as u64)
+            .sum();
+
+        if run.merged.seal().is_err() {
+            return;
+        }
+        let merged_bytes = run.merged.resident_bytes();
+        let merged_arc = Arc::new(RwLock::new(run.merged));
+
+        for &index in positions.iter().rev() {
+            sealed.remove(index);
+        }
+        let insert_at = positions[0].min(sealed.len());
+        sealed.insert(insert_at, Arc::clone(&merged_arc));
+        drop(sealed);
+
+        // Remap the entity→segment hints that pointed at the retired sources.
+        let source_ids: Vec<SegmentId> = run.sources.iter().map(|source| source.id).collect();
+        {
+            let mut entity_segment = self.entity_segment.write();
+            for segment_id in entity_segment.values_mut() {
+                if source_ids.contains(segment_id) {
+                    *segment_id = run.merged_id;
+                }
+            }
+        }
+
+        {
+            let mut stats = self.stats.write();
+            stats.sealed_count = stats
+                .sealed_count
+                .saturating_sub(positions.len())
+                .saturating_add(1);
+            let consolidation = &mut stats.consolidation;
+            consolidation.runs_completed += 1;
+            consolidation.segments_merged += positions.len() as u64;
+            consolidation.tombstones_reclaimed += reclaimed_tombstones;
+            consolidation.bytes_reclaimed += reclaimed_bytes.saturating_sub(merged_bytes);
+        }
+
+        self.emit(LifecycleEvent::SegmentConsolidated {
+            source: source_ids,
+            target: run.merged_id,
+        });
+    }
+
+    /// Entities copied by the consolidation currently in flight, or `None` when
+    /// none is running. Exposed for the pacing tests.
+    #[cfg(test)]
+    fn consolidation_progress(&self) -> Option<u64> {
+        self.consolidation
+            .read()
+            .as_ref()
+            .map(|run| run.entities_copied)
     }
 }
 
@@ -1729,6 +2146,380 @@ mod tests {
 
         let vectors = manager.get_by_kind("vector");
         assert_eq!(vectors.len(), 1);
+    }
+
+    // ========================================================================
+    // Consolidation — ADR 0073 §5
+    // ========================================================================
+
+    /// A manager whose sealed set never trips the count trigger, so tests can
+    /// exercise the tombstone/fragmentation triggers in isolation.
+    fn consolidating_manager(entities_per_tick: usize) -> SegmentManager {
+        SegmentManager::with_config(
+            "test",
+            ManagerConfig {
+                max_sealed_segments: 1_000,
+                consolidation_entities_per_tick: entities_per_tick,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Bulk-load `count` rows into a fresh segment and seal it. Bulk-inserted
+    /// entities land in flat storage, where a tombstone keeps its payload
+    /// resident — which is the memory consolidation reclaims.
+    fn seal_bulk_segment(manager: &SegmentManager, count: usize) -> Vec<EntityId> {
+        let entities: Vec<UnifiedEntity> = (0..count)
+            .map(|i| {
+                UnifiedEntity::table_row(
+                    manager.next_entity_id(),
+                    "users",
+                    i as u64,
+                    vec![Value::Integer(i as i64), Value::text(format!("row-{i}"))],
+                )
+            })
+            .collect();
+        let ids = manager.bulk_insert(entities).expect("bulk insert");
+        manager.force_seal().expect("seal");
+        ids
+    }
+
+    fn live_ids(manager: &SegmentManager) -> Vec<u64> {
+        let mut ids: Vec<u64> = manager
+            .query_all(|_| true)
+            .into_iter()
+            .map(|entity| entity.id.raw())
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn drain_maintenance(manager: &SegmentManager) -> usize {
+        let mut ticks = 0;
+        while manager.consolidation.read().is_some() || ticks == 0 {
+            manager.run_maintenance().expect("maintenance");
+            ticks += 1;
+            assert!(ticks < 1_000, "consolidation failed to converge");
+        }
+        ticks
+    }
+
+    #[test]
+    fn delete_heavy_workload_reclaims_tombstoned_memory_and_counts_it() {
+        let manager = consolidating_manager(CONSOLIDATION_ENTITIES_PER_TICK);
+        let ids = seal_bulk_segment(&manager, 100);
+
+        let bytes_before_delete = manager.resident_bytes();
+
+        // 40% tombstones — past CONSOLIDATION_TOMBSTONE_RATIO.
+        for id in ids.iter().take(40) {
+            assert!(manager.delete(*id).expect("delete"));
+        }
+
+        // Tombstones cost memory: the payload stays resident in flat storage
+        // and the tombstone set grows.
+        let bytes_with_tombstones = manager.resident_bytes();
+        assert!(bytes_with_tombstones > bytes_before_delete);
+
+        let survivors = live_ids(&manager);
+        assert_eq!(survivors.len(), 60);
+
+        drain_maintenance(&manager);
+
+        let stats = manager.stats();
+        assert_eq!(stats.consolidation.runs_started, 1);
+        assert_eq!(stats.consolidation.runs_completed, 1);
+        assert_eq!(stats.consolidation.segments_merged, 1);
+        assert_eq!(stats.consolidation.tombstones_reclaimed, 40);
+        assert!(stats.consolidation.bytes_reclaimed > 0);
+
+        // The reclaimed memory is at least the tombstoned entities' share.
+        let bytes_after = manager.resident_bytes();
+        assert!(
+            bytes_after <= bytes_before_delete,
+            "consolidation must return the tombstones' memory: {bytes_after} > {bytes_before_delete}"
+        );
+        assert_eq!(
+            bytes_with_tombstones - bytes_after,
+            stats.consolidation.bytes_reclaimed
+        );
+        assert_eq!(stats.total_memory_bytes, bytes_after as usize);
+
+        assert_eq!(live_ids(&manager), survivors);
+        assert_eq!(manager.sealed.read().len(), 1);
+        assert_eq!(manager.sealed.read()[0].read().tombstone_count(), 0);
+    }
+
+    #[test]
+    fn query_results_are_identical_before_during_and_after_consolidation() {
+        let manager = consolidating_manager(3);
+        let ids = seal_bulk_segment(&manager, 20);
+        seal_bulk_segment(&manager, 20);
+        for id in ids.iter().take(10) {
+            assert!(manager.delete(*id).expect("delete"));
+        }
+
+        let before = live_ids(&manager);
+        let survivor = *ids.last().expect("at least one row");
+
+        // Every mid-tick observation matches the pre-consolidation snapshot:
+        // point reads, full scans, and the kind index.
+        let mut mid_tick_observations = 0;
+        while manager.consolidation.read().is_some() || mid_tick_observations == 0 {
+            manager.run_maintenance().expect("maintenance");
+            assert_eq!(live_ids(&manager), before);
+            assert!(manager.get(survivor).is_some());
+            assert_eq!(manager.get_by_kind("table").len(), before.len());
+            mid_tick_observations += 1;
+            assert!(mid_tick_observations < 1_000);
+        }
+
+        assert!(
+            mid_tick_observations > 2,
+            "expected the run to span several ticks, saw {mid_tick_observations}"
+        );
+        assert_eq!(live_ids(&manager), before);
+        assert!(manager.get(survivor).is_some());
+        assert_eq!(manager.get_by_kind("table").len(), before.len());
+    }
+
+    #[test]
+    fn consolidation_is_paced_by_the_per_tick_entity_bound() {
+        const PER_TICK: usize = 4;
+        let manager = consolidating_manager(PER_TICK);
+        let ids = seal_bulk_segment(&manager, 60);
+        for id in ids.iter().take(30) {
+            assert!(manager.delete(*id).expect("delete"));
+        }
+
+        // First tick opens the run and copies exactly one bound's worth.
+        manager.run_maintenance().expect("maintenance");
+        assert_eq!(manager.consolidation_progress(), Some(PER_TICK as u64));
+
+        // Each subsequent tick advances by no more than the bound, and the run
+        // is still in flight — it never completes in one unbounded pass.
+        let mut previous = PER_TICK as u64;
+        let mut ticks = 1;
+        while let Some(copied) = manager.consolidation_progress() {
+            assert!(
+                copied - previous <= PER_TICK as u64,
+                "tick copied {} entities, bound is {PER_TICK}",
+                copied - previous
+            );
+            previous = copied;
+            manager.run_maintenance().expect("maintenance");
+            ticks += 1;
+            assert!(ticks < 100);
+        }
+
+        // 30 survivors at 4 per tick: the run cannot have finished before the
+        // eighth tick.
+        assert!(ticks >= 8, "consolidation completed in only {ticks} ticks");
+        assert_eq!(manager.stats().consolidation.runs_completed, 1);
+        assert_eq!(live_ids(&manager).len(), 30);
+    }
+
+    #[test]
+    fn sealed_segment_count_above_the_limit_triggers_a_merge() {
+        let manager = SegmentManager::with_config(
+            "test",
+            ManagerConfig {
+                max_sealed_segments: 3,
+                ..Default::default()
+            },
+        );
+        for _ in 0..4 {
+            seal_bulk_segment(&manager, 5);
+        }
+        assert_eq!(manager.sealed.read().len(), 4);
+
+        let before = live_ids(&manager);
+        drain_maintenance(&manager);
+
+        // The knob finally does what it claimed: the sealed set collapses even
+        // though not a single row was deleted.
+        assert_eq!(manager.sealed.read().len(), 1);
+        assert_eq!(manager.stats().consolidation.segments_merged, 4);
+        assert_eq!(manager.stats().consolidation.tombstones_reclaimed, 0);
+        assert_eq!(live_ids(&manager), before);
+    }
+
+    #[test]
+    fn a_clean_sealed_set_below_the_limit_is_never_consolidated() {
+        let manager = consolidating_manager(CONSOLIDATION_ENTITIES_PER_TICK);
+        seal_bulk_segment(&manager, 10);
+        seal_bulk_segment(&manager, 10);
+
+        for _ in 0..5 {
+            manager.run_maintenance().expect("maintenance");
+        }
+
+        assert_eq!(manager.stats().consolidation.runs_started, 0);
+        assert_eq!(manager.sealed.read().len(), 2);
+    }
+
+    #[test]
+    fn concurrent_readers_never_observe_a_missing_or_duplicated_entity() {
+        use std::sync::atomic::AtomicBool;
+
+        let manager = Arc::new(consolidating_manager(2));
+        let ids = seal_bulk_segment(&manager, 40);
+        seal_bulk_segment(&manager, 40);
+        for id in ids.iter().take(20) {
+            assert!(manager.delete(*id).expect("delete"));
+        }
+
+        let expected = live_ids(&manager);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let manager = Arc::clone(&manager);
+                let stop = Arc::clone(&stop);
+                let expected = expected.clone();
+                std::thread::spawn(move || {
+                    let mut scans = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        let mut seen: Vec<u64> = manager
+                            .query_all(|_| true)
+                            .into_iter()
+                            .map(|entity| entity.id.raw())
+                            .collect();
+                        seen.sort_unstable();
+                        // Sorting is not enough: a duplicated row would keep
+                        // the set equal but change the length.
+                        assert_eq!(seen, expected, "reader saw a torn sealed set");
+                        scans += 1;
+                    }
+                    scans
+                })
+            })
+            .collect();
+
+        drain_maintenance(&manager);
+        stop.store(true, Ordering::Relaxed);
+
+        for reader in readers {
+            let scans = reader.join().expect("reader thread");
+            assert!(scans > 0, "reader never got to scan");
+        }
+
+        assert_eq!(manager.stats().consolidation.runs_completed, 1);
+        assert_eq!(live_ids(&manager), expected);
+    }
+
+    #[test]
+    fn a_row_deleted_mid_consolidation_is_not_resurrected_by_the_swap() {
+        let manager = consolidating_manager(4);
+        let ids = seal_bulk_segment(&manager, 20);
+        for id in ids.iter().take(6) {
+            assert!(manager.delete(*id).expect("delete"));
+        }
+
+        // Copy the first bound's worth, then delete a row we just copied.
+        manager.run_maintenance().expect("maintenance");
+        assert_eq!(manager.consolidation_progress(), Some(4));
+        let doomed = ids[6];
+        assert!(manager.delete(doomed).expect("delete"));
+
+        let expected = live_ids(&manager);
+        drain_maintenance(&manager);
+
+        assert!(manager.get(doomed).is_none(), "deleted row came back");
+        assert_eq!(live_ids(&manager), expected);
+    }
+
+    #[test]
+    fn discarding_an_in_flight_consolidation_leaves_the_data_untouched() {
+        let manager = consolidating_manager(3);
+        let ids = seal_bulk_segment(&manager, 30);
+        for id in ids.iter().take(12) {
+            assert!(manager.delete(*id).expect("delete"));
+        }
+
+        let before = live_ids(&manager);
+        let sealed_before: Vec<SegmentId> = manager
+            .sealed
+            .read()
+            .iter()
+            .map(|segment| segment.read().id())
+            .collect();
+
+        manager.run_maintenance().expect("maintenance");
+        manager.run_maintenance().expect("maintenance");
+        assert!(manager.consolidation.read().is_some());
+
+        // A crash between ticks drops the half-built merged segment. Sealed
+        // segments are the durable truth, so nothing was lost — and the run is
+        // simply started over.
+        *manager.consolidation.write() = None;
+
+        assert_eq!(live_ids(&manager), before);
+        let sealed_after: Vec<SegmentId> = manager
+            .sealed
+            .read()
+            .iter()
+            .map(|segment| segment.read().id())
+            .collect();
+        assert_eq!(sealed_after, sealed_before);
+        assert_eq!(manager.stats().consolidation.runs_completed, 0);
+
+        drain_maintenance(&manager);
+        assert_eq!(live_ids(&manager), before);
+        assert_eq!(manager.stats().consolidation.runs_completed, 1);
+    }
+
+    #[test]
+    fn consolidation_preserves_entity_payload_metadata_and_sequence() {
+        let manager = consolidating_manager(CONSOLIDATION_ENTITIES_PER_TICK);
+        let ids = seal_bulk_segment(&manager, 10);
+
+        let mut meta = Metadata::new();
+        meta.set(
+            "os",
+            super::super::metadata::MetadataValue::String("linux".to_string()),
+        );
+        manager.set_metadata(ids[9], meta).expect("set metadata");
+        // set_metadata on a sealed row rewrites it into the growing segment;
+        // seal that too so everything under test is sealed.
+        manager.force_seal().expect("seal");
+
+        assert!(manager.delete(ids[0]).expect("delete"));
+        assert!(manager.delete(ids[1]).expect("delete"));
+        assert!(manager.delete(ids[2]).expect("delete"));
+
+        let before: Vec<UnifiedEntity> = {
+            let mut entities = manager.query_all(|_| true);
+            entities.sort_by_key(|entity| entity.id.raw());
+            entities
+        };
+
+        drain_maintenance(&manager);
+
+        let after: Vec<UnifiedEntity> = {
+            let mut entities = manager.query_all(|_| true);
+            entities.sort_by_key(|entity| entity.id.raw());
+            entities
+        };
+
+        let columns = |entity: &UnifiedEntity| match &entity.data {
+            super::super::entity::EntityData::Row(row) => row.columns.clone(),
+            _ => Vec::new(),
+        };
+
+        assert_eq!(before.len(), after.len());
+        for (old, new) in before.iter().zip(after.iter()) {
+            assert_eq!(old.id, new.id);
+            assert_eq!(columns(old), columns(new));
+            assert_eq!(
+                old.sequence_id, new.sequence_id,
+                "merge must not re-issue sequence ids"
+            );
+        }
+        assert!(manager
+            .get_metadata(ids[9])
+            .expect("metadata survives the merge")
+            .has("os"));
     }
 
     #[test]
