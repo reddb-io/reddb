@@ -673,14 +673,6 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.memtable",
-                    &crate::json!({
-                        "enabled": true,
-                        "max_bytes": 67108864_u64,
-                        "flush_threshold": 0.75
-                    }),
-                );
-                store.set_config_tree(
                     "red.probabilistic",
                     &crate::json!({
                         "hll_registers": 16384,

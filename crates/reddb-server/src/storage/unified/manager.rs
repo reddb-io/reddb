@@ -322,7 +322,7 @@ impl SegmentManager {
     }
 
     /// Turbo bulk insert — single lock acquisition for the entire batch.
-    /// Skips bloom filter, memtable, and cross-ref indexing for maximum speed.
+    /// Skips bloom filter and cross-ref indexing for maximum speed.
     pub fn bulk_insert(
         &self,
         mut entities: Vec<UnifiedEntity>,
@@ -372,7 +372,7 @@ impl SegmentManager {
         let mut segment = segment_arc.write();
         let segment_id = segment.id();
 
-        // Single call to GrowingSegment.bulk_insert (one lock, no bloom/memtable)
+        // Single call to GrowingSegment.bulk_insert (one lock, no bloom/cross-refs)
         let ids = segment.bulk_insert(entities)?;
 
         // Skip entity-segment mapping for bulk inserts (saves ~56 bytes/entity).
