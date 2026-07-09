@@ -42,7 +42,7 @@ status = "pending"  → bitmap {3, 4, 6, 10, 11, ...}
 
 - High-cardinality columns (> 1000 distinct values) -- use Hash or B-tree instead
 - Range queries -- use B-tree
-- Spatial queries -- use R-tree
+- Spatial queries -- use H3
 
 ## See Also
 
