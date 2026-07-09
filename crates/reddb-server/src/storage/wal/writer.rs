@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// before the next `sync()` drains the buffer. Tunable; reflects the
 /// postgres XLOG block size (8 KiB) scaled up because we batch
 /// record-level rather than page-level.
-const WAL_BUFFER_BYTES: usize = 64 * 1024;
+pub const WAL_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WalSyncMethod {
