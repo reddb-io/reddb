@@ -158,10 +158,15 @@ struct SourceProgress {
     id: SegmentId,
     /// Ids copied out of this source into the merged segment.
     copied: Vec<EntityId>,
-    /// The source's tombstone count when we finished copying it. A source whose
-    /// count is unchanged at swap time needs no revalidation — nothing was
-    /// deleted from it while the merge ran.
-    tombstones_at_copy: Option<usize>,
+    /// The source's tombstone count when the run opened it, and `None` before
+    /// that. Tombstones only ever grow, so a source whose count is unchanged at
+    /// swap time saw no deletes after we started reading it — and every row we
+    /// copied out of it is still live. Anything else needs a per-row check.
+    ///
+    /// Recording this when the source is *opened*, not when it is drained, is
+    /// what makes the check sound: a row deleted between two copy ticks would
+    /// otherwise be invisible to the swap and get resurrected.
+    tombstones_at_open: Option<usize>,
 }
 
 /// Segment manager for a collection
@@ -1585,7 +1590,10 @@ impl SegmentManager {
     /// and swaps once every source has been drained. Returns without finishing
     /// otherwise — the half-built merged segment waits for the next tick.
     fn consolidation_tick(&self) {
-        if self.consolidation.read().is_none() && !self.start_consolidation() {
+        // Drop the read guard before `start_consolidation` takes the write
+        // guard: `parking_lot` locks are not reentrant.
+        let running = self.consolidation.read().is_some();
+        if !running && !self.start_consolidation() {
             return;
         }
 
@@ -1621,15 +1629,18 @@ impl SegmentManager {
                 .iter()
                 .filter_map(|segment_arc| {
                     let segment = segment_arc.read();
-                    sources
-                        .contains(&segment.id())
-                        .then(|| segment.live_entity_count())
+                    if sources.contains(&segment.id()) {
+                        Some(segment.live_entity_count())
+                    } else {
+                        None
+                    }
                 })
                 .sum()
         };
 
         let merged_id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
-        let merged = GrowingSegment::with_bloom_capacity(merged_id, &self.collection, live_estimate);
+        let merged =
+            GrowingSegment::with_bloom_capacity(merged_id, &self.collection, live_estimate);
 
         *self.consolidation.write() = Some(Consolidation {
             sources: sources
@@ -1637,7 +1648,7 @@ impl SegmentManager {
                 .map(|id| SourceProgress {
                     id,
                     copied: Vec::new(),
-                    tombstones_at_copy: None,
+                    tombstones_at_open: None,
                 })
                 .collect(),
             merged_id,
@@ -1745,18 +1756,20 @@ impl SegmentManager {
         while budget > 0 && run.cursor < run.sources.len() {
             let source_id = run.sources[run.cursor].id;
             let Some(source_arc) = self.sealed_segment(source_id) else {
-                // The source vanished (only consolidation removes sealed
-                // segments, and it is single-threaded, so this cannot happen
-                // today). Skip it rather than resurrect its rows.
-                run.sources[run.cursor].tombstones_at_copy = Some(usize::MAX);
+                // The source vanished. Only consolidation removes sealed
+                // segments and it is single-threaded per collection, so this
+                // cannot happen today — skip it rather than resurrect its rows.
                 run.cursor += 1;
                 run.pending_ids.clear();
                 run.pending_cursor = 0;
                 continue;
             };
 
-            if run.pending_cursor == 0 && run.pending_ids.is_empty() {
-                run.pending_ids = source_arc.read().live_entity_ids();
+            if run.sources[run.cursor].tombstones_at_open.is_none() {
+                let source = source_arc.read();
+                run.pending_ids = source.live_entity_ids();
+                run.pending_cursor = 0;
+                run.sources[run.cursor].tombstones_at_open = Some(source.tombstone_count());
             }
 
             {
@@ -1779,8 +1792,6 @@ impl SegmentManager {
             }
 
             if run.pending_cursor >= run.pending_ids.len() {
-                run.sources[run.cursor].tombstones_at_copy =
-                    Some(source_arc.read().tombstone_count());
                 run.cursor += 1;
                 run.pending_ids.clear();
                 run.pending_cursor = 0;
@@ -1822,7 +1833,7 @@ impl SegmentManager {
                 continue;
             };
             let segment = source_arc.read();
-            if source.tombstones_at_copy == Some(segment.tombstone_count()) {
+            if source.tombstones_at_open == Some(segment.tombstone_count()) {
                 continue;
             }
             stale.extend(
@@ -2472,7 +2483,21 @@ mod tests {
     #[test]
     fn consolidation_preserves_entity_payload_metadata_and_sequence() {
         let manager = consolidating_manager(CONSOLIDATION_ENTITIES_PER_TICK);
-        let ids = seal_bulk_segment(&manager, 10);
+
+        // Metadata must be attached before the seal: `set_metadata` on a sealed
+        // row rewrites it into the growing segment, which would take it out of
+        // the segment under test.
+        let entities: Vec<UnifiedEntity> = (0..10)
+            .map(|i| {
+                UnifiedEntity::table_row(
+                    manager.next_entity_id(),
+                    "users",
+                    i as u64,
+                    vec![Value::Integer(i as i64)],
+                )
+            })
+            .collect();
+        let ids = manager.bulk_insert(entities).expect("bulk insert");
 
         let mut meta = Metadata::new();
         meta.set(
@@ -2480,8 +2505,6 @@ mod tests {
             super::super::metadata::MetadataValue::String("linux".to_string()),
         );
         manager.set_metadata(ids[9], meta).expect("set metadata");
-        // set_metadata on a sealed row rewrites it into the growing segment;
-        // seal that too so everything under test is sealed.
         manager.force_seal().expect("seal");
 
         assert!(manager.delete(ids[0]).expect("delete"));
