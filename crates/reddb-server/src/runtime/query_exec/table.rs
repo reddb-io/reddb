@@ -1530,6 +1530,77 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     execute_runtime_canonical_table_node(db, &plan.root, &context)
 }
 
+/// Materialize computed SELECT-alias values referenced by ORDER BY onto the
+/// records before sorting (#1982). The planner places the sort node *below*
+/// the projection node, so a computed alias such as `GEO_DISTANCE(...) AS dist`
+/// is not yet a column when the sort runs — resolving the bare name yields
+/// `None` for every row, the comparator treats all rows as equal, and the
+/// stable sort leaves them in nondeterministic scan order (ORDER BY silently
+/// no-ops). We compute the alias with the same `project_runtime_record_with_db`
+/// the projection node uses — which resolves document-body fields correctly on
+/// the lean records — and inject it as a virtual column; the sort then finds
+/// it, and the projection node re-projects it idempotently. Re-evaluating the
+/// expression directly at sort time does NOT work: the lean records do not
+/// expose document-body fields to the bare expression evaluator.
+fn materialize_order_by_computed_keys(
+    db: &RedDB,
+    records: &mut [UnifiedRecord],
+    order_by: &[OrderByClause],
+    projections: &[Projection],
+    table_name: &str,
+    table_alias: &str,
+    document_projection: bool,
+    entity_projection: bool,
+) {
+    let referenced: Vec<String> = order_by
+        .iter()
+        .filter(|clause| clause.expr.is_none())
+        .filter_map(|clause| match &clause.field {
+            FieldRef::TableColumn { table, column } if table.is_empty() => Some(column.clone()),
+            _ => None,
+        })
+        .collect();
+    if referenced.is_empty() {
+        return;
+    }
+    let needed: Vec<&Projection> = projections
+        .iter()
+        .filter(|projection| {
+            matches!(
+                projection,
+                Projection::Function(..) | Projection::Expression(..)
+            ) && referenced
+                .iter()
+                .any(|name| *name == projection_name(projection))
+        })
+        .collect();
+    if needed.is_empty() {
+        return;
+    }
+    for record in records.iter_mut() {
+        for projection in &needed {
+            let name = projection_name(projection);
+            if record.get(name.as_str()).is_some() {
+                continue;
+            }
+            if let Ok(projected) = project_runtime_record_with_db(
+                Some(db),
+                record,
+                std::slice::from_ref(*projection),
+                Some(table_name),
+                Some(table_alias),
+                document_projection,
+                entity_projection,
+            ) {
+                if let Some(value) = projected.get(name.as_str()) {
+                    let value = value.clone();
+                    record.set(name.as_str(), value);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn execute_runtime_canonical_table_node(
     db: &RedDB,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
@@ -1797,6 +1868,23 @@ pub(crate) fn execute_runtime_canonical_table_node(
             if !context.query.order_by.is_empty() {
                 // Issue #769 — cap the materialized sort buffer.
                 crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
+                // #1982 — materialize computed SELECT aliases referenced by
+                // ORDER BY before sorting, so the sort finds the column instead
+                // of resolving it to None and leaving rows unordered.
+                let effective_projections = effective_table_projections(context.query);
+                let document_projection = node.operator == "document_sort"
+                    || runtime_projections_use_document_path(&effective_projections, context.query);
+                let entity_projection = node.operator == "entity_sort";
+                materialize_order_by_computed_keys(
+                    db,
+                    &mut records,
+                    &context.query.order_by,
+                    &effective_projections,
+                    context.table_name,
+                    context.table_alias,
+                    document_projection,
+                    entity_projection,
+                );
                 super::super::join_filter::sort_records_by_order_by_with_db(
                     Some(db),
                     &mut records,
