@@ -317,6 +317,21 @@ fn geo_distance_select_signature(rt: &RedDBRuntime, query: &str) -> Vec<(i64, u6
         .collect()
 }
 
+fn id_name_signature(rt: &RedDBRuntime, query: &str) -> Vec<(i64, String)> {
+    let res = rt.execute_query(query).expect("SELECT executes");
+    res.result
+        .records
+        .iter()
+        .map(|record| {
+            let id = match record.get("id") {
+                Some(Value::Integer(value)) => *value,
+                other => panic!("expected id integer field, got {other:?} in {record:?}"),
+            };
+            (id, text_field(record, "name").to_string())
+        })
+        .collect()
+}
+
 fn explain_ops(rt: &RedDBRuntime, query: &str) -> Vec<String> {
     rt.execute_query(query)
         .expect("EXPLAIN executes")
@@ -837,6 +852,97 @@ fn h3_accelerates_geo_distance_document_predicate_with_parity() {
         &rt,
         "CREATE INDEX idx_loc ON events (gpsLocation) USING H3",
         &[query],
+    );
+}
+
+#[test]
+fn geo_within_predicate_composes_over_rows_documents_and_h3_explain() {
+    let row_query = "SELECT id, name \
+                     FROM couriers \
+                     WHERE GEO_WITHIN(current, POLYGON((38.70 -77.20), (38.80 -77.20), (38.80 -77.05), (38.70 -77.05))) \
+                       AND status = 'available' \
+                       AND shift = 'night' \
+                     ORDER BY name \
+                     LIMIT 2";
+
+    let rows = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rows.execute_query(
+        "CREATE TABLE couriers (id INT, name TEXT, status TEXT, shift TEXT, current GEOPOINT)",
+    )
+    .unwrap();
+    rows.execute_query(
+        "INSERT INTO couriers (id, name, status, shift, current) VALUES \
+         (1, 'Ada', 'available', 'night', '38.75,-77.15'), \
+         (2, 'Bea', 'available', 'day', '38.75,-77.15'), \
+         (3, 'Cid', 'busy', 'night', '38.75,-77.15'), \
+         (4, 'Dee', 'available', 'night', '38.69,-77.15'), \
+         (5, 'Eli', 'available', 'night', '38.79,-77.19'), \
+         (6, 'Fay', 'available', 'night', NULL)",
+    )
+    .unwrap();
+
+    let baseline = id_name_signature(&rows, row_query);
+    assert_eq!(
+        baseline,
+        vec![(1, "Ada".to_string()), (5, "Eli".to_string())]
+    );
+
+    let verb = "SEARCH SPATIAL WITHIN POLYGON ((38.70 -77.20), (38.80 -77.20), (38.80 -77.05), (38.70 -77.05)) COLLECTION couriers COLUMN current";
+    assert_eq!(
+        spatial_entity_ids(&rows, verb),
+        vec![1, 2, 3, 5],
+        "GEO_WITHIN must agree with the verb before extra boolean predicates"
+    );
+
+    let scan_ops = explain_ops(&rows, &format!("EXPLAIN {row_query}"));
+    assert!(
+        scan_ops.iter().all(|op| op != "geo_h3_index_seek"),
+        "unindexed GEO_WITHIN plan must stay on the scan path: {scan_ops:?}"
+    );
+
+    rows.execute_query("CREATE INDEX idx_current ON couriers (current) USING H3")
+        .unwrap();
+    assert_eq!(
+        id_name_signature(&rows, row_query),
+        baseline,
+        "indexed GEO_WITHIN row predicate must match the scan path"
+    );
+    let indexed_ops = explain_ops(&rows, &format!("EXPLAIN {row_query}"));
+    assert!(
+        indexed_ops.iter().any(|op| op == "geo_h3_index_seek"),
+        "indexed GEO_WITHIN predicate should explain the H3 route: {indexed_ops:?}"
+    );
+
+    let docs = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    docs.execute_query("CREATE DOCUMENT couriers").unwrap();
+    docs.execute_query(
+        r#"INSERT INTO couriers DOCUMENT VALUES
+        ({"id":1,"name":"Ada","status":"available","shift":"night","current":{"lat":38.75,"lon":-77.15}}),
+        ({"id":2,"name":"Bea","status":"available","shift":"day","current":{"lat":38.75,"lon":-77.15}}),
+        ({"id":3,"name":"Cid","status":"busy","shift":"night","current":{"lat":38.75,"lon":-77.15}}),
+        ({"id":4,"name":"Dee","status":"available","shift":"night","current":{"lat":38.69,"lon":-77.15}}),
+        ({"id":5,"name":"Eli","status":"available","shift":"night","current":{"lat":38.79,"lon":-77.19}}),
+        ({"id":6,"name":"Fay","status":"available","shift":"night"})"#,
+    )
+    .unwrap();
+    let doc_baseline = id_name_signature(&docs, row_query);
+    assert_eq!(doc_baseline, baseline);
+    docs.execute_query("CREATE INDEX idx_current ON couriers (current) USING H3")
+        .unwrap();
+    assert_eq!(
+        id_name_signature(&docs, row_query),
+        doc_baseline,
+        "indexed GEO_WITHIN document predicate must match the scan path"
+    );
+
+    let non_constant_ops = explain_ops(
+        &rows,
+        "EXPLAIN SELECT id FROM couriers \
+         WHERE GEO_WITHIN(current, current)",
+    );
+    assert!(
+        non_constant_ops.iter().all(|op| op != "geo_h3_index_seek"),
+        "non-constant polygon expressions must keep the scan path: {non_constant_ops:?}"
     );
 }
 
