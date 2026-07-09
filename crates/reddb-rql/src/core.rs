@@ -2897,6 +2897,17 @@ pub enum SearchCommand {
         /// and clears this back to `None`.
         limit_param: Option<usize>,
     },
+    /// SEARCH SPATIAL WITHIN POLYGON ((lat lon), ...) COLLECTION col COLUMN col [LIMIT n]
+    SpatialWithinPolygon {
+        vertices: Vec<(f64, f64)>,
+        collection: String,
+        column: String,
+        limit: usize,
+        /// `$N` placeholder for the `LIMIT` slot. The binder
+        /// substitutes the user-supplied positive integer into `limit`
+        /// and clears this back to `None`.
+        limit_param: Option<usize>,
+    },
     /// SEARCH SPATIAL NEAREST lat lon K n COLLECTION col COLUMN col
     SpatialNearest {
         lat: f64,

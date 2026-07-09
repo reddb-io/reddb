@@ -10,7 +10,11 @@
 //! (`grid_disk`) and parent truncation only. No on-disk index is
 //! touched here — that arrives in later slices.
 
-use h3o::{CellIndex, LatLng, Resolution};
+use geo::{LineString, Polygon};
+use h3o::{
+    geom::{ContainmentMode, TilerBuilder},
+    CellIndex, LatLng, Resolution,
+};
 
 pub const MIN_RESOLUTION: i64 = 0;
 pub const MAX_RESOLUTION: i64 = 15;
@@ -92,6 +96,45 @@ pub fn cell_to_parent(cell: u64, res: u8) -> u64 {
         Ok(c) => c.parent(clamp_resolution(res)).map(u64::from).unwrap_or(0),
         Err(_) => 0,
     }
+}
+
+/// Cover a polygon with every H3 cell whose boundary intersects or covers the
+/// polygon at `res`.
+///
+/// Input vertices are `(lat, lon)` degrees. Returns `None` when the geometry
+/// cannot be tiled or when the caller-supplied cap would be exceeded, so query
+/// execution can fall back to an exact full scan.
+pub fn polygon_to_cover_cells(
+    vertices: &[(f64, f64)],
+    res: u8,
+    max_cells: usize,
+) -> Option<Vec<u64>> {
+    if vertices.len() < 3 {
+        return None;
+    }
+    let mut coords: Vec<(f64, f64)> = vertices.iter().map(|(lat, lon)| (*lon, *lat)).collect();
+    if coords.first() != coords.last() {
+        coords.push(*coords.first()?);
+    }
+    let polygon = Polygon::new(LineString::from(coords), vec![]);
+    let mut tiler = TilerBuilder::new(clamp_resolution(res))
+        .containment_mode(ContainmentMode::Covers)
+        .disable_transmeridian_heuristic()
+        .build();
+    tiler.add(polygon).ok()?;
+    if tiler.coverage_size_hint() > max_cells {
+        return None;
+    }
+    let mut cells = Vec::new();
+    for cell in tiler.into_coverage() {
+        if cells.len() >= max_cells {
+            return None;
+        }
+        cells.push(u64::from(cell));
+    }
+    cells.sort_unstable();
+    cells.dedup();
+    Some(cells)
 }
 
 #[cfg(test)]

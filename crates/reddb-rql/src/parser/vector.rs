@@ -200,6 +200,10 @@ impl<'a> Parser<'a> {
             return Ok(expr);
         }
 
+        if matches!(self.peek(), Token::Ident(name) if is_vector_geo_distance_function(name)) {
+            return self.parse_metadata_geo_radius();
+        }
+
         // field op value
         let field = self.expect_ident()?;
 
@@ -243,6 +247,37 @@ impl<'a> Parser<'a> {
                 self.position(),
             ))
         }
+    }
+
+    fn parse_metadata_geo_radius(&mut self) -> Result<MetadataFilter, ParseError> {
+        let function = self.expect_ident()?;
+        self.expect(Token::LParen)?;
+        let field = self.expect_ident()?;
+        self.expect(Token::Comma)?;
+        let center_lat = self.parse_float()?;
+        self.expect(Token::Comma)?;
+        let center_lon = self.parse_float()?;
+        self.expect(Token::RParen)?;
+        if !self.consume(&Token::Le)? && !self.consume(&Token::Lt)? {
+            return Err(ParseError::expected(
+                vec!["<", "<="],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let radius_km = self.parse_float()?;
+        if radius_km.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return Err(ParseError::new(
+                format!("{function} radius must be > 0"),
+                self.position(),
+            ));
+        }
+        Ok(MetadataFilter::GeoRadius {
+            key: field,
+            center_lat,
+            center_lon,
+            radius_km,
+        })
     }
 
     /// Parse metadata value
@@ -327,6 +362,10 @@ impl<'a> Parser<'a> {
             )),
         }
     }
+}
+
+fn is_vector_geo_distance_function(name: &str) -> bool {
+    name.eq_ignore_ascii_case("GEO_DISTANCE") || name.eq_ignore_ascii_case("HAVERSINE")
 }
 
 #[cfg(test)]
@@ -495,6 +534,40 @@ mod tests {
             }
             other => panic!("expected AND filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn metadata_filter_parses_geo_radius() {
+        let query = parse_query(
+            "VECTOR SEARCH restaurants SIMILAR TO [1.0, 0.0] \
+             WHERE GEO_DISTANCE(location, 48.8566, 2.3522) <= 5.0 AND cuisine = 'bistro' \
+             LIMIT 3",
+        )
+        .unwrap();
+
+        let QueryExpr::Vector(vector) = query else {
+            panic!("expected vector query");
+        };
+        let Some(MetadataFilter::And(and_parts)) = vector.filter else {
+            panic!("expected AND filter");
+        };
+        assert!(matches!(
+            &and_parts[0],
+            MetadataFilter::GeoRadius {
+                key,
+                center_lat,
+                center_lon,
+                radius_km,
+            } if key == "location"
+                && (*center_lat - 48.8566).abs() < f64::EPSILON
+                && (*center_lon - 2.3522).abs() < f64::EPSILON
+                && (*radius_km - 5.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            &and_parts[1],
+            MetadataFilter::Eq(field, MetadataValue::String(value))
+                if field == "cuisine" && value == "bistro"
+        ));
     }
 
     #[test]

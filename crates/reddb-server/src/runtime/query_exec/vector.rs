@@ -147,6 +147,7 @@ pub(crate) fn runtime_vector_matches(
             index.search(vector, search_k, metric)
         };
         let mut results = Vec::with_capacity(raw.len());
+        let filter = effective_vector_filter(query);
         for hit in raw {
             let Some(entity) = db.store().get(&query.collection, hit.entity_id) else {
                 continue;
@@ -160,6 +161,11 @@ pub(crate) fn runtime_vector_matches(
             // version-superseded vector never reaches the results.
             if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
                 continue;
+            }
+            if let Some(filter) = filter.as_ref() {
+                if !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter) {
+                    continue;
+                }
             }
             // Exact re-rank against the stored full-precision vector rather
             // than trusting the quantised approximate score.
@@ -209,6 +215,7 @@ pub(crate) fn runtime_vector_matches(
 
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     let mut index = BruteForceVectorIndex::default();
+    let filter = effective_vector_filter(query);
     let search_k = if effective_vector_filter(query).is_some() {
         manager.count().max(1)
     } else {
@@ -229,6 +236,11 @@ pub(crate) fn runtime_vector_matches(
         }
         crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
     }) {
+        if let Some(filter) = filter.as_ref() {
+            if !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter) {
+                continue;
+            }
+        }
         if let EntityData::Vector(data) = &entity.data {
             index.upsert(VectorIndexEntry {
                 entity_id: entity.id,
@@ -271,8 +283,81 @@ pub(crate) fn runtime_vector_record_matches_filter(
         .store()
         .get_metadata(collection, entity_id)
         .unwrap_or_default();
-    let entry = runtime_metadata_entry(&metadata);
-    filter.matches(&entry)
+    runtime_metadata_matches_vector_filter(&metadata, filter)
+}
+
+fn runtime_vector_entity_matches_filter(
+    db: &RedDB,
+    collection: &str,
+    entity_id: EntityId,
+    filter: &VectorMetadataFilter,
+) -> bool {
+    let metadata = db
+        .store()
+        .get_metadata(collection, entity_id)
+        .unwrap_or_default();
+    runtime_metadata_matches_vector_filter(&metadata, filter)
+}
+
+fn runtime_metadata_matches_vector_filter(
+    metadata: &Metadata,
+    filter: &VectorMetadataFilter,
+) -> bool {
+    match filter {
+        VectorMetadataFilter::GeoRadius {
+            key,
+            center_lat,
+            center_lon,
+            radius_km,
+        } => metadata
+            .get(key)
+            .and_then(runtime_metadata_geo_point)
+            .is_some_and(|(lat, lon)| {
+                crate::geo::haversine_km(*center_lat, *center_lon, lat, lon) <= *radius_km
+            }),
+        VectorMetadataFilter::And(filters) => filters
+            .iter()
+            .all(|filter| runtime_metadata_matches_vector_filter(metadata, filter)),
+        VectorMetadataFilter::Or(filters) => filters
+            .iter()
+            .any(|filter| runtime_metadata_matches_vector_filter(metadata, filter)),
+        VectorMetadataFilter::Not(inner) => {
+            !runtime_metadata_matches_vector_filter(metadata, inner)
+        }
+        _ => {
+            let entry = runtime_metadata_entry(metadata);
+            filter.matches(&entry)
+        }
+    }
+}
+
+fn runtime_metadata_geo_point(value: &UnifiedMetadataValue) -> Option<(f64, f64)> {
+    let fields = match value {
+        UnifiedMetadataValue::Geo { lat, lon } => vec![
+            ("lat".to_string(), Value::Float(*lat)),
+            ("lon".to_string(), Value::Float(*lon)),
+        ],
+        UnifiedMetadataValue::Object(object) => object
+            .iter()
+            .filter_map(|(key, value)| {
+                runtime_metadata_geo_field_value(value).map(|value| (key.clone(), value))
+            })
+            .collect(),
+        _ => return None,
+    };
+    crate::geo::recognize_geo_fields(|key| {
+        fields
+            .iter()
+            .find_map(|(field, value)| (field == key).then_some(value))
+    })
+}
+
+fn runtime_metadata_geo_field_value(value: &UnifiedMetadataValue) -> Option<Value> {
+    match value {
+        UnifiedMetadataValue::Int(value) => Some(Value::Integer(*value)),
+        UnifiedMetadataValue::Float(value) => Some(Value::Float(*value)),
+        _ => None,
+    }
 }
 
 pub(crate) fn runtime_vector_metric(db: &RedDB, query: &VectorQuery) -> DistanceMetric {

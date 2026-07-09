@@ -312,6 +312,43 @@ pub fn polygon_area_km2(vertices: &[(f64, f64)]) -> f64 {
     (total.abs() / 2.0) * EARTH_RADIUS_KM * EARTH_RADIUS_KM
 }
 
+/// Exact planar even-odd point-in-polygon test over `(lat, lon)` degrees.
+///
+/// Boundary ties are included: a point exactly on a polygon vertex or edge is
+/// considered inside. Self-intersections are accepted and resolved by the
+/// standard even-odd rule.
+pub fn point_in_polygon_even_odd(lat: f64, lon: f64, vertices: &[(f64, f64)]) -> bool {
+    if vertices.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let (yi, xi) = vertices[i];
+        let (yj, xj) = vertices[j];
+        if point_on_segment(lat, lon, yi, xi, yj, xj) {
+            return true;
+        }
+        if ((yi > lat) != (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+fn point_on_segment(py: f64, px: f64, ay: f64, ax: f64, by: f64, bx: f64) -> bool {
+    const EPS: f64 = 1e-12;
+    let cross = (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+    if cross.abs() > EPS {
+        return false;
+    }
+    px >= ax.min(bx) - EPS
+        && px <= ax.max(bx) + EPS
+        && py >= ay.min(by) - EPS
+        && py <= ay.max(by) + EPS
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
