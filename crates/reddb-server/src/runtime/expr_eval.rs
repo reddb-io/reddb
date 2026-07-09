@@ -1673,6 +1673,13 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                 lat1, lon1, lat2, lon2,
             )))
         }
+        "GEO_WITHIN" => {
+            let (lat, lon) = geo_point(args.first()?)?;
+            let vertices = polygon_vertices(args.get(1)?)?;
+            Some(Value::Boolean(crate::geo::point_in_polygon_even_odd(
+                lat, lon, &vertices,
+            )))
+        }
         "VINCENTY" => {
             let (lat1, lon1, lat2, lon2) = geo_args(args)?;
             Some(Value::Float(crate::geo::vincenty_km(
@@ -2184,6 +2191,24 @@ fn geo_args(args: &[Value]) -> Option<(f64, f64, f64, f64)> {
 
 fn geo_point(value: &Value) -> Option<(f64, f64)> {
     crate::geo::recognize_geo_value(value)
+}
+
+fn polygon_vertices(value: &Value) -> Option<Vec<(f64, f64)>> {
+    let Value::Array(vertices) = value else {
+        return None;
+    };
+    vertices
+        .iter()
+        .map(|vertex| {
+            let Value::Array(pair) = vertex else {
+                return None;
+            };
+            let [lat, lon] = pair.as_slice() else {
+                return None;
+            };
+            Some((value_as_f64(lat)?, value_as_f64(lon)?))
+        })
+        .collect()
 }
 
 fn value_as_f64(value: &Value) -> Option<f64> {
