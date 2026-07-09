@@ -730,6 +730,14 @@ impl GrowingSegment {
         self.memory_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    /// This segment's approximate resident bytes. One relaxed load — the
+    /// arena's contribution to the shared accounting pool (ADR 0073 §2).
+    /// Unlike `stats()` this never walks the entity map, so a stats reader
+    /// does not pay `O(entities)` to observe memory.
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory_bytes.load(Ordering::Relaxed)
+    }
+
     /// Estimate memory for an entity
     fn estimate_entity_size(entity: &UnifiedEntity) -> usize {
         let mut size = std::mem::size_of::<UnifiedEntity>();
