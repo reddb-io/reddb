@@ -975,7 +975,9 @@ mod tests {
     fn sealed_zone(gen_a: Option<u64>, gen_b: Option<u64>) -> Vec<u8> {
         let mut zone = vec![0u8; PAGED_SUPERBLOCK_ZONE_SIZE];
         for (copy_index, generation) in [gen_a, gen_b].into_iter().enumerate() {
-            let Some(generation) = generation else { continue };
+            let Some(generation) = generation else {
+                continue;
+            };
             let start = copy_index * PAGED_SUPERBLOCK_SLOT_SIZE;
             let slot = &mut zone[start..start + PAGED_SUPERBLOCK_SLOT_SIZE];
             init_database_header_page(slot, 3).expect("init header");
@@ -1077,7 +1079,12 @@ mod tests {
         init_database_header_page(&mut slot, 3).expect("init header");
         seal_paged_superblock_slot(&mut slot, 0, 1).expect("seal slot");
 
-        for offset in [0, 40, DB_HEADER_MIN_LEN - 1, PAGED_SUPERBLOCK_SLOT_SIZE - 33] {
+        for offset in [
+            0,
+            40,
+            DB_HEADER_MIN_LEN - 1,
+            PAGED_SUPERBLOCK_SLOT_SIZE - 33,
+        ] {
             let mut rotted = slot.clone();
             rotted[offset] ^= 0x01;
             assert_eq!(
