@@ -401,7 +401,11 @@ fn crash_plus_torn_write_composes_deterministically() {
             first.0.contains("class=torn_write") || first.1.contains("Ok"),
             "SEED={seed}: a torn write must either land or leave recovery clean"
         );
-        assert_eq!(first, run(seed), "SEED={seed}: crash + torn_write must replay");
+        assert_eq!(
+            first,
+            run(seed),
+            "SEED={seed}: crash + torn_write must replay"
+        );
     }
 }
 
@@ -415,10 +419,9 @@ fn bit_rot_in_the_wal_is_detected_not_silently_accepted() {
     for seed in 0..32u64 {
         let outcome = run_fault_seed(seed, cfg);
 
-        let rotted_wal = outcome
-            .faults
-            .iter()
-            .any(|record| record.class == FaultClass::BitRot && record.file.ends_with(WAL_FILE_NAME));
+        let rotted_wal = outcome.faults.iter().any(|record| {
+            record.class == FaultClass::BitRot && record.file.ends_with(WAL_FILE_NAME)
+        });
         assert!(rotted_wal, "SEED={seed}: bit_rot at 1e6 must rot the WAL");
 
         match outcome.recovery {
