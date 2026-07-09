@@ -110,6 +110,7 @@ const ARGS_TEXT_TWO_INT: &[DataType] = &[DataType::Text, DataType::Integer, Data
 const ARGS_NONE: &[DataType] = &[];
 const ARGS_TWO_FLOATS: &[DataType] = &[DataType::Float, DataType::Float];
 const ARGS_GEO_PAIR: &[DataType] = &[DataType::GeoPoint, DataType::GeoPoint];
+const ARGS_GEO_POLYGON: &[DataType] = &[DataType::GeoPoint, DataType::Array];
 const ARGS_FOUR_FLOATS: &[DataType] = &[
     DataType::Float,
     DataType::Float,
@@ -757,6 +758,13 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         "GEO_DISTANCE",
         ARGS_FOUR_FLOATS,
         DataType::Float,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "GEO_WITHIN",
+        ARGS_GEO_POLYGON,
+        DataType::Boolean,
         FunctionKind::Scalar,
         false,
     ),
