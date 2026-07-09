@@ -14,6 +14,7 @@ use reddb_server::storage::timeseries::chunk::{
     points_from_column_block, TimeSeriesChunk, COLUMNAR_TS_COLUMN_ID, COLUMNAR_VALUE_COLUMN_ID,
 };
 use std::hint::black_box;
+use std::time::{Duration, Instant};
 
 /// Seal a synthetic chunk of `n` rows: timestamps 1 ms apart starting at a
 /// realistic epoch, values cycling over a small range to reproduce the codec
@@ -33,6 +34,7 @@ fn sealed_chunk(n: usize) -> Vec<u8> {
 }
 
 const CHUNK_SIZES: &[usize] = &[1_000, 10_000, 50_000];
+const GUARDED_RATIO_REPS: u32 = 16;
 
 /// Row-at-a-time path: `points_from_column_block` → `Vec<TimeSeriesPoint>`.
 fn bench_row_path(c: &mut Criterion) {
@@ -90,10 +92,69 @@ fn bench_columnar_ts_only(c: &mut Criterion) {
     group.finish();
 }
 
+/// Guarded lane for the projection read-win claim.
+///
+/// The row and projection paths are measured in one Criterion run, and the
+/// explicit ratio is derived from a paired timing pass over the same blocks.
+fn bench_projection_vs_row_guard(c: &mut Criterion) {
+    let projection = [COLUMNAR_TS_COLUMN_ID];
+    let mut group = c.benchmark_group("columnar-read/projection-vs-row-guard");
+    group.sample_size(10);
+    for &n in CHUNK_SIZES {
+        let block = sealed_chunk(n);
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("row-scan", n), &block, |b, block| {
+            b.iter(|| {
+                let points = points_from_column_block(black_box(block)).expect("row decode");
+                black_box(points)
+            });
+        });
+        group.bench_with_input(
+            BenchmarkId::new("columnar-projection-scan", n),
+            &block,
+            |b, block| {
+                b.iter(|| {
+                    let batch = column_batch_from_block(black_box(block), black_box(&projection))
+                        .expect("ts-only batch decode");
+                    black_box(batch)
+                });
+            },
+        );
+        let (row, projection) = paired_projection_ratio(&block, &projection);
+        let ratio = projection.as_secs_f64() / row.as_secs_f64();
+        eprintln!(
+            "[columnar-read guard] rows={n} row_scan={row:?} columnar_projection_scan={projection:?} ratio(projection/row)={ratio:.3}"
+        );
+    }
+    group.finish();
+}
+
+fn paired_projection_ratio(block: &[u8], projection: &[u32]) -> (Duration, Duration) {
+    let mut row_total = Duration::ZERO;
+    let mut projection_total = Duration::ZERO;
+    for _ in 0..GUARDED_RATIO_REPS {
+        let start = Instant::now();
+        let points = points_from_column_block(black_box(block)).expect("row decode");
+        black_box(points);
+        row_total += start.elapsed();
+
+        let start = Instant::now();
+        let batch =
+            column_batch_from_block(black_box(block), black_box(projection)).expect("batch decode");
+        black_box(batch);
+        projection_total += start.elapsed();
+    }
+    (
+        row_total / GUARDED_RATIO_REPS,
+        projection_total / GUARDED_RATIO_REPS,
+    )
+}
+
 criterion_group!(
     benches,
     bench_row_path,
     bench_columnar_path,
-    bench_columnar_ts_only
+    bench_columnar_ts_only,
+    bench_projection_vs_row_guard
 );
 criterion_main!(benches);
