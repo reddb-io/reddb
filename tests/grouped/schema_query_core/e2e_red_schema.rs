@@ -1375,6 +1375,16 @@ const MEMORY_BUDGET_SOURCES: [&str; 5] = [
     "physical-fraction",
 ];
 
+// Issue #1962 (ADR 0073 §2) — the pools that receive shares of that budget,
+// in the order `red.stats` reports them.
+const MEMORY_POOL_NAMES: [&str; 5] = [
+    "page_cache",
+    "blob_cache_l1",
+    "segment_arena",
+    "index_memory",
+    "wal_buffers",
+];
+
 fn budget_metric(rt: &RedDBRuntime, metric: &str) -> Value {
     let sql = format!(
         "SELECT * FROM red.stats WHERE collection = '{MEMORY_BUDGET_COLLECTION}' \
@@ -1390,8 +1400,33 @@ fn budget_metric(rt: &RedDBRuntime, metric: &str) -> Value {
     row.get("value").cloned().expect("budget metric value")
 }
 
+fn budget_unsigned(rt: &RedDBRuntime, metric: &str) -> u64 {
+    match budget_metric(rt, metric) {
+        Value::UnsignedInteger(bytes) => bytes,
+        other => panic!("{metric} should be an unsigned integer, got {other:?}"),
+    }
+}
+
+/// One pool's `share_bytes` or `used_bytes` row (`entity` = the pool name).
+fn pool_metric(rt: &RedDBRuntime, pool: &str, metric: &str) -> u64 {
+    let sql = format!(
+        "SELECT * FROM red.stats WHERE collection = '{MEMORY_BUDGET_COLLECTION}' \
+         AND entity = '{pool}' AND metric = '{metric}'"
+    );
+    let result = rt.execute_query(&sql).expect("red.stats pool row");
+    let row = result
+        .result
+        .records
+        .first()
+        .unwrap_or_else(|| panic!("pool {pool} metric {metric} present"));
+    match row.get("value") {
+        Some(Value::UnsignedInteger(bytes)) => *bytes,
+        other => panic!("{pool}.{metric} should be unsigned, got {other:?}"),
+    }
+}
+
 #[test]
-fn red_stats_exposes_the_memory_budget_section_with_empty_placeholders() {
+fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() {
     cleanup_scope();
     let rt = runtime();
 
@@ -1411,17 +1446,37 @@ fn red_stats_exposes_the_memory_budget_section_with_empty_placeholders() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    let mut expected_metrics = vec!["resolved_bytes", "source"];
+    for _ in MEMORY_POOL_NAMES {
+        expected_metrics.push("share_bytes");
+        expected_metrics.push("used_bytes");
+    }
+    expected_metrics.push("total_share_bytes");
+    expected_metrics.push("total_used_bytes");
     assert_eq!(
-        metrics,
-        vec!["resolved_bytes", "source", "pool_shares", "live_accounting"],
+        metrics, expected_metrics,
         "documented budget field names, in order"
     );
 
+    // The per-pool rows are keyed by pool name, in the documented order.
+    let pools = result
+        .result
+        .records
+        .iter()
+        .filter_map(|row| match row.get("entity") {
+            Some(Value::Text(pool)) => Some(pool.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected_pools = MEMORY_POOL_NAMES
+        .iter()
+        .flat_map(|pool| [pool.to_string(), pool.to_string()])
+        .collect::<Vec<_>>();
+    assert_eq!(pools, expected_pools);
+
     // The budget always exists and is never zero — there is no unlimited mode.
-    match budget_metric(&rt, "resolved_bytes") {
-        Value::UnsignedInteger(bytes) => assert!(bytes > 0, "resolved budget must be positive"),
-        other => panic!("resolved_bytes should be an unsigned integer, got {other:?}"),
-    }
+    let resolved = budget_unsigned(&rt, "resolved_bytes");
+    assert!(resolved > 0, "resolved budget must be positive");
 
     // Source is whichever tier the host resolved through; on an unconfigured
     // embedded runtime that is a detection tier, never `config`.
@@ -1436,12 +1491,31 @@ fn red_stats_exposes_the_memory_budget_section_with_empty_placeholders() {
         other => panic!("source should be text, got {other:?}"),
     }
 
-    // Placeholders for the pool-sizing and enforcement slices: present so the
-    // surface shape is stable, empty because nothing is sized or accounted yet.
-    assert_eq!(budget_metric(&rt, "pool_shares"), Value::Array(Vec::new()));
-    assert_eq!(
-        budget_metric(&rt, "live_accounting"),
-        Value::Array(Vec::new())
+    // ADR 0073 §2's property, observed through the public surface: the shares
+    // come out of one budget and never oversubscribe it.
+    let total_share = budget_unsigned(&rt, "total_share_bytes");
+    let summed_shares: u64 = MEMORY_POOL_NAMES
+        .iter()
+        .map(|pool| pool_metric(&rt, pool, "share_bytes"))
+        .sum();
+    assert_eq!(summed_shares, total_share, "the total is the sum of parts");
+    assert!(
+        total_share <= resolved,
+        "Σ(shares) = {total_share} exceeds budget {resolved}"
+    );
+    assert!(total_share > 0, "a real budget reaches the pools");
+
+    // Usage is live, not a placeholder: an open store already holds its WAL
+    // writer buffer, and the shared total is the sum of the per-pool rows.
+    let total_used = budget_unsigned(&rt, "total_used_bytes");
+    let summed_used: u64 = MEMORY_POOL_NAMES
+        .iter()
+        .map(|pool| pool_metric(&rt, pool, "used_bytes"))
+        .sum();
+    assert_eq!(summed_used, total_used);
+    assert!(
+        pool_metric(&rt, "wal_buffers", "used_bytes") > 0,
+        "an open store holds its WAL writer buffer"
     );
 
     // The section is part of the unfiltered profiling scan too.
@@ -1452,6 +1526,81 @@ fn red_stats_exposes_the_memory_budget_section_with_empty_placeholders() {
             .any(|row| row[0] == Value::text(MEMORY_BUDGET_COLLECTION)),
         "SHOW STATS should include the budget section: {all_stats:?}"
     );
+
+    cleanup_scope();
+}
+
+#[test]
+fn doubling_the_configured_budget_doubles_every_pool_share() {
+    cleanup_scope();
+    let small = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(512 << 20))
+        .expect("runtime with a 512 MiB budget");
+    let large = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(1 << 30))
+        .expect("runtime with a 1 GiB budget");
+
+    for pool in MEMORY_POOL_NAMES {
+        let base = pool_metric(&small, pool, "share_bytes");
+        let doubled = pool_metric(&large, pool, "share_bytes");
+        assert!(base > 0, "{pool} must receive a share");
+        assert_eq!(doubled, base * 2, "{pool} share must scale with the budget");
+    }
+
+    assert_eq!(
+        budget_unsigned(&large, "total_share_bytes"),
+        budget_unsigned(&small, "total_share_bytes") * 2
+    );
+
+    cleanup_scope();
+}
+
+#[test]
+fn segment_and_index_usage_move_under_load() {
+    cleanup_scope();
+    let rt = runtime();
+
+    let baseline_segment = pool_metric(&rt, "segment_arena", "used_bytes");
+    let baseline_index = pool_metric(&rt, "index_memory", "used_bytes");
+
+    exec(&rt, "CREATE TABLE hosts (id INT, region TEXT)");
+    for id in 1..=200 {
+        exec(
+            &rt,
+            &format!("INSERT INTO hosts (id, region) VALUES ({id}, 'eu-west-{id}')"),
+        );
+    }
+
+    // Inserting rows grows the segment arena.
+    let loaded_segment = pool_metric(&rt, "segment_arena", "used_bytes");
+    assert!(
+        loaded_segment > baseline_segment,
+        "segment arena should grow under insert load: {baseline_segment} -> {loaded_segment}"
+    );
+
+    // Building an index over those rows grows index memory.
+    exec(&rt, "CREATE INDEX hosts_region ON hosts (region)");
+    let indexed = pool_metric(&rt, "index_memory", "used_bytes");
+    assert!(
+        indexed > baseline_index,
+        "index memory should grow when an index is built: {baseline_index} -> {indexed}"
+    );
+
+    // Deleting the indexed rows returns index memory; the arena keeps the
+    // tombstoned rows until consolidation reclaims them (ADR 0073 §5).
+    exec(&rt, "DELETE FROM hosts WHERE id > 0");
+    let after_delete = pool_metric(&rt, "index_memory", "used_bytes");
+    assert!(
+        after_delete < indexed,
+        "index memory should shrink when the indexed rows go: {indexed} -> {after_delete}"
+    );
+    assert!(pool_metric(&rt, "segment_arena", "used_bytes") >= loaded_segment);
+
+    // Whatever moved, the shared total stays the sum of its parts.
+    let total_used = budget_unsigned(&rt, "total_used_bytes");
+    let summed: u64 = MEMORY_POOL_NAMES
+        .iter()
+        .map(|pool| pool_metric(&rt, pool, "used_bytes"))
+        .sum();
+    assert_eq!(summed, total_used);
 
     cleanup_scope();
 }
