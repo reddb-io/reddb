@@ -1511,9 +1511,13 @@ impl SegmentManager {
             }
         }
 
-        // Sealed segments
+        // Sealed segments. Iterate through the read guard, not the
+        // `Arc<RwLock<GrowingSegment>>` impl of `iter_kind` — that one cannot
+        // hand out references across the lock, so it returns an empty iterator
+        // and every sealed entity was silently missing from the result.
         let sealed = self.sealed.read();
-        for segment in sealed.iter() {
+        for segment_arc in sealed.iter() {
+            let segment = segment_arc.read();
             for entity in segment.iter_kind(kind) {
                 results.push(entity.clone());
             }
@@ -2272,14 +2276,16 @@ mod tests {
 
         let before = live_ids(&manager);
         let survivor = *ids.last().expect("at least one row");
+        let tombstoned = ids[0];
 
         // Every mid-tick observation matches the pre-consolidation snapshot:
-        // point reads, full scans, and the kind index.
+        // point reads, full scans, and the kind index (rebuilt by the merge).
         let mut mid_tick_observations = 0;
         while manager.consolidation.read().is_some() || mid_tick_observations == 0 {
             manager.run_maintenance().expect("maintenance");
             assert_eq!(live_ids(&manager), before);
             assert!(manager.get(survivor).is_some());
+            assert!(manager.get(tombstoned).is_none());
             assert_eq!(manager.get_by_kind("table").len(), before.len());
             mid_tick_observations += 1;
             assert!(mid_tick_observations < 1_000);
@@ -2291,7 +2297,21 @@ mod tests {
         );
         assert_eq!(live_ids(&manager), before);
         assert!(manager.get(survivor).is_some());
+        assert!(manager.get(tombstoned).is_none());
         assert_eq!(manager.get_by_kind("table").len(), before.len());
+    }
+
+    #[test]
+    fn get_by_kind_reaches_sealed_segments() {
+        let manager = consolidating_manager(CONSOLIDATION_ENTITIES_PER_TICK);
+        let ids = seal_bulk_segment(&manager, 5);
+        assert!(manager.delete(ids[0]).expect("delete"));
+
+        // The sealed list is walked through the segment read guard; the
+        // `Arc<RwLock<GrowingSegment>>` impl of `iter_kind` cannot hand out
+        // references across the lock and yields nothing.
+        assert_eq!(manager.get_by_kind("table").len(), 4);
+        assert_eq!(manager.get_by_kind("vector").len(), 0);
     }
 
     #[test]
