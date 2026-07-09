@@ -8,6 +8,12 @@ pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
 pub(super) const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
 pub(super) const SUPERBLOCK_ZONE_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE;
 
+/// The newest valid superblock copy together with its slot image.
+type NewestSuperblock = (
+    reddb_file::PagedSuperblockSelection,
+    [u8; SUPERBLOCK_SLOT_SIZE],
+);
+
 /// Take the first slot's worth of a freshly-built page-0 image. The database
 /// header and the encryption header both live well inside this prefix.
 fn superblock_slot_image(page: &[u8; PAGE_SIZE]) -> [u8; SUPERBLOCK_SLOT_SIZE] {
@@ -354,7 +360,7 @@ impl Pager {
         if self.page_count().unwrap_or(0) == 0 {
             return self.bind_encryption_for_new();
         }
-        let (_, _, image) = self.newest_superblock()?;
+        let (_, image) = self.newest_superblock()?;
         let data = &image[..];
         let has_marker = reddb_file::paged_encryption_marker_present(data);
 
@@ -494,7 +500,7 @@ impl Pager {
     /// Both copies invalid is the one unrecoverable superblock state (ADR 0074
     /// §2): the store does not open, and the error names the zone and points
     /// at salvage rather than panicking or silently re-initialising.
-    fn newest_superblock(&self) -> Result<(usize, u64, [u8; SUPERBLOCK_SLOT_SIZE]), PagerError> {
+    fn newest_superblock(&self) -> Result<NewestSuperblock, PagerError> {
         let zone = self.read_superblock_zone()?;
         let selection = reddb_file::select_paged_superblock(&zone)
             .ok_or_else(|| PagerError::SuperblockZoneUnrecoverable(self.path.clone()))?;
@@ -502,7 +508,7 @@ impl Pager {
         let start = selection.copy_index * SUPERBLOCK_SLOT_SIZE;
         let mut image = [0u8; SUPERBLOCK_SLOT_SIZE];
         image.copy_from_slice(&zone[start..start + SUPERBLOCK_SLOT_SIZE]);
-        Ok((selection.copy_index, selection.generation, image))
+        Ok((selection, image))
     }
 
     /// Seal `slot` for `copy_index`/`generation` and write exactly that slot,
@@ -540,15 +546,15 @@ impl Pager {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
-        let (copy_index, generation, mut image) = self.newest_superblock()?;
+        let (newest, mut image) = self.newest_superblock()?;
         mutate(&mut image)?;
-        let next_copy = (copy_index + 1) % reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT;
-        self.write_superblock_slot(&mut image, next_copy, generation.saturating_add(1))
+        let next_copy = reddb_file::paged_superblock_next_copy(Some(newest));
+        self.write_superblock_slot(&mut image, next_copy, newest.generation.saturating_add(1))
     }
 
     /// Load the database header from the newest valid superblock copy.
     fn load_header(&self) -> Result<(), PagerError> {
-        let (_, _, image) = self.newest_superblock()?;
+        let (_, image) = self.newest_superblock()?;
 
         let decoded_header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
