@@ -1,17 +1,17 @@
 //! Issue "Tier-wiring meta-slice": `RedDBOptions::with_layout(...)` must
-//! flip the six tier-flag global toggles at open time, materialise the
+//! flip the tier-flag global toggles at open time, materialise the
 //! support directories the layout demands, and expose the resolved
 //! audit / slow log destinations via `tier_wiring::current_log_destinations`.
 //!
 //! Verifies the *defaults per tier* table from `apply_tier_defaults`'s
-//! doc comment:
+//! doc comment (`fold_pager_meta` left the table — ADR 0038 §4 phase 1
+//! made folding unconditional):
 //!
 //! | toggle                     | minimal | standard | performance | max  |
 //! |----------------------------|:-------:|:--------:|:-----------:|:----:|
 //! | `.meta.json` sidecar       |   off   |    off   |     off     |  on  |
 //! | seq-N catalog journal      |   off   |    off   |     off     |  on  |
 //! | `-shm` provisioning        |   off   | **on**   |   **on**    | on   |
-//! | `fold_pager_meta`          |   off   |    off   |     off     |  on  |
 //! | `fold_dwb_into_wal`        |   off   |    off   |     off     |  on  |
 //! | audit/slow log destination | stderr  |  stderr  |    file     | file |
 
@@ -20,9 +20,9 @@
 mod support;
 
 use reddb::{
-    fold_dwb_into_wal_enabled, fold_pager_meta_enabled, meta_json_sidecar_enabled,
-    seqn_journal_enabled, seqn_journal_retention, shm_provisioning_enabled, tier_wiring,
-    LayoutOverrides, LogDestination, RedDBOptions, RedDBRuntime, StorageLayout,
+    fold_dwb_into_wal_enabled, meta_json_sidecar_enabled, seqn_journal_enabled,
+    seqn_journal_retention, shm_provisioning_enabled, tier_wiring, LayoutOverrides,
+    LogDestination, RedDBOptions, RedDBRuntime, StorageLayout,
     DEFAULT_METADATA_JOURNAL_RETENTION, OPT_IN_METADATA_JOURNAL_RETENTION,
 };
 
@@ -31,7 +31,6 @@ fn reset_env() {
     std::env::remove_var("REDDB_SEQN_JOURNAL");
     std::env::remove_var("REDDB_SEQN_JOURNAL_RETENTION");
     std::env::remove_var("REDDB_SHM_PROVISION");
-    std::env::remove_var("REDDB_FOLD_PAGER_META");
     std::env::remove_var("REDDB_FOLD_DWB_INTO_WAL");
 }
 
@@ -51,10 +50,6 @@ fn minimal_tier_defaults_all_toggles_off() {
     assert!(!meta_json_sidecar_enabled(), "meta.json off for Minimal");
     assert!(!seqn_journal_enabled(), "seq-N journal off for Minimal");
     assert!(!shm_provisioning_enabled(), "-shm off for Minimal");
-    assert!(
-        !fold_pager_meta_enabled(),
-        "fold_pager_meta off for Minimal"
-    );
     assert!(!fold_dwb_into_wal_enabled(), "fold_dwb off for Minimal");
 
     let (audit, slow) = tier_wiring::current_log_destinations();
@@ -71,10 +66,6 @@ fn standard_tier_provisions_shm_only() {
     assert!(!meta_json_sidecar_enabled(), "meta.json off for Standard");
     assert!(!seqn_journal_enabled(), "seq-N journal off for Standard");
     assert!(shm_provisioning_enabled(), "-shm ON for Standard");
-    assert!(
-        !fold_pager_meta_enabled(),
-        "fold_pager_meta off for Standard"
-    );
     assert!(!fold_dwb_into_wal_enabled(), "fold_dwb off for Standard");
     assert_eq!(seqn_journal_retention(), OPT_IN_METADATA_JOURNAL_RETENTION);
 
@@ -113,7 +104,6 @@ fn max_tier_enables_all_toggles() {
     assert!(meta_json_sidecar_enabled(), "meta.json ON for Max");
     assert!(seqn_journal_enabled(), "seq-N journal ON for Max");
     assert!(shm_provisioning_enabled(), "-shm ON for Max");
-    assert!(fold_pager_meta_enabled(), "fold_pager_meta ON for Max");
     assert!(fold_dwb_into_wal_enabled(), "fold_dwb ON for Max");
     assert_eq!(
         seqn_journal_retention(),
