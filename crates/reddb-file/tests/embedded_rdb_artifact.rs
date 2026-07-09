@@ -3,7 +3,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use reddb_file::{
-    EmbeddedRdbArtifact, EMBEDDED_RDB_MANIFEST_OFFSET, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
+    EmbeddedRdbArtifact, EMBEDDED_RDB_MANIFEST_0_OFFSET, EMBEDDED_RDB_MANIFEST_1_OFFSET,
+    EMBEDDED_RDB_MANIFEST_ZONE_END, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
     EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
 };
 
@@ -55,7 +56,7 @@ fn create_open_embedded_rdb_uses_one_required_artifact() {
     assert_eq!(created.selected_superblock.generation, 2);
     assert_eq!(
         created.selected_superblock.manifest_offset,
-        EMBEDDED_RDB_MANIFEST_OFFSET
+        EMBEDDED_RDB_MANIFEST_0_OFFSET
     );
     assert_eq!(
         created.manifest.wal_recovery_boundary,
@@ -90,33 +91,109 @@ fn open_falls_back_to_older_superblock_when_newer_copy_is_invalid() {
     assert_eq!(reopened.selected_superblock.generation, 1);
 }
 
-#[test]
-fn open_validates_manifest_checksum_from_selected_superblock() {
-    let dir = temp_dir("manifest_checksum");
-    let path = dir.path().join("data.rdb");
-    EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
-
+/// Flip one bit at `offset`, leaving every other byte of the file alone.
+fn rot_bit(path: &Path, offset: u64) {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&path)
+        .open(path)
         .unwrap();
-    file.seek(SeekFrom::Start(EMBEDDED_RDB_MANIFEST_OFFSET + 20))
-        .unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
     let mut byte = [0u8; 1];
     file.read_exact(&mut byte).unwrap();
-    file.seek(SeekFrom::Start(EMBEDDED_RDB_MANIFEST_OFFSET + 20))
-        .unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
     file.write_all(&[byte[0] ^ 0x01]).unwrap();
     file.sync_all().unwrap();
+}
+
+#[test]
+fn manifest_bit_rot_fails_the_open_didactically_instead_of_falling_back() {
+    let dir = temp_dir("manifest_checksum");
+    let path = dir.path().join("data.rdb");
+    let created = EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
+    assert_eq!(
+        created.selected_superblock.manifest_offset,
+        EMBEDDED_RDB_MANIFEST_0_OFFSET
+    );
+
+    rot_bit(&path, EMBEDDED_RDB_MANIFEST_0_OFFSET + 20);
 
     let err =
         EmbeddedRdbArtifact::open_strict_manifest(&path).expect_err("manifest corruption fails");
     let msg = err.to_string();
     assert!(msg.contains("manifest checksum mismatch"), "{msg}");
 
-    let recovered = EmbeddedRdbArtifact::open(&path).expect("open recovers from superblock");
-    assert_eq!(recovered.manifest.wal_region_offset, 12288);
+    // ADR 0074 §2: manifest corruption fails the open with a didactic error
+    // naming the zone. Silently re-deriving the manifest from the superblock
+    // would resurrect a root the checksum can no longer vouch for.
+    let err = EmbeddedRdbArtifact::open(&path).expect_err("open must not paper over bit rot");
+    let msg = err.to_string();
+    assert!(msg.contains("manifest zone"), "{msg}");
+    assert!(msg.contains("salvage"), "{msg}");
+}
+
+#[test]
+fn a_checkpoint_publishes_the_manifest_into_the_inactive_slot() {
+    let dir = temp_dir("manifest_pingpong");
+    let path = dir.path().join("data.rdb");
+    let created = EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-v1").expect("create");
+    assert_eq!(
+        created.selected_superblock.manifest_offset,
+        EMBEDDED_RDB_MANIFEST_0_OFFSET
+    );
+
+    let checkpointed = EmbeddedRdbArtifact::write_snapshot(&path, b"RDST-v2").expect("checkpoint");
+    assert_eq!(
+        checkpointed.selected_superblock.manifest_offset, EMBEDDED_RDB_MANIFEST_1_OFFSET,
+        "a checkpoint must not overwrite the manifest the live superblock roots through"
+    );
+
+    // Slot 0 still holds the pre-checkpoint manifest, byte for byte: that is
+    // what makes the update atomic from a reader's point of view.
+    let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+    let mut slot0 = vec![0u8; 32];
+    file.seek(SeekFrom::Start(EMBEDDED_RDB_MANIFEST_0_OFFSET))
+        .unwrap();
+    file.read_exact(&mut slot0).unwrap();
+    assert_eq!(&slot0[0..8], b"RDBMNFS1");
+
+    let next = EmbeddedRdbArtifact::write_snapshot(&path, b"RDST-v3").expect("second checkpoint");
+    assert_eq!(
+        next.selected_superblock.manifest_offset, EMBEDDED_RDB_MANIFEST_0_OFFSET,
+        "consecutive checkpoints alternate manifest slots"
+    );
+}
+
+#[test]
+fn a_superblock_naming_a_manifest_outside_the_zone_is_refused() {
+    let dir = temp_dir("manifest_misdirected");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
+
+    // Point both superblocks' manifest_offset at the WAL region. A pointer
+    // outside the zone is a misdirected or forged write; never chase it.
+    for copy_offset in [
+        EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
+        EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
+    ] {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // manifest_offset sits at magic(8) + version(4) + copy_index(1) +
+        // generation(8) + format_version(4) = 25 bytes into the slot.
+        file.seek(SeekFrom::Start(copy_offset + 25)).unwrap();
+        file.write_all(&EMBEDDED_RDB_MANIFEST_ZONE_END.to_le_bytes())
+            .unwrap();
+        file.sync_all().unwrap();
+    }
+
+    // The superblock CRC now fails too, so this lands as a rootless store —
+    // either way the pointer is never followed.
+    let err = EmbeddedRdbArtifact::open(&path).expect_err("a forged pointer must not be chased");
+    let msg = err.to_string();
+    assert!(msg.contains("zone of"), "{msg}");
 }
 
 #[test]
@@ -373,6 +450,7 @@ fn embedded_snapshot_crash_injection_preserves_published_snapshot() {
         "snapshot_after_image_write",
         "snapshot_after_image_sync",
         "snapshot_after_manifest_write",
+        "snapshot_after_manifest_sync",
         "snapshot_after_superblock_write",
     ] {
         let path = dir.path().join(format!("{point}.rdb"));
