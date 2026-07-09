@@ -143,17 +143,19 @@ fn build_meta_page1_with_overflow(
     Ok(page1)
 }
 
-/// Assemble the full metadata payload from page 1 (plus its overflow chain
-/// when the native overflow wrapper is present). Returns the bytes that the
-/// metadata parser would see starting from the content offset of page 1.
-/// Single-page metadata returns the raw page content (including trailing
-/// zero-pad), so the legacy parser sees the same bytes it always saw.
+/// Assemble the full metadata payload from the internal manifest zone: page 1
+/// plus its overflow chain when the native overflow wrapper is present. Returns
+/// the bytes that the metadata parser would see starting from the content
+/// offset of page 1. Single-page metadata returns the raw page content
+/// (including trailing zero-pad), so the legacy parser sees the same bytes it
+/// always saw.
+///
+/// The zone is rooted by the superblock and checksummed per ADR 0074 §2: a
+/// failing checksum yields `None` here, and the caller surfaces the didactic
+/// manifest-zone error rather than reading a sidecar copy.
 fn read_meta_payload(pager: &Pager) -> Option<Vec<u8>> {
     let cs = crate::storage::engine::HEADER_SIZE;
-    let meta_page = pager
-        .read_page(1)
-        .or_else(|_| pager.recover_meta_from_shadow())
-        .ok()?;
+    let meta_page = pager.read_manifest_page().ok()?;
     let bytes = meta_page.as_bytes();
     if bytes.len() < cs + 4 {
         return Some(bytes.get(cs..).unwrap_or(&[]).to_vec());
@@ -298,9 +300,6 @@ impl UnifiedStore {
         let meta_page = build_meta_page1_with_overflow(pager, &meta_data)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
-        pager
-            .write_meta_shadow(&meta_page)
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
         pager
             .write_page(1, meta_page)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
@@ -867,13 +866,9 @@ impl UnifiedStore {
         let meta_page = build_meta_page1_with_overflow(pager, &meta_data)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
-        // Write metadata shadow FIRST (intact copy in case main write fails).
-        // The shadow is a no-op when `fold_pager_meta` is enabled.
-        pager
-            .write_meta_shadow(&meta_page)
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-
-        // Write page
+        // Write the manifest zone (page 1 + overflow chain). It is rooted by
+        // the superblock and carries its own page checksum; there is no
+        // sidecar copy to keep in step.
         pager
             .write_page(1, meta_page)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
