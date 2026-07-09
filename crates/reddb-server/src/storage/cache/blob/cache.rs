@@ -1102,6 +1102,19 @@ impl BlobCache {
         true
     }
 
+    /// RAM this cache occupies right now (ADR 0073 §2, the `blob_cache_l1`
+    /// pool): L1 entry payloads plus L2's resident metadata — its B+ tree
+    /// pages and Bloom synopsis filters. L2's *disk* extent is not memory and
+    /// is excluded; `BlobCacheStats::l2_bytes_in_use` reports it separately.
+    pub fn ram_bytes_in_use(&self) -> u64 {
+        let l1 = self.bytes_in_use.load(Ordering::Relaxed) as u64;
+        let l2 = self
+            .l2
+            .as_ref()
+            .map_or(0, |l2| l2.resident_metadata_bytes());
+        l1.saturating_add(l2)
+    }
+
     pub fn stats(&self) -> BlobCacheStats {
         BlobCacheStats {
             hits: self.stats.hits.load(Ordering::Relaxed),
