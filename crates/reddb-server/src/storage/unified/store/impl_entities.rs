@@ -535,7 +535,7 @@ impl UnifiedStore {
 
     /// Turbo bulk insert — optimized fast path.
     ///
-    /// Single lock for the entire batch. Skips bloom filter, memtable,
+    /// Single lock for the entire batch. Skips bloom filter,
     /// context index, and cross-ref indexing. B-tree writes are batched.
     pub fn bulk_insert(
         &self,
