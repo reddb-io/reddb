@@ -299,6 +299,37 @@ fn float_field(record: &reddb::storage::query::UnifiedRecord, field: &str) -> f6
     }
 }
 
+fn geo_distance_select_signature(rt: &RedDBRuntime, query: &str) -> Vec<(i64, u64)> {
+    let res = rt
+        .execute_query(query)
+        .expect("geo distance SELECT executes");
+    res.result
+        .records
+        .iter()
+        .map(|record| {
+            let id = match record.get("id") {
+                Some(Value::Integer(value)) => *value,
+                other => panic!("expected id integer field, got {other:?} in {record:?}"),
+            };
+            let dist = float_field(record, "dist").to_bits();
+            (id, dist)
+        })
+        .collect()
+}
+
+fn explain_ops(rt: &RedDBRuntime, query: &str) -> Vec<String> {
+    rt.execute_query(query)
+        .expect("EXPLAIN executes")
+        .result
+        .records
+        .iter()
+        .filter_map(|record| match record.get("op") {
+            Some(Value::Text(op)) => Some(op.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn uint_field(record: &reddb::storage::query::UnifiedRecord, field: &str) -> u64 {
     match record.get(field) {
         Some(Value::UnsignedInteger(value)) => *value,
@@ -350,6 +381,21 @@ fn assert_h3_document_parity(create_index: &str, queries: &[String]) {
             &spatial_rows(&rt, q),
             expected,
             "document H3 route diverged from full scan for: {q}"
+        );
+    }
+}
+
+fn assert_h3_geo_distance_select_parity(rt: &RedDBRuntime, create_index: &str, queries: &[&str]) {
+    let baseline: Vec<Vec<(i64, u64)>> = queries
+        .iter()
+        .map(|q| geo_distance_select_signature(rt, q))
+        .collect();
+    rt.execute_query(create_index).unwrap();
+    for (q, expected) in queries.iter().zip(&baseline) {
+        assert_eq!(
+            &geo_distance_select_signature(rt, q),
+            expected,
+            "indexed GEO_DISTANCE predicate diverged from scan for: {q}"
         );
     }
 }
@@ -628,6 +674,54 @@ fn geo_distance_predicate_projects_and_orders_row_geopoint() {
 }
 
 #[test]
+fn h3_accelerates_geo_distance_row_predicate_with_parity_and_explain() {
+    let queries = [
+        "SELECT id, GEO_DISTANCE(loc, 48.8566, 2.3522) AS dist \
+         FROM places \
+         WHERE GEO_DISTANCE(loc, 48.8566, 2.3522) < 5.0 \
+         ORDER BY dist \
+         LIMIT 4",
+        "SELECT id, GEO_DISTANCE(loc, 48.8566, 2.3522) AS dist \
+         FROM places \
+         WHERE GEO_DISTANCE(loc, 48.8566, 2.3522) < 20001.0 \
+         ORDER BY id \
+         LIMIT 10",
+    ];
+
+    let rt = seed_geo_corpus("places");
+    assert_h3_geo_distance_select_parity(
+        &rt,
+        "CREATE INDEX idx_loc ON places (loc) USING H3",
+        &queries,
+    );
+
+    let baseline = seed_geo_corpus("places");
+    let scan_ops = explain_ops(
+        &baseline,
+        "EXPLAIN SELECT id FROM places \
+         WHERE GEO_DISTANCE(loc, 48.8566, 2.3522) < 5.0",
+    );
+    assert!(
+        scan_ops.iter().all(|op| op != "geo_h3_index_seek"),
+        "unindexed plan must not advertise H3 geo acceleration: {scan_ops:?}"
+    );
+
+    let indexed = seed_geo_corpus("places");
+    indexed
+        .execute_query("CREATE INDEX idx_loc ON places (loc) USING H3")
+        .unwrap();
+    let indexed_ops = explain_ops(
+        &indexed,
+        "EXPLAIN SELECT id FROM places \
+         WHERE GEO_DISTANCE(loc, 48.8566, 2.3522) < 5.0",
+    );
+    assert!(
+        indexed_ops.iter().any(|op| op == "geo_h3_index_seek"),
+        "indexed GEO_DISTANCE predicate should explain the H3 route: {indexed_ops:?}"
+    );
+}
+
+#[test]
 fn geo_distance_predicate_resolves_document_body_and_dotted_path() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     rt.execute_query("CREATE DOCUMENT doc_events").unwrap();
@@ -674,6 +768,21 @@ fn geo_distance_predicate_resolves_document_body_and_dotted_path() {
     assert!(
         (float_field(&dotted.result.records[1], "dist") - 1.111_949_266).abs() < 0.000_001,
         "near dotted-path distance should be the worked haversine value"
+    );
+}
+
+#[test]
+fn h3_accelerates_geo_distance_document_predicate_with_parity() {
+    let query = "SELECT id, GEO_DISTANCE(gpsLocation, 48.8566, 2.3522) AS dist \
+                 FROM events \
+                 WHERE GEO_DISTANCE(gpsLocation, 48.8566, 2.3522) < 5.0 \
+                 ORDER BY dist \
+                 LIMIT 4";
+    let rt = seed_document_geo_corpus("events");
+    assert_h3_geo_distance_select_parity(
+        &rt,
+        "CREATE INDEX idx_loc ON events (gpsLocation) USING H3",
+        &[query],
     );
 }
 

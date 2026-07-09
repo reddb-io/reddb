@@ -1,5 +1,6 @@
 use super::*;
 use crate::application::SearchContextInput;
+use crate::storage::query::ast::Expr;
 use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_query};
 
 const ASK_AUDIT_COLLECTION: &str = "red_ask_audit";
@@ -24,6 +25,65 @@ fn mark_table_scan_as_index_seek(
         }
     }
     false
+}
+
+fn mark_table_scan_as_geo_h3_index_seek(
+    node: &mut crate::storage::query::planner::CanonicalLogicalNode,
+) -> bool {
+    if node.operator == "table_scan" || node.operator == "index_seek" {
+        node.operator = "geo_h3_index_seek".to_string();
+        node.details.insert(
+            "reason".to_string(),
+            "GEO_DISTANCE predicate uses H3 covering-ring candidates".to_string(),
+        );
+        return true;
+    }
+    for child in &mut node.children {
+        if mark_table_scan_as_geo_h3_index_seek(child) {
+            return true;
+        }
+    }
+    false
+}
+
+fn explain_literal_f64(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::Literal {
+            value: Value::Float(value),
+            ..
+        } => Some(*value),
+        Expr::Literal {
+            value: Value::Integer(value),
+            ..
+        } => Some(*value as f64),
+        Expr::Literal {
+            value: Value::UnsignedInteger(value),
+            ..
+        } => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn flip_geo_compare_op(op: CompareOp) -> CompareOp {
+    match op {
+        CompareOp::Eq => CompareOp::Eq,
+        CompareOp::Ne => CompareOp::Ne,
+        CompareOp::Lt => CompareOp::Gt,
+        CompareOp::Le => CompareOp::Ge,
+        CompareOp::Gt => CompareOp::Lt,
+        CompareOp::Ge => CompareOp::Le,
+    }
+}
+
+fn explain_h3_cover_is_enumerable(lat: f64, lon: f64, radius_km: f64, resolution: u8) -> bool {
+    let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, resolution);
+    if cell == 0 {
+        return false;
+    }
+    let edge_km = crate::geo::h3::edge_length_km(resolution).max(f64::MIN_POSITIVE);
+    const MAX_COVER_RING: u32 = 128;
+    let k_f = (radius_km / edge_km).ceil() + 1.0;
+    k_f.is_finite() && k_f <= f64::from(MAX_COVER_RING)
 }
 
 impl RedDBRuntime {
@@ -104,6 +164,10 @@ impl RedDBRuntime {
         if table.filter.is_none() && table.where_expr.is_none() {
             return;
         }
+        if self.table_filter_has_geo_h3_route(table) {
+            mark_table_scan_as_geo_h3_index_seek(node);
+            return;
+        }
         let Some(index) = self
             .inner
             .index_store
@@ -114,6 +178,74 @@ impl RedDBRuntime {
             return;
         };
         mark_table_scan_as_index_seek(node, &index.name);
+    }
+
+    fn table_filter_has_geo_h3_route(&self, table: &TableQuery) -> bool {
+        let Some(filter) = crate::storage::query::sql_lowering::effective_table_filter(table)
+        else {
+            return false;
+        };
+        self.filter_has_geo_h3_route(table.table.as_str(), &filter)
+    }
+
+    fn filter_has_geo_h3_route(&self, table: &str, filter: &Filter) -> bool {
+        match filter {
+            Filter::CompareExpr { lhs, op, rhs } => self
+                .geo_h3_route_column(lhs, *op, rhs)
+                .or_else(|| self.geo_h3_route_column(rhs, flip_geo_compare_op(*op), lhs))
+                .is_some_and(|column| {
+                    self.inner
+                        .index_store
+                        .find_index_for_column(table, column)
+                        .is_some_and(|index| {
+                            matches!(
+                                index.method,
+                                crate::runtime::index_store::IndexMethodKind::H3 { .. }
+                            )
+                        })
+                }),
+            Filter::And(left, right) => {
+                self.filter_has_geo_h3_route(table, left)
+                    || self.filter_has_geo_h3_route(table, right)
+            }
+            Filter::Or(left, right) => {
+                self.filter_has_geo_h3_route(table, left)
+                    && self.filter_has_geo_h3_route(table, right)
+            }
+            Filter::Not(_) => false,
+            _ => false,
+        }
+    }
+
+    fn geo_h3_route_column<'a>(&self, lhs: &'a Expr, op: CompareOp, rhs: &Expr) -> Option<&'a str> {
+        if !matches!(op, CompareOp::Lt | CompareOp::Le) {
+            return None;
+        }
+        let radius_km = explain_literal_f64(rhs)?;
+        if radius_km.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return None;
+        }
+        let Expr::FunctionCall { name, args, .. } = lhs else {
+            return None;
+        };
+        if !(name.eq_ignore_ascii_case("GEO_DISTANCE") || name.eq_ignore_ascii_case("HAVERSINE")) {
+            return None;
+        }
+        let [Expr::Column { field, .. }, lat, lon] = args.as_slice() else {
+            return None;
+        };
+        if !explain_h3_cover_is_enumerable(
+            explain_literal_f64(lat)?,
+            explain_literal_f64(lon)?,
+            radius_km,
+            9,
+        ) {
+            return None;
+        }
+        match field {
+            FieldRef::TableColumn { column, .. } => Some(column.as_str()),
+            _ => None,
+        }
     }
 
     pub fn search_similar(
