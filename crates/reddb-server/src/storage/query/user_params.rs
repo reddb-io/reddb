@@ -312,6 +312,11 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(*idx);
             }
         }
+        QueryExpr::SearchCommand(SearchCommand::SpatialWithinPolygon { limit_param, .. }) => {
+            if let Some(idx) = limit_param {
+                out.push(*idx);
+            }
+        }
         QueryExpr::SearchCommand(SearchCommand::Text { limit_param, .. }) => {
             if let Some(idx) = limit_param {
                 out.push(*idx);
@@ -679,6 +684,50 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             limit: bound_limit,
             limit_param: None,
         }));
+    }
+
+    if let QueryExpr::SearchCommand(SearchCommand::SpatialWithinPolygon {
+        vertices,
+        collection,
+        column,
+        limit,
+        limit_param,
+    }) = expr
+    {
+        let bound_limit = if let Some(idx) = limit_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Integer(n) if *n > 0 => *n as usize,
+                Value::UnsignedInteger(n) if *n > 0 => *n as usize,
+                Value::BigInt(n) if *n > 0 => *n as usize,
+                Value::Integer(_) | Value::UnsignedInteger(_) | Value::BigInt(_) => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SPATIAL WITHIN POLYGON LIMIT parameter (must be > 0)",
+                        got: value_variant_name(value),
+                    });
+                }
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SPATIAL WITHIN POLYGON LIMIT parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            *limit
+        };
+        return Ok(QueryExpr::SearchCommand(
+            SearchCommand::SpatialWithinPolygon {
+                vertices: vertices.clone(),
+                collection: collection.clone(),
+                column: column.clone(),
+                limit: bound_limit,
+                limit_param: None,
+            },
+        ));
     }
 
     if let QueryExpr::SearchCommand(SearchCommand::Text {

@@ -309,6 +309,13 @@ fn uint_field(record: &reddb::storage::query::UnifiedRecord, field: &str) -> u64
     }
 }
 
+fn spatial_entity_ids(rt: &RedDBRuntime, query: &str) -> Vec<u64> {
+    spatial_rows(rt, query)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
 /// For each query: run the full scan (no index), create the H3 index, run
 /// the ring scan, and assert the two are byte-identical.
 fn assert_h3_parity(create_index: &str, queries: &[String]) {
@@ -341,6 +348,28 @@ fn seed_document_geo_corpus(collection: &str) -> RedDBRuntime {
     rt
 }
 
+fn seed_geofence_rows() -> RedDBRuntime {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE TABLE couriers (id INT, loc GEOPOINT)")
+        .unwrap();
+    for (id, loc) in [
+        (1, "38.75,-77.15"), // inside rectangle
+        (2, "38.70,-77.20"), // vertex tie: inside
+        (3, "38.80,-77.12"), // edge tie: inside
+        (4, "38.74,-77.06"), // inside non-convex test
+        (5, "38.79,-77.19"), // inside rectangle
+        (6, "38.69,-77.15"), // outside south
+        (7, "38.75,-77.04"), // outside east
+        (8, "39.00,-77.15"), // outside north
+    ] {
+        rt.execute_query(&format!(
+            "INSERT INTO couriers (id, loc) VALUES ({id}, '{loc}')"
+        ))
+        .unwrap();
+    }
+    rt
+}
+
 fn assert_h3_document_parity(create_index: &str, queries: &[String]) {
     let rt = seed_document_geo_corpus("events");
     let baseline: Vec<Vec<(u64, u64)>> = queries.iter().map(|q| spatial_rows(&rt, q)).collect();
@@ -350,6 +379,19 @@ fn assert_h3_document_parity(create_index: &str, queries: &[String]) {
             &spatial_rows(&rt, q),
             expected,
             "document H3 route diverged from full scan for: {q}"
+        );
+    }
+}
+
+fn assert_polygon_parity(create_index: &str, queries: &[String]) {
+    let rt = seed_geofence_rows();
+    let baseline: Vec<Vec<u64>> = queries.iter().map(|q| spatial_entity_ids(&rt, q)).collect();
+    rt.execute_query(create_index).unwrap();
+    for (q, expected) in queries.iter().zip(&baseline) {
+        assert_eq!(
+            &spatial_entity_ids(&rt, q),
+            expected,
+            "H3 polygon cover diverged from full scan for: {q}"
         );
     }
 }
@@ -1050,6 +1092,102 @@ fn h3_bbox_parity_with_full_scan() {
     })
     .collect();
     assert_h3_parity("CREATE INDEX idx ON places (loc) USING H3", &queries);
+}
+
+#[test]
+fn h3_polygon_parity_with_full_scan_for_adversarial_shapes() {
+    let queries = vec![
+        // Rectangle from the issue: includes interior points plus documented
+        // vertex/edge ties.
+        "SEARCH SPATIAL WITHIN POLYGON ((38.70 -77.20), (38.80 -77.20), (38.80 -77.05), (38.70 -77.05)) COLLECTION couriers COLUMN loc".to_string(),
+        // Tiny polygon inside one H3 cell: H3 covers only prunes; exact
+        // point-in-polygon decides the answer.
+        "SEARCH SPATIAL WITHIN POLYGON ((38.7499 -77.1501), (38.7501 -77.1501), (38.7501 -77.1499), (38.7499 -77.1499)) COLLECTION couriers COLUMN loc".to_string(),
+        // Non-convex shape handled by the exact even-odd post-filter.
+        "SEARCH SPATIAL WITHIN POLYGON ((38.70 -77.20), (38.80 -77.20), (38.74 -77.12), (38.80 -77.05), (38.70 -77.05)) COLLECTION couriers COLUMN loc".to_string(),
+        // Region-scale polygon at fine resolution exceeds the cover cap and
+        // falls back to the full scan; results must still be identical.
+        "SEARCH SPATIAL WITHIN POLYGON ((-80.0 -80.0), (80.0 -80.0), (80.0 80.0), (-80.0 80.0)) COLLECTION couriers COLUMN loc".to_string(),
+    ];
+    assert_polygon_parity("CREATE INDEX idx ON couriers (loc) USING H3 (15)", &queries);
+}
+
+#[test]
+fn spatial_within_polygon_reads_document_body_column_with_and_without_h3() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT couriers").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO couriers DOCUMENT VALUES
+        ({"current":{"lat":38.75,"lon":-77.15},"name":"inside"}),
+        ({"current":{"lat":38.69,"lon":-77.15},"name":"outside"}),
+        ({"home":{"lat":38.75,"lon":-77.15},"name":"wrong-field"})"#,
+    )
+    .unwrap();
+
+    let q = "SEARCH SPATIAL WITHIN POLYGON ((38.70 -77.20), (38.80 -77.20), (38.80 -77.05), (38.70 -77.05)) COLLECTION couriers COLUMN current";
+    let baseline = spatial_entity_ids(&rt, q);
+    assert_eq!(
+        baseline.len(),
+        1,
+        "full scan must read only the named document body field"
+    );
+
+    rt.execute_query("CREATE INDEX idx_current ON couriers (current) USING H3")
+        .unwrap();
+    assert_eq!(
+        spatial_entity_ids(&rt, q),
+        baseline,
+        "indexed document polygon search must match full scan"
+    );
+}
+
+#[test]
+fn spatial_within_polygon_rejects_degenerate_and_antimeridian_inputs() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE TABLE places (id INT, loc GEOPOINT)")
+        .unwrap();
+    for (sql, needle) in [
+        (
+            "SEARCH SPATIAL WITHIN POLYGON ((0 0), (1 1)) COLLECTION places COLUMN loc",
+            "at least 3 vertices",
+        ),
+        (
+            "SEARCH SPATIAL WITHIN POLYGON ((91 0), (0 0), (1 1)) COLLECTION places COLUMN loc",
+            "lat",
+        ),
+        (
+            "SEARCH SPATIAL WITHIN POLYGON ((0 170), (10 -170), (0 -160)) COLLECTION places COLUMN loc",
+            "antimeridian",
+        ),
+    ] {
+        let err = rt
+            .execute_query(sql)
+            .expect_err("invalid polygon must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(needle),
+            "expected {needle:?} in error message, got {msg:?}"
+        );
+    }
+}
+
+#[test]
+fn h3_polygon_cover_is_superset_for_generated_rectangles() {
+    let queries: Vec<String> = [
+        (38.73, -77.18, 38.77, -77.12),
+        (38.69, -77.21, 38.76, -77.14),
+        (38.76, -77.18, 38.81, -77.10),
+        (38.70, -77.20, 38.80, -77.05),
+        (38.68, -77.22, 38.82, -77.03),
+    ]
+    .iter()
+    .map(|(min_lat, min_lon, max_lat, max_lon)| {
+        format!(
+            "SEARCH SPATIAL WITHIN POLYGON (({min_lat} {min_lon}), ({max_lat} {min_lon}), ({max_lat} {max_lon}), ({min_lat} {max_lon})) COLLECTION couriers COLUMN loc"
+        )
+    })
+    .collect();
+    assert_polygon_parity("CREATE INDEX idx ON couriers (loc) USING H3 (9)", &queries);
 }
 
 // ── Slice 4 (PRD #1574 / #1578): H3 is the DEFAULT spatial index ─────────────
