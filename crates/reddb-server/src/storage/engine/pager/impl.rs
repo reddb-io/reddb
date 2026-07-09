@@ -1264,42 +1264,48 @@ mod tests {
 
     fn read_zone(path: &Path) -> Vec<u8> {
         let mut zone = vec![0u8; SUPERBLOCK_ZONE_SIZE];
-        let mut file = File::open(path).unwrap();
-        file.read_exact(&mut zone).unwrap();
+        let mut file = File::open(path).expect("open() should succeed");
+        file.read_exact(&mut zone)
+            .expect("read_exact() should succeed");
         zone
     }
 
     /// Overwrite one superblock slot in place, leaving the sibling untouched.
     fn poke_slot(path: &Path, copy_index: usize, bytes: &[u8]) {
-        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open() should succeed");
         file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
             copy_index,
         )))
-        .unwrap();
-        file.write_all(bytes).unwrap();
-        file.sync_all().unwrap();
+        .expect("operation should succeed");
+        file.write_all(bytes).expect("write_all() should succeed");
+        file.sync_all().expect("sync_all() should succeed");
     }
 
     #[test]
     fn open_refuses_future_database_version() {
         let path = temp_db_path("future-version");
-        let pager = Pager::open_default(&path).unwrap();
+        let pager = Pager::open_default(&path).expect("open_default() should succeed");
         drop(pager);
 
         // A *valid* superblock slot — correct magic, copy index and CRC — whose
         // database header names a version we cannot read. The slot is intact;
         // the header is from the future.
-        let selection = reddb_file::select_paged_superblock(&read_zone(&path)).unwrap();
+        let selection = reddb_file::select_paged_superblock(&read_zone(&path))
+            .expect("operation should succeed");
         let mut slot = vec![0u8; SUPERBLOCK_SLOT_SIZE];
-        reddb_file::init_database_header_page(&mut slot, 1).unwrap();
+        reddb_file::init_database_header_page(&mut slot, 1)
+            .expect("init_database_header_page() should succeed");
         reddb_file::set_database_header_version(&mut slot, reddb_file::PAGE_FILE_VERSION + 1)
-            .unwrap();
+            .expect("operation should succeed");
         reddb_file::seal_paged_superblock_slot(
             &mut slot,
             selection.copy_index,
             selection.generation + 1,
         )
-        .unwrap();
+        .expect("operation should succeed");
         poke_slot(&path, selection.copy_index, &slot);
 
         let err = match Pager::open_default(&path) {
@@ -1321,7 +1327,7 @@ mod tests {
         // The ping-pong invariant must hold from the very first update, which
         // means creation cannot leave one copy blank.
         let path = temp_db_path("fresh-pair");
-        let pager = Pager::open_default(&path).unwrap();
+        let pager = Pager::open_default(&path).expect("open_default() should succeed");
         drop(pager);
 
         let zone = read_zone(&path);
@@ -1342,14 +1348,18 @@ mod tests {
     #[test]
     fn an_update_writes_the_stale_copy_and_leaves_the_newest_one_intact() {
         let path = temp_db_path("ping-pong");
-        let pager = Pager::open_default(&path).unwrap();
-        let before = reddb_file::select_paged_superblock(&read_zone(&path)).unwrap();
+        let pager = Pager::open_default(&path).expect("open_default() should succeed");
+        let before = reddb_file::select_paged_superblock(&read_zone(&path))
+            .expect("operation should succeed");
 
-        pager.allocate_page(PageType::BTreeLeaf).unwrap();
-        pager.sync().unwrap();
+        pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
+        pager.sync().expect("sync() should succeed");
 
         let zone = read_zone(&path);
-        let after = reddb_file::select_paged_superblock(&zone).unwrap();
+        let after = reddb_file::select_paged_superblock(&zone)
+            .expect("select_paged_superblock() should succeed");
         assert_ne!(
             after.copy_index, before.copy_index,
             "an update must target the stale copy"
@@ -1376,12 +1386,15 @@ mod tests {
     fn open_recovers_from_the_older_copy_when_the_newest_is_torn() {
         let path = temp_db_path("torn-newest");
         {
-            let pager = Pager::open_default(&path).unwrap();
-            pager.allocate_page(PageType::BTreeLeaf).unwrap();
-            pager.sync().unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
+            pager.sync().expect("sync() should succeed");
         }
 
-        let newest = reddb_file::select_paged_superblock(&read_zone(&path)).unwrap();
+        let newest = reddb_file::select_paged_superblock(&read_zone(&path))
+            .expect("operation should succeed");
         // Tear the newest copy: a torn write leaves its CRC broken.
         let mut torn = vec![0u8; SUPERBLOCK_SLOT_SIZE];
         torn.copy_from_slice(
@@ -1392,7 +1405,7 @@ mod tests {
         poke_slot(&path, newest.copy_index, &torn);
 
         let pager = Pager::open_default(&path).expect("older copy must root the store");
-        assert!(pager.page_count().unwrap() >= 3);
+        assert!(pager.page_count().expect("page_count() should succeed") >= 3);
         drop(pager);
         cleanup(&path);
     }
@@ -1401,7 +1414,7 @@ mod tests {
     fn open_refuses_didactically_when_both_superblock_copies_are_invalid() {
         let path = temp_db_path("both-invalid");
         {
-            let _ = Pager::open_default(&path).unwrap();
+            let _ = Pager::open_default(&path).expect("open_default() should succeed");
         }
 
         let zone = read_zone(&path);
@@ -1428,11 +1441,11 @@ mod tests {
     fn open_refuses_a_legacy_sidecar_store_and_names_the_migration_tool() {
         let path = temp_db_path("legacy-sidecar");
         {
-            let _ = Pager::open_default(&path).unwrap();
+            let _ = Pager::open_default(&path).expect("open_default() should succeed");
         }
 
         let sidecar = reddb_file::layout::retired::pager_header_path_v0(&path);
-        std::fs::write(&sidecar, b"legacy header shadow").unwrap();
+        std::fs::write(&sidecar, b"legacy header shadow").expect("write() should succeed");
 
         let err = match Pager::open_default(&path) {
             Ok(_) => panic!("legacy stores need migration first"),
@@ -1450,14 +1463,18 @@ mod tests {
     fn no_phase_one_sidecar_survives_a_create_write_reopen_cycle() {
         let path = temp_db_path("census");
         {
-            let pager = Pager::open_default(&path).unwrap();
-            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
-            pager.write_page(page.page_id(), page).unwrap();
-            pager.sync().unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            let page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
+            pager
+                .write_page(page.page_id(), page)
+                .expect("operation should succeed");
+            pager.sync().expect("sync() should succeed");
         }
         {
-            let pager = Pager::open_default(&path).unwrap();
-            pager.sync().unwrap();
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            pager.sync().expect("sync() should succeed");
         }
 
         assert_eq!(

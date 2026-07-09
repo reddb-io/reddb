@@ -817,8 +817,10 @@ const PAGED_SUPERBLOCK_MAGIC: [u8; 8] = *b"RDBPSBK1";
 const PAGED_SUPERBLOCK_SLOT_VERSION: u32 = 1;
 
 /// Offset of the trailer within a slot: magic(8) ‖ version(4) ‖ copy(4) ‖
-/// generation(8) ‖ crc(4) ‖ reserved(4).
-const PAGED_SUPERBLOCK_TRAILER_OFFSET: usize = PAGED_SUPERBLOCK_SLOT_SIZE - 32;
+/// generation(8) ‖ crc(4) ‖ reserved(4). Everything before it is the page-0
+/// image, which is why the offline migration tool can strip the trailer to
+/// recover the sidecar-era page 0 byte for byte.
+pub const PAGED_SUPERBLOCK_TRAILER_OFFSET: usize = PAGED_SUPERBLOCK_SLOT_SIZE - 32;
 const PAGED_SUPERBLOCK_VERSION_OFFSET: usize = PAGED_SUPERBLOCK_TRAILER_OFFSET + 8;
 const PAGED_SUPERBLOCK_COPY_OFFSET: usize = PAGED_SUPERBLOCK_TRAILER_OFFSET + 12;
 const PAGED_SUPERBLOCK_GENERATION_OFFSET: usize = PAGED_SUPERBLOCK_TRAILER_OFFSET + 16;
@@ -1006,7 +1008,10 @@ mod tests {
         seal_paged_superblock_slot(&mut slot, 1, 42).expect("seal slot");
 
         assert_eq!(paged_superblock_slot_generation(&slot, 1), Some(42));
-        assert_eq!(database_header_page_count(&slot).unwrap(), 7);
+        assert_eq!(
+            database_header_page_count(&slot).expect("database_header_page_count() should succeed"),
+            7
+        );
     }
 
     #[test]

@@ -80,9 +80,9 @@ fn open_falls_back_to_older_superblock_when_newer_copy_is_invalid() {
         .read(true)
         .write(true)
         .open(&path)
-        .unwrap();
+        .expect("operation should succeed");
     file.seek(SeekFrom::Start(EMBEDDED_RDB_SUPERBLOCK_1_OFFSET + 64))
-        .unwrap();
+        .expect("operation should succeed");
     file.write_all(&[0xA5]).unwrap();
     file.sync_all().unwrap();
 
@@ -97,11 +97,13 @@ fn rot_bit(path: &Path, offset: u64) {
         .read(true)
         .write(true)
         .open(path)
-        .unwrap();
-    file.seek(SeekFrom::Start(offset)).unwrap();
+        .expect("operation should succeed");
+    file.seek(SeekFrom::Start(offset))
+        .expect("seek() should succeed");
     let mut byte = [0u8; 1];
     file.read_exact(&mut byte).unwrap();
-    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.seek(SeekFrom::Start(offset))
+        .expect("seek() should succeed");
     file.write_all(&[byte[0] ^ 0x01]).unwrap();
     file.sync_all().unwrap();
 }
@@ -150,11 +152,15 @@ fn a_checkpoint_publishes_the_manifest_into_the_inactive_slot() {
 
     // Slot 0 still holds the pre-checkpoint manifest, byte for byte: that is
     // what makes the update atomic from a reader's point of view.
-    let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(&path)
+        .expect("open() should succeed");
     let mut slot0 = vec![0u8; 32];
     file.seek(SeekFrom::Start(EMBEDDED_RDB_MANIFEST_0_OFFSET))
-        .unwrap();
-    file.read_exact(&mut slot0).unwrap();
+        .expect("operation should succeed");
+    file.read_exact(&mut slot0)
+        .expect("read_exact() should succeed");
     assert_eq!(&slot0[0..8], b"RDBMNFS1");
 
     let next = EmbeddedRdbArtifact::write_snapshot(&path, b"RDST-v3").expect("second checkpoint");
@@ -180,13 +186,14 @@ fn a_superblock_naming_a_manifest_outside_the_zone_is_refused() {
             .read(true)
             .write(true)
             .open(&path)
-            .unwrap();
+            .expect("operation should succeed");
         // manifest_offset sits at magic(8) + version(4) + copy_index(1) +
         // generation(8) + format_version(4) = 25 bytes into the slot.
-        file.seek(SeekFrom::Start(copy_offset + 25)).unwrap();
+        file.seek(SeekFrom::Start(copy_offset + 25))
+            .expect("operation should succeed");
         file.write_all(&EMBEDDED_RDB_MANIFEST_ZONE_END.to_le_bytes())
-            .unwrap();
-        file.sync_all().unwrap();
+            .expect("operation should succeed");
+        file.sync_all().expect("sync_all() should succeed");
     }
 
     // The superblock CRC now fails too, so this lands as a rootless store —
@@ -222,9 +229,9 @@ fn embedded_wal_frames_are_versioned_ordered_and_chained() {
         .read(true)
         .write(true)
         .open(&path)
-        .unwrap();
+        .expect("operation should succeed");
     file.seek(SeekFrom::Start(second_previous_crc_offset))
-        .unwrap();
+        .expect("operation should succeed");
     file.write_all(&[0xFF]).unwrap();
     file.sync_all().unwrap();
 
@@ -250,9 +257,9 @@ fn embedded_wal_recovery_ignores_corrupt_or_truncated_tail_frame() {
         .read(true)
         .write(true)
         .open(&corrupt_path)
-        .unwrap();
+        .expect("operation should succeed");
     file.seek(SeekFrom::Start(artifact.manifest.wal_recovery_boundary - 1))
-        .unwrap();
+        .expect("operation should succeed");
     file.write_all(&[0x00]).unwrap();
     file.sync_all().unwrap();
 
@@ -273,9 +280,9 @@ fn embedded_wal_recovery_ignores_corrupt_or_truncated_tail_frame() {
         .read(true)
         .write(true)
         .open(&truncated_path)
-        .unwrap();
+        .expect("operation should succeed");
     file.set_len(artifact.manifest.wal_recovery_boundary - 2)
-        .unwrap();
+        .expect("operation should succeed");
     file.sync_all().unwrap();
 
     let artifact = EmbeddedRdbArtifact::open(&truncated_path).expect("open truncated tail");
@@ -389,7 +396,7 @@ fn embedded_snapshot_checkpoint_is_copy_on_write_until_superblock_publish() {
         .read(true)
         .write(true)
         .open(&path)
-        .unwrap();
+        .expect("operation should succeed");
     file.seek(SeekFrom::Start(newer_copy_offset + 64)).unwrap();
     file.write_all(&[0xA5]).unwrap();
     file.sync_all().unwrap();
@@ -416,9 +423,9 @@ fn embedded_open_skips_newer_superblock_when_snapshot_checksum_fails() {
         .read(true)
         .write(true)
         .open(&path)
-        .unwrap();
+        .expect("operation should succeed");
     file.seek(SeekFrom::Start(checkpointed.manifest.snapshot_offset + 5))
-        .unwrap();
+        .expect("operation should succeed");
     file.write_all(&[0xFF]).unwrap();
     file.sync_all().unwrap();
 
@@ -462,7 +469,7 @@ fn embedded_snapshot_crash_injection_preserves_published_snapshot() {
         let artifact = EmbeddedRdbArtifact::open(&path).expect("open after snapshot crash");
         let snapshot = EmbeddedRdbArtifact::read_snapshot(&artifact)
             .expect("read snapshot")
-            .unwrap();
+            .expect("operation should succeed");
         assert!(
             snapshot == b"RDST-base".to_vec() || snapshot == b"RDST-crash-checkpoint".to_vec(),
             "unexpected snapshot after {point}: {snapshot:?}"
