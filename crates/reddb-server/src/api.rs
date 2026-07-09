@@ -230,7 +230,7 @@ pub struct RedDBOptions {
     pub auto_index_id: bool,
     /// Tiered storage layout preset. Drives the defaults of the six
     /// tier-flag toggles (`.meta.json` sidecar, seq-N catalog journal,
-    /// `-shm` provisioning, audit/slow log destinations, `fold_pager_meta`,
+    /// `-shm` provisioning, audit/slow log destinations,
     /// `fold_dwb_into_wal`). Explicit per-feature setters still win over
     /// the tier default. See `crate::storage::layout::StorageLayout`.
     pub layout: crate::storage::layout::StorageLayout,
@@ -687,7 +687,6 @@ impl RedDBOptions {
     /// | `.meta.json` sidecar       |   off   |    off   |     off     |  on |
     /// | seq-N catalog journal      |   off   |    off   |     off     |  on |
     /// | `-shm` provisioning        |   off   | **on**   |   **on**    |  on |
-    /// | `fold_pager_meta`          |   off   |    off   |     off     |  on |
     /// | `fold_dwb_into_wal`        |   off   |    off   |     off     |  on |
     /// | audit/slow log destination | stderr  |  stderr  |  file       | file|
     ///
@@ -726,9 +725,9 @@ impl RedDBOptions {
             StorageLayout::Standard | StorageLayout::Performance | StorageLayout::Max
         ));
 
-        // Fold pager meta + fold DWB into WAL — Max only (single
-        // datafile + single recovery substrate is the Max story).
-        crate::physical::set_fold_pager_meta_enabled(matches!(layout, StorageLayout::Max));
+        // Fold DWB into WAL — Max only (a single recovery substrate is the
+        // Max story). The pager manifest is folded into the `.rdb` on every
+        // tier since ADR 0038 §4 phase 1, so it has no toggle.
         crate::physical::set_fold_dwb_into_wal_enabled(matches!(layout, StorageLayout::Max));
 
         // Cache resolved layout paths for `red status` / diagnostics.
