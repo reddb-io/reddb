@@ -1694,6 +1694,34 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                 lat, lon, res,
             )))
         }
+        "H3_CELL" => {
+            let Some((lat, lon)) = geo_point(args.first()?) else {
+                return Some(Value::Null);
+            };
+            let res_value = value_as_i64(args.get(1)?)?;
+            let Some(res) = crate::geo::h3::valid_resolution(res_value) else {
+                return Some(Value::Null);
+            };
+            let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, res);
+            if cell == 0 {
+                Some(Value::Null)
+            } else {
+                Some(Value::UnsignedInteger(cell))
+            }
+        }
+        "H3_PARENT" => {
+            let cell = value_as_u64(args.first()?)?;
+            let res_value = value_as_i64(args.get(1)?)?;
+            let Some(res) = crate::geo::h3::valid_resolution(res_value) else {
+                return Some(Value::Null);
+            };
+            let parent = crate::geo::h3::cell_to_parent(cell, res);
+            if parent == 0 {
+                Some(Value::Null)
+            } else {
+                Some(Value::UnsignedInteger(parent))
+            }
+        }
         "H3_TO_LATLNG" => {
             let cell = value_as_u64(args.first()?)?;
             let (lat, lon) = crate::geo::h3::cell_to_lat_lng(cell);

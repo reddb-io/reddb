@@ -313,6 +313,34 @@ fn evaluate_scalar_function_legacy(
                 lat, lon, res,
             )))
         }
+        "H3_CELL" => {
+            let Some((lat, lon)) = resolve_geo_arg(args.first()?, source) else {
+                return Some(Value::Null);
+            };
+            let res_value = value_as_i64(&resolve_scalar_arg(args, 1, source)?)?;
+            let Some(res) = crate::geo::h3::valid_resolution(res_value) else {
+                return Some(Value::Null);
+            };
+            let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, res);
+            if cell == 0 {
+                Some(Value::Null)
+            } else {
+                Some(Value::UnsignedInteger(cell))
+            }
+        }
+        "H3_PARENT" => {
+            let cell = value_as_u64(&resolve_scalar_arg(args, 0, source)?)?;
+            let res_value = value_as_i64(&resolve_scalar_arg(args, 1, source)?)?;
+            let Some(res) = crate::geo::h3::valid_resolution(res_value) else {
+                return Some(Value::Null);
+            };
+            let parent = crate::geo::h3::cell_to_parent(cell, res);
+            if parent == 0 {
+                Some(Value::Null)
+            } else {
+                Some(Value::UnsignedInteger(parent))
+            }
+        }
         "H3_TO_LATLNG" => {
             let cell = value_as_u64(&resolve_scalar_arg(args, 0, source)?)?;
             let (lat, lon) = crate::geo::h3::cell_to_lat_lng(cell);

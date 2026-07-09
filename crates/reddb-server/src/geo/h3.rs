@@ -12,6 +12,17 @@
 
 use h3o::{CellIndex, LatLng, Resolution};
 
+pub const MIN_RESOLUTION: i64 = 0;
+pub const MAX_RESOLUTION: i64 = 15;
+
+pub fn valid_resolution(res: i64) -> Option<u8> {
+    if (MIN_RESOLUTION..=MAX_RESOLUTION).contains(&res) {
+        Some(res as u8)
+    } else {
+        None
+    }
+}
+
 /// Clamp an arbitrary resolution byte into h3o's valid `0..=15` range.
 ///
 /// H3 has 16 resolutions; anything coarser/finer than the bounds is
