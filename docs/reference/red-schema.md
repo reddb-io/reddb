@@ -323,6 +323,37 @@ Timeseries (`TIME_SERIES` model) metric set:
 | `newest_timestamp_ns` | `NULL` | Newest point timestamp in nanoseconds, or `NULL` when empty. |
 | `metric_point_count` | metric name | Number of points for that metric. |
 
+### Memory budget section
+
+Every RedDB process runs under exactly one memory budget, resolved at boot
+(ADR 0073 §1). It is not a property of any collection, so it is reported under
+the reserved `red.memory_budget` collection label with a `NULL` `entity`:
+
+```sql
+SELECT * FROM red.stats WHERE collection = 'red.memory_budget';
+```
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `resolved_bytes` | `NULL` | The budget this process runs under, in bytes. Always greater than zero — there is no unlimited mode. |
+| `source` | `NULL` | The precedence tier that produced the budget: `config`, `profile-default`, `cgroup-v2`, `cgroup-v1`, or `physical-fraction`. |
+| `pool_shares` | `NULL` | Per-pool budget shares. Empty until the pool-sizing slice populates it. |
+| `live_accounting` | `NULL` | Live per-pool usage. Empty until the enforcement slice populates it. |
+
+The budget is resolved once and is immutable for the process lifetime. The
+resolution order is first-hit-wins: explicit operator configuration (the
+`memory_budget_bytes` startup option, else the `REDDB_MEMORY_BUDGET`
+environment variable), then the deployment-profile default (serverless ships a
+strict default; other profiles fall through to detection), then the container
+limit (cgroup v2 `memory.max`, then cgroup v1 `memory.limit_in_bytes`), and
+finally a conservative fraction of physical RAM. A cgroup value of `max` means
+unlimited and falls through to physical detection. A configured value that is
+not a positive byte count fails the boot with an error naming the valid form —
+it is never silently replaced by a default.
+
+Because the budget is process-scoped, `SHOW STATS <collection>` never returns
+these rows; the unfiltered `SHOW STATS` does.
+
 ### Freshness tiers
 
 `red.*` columns and views split across three consistency tiers:
