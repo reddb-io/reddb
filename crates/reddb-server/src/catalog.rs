@@ -1081,7 +1081,6 @@ fn index_kind_string(kind: IndexKind) -> String {
         IndexKind::BTree => "btree",
         IndexKind::Hash => "hash",
         IndexKind::Bitmap => "bitmap",
-        IndexKind::Spatial => "spatial.rtree",
         IndexKind::VectorHnsw => "vector.hnsw",
         IndexKind::VectorInverted => "vector.inverted",
         IndexKind::VectorTurbo => "vector.turbo",

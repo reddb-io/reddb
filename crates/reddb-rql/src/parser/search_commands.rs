@@ -419,7 +419,7 @@ impl<'a> Parser<'a> {
                 let collection = self.expect_ident()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
-                let column = self.expect_ident()?;
+                let column = self.parse_search_spatial_column()?;
 
                 let mut limit_param: Option<usize> = None;
                 let limit = if self.consume(&Token::Limit)? {
@@ -486,7 +486,7 @@ impl<'a> Parser<'a> {
                 let collection = self.expect_ident()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
-                let column = self.expect_ident()?;
+                let column = self.parse_search_spatial_column()?;
 
                 let mut limit_param: Option<usize> = None;
                 let limit = if self.consume(&Token::Limit)? {
@@ -546,7 +546,7 @@ impl<'a> Parser<'a> {
                 let collection = self.expect_ident()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
-                let column = self.expect_ident()?;
+                let column = self.parse_search_spatial_column()?;
 
                 Ok(QueryExpr::SearchCommand(SearchCommand::SpatialNearest {
                     lat,
@@ -563,6 +563,45 @@ impl<'a> Parser<'a> {
                 self.position(),
             )),
         }
+    }
+
+    fn parse_search_spatial_column(&mut self) -> Result<String, ParseError> {
+        let mut segments = vec![self.expect_spatial_column_segment()?];
+        while self.consume(&Token::Dot)? {
+            segments.push(self.expect_spatial_column_segment()?);
+        }
+        Ok(segments.join("."))
+    }
+
+    /// One dotted-path segment of a `SEARCH SPATIAL ... COLUMN` argument.
+    ///
+    /// Column names are user data, not grammar: a document field named
+    /// `current` lexes (case-insensitively) into the window-frame keyword
+    /// token, whose display form would silently rewrite the column to
+    /// `CURRENT` and break the case-sensitive body-field lookup. Recover
+    /// the typed spelling by slicing the token's source span; only
+    /// word-shaped tokens qualify as segments.
+    fn expect_spatial_column_segment(&mut self) -> Result<String, ParseError> {
+        if let Token::Ident(name) = &self.current.token {
+            let name = name.clone();
+            self.advance()?;
+            return Ok(name);
+        }
+        let start = self.current.start.offset as usize;
+        let end = self.current.end.offset as usize;
+        let raw = self.lexer.source().get(start..end).unwrap_or("");
+        let word_shaped = !raw.is_empty()
+            && raw.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !raw.chars().next().is_some_and(|c| c.is_ascii_digit());
+        if word_shaped {
+            let name = raw.to_string();
+            self.advance()?;
+            return Ok(name);
+        }
+        Err(ParseError::new(
+            format!("expected column name, found {}", self.current.token),
+            self.position(),
+        ))
     }
 
     /// Parse a vector literal: [0.1, 0.2, 0.3]

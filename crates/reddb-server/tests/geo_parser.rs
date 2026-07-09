@@ -2,8 +2,8 @@
 //! (issue #104).
 //!
 //! Reuses the `tests/support/parser_hardening` harness from #87 to
-//! cover the SEARCH SPATIAL grammar (RADIUS / BBOX / NEAREST), the
-//! RTREE index method, and the geo scalar functions
+//! cover the SEARCH SPATIAL grammar (RADIUS / BBOX / NEAREST), retired
+//! RTREE rejection, and the geo scalar functions
 //! (`GEO_DISTANCE`, `HAVERSINE`, `VINCENTY`, …).
 //!
 //! The geo grammar is reached through the standard
@@ -104,13 +104,15 @@ proptest! {
         );
     }
 
-    /// Generated CREATE INDEX … USING RTREE shapes parse cleanly.
+    /// Generated CREATE INDEX … USING RTREE shapes report the didactic
+    /// retirement error instead of generic syntax noise.
     #[test]
-    fn proptest_rtree_index_roundtrips(s in geo_grammar::rtree_index_stmt()) {
-        harness::roundtrip_property::<GeoParser>(&s);
+    fn proptest_rtree_index_reports_removal(s in geo_grammar::rtree_index_stmt()) {
+        let err = parser::parse(&s).expect_err("rtree index must be rejected");
+        let msg = err.to_string();
         prop_assert!(
-            GeoParser::parse(&s).is_ok(),
-            "rtree index did not parse: {}", s
+            msg.contains("USING RTREE was removed") && msg.contains("Use USING H3"),
+            "unexpected rtree removal message for {s}: {msg}"
         );
     }
 
@@ -163,7 +165,7 @@ proptest! {
 // surfaces as a precise failure rather than a fuzzy proptest
 // shrink.
 
-use reddb_server::storage::query::ast::{IndexMethod, QueryExpr, SearchCommand};
+use reddb_server::storage::query::ast::{QueryExpr, SearchCommand};
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)
@@ -260,18 +262,16 @@ fn happy_nearest_k_5_parses() {
 }
 
 #[test]
-fn happy_rtree_index_parses_with_method() {
-    let q = parse_query("CREATE INDEX gix_loc ON sites (location) USING RTREE");
-    match q {
-        QueryExpr::CreateIndex(ci) => {
-            assert_eq!(ci.name, "gix_loc");
-            assert_eq!(ci.table, "sites");
-            assert_eq!(ci.columns, vec!["location".to_string()]);
-            assert_eq!(ci.method, IndexMethod::RTree);
-            assert!(!ci.unique);
-        }
-        other => panic!("expected CreateIndex, got {other:?}"),
-    }
+fn rtree_index_reports_didactic_removal() {
+    let err = parser::parse("CREATE INDEX gix_loc ON sites (location) USING RTREE")
+        .expect_err("RTREE index DDL must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("USING RTREE was removed"), "{msg}");
+    assert!(msg.contains("Use USING H3"), "{msg}");
+    assert!(
+        msg.contains("CREATE INDEX idx_loc ON events (gpsLocation) USING H3"),
+        "{msg}"
+    );
 }
 
 #[test]

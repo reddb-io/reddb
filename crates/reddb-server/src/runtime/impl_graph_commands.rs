@@ -874,7 +874,7 @@ impl RedDBRuntime {
                             .to_string(),
                     ));
                 }
-                use crate::storage::unified::spatial_index::haversine_km;
+                use crate::geo::haversine_km;
                 // When the geo column carries an H3 index, gather candidates
                 // from a covering kRing over the disk B-tree cell ids; the
                 // ring is a provable superset of the in-radius rows, so the
@@ -893,8 +893,9 @@ impl RedDBRuntime {
 
                 let mut hits: Vec<(u64, f64)> = Vec::new();
                 for entity in &entities {
-                    // Extract lat/lon from GeoPoint values in entity data
-                    if let Some((lat, lon)) = extract_geo_from_entity(entity) {
+                    if let Some((lat, lon)) =
+                        self.extract_spatial_column(entity, collection, column)
+                    {
                         let dist = haversine_km(*center_lat, *center_lon, lat, lon);
                         if dist <= *radius_km {
                             hits.push((entity.id.raw(), dist));
@@ -955,7 +956,9 @@ impl RedDBRuntime {
                     if count >= *limit {
                         break;
                     }
-                    if let Some((lat, lon)) = extract_geo_from_entity(entity) {
+                    if let Some((lat, lon)) =
+                        self.extract_spatial_column(entity, collection, column)
+                    {
                         if lat >= *min_lat && lat <= *max_lat && lon >= *min_lon && lon <= *max_lon
                         {
                             let mut record = UnifiedRecord::new();
@@ -990,7 +993,7 @@ impl RedDBRuntime {
                             .to_string(),
                     ));
                 }
-                use crate::storage::unified::spatial_index::haversine_km;
+                use crate::geo::haversine_km;
                 // Expand rings outward off the H3 disk index until the K-th
                 // nearest candidate is provably closer than any unscanned
                 // cell, then post-filter exactly as the full scan does. When
@@ -1004,7 +1007,9 @@ impl RedDBRuntime {
 
                 let mut hits: Vec<(u64, f64)> = Vec::new();
                 for entity in &entities {
-                    if let Some((elat, elon)) = extract_geo_from_entity(entity) {
+                    if let Some((elat, elon)) =
+                        self.extract_spatial_column(entity, collection, column)
+                    {
                         let dist = haversine_km(*lat, *lon, elat, elon);
                         hits.push((entity.id.raw(), dist));
                     }
@@ -1210,86 +1215,52 @@ fn parse_components_mode(s: &str) -> RedDBResult<RuntimeGraphComponentsMode> {
 fn extract_geo_from_entity(entity: &UnifiedEntity) -> Option<(f64, f64)> {
     match &entity.data {
         EntityData::Row(row) => {
-            // Search named columns for GeoPoint or lat/lon pairs
             if let Some(ref named) = row.named {
-                // Direct GeoPoint value
                 for value in named.values() {
-                    if let Value::GeoPoint(lat_micro, lon_micro) = value {
-                        return Some((
-                            *lat_micro as f64 / 1_000_000.0,
-                            *lon_micro as f64 / 1_000_000.0,
-                        ));
+                    if let Some(point) = crate::geo::recognize_geo_value(value) {
+                        return Some(point);
                     }
                 }
-                // Try lat/lon or latitude/longitude named fields
-                let lat =
-                    named
-                        .get("lat")
-                        .or_else(|| named.get("latitude"))
-                        .and_then(|v| match v {
-                            Value::Float(f) => Some(*f),
-                            Value::Integer(i) => Some(*i as f64),
-                            _ => None,
-                        });
-                let lon = named
-                    .get("lon")
-                    .or_else(|| named.get("lng"))
-                    .or_else(|| named.get("longitude"))
-                    .and_then(|v| match v {
-                        Value::Float(f) => Some(*f),
-                        Value::Integer(i) => Some(*i as f64),
-                        _ => None,
-                    });
-                if let (Some(la), Some(lo)) = (lat, lon) {
-                    return Some((la, lo));
+                if let Some(point) = crate::geo::recognize_geo_fields(|key| named.get(key)) {
+                    return Some(point);
                 }
             }
-            // Search positional columns for GeoPoint
             for value in &row.columns {
-                if let Value::GeoPoint(lat_micro, lon_micro) = value {
-                    return Some((
-                        *lat_micro as f64 / 1_000_000.0,
-                        *lon_micro as f64 / 1_000_000.0,
-                    ));
+                if let Some(point) = crate::geo::recognize_geo_value(value) {
+                    return Some(point);
                 }
             }
             None
         }
         EntityData::Node(node) => {
-            // Search node properties
             for value in node.properties.values() {
-                if let Value::GeoPoint(lat_micro, lon_micro) = value {
-                    return Some((
-                        *lat_micro as f64 / 1_000_000.0,
-                        *lon_micro as f64 / 1_000_000.0,
-                    ));
+                if let Some(point) = crate::geo::recognize_geo_value(value) {
+                    return Some(point);
                 }
             }
-            let lat = node
-                .properties
-                .get("lat")
-                .or_else(|| node.properties.get("latitude"))
-                .and_then(|v| match v {
-                    Value::Float(f) => Some(*f),
-                    Value::Integer(i) => Some(*i as f64),
-                    _ => None,
-                });
-            let lon = node
-                .properties
-                .get("lon")
-                .or_else(|| node.properties.get("lng"))
-                .or_else(|| node.properties.get("longitude"))
-                .and_then(|v| match v {
-                    Value::Float(f) => Some(*f),
-                    Value::Integer(i) => Some(*i as f64),
-                    _ => None,
-                });
-            if let (Some(la), Some(lo)) = (lat, lon) {
-                return Some((la, lo));
-            }
-            None
+            crate::geo::recognize_geo_fields(|key| node.properties.get(key))
         }
         _ => None,
+    }
+}
+
+fn index_fields_from_entity(entity: &UnifiedEntity) -> Vec<(String, Value)> {
+    match &entity.data {
+        EntityData::Row(row) => row
+            .iter_fields()
+            .map(|(field, value)| (field.to_string(), value.clone()))
+            .collect(),
+        EntityData::Node(node) => node
+            .properties
+            .iter()
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect(),
+        EntityData::Edge(edge) => edge
+            .properties
+            .iter()
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1303,14 +1274,20 @@ fn scan_collection_with_candidates(
     collection: &str,
     candidates: &Option<std::collections::HashSet<u64>>,
 ) -> Vec<UnifiedEntity> {
+    let resolver =
+        crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
     match candidates {
         Some(ids) => store
             .get_collection(collection)
-            .map(|m| m.query_all(|e| ids.contains(&e.id.raw())))
+            .map(|m| {
+                m.query_all(|e| {
+                    ids.contains(&e.id.raw()) && resolver.resolve_read_candidate(e).is_some()
+                })
+            })
             .unwrap_or_default(),
         None => store
             .get_collection(collection)
-            .map(|m| m.query_all(|_| true))
+            .map(|m| m.query_all(|e| resolver.resolve_read_candidate(e).is_some()))
             .unwrap_or_default(),
     }
 }
@@ -1340,6 +1317,38 @@ fn h3_cover_cells(lat: f64, lon: f64, radius_km: f64, resolution: u8) -> Vec<u64
 }
 
 impl RedDBRuntime {
+    fn extract_spatial_column(
+        &self,
+        entity: &UnifiedEntity,
+        collection: &str,
+        column: &str,
+    ) -> Option<(f64, f64)> {
+        let fields = index_fields_from_entity(entity);
+        if let Some(value) = self
+            .inner
+            .index_store
+            .resolve_index_field_value(&fields, column)
+        {
+            return crate::geo::recognize_geo_value(&value);
+        }
+
+        let is_document_collection =
+            self.inner
+                .db
+                .collection_contract(collection)
+                .is_some_and(|contract| {
+                    contract.declared_model == crate::catalog::CollectionModel::Document
+                });
+        if is_document_collection {
+            return None;
+        }
+
+        match entity.data {
+            EntityData::Row(_) | EntityData::Node(_) => extract_geo_from_entity(entity),
+            _ => None,
+        }
+    }
+
     /// Resolution of the H3 index registered on `(collection, column)`, if
     /// the column is covered by one. `None` for any other (or no) index.
     fn h3_index_resolution(&self, collection: &str, column: &str) -> Option<u8> {

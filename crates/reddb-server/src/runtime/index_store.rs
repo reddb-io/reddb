@@ -1,6 +1,6 @@
 //! Unified Index Store
 //!
-//! Holds all user-created secondary indices (Hash, Bitmap, Spatial) and
+//! Holds all user-created secondary indices (Hash, Bitmap, BTree, H3) and
 //! provides a single point of access for the query executor.
 //!
 //! The executor calls `lookup()` with a collection, column, and value —
@@ -15,7 +15,6 @@ use crate::storage::schema::{value_to_canonical_key, CanonicalKey, CanonicalKeyF
 use crate::storage::unified::bitmap_index::BitmapIndexManager;
 use crate::storage::unified::entity::EntityId;
 use crate::storage::unified::hash_index::{HashIndexConfig, HashIndexManager};
-use crate::storage::unified::spatial_index::SpatialIndexManager;
 
 enum CanonicalizedValue {
     Exact(CanonicalKey),
@@ -1120,7 +1119,7 @@ impl RegisteredIndex {
         match self.method {
             IndexMethodKind::Hash => std::borrow::Cow::Borrowed(self.name.as_str()),
             IndexMethodKind::BTree => std::borrow::Cow::Owned(format!("{}_hash", self.name)),
-            IndexMethodKind::Bitmap | IndexMethodKind::Spatial | IndexMethodKind::H3 { .. } => {
+            IndexMethodKind::Bitmap | IndexMethodKind::H3 { .. } => {
                 std::borrow::Cow::Borrowed(self.name.as_str())
             }
         }
@@ -1131,7 +1130,6 @@ impl RegisteredIndex {
 pub enum IndexMethodKind {
     Hash,
     Bitmap,
-    Spatial,
     BTree,
     /// H3 spatial index: the geo column's `(lat, lon)` is encoded to a
     /// single H3 cell-id and stored in the sorted (disk-paged B-tree)
@@ -1151,13 +1149,8 @@ impl IndexMethodKind {
     /// As of PRD #1574 slice 4 (#1578) the default is the disk-resident
     /// [`IndexMethodKind::H3`] index: `(lat, lon)` is encoded to a single
     /// H3 cell-id `u64` and stored in the existing paged B-tree, so RAM
-    /// stays O(working set) rather than O(total points). The in-RAM
-    /// `rstar` R-tree ([`IndexMethodKind::Spatial`]) is no longer the
-    /// default — it is reachable only via the explicit `USING RTREE` opt-in
-    /// and is memory-capped (see `storage::unified::spatial_index`).
-    ///
-    /// Trade-off: R-tree = arbitrary shapes / exact small sets, held in
-    /// RAM (now capped); H3 = points at scale, on disk, the default.
+    /// stays O(working set) rather than O(total points). The old in-RAM
+    /// R-tree backend was retired; `USING RTREE` is now a didactic error.
     pub fn default_spatial() -> Self {
         IndexMethodKind::H3 {
             resolution: DEFAULT_H3_RESOLUTION,
@@ -1176,7 +1169,6 @@ pub(crate) const DEFAULT_H3_RESOLUTION: u8 = 9;
 pub struct IndexStore {
     pub hash: HashIndexManager,
     pub bitmap: BitmapIndexManager,
-    pub spatial: SpatialIndexManager,
     pub sorted: SortedIndexManager,
     /// Registry of all created indices: (collection, index_name) → metadata
     registry: RwLock<HashMap<(String, String), RegisteredIndex>>,
@@ -1187,7 +1179,6 @@ impl IndexStore {
         Self {
             hash: HashIndexManager::new(),
             bitmap: BitmapIndexManager::new(),
-            spatial: SpatialIndexManager::new(),
             sorted: SortedIndexManager::new(),
             registry: RwLock::new(HashMap::new()),
         }
@@ -1248,11 +1239,6 @@ impl IndexStore {
                     }
                 }
                 Ok(count)
-            }
-            IndexMethodKind::Spatial => {
-                self.spatial.create_index(collection, col);
-                // Spatial indexing happens via insert with lat/lon
-                Ok(0)
             }
             IndexMethodKind::H3 { resolution } => {
                 // Encode each existing row's geo column to its H3 cell-id
@@ -1316,10 +1302,6 @@ impl IndexStore {
                 IndexMethodKind::Bitmap => {
                     let col = info.columns.first().map(|s| s.as_str()).unwrap_or("");
                     self.bitmap.drop_index(collection, col)
-                }
-                IndexMethodKind::Spatial => {
-                    let col = info.columns.first().map(|s| s.as_str()).unwrap_or("");
-                    self.spatial.drop_index(collection, col)
                 }
                 // Sorted-backed indexes (BTree / H3) are removed from the
                 // registry above; the sorted manager has no per-index drop
@@ -1422,12 +1404,6 @@ impl IndexStore {
                 .first()
                 .and_then(|column| self.bitmap.index_stats(&index.collection, column).ok())
                 .map(|stats| stats.entity_count as u64)
-                .unwrap_or(0),
-            IndexMethodKind::Spatial => index
-                .columns
-                .first()
-                .and_then(|column| self.spatial.index_stats(&index.collection, column).ok())
-                .map(|stats| stats.point_count as u64)
                 .unwrap_or(0),
         }
     }
@@ -1560,7 +1536,6 @@ impl IndexStore {
                                 self.sorted.insert_one(collection, col, &cell, *entity_id);
                             }
                         }
-                        IndexMethodKind::Spatial => {}
                     }
                 }
             }
@@ -1628,7 +1603,6 @@ impl IndexStore {
                             self.sorted.insert_one(collection, col, &cell, entity_id);
                         }
                     }
-                    IndexMethodKind::Spatial => {}
                 }
             }
         }
@@ -1691,7 +1665,6 @@ impl IndexStore {
                             self.sorted.delete_one(collection, col, &cell, entity_id);
                         }
                     }
-                    IndexMethodKind::Spatial => {}
                 }
             }
         }
@@ -1841,7 +1814,6 @@ impl From<IndexMethodKind> for IncMethodKind {
         match value {
             IndexMethodKind::Hash => IncMethodKind::Hash,
             IndexMethodKind::Bitmap => IncMethodKind::Bitmap,
-            IndexMethodKind::Spatial => IncMethodKind::Spatial,
             IndexMethodKind::BTree => IncMethodKind::BTree,
             // The maintainer mirror doesn't carry the H3 resolution; the
             // sorted half is maintained via `index_entity_insert`.
@@ -1855,7 +1827,6 @@ impl From<IncMethodKind> for IndexMethodKind {
         match value {
             IncMethodKind::Hash => IndexMethodKind::Hash,
             IncMethodKind::Bitmap => IndexMethodKind::Bitmap,
-            IncMethodKind::Spatial => IndexMethodKind::Spatial,
             IncMethodKind::BTree => IndexMethodKind::BTree,
             // Resolution isn't carried by the mirror — placeholder only;
             // the authoritative resolution lives in the index registry.
@@ -1902,8 +1873,8 @@ impl SecondaryIndexBackend for IndexStore {
             }
             // H3 has no auxiliary hash side-pocket; its sorted half is
             // maintained by `index_entity_insert` (which has the raw
-            // GeoPoint Value + resolution). Spatial is likewise a no-op.
-            IncMethodKind::Spatial | IncMethodKind::H3 => Ok(()),
+            // GeoPoint Value + resolution).
+            IncMethodKind::H3 => Ok(()),
         }
     }
 
@@ -1926,7 +1897,7 @@ impl SecondaryIndexBackend for IndexStore {
                 let aux = format!("{}_hash", idx.name);
                 let _ = self.hash.remove(collection, &aux, key, row_id);
             }
-            IncMethodKind::Spatial | IncMethodKind::H3 => {}
+            IncMethodKind::H3 => {}
         }
     }
 }
@@ -1973,12 +1944,27 @@ impl IndexStore {
 }
 
 fn index_field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<Cow<'a, Value>> {
-    if !column.contains('.') {
-        // Single-source document: an index on a bare document field (`score`)
-        // is backed by the body.
-        // Offset-read it from the binary `body` container (inert otherwise).
-        if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
-            return crate::document_body::read_body_field(bytes, column).map(Cow::Owned);
+    if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
+        // Single-source document: an index on a bare or dotted document field
+        // (`score`, `location.gps`) is backed by the body, not a stored column.
+        // The ROOT segment must be offset-read from the binary `body`
+        // container (`read_body_field` is the binary-container-aware,
+        // storage-typed read); the generic document-path resolver does not
+        // decode binary containers, so resolving the whole path against the
+        // raw `body` value silently yields nothing and builds an empty
+        // index. Descend into nested structure only AFTER the offset-read.
+        let segments = super::join_filter::parse_runtime_document_path(column);
+        if let Some((root, tail)) = segments.split_first() {
+            if let Some(root_value) = crate::document_body::read_body_field(bytes, root) {
+                if tail.is_empty() {
+                    return Some(Cow::Owned(root_value));
+                }
+                if let Some(value) =
+                    super::join_filter::resolve_runtime_document_path_from_value(&root_value, tail)
+                {
+                    return Some(Cow::Owned(value));
+                }
+            }
         }
     }
     if let Some((_, value)) = fields.iter().find(|(field, _)| field == column) {
@@ -2016,18 +2002,12 @@ fn derive_index_entities_for_column(
 /// (slice 1), which also yields an `UnsignedInteger`, so the index key
 /// family matches the query side.
 ///
-/// Returns `None` when the value is not a `GeoPoint`, or when the
+/// Returns `None` when the value is not a recognized geo value, or when the
 /// coordinate fails to encode (`lat_lng_to_cell` returns the `0`
 /// sentinel) — those rows are simply absent from the index, exactly as
 /// an `Unsupported` value is absent from a BTree index.
 fn h3_cell_value(value: &Value, resolution: u8) -> Option<Value> {
-    let (lat, lon) = match value {
-        Value::GeoPoint(lat_micro, lon_micro) => (
-            crate::geo::micro_to_deg(*lat_micro),
-            crate::geo::micro_to_deg(*lon_micro),
-        ),
-        _ => return None,
-    };
+    let (lat, lon) = crate::geo::recognize_geo_value(value)?;
     let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, resolution);
     if cell == 0 {
         return None;
@@ -2104,6 +2084,28 @@ mod tests {
     fn h3_cell_value_rejects_non_geopoint() {
         assert!(h3_cell_value(&Value::Integer(5), 9).is_none());
         assert!(h3_cell_value(&Value::text("48.8,2.3".to_string()), 9).is_none());
+    }
+
+    #[test]
+    fn h3_cell_value_uses_shared_geo_recognition_for_json_objects() {
+        let value = Value::Json(br#"{"latitude":48.8566,"longitude":2.3522}"#.to_vec());
+        let cell = h3_cell_value(&value, 9).expect("json object coordinate must encode");
+        assert_eq!(
+            cell,
+            Value::UnsignedInteger(crate::geo::h3::lat_lng_to_cell(48.8566, 2.3522, 9))
+        );
+    }
+
+    #[test]
+    fn h3_cell_value_rejects_shared_geo_non_goals() {
+        for value in [
+            Value::Json(br#"{"lat":"48.8566","lon":"2.3522"}"#.to_vec()),
+            Value::Json(br#"{"type":"Point","coordinates":[2.3522,48.8566]}"#.to_vec()),
+            Value::Json(br#"{"lat":48.8566}"#.to_vec()),
+            Value::Json(br#"{"lat":91.0,"lon":2.3522}"#.to_vec()),
+        ] {
+            assert_eq!(h3_cell_value(&value, 9), None, "{value:?}");
+        }
     }
 
     #[test]

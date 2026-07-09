@@ -897,12 +897,10 @@ pub enum IndexMethod {
     BTree,
     Hash,
     Bitmap,
-    RTree,
     /// Generic spatial index request (`USING SPATIAL`) — the engine picks
     /// the default spatial backend. As of PRD #1574 slice 4 (#1578) that
     /// default is the disk-resident H3 index (RAM stays O(working set)),
-    /// not the unbounded in-RAM `RTree`. Use the explicit `USING RTREE`
-    /// form when the memory-capped in-RAM R-tree is specifically wanted.
+    /// not the retired in-RAM R-tree.
     Spatial,
     /// H3 hexagonal spatial index: the `(lat, lon)` geo column is
     /// encoded to a single H3 cell-id `u64` (at `resolution`) and stored
@@ -918,7 +916,6 @@ impl fmt::Display for IndexMethod {
             Self::BTree => write!(f, "BTREE"),
             Self::Hash => write!(f, "HASH"),
             Self::Bitmap => write!(f, "BITMAP"),
-            Self::RTree => write!(f, "RTREE"),
             Self::Spatial => write!(f, "SPATIAL"),
             Self::H3 { .. } => write!(f, "H3"),
         }
@@ -3438,7 +3435,6 @@ mod tests {
         assert_eq!(IndexMethod::BTree.to_string(), "BTREE");
         assert_eq!(IndexMethod::Hash.to_string(), "HASH");
         assert_eq!(IndexMethod::Bitmap.to_string(), "BITMAP");
-        assert_eq!(IndexMethod::RTree.to_string(), "RTREE");
         assert_eq!(IndexMethod::Spatial.to_string(), "SPATIAL");
         assert_eq!(IndexMethod::H3 { resolution: 9 }.to_string(), "H3");
     }

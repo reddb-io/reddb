@@ -17,6 +17,22 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 - **ExtendedTtlPolicy** — opt-in extension to the cache policy carrying `idle_ttl_ms`, `stale_serve_ms`, and `jitter_pct`. Off by default; per-entry rather than global.
 - **Page cache** — internal sharded SIEVE cache of database pages. Distinct from the Blob Cache. Lives at `storage/engine/page_cache.rs`.
 
+## Resource governance
+
+- **Memory budget** — per [ADR 0073](../adr/0073-memory-budget-governance.md), the explicit memory ceiling every RedDB process runs under, resolved at boot (operator config > profile default > host/cgroup detection — never "unlimited"). Big structures (page cache, segment arenas, index memory, WAL buffers) are pre-sized from it; admission that would exceed it fails didactically or triggers reclamation. The kernel OOM killer is never the limit mechanism.
+- **Budget share** — the slice of the memory budget assigned to one subsystem pool at startup. Shares draw from one shared accounting pool; per-subsystem caps that don't share accounting are explicitly rejected (OOM by summation).
+- **Segment consolidation** — budget-driven reclamation mechanism: merges sealed segments and garbage-collects tombstones, returning memory to the budget when tombstone/fragmentation ratios cross thresholds. Replaces the vestigial LSM compaction scaffolding in the unified layer. Always paced (see *Paced maintenance*).
+- **Paced maintenance** — per [ADR 0038](../adr/0038-embedded-single-file-zoned-rdb.md) §3, the rule that all storage maintenance (consolidation, scrub, append-only compaction, archival) runs as incremental tick-paced work with bounded per-tick cost. Bursty background maintenance threads (the Cassandra compaction model) are prohibited in every profile.
+- **Scale contract** — the per-profile promise about dataset size vs memory: embedded contracts working set ≤ memory budget; the server profile carries the disk-residency roadmap (dataset > RAM, ADR 0038 phase 4); serverless contracts strict boundedness. Documented in ADR 0038 §1.
+
+## Fault model & integrity tooling
+
+- **Storage fault model** — per [ADR 0074](../adr/0074-storage-fault-model.md), the explicit list of modeled physical faults: torn writes, misdirected writes, bit rot, lost writes, and crash-at-any-point. Each zone (superblock, manifest, WAL region, pages/blocks) has a written detection contract; out-of-model faults are documented as such.
+- **Scrub** — operator-invocable (and paceable background) integrity pass verifying every checksum in a store and reporting a structured result without mutating anything. RedDB's `PRAGMA integrity_check` counterpart, with fault-class attribution where evidence allows.
+- **Salvage** — best-effort extractor that reads a damaged `.rdb` and exports every recoverable entity into a fresh store plus a loss report, skipping and enumerating what fails verification. RedDB's `.recover` counterpart; DST-proven against injected fault classes. Never writes into the damaged file.
+- **Paranoid cluster clause** — ADR 0074 §5: cluster/replica profiles never serve data whose checksum failed, run scrub continuously, and treat repair-from-replica as a mandatory profile capability, not an optimization.
+- **Test-scoped determinism** — ADR 0074 §6: execution determinism (SimClock, seeded randomness, `buggify!`) is a property of the DST harness, not a runtime guarantee. Replication copies bytes (WAL shipping); deterministic state-machine replication is out of horizon unless a future ADR reverses this.
+
 ## Files & layout (operational directory)
 
 - **File/protocol ownership boundary** — per [ADR 0046](../adr/0046-wire-file-crate-authority-boundary.md), the published crate `reddb-io-file` uses Rust import `reddb_file`, and local crate `reddb-file` is the authority for file contracts: names, paths, sidecars, manifests, superblocks, WAL artifacts, checkpoint artifacts, and recovery metadata. The published crate `reddb-io-wire` uses Rust import `reddb_wire`, and local crate `reddb-wire` is the authority for communication contracts: frames, codecs, payloads, topology, connection strings, sanitizers, and replication wire messages. The published crate `reddb-io-server` uses Rust import `reddb_server`, and local crate `reddb-server` orchestrates runtime, SQL, auth, storage engine policy, and calls into those crates; it must not introduce new persistent file formats or protocol payload formats directly.

@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"CREATE INDEX gix ON sites (location) USING WRONGT
 ---
 input: "CREATE INDEX gix ON sites (location) USING WRONGTREE"
 kind:  Syntax
-error: Parse error at 1:44: unknown index method 'WRONGTREE', expected HASH, BTREE, BITMAP, RTREE, SPATIAL, or H3
+error: Parse error at 1:44: unknown index method 'WRONGTREE', expected HASH, BTREE, BITMAP, SPATIAL, or H3

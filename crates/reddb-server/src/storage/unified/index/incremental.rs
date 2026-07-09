@@ -61,7 +61,6 @@ use crate::storage::unified::entity::EntityId;
 pub enum IndexMethodKind {
     Hash,
     Bitmap,
-    Spatial,
     BTree,
     /// H3 spatial index (cell-id `u64` stored in the sorted B-tree).
     /// The maintainer mirror does not carry the resolution — the

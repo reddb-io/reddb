@@ -75,6 +75,11 @@ untrusted input, and the absence of any `[workspace.lints]`.
   on untrusted input*, not the absence of recursion. Recursive-descent parsing is natural; we
   require an explicit depth cap instead of converting it to explicit-stack iteration.
 
+  *Amended 2026-07-08 (ADR 0073 §6):* in the **storage/recovery data plane** the reframing is
+  hardened back to the literal rule — recursion is prohibited there (explicit stacks with
+  budget-sized capacity), because a stack overflow during recovery is a data-loss event, not a
+  crash. Parser/planner/query surfaces keep the depth-bounded rule above unchanged.
+
 ## Enforcement
 
 CI already runs `cargo clippy --locked --all -- -D warnings`, so any `warn`-level lint becomes a
