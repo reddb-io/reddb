@@ -277,6 +277,7 @@ fn decode_result_cache_payload(mut input: &[u8]) -> Option<(RuntimeQueryResult, 
             affected_rows,
             statement_type,
             bookmark: None,
+            notice: None,
         },
         scopes,
     ))
