@@ -4,7 +4,7 @@
 //! - UnifiedEntity object creation
 //! - HashMap allocation
 //! - B-tree traversal & splitting
-//! - Bloom filter, memtable, cross-refs
+//! - Bloom filter, cross-refs
 //!
 //! Each row is serialized as a cell and packed sequentially into pages.
 //! Pages are linked as a doubly-linked list and written to the pager in batch.
