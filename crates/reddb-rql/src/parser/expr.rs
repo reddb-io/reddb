@@ -609,6 +609,22 @@ impl<'a> Parser<'a> {
             });
         }
 
+        if function_name.eq_ignore_ascii_case("POLYGON") {
+            let vertices = self.parse_polygon_expr_vertices()?;
+            super::search_commands::validate_search_spatial_polygon(&vertices, self.position())?;
+            let value = Value::Array(
+                vertices
+                    .into_iter()
+                    .map(|(lat, lon)| Value::Array(vec![Value::Float(lat), Value::Float(lon)]))
+                    .collect(),
+            );
+            let end = self.position();
+            return Ok(Expr::Literal {
+                value,
+                span: Span::new(start, end),
+            });
+        }
+
         if function_name.eq_ignore_ascii_case("COUNT") {
             if self.consume(&Token::Distinct)? {
                 let arg = self.parse_expr_prec(0)?;
@@ -684,6 +700,26 @@ impl<'a> Parser<'a> {
             args,
             span: Span::new(start, end),
         })
+    }
+
+    fn parse_polygon_expr_vertices(&mut self) -> Result<Vec<(f64, f64)>, ParseError> {
+        let mut vertices = Vec::new();
+        if self.check(&Token::RParen) {
+            self.expect(Token::RParen)?;
+            return Ok(vertices);
+        }
+        loop {
+            self.expect(Token::LParen)?;
+            let lat = self.parse_float()?;
+            let lon = self.parse_float()?;
+            self.expect(Token::RParen)?;
+            vertices.push((lat, lon));
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        Ok(vertices)
     }
 
     /// Parse a single CONFIG()/KV() argument. A bare identifier or
