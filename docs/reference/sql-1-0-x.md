@@ -115,6 +115,7 @@ columns or top-level document, KV, node, or edge properties named `rid`,
 | `SHOW SCHEMA <collection>` | `SHOW SCHEMA users` | supported |
 | `SHOW SAMPLE <collection> [LIMIT n]` | `SHOW SAMPLE users LIMIT 5` | supported |
 | `SHOW STATS [collection]` | `SHOW STATS users` | supported |
+| `SCRUB [BACKGROUND BUDGET n]` | `SCRUB BACKGROUND BUDGET 128` | supported |
 | `CREATE VIEW` / `CREATE MATERIALIZED VIEW` | `CREATE VIEW active AS SELECT * FROM users WHERE active = true` | supported |
 | `DROP [MATERIALIZED] VIEW` | `DROP MATERIALIZED VIEW active` | supported |
 | `REFRESH MATERIALIZED VIEW` | `REFRESH MATERIALIZED VIEW active` | supported |
