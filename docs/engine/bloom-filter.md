@@ -40,4 +40,4 @@ own their bloom state alongside the other per-segment metadata.
 
 - [Architecture](/engine/architecture.md) -- Storage engine overview
 - [B-Tree Index](/engine/btree.md) -- Primary index structure
-- [Memtable & Skip List](/engine/memtable.md) -- Write buffer
+- [Write & Read Paths](/engine/memtable.md) -- Growing and sealed segment paths

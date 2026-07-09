@@ -589,19 +589,29 @@ impl CompiledEntityFilter {
             return false;
         }
 
-        // Fixed-size bool stack — no heap allocation per row.
+        // Fixed-size three-valued stack — no heap allocation per row.
         // 32 slots is enough for any filter tree likely to appear in a real
         // query (worst case: N binary ops need N+1 operand slots at once).
+        //
+        // The third value is `None`: "this subtree cannot be decided here".
+        // Only `Fallback` produces it, and it must survive negation — a row
+        // the prefilter cannot judge has to reach the runtime recheck, not
+        // be flipped into a definite `false` by an enclosing NOT.
         const STACK_CAP: usize = 32;
-        let mut stack = [false; STACK_CAP];
+        let mut stack: [Option<bool>; STACK_CAP] = [None; STACK_CAP];
         let mut sp = 0usize; // stack pointer (next free slot)
 
-        macro_rules! push {
+        macro_rules! push_opt {
             ($v:expr) => {
                 if sp < STACK_CAP {
                     stack[sp] = $v;
                     sp += 1;
                 }
+            };
+        }
+        macro_rules! push {
+            ($v:expr) => {
+                push_opt!(Some($v))
             };
         }
         macro_rules! pop {
@@ -613,6 +623,22 @@ impl CompiledEntityFilter {
                     stack[sp]
                 }
             }};
+        }
+        // Kleene AND / OR: a definite short-circuit wins over an undecided
+        // operand; otherwise undecided propagates.
+        fn kleene_and(lhs: Option<bool>, rhs: Option<bool>) -> Option<bool> {
+            match (lhs, rhs) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            }
+        }
+        fn kleene_or(lhs: Option<bool>, rhs: Option<bool>) -> Option<bool> {
+            match (lhs, rhs) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            }
         }
 
         for op in &self.ops {
@@ -707,32 +733,33 @@ impl CompiledEntityFilter {
                     push!(result);
                 }
                 CompiledEntityOp::And => {
-                    let r = pop!(true);
-                    let l = pop!(true);
-                    push!(l && r);
+                    let r = pop!(Some(true));
+                    let l = pop!(Some(true));
+                    push_opt!(kleene_and(l, r));
                 }
                 CompiledEntityOp::Or => {
-                    let r = pop!(false);
-                    let l = pop!(false);
-                    push!(l || r);
+                    let r = pop!(Some(false));
+                    let l = pop!(Some(false));
+                    push_opt!(kleene_or(l, r));
                 }
                 CompiledEntityOp::Not => {
-                    let v = pop!(true);
-                    push!(!v);
+                    let v = pop!(None);
+                    push_opt!(v.map(|decided| !decided));
                 }
                 CompiledEntityOp::Fallback(filter) => {
                     // The compiled entity filter has no DB/runtime
                     // context, so expression fallbacks such as
-                    // CONFIG() and $secret.* cannot be evaluated here.
-                    // Return true as a prefilter and let callers that
-                    // observe has_fallback() run the full runtime
-                    // evaluator after materializing the row.
+                    // CONFIG(), $secret.* and boolean scalar functions
+                    // cannot be evaluated here. Yield "undecided" and
+                    // let callers that observe has_fallback() run the
+                    // full runtime evaluator after materializing the row.
                     let _ = filter;
-                    push!(true);
+                    push_opt!(None);
                 }
             }
         }
-        pop!(true)
+        // Keep the row unless the prefilter proved it cannot match.
+        pop!(Some(true)) != Some(false)
     }
 
     /// Evaluate the filter against a batch of entities. Appends the

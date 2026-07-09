@@ -46,11 +46,9 @@ pub mod entity_cache;
 pub mod hash_index;
 pub mod index;
 pub mod manager;
-pub mod memtable;
 pub mod metadata;
 pub mod segment;
 pub mod segment_codec;
-pub mod skiplist;
 pub mod store;
 pub mod tokenization;
 

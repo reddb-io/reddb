@@ -142,7 +142,7 @@ Indexes accelerate reads and are attached to collections / columns rather than s
 | B-Tree | `CREATE INDEX idx_created ON events (created_at)` | General ordered lookups and ranges |
 | Hash | `CREATE INDEX idx_email ON users (email) USING HASH` | Exact-match lookups |
 | Bitmap | `CREATE INDEX idx_status ON orders (status) USING BITMAP` | Low-cardinality analytical filters |
-| R-Tree | `CREATE INDEX idx_location ON sites (location) USING RTREE` | Spatial search |
+| H3 | `CREATE INDEX idx_location ON sites (location) USING H3` | Spatial search |
 | Context Index | `CREATE TABLE ... WITH CONTEXT INDEX ON (host, email)` | Cross-model context search and identity resolution |
 
 ### Probabilistic Structures

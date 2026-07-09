@@ -51,15 +51,19 @@ CREATE INDEX idx_role ON users (role) USING BITMAP
 
 ### H3
 
-H3 spatial index. Required for efficient geo queries on `GeoPoint` columns,
-JSON `{lat, lon}` point objects, and GeoJSON `Point` values.
+H3 spatial index. Encodes a geographic point to a 64-bit hexagonal cell id and stores it in the disk-paged sorted index, so spatial queries prune to a ring of cells instead of scanning.
 
 ```sql
 CREATE INDEX idx_location ON sites (location) USING H3
+CREATE INDEX idx_location ON sites (location) USING H3 (9)   -- explicit resolution, 0..=15
 ```
 
-**Best for:** Radius search, bounding box queries, nearest-neighbor. See [Spatial Search](/query/spatial-search.md).
-**Complexity:** O(log n) for spatial queries.
+Indexes `GEOPOINT` columns and document fields holding a `{lat, lon}` object or a GeoJSON `Point`, including dotted paths (`telemetry.gps`). The resolution defaults to `9`. `USING SPATIAL` is an alias for the default spatial backend, which is H3 at resolution 9.
+
+**Best for:** Radius search, bounding box queries, nearest-neighbor, polygon geofences. See the [Spatial Search guide](/guides/spatial-search.md).
+**Complexity:** O(cover + candidates) — the index is a pure optimization, so results match a full scan exactly.
+
+> `USING RTREE` was removed. The in-RAM R-tree indexed nothing and served no queries; use `USING H3`. See [Migration note](/guides/spatial-search.md#migration-note-using-rtree-was-removed).
 
 ## Choosing the Right Index
 
@@ -68,7 +72,7 @@ CREATE INDEX idx_location ON sites (location) USING H3
 | `WHERE id = 42` | HASH |
 | `WHERE price > 100` | BTREE |
 | `WHERE status = 'active'` | BITMAP |
-| `WHERE location WITHIN 10km OF (48.85, 2.35)` | H3 |
+| `SEARCH SPATIAL RADIUS 48.85 2.35 10.0 ...` | H3 |
 | `ORDER BY created_at DESC` | BTREE |
 | `GROUP BY category` | BITMAP |
 | `SELECT COUNT(*) WHERE role = 'admin'` | BITMAP |
@@ -91,5 +95,6 @@ DROP INDEX IF EXISTS idx_email ON users
 ## See Also
 
 - [CREATE TABLE](/query/create-table.md) -- Creating collections
-- [Spatial Search](/query/spatial-search.md) -- Using R-tree indexes
+- [Spatial Search guide](/guides/spatial-search.md) -- The complete H3 surface, end to end
+- [Spatial Search reference](/query/spatial-search.md) -- `SEARCH SPATIAL` grammar
 - [B-Tree Index](/engine/btree.md) -- B-tree internals

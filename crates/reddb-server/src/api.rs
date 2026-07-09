@@ -245,6 +245,12 @@ pub struct RedDBOptions {
     /// before opening a runtime) are not clobbered by the implicit
     /// `Standard` default. The new tier-driven behavior is opt-in.
     pub layout_explicit: bool,
+    /// Explicit operator memory budget in bytes — the top tier of the ADR
+    /// 0073 §1 precedence chain. `None` defers to `REDDB_MEMORY_BUDGET`, the
+    /// deployment-profile default, the cgroup limit, and finally a fraction
+    /// of physical RAM. There is no "unlimited" value: `Some(0)` is rejected
+    /// at boot, exactly like an unparseable env var.
+    pub memory_budget_bytes: Option<u64>,
 }
 
 impl fmt::Debug for RedDBOptions {
@@ -282,6 +288,7 @@ impl fmt::Debug for RedDBOptions {
             .field("layout", &self.layout)
             .field("layout_overrides", &self.layout_overrides)
             .field("storage_profile", &self.storage_profile)
+            .field("memory_budget_bytes", &self.memory_budget_bytes)
             .finish()
     }
 }
@@ -318,6 +325,7 @@ impl Clone for RedDBOptions {
             layout_overrides: self.layout_overrides.clone(),
             storage_profile: self.storage_profile,
             layout_explicit: self.layout_explicit,
+            memory_budget_bytes: self.memory_budget_bytes,
         }
     }
 }
@@ -362,6 +370,7 @@ impl Default for RedDBOptions {
             storage_profile: crate::storage::profile::StorageProfileSelection::embedded_single_file(
             ),
             layout_explicit: false,
+            memory_budget_bytes: None,
         }
     }
 }
@@ -629,6 +638,15 @@ impl RedDBOptions {
         overrides: crate::storage::layout::LayoutOverrides,
     ) -> Self {
         self.layout_overrides = overrides;
+        self
+    }
+
+    /// Declare the process memory budget explicitly (ADR 0073 §1, tier 1).
+    /// Wins over `REDDB_MEMORY_BUDGET`, the profile default, the cgroup limit
+    /// and physical-RAM detection. A zero budget is rejected when the runtime
+    /// opens, not silently swapped for a default.
+    pub fn with_memory_budget(mut self, bytes: u64) -> Self {
+        self.memory_budget_bytes = Some(bytes);
         self
     }
 

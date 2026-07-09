@@ -77,6 +77,12 @@ pub mod layout;
 // Storage/deploy profile selection contract.
 pub mod profile;
 
+// Boot-time memory budget resolver (ADR 0073 §1). Resolves the single
+// process-wide budget from operator config, the deployment-profile default,
+// the cgroup limit, or a conservative fraction of physical RAM. Pool sizing
+// and admission enforcement are downstream slices consuming the number.
+pub mod memory_budget;
+
 // Embedded single-file `.rdb` artifact skeleton.
 pub mod embedded;
 
@@ -114,6 +120,9 @@ pub use keyring::{
 pub use layout::{
     LayoutOverrides, LayoutToggles, LogDestination, LogRoutingOverrides, StorageLayout,
     TieredLayoutPaths,
+};
+pub use memory_budget::{
+    InvalidMemoryBudget, MemoryBudget, MemoryBudgetInputs, MemoryBudgetSource,
 };
 pub use profile::{DeployProfile, StorageDeployPreset, StoragePackaging, StorageProfileSelection};
 pub use unified::RedDB;

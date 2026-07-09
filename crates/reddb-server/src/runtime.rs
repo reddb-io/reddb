@@ -999,6 +999,9 @@ struct RuntimeInner {
     db: Arc<RedDB>,
     layout: PhysicalLayout,
     embedded_single_file: bool,
+    /// The one memory budget this process runs under (ADR 0073 §1),
+    /// resolved once at boot and immutable for the process lifetime.
+    pub(crate) memory_budget: crate::storage::memory_budget::MemoryBudget,
     indices: IndexCatalog,
     pool_config: ConnectionPoolConfig,
     pool: Mutex<PoolState>,
