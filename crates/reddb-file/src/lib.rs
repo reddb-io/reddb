@@ -44,6 +44,7 @@ pub mod physical_metadata;
 pub mod physical_metadata_policy;
 pub mod primary_replica;
 pub mod profile;
+pub mod scrub;
 pub mod serverless;
 pub mod shm;
 pub mod spill;
@@ -336,6 +337,9 @@ pub use primary_replica::{
     TimelineHistoryEntry, TimelineId, WalPruneResult, WalRetentionPlan, WalRetentionPolicy,
 };
 pub use profile::{FileArtifactKind, FileProfile};
+pub use scrub::{
+    scrub_embedded_store, StorageScrubFinding, StorageScrubReport, StorageScrubVerifiedCounters,
+};
 pub use serverless::{
     decode_serverless_writer_lease_json, encode_serverless_writer_lease_json,
     serverless_writer_lease_key, serverless_writer_lease_temp_path, ServerlessBootIndex,
