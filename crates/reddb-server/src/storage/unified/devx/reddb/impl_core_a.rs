@@ -16,10 +16,23 @@ fn write_optional_snapshot_sidecar(
     Ok(())
 }
 
-fn store_config_from_options(options: &RedDBOptions) -> UnifiedStoreConfig {
+fn store_config_from_options(
+    options: &RedDBOptions,
+) -> Result<UnifiedStoreConfig, crate::storage::InvalidMemoryBudget> {
+    // ADR 0073 §2 — the page cache is pre-sized from its share of the one
+    // budget this process resolved at boot, never from a hardcoded slot count.
+    // Resolution is a pure function of the profile and the operator's setting,
+    // so re-deriving it here yields the same number `RedDBRuntime` logged; a
+    // nonsensical setting fails the open rather than falling back to a guess.
+    let profile = options.storage_profile.deploy_profile;
+    let budget =
+        crate::storage::memory_budget::resolve_for_boot(profile, options.memory_budget_bytes)?;
+    let shares = crate::storage::memory_pools::BudgetShares::resolve(budget, profile);
+
     let mut config = UnifiedStoreConfig::default()
         .with_durability_mode(options.durability_mode)
-        .with_group_commit(options.group_commit);
+        .with_group_commit(options.group_commit)
+        .with_page_cache_slots(shares.page_cache_slots());
     config.auto_index_id = options.auto_index_id;
 
     if let Ok(value) = std::env::var("REDDB_DURABILITY") {
@@ -44,7 +57,7 @@ fn store_config_from_options(options: &RedDBOptions) -> UnifiedStoreConfig {
             group_commit.max_wal_bytes = parsed.max(1);
         }
     }
-    config.with_group_commit(group_commit)
+    Ok(config.with_group_commit(group_commit))
 }
 
 fn embedded_single_file_selected(options: &RedDBOptions) -> bool {
@@ -434,7 +447,7 @@ impl RedDB {
         }
 
         let path_buf = options.resolved_path(reddb_file::default_database_path());
-        let store_config = store_config_from_options(options);
+        let store_config = store_config_from_options(options)?;
         let embedded_store_config = store_config
             .clone()
             .with_embedded_wal_path(path_buf.clone());
