@@ -633,7 +633,10 @@ impl<'a> Parser<'a> {
     /// `CURRENT` and break the case-sensitive body-field lookup. Recover
     /// the typed spelling by slicing the token's source span; only
     /// word-shaped tokens qualify as segments.
-    fn expect_spatial_column_segment(&mut self) -> Result<String, ParseError> {
+    ///
+    /// Shared with the `GEO_WITHIN(col, POLYGON(...))` predicate, whose
+    /// first argument names the same kind of geo column.
+    pub(crate) fn expect_spatial_column_segment(&mut self) -> Result<String, ParseError> {
         if let Token::Ident(name) = &self.current.token {
             let name = name.clone();
             self.advance()?;
@@ -678,9 +681,24 @@ fn validate_search_spatial_polygon(
     vertices: &[(f64, f64)],
     pos: crate::lexer::Position,
 ) -> Result<(), ParseError> {
+    validate_polygon_vertices(vertices, "SEARCH SPATIAL WITHIN POLYGON", pos)
+}
+
+/// Polygon input rules shared by every surface that accepts a literal
+/// polygon: the `SEARCH SPATIAL WITHIN POLYGON` verb and the
+/// `GEO_WITHIN(col, POLYGON(...))` predicate. Keeping one validator
+/// keeps the two surfaces from drifting on what a legal polygon is.
+///
+/// `surface` names the caller in the error text so the user sees the
+/// construct they actually wrote.
+pub(crate) fn validate_polygon_vertices(
+    vertices: &[(f64, f64)],
+    surface: &str,
+    pos: crate::lexer::Position,
+) -> Result<(), ParseError> {
     if vertices.len() < 3 {
         return Err(ParseError::new(
-            "SEARCH SPATIAL WITHIN POLYGON requires at least 3 vertices".to_string(),
+            format!("{surface} requires at least 3 vertices"),
             pos,
         ));
     }
@@ -706,8 +724,7 @@ fn validate_search_spatial_polygon(
     );
     if max_lon - min_lon > 180.0 {
         return Err(ParseError::new(
-            "SEARCH SPATIAL WITHIN POLYGON does not support polygons crossing the antimeridian"
-                .to_string(),
+            format!("{surface} does not support polygons crossing the antimeridian"),
             pos,
         ));
     }
