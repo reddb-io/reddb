@@ -101,7 +101,7 @@
   - [Bitmap Index](/engine/bitmap-index.md)
   - [H3 Index (Spatial)](/engine/h3-index.md)
   - [Bloom Filter](/engine/bloom-filter.md)
-  - [Memtable & Skip List](/engine/memtable.md)
+  - [Write & Read Paths](/engine/memtable.md)
   - [File Format Anatomy](/engine/file-format.md)
   - [Operational Storage Profiles](/engine/operational-storage-profiles.md)
   - [WAL & Recovery](/engine/wal.md)
