@@ -745,12 +745,18 @@ fn append_consolidation_stats(
     for (metric, value) in [
         ("consolidation_runs_started", consolidation.runs_started),
         ("consolidation_runs_completed", consolidation.runs_completed),
-        ("consolidation_segments_merged", consolidation.segments_merged),
+        (
+            "consolidation_segments_merged",
+            consolidation.segments_merged,
+        ),
         (
             "consolidation_tombstones_reclaimed",
             consolidation.tombstones_reclaimed,
         ),
-        ("consolidation_bytes_reclaimed", consolidation.bytes_reclaimed),
+        (
+            "consolidation_bytes_reclaimed",
+            consolidation.bytes_reclaimed,
+        ),
     ] {
         rows.push(stats_row(
             schema,
