@@ -363,6 +363,17 @@ impl BlobCacheL2 {
         self.synopsis.read().values().map(synopsis_heap_bytes).sum()
     }
 
+    /// RAM held by L2 (ADR 0073 §2): the resident pages of the metadata B+
+    /// tree plus the per-namespace Bloom synopsis filters. The disk extent is
+    /// not memory and is deliberately excluded — `stats_bytes_in_use` reports
+    /// that separately.
+    pub(super) fn resident_metadata_bytes(&self) -> u64 {
+        let metadata_pages = self.pager.cache_len() as u64;
+        metadata_pages
+            .saturating_mul(crate::storage::memory_pools::PAGE_CACHE_PAGE_SIZE_BYTES)
+            .saturating_add(self.stats_synopsis_bytes())
+    }
+
     pub(super) fn stats_compression_original_bytes(&self) -> u64 {
         self.compression_original_bytes_sum.load(Ordering::Relaxed)
     }
