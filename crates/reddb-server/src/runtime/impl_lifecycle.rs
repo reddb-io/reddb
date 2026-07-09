@@ -241,6 +241,7 @@ impl RedDBRuntime {
                 index_store: super::index_store::IndexStore::new(),
                 cdc: crate::replication::cdc::CdcBuffer::new(100_000),
                 checkpoint_projection_stats: super::CheckpointProjectionStats::default(),
+                scrub_state: parking_lot::Mutex::new(super::ScrubRuntimeState::default()),
                 checkpoint_columnar_emission_budget_chunks: options
                     .checkpoint_columnar_emission_budget_chunks,
                 columnar_projection_size_floor_rows: options.columnar_projection_size_floor_rows,
