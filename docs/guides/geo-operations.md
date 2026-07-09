@@ -226,7 +226,7 @@ SEARCH SPATIAL NEAREST -23.55 -46.63 K 10
 COLLECTION stores COLUMN location
 ```
 
-These commands use an R-tree spatial index for efficient queries on large datasets.
+These commands use an H3 spatial index for efficient queries on large datasets, falling back to an exact full scan when no index exists. See the [Spatial Search guide](/guides/spatial-search.md) for indexing, resolution choice, and document-body coordinates.
 
 ---
 
