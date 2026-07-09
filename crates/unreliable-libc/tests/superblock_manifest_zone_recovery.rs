@@ -20,8 +20,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use reddb_file::dst::SECTOR_BYTES;
 use reddb_file::{
-    seal_paged_superblock_slot, select_paged_superblock, EmbeddedRdbArtifact,
+    seal_paged_superblock_slot, select_paged_superblock, EmbeddedRdbArtifact, FaultClass,
     EMBEDDED_RDB_MANIFEST_0_OFFSET, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
     EMBEDDED_RDB_SUPERBLOCK_1_OFFSET, EMBEDDED_RDB_SUPERBLOCK_SIZE, PAGED_SUPERBLOCK_SLOT_COUNT,
     PAGED_SUPERBLOCK_SLOT_SIZE, PAGED_SUPERBLOCK_ZONE_SIZE,
@@ -50,7 +51,10 @@ const CAMPAIGN_SEED: u64 = 0x5B10_C4A5;
 
 #[test]
 fn the_superblock_copy_length_matches_the_file_layer() {
-    assert_eq!(u64::try_from(SUPERBLOCK_LEN), Ok(EMBEDDED_RDB_SUPERBLOCK_SIZE));
+    assert_eq!(
+        u64::try_from(SUPERBLOCK_LEN),
+        Ok(EMBEDDED_RDB_SUPERBLOCK_SIZE)
+    );
 }
 
 fn power_cut_only(after: u64) -> SimFaultConfig {
@@ -165,48 +169,51 @@ fn temp_store(label: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
-/// The four modeled physical faults (ADR 0074 §1), each applied to one copy of
-/// a two-copy zone. `lost` needs the bytes the copy held one generation ago.
-fn apply_fault(path: &Path, offset: u64, len: usize, fault: &str, lost_bytes: &[u8]) {
-    match fault {
-        // Torn write: the tail of the copy never reached the platter.
-        "torn" => {
-            let half = u64::try_from(len / 2).unwrap_or(0);
-            let zeros = vec![0u8; len / 2];
-            write_at(path, offset + half, &zeros);
+/// Apply one modeled fault class (ADR 0074 §1, the #1956 vocabulary) to the
+/// region `[offset, offset + len)`, which holds one copy of a two-copy zone.
+///
+/// `stale` is the region's contents one generation ago: a torn write leaves the
+/// tail at those bytes, and a lost write leaves the whole region there. The
+/// `.rdb` zones are written through `std::fs`, not the `SimVfs`, so the same
+/// decisions the simulator would make are applied to the real file here.
+fn apply_fault(path: &Path, offset: u64, len: usize, class: FaultClass, stale: &[u8]) {
+    match class {
+        // Persist only a sector-aligned prefix; the tail keeps the old bytes.
+        FaultClass::TornWrite => {
+            let cut = usize::try_from(SECTOR_BYTES).unwrap_or(512).min(len);
+            let resume = u64::try_from(cut).unwrap_or(0);
+            write_at(path, offset + resume, &stale[cut..]);
         }
-        // Bit rot: one flipped bit, everything else pristine.
-        "bit_rot" => {
+        // Right data, wrong offset. The wrong offset is another copy's, so the
+        // caller supplies that copy's bytes rather than the region's own past.
+        FaultClass::MisdirectedWrite => write_at(path, offset, stale),
+        // One flipped bit under the checksum; everything else pristine.
+        FaultClass::BitRot => {
             let mut byte = read_at(path, offset + 40, 1);
             byte[0] ^= 0x01;
             write_at(path, offset + 40, &byte);
         }
-        // Lost write: the copy silently reverted to its previous contents.
-        "lost" => write_at(path, offset, lost_bytes),
-        _ => unreachable!("unknown fault {fault}"),
+        // The write never reached the platter, but success was reported.
+        FaultClass::LostWrite => write_at(path, offset, stale),
     }
 }
 
 #[test]
 fn every_fault_class_against_one_superblock_copy_is_detected_and_survived() {
-    for fault in ["torn", "bit_rot", "lost"] {
-        let (_dir, path) = temp_store(fault);
+    for class in [
+        FaultClass::TornWrite,
+        FaultClass::BitRot,
+        FaultClass::LostWrite,
+    ] {
+        let (_dir, path) = temp_store(class.name());
         EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-v1")
             .expect("create_with_snapshot() should succeed");
         // Snapshot both copies at genesis so `lost` can revert the copy the
         // checkpoint is about to update back to *its own* prior contents —
         // that is what an acknowledged-but-absent write leaves behind.
         let genesis = [
-            read_at(
-                &path,
-                EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
-                SUPERBLOCK_LEN,
-            ),
-            read_at(
-                &path,
-                EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
-                SUPERBLOCK_LEN,
-            ),
+            read_at(&path, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET, SUPERBLOCK_LEN),
+            read_at(&path, EMBEDDED_RDB_SUPERBLOCK_1_OFFSET, SUPERBLOCK_LEN),
         ];
 
         let checkpointed = EmbeddedRdbArtifact::write_snapshot(&path, b"RDST-v2")
@@ -222,22 +229,22 @@ fn every_fault_class_against_one_superblock_copy_is_detected_and_survived() {
             &path,
             newest_offset,
             SUPERBLOCK_LEN,
-            fault,
-            &genesis[newest as usize],
+            class,
+            &genesis[usize::from(newest)],
         );
 
         // Detection: the damaged copy is skipped, and the surviving copy roots
         // the store. The reader never sees data the zone cannot vouch for.
         let recovered = EmbeddedRdbArtifact::open(&path)
-            .unwrap_or_else(|err| panic!("{fault} on one copy must survive: {err}"));
+            .unwrap_or_else(|err| panic!("{class} on one copy must survive: {err}"));
         assert_ne!(
             recovered.selected_superblock.copy_index, newest,
-            "{fault}: the damaged copy must not be selected"
+            "{class}: the damaged copy must not be selected"
         );
         let snapshot = EmbeddedRdbArtifact::read_snapshot(&recovered)
             .expect("operation should succeed")
             .expect("operation should succeed");
-        assert_eq!(snapshot, b"RDST-v1".to_vec(), "{fault}");
+        assert_eq!(snapshot, b"RDST-v1".to_vec(), "{class}");
     }
 }
 
@@ -250,11 +257,7 @@ fn a_misdirected_superblock_write_is_detected_not_read_as_an_older_generation() 
         .expect("write_snapshot() should succeed");
 
     // Right data, wrong offset: copy 0's sealed bytes land on copy 1.
-    let copy_zero = read_at(
-        &path,
-        EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
-        SUPERBLOCK_LEN,
-    );
+    let copy_zero = read_at(&path, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET, SUPERBLOCK_LEN);
     write_at(&path, EMBEDDED_RDB_SUPERBLOCK_1_OFFSET, &copy_zero);
 
     // The copy index inside the slot no longer matches where it sits, so the
@@ -273,13 +276,7 @@ fn both_superblock_copies_damaged_fails_the_open_by_name() {
         EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
         EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
     ] {
-        apply_fault(
-            &path,
-            offset,
-            SUPERBLOCK_LEN,
-            "bit_rot",
-            &[],
-        );
+        apply_fault(&path, offset, SUPERBLOCK_LEN, "bit_rot", &[]);
     }
 
     let err = EmbeddedRdbArtifact::open(&path).expect_err("a rootless store must not open");
@@ -294,7 +291,13 @@ fn bit_rot_in_the_manifest_zone_fails_the_open_by_name() {
     EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-v1")
         .expect("create_with_snapshot() should succeed");
 
-    apply_fault(&path, EMBEDDED_RDB_MANIFEST_0_OFFSET, 4096, "bit_rot", &[]);
+    apply_fault(
+        &path,
+        EMBEDDED_RDB_MANIFEST_0_OFFSET,
+        4096,
+        FaultClass::BitRot,
+        &[],
+    );
 
     let err = EmbeddedRdbArtifact::open(&path).expect_err("a rotted manifest must not open");
     let message = err.to_string();
