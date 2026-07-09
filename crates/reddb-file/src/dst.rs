@@ -534,7 +534,10 @@ mod tests {
                     let decision = decision.unwrap_or_else(|| panic!("{armed} must fire at 1e6"));
                     assert_eq!(decision.class(), armed);
                 } else {
-                    assert_eq!(decision, None, "{class} must stay off while {armed} is armed");
+                    assert_eq!(
+                        decision, None,
+                        "{class} must stay off while {armed} is armed"
+                    );
                 }
             }
             let trace = String::from_utf8(guard.trace()).unwrap();
@@ -554,7 +557,10 @@ mod tests {
         else {
             panic!("torn_write must fire at 1e6")
         };
-        assert!((offset + persisted) % SECTOR_BYTES == 0, "cut at {persisted}");
+        assert!(
+            (offset + persisted) % SECTOR_BYTES == 0,
+            "cut at {persisted}"
+        );
         assert!(persisted < 1_200, "a torn write always loses bytes");
         drop(guard);
     }
@@ -672,7 +678,11 @@ mod tests {
             out.extend_from_slice(guard.fault_log_lines().as_bytes());
             out
         }
-        assert_eq!(run(1234), run(1234), "crash + torn_write must replay exactly");
+        assert_eq!(
+            run(1234),
+            run(1234),
+            "crash + torn_write must replay exactly"
+        );
     }
 
     #[test]
