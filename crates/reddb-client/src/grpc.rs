@@ -640,6 +640,10 @@ fn parse_query_json(s: &str) -> Result<QueryResult> {
         affected,
         columns,
         rows,
+        notice: parsed
+            .get("notice")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned),
     })
 }
 
