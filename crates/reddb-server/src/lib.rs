@@ -45,6 +45,7 @@ pub mod mcp;
 pub mod modules;
 pub mod notifications;
 pub mod operational_bootstrap;
+pub mod pager_zone_migration;
 pub mod physical;
 pub(crate) mod presentation;
 pub mod regress;
