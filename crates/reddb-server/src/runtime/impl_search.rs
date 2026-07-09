@@ -34,7 +34,7 @@ fn mark_table_scan_as_geo_h3_index_seek(
         node.operator = "geo_h3_index_seek".to_string();
         node.details.insert(
             "reason".to_string(),
-            "GEO_DISTANCE predicate uses H3 covering-ring candidates".to_string(),
+            "geo predicate uses H3 covering-cell candidates".to_string(),
         );
         return true;
     }
@@ -190,20 +190,13 @@ impl RedDBRuntime {
 
     fn filter_has_geo_h3_route(&self, table: &str, filter: &Filter) -> bool {
         match filter {
-            Filter::CompareExpr { lhs, op, rhs } => self
-                .geo_h3_route_column(lhs, *op, rhs)
-                .or_else(|| self.geo_h3_route_column(rhs, flip_geo_compare_op(*op), lhs))
-                .is_some_and(|column| {
-                    self.inner
-                        .index_store
-                        .find_index_for_column(table, column)
-                        .is_some_and(|index| {
-                            matches!(
-                                index.method,
-                                crate::runtime::index_store::IndexMethodKind::H3 { .. }
-                            )
-                        })
-                }),
+            Filter::CompareExpr { lhs, op, rhs } => {
+                self.geo_h3_route_column(lhs, *op, rhs)
+                    .or_else(|| self.geo_h3_route_column(rhs, flip_geo_compare_op(*op), lhs))
+                    .is_some_and(|column| self.column_has_h3_index(table, column))
+                    || self.geo_within_has_h3_route(table, lhs, *op, rhs)
+                    || self.geo_within_has_h3_route(table, rhs, flip_geo_compare_op(*op), lhs)
+            }
             Filter::And(left, right) => {
                 self.filter_has_geo_h3_route(table, left)
                     || self.filter_has_geo_h3_route(table, right)
@@ -215,6 +208,43 @@ impl RedDBRuntime {
             Filter::Not(_) => false,
             _ => false,
         }
+    }
+
+    fn column_has_h3_index(&self, table: &str, column: &str) -> bool {
+        self.h3_route_resolution(table, column).is_some()
+    }
+
+    fn h3_route_resolution(&self, table: &str, column: &str) -> Option<u8> {
+        match self
+            .inner
+            .index_store
+            .find_index_for_column(table, column)?
+            .method
+        {
+            crate::runtime::index_store::IndexMethodKind::H3 { resolution } => Some(resolution),
+            _ => None,
+        }
+    }
+
+    /// Whether `GEO_WITHIN(col, POLYGON(...)) = TRUE` will take the H3
+    /// route at execution time. Uses the executor's own recognizer and
+    /// the same polyfill cover, so a polygon the executor would find too
+    /// large to enumerate is reported as a scan here too.
+    fn geo_within_has_h3_route(&self, table: &str, lhs: &Expr, op: CompareOp, rhs: &Expr) -> bool {
+        let Some(predicate) =
+            crate::storage::query::ast::geo_predicate::geo_within_truth_test(lhs, op, rhs)
+        else {
+            return false;
+        };
+        let Some(resolution) = self.h3_route_resolution(table, predicate.column) else {
+            return false;
+        };
+        crate::geo::h3::polygon_to_cover_cells(
+            &predicate.vertices,
+            resolution,
+            crate::geo::h3::MAX_POLYGON_COVER_CELLS,
+        )
+        .is_some_and(|cells| !cells.is_empty())
     }
 
     fn geo_h3_route_column<'a>(&self, lhs: &'a Expr, op: CompareOp, rhs: &Expr) -> Option<&'a str> {

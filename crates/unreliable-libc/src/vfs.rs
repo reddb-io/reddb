@@ -35,14 +35,34 @@
 //!   became durable, so the old target survives) or leave a torn target when
 //!   the source was not fully durable. A `sync_dir` after the rename is what
 //!   makes it durable.
+//!
+//! # Named fault classes (#1959, ADR 0074 §1)
+//!
+//! On top of the families above, [`SimVfs`] applies the four modeled storage
+//! fault classes — [`FaultClass::TornWrite`], [`FaultClass::MisdirectedWrite`],
+//! [`FaultClass::BitRot`] and [`FaultClass::LostWrite`] — each armed by name at
+//! its own ppm through [`SimFaultConfig`], each off by default, and each
+//! composing freely with the crash/delay knobs. Write-side classes are rolled on
+//! every `write_all`; `bit_rot` is rolled on the read side ([`VfsFile::read`]
+//! and [`SimVfs::crash_image`], the recovery reader's read) so the original
+//! write path is untouched.
+//!
+//! Every applied injection is appended to the device's [`fault log`](SimVfs::fault_log)
+//! — class, target file, offset, length — and mirrored into the campaign's
+//! [`SimulationContext`](reddb_file::SimulationContext) log when one is
+//! installed. Exactly as with the crash knobs, an installed simulation context
+//! takes over the coin flips (and their probabilities) so `buggify!`-driven
+//! campaigns stay on the seed's single decision stream.
 
 use crate::prng::SplitMix64;
+use reddb_file::dst::{self, FaultClass, FaultDecision, FaultRecord};
 use std::collections::HashMap;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const TURBO_CRASH_INJECT_ENV: &str = "REDDB_TURBO_CRASH_AT";
+const PPM_DENOMINATOR: u64 = 1_000_000;
 
 /// How a file is opened. Mirrors the subset of `OpenOptions` the durable
 /// writers actually use.
@@ -171,6 +191,21 @@ pub struct SimFaultConfig {
     pub revert_rename_ppm: u64,
     /// A `rename` leaves a torn (byte-prefix) target on crash.
     pub torn_rename_ppm: u64,
+    /// ADR 0074 §1 `torn_write`: a `write` persists only a prefix of its buffer,
+    /// cut at a simulated sector boundary, then reports the full length.
+    pub torn_write_ppm: u64,
+    /// Whether a fired `torn_write` also cuts power instead of reporting the
+    /// full length — the campaign's choice between the two modeled outcomes.
+    pub torn_write_crashes: bool,
+    /// ADR 0074 §1 `misdirected_write`: a `write` persists the correct bytes at
+    /// a wrong (seed-derived) offset and reports success.
+    pub misdirected_write_ppm: u64,
+    /// ADR 0074 §1 `bit_rot`: stored bytes come back with a flipped bit on a
+    /// later read. Rolled on the read side, so the write path is untouched.
+    pub bit_rot_ppm: u64,
+    /// ADR 0074 §1 `lost_write`: the `write` is dropped entirely while success
+    /// is reported.
+    pub lost_write_ppm: u64,
     /// Force a power-cut after this many durability syscalls (`None` = run to
     /// completion). A power-cut torns the unsynced tail of every file.
     pub power_cut_after: Option<u64>,
@@ -185,7 +220,34 @@ impl SimFaultConfig {
             reorder_fsync_ppm: 0,
             revert_rename_ppm: 0,
             torn_rename_ppm: 0,
+            torn_write_ppm: 0,
+            torn_write_crashes: false,
+            misdirected_write_ppm: 0,
+            bit_rot_ppm: 0,
+            lost_write_ppm: 0,
             power_cut_after: None,
+        }
+    }
+
+    /// Arm one named fault class at `ppm`, leaving every other knob alone.
+    #[must_use]
+    pub fn with_fault_class(mut self, class: FaultClass, ppm: u64) -> Self {
+        match class {
+            FaultClass::TornWrite => self.torn_write_ppm = ppm,
+            FaultClass::MisdirectedWrite => self.misdirected_write_ppm = ppm,
+            FaultClass::BitRot => self.bit_rot_ppm = ppm,
+            FaultClass::LostWrite => self.lost_write_ppm = ppm,
+        }
+        self
+    }
+
+    /// The probability armed for `class`.
+    pub fn fault_ppm(&self, class: FaultClass) -> u64 {
+        match class {
+            FaultClass::TornWrite => self.torn_write_ppm,
+            FaultClass::MisdirectedWrite => self.misdirected_write_ppm,
+            FaultClass::BitRot => self.bit_rot_ppm,
+            FaultClass::LostWrite => self.lost_write_ppm,
         }
     }
 }
@@ -213,14 +275,49 @@ struct SimState {
     syscalls: u64,
     /// Set once a power-cut fires; all further durable calls fail.
     crashed: bool,
+    /// Every named-fault-class injection applied to this device, in order.
+    fault_log: Vec<FaultRecord>,
 }
 
 impl SimState {
     fn fires(&mut self, point: &str, ppm: u64) -> bool {
-        if reddb_file::dst::is_active() {
-            return reddb_file::dst::buggify_at(TURBO_CRASH_INJECT_ENV, point, ppm);
+        if dst::is_active() {
+            return dst::buggify_at(TURBO_CRASH_INJECT_ENV, point, ppm);
         }
-        ppm != 0 && self.rng.below(1_000_000) < ppm
+        ppm != 0 && self.rng.below(PPM_DENOMINATOR) < ppm
+    }
+
+    /// Roll the coin for one named fault class over `[offset, offset + length)`.
+    ///
+    /// An installed [`SimulationContext`](reddb_file::SimulationContext) owns the
+    /// decision (and the probability), mirroring how `fires` defers the crash
+    /// knobs; otherwise the device rolls its own seeded coin against
+    /// [`SimFaultConfig`]. Both paths derive the fault's parameters through the
+    /// same [`dst::derive_fault`], so a class behaves identically either way.
+    fn roll(&mut self, class: FaultClass, offset: u64, length: u64) -> Option<FaultDecision> {
+        if length == 0 {
+            return None;
+        }
+        if dst::is_active() {
+            return dst::roll_fault(class, offset, length);
+        }
+        let ppm = self.cfg.fault_ppm(class);
+        if ppm == 0 || self.rng.below(PPM_DENOMINATOR) >= ppm {
+            return None;
+        }
+        let rng = &mut self.rng;
+        Some(dst::derive_fault(class, offset, length, &mut || {
+            rng.next_u64()
+        }))
+    }
+
+    /// Log an injection the device actually applied. When several classes fire on
+    /// one call only the applied one is recorded, so the log names exactly the
+    /// durable bytes that were touched.
+    fn record(&mut self, path: &Path, offset: u64, length: u64, decision: FaultDecision) {
+        let record = FaultRecord::new(path.display().to_string(), offset, length, decision);
+        dst::record_fault(record.clone());
+        self.fault_log.push(record);
     }
 
     /// Charge one durability syscall and trip the power-cut once the budget is
@@ -241,9 +338,19 @@ impl SimState {
 
     /// Collapse every file to its post-crash durable image (torn unsynced tail)
     /// and mark the device gone.
+    ///
+    /// Files are torn in path order: each one draws from the seeded stream, so
+    /// hash iteration order would otherwise make the crash image differ between
+    /// two runs of the same seed.
     fn trip_power_cut(&mut self) {
-        for file in self.files.values_mut() {
-            let image = crash_image(file, &mut self.rng);
+        let mut paths: Vec<PathBuf> = self.files.keys().cloned().collect();
+        paths.sort();
+        for path in paths {
+            let Self { files, rng, .. } = self;
+            let Some(file) = files.get_mut(&path) else {
+                continue;
+            };
+            let image = crash_image(file, rng);
             file.durable = image.clone();
             file.live = image;
             file.dirty.clear();
@@ -285,6 +392,31 @@ fn apply_write(image: &mut Vec<u8>, offset: usize, bytes: &[u8]) {
     image[offset..end].copy_from_slice(bytes);
 }
 
+/// Apply read-side [`FaultClass::BitRot`] to bytes leaving the device: roll the
+/// class over the served region and, if it fires, flip the chosen bit in the
+/// caller's copy. The stored image is never touched — the corruption is
+/// *observed* on read, exactly as a rotted sector is.
+///
+/// `base` is the absolute file offset the buffer starts at, so the logged offset
+/// names a real durable location.
+fn rot_bits(state: &mut SimState, path: &Path, base: u64, bytes: &mut [u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let length = bytes.len() as u64;
+    let Some(decision @ FaultDecision::BitRot { byte_offset, bit }) =
+        state.roll(FaultClass::BitRot, base, length)
+    else {
+        return;
+    };
+    let index = as_usize(byte_offset.saturating_sub(base));
+    let Some(byte) = bytes.get_mut(index) else {
+        return;
+    };
+    *byte ^= 1u8 << bit;
+    state.record(path, base, length, decision);
+}
+
 fn power_cut_error() -> io::Error {
     io::Error::other(POWER_CUT_MESSAGE)
 }
@@ -319,8 +451,23 @@ impl SimVfs {
                 cfg,
                 syscalls: 0,
                 crashed: false,
+                fault_log: Vec::new(),
             })),
         }
+    }
+
+    /// Every named-fault-class injection applied to this device, in order — the
+    /// campaign's machine-readable fault log (class, file, offset, length).
+    pub fn fault_log(&self) -> Vec<FaultRecord> {
+        self.lock().fault_log.clone()
+    }
+
+    /// The fault log as newline-terminated `key=value` lines.
+    pub fn fault_log_lines(&self) -> String {
+        self.fault_log()
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect()
     }
 
     /// Trigger a power-cut now (torns every unsynced tail). Idempotent.
@@ -344,24 +491,37 @@ impl SimVfs {
     /// Snapshot every file's post-crash durable image. If no power-cut has
     /// fired, this is the current durable state; otherwise it is the torn image
     /// left by the crash. Use this to materialize the device for the oracle.
+    ///
+    /// This is the recovery reader's read of the device, so it is where
+    /// [`FaultClass::BitRot`] surfaces: the stored bytes are handed back with a
+    /// flipped bit while the device itself keeps what the write path put there.
+    /// Files are visited in path order so the seeded fault schedule does not
+    /// depend on hash iteration order.
     pub fn crash_image(&self) -> HashMap<PathBuf, Vec<u8>> {
         let mut state = self.lock();
-        if !state.crashed {
-            // Compute a torn image without mutating state, so callers can both
-            // inspect and keep simulating.
-            let mut out = HashMap::new();
-            let SimState { files, rng, .. } = &mut *state;
-            for (path, file) in files.iter() {
-                out.insert(path.clone(), crash_image(file, rng));
+        let crashed = state.crashed;
+        let mut paths: Vec<PathBuf> = state.files.keys().cloned().collect();
+        paths.sort();
+
+        let mut images: Vec<(PathBuf, Vec<u8>)> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let image = if crashed {
+                state.files.get(&path).map(|f| f.durable.clone())
+            } else {
+                // Compute a torn image without mutating state, so callers can
+                // both inspect and keep simulating.
+                let SimState { files, rng, .. } = &mut *state;
+                files.get(&path).map(|file| crash_image(file, rng))
+            };
+            if let Some(image) = image {
+                images.push((path, image));
             }
-            out
-        } else {
-            state
-                .files
-                .iter()
-                .map(|(p, f)| (p.clone(), f.durable.clone()))
-                .collect()
         }
+
+        for (path, bytes) in &mut images {
+            rot_bits(&mut state, path, 0, bytes);
+        }
+        images.into_iter().collect()
     }
 
     /// Materialize the post-crash device into a real directory so the
@@ -396,6 +556,15 @@ impl SimFileHandle {
 }
 
 impl VfsFile for SimFileHandle {
+    /// Apply one write, subject to `ENOSPC` and the three write-side named fault
+    /// classes.
+    ///
+    /// All three classes are rolled on every call, in a fixed order, so the seed
+    /// stream never depends on which of them fired. When more than one fires the
+    /// most destructive wins: a `lost_write` persists nothing, so it subsumes a
+    /// misdirected or torn one; a `misdirected_write` moves the whole buffer, so
+    /// it subsumes a tear of the buffer at its requested offset. Only the applied
+    /// class reaches the fault log.
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         let mut state = self.lock();
         state.charge()?;
@@ -403,20 +572,58 @@ impl VfsFile for SimFileHandle {
         if state.fires("simvfs_enospc", enospc_ppm) {
             return Err(enospc_error());
         }
-        let offset = usize::try_from(self.pos).unwrap_or(usize::MAX);
-        if let Some(file) = state.files.get_mut(&self.path) {
-            apply_write(&mut file.live, offset, buf);
-            file.dirty.push((offset, buf.to_vec()));
-        } else {
+        if !state.files.contains_key(&self.path) {
             return Err(io::Error::new(io::ErrorKind::NotFound, "file not open"));
         }
+
+        let offset = self.pos;
+        let length = buf.len() as u64;
+        let lost = state.roll(FaultClass::LostWrite, offset, length);
+        let misdirected = state.roll(FaultClass::MisdirectedWrite, offset, length);
+        let torn = state.roll(FaultClass::TornWrite, offset, length);
+
+        // The writer is told the full buffer landed in every one of these cases;
+        // only the durable bytes differ. The cursor therefore always advances.
+        let (target, persisted, decision) = match (lost, misdirected, torn) {
+            (Some(decision), _, _) => (offset, 0, Some(decision)),
+            (_, Some(decision @ FaultDecision::MisdirectedWrite { actual_offset }), _) => {
+                (actual_offset, buf.len(), Some(decision))
+            }
+            (_, _, Some(decision @ FaultDecision::TornWrite { persisted })) => {
+                (offset, as_usize(persisted).min(buf.len()), Some(decision))
+            }
+            _ => (offset, buf.len(), None),
+        };
+
+        if persisted > 0 {
+            let at = as_usize(target);
+            if let Some(file) = state.files.get_mut(&self.path) {
+                apply_write(&mut file.live, at, &buf[..persisted]);
+                file.dirty.push((at, buf[..persisted].to_vec()));
+            }
+        }
+        if let Some(decision) = decision {
+            state.record(&self.path, offset, length, decision);
+        }
+
+        // A torn write may also take the power with it, per campaign choice.
+        let crashing_tear = state.cfg.torn_write_crashes
+            && matches!(decision, Some(FaultDecision::TornWrite { .. }));
+        if crashing_tear {
+            state.trip_power_cut();
+            return Err(power_cut_error());
+        }
+
         drop(state);
-        self.pos += buf.len() as u64;
+        self.pos += length;
         Ok(())
     }
 
+    /// Read at the cursor. Bytes leaving the device pass through read-side
+    /// [`FaultClass::BitRot`], so a rotted sector is observed here rather than
+    /// having been written wrong.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let state = self.lock();
+        let mut state = self.lock();
         let file = state
             .files
             .get(&self.path)
@@ -427,6 +634,7 @@ impl VfsFile for SimFileHandle {
         let end = (start + buf.len()).min(file.live.len());
         let n = end - start;
         buf[..n].copy_from_slice(&file.live[start..end]);
+        rot_bits(&mut state, &self.path, start as u64, &mut buf[..n]);
         drop(state);
         self.pos += n as u64;
         Ok(n)
@@ -708,6 +916,170 @@ mod tests {
             vfs.crash_image().get(Path::new("dst")).unwrap().as_slice(),
             b"NEWVALUE"
         );
+    }
+
+    /// A device with one named class armed at certainty, and nothing else.
+    fn armed(seed: u64, class: FaultClass) -> SimVfs {
+        SimVfs::new(
+            seed,
+            SimFaultConfig::none().with_fault_class(class, 1_000_000),
+        )
+    }
+
+    #[test]
+    fn no_named_fault_class_fires_by_default() {
+        let vfs = SimVfs::new(17, SimFaultConfig::none());
+        let path = Path::new("clean.bin");
+        let mut f = vfs.open(path, OpenMode::create_truncate()).unwrap();
+        f.write_all(b"untouched").unwrap();
+        f.sync_all().unwrap();
+        assert_eq!(read_back(&vfs, path), b"untouched");
+        assert!(vfs.fault_log().is_empty(), "classes must be off by default");
+    }
+
+    #[test]
+    fn lost_write_reports_success_and_persists_nothing() {
+        let vfs = armed(31, FaultClass::LostWrite);
+        let path = Path::new("lost.bin");
+        let mut f = vfs.open(path, OpenMode::create_truncate()).unwrap();
+        // The writer is told the write landed...
+        f.write_all(b"acknowledged").unwrap();
+        f.sync_all().unwrap();
+        // ...but nothing reached the platter.
+        assert!(vfs.crash_image().get(path).unwrap().is_empty());
+
+        let log = vfs.fault_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].class, FaultClass::LostWrite);
+        assert_eq!(log[0].file, "lost.bin");
+        assert_eq!(log[0].offset, 0);
+        assert_eq!(log[0].length, b"acknowledged".len() as u64);
+    }
+
+    #[test]
+    fn torn_write_persists_only_a_prefix_but_reports_the_full_length() {
+        let vfs = armed(37, FaultClass::TornWrite);
+        let path = Path::new("torn.bin");
+        let mut f = vfs.open(path, OpenMode::create_truncate()).unwrap();
+        let payload = [0xABu8; 64];
+        f.write_all(&payload).unwrap();
+        f.sync_all().unwrap();
+
+        let durable = vfs.crash_image().get(path).unwrap().clone();
+        assert!(durable.len() < payload.len(), "the tear must lose bytes");
+        assert!(payload.starts_with(&durable), "what landed is a prefix");
+        let log = vfs.fault_log();
+        assert_eq!(log[0].class, FaultClass::TornWrite);
+        assert_eq!(
+            log[0].decision,
+            FaultDecision::TornWrite {
+                persisted: durable.len() as u64
+            }
+        );
+    }
+
+    #[test]
+    fn torn_write_can_take_the_power_with_it() {
+        let cfg = SimFaultConfig {
+            torn_write_crashes: true,
+            ..SimFaultConfig::none().with_fault_class(FaultClass::TornWrite, 1_000_000)
+        };
+        let vfs = SimVfs::new(41, cfg);
+        let mut f = vfs
+            .open(Path::new("crash.bin"), OpenMode::create_truncate())
+            .unwrap();
+        let err = f.write_all(&[7u8; 32]).unwrap_err();
+        assert!(err.to_string().contains(POWER_CUT_MESSAGE));
+        assert!(vfs.is_crashed());
+    }
+
+    #[test]
+    fn misdirected_write_lands_the_right_bytes_at_the_wrong_offset() {
+        let vfs = armed(43, FaultClass::MisdirectedWrite);
+        let path = Path::new("misdirected.bin");
+        let mut f = vfs.open(path, OpenMode::create_keep()).unwrap();
+        f.seek(SeekFrom::Start(4_096)).unwrap();
+        f.write_all(b"PAYLOAD").unwrap();
+        f.sync_all().unwrap();
+
+        let log = vfs.fault_log();
+        assert_eq!(log[0].class, FaultClass::MisdirectedWrite);
+        let FaultDecision::MisdirectedWrite { actual_offset } = log[0].decision else {
+            panic!("expected a misdirected write")
+        };
+        assert_ne!(actual_offset, 4_096);
+
+        let durable = vfs.crash_image().get(path).unwrap().clone();
+        let at = as_usize(actual_offset);
+        assert_eq!(&durable[at..at + 7], b"PAYLOAD", "right bytes, wrong place");
+        // The requested offset never received the bytes.
+        assert_ne!(durable.get(4_096..4_103), Some(&b"PAYLOAD"[..]));
+    }
+
+    #[test]
+    fn bit_rot_flips_a_bit_on_read_without_touching_the_write_path() {
+        let vfs = armed(47, FaultClass::BitRot);
+        let path = Path::new("rot.bin");
+        let mut f = vfs.open(path, OpenMode::create_truncate()).unwrap();
+        let payload = [0u8; 32];
+        f.write_all(&payload).unwrap();
+        f.sync_all().unwrap();
+        // The write path is untouched: every fault so far is a read-side rot.
+        assert!(vfs.fault_log().is_empty());
+
+        let served = read_back(&vfs, path);
+        assert_eq!(served.len(), payload.len());
+        let flipped: Vec<usize> = (0..payload.len()).filter(|&i| served[i] != 0).collect();
+        assert_eq!(flipped.len(), 1, "exactly one byte rots per read");
+        assert_eq!(served[flipped[0]].count_ones(), 1, "exactly one bit flips");
+
+        let log = vfs.fault_log();
+        assert_eq!(log[0].class, FaultClass::BitRot);
+        assert_eq!(log[0].file, "rot.bin");
+    }
+
+    #[test]
+    fn a_fired_class_is_the_only_one_logged_for_that_write() {
+        // Every write-side class armed at certainty: `lost_write` dominates, so
+        // the log names exactly the bytes that were (not) touched.
+        let mut cfg = SimFaultConfig::none();
+        for class in FaultClass::ALL {
+            cfg = cfg.with_fault_class(class, 1_000_000);
+        }
+        let vfs = SimVfs::new(53, cfg);
+        let mut f = vfs
+            .open(Path::new("all.bin"), OpenMode::create_truncate())
+            .unwrap();
+        f.write_all(b"gone").unwrap();
+        let log = vfs.fault_log();
+        assert_eq!(log.len(), 1, "one applied injection, one record");
+        assert_eq!(log[0].class, FaultClass::LostWrite);
+    }
+
+    #[test]
+    fn same_seed_produces_an_identical_fault_log() {
+        let mut cfg = SimFaultConfig {
+            power_cut_after: Some(24),
+            ..SimFaultConfig::none()
+        };
+        for class in FaultClass::ALL {
+            cfg = cfg.with_fault_class(class, 120_000);
+        }
+        let run = || {
+            let vfs = SimVfs::new(0xC0FFEE, cfg);
+            for i in 0..16u8 {
+                let Ok(mut f) = vfs.open(Path::new("s.bin"), OpenMode::create_keep()) else {
+                    break;
+                };
+                let _ = f.write_all(&[i; 40]);
+                let _ = f.sync_all();
+            }
+            let _ = vfs.crash_image();
+            vfs.fault_log_lines()
+        };
+        let first = run();
+        assert!(!first.is_empty(), "the sweep must inject something");
+        assert_eq!(first, run(), "same seed → identical fault schedule");
     }
 
     #[test]

@@ -1574,9 +1574,11 @@ impl RedDBRuntime {
         vertices: &[(f64, f64)],
     ) -> Option<std::collections::HashSet<u64>> {
         let resolution = self.h3_index_resolution(collection, column)?;
-        const MAX_POLYGON_COVER_CELLS: usize = 50_000;
-        let cells =
-            crate::geo::h3::polygon_to_cover_cells(vertices, resolution, MAX_POLYGON_COVER_CELLS)?;
+        let cells = crate::geo::h3::polygon_to_cover_cells(
+            vertices,
+            resolution,
+            crate::geo::h3::MAX_POLYGON_COVER_CELLS,
+        )?;
         self.h3_cell_candidate_ids(collection, column, &cells)
     }
 

@@ -576,6 +576,41 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // `GEO_WITHIN(<geo-column>, POLYGON(...))` — the composable form
+        // of the `SEARCH SPATIAL WITHIN POLYGON` verb. The first argument
+        // names a geo column and is captured through the spatial-column
+        // segment reader so a document field spelled `current` survives
+        // the window-frame keyword token instead of folding to `CURRENT`.
+        if function_name.eq_ignore_ascii_case("GEO_WITHIN") {
+            let column = self.parse_geo_column_expr()?;
+            self.expect(Token::Comma)?;
+            let polygon = self.parse_expr_prec(0)?;
+            self.expect(Token::RParen)?;
+            let end = self.position();
+            return Ok(Expr::FunctionCall {
+                name: function_name,
+                args: vec![column, polygon],
+                span: Span::new(start, end),
+            });
+        }
+
+        // `POLYGON((lat lon), (lat lon), …)` — vertices are space-separated
+        // pairs, matching the verb's spelling. The generic expression
+        // grammar would read `(38.70 -77.20)` as the subtraction
+        // `38.70 - 77.20`, so each coordinate parses at a precedence above
+        // the additive operators: an atom, optionally sign-prefixed, and
+        // nothing more.
+        if function_name.eq_ignore_ascii_case("POLYGON") {
+            let args = self.parse_polygon_vertex_args()?;
+            self.expect(Token::RParen)?;
+            let end = self.position();
+            return Ok(Expr::FunctionCall {
+                name: function_name,
+                args,
+                span: Span::new(start, end),
+            });
+        }
+
         if function_name.eq_ignore_ascii_case("TRIM") {
             let (name, args) = self.parse_trim_expr_args()?;
             self.expect(Token::RParen)?;
@@ -684,6 +719,97 @@ impl<'a> Parser<'a> {
             args,
             span: Span::new(start, end),
         })
+    }
+
+    /// Parse the geo-column argument of `GEO_WITHIN`: one or more
+    /// dot-separated word-shaped segments, each captured in the spelling
+    /// the user typed. The leading segment becomes the qualifier so
+    /// `body.location.gps` resolves the same way it does for
+    /// `GEO_DISTANCE`.
+    fn parse_geo_column_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.position();
+        let mut segments = vec![self.expect_spatial_column_segment()?];
+        while self.consume(&Token::Dot)? {
+            segments.push(self.expect_spatial_column_segment()?);
+        }
+        let table = if segments.len() > 1 {
+            segments.remove(0)
+        } else {
+            String::new()
+        };
+        Ok(Expr::Column {
+            field: FieldRef::TableColumn {
+                table,
+                column: segments.join("."),
+            },
+            span: Span::new(start, self.position()),
+        })
+    }
+
+    /// Parse `POLYGON`'s vertex list into a flat `[lat0, lon0, lat1, lon1, …]`
+    /// argument vector. When every coordinate is a numeric literal the
+    /// polygon is validated here against the same input rules the
+    /// `SEARCH SPATIAL WITHIN POLYGON` verb enforces; a polygon built
+    /// from columns or other runtime expressions is left to the executor.
+    fn parse_polygon_vertex_args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let pos = self.position();
+        let mut args = Vec::new();
+        loop {
+            self.expect(Token::LParen)?;
+            args.push(self.parse_polygon_coordinate()?);
+            args.push(self.parse_polygon_coordinate()?);
+            self.expect(Token::RParen)?;
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        if let Some(vertices) = crate::ast::geo_predicate::literal_polygon_vertices(&args) {
+            super::search_commands::validate_polygon_vertices(&vertices, "POLYGON", pos)?;
+        } else if args.len() < 6 || !args.len().is_multiple_of(2) {
+            return Err(ParseError::new(
+                "POLYGON requires at least 3 vertices".to_string(),
+                pos,
+            ));
+        }
+        Ok(args)
+    }
+
+    /// One `POLYGON` coordinate.
+    ///
+    /// A number-shaped coordinate — with or without a leading sign — is
+    /// read as a single `f64` literal, exactly as the `SEARCH SPATIAL
+    /// WITHIN POLYGON` verb reads it. That matters beyond spelling: left
+    /// to the generic grammar, `-77.20` would become a negation *node*
+    /// wrapping a literal, and the planner's constant-polygon test would
+    /// reject every western-hemisphere polygon as non-constant.
+    ///
+    /// Anything else is a runtime expression (a column, a parameter). It
+    /// parses above the additive precedence so the space-separated
+    /// `(lat lon)` pair cannot collapse into one subtraction node.
+    fn parse_polygon_coordinate(&mut self) -> Result<Expr, ParseError> {
+        const ABOVE_ADDITIVE: u8 = 70;
+        let start = self.position();
+        if self.polygon_coordinate_is_numeric()? {
+            let value = self.parse_float()?;
+            return Ok(Expr::Literal {
+                value: Value::Float(value),
+                span: Span::new(start, self.position()),
+            });
+        }
+        self.parse_expr_prec(ABOVE_ADDITIVE)
+    }
+
+    fn polygon_coordinate_is_numeric(&mut self) -> Result<bool, ParseError> {
+        if matches!(self.peek(), Token::Float(_) | Token::Integer(_)) {
+            return Ok(true);
+        }
+        if matches!(self.peek(), Token::Minus | Token::Dash) {
+            return Ok(matches!(
+                self.peek_next()?,
+                Token::Float(_) | Token::Integer(_)
+            ));
+        }
+        Ok(false)
     }
 
     /// Parse a single CONFIG()/KV() argument. A bare identifier or
