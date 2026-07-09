@@ -49,12 +49,13 @@ CREATE INDEX idx_role ON users (role) USING BITMAP
 **Complexity:** O(1) for count, sub-millisecond AND/OR/NOT across millions of rows.
 **Trade-off:** Memory-efficient only for low-cardinality columns (< 1000 distinct values).
 
-### RTREE
+### H3
 
-R-tree spatial index. Required for efficient geo queries on `GeoPoint`, `Latitude`, `Longitude` columns.
+H3 spatial index. Required for efficient geo queries on `GeoPoint` columns,
+JSON `{lat, lon}` point objects, and GeoJSON `Point` values.
 
 ```sql
-CREATE INDEX idx_location ON sites (location) USING RTREE
+CREATE INDEX idx_location ON sites (location) USING H3
 ```
 
 **Best for:** Radius search, bounding box queries, nearest-neighbor. See [Spatial Search](/query/spatial-search.md).
@@ -67,7 +68,7 @@ CREATE INDEX idx_location ON sites (location) USING RTREE
 | `WHERE id = 42` | HASH |
 | `WHERE price > 100` | BTREE |
 | `WHERE status = 'active'` | BITMAP |
-| `WHERE location WITHIN 10km OF (48.85, 2.35)` | RTREE |
+| `WHERE location WITHIN 10km OF (48.85, 2.35)` | H3 |
 | `ORDER BY created_at DESC` | BTREE |
 | `GROUP BY category` | BITMAP |
 | `SELECT COUNT(*) WHERE role = 'admin'` | BITMAP |
