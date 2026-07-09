@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.23.0
+
+### Minor Changes
+
+- Geo/spatial minor: disk-resident H3 spatial indexing and composable geofencing.
+
+  - **GEO_WITHIN(point, POLYGON(...))** — point-in-polygon geofencing as a plain
+    boolean predicate that composes with the rest of the WHERE clause (AND/OR/NOT),
+    planner-accelerated through the H3 polyfill cover with EXPLAIN visibility
+    (PRD [#1939](https://github.com/reddb-io/reddb/issues/1939)).
+  - **POLYGON(...)** — variadic polygon constructor over a flat lat/lon list.
+  - **Disk-resident H3 spatial index** over the disk B-tree, retiring the in-RAM
+    rstar index: H3_INDEX, H3_RING, H3_TO_LATLNG, nearest-neighbour and radius
+    search backed by the pager (PRD [#1932](https://github.com/reddb-io/reddb/issues/1932)).
+  - **ORDER BY computed aliases** — sorting by a computed projection alias
+    (e.g. `GEO_DISTANCE(...) AS dist ... ORDER BY dist`) is now deterministic;
+    the sort materializes ORDER-BY-referenced computed keys before ordering
+    ([#1982](https://github.com/reddb-io/reddb/issues/1982)).
+  - Geo scalars catalogued and documented: GEO_DISTANCE, GEO_BEARING, HAVERSINE,
+    VINCENTY, GEO_WITHIN, POLYGON — llms.txt and the spatial guide regenerated
+    from the engine's own catalog.
+
 ## 1.22.0
 
 ### Minor Changes
