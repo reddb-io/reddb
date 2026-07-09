@@ -695,11 +695,9 @@ fn server_does_not_redeclare_physical_metadata_core_contracts() {
         "pub const DEFAULT_SUPERBLOCK_COPIES",
         "static META_JSON_SIDECAR_POLICY",
         "static SEQN_JOURNAL_POLICY",
-        "static FOLD_PAGER_META_POLICY",
         "static FOLD_DWB_INTO_WAL_POLICY",
         "pub fn meta_json_sidecar_enabled",
         "pub fn seqn_journal_enabled",
-        "pub fn fold_pager_meta_enabled",
         "pub fn fold_dwb_into_wal_enabled",
     ] {
         assert!(
@@ -722,11 +720,9 @@ fn server_does_not_redeclare_physical_metadata_core_contracts() {
         "pub const DEFAULT_SUPERBLOCK_COPIES",
         "static META_JSON_SIDECAR_POLICY",
         "static SEQN_JOURNAL_POLICY",
-        "static FOLD_PAGER_META_POLICY",
         "static FOLD_DWB_INTO_WAL_POLICY",
         "pub fn meta_json_sidecar_enabled",
         "pub fn seqn_journal_enabled",
-        "pub fn fold_pager_meta_enabled",
         "pub fn fold_dwb_into_wal_enabled",
     ] {
         assert!(
