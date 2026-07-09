@@ -382,9 +382,14 @@ fn seed_document_geo_corpus(collection: &str) -> RedDBRuntime {
         let (lat, lon) = loc
             .split_once(',')
             .unwrap_or_else(|| panic!("invalid test coordinate: {loc}"));
+        let gps_location = if id % 2 == 0 {
+            format!(r#"{{"type":"Point","coordinates":[{lon},{lat}]}}"#)
+        } else {
+            format!(r#"{{"lat":{lat},"lon":{lon}}}"#)
+        };
         rt.execute_query(&format!(
             r#"INSERT INTO {collection} DOCUMENT VALUES
-               ({{"id":{id},"gpsLocation":{{"lat":{lat},"lon":{lon}}}}})"#
+               ({{"id":{id},"gpsLocation":{gps_location}}})"#
         ))
         .unwrap();
     }
@@ -898,7 +903,8 @@ fn spatial_full_scan_skips_non_geo_named_document_values() {
         r#"INSERT INTO events DOCUMENT VALUES
         ({"gpsLocation":"not-geo","fallback":{"lat":38.76,"lon":-77.15}}),
         ({"fallback":{"lat":38.76,"lon":-77.15}}),
-        ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+        ({"gpsLocation":{"type":"Polygon","coordinates":[[[-77.15,38.76]]]}}),
+        ({"gpsLocation":{"type":"Point","coordinates":[-77.15]}})"#,
     )
     .unwrap();
 
@@ -908,7 +914,39 @@ fn spatial_full_scan_skips_non_geo_named_document_values() {
     );
     assert!(
         hits.is_empty(),
-        "non-geo, missing, and GeoJSON named document values must be skipped"
+        "non-geo, missing, non-Point GeoJSON, and malformed Point values must be skipped"
+    );
+}
+
+#[test]
+fn spatial_full_scan_document_column_accepts_geojson_point_lon_lat_order() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"name":"dc","gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}}),
+        ({"name":"antarctic-mirror","gpsLocation":{"type":"Point","coordinates":[38.76,-77.15]}})"#,
+    )
+    .unwrap();
+
+    let dc = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(dc.len(), 1, "GeoJSON Point must use [lon, lat] order");
+
+    let swapped = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS -77.15 38.76 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(
+        swapped.len(),
+        1,
+        "the mirrored fixture proves swapped coordinates land elsewhere"
+    );
+    assert!(
+        dc[0].0 < swapped[0].0,
+        "the first inserted document is the DC point; a swapped implementation returns the mirror"
     );
 }
 
@@ -934,11 +972,13 @@ fn h3_create_index_reports_existing_geo_coverage() {
 fn h3_create_index_reports_zero_coverage_shape_hint_for_non_empty_collection() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     rt.execute_query("CREATE DOCUMENT events").unwrap();
+    // A GeoJSON Point would index since gh-1943; LineString stays out of
+    // the recognized-point set, keeping this fixture shape-mismatched.
     rt.execute_query(
         r#"INSERT INTO events DOCUMENT VALUES
            ({"gpsLocation":"not-geo"}),
            ({"name":"missing"}),
-           ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+           ({"gpsLocation":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}})"#,
     )
     .unwrap();
 
@@ -947,7 +987,7 @@ fn h3_create_index_reports_zero_coverage_shape_hint_for_non_empty_collection() {
         .unwrap();
     assert_eq!(
         result_message(&res),
-        "index 'idx_loc' created on 'events' (gpsLocation) using H3 (0 of 3 entities indexed — no indexable geo value in 'gpsLocation'; expected GEO_POINT or {lat, lon} object)"
+        "index 'idx_loc' created on 'events' (gpsLocation) using H3 (0 of 3 entities indexed — no indexable geo value in 'gpsLocation'; expected GEO_POINT, {lat, lon} object, or GeoJSON Point)"
     );
 }
 
@@ -969,11 +1009,13 @@ fn h3_create_index_reports_plain_zero_for_empty_collection() {
 fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     rt.execute_query("CREATE DOCUMENT events").unwrap();
+    // A GeoJSON Point would match since gh-1943; LineString stays out of
+    // the recognized-point set, keeping this fixture shape-mismatched.
     rt.execute_query(
         r#"INSERT INTO events DOCUMENT VALUES
            ({"gpsLocation":"not-geo"}),
            ({"name":"missing"}),
-           ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+           ({"gpsLocation":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}})"#,
     )
     .unwrap();
 
@@ -986,7 +1028,7 @@ fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
     assert_eq!(
         res.notice.as_deref(),
         Some(
-            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT or {lat, lon} object)."
+            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT, {lat, lon} object, or GeoJSON Point)."
         )
     );
     rt.execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
@@ -1000,7 +1042,7 @@ fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
     assert_eq!(
         res.notice.as_deref(),
         Some(
-            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT or {lat, lon} object)."
+            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT, {lat, lon} object, or GeoJSON Point)."
         )
     );
 
@@ -1074,7 +1116,7 @@ fn h3_document_body_repro_backfills_existing_documents() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     rt.execute_query("CREATE DOCUMENT events").unwrap();
     rt.execute_query(
-        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":38.76,"lon":-77.15}})"#,
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
     )
     .unwrap();
 
@@ -1097,7 +1139,7 @@ fn h3_document_body_repro_backfills_existing_documents() {
     assert_eq!(
         hits[0].1,
         0.0_f64.to_bits(),
-        "exact document hit must report zero distance"
+        "exact GeoJSON Point document hit must report zero distance"
     );
 }
 
@@ -1109,7 +1151,7 @@ fn h3_document_body_indexes_live_inserts() {
         .unwrap();
 
     rt.execute_query(
-        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":38.76,"lon":-77.15}})"#,
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
     )
     .unwrap();
 
@@ -1124,6 +1166,38 @@ fn h3_document_body_indexes_live_inserts() {
     );
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].1, 0.0_f64.to_bits());
+}
+
+#[test]
+fn h3_document_geojson_point_lon_lat_order_is_adversarial() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
+        .unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"name":"dc","gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+    )
+    .unwrap();
+
+    let correct = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(
+        correct.len(),
+        1,
+        "H3 index must encode coordinates[1] as latitude and coordinates[0] as longitude"
+    );
+
+    let mirrored = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS -77.15 38.76 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert!(
+        mirrored.is_empty(),
+        "a swapped implementation would index this point near the mirrored continent"
+    );
 }
 
 #[test]

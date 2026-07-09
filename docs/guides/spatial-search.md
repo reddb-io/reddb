@@ -111,6 +111,7 @@ INSERT INTO fleet DOCUMENT VALUES
 | Integer members | `{"lat":39,"lon":-77}` | Yes |
 | Extra members alongside | `{"lat":38.76,"lon":-77.15,"accuracy":5}` | Yes |
 | Sibling `lat`/`lon` columns | a row or node with `lat` and `lon` fields | Yes, via fallback (see below) |
+| GeoJSON `Point` | `{"type":"Point","coordinates":[-77.15,38.76]}` | Yes — coordinates are **longitude-first** (see below) |
 
 The latitude member is resolved as `lat`, then `latitude`. The longitude member
 is resolved as `lon`, then `lng`, then `longitude`. Key matching is
@@ -123,7 +124,7 @@ is resolved as `lon`, then `lng`, then `longitude`. Key matching is
 | String coordinates | `{"lat":"38.76","lon":"-77.15"}` | Members must be JSON numbers |
 | String pair | `"38.76,-77.15"` | Not an object |
 | Array coordinates | `[38.76,-77.15]` | Not an object |
-| GeoJSON | `{"type":"Point","coordinates":[-77.15,38.76]}` | Named not-yet — see below |
+| GeoJSON non-`Point` | `{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}` | Only `Point` is a single coordinate pair — see below |
 | Missing member | `{"lat":38.76}` | Both members required |
 | Null member | `{"lat":38.76,"lon":null}` | Members must be JSON numbers |
 | Latitude out of range | `{"lat":91,"lon":0}` | Latitude must be in `-90..=90` |
@@ -137,21 +138,23 @@ as an unsupported value is absent from a B-tree index. The
 [zero-geo notice](#the-zero-geo-notice) are how RedDB tells you a shape mismatch
 happened.
 
-### GeoJSON is out of scope
+### GeoJSON `Point` — and only `Point`
 
-GeoJSON `{"type":"Point","coordinates":[lon, lat]}` is **not recognized**, and
-this is deliberate rather than an oversight: RedDB indexes points, and adopting
-the GeoJSON envelope would imply the full geometry set (`LineString`,
-`Polygon`, `MultiPolygon`, …) that the H3 point index does not serve.
+GeoJSON `{"type":"Point","coordinates":[lon, lat]}` **is recognized** (gh-1943).
+The `coordinates` array is read longitude-first, exactly as GeoJSON RFC 7946
+§3.1.1 demands — a point that renders correctly on a GeoJSON map lands in the
+same place here, with no manual swapping.
 
-Convert on the way in. GeoJSON is longitude-first; the object convention is
-named, so ordering cannot be mistaken:
+The rest of the GeoJSON geometry set (`LineString`, `Polygon`, `MultiPolygon`,
+…) is deliberately **not** recognized: RedDB indexes points, and only `Point`
+carries a single coordinate pair. A non-`Point` GeoJSON value is skipped like
+any other unrecognized shape.
 
 ```json
 {"type":"Point","coordinates":[-77.15, 38.76]}
 ```
 
-becomes
+indexes at the same location as
 
 ```json
 {"lat": 38.76, "lon": -77.15}
@@ -227,14 +230,14 @@ CREATE DOCUMENT sensors;
 
 INSERT INTO sensors DOCUMENT VALUES
   ({"id":1,"spot":"38.76,-77.15"}),
-  ({"id":2,"spot":{"type":"Point","coordinates":[-77.15,38.76]}}),
+  ({"id":2,"spot":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}}),
   ({"id":3,"spot":{"lat":38.76}});
 
 CREATE INDEX idx_sensors_spot ON sensors (spot) USING H3;
 ```
 
 ```
-index 'idx_sensors_spot' created on 'sensors' (spot) using H3 (0 of 3 entities indexed — no indexable geo value in 'spot'; expected GEO_POINT or {lat, lon} object)
+index 'idx_sensors_spot' created on 'sensors' (spot) using H3 (0 of 3 entities indexed — no indexable geo value in 'spot'; expected GEO_POINT, {lat, lon} object, or GeoJSON Point)
 ```
 
 An **empty** collection gets the plain form, `0 of 0 entities indexed`, with no
@@ -379,7 +382,7 @@ SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION sensors COLUMN spot;
 ```
 
 ```
-no entity in 'sensors' has an indexable geo value in column 'spot' (expected GEO_POINT or {lat, lon} object).
+no entity in 'sensors' has an indexable geo value in column 'spot' (expected GEO_POINT, {lat, lon} object, or GeoJSON Point).
 ```
 
 Over HTTP the string appears as the `notice` field of the query response.

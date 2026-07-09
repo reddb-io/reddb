@@ -148,24 +148,57 @@ fn build_meta_page1_with_overflow(
 /// metadata parser would see starting from the content offset of page 1.
 /// Single-page metadata returns the raw page content (including trailing
 /// zero-pad), so the legacy parser sees the same bytes it always saw.
-fn read_meta_payload(pager: &Pager) -> Option<Vec<u8>> {
+fn storage_integrity(
+    zone: &str,
+    id: impl Into<String>,
+    collection: Option<String>,
+    detail: impl Into<String>,
+) -> StoreError {
+    StoreError::StorageIntegrity(crate::api::StorageIntegrityError::new(
+        zone, id, collection, detail,
+    ))
+}
+
+fn page_integrity(
+    page_id: u32,
+    collection: Option<String>,
+    detail: impl Into<String>,
+) -> StoreError {
+    storage_integrity("page", page_id.to_string(), collection, detail)
+}
+
+fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
     let cs = crate::storage::engine::HEADER_SIZE;
-    let meta_page = pager
-        .read_page(1)
-        .or_else(|_| pager.recover_meta_from_shadow())
-        .ok()?;
+    let meta_page = match pager.read_page(1) {
+        Ok(page) => page,
+        Err(read_err) => pager.recover_meta_from_shadow().map_err(|shadow_err| {
+            page_integrity(
+                1,
+                None,
+                format!(
+                    "metadata page checksum/read failed ({read_err}); shadow recovery also failed ({shadow_err})"
+                ),
+            )
+        })?,
+    };
     let bytes = meta_page.as_bytes();
     if bytes.len() < cs + 4 {
-        return Some(bytes.get(cs..).unwrap_or(&[]).to_vec());
+        return Ok(Some(bytes.get(cs..).unwrap_or(&[]).to_vec()));
     }
-    let header = match reddb_file::decode_native_metadata_overflow_header(&bytes[cs..]).ok()? {
+    let header = match reddb_file::decode_native_metadata_overflow_header(&bytes[cs..])
+        .map_err(|err| page_integrity(1, None, err.to_string()))?
+    {
         Some(header) => header,
         None => {
-            return Some(bytes[cs..].to_vec());
+            return Ok(Some(bytes[cs..].to_vec()));
         }
     };
     if bytes.len() < cs + META_V3_PAGE1_HEADER {
-        return None;
+        return Err(page_integrity(
+            1,
+            None,
+            "metadata overflow header is truncated",
+        ));
     }
     let total = header.total_payload_bytes as usize;
     let mut next = header.next_overflow_page_id;
@@ -175,13 +208,20 @@ fn read_meta_payload(pager: &Pager) -> Option<Vec<u8>> {
         &bytes[cs + META_V3_PAGE1_HEADER..cs + META_V3_PAGE1_HEADER + first_take],
     );
     while next != 0 && payload.len() < total {
-        let ov = pager.read_page(next).ok()?;
+        let ov = pager
+            .read_page(next)
+            .map_err(|err| page_integrity(next, None, err.to_string()))?;
         let ob = ov.as_bytes();
         if ob.len() < cs + META_V3_OVERFLOW_HEADER {
-            return None;
+            return Err(page_integrity(
+                next,
+                None,
+                "metadata overflow continuation is truncated",
+            ));
         }
         let continuation =
-            reddb_file::decode_native_metadata_overflow_continuation_header(&ob[cs..]).ok()?;
+            reddb_file::decode_native_metadata_overflow_continuation_header(&ob[cs..])
+                .map_err(|err| page_integrity(next, None, err.to_string()))?;
         let nn = continuation.next_overflow_page_id;
         let len = continuation.chunk_bytes as usize;
         let remaining = total - payload.len();
@@ -191,7 +231,7 @@ fn read_meta_payload(pager: &Pager) -> Option<Vec<u8>> {
         );
         next = nn;
     }
-    Some(payload)
+    Ok(Some(payload))
 }
 
 impl UnifiedStore {
@@ -439,7 +479,7 @@ impl UnifiedStore {
         let pending_drops =
             crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
                 .recover_or_bootstrap(&collections)
-                .map_err(StoreError::Io)?;
+                .map_err(|err| storage_integrity("manifest", "current", None, err.to_string()))?;
         for name in pending_drops {
             if self.get_collection(&name).is_some() {
                 self.drop_collection(&name)?;
@@ -509,7 +549,7 @@ impl UnifiedStore {
         // helper transparently follows the `RDM3` overflow chain when the
         // metadata blob spans multiple pages and falls back to the legacy
         // `<data>-meta` shadow when page 1 itself is corrupted.
-        if let Some(content_vec) = read_meta_payload(pager) {
+        if let Some(content_vec) = read_meta_payload(pager)? {
             let content: &[u8] = &content_vec;
             if content.len() >= 4 {
                 let mut pos = 0;
@@ -558,30 +598,34 @@ impl UnifiedStore {
                             let btree = BTree::with_root(Arc::clone(pager), root_page);
 
                             // Load all entities from B-tree into the collection
-                            if let Ok(mut cursor) = btree.cursor_first() {
-                                let manager = self.get_collection(&name);
-                                while let Ok(Some((key, value))) = cursor.next() {
-                                    // Deserialize entity from value bytes
-                                    if let Ok((entity, metadata)) = Self::deserialize_entity_record(
-                                        &value,
-                                        self.format_version(),
-                                    ) {
-                                        if let Some(m) = &manager {
-                                            let id = entity.id;
-                                            if let EntityKind::TableRow { row_id, .. } =
-                                                &entity.kind
-                                            {
-                                                m.register_row_id(*row_id);
-                                            }
-                                            self.context_index.index_entity(&name, &entity);
-                                            let _ = m.insert(entity.clone());
-                                            if let Some(metadata) = metadata {
-                                                let _ = m.set_metadata(id, metadata);
-                                            }
-                                            self.register_entity_id(id);
-                                            if self.config.auto_index_refs {
-                                                self.index_cross_refs(&entity, &name)?;
-                                            }
+                            let mut cursor = btree.cursor_first().map_err(|err| {
+                                page_integrity(root_page, Some(name.clone()), err.to_string())
+                            })?;
+                            let manager = self.get_collection(&name);
+                            loop {
+                                let next = cursor.next().map_err(|err| {
+                                    page_integrity(root_page, Some(name.clone()), err.to_string())
+                                })?;
+                                let Some((key, value)) = next else {
+                                    break;
+                                };
+                                // Deserialize entity from value bytes
+                                if let Ok((entity, metadata)) =
+                                    Self::deserialize_entity_record(&value, self.format_version())
+                                {
+                                    if let Some(m) = &manager {
+                                        let id = entity.id;
+                                        if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+                                            m.register_row_id(*row_id);
+                                        }
+                                        self.context_index.index_entity(&name, &entity);
+                                        let _ = m.insert(entity.clone());
+                                        if let Some(metadata) = metadata {
+                                            let _ = m.set_metadata(id, metadata);
+                                        }
+                                        self.register_entity_id(id);
+                                        if self.config.auto_index_refs {
+                                            self.index_cross_refs(&entity, &name)?;
                                         }
                                     }
                                 }

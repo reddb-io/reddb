@@ -202,7 +202,7 @@ fn guide_quotes_the_real_coverage_messages() {
     rt.execute_query(
         r#"INSERT INTO sensors DOCUMENT VALUES
              ({"id":1,"spot":"38.76,-77.15"}),
-             ({"id":2,"spot":{"type":"Point","coordinates":[-77.15,38.76]}}),
+             ({"id":2,"spot":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}}),
              ({"id":3,"spot":{"lat":38.76}})"#,
     )
     .unwrap();
@@ -223,7 +223,7 @@ fn guide_quotes_the_real_zero_geo_notice() {
     rt.execute_query(
         r#"INSERT INTO sensors DOCUMENT VALUES
              ({"id":1,"spot":"38.76,-77.15"}),
-             ({"id":2,"spot":{"type":"Point","coordinates":[-77.15,38.76]}}),
+             ({"id":2,"spot":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}}),
              ({"id":3,"spot":{"lat":38.76}})"#,
     )
     .unwrap();
@@ -292,6 +292,8 @@ fn guide_recognized_shapes_table_matches_the_seam() {
         r#"{"lat":38.76,"lng":-77.15}"#,
         r#"{"lat":39,"lon":-77}"#,
         r#"{"lat":38.76,"lon":-77.15,"accuracy":5}"#,
+        // GeoJSON Point, longitude-first per RFC 7946 (gh-1943).
+        r#"{"type":"Point","coordinates":[-77.15,38.76]}"#,
     ] {
         assert_guide_quotes(body);
         assert_eq!(
@@ -316,9 +318,11 @@ fn guide_recognized_shapes_table_matches_the_seam() {
 #[test]
 fn guide_rejected_shapes_table_matches_the_seam() {
     // Object-shaped rejects, quoted in the guide's "Rejected shapes" table.
+    // GeoJSON `Point` moved to the recognized table (gh-1943); non-`Point`
+    // GeoJSON geometries stay out.
     for body in [
         r#"{"lat":"38.76","lon":"-77.15"}"#,
-        r#"{"type":"Point","coordinates":[-77.15,38.76]}"#,
+        r#"{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}"#,
         r#"{"lat":38.76}"#,
         r#"{"lat":38.76,"lon":null}"#,
         r#"{"lat":91,"lon":0}"#,

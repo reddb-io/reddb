@@ -185,6 +185,7 @@ pub fn sqlstate_for_reddb_error(err: &crate::api::RedDBError) -> SqlState {
         E::InvalidOperation(_) => WRONG_OBJECT_TYPE,
         E::Engine(_) => INTERNAL_ERROR,
         E::Catalog(_) => INTERNAL_ERROR,
+        E::StorageIntegrity(_) => DATA_CORRUPTED,
         E::Query(_) => SYNTAX_ERROR,
         E::Validation { .. } => SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION,
         E::Io(_) => IO_ERROR,
