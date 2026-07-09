@@ -283,6 +283,13 @@ fn evaluate_scalar_function_legacy(
                 lat1, lon1, lat2, lon2,
             )))
         }
+        "GEO_WITHIN" => {
+            let (lat, lon) = resolve_geo_arg(args.first()?, source)?;
+            let vertices = polygon_vertices_from_value(&resolve_scalar_arg(args, 1, source)?)?;
+            Some(Value::Boolean(crate::geo::point_in_polygon_even_odd(
+                lat, lon, &vertices,
+            )))
+        }
         "TIME_BUCKET" => {
             let bucket_ns = resolve_time_bucket_duration(args, 0)?;
             let timestamp_ns = resolve_time_bucket_timestamp(args, source)?;
@@ -820,6 +827,27 @@ pub(super) fn value_as_number(v: &Value) -> Option<NumOperand> {
         }
         _ => None,
     }
+}
+
+fn polygon_vertices_from_value(value: &Value) -> Option<Vec<(f64, f64)>> {
+    let Value::Array(vertices) = value else {
+        return None;
+    };
+    vertices
+        .iter()
+        .map(|vertex| {
+            let Value::Array(pair) = vertex else {
+                return None;
+            };
+            let [lat, lon] = pair.as_slice() else {
+                return None;
+            };
+            Some((
+                value_as_number(lat)?.as_f64(),
+                value_as_number(lon)?.as_f64(),
+            ))
+        })
+        .collect()
 }
 
 /// Convert a `Value` to a new `Value` of the requested `DataType`. Used
