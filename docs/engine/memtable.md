@@ -1,52 +1,45 @@
-# Memtable & Skip List
+# Write & Read Paths
 
-The memtable is an in-memory write buffer backed by a sorted skip list. All writes go to the memtable first, then flush to the B-tree when a size threshold is reached.
+The unified storage layer does not use a write-buffer memtable. Writes land
+directly in the growing segment's entity storage; the memtable module has been
+removed (ADR 0073 §5).
 
 ## Write Path
 
 ```
 1. WAL write (durability)
-2. Memtable insert (skip list -- in memory, ordered)
-3. Background flush to B-tree when threshold reached
+2. Growing-segment entity storage in RAM
+   - HashMap mode (default): keyed by EntityId, random-access O(1)
+   - Flat-vector mode: epoch-published Vec for lock-free sequential reads
+3. seal() — freezes the growing segment; builds bloom filter and zone maps
+   over the now-immutable data, producing a Sealed segment
 ```
 
 ## Read Path
 
 ```
-1. Check memtable first (most recent writes)
-2. Check sealed segments (B-tree)
-3. Merge results (memtable takes precedence)
+1. Growing segment entity storage (most recent writes)
+2. Sealed segments (older, immutable; bloom filter and zone maps applied for pruning)
 ```
 
-## Skip List
+Reads never consult a write buffer. The growing segment and sealed segments are
+the two tiers consulted, in that order.
 
-The skip list provides O(log n) insert, lookup, and range scan with sorted iteration. It serves as the backing structure for the memtable.
+## Segment Lifecycle
 
-Key operations:
-
-| Operation | Complexity |
-|:----------|:-----------|
-| Insert | O(log n) |
-| Lookup | O(log n) |
-| Range scan | O(log n + k) |
-| Drain sorted | O(n) |
-
-## Memtable Features
-
-- **Tombstone markers**: Deletes insert a tombstone so reads don't fall through to older segments
-- **Size tracking**: Approximate byte tracking for flush decisions
-- **Configurable threshold**: Flush when memtable reaches 75% of max size (default 64 MB)
-- **Sorted drain**: On flush, entries are drained in sorted order for efficient B-tree bulk insert
-
-## Configuration
-
-| Parameter | Default | Description |
-|:----------|:--------|:------------|
-| `max_bytes` | 64 MB | Maximum memtable size before flush |
-| `flush_threshold` | 0.75 | Flush at 75% of max_bytes |
+```
+Growing (in-memory, accepts writes)
+   ↓ seal() when full or manually triggered
+Sealed (immutable, bloom filter + zone maps built)
+   ↓ flush() for persistence
+Flushed (on disk, can be mmap'd)
+   ↓ archive() for cold storage
+Archived (compressed, infrequently accessed)
+```
 
 ## See Also
 
 - [B-Tree Index](/engine/btree.md) -- Primary index structure
 - [WAL & Recovery](/engine/wal.md) -- Write-ahead log
+- [Bloom Filter](/engine/bloom-filter.md) -- Fast negative key lookups
 - [Architecture](/engine/architecture.md) -- Storage engine overview
