@@ -52,5 +52,6 @@ SEARCH SPATIAL NEAREST 48.8566 2.3522 K 2 COLLECTION places COLUMN loc;
 
 ## Where to go next
 
-- [CREATE INDEX reference](/query/create-index.md) — H3, R-tree, and other index kinds
+- [Spatial Search guide](/guides/spatial-search.md) — the complete H3 surface, end to end
+- [CREATE INDEX reference](/query/create-index.md) — H3 and the other index kinds
 - [Data Model Overview](/data-models/overview.md) — how spatial composes with other models
