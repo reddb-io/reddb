@@ -1235,6 +1235,9 @@ impl RedDBRuntime {
                     },
                 ))
             }
+            QueryExpr::Scrub { background, budget } => {
+                self.execute_scrub_query(query, mode, background, budget)
+            }
             // SHOW SECRET[S] [prefix]
             QueryExpr::ShowSecrets { ref prefix } => {
                 let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
