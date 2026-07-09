@@ -18,9 +18,17 @@
     (e.g. `GEO_DISTANCE(...) AS dist ... ORDER BY dist`) is now deterministic;
     the sort materializes ORDER-BY-referenced computed keys before ordering
     ([#1982](https://github.com/reddb-io/reddb/issues/1982)).
+  - **GeoJSON `Point` recognition** — document fields holding a GeoJSON
+    `{"type":"Point","coordinates":[lon, lat]}` value are recognized as
+    geographic points end to end (H3 indexing, spatial search, coverage
+    hints), read longitude-first per RFC 7946; other GeoJSON geometries
+    stay out ([#1943](https://github.com/reddb-io/reddb/issues/1943)).
   - Geo scalars catalogued and documented: GEO_DISTANCE, GEO_BEARING, HAVERSINE,
     VINCENTY, GEO_WITHIN, POLYGON — llms.txt and the spatial guide regenerated
     from the engine's own catalog.
+  - Didactic storage-integrity read errors: checksum failures name the
+    zone/page/collection, fail closed, and map to data-corrupted SQLSTATEs
+    at the wire ([#1963](https://github.com/reddb-io/reddb/issues/1963)).
 
 ## 1.22.0
 
