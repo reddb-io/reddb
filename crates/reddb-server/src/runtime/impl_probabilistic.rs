@@ -816,6 +816,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     })
                 } else {
                     // Multi-HLL count = union count
@@ -858,6 +859,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     })
                 }
             }
@@ -938,6 +940,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             ProbabilisticCommand::DropHll { name, if_exists } => {
@@ -1060,6 +1063,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             ProbabilisticCommand::SketchMerge { dest, sources } => {
@@ -1140,6 +1144,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             ProbabilisticCommand::DropSketch { name, if_exists } => {
@@ -1257,6 +1262,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             ProbabilisticCommand::FilterDelete { name, element } => {
@@ -1304,6 +1310,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             ProbabilisticCommand::FilterInfo { name } => {
@@ -1338,6 +1345,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             ProbabilisticCommand::DropFilter { name, if_exists } => {

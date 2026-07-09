@@ -1643,12 +1643,30 @@ impl RedDBRuntime {
         let method_str = format!("{}", query.method);
         let unique_str = if query.unique { "unique " } else { "" };
         let cols = query.columns.join(", ");
+        let total_count = entity_fields.len();
+        let coverage_detail =
+            if matches!(method_kind, super::index_store::IndexMethodKind::H3 { .. })
+                && total_count > 0
+                && indexed_count == 0
+            {
+                format!(
+                    "{} of {} entities indexed — no indexable geo value in '{}'; expected {}",
+                    indexed_count,
+                    total_count,
+                    cols,
+                    crate::geo::RECOGNIZED_GEO_SHAPES
+                )
+            } else if matches!(method_kind, super::index_store::IndexMethodKind::H3 { .. }) {
+                format!("{} of {} entities indexed", indexed_count, total_count)
+            } else {
+                format!("{} entities indexed", indexed_count)
+            };
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
             &format!(
-                "{}index '{}' created on '{}' ({}) using {} ({} entities indexed)",
-                unique_str, query.name, query.table, cols, method_str, indexed_count
+                "{}index '{}' created on '{}' ({}) using {} ({})",
+                unique_str, query.name, query.table, cols, method_str, coverage_detail
             ),
             "create",
         ))

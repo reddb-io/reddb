@@ -723,6 +723,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             QueryExpr::Table(table) => {
@@ -755,6 +756,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     };
                     frame.write_result_cache(self, &tvf_result, result_cache_scopes.clone());
                     return Ok(tvf_result);
@@ -787,6 +789,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     };
                     frame.write_result_cache(self, &inline_result, result_cache_scopes);
                     return Ok(inline_result);
@@ -806,6 +809,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
 
@@ -825,6 +829,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
 
@@ -838,6 +843,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
 
@@ -864,6 +870,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
 
@@ -898,6 +905,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 };
                 Ok(RuntimeQueryResult {
@@ -920,6 +928,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             QueryExpr::Join(join) => {
@@ -946,6 +955,7 @@ impl RedDBRuntime {
                             affected_rows: 0,
                             statement_type: "select",
                             bookmark: None,
+                            notice: None,
                         });
                     }
                 };
@@ -958,6 +968,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             QueryExpr::Vector(vector) => Ok(RuntimeQueryResult {
@@ -969,6 +980,7 @@ impl RedDBRuntime {
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
+                notice: None,
             }),
             QueryExpr::Hybrid(hybrid) => Ok(RuntimeQueryResult {
                 query: query.to_string(),
@@ -979,6 +991,7 @@ impl RedDBRuntime {
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
+                notice: None,
             }),
             QueryExpr::RankOf(ref rank) => self.execute_rank_of(query, rank),
             QueryExpr::ApproxRankOf(ref rank) => self.execute_approx_rank_of(query, rank),
@@ -1263,6 +1276,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             // SHOW CONFIG [prefix] [AS JSON|FORMAT JSON]
@@ -1291,6 +1305,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
                 let manager = store
@@ -1357,6 +1372,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             // Session-local multi-tenancy handle (Phase 2.5.3).
@@ -1395,6 +1411,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             // Transaction control (Phase 2.3 PG parity).
@@ -2955,6 +2972,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
                 // Inline-graph TVF (issue #799) on the prepared-statement /
@@ -2981,6 +2999,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
                 if super::red_schema::is_virtual_table(&table.table) {
@@ -2998,6 +3017,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
                 // `<graph>.<output>` analytics virtual view (issue #800).
@@ -3014,6 +3034,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 }
                 let Some(table_with_rls) = self.authorize_relational_table_select(
@@ -3030,6 +3051,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 };
                 Ok(RuntimeQueryResult {
@@ -3045,6 +3067,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             QueryExpr::Join(join) => {
@@ -3063,6 +3086,7 @@ impl RedDBRuntime {
                         affected_rows: 0,
                         statement_type: "select",
                         bookmark: None,
+                        notice: None,
                     });
                 };
                 Ok(RuntimeQueryResult {
@@ -3074,6 +3098,7 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
+                    notice: None,
                 })
             }
             QueryExpr::Vector(vector) => Ok(RuntimeQueryResult {
@@ -3085,6 +3110,7 @@ impl RedDBRuntime {
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
+                notice: None,
             }),
             QueryExpr::Hybrid(hybrid) => Ok(RuntimeQueryResult {
                 query: query_str.to_string(),
@@ -3095,6 +3121,7 @@ impl RedDBRuntime {
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
+                notice: None,
             }),
             QueryExpr::Insert(ref insert) if super::red_schema::is_virtual_table(&insert.table) => {
                 Err(RedDBError::Query(
@@ -3249,6 +3276,7 @@ impl RedDBRuntime {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         })
     }
 
@@ -3320,6 +3348,7 @@ impl RedDBRuntime {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         })
     }
 }

@@ -81,6 +81,9 @@ pub(crate) fn runtime_query_json(
             JsonValue::String(bookmark.to_string()),
         );
     }
+    if let Some(notice) = result.notice.as_deref() {
+        object.insert("notice".to_string(), JsonValue::String(notice.to_string()));
+    }
     object.insert(
         "result".to_string(),
         unified_result_json_with_records(&result.result, &records),
@@ -1131,6 +1134,7 @@ mod descriptor_tests {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         };
 
         let json = runtime_query_json(&runtime_result, &None, &None);

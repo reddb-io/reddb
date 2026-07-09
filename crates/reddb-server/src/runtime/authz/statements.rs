@@ -688,6 +688,7 @@ impl RedDBRuntime {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         })
     }
 
@@ -763,6 +764,7 @@ impl RedDBRuntime {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         })
     }
 
@@ -860,6 +862,7 @@ impl RedDBRuntime {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         })
     }
 
@@ -1031,6 +1034,7 @@ impl RedDBRuntime {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         })
     }
 
@@ -1109,6 +1113,7 @@ impl RedDBRuntime {
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         })
     }
 }
