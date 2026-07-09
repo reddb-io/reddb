@@ -560,8 +560,7 @@ mod tests {
         // The old hardcoded 256 MiB L1 would have been the *entire* serverless
         // budget on its own. That is the default this slice deletes.
         assert!(
-            shares.blob_cache_l1_bytes()
-                < crate::storage::cache::blob::DEFAULT_BLOB_L1_BYTES_MAX,
+            shares.blob_cache_l1_bytes() < crate::storage::cache::blob::DEFAULT_BLOB_L1_BYTES_MAX,
             "serverless L1 = {} bytes",
             shares.blob_cache_l1_bytes()
         );
