@@ -530,6 +530,7 @@ fn evaluate_filter(filter: &MetadataFilter, metadata: &HashMap<String, MetadataV
                 false
             }
         }
+        MetadataFilter::GeoRadius { .. } => false,
         MetadataFilter::Exists(field) => metadata.contains_key(field),
         MetadataFilter::NotExists(field) => !metadata.contains_key(field),
     }
