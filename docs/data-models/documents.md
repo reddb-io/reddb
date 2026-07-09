@@ -298,6 +298,10 @@ The create-index message reports how many existing entities were indexed. If a
 non-empty collection reports `0 of N`, the message names the field and expected
 shape so a document-shape mismatch is visible at index time.
 
+For the complete spatial surface — the model, both coordinate entry points, all
+three search verbs, resolution guidance, and the `USING RTREE` migration note —
+see the [Spatial Search guide](/guides/spatial-search.md).
+
 ## Updating Documents
 
 Patch specific nested fields in a document with JSON-pointer-style paths under `body`:

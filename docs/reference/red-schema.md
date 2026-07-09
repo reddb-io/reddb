@@ -162,7 +162,7 @@ Current columns:
 | `name`            | Index name |
 | `table`           | Indexed table/collection |
 | `columns`         | Ordered array of indexed columns |
-| `kind`            | Index method (`HASH`, `BTREE`, `BITMAP`, `RTREE`) |
+| `kind`            | Index method (`HASH`, `BTREE`, `BITMAP`, `H3`) |
 | `unique`          | Whether the index was declared unique |
 | `entries_indexed` | Number of live entries in the index backing store |
 
@@ -177,7 +177,7 @@ Current columns:
 |--------------------|-------------|
 | `collection`       | Collection that owns the index, or `NULL` for unscoped catalog indexes. |
 | `name`             | Index name. |
-| `kind`             | Index implementation kind, such as `hash`, `btree`, `bitmap`, or `spatial.rtree`. |
+| `kind`             | Index implementation kind, such as `hash`, `btree`, `bitmap`, or `h3`. |
 | `declared`         | Whether the index is declared in catalog metadata. |
 | `operational`      | Whether an operational index artifact is present. |
 | `enabled`          | Whether the index is enabled. |

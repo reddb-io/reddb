@@ -95,6 +95,10 @@ name = "docs_getting_started_quickstarts"
 path = "tests/docs_getting_started_quickstarts.rs"
 
 [[test]]
+name = "docs_spatial_guide"
+path = "tests/docs_spatial_guide.rs"
+
+[[test]]
 name = "grouped_ai_search"
 path = "tests/grouped/ai_search.rs"
 
