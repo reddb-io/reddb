@@ -337,12 +337,8 @@ impl UnifiedStore {
     /// (ADR 0073 §2). Same number `stats().total_memory_bytes` reports, without
     /// building the per-collection stats map a sampler would throw away.
     pub fn segment_memory_bytes(&self) -> u64 {
-        let managers: Vec<Arc<SegmentManager>> = self
-            .collections
-            .read()
-            .values()
-            .map(Arc::clone)
-            .collect();
+        let managers: Vec<Arc<SegmentManager>> =
+            self.collections.read().values().map(Arc::clone).collect();
 
         managers
             .iter()
