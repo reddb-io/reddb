@@ -57,6 +57,260 @@ fn projections_require_runtime_projection(projections: &[Projection]) -> bool {
     })
 }
 
+#[derive(Clone, Copy)]
+struct GeoDistancePredicate<'a> {
+    column: &'a str,
+    center_lat: f64,
+    center_lon: f64,
+    radius_km: f64,
+}
+
+fn execute_geo_distance_candidate_scan(
+    db: &RedDB,
+    query: &TableQuery,
+    filter: &Filter,
+    effective_projections: &[Projection],
+    candidate_ids: &std::collections::HashSet<u64>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let manager = db
+        .store()
+        .get_collection(query.table.as_str())
+        .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+    let table_name = query.table.as_str();
+    let table_alias = query.alias.as_deref().unwrap_or(table_name);
+    let compiled = crate::runtime::scalar_evaluator::compile_filter(
+        filter,
+        &crate::runtime::scalar_evaluator::PermissiveScope,
+    );
+
+    let table_row_resolver = TableRowMvccReadResolver::current_statement();
+    let hydrate_store = db.store();
+    let mut records = Vec::new();
+    manager.for_each_entity(|entity| {
+        if !candidate_ids.contains(&entity.id.raw()) {
+            return true;
+        }
+        if table_row_resolver.resolve_read_candidate(entity).is_none() {
+            return true;
+        }
+        if !db.replica_allows_entity_at_read(&query.table, entity) {
+            return true;
+        }
+        let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+            hydrate_store.as_ref(),
+            entity,
+        );
+        let Some(record) = runtime_table_record_from_entity(hydrated) else {
+            return true;
+        };
+        if crate::runtime::scalar_evaluator::evaluate_compiled_filter(
+            Some(db),
+            &compiled,
+            &record,
+            Some(table_name),
+            Some(table_alias),
+        ) {
+            records.push(record);
+        }
+        true
+    });
+
+    crate::runtime::window_phase::apply(
+        Some(db),
+        &mut records,
+        effective_projections,
+        Some(table_name),
+        Some(table_alias),
+    )?;
+
+    let mut records = records
+        .iter()
+        .map(|record| {
+            project_runtime_record_with_db(
+                Some(db),
+                record,
+                effective_projections,
+                Some(table_name),
+                Some(table_alias),
+                false,
+                false,
+            )
+        })
+        .collect::<RedDBResult<Vec<_>>>()?;
+
+    if !query.order_by.is_empty() {
+        crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
+        super::super::join_filter::sort_records_by_order_by_with_db(
+            Some(db),
+            &mut records,
+            &query.order_by,
+            Some(table_name),
+            Some(table_alias),
+        );
+    }
+    if let Some(offset) = query.offset {
+        let offset = offset as usize;
+        if offset < records.len() {
+            records = records.into_iter().skip(offset).collect();
+        } else {
+            records.clear();
+        }
+    }
+    if let Some(limit) = query.limit {
+        records.truncate(limit as usize);
+    }
+
+    Ok(records)
+}
+
+fn geo_distance_h3_candidate_ids(
+    filter: &Filter,
+    table: &str,
+    idx_store: &super::index_store::IndexStore,
+) -> Option<std::collections::HashSet<u64>> {
+    match filter {
+        Filter::CompareExpr { lhs, op, rhs } => {
+            let predicate = geo_distance_predicate(lhs, *op, rhs)
+                .or_else(|| geo_distance_predicate(rhs, flipped_compare_op_for_geo(*op), lhs))?;
+            geo_distance_predicate_candidate_ids(predicate, table, idx_store)
+        }
+        Filter::And(left, right) => {
+            let left_ids = geo_distance_h3_candidate_ids(left, table, idx_store);
+            let right_ids = geo_distance_h3_candidate_ids(right, table, idx_store);
+            match (left_ids, right_ids) {
+                (Some(mut left), Some(right)) => {
+                    left.retain(|id| right.contains(id));
+                    Some(left)
+                }
+                (Some(ids), None) | (None, Some(ids)) => Some(ids),
+                (None, None) => None,
+            }
+        }
+        Filter::Or(left, right) => {
+            let mut left_ids = geo_distance_h3_candidate_ids(left, table, idx_store)?;
+            let right_ids = geo_distance_h3_candidate_ids(right, table, idx_store)?;
+            left_ids.extend(right_ids);
+            Some(left_ids)
+        }
+        Filter::Not(_) => None,
+        _ => None,
+    }
+}
+
+fn geo_distance_predicate<'a>(
+    lhs: &'a Expr,
+    op: CompareOp,
+    rhs: &'a Expr,
+) -> Option<GeoDistancePredicate<'a>> {
+    if !matches!(op, CompareOp::Lt | CompareOp::Le) {
+        return None;
+    }
+    let radius_km = literal_f64(rhs)?;
+    if radius_km.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return None;
+    }
+    let Expr::FunctionCall { name, args, .. } = lhs else {
+        return None;
+    };
+    if !(name.eq_ignore_ascii_case("GEO_DISTANCE") || name.eq_ignore_ascii_case("HAVERSINE")) {
+        return None;
+    }
+    let [Expr::Column { field, .. }, lat, lon] = args.as_slice() else {
+        return None;
+    };
+    let column = match field {
+        FieldRef::TableColumn { column, .. } => column.as_str(),
+        _ => return None,
+    };
+    Some(GeoDistancePredicate {
+        column,
+        center_lat: literal_f64(lat)?,
+        center_lon: literal_f64(lon)?,
+        radius_km,
+    })
+}
+
+fn literal_f64(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::Literal {
+            value: Value::Float(value),
+            ..
+        } => Some(*value),
+        Expr::Literal {
+            value: Value::Integer(value),
+            ..
+        } => Some(*value as f64),
+        Expr::Literal {
+            value: Value::UnsignedInteger(value),
+            ..
+        } => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn flipped_compare_op_for_geo(op: CompareOp) -> CompareOp {
+    match op {
+        CompareOp::Eq => CompareOp::Eq,
+        CompareOp::Ne => CompareOp::Ne,
+        CompareOp::Lt => CompareOp::Gt,
+        CompareOp::Le => CompareOp::Ge,
+        CompareOp::Gt => CompareOp::Lt,
+        CompareOp::Ge => CompareOp::Le,
+    }
+}
+
+fn geo_distance_predicate_candidate_ids(
+    predicate: GeoDistancePredicate<'_>,
+    table: &str,
+    idx_store: &super::index_store::IndexStore,
+) -> Option<std::collections::HashSet<u64>> {
+    let index = idx_store.find_index_for_column(table, predicate.column)?;
+    let super::index_store::IndexMethodKind::H3 { resolution } = index.method else {
+        return None;
+    };
+    let cells = h3_cover_cells_for_geo_predicate(
+        predicate.center_lat,
+        predicate.center_lon,
+        predicate.radius_km,
+        resolution,
+    );
+    if cells.is_empty() {
+        return None;
+    }
+    let keys: Vec<_> = cells
+        .iter()
+        .filter_map(|cell| {
+            crate::storage::schema::value_to_canonical_key(&Value::UnsignedInteger(*cell))
+        })
+        .collect();
+    if keys.is_empty() {
+        return None;
+    }
+    let ids = idx_store
+        .sorted
+        .in_lookup_limited(table, predicate.column, &keys, usize::MAX)?;
+    Some(ids.into_iter().map(|id| id.raw()).collect())
+}
+
+fn h3_cover_cells_for_geo_predicate(
+    lat: f64,
+    lon: f64,
+    radius_km: f64,
+    resolution: u8,
+) -> Vec<u64> {
+    let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, resolution);
+    if cell == 0 {
+        return Vec::new();
+    }
+    let edge_km = crate::geo::h3::edge_length_km(resolution).max(f64::MIN_POSITIVE);
+    const MAX_COVER_RING: u32 = 128;
+    let k_f = (radius_km / edge_km).ceil() + 1.0;
+    if !k_f.is_finite() || k_f > f64::from(MAX_COVER_RING) {
+        return Vec::new();
+    }
+    crate::geo::h3::grid_disk(cell, k_f as u32)
+}
+
 pub(crate) fn execute_runtime_canonical_table_query_indexed(
     db: &RedDB,
     query: &TableQuery,
@@ -219,6 +473,29 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
     let requires_mvcc_index_fallback =
         crate::runtime::impl_core::current_snapshot_requires_index_fallback();
+
+    // ── GEO_DISTANCE H3 CANDIDATE PATH ────────────────────────────────────────
+    // `WHERE GEO_DISTANCE(col, lat, lon) < r` over an H3-indexed column can
+    // use the same covering-ring candidate set as SEARCH SPATIAL RADIUS. The
+    // full WHERE expression is still evaluated after candidate pruning, so
+    // the index remains a pure optimization.
+    if let (false, Some(idx_store), Some(ref filter)) =
+        (requires_mvcc_index_fallback, index_store, &effective_filter)
+    {
+        if !is_universal_query_source(&query.table) {
+            if let Some(candidate_ids) =
+                geo_distance_h3_candidate_ids(filter, &query.table, idx_store)
+            {
+                return execute_geo_distance_candidate_scan(
+                    db,
+                    query,
+                    filter,
+                    &effective_projections,
+                    &candidate_ids,
+                );
+            }
+        }
+    }
 
     // ── INDEX-ASSISTED PATH: sorted (BTREE) index for BETWEEN / >/>= ──
     //
