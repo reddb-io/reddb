@@ -21,9 +21,9 @@ mod support;
 
 use reddb::{
     fold_dwb_into_wal_enabled, meta_json_sidecar_enabled, seqn_journal_enabled,
-    seqn_journal_retention, shm_provisioning_enabled, tier_wiring, LayoutOverrides,
-    LogDestination, RedDBOptions, RedDBRuntime, StorageLayout,
-    DEFAULT_METADATA_JOURNAL_RETENTION, OPT_IN_METADATA_JOURNAL_RETENTION,
+    seqn_journal_retention, shm_provisioning_enabled, tier_wiring, LayoutOverrides, LogDestination,
+    RedDBOptions, RedDBRuntime, StorageLayout, DEFAULT_METADATA_JOURNAL_RETENTION,
+    OPT_IN_METADATA_JOURNAL_RETENTION,
 };
 
 fn reset_env() {
