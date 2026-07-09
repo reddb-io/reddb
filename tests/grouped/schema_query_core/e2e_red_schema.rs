@@ -217,7 +217,7 @@ fn stat_value(rt: &RedDBRuntime, collection: &str, entity: Value, metric: &str) 
         .clone()
 }
 
-const SCRUB_COLUMNS: [&str; 10] = [
+const SCRUB_COLUMNS: [&str; 15] = [
     "row_kind",
     "zone_kind",
     "physical_identity",
@@ -226,6 +226,11 @@ const SCRUB_COLUMNS: [&str; 10] = [
     "actual_checksum",
     "fault_class",
     "objects_verified",
+    "superblock_verified",
+    "manifest_verified",
+    "wal_verified",
+    "page_verified",
+    "segment_chunk_verified",
     "bytes_read",
     "duration_ms",
 ];
@@ -243,7 +248,10 @@ fn file_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             if metadata.is_dir() {
                 visit(base, &path, out);
             } else if metadata.is_file() {
-                let relative = path.strip_prefix(base).expect("relative path").to_path_buf();
+                let relative = path
+                    .strip_prefix(base)
+                    .expect("relative path")
+                    .to_path_buf();
                 out.insert(relative, fs::read(&path).expect("read store file"));
             }
         }
@@ -1525,6 +1533,10 @@ fn scrub_healthy_store_returns_summary_and_does_not_mutate_files() {
     assert_eq!(summary.get("row_kind"), Some(&Value::text("summary")));
     assert_eq!(summary.get("zone_kind"), Some(&Value::text("summary")));
     assert!(uint_field(summary, "objects_verified") > 0);
+    assert!(uint_field(summary, "superblock_verified") > 0);
+    assert!(uint_field(summary, "manifest_verified") > 0);
+    assert!(uint_field(summary, "wal_verified") > 0);
+    assert!(uint_field(summary, "page_verified") > 0);
     assert!(uint_field(summary, "bytes_read") > 0);
     assert_eq!(before, after, "SCRUB must not mutate store bytes");
 
@@ -1584,7 +1596,10 @@ fn scrub_reports_corrupt_manifest_finding_without_repairing_store() {
         })
         .unwrap_or_else(|| panic!("manifest finding missing: {:?}", scrub.result.records));
     assert!(text_field(finding, "physical_identity").contains("manifest"));
-    assert_ne!(finding.get("expected_checksum"), finding.get("actual_checksum"));
+    assert_ne!(
+        finding.get("expected_checksum"),
+        finding.get("actual_checksum")
+    );
     assert_eq!(before, after, "SCRUB reports corruption without repair");
 
     cleanup_scope();
@@ -1628,8 +1643,7 @@ fn scrub_background_tick_is_bounded_and_visible_in_red_stats() {
     assert!(total > 1, "small budget should leave work for later ticks");
 
     for _ in 0..16 {
-        if stat_value(&rt, "red.scrub", Value::Null, "background_status")
-            == Value::text("complete")
+        if stat_value(&rt, "red.scrub", Value::Null, "background_status") == Value::text("complete")
         {
             break;
         }
