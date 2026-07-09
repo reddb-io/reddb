@@ -674,7 +674,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn validate_search_spatial_polygon(
+pub(super) fn validate_search_spatial_polygon(
     vertices: &[(f64, f64)],
     pos: crate::lexer::Position,
 ) -> Result<(), ParseError> {
