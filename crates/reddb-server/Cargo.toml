@@ -91,7 +91,8 @@ rayon = "1.12"
 # Pure-Rust H3 hexagonal geospatial index (no C FFI; ADR 0061
 # source-consumable). Wrapped behind `crate::geo::h3` so no other
 # module depends on h3o directly (PRD #1574 slice 1, #1575).
-h3o = "0.10"
+h3o = { version = "0.10", features = ["geo"] }
+geo = "0.33"
 regex = "1"
 fs2 = "0.4"
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging", "ring"] }

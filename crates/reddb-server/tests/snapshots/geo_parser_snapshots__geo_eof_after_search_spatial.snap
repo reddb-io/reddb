@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"SEARCH SPATIAL\")"
 ---
 input: "SEARCH SPATIAL"
 kind:  Syntax
-error: Parse error at 1:15: Unexpected token: EOF (expected: RADIUS, BBOX, NEAREST)
+error: Parse error at 1:15: Unexpected token: EOF (expected: RADIUS, BBOX, WITHIN, NEAREST)

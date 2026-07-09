@@ -375,11 +375,12 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: SEARCH SPATIAL (RADIUS | BBOX | NEAREST) ...
+    /// Parse: SEARCH SPATIAL (RADIUS | BBOX | WITHIN POLYGON | NEAREST) ...
     ///
     /// Syntax:
     /// - SEARCH SPATIAL RADIUS lat lon radius_km COLLECTION col COLUMN col [LIMIT n]
     /// - SEARCH SPATIAL BBOX min_lat min_lon max_lat max_lon COLLECTION col COLUMN col [LIMIT n]
+    /// - SEARCH SPATIAL WITHIN POLYGON ((lat lon), ...) COLLECTION col COLUMN col [LIMIT n]
     /// - SEARCH SPATIAL NEAREST lat lon K n COLLECTION col COLUMN col
     fn parse_search_spatial(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume SPATIAL
@@ -511,6 +512,40 @@ impl<'a> Parser<'a> {
                     limit_param,
                 }))
             }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("WITHIN") => {
+                self.advance()?; // consume WITHIN
+                self.expect_search_ident("POLYGON")?;
+                let vertices = self.parse_search_spatial_polygon_vertices()?;
+                validate_search_spatial_polygon(&vertices, self.position())?;
+
+                self.expect(Token::Collection)?;
+                let collection = self.expect_ident()?;
+
+                let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
+                let column = self.parse_search_spatial_column()?;
+
+                let mut limit_param: Option<usize> = None;
+                let limit = if self.consume(&Token::Limit)? {
+                    if matches!(self.peek(), Token::Dollar | Token::Question) {
+                        limit_param = Some(self.parse_param_slot("LIMIT")?);
+                        0
+                    } else {
+                        self.parse_integer()? as usize
+                    }
+                } else {
+                    100
+                };
+
+                Ok(QueryExpr::SearchCommand(
+                    SearchCommand::SpatialWithinPolygon {
+                        vertices,
+                        collection,
+                        column,
+                        limit,
+                        limit_param,
+                    },
+                ))
+            }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("NEAREST") => {
                 self.advance()?; // consume NEAREST
                 let lat_pos = self.position();
@@ -558,11 +593,28 @@ impl<'a> Parser<'a> {
                 }))
             }
             _ => Err(ParseError::expected(
-                vec!["RADIUS", "BBOX", "NEAREST"],
+                vec!["RADIUS", "BBOX", "WITHIN", "NEAREST"],
                 self.peek(),
                 self.position(),
             )),
         }
+    }
+
+    fn parse_search_spatial_polygon_vertices(&mut self) -> Result<Vec<(f64, f64)>, ParseError> {
+        self.expect(Token::LParen)?;
+        let mut vertices = Vec::new();
+        loop {
+            self.expect(Token::LParen)?;
+            let lat = self.parse_float()?;
+            let lon = self.parse_float()?;
+            self.expect(Token::RParen)?;
+            vertices.push((lat, lon));
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        Ok(vertices)
     }
 
     fn parse_search_spatial_column(&mut self) -> Result<String, ParseError> {
@@ -620,6 +672,46 @@ impl<'a> Parser<'a> {
         self.expect(Token::RBracket)?;
         Ok(items)
     }
+}
+
+fn validate_search_spatial_polygon(
+    vertices: &[(f64, f64)],
+    pos: crate::lexer::Position,
+) -> Result<(), ParseError> {
+    if vertices.len() < 3 {
+        return Err(ParseError::new(
+            "SEARCH SPATIAL WITHIN POLYGON requires at least 3 vertices".to_string(),
+            pos,
+        ));
+    }
+    for (lat, lon) in vertices {
+        if !lat.is_finite() || !(-90.0..=90.0).contains(lat) {
+            return Err(ParseError::value_out_of_range(
+                "lat",
+                "must be in -90.0..=90.0",
+                pos,
+            ));
+        }
+        if !lon.is_finite() || !(-180.0..=180.0).contains(lon) {
+            return Err(ParseError::value_out_of_range(
+                "lon",
+                "must be in -180.0..=180.0",
+                pos,
+            ));
+        }
+    }
+    let (min_lon, max_lon) = vertices.iter().map(|(_, lon)| *lon).fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(min_lon, max_lon), lon| (min_lon.min(lon), max_lon.max(lon)),
+    );
+    if max_lon - min_lon > 180.0 {
+        return Err(ParseError::new(
+            "SEARCH SPATIAL WITHIN POLYGON does not support polygons crossing the antimeridian"
+                .to_string(),
+            pos,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
