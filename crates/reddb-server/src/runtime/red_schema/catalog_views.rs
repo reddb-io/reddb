@@ -84,7 +84,13 @@ pub(super) fn show_indexes_snapshot(
                 vec![
                     Value::text(index.name),
                     Value::text(index.collection),
-                    Value::Array(index.columns.into_iter().map(Value::text).collect()),
+                    Value::Array(
+                        index
+                            .columns
+                            .into_iter()
+                            .map(|value| Value::text(value.as_str()))
+                            .collect(),
+                    ),
                     Value::text(render_index_method_for_ddl(index.method)),
                     Value::Boolean(index.unique),
                     Value::UnsignedInteger(entries_indexed),
@@ -103,13 +109,19 @@ fn index_status_record(
     UnifiedRecord::with_schema(
         schema,
         vec![
-            status.collection.map(Value::text).unwrap_or(Value::Null),
+            status
+                .collection
+                .map(|value| Value::text(value.as_str()))
+                .unwrap_or(Value::Null),
             Value::text(status.name),
             Value::text(status.kind),
             Value::Boolean(status.declared),
             Value::Boolean(status.operational),
             Value::Boolean(status.enabled),
-            status.build_state.map(Value::text).unwrap_or(Value::Null),
+            status
+                .build_state
+                .map(|value| Value::text(value.as_str()))
+                .unwrap_or(Value::Null),
             Value::Boolean(status.in_sync),
             Value::Boolean(status.queryable),
             Value::Boolean(status.requires_rebuild),
@@ -488,6 +500,7 @@ const STATS_MCV_LIMIT: usize = 10;
 /// collection, so it occupies a reserved `red.`-prefixed label rather than
 /// being repeated once per collection.
 const MEMORY_BUDGET_COLLECTION: &str = "red.memory_budget";
+const SCRUB_COLLECTION: &str = "red.scrub";
 
 /// Long-format `red.stats` profiling view (issue #1787). This is the
 /// **computed** freshness tier: every read runs an on-demand profiling
@@ -529,6 +542,12 @@ pub(super) fn stats_snapshot(
         &mut rows,
         &schema,
         &runtime.memory_budget(),
+        target.as_deref(),
+    );
+    append_scrub_stats(
+        &mut rows,
+        &schema,
+        &runtime.scrub_stats_snapshot(),
         target.as_deref(),
     );
     for collection in snapshot.collections {
@@ -614,6 +633,88 @@ pub(super) fn stats_snapshot(
         }
     }
     rows
+}
+
+fn append_scrub_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    scrub: &crate::runtime::ScrubStatsSnapshot,
+    target: Option<&str>,
+) {
+    if target.is_some_and(|target| target != SCRUB_COLLECTION) {
+        return;
+    }
+
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::Null,
+        "last_run_unix_ms",
+        Value::UnsignedInteger(scrub.last_run_unix_ms),
+    ));
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::Null,
+        "last_findings_count",
+        Value::UnsignedInteger(scrub.last_findings_count),
+    ));
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::Null,
+        "background_status",
+        Value::text(scrub.background_status.as_str()),
+    ));
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::Null,
+        "background_verified_objects",
+        Value::UnsignedInteger(scrub.background_verified_objects),
+    ));
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::Null,
+        "background_total_objects",
+        Value::UnsignedInteger(scrub.background_total_objects),
+    ));
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::text("superblock"),
+        "verified_objects",
+        Value::UnsignedInteger(scrub.verified.superblock),
+    ));
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::text("manifest"),
+        "verified_objects",
+        Value::UnsignedInteger(scrub.verified.manifest),
+    ));
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::text("wal"),
+        "verified_objects",
+        Value::UnsignedInteger(scrub.verified.wal),
+    ));
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::text("page"),
+        "verified_objects",
+        Value::UnsignedInteger(scrub.verified.page),
+    ));
+    rows.push(stats_row(
+        schema,
+        SCRUB_COLLECTION,
+        Value::text("segment-chunk"),
+        "verified_objects",
+        Value::UnsignedInteger(scrub.verified.segment_chunk),
+    ));
 }
 
 /// Memory-budget section of `red.stats` (ADR 0073 §1, issue #1958).
