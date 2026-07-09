@@ -302,6 +302,7 @@ fn runtime_query_result_to_client(result: &reddb::runtime::RuntimeQueryResult) -
         affected: result.affected_rows,
         columns,
         rows,
+        notice: result.notice.clone(),
     }
 }
 
@@ -1103,6 +1104,11 @@ fn format_result_pretty(result: &reddb::runtime::RuntimeQueryResult) -> String {
     }
     if result.result.records.is_empty() {
         out.push_str("(no rows)\n");
+        if let Some(notice) = result.notice.as_deref() {
+            out.push_str("Note: ");
+            out.push_str(notice);
+            out.push('\n');
+        }
         return out;
     }
     for (i, record) in result.result.records.iter().enumerate() {
@@ -1161,7 +1167,13 @@ fn format_result_json(result: &reddb::runtime::RuntimeQueryResult) -> String {
         }
         out.push('}');
     }
-    out.push_str("]}");
+    out.push(']');
+    if let Some(notice) = result.notice.as_deref() {
+        out.push_str(",\"notice\":\"");
+        out.push_str(&json_escape(notice));
+        out.push('"');
+    }
+    out.push('}');
     out
 }
 
@@ -7603,6 +7615,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             affected_rows: 0,
             statement_type: "select",
             bookmark: None,
+            notice: None,
         };
 
         let out = format_result_json(&query);
