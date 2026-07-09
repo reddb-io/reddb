@@ -256,6 +256,13 @@ pub enum MetadataFilter {
     StartsWith(String, String),
     /// String ends with: key ends with suffix
     EndsWith(String, String),
+    /// Geographic radius predicate over a metadata field.
+    GeoRadius {
+        key: String,
+        center_lat: f64,
+        center_lon: f64,
+        radius_km: f64,
+    },
     /// Key exists
     Exists(String),
     /// Key does not exist
@@ -365,6 +372,7 @@ impl MetadataFilter {
             MetadataFilter::EndsWith(key, suffix) => {
                 entry.get(key).map(|v| v.ends_with(suffix)).unwrap_or(false)
             }
+            MetadataFilter::GeoRadius { .. } => false,
             MetadataFilter::Exists(key) => entry.contains_key(key),
             MetadataFilter::NotExists(key) => !entry.contains_key(key),
             MetadataFilter::And(filters) => filters.iter().all(|f| f.matches(entry)),
