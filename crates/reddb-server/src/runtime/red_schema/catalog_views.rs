@@ -483,6 +483,12 @@ pub(super) fn collections_snapshot(
 /// hottest handful so the long-format `value` array stays readable.
 const STATS_MCV_LIMIT: usize = 10;
 
+/// Synthetic `collection` label carrying the process-scoped memory-budget
+/// rows in `red.stats`. The budget belongs to the process, not to any user
+/// collection, so it occupies a reserved `red.`-prefixed label rather than
+/// being repeated once per collection.
+const MEMORY_BUDGET_COLLECTION: &str = "red.memory_budget";
+
 /// Long-format `red.stats` profiling view (issue #1787). This is the
 /// **computed** freshness tier: every read runs an on-demand profiling
 /// scan over the target collections rather than serving a cached
@@ -491,6 +497,9 @@ const STATS_MCV_LIMIT: usize = 10;
 /// * `row_count` — one row per collection, `entity` is `NULL`.
 /// * `null_count` / `distinct_count` / `most_common_values` — one row
 ///   per column, `entity` is the column name.
+///
+/// The view also carries the process-scoped memory-budget section under the
+/// `red.memory_budget` collection label — see `append_memory_budget_stats`.
 pub(super) fn stats_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
@@ -516,6 +525,12 @@ pub(super) fn stats_snapshot(
     let pending_wal_records = runtime.db().embedded_pending_wal_records().unwrap_or(0);
 
     let mut rows = Vec::new();
+    append_memory_budget_stats(
+        &mut rows,
+        &schema,
+        &runtime.memory_budget(),
+        target.as_deref(),
+    );
     for collection in snapshot.collections {
         if let Some(target) = target.as_deref() {
             if collection.name != target {
@@ -599,6 +614,65 @@ pub(super) fn stats_snapshot(
         }
     }
     rows
+}
+
+/// Memory-budget section of `red.stats` (ADR 0073 §1, issue #1958).
+///
+/// Four rows under the `red.memory_budget` collection label, all with a NULL
+/// `entity`:
+///
+/// * `resolved_bytes` — the one budget this process runs under.
+/// * `source` — which precedence tier produced it (`config`,
+///   `profile-default`, `cgroup-v2`, `cgroup-v1`, `physical-fraction`).
+/// * `pool_shares` — per-pool budget shares. Empty until the pool-sizing
+///   slice fills it; present from day one so the surface shape is stable.
+/// * `live_accounting` — live per-pool usage. Empty until the enforcement
+///   slice fills it.
+///
+/// The two placeholders are empty arrays rather than zeros: this slice
+/// resolves the number, it does not size or account anything, and a `0` would
+/// claim otherwise.
+///
+/// Budget rows are process-scoped, so a `SHOW STATS <collection>` scan that
+/// targets a user collection skips them entirely.
+fn append_memory_budget_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    budget: &crate::storage::memory_budget::MemoryBudget,
+    target: Option<&str>,
+) {
+    if target.is_some_and(|target| target != MEMORY_BUDGET_COLLECTION) {
+        return;
+    }
+
+    rows.push(stats_row(
+        schema,
+        MEMORY_BUDGET_COLLECTION,
+        Value::Null,
+        "resolved_bytes",
+        Value::UnsignedInteger(budget.resolved_bytes),
+    ));
+    rows.push(stats_row(
+        schema,
+        MEMORY_BUDGET_COLLECTION,
+        Value::Null,
+        "source",
+        Value::text(budget.source.as_str()),
+    ));
+    rows.push(stats_row(
+        schema,
+        MEMORY_BUDGET_COLLECTION,
+        Value::Null,
+        "pool_shares",
+        Value::Array(Vec::new()),
+    ));
+    rows.push(stats_row(
+        schema,
+        MEMORY_BUDGET_COLLECTION,
+        Value::Null,
+        "live_accounting",
+        Value::Array(Vec::new()),
+    ));
 }
 
 fn append_table_stats(
