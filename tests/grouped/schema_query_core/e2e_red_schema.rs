@@ -1362,6 +1362,158 @@ fn select_from_red_stats_materializes_long_format_profiling_rows() {
     cleanup_scope();
 }
 
+// Issue #1958 (ADR 0073 §1) — the process memory budget is queryable through
+// the public RQL surface as a `red.stats` section, with the per-pool and live
+// accounting fields present-but-empty until the downstream slices fill them.
+const MEMORY_BUDGET_COLLECTION: &str = "red.memory_budget";
+
+const MEMORY_BUDGET_SOURCES: [&str; 5] = [
+    "config",
+    "profile-default",
+    "cgroup-v2",
+    "cgroup-v1",
+    "physical-fraction",
+];
+
+fn budget_metric(rt: &RedDBRuntime, metric: &str) -> Value {
+    let sql = format!(
+        "SELECT * FROM red.stats WHERE collection = '{MEMORY_BUDGET_COLLECTION}' \
+         AND metric = '{metric}'"
+    );
+    let result = rt.execute_query(&sql).expect("red.stats budget section");
+    let row = result
+        .result
+        .records
+        .first()
+        .unwrap_or_else(|| panic!("budget metric {metric} present"));
+    assert_eq!(row.get("entity"), Some(&Value::Null));
+    row.get("value").cloned().expect("budget metric value")
+}
+
+#[test]
+fn red_stats_exposes_the_memory_budget_section_with_empty_placeholders() {
+    cleanup_scope();
+    let rt = runtime();
+
+    let result = rt
+        .execute_query(&format!(
+            "SELECT * FROM red.stats WHERE collection = '{MEMORY_BUDGET_COLLECTION}'"
+        ))
+        .expect("red.stats budget section");
+    assert_eq!(result.result.columns, STATS_COLUMNS.map(str::to_string));
+
+    let metrics = result
+        .result
+        .records
+        .iter()
+        .filter_map(|row| match row.get("metric") {
+            Some(Value::Text(metric)) => Some(metric.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        metrics,
+        vec!["resolved_bytes", "source", "pool_shares", "live_accounting"],
+        "documented budget field names, in order"
+    );
+
+    // The budget always exists and is never zero — there is no unlimited mode.
+    match budget_metric(&rt, "resolved_bytes") {
+        Value::UnsignedInteger(bytes) => assert!(bytes > 0, "resolved budget must be positive"),
+        other => panic!("resolved_bytes should be an unsigned integer, got {other:?}"),
+    }
+
+    // Source is whichever tier the host resolved through; on an unconfigured
+    // embedded runtime that is a detection tier, never `config`.
+    match budget_metric(&rt, "source") {
+        Value::Text(source) => {
+            assert!(
+                MEMORY_BUDGET_SOURCES.contains(&source.as_ref()),
+                "unknown budget source: {source}"
+            );
+            assert_ne!(source.as_ref(), "config", "no budget was configured");
+        }
+        other => panic!("source should be text, got {other:?}"),
+    }
+
+    // Placeholders for the pool-sizing and enforcement slices: present so the
+    // surface shape is stable, empty because nothing is sized or accounted yet.
+    assert_eq!(budget_metric(&rt, "pool_shares"), Value::Array(Vec::new()));
+    assert_eq!(
+        budget_metric(&rt, "live_accounting"),
+        Value::Array(Vec::new())
+    );
+
+    // The section is part of the unfiltered profiling scan too.
+    let (_, all_stats) = query_snapshot(&rt, "SHOW STATS");
+    assert!(
+        all_stats
+            .iter()
+            .any(|row| row[0] == Value::text(MEMORY_BUDGET_COLLECTION)),
+        "SHOW STATS should include the budget section: {all_stats:?}"
+    );
+
+    cleanup_scope();
+}
+
+#[test]
+fn red_stats_echoes_an_explicitly_configured_memory_budget() {
+    cleanup_scope();
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(512 << 20))
+        .expect("runtime with an explicit memory budget");
+
+    assert_eq!(
+        budget_metric(&rt, "resolved_bytes"),
+        Value::UnsignedInteger(512 << 20)
+    );
+    assert_eq!(budget_metric(&rt, "source"), Value::text("config"));
+
+    cleanup_scope();
+}
+
+#[test]
+fn a_zero_memory_budget_is_rejected_at_boot_never_silently_replaced() {
+    cleanup_scope();
+    let err = match RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(0)) {
+        Ok(_) => panic!("a zero budget must fail the boot"),
+        Err(err) => err.to_string(),
+    };
+
+    assert!(
+        err.contains("invalid memory budget `0`"),
+        "error was: {err}"
+    );
+    assert!(
+        err.contains("expected a positive byte count"),
+        "error names the valid form: {err}"
+    );
+    assert!(err.contains("no unlimited mode"), "error was: {err}");
+
+    cleanup_scope();
+}
+
+#[test]
+fn red_stats_scoped_to_a_collection_omits_the_process_budget_section() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE users (id INT)");
+    exec(&rt, "INSERT INTO users (id) VALUES (1)");
+
+    let scoped = rt
+        .execute_query("SHOW STATS users")
+        .expect("show stats users");
+    assert!(
+        scoped
+            .result
+            .records
+            .iter()
+            .all(|row| row.get("collection") == Some(&Value::text("users"))),
+        "a collection-scoped scan carries no process-scoped budget rows"
+    );
+
+    cleanup_scope();
+}
+
 #[test]
 fn red_stats_exposes_checkpoint_projection_lag() {
     cleanup_scope();

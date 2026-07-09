@@ -163,6 +163,13 @@ impl RedDBRuntime {
         Self::with_pool(options, ConnectionPoolConfig::default())
     }
 
+    /// The memory budget resolved at boot (ADR 0073 §1). Immutable for the
+    /// process lifetime; echoed by the boot log and the `red.stats` budget
+    /// section.
+    pub fn memory_budget(&self) -> crate::storage::memory_budget::MemoryBudget {
+        self.inner.memory_budget
+    }
+
     pub fn with_pool(
         options: RedDBOptions,
         pool_config: ConnectionPoolConfig,
@@ -178,6 +185,15 @@ impl RedDBRuntime {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        // ADR 0073 §1 — resolve the one memory budget before anything is
+        // opened, so a nonsensical operator value fails the boot before the
+        // process touches disk. The log line fires once per process.
+        let memory_budget = crate::storage::memory_budget::resolve_for_boot(
+            options.storage_profile.deploy_profile,
+            options.memory_budget_bytes,
+        )
+        .map_err(|err| RedDBError::InvalidConfig(err.to_string()))?;
+        crate::storage::memory_budget::log_resolved_once(&memory_budget);
         let embedded_single_file = options.storage_profile.deploy_profile
             == crate::storage::DeployProfile::Embedded
             && options.storage_profile.packaging == crate::storage::StoragePackaging::SingleFile;
@@ -208,6 +224,7 @@ impl RedDBRuntime {
                 db: db.clone(),
                 layout: PhysicalLayout::from_options(&options),
                 embedded_single_file,
+                memory_budget,
                 indices: IndexCatalog::register_default_vector_graph(
                     options.has_capability(crate::api::Capability::Table),
                     options.has_capability(crate::api::Capability::Graph),
