@@ -17,6 +17,8 @@ const WGS84_A: f64 = 6_378_137.0; // semi-major axis (meters)
 const WGS84_F: f64 = 1.0 / 298.257_223_563; // flattening
 const WGS84_B: f64 = WGS84_A * (1.0 - WGS84_F); // semi-minor axis
 
+pub const RECOGNIZED_GEO_SHAPES: &str = "GEO_POINT or {lat, lon} object";
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 #[inline]
