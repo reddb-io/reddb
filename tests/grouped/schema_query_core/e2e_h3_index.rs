@@ -285,6 +285,18 @@ fn spatial_rows(rt: &RedDBRuntime, query: &str) -> Vec<(u64, u64)> {
         .collect()
 }
 
+fn result_message(res: &reddb::runtime::RuntimeQueryResult) -> String {
+    match res
+        .result
+        .records
+        .first()
+        .and_then(|record| record.get("message"))
+    {
+        Some(Value::Text(message)) => message.to_string(),
+        other => panic!("missing message row: {other:?}"),
+    }
+}
+
 /// For each query: run the full scan (no index), create the H3 index, run
 /// the ring scan, and assert the two are byte-identical.
 fn assert_h3_parity(create_index: &str, queries: &[String]) {
@@ -450,6 +462,123 @@ fn spatial_full_scan_skips_non_geo_named_document_values() {
         hits.is_empty(),
         "non-geo, missing, and GeoJSON named document values must be skipped"
     );
+}
+
+#[test]
+fn h3_create_index_reports_existing_geo_coverage() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":38.76,"lon":-77.15}})"#,
+    )
+    .unwrap();
+
+    let res = rt
+        .execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
+        .unwrap();
+    assert_eq!(
+        result_message(&res),
+        "index 'idx_loc' created on 'events' (gpsLocation) using H3 (1 of 1 entities indexed)"
+    );
+}
+
+#[test]
+fn h3_create_index_reports_zero_coverage_shape_hint_for_non_empty_collection() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+           ({"gpsLocation":"not-geo"}),
+           ({"name":"missing"}),
+           ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+    )
+    .unwrap();
+
+    let res = rt
+        .execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
+        .unwrap();
+    assert_eq!(
+        result_message(&res),
+        "index 'idx_loc' created on 'events' (gpsLocation) using H3 (0 of 3 entities indexed — no indexable geo value in 'gpsLocation'; expected GEO_POINT or {lat, lon} object)"
+    );
+}
+
+#[test]
+fn h3_create_index_reports_plain_zero_for_empty_collection() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+
+    let res = rt
+        .execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
+        .unwrap();
+    assert_eq!(
+        result_message(&res),
+        "index 'idx_loc' created on 'events' (gpsLocation) using H3 (0 of 0 entities indexed)"
+    );
+}
+
+#[test]
+fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+           ({"gpsLocation":"not-geo"}),
+           ({"name":"missing"}),
+           ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+    )
+    .unwrap();
+
+    let res = rt
+        .execute_query(
+            "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+        )
+        .unwrap();
+    assert!(res.result.records.is_empty());
+    assert_eq!(
+        res.notice.as_deref(),
+        Some(
+            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT or {lat, lon} object)."
+        )
+    );
+    rt.execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
+        .unwrap();
+    let res = rt
+        .execute_query(
+            "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+        )
+        .unwrap();
+    assert!(res.result.records.is_empty());
+    assert_eq!(
+        res.notice.as_deref(),
+        Some(
+            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT or {lat, lon} object)."
+        )
+    );
+
+    let empty = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    empty.execute_query("CREATE DOCUMENT events").unwrap();
+    let res = empty
+        .execute_query(
+            "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+        )
+        .unwrap();
+    assert!(res.result.records.is_empty());
+    assert_eq!(res.notice, None);
+
+    let miss = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    miss.execute_query("CREATE DOCUMENT events").unwrap();
+    miss.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":40.7,"lon":-74.0}})"#,
+    )
+    .unwrap();
+    let res = miss
+        .execute_query(
+            "SEARCH SPATIAL RADIUS 38.76 -77.15 1.0 COLLECTION events COLUMN gpsLocation",
+        )
+        .unwrap();
+    assert!(res.result.records.is_empty());
+    assert_eq!(res.notice, None);
 }
 
 #[test]
