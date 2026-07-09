@@ -316,6 +316,23 @@ impl UnifiedStore {
         self.pager.as_ref()
     }
 
+    /// Bytes of page-cache memory currently occupied by resident pages
+    /// (ADR 0073 §2). Slots are fixed size, so occupancy times the page size
+    /// *is* the footprint; a store without a pager occupies none.
+    pub fn page_cache_bytes_in_use(&self) -> u64 {
+        self.pager.as_ref().map_or(0, |pager| {
+            pager.cache_len() as u64 * crate::storage::memory_pools::PAGE_CACHE_PAGE_SIZE_BYTES
+        })
+    }
+
+    /// Bytes of WAL buffer memory held by this store's group-commit
+    /// coordinator: queued records plus the writer's fixed append buffer.
+    pub fn wal_buffer_bytes_in_use(&self) -> u64 {
+        self.commit
+            .as_ref()
+            .map_or(0, |commit| commit.buffered_bytes())
+    }
+
     /// Borrow the immutable store configuration. Runtime hooks (e.g. the
     /// `auto_index_id` first-insert hook in `MutationEngine`) read knobs
     /// off this struct without going through the legacy global config tree.
@@ -373,6 +390,12 @@ impl UnifiedStore {
     ) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let mut pager_config = PagerConfig::default();
+        // ADR 0073 §2 — the page cache is pre-sized from its budget share.
+        // The pager's own `cache_size` default survives only for direct
+        // library callers who never resolved a budget.
+        if let Some(slots) = config.page_cache_slots {
+            pager_config.cache_size = slots;
+        }
         // Tunables via env — experimental, used by the benchmark harness
         // to compare durability profiles head-to-head with Postgres.
         // REDDB_DOUBLE_WRITE=0 requests skipping the double-write buffer,
