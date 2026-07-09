@@ -276,7 +276,7 @@ fn both_superblock_copies_damaged_fails_the_open_by_name() {
         EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
         EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
     ] {
-        apply_fault(&path, offset, SUPERBLOCK_LEN, "bit_rot", &[]);
+        apply_fault(&path, offset, SUPERBLOCK_LEN, FaultClass::BitRot, &[]);
     }
 
     let err = EmbeddedRdbArtifact::open(&path).expect_err("a rootless store must not open");
