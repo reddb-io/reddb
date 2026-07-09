@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"SEARCH SPATIAL POLYGON 0.0 0.0 COLLECTION c COLUM
 ---
 input: "SEARCH SPATIAL POLYGON 0.0 0.0 COLLECTION c COLUMN col"
 kind:  Syntax
-error: Parse error at 1:16: Unexpected token: POLYGON (expected: RADIUS, BBOX, NEAREST)
+error: Parse error at 1:16: Unexpected token: POLYGON (expected: RADIUS, BBOX, WITHIN, NEAREST)
