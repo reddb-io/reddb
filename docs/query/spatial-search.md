@@ -1,13 +1,16 @@
 # Spatial Search
 
-RedDB supports spatial queries on `GeoPoint`, `Latitude`, and `Longitude` columns using an R-tree index. Find points within a radius, bounding box, or nearest neighbors.
+RedDB supports spatial queries on `GeoPoint` columns, JSON `{lat, lon}` point
+objects, and GeoJSON `Point` values using an H3 index. GeoJSON `Point`
+coordinates are `[longitude, latitude]`. Other GeoJSON shapes are not
+recognized as points.
 
 ## Prerequisites
 
-Create an R-tree index on the spatial column:
+Create an H3 index on the spatial column:
 
 ```sql
-CREATE INDEX idx_location ON sites (location) USING RTREE
+CREATE INDEX idx_location ON sites (location) USING H3
 ```
 
 ## Radius Search
@@ -73,9 +76,13 @@ RedDB uses the **Haversine formula** for accurate great-circle distances on the 
 - **Latitude:** -90 to 90 (North positive)
 - **Longitude:** -180 to 180 (East positive)
 - RedDB `GeoPoint` values store coordinates in microdegrees internally, converting automatically.
+- GeoJSON `Point` values use GeoJSON order: `[longitude, latitude]`.
+- GeoJSON `Polygon`, `LineString`, malformed coordinate arrays, non-numeric
+  coordinates, and out-of-range coordinates are rejected by the geo recognition
+  seam.
 
 ## See Also
 
-- [CREATE INDEX](/query/create-index.md) -- Creating R-tree indexes
-- [Geo Types](/types/geo.md) -- GeoPoint, Latitude, Longitude types
+- [CREATE INDEX](/query/create-index.md) -- Creating H3 indexes
+- [Geo Types](/types/geo.md) -- GeoPoint and recognized JSON point shapes
 - [Search Commands](/query/search-commands.md) -- Other search types
