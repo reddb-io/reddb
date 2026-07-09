@@ -1,15 +1,27 @@
 //! Unified Segment System
 //!
-//! Implements the Growing → Sealed segment lifecycle pattern inspired by
-//! Milvus and ChromaDB. Segments are the fundamental unit of storage
-//! that handle entities of all types.
+//! Implements the Growing → Sealed segment lifecycle pattern. Segments are the
+//! fundamental unit of storage that handle entities of all types.
+//!
+//! # Write Path
+//!
+//! 1. WAL write (durability)
+//! 2. Growing-segment entity storage in RAM (HashMap mode or flat-vector mode
+//!    with epoch-published lock-free reads)
+//! 3. `seal()` freezes the growing segment into a Sealed segment and builds
+//!    bloom filter and zone maps over the immutable data
+//!
+//! # Read Path
+//!
+//! 1. Growing segment entity storage (most recent writes)
+//! 2. Sealed segments (older, immutable, bloom/zone-map guarded)
 //!
 //! # Lifecycle
 //!
 //! ```text
 //! Growing (in-memory, accepts writes)
 //!    ↓ seal() when full or manually triggered
-//! Sealed (immutable, fully indexed)
+//! Sealed (immutable, bloom filter + zone maps built)
 //!    ↓ flush() for persistence
 //! Flushed (on disk, can be mmap'd)
 //!    ↓ archive() for cold storage
@@ -21,7 +33,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
-use super::memtable::Memtable;
 use super::metadata::{Metadata, MetadataStorage};
 use crate::storage::primitives::bloom::BloomFilter;
 use crate::storage::query::value_compare::partial_compare_values;
@@ -434,9 +445,6 @@ pub struct GrowingSegment {
     /// Bloom filter for fast negative key lookups
     bloom: BloomFilter,
 
-    /// Write buffer for absorbing write spikes (sorted by key)
-    memtable: Memtable,
-
     /// Per-column zone maps: col_name → (min, max) for segment pruning
     col_zones: HashMap<String, ColZone>,
     /// Sealed-only minmax-multi summaries built from canonical ordering.
@@ -540,7 +548,6 @@ impl GrowingSegment {
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
             bloom: BloomFilter::with_capacity(100_000, 0.01),
-            memtable: Memtable::new(),
             col_zones: HashMap::new(),
             sealed_col_zones: HashMap::new(),
             sequence: AtomicU64::new(0),
@@ -1049,16 +1056,6 @@ impl GrowingSegment {
         self.cross_ref_forward.get(&id).cloned().unwrap_or_default()
     }
 
-    /// Get memtable statistics
-    pub fn memtable_stats(&self) -> super::memtable::MemtableStats {
-        self.memtable.stats()
-    }
-
-    /// Check if memtable should be flushed
-    pub fn memtable_should_flush(&self) -> bool {
-        self.memtable.should_flush()
-    }
-
     /// Get age in seconds
     pub fn age_secs(&self) -> u64 {
         let now = current_unix_secs();
@@ -1074,7 +1071,7 @@ impl GrowingSegment {
     /// Turbo bulk insert — minimal allocations per entity.
     ///
     /// Optimizations vs normal insert:
-    /// - Skips bloom filter, memtable, cross-refs, memory tracking
+    /// - Skips bloom filter, cross-refs, memory tracking
     /// - Computes kind_key ONCE (not per entity)
     /// - Pre-allocates kind_index HashSet
     /// - Skips contains_key check (caller guarantees unique IDs)
@@ -1511,14 +1508,6 @@ impl UnifiedSegment for GrowingSegment {
         }
 
         self.state = SegmentState::Sealing;
-
-        // Flush memtable: drain sorted entries for potential B-tree bulk insert
-        let memtable_stats = self.memtable.stats();
-        if memtable_stats.entry_count > 0 {
-            // The memtable entries are entity ID keys in sorted order.
-            // This ordering enables efficient sequential I/O for persistence.
-            self.memtable.clear();
-        }
 
         // Build indices on the sealed data:
         // - Bloom filter is already populated from insert()
