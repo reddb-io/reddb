@@ -127,7 +127,7 @@ pub use control_store::{
     DurableLastVote, FileLastVoteStore, FileTermStore, DEFAULT_FILE_TERM, LAST_VOTE_TEMP_EXTENSION,
     TERM_TEMP_EXTENSION,
 };
-pub use dst::SimulationContext;
+pub use dst::{FaultClass, FaultDecision, FaultRecord, SimulationContext};
 pub use embedded::{
     EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock, RdbFileError,
     RdbFileResult, DEFAULT_FORMAT_VERSION, EMBEDDED_RDB_MANIFEST_0_OFFSET,
