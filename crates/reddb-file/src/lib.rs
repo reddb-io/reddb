@@ -130,9 +130,10 @@ pub use control_store::{
 pub use dst::SimulationContext;
 pub use embedded::{
     EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock, RdbFileError,
-    RdbFileResult, DEFAULT_FORMAT_VERSION, EMBEDDED_RDB_MANIFEST_OFFSET,
-    EMBEDDED_RDB_SUPERBLOCK_0_OFFSET, EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
-    EMBEDDED_RDB_SUPERBLOCK_SIZE,
+    RdbFileResult, DEFAULT_FORMAT_VERSION, EMBEDDED_RDB_MANIFEST_0_OFFSET,
+    EMBEDDED_RDB_MANIFEST_1_OFFSET, EMBEDDED_RDB_MANIFEST_SLOT_SIZE,
+    EMBEDDED_RDB_MANIFEST_ZONE_END, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
+    EMBEDDED_RDB_SUPERBLOCK_1_OFFSET, EMBEDDED_RDB_SUPERBLOCK_SIZE,
 };
 pub use file_format::{
     clear_paged_page_checksum, database_header_freelist_head, database_header_magic_matches,

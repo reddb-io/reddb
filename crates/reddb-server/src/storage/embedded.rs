@@ -10,9 +10,10 @@ use std::path::Path;
 use crate::api::{RedDBError, RedDBResult};
 
 pub use reddb_file::{
-    EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock, EMBEDDED_RDB_MANIFEST_OFFSET,
-    EMBEDDED_RDB_SUPERBLOCK_0_OFFSET, EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
-    EMBEDDED_RDB_SUPERBLOCK_SIZE,
+    EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock, EMBEDDED_RDB_MANIFEST_0_OFFSET,
+    EMBEDDED_RDB_MANIFEST_1_OFFSET, EMBEDDED_RDB_MANIFEST_SLOT_SIZE,
+    EMBEDDED_RDB_MANIFEST_ZONE_END, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
+    EMBEDDED_RDB_SUPERBLOCK_1_OFFSET, EMBEDDED_RDB_SUPERBLOCK_SIZE,
 };
 
 pub struct EmbeddedRdbArtifact;
