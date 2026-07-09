@@ -995,6 +995,54 @@ pub(crate) struct CheckpointProjectionStatsSnapshot {
     pub(crate) last_checkpoint_duration_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ScrubStatsSnapshot {
+    pub(crate) last_run_unix_ms: u64,
+    pub(crate) last_findings_count: u64,
+    pub(crate) background_status: String,
+    pub(crate) background_verified_objects: u64,
+    pub(crate) background_total_objects: u64,
+    pub(crate) verified: reddb_file::StorageScrubVerifiedCounters,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ScrubRuntimeState {
+    pub(crate) last_run_unix_ms: u64,
+    pub(crate) last_findings_count: u64,
+    pub(crate) background_cursor: usize,
+    pub(crate) background_status: String,
+    pub(crate) background_verified_objects: u64,
+    pub(crate) background_total_objects: u64,
+    pub(crate) verified: reddb_file::StorageScrubVerifiedCounters,
+}
+
+impl Default for ScrubRuntimeState {
+    fn default() -> Self {
+        Self {
+            last_run_unix_ms: 0,
+            last_findings_count: 0,
+            background_cursor: 0,
+            background_status: "idle".to_string(),
+            background_verified_objects: 0,
+            background_total_objects: 0,
+            verified: reddb_file::StorageScrubVerifiedCounters::default(),
+        }
+    }
+}
+
+impl ScrubRuntimeState {
+    pub(crate) fn snapshot(&self) -> ScrubStatsSnapshot {
+        ScrubStatsSnapshot {
+            last_run_unix_ms: self.last_run_unix_ms,
+            last_findings_count: self.last_findings_count,
+            background_status: self.background_status.clone(),
+            background_verified_objects: self.background_verified_objects,
+            background_total_objects: self.background_total_objects,
+            verified: self.verified.clone(),
+        }
+    }
+}
+
 struct RuntimeInner {
     db: Arc<RedDB>,
     layout: PhysicalLayout,
@@ -1010,6 +1058,7 @@ struct RuntimeInner {
     index_store: index_store::IndexStore,
     cdc: crate::replication::cdc::CdcBuffer,
     pub(crate) checkpoint_projection_stats: CheckpointProjectionStats,
+    pub(crate) scrub_state: parking_lot::Mutex<ScrubRuntimeState>,
     pub(crate) checkpoint_columnar_emission_budget_chunks: usize,
     pub(crate) columnar_projection_size_floor_rows: usize,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
@@ -1476,6 +1525,7 @@ mod impl_telemetry_accessors;
 mod impl_tenant_registry;
 pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
+mod impl_scrub;
 mod impl_search;
 mod impl_serverless;
 mod impl_timeseries;
