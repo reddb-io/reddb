@@ -230,13 +230,7 @@ impl RedDBRuntime {
     /// route at execution time. Uses the executor's own recognizer and
     /// the same polyfill cover, so a polygon the executor would find too
     /// large to enumerate is reported as a scan here too.
-    fn geo_within_has_h3_route(
-        &self,
-        table: &str,
-        lhs: &Expr,
-        op: CompareOp,
-        rhs: &Expr,
-    ) -> bool {
+    fn geo_within_has_h3_route(&self, table: &str, lhs: &Expr, op: CompareOp, rhs: &Expr) -> bool {
         let Some(predicate) =
             crate::storage::query::ast::geo_predicate::geo_within_truth_test(lhs, op, rhs)
         else {

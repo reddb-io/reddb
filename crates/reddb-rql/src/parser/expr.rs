@@ -765,7 +765,7 @@ impl<'a> Parser<'a> {
         }
         if let Some(vertices) = crate::ast::geo_predicate::literal_polygon_vertices(&args) {
             super::search_commands::validate_polygon_vertices(&vertices, "POLYGON", pos)?;
-        } else if args.len() < 6 || args.len() % 2 != 0 {
+        } else if args.len() < 6 || !args.len().is_multiple_of(2) {
             return Err(ParseError::new(
                 "POLYGON requires at least 3 vertices".to_string(),
                 pos,

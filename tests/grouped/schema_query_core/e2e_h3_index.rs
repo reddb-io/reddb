@@ -1472,8 +1472,10 @@ fn names(rt: &RedDBRuntime, query: &str) -> Vec<String> {
 /// and `shift` each cut the set differently.
 fn seed_courier_fleet() -> RedDBRuntime {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-    rt.execute_query("CREATE TABLE couriers (id INT, name TEXT, status TEXT, shift TEXT, loc GEOPOINT)")
-        .unwrap();
+    rt.execute_query(
+        "CREATE TABLE couriers (id INT, name TEXT, status TEXT, shift TEXT, loc GEOPOINT)",
+    )
+    .unwrap();
     for (id, name, status, shift, loc) in [
         (1, "ada", "available", "night", "38.75,-77.15"),
         (2, "bo", "available", "night", "38.79,-77.19"),
@@ -1633,7 +1635,10 @@ fn geo_within_predicate_indexed_and_scan_routes_are_identical() {
 /// same entities from the same data, indexed or not.
 #[test]
 fn geo_within_predicate_agrees_with_within_polygon_verb() {
-    for create_index in [None, Some("CREATE INDEX idx ON couriers (loc) USING H3 (9)")] {
+    for create_index in [
+        None,
+        Some("CREATE INDEX idx ON couriers (loc) USING H3 (9)"),
+    ] {
         let rt = seed_geofence_rows();
         if let Some(create_index) = create_index {
             rt.execute_query(create_index).unwrap();

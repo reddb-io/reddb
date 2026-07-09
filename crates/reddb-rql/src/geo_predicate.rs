@@ -31,7 +31,7 @@ pub struct GeoWithinPredicate<'a> {
 /// so no single covering-cell set describes it and callers fall back to
 /// evaluating the predicate over a full scan.
 pub fn literal_polygon_vertices(args: &[Expr]) -> Option<Vec<(f64, f64)>> {
-    if args.len() < 6 || args.len() % 2 != 0 {
+    if args.len() < 6 || !args.len().is_multiple_of(2) {
         return None;
     }
     let mut vertices = Vec::with_capacity(args.len() / 2);
