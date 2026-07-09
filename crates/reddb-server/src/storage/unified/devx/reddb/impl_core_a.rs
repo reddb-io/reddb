@@ -279,18 +279,6 @@ impl RedDB {
         let metadata_json_path =
             crate::physical::PhysicalMetadataFile::metadata_path_for(local_path);
         write_optional_snapshot_sidecar(&json, "metadata_json_hex", &metadata_json_path)?;
-
-        write_optional_snapshot_sidecar(
-            &json,
-            "header_shadow_hex",
-            &reddb_file::layout::pager_header_shadow_path(local_path),
-        )?;
-
-        write_optional_snapshot_sidecar(
-            &json,
-            "metadata_shadow_hex",
-            &reddb_file::layout::pager_meta_shadow_path(local_path),
-        )?;
         Ok(true)
     }
 
