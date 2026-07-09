@@ -338,9 +338,19 @@ impl SimState {
 
     /// Collapse every file to its post-crash durable image (torn unsynced tail)
     /// and mark the device gone.
+    ///
+    /// Files are torn in path order: each one draws from the seeded stream, so
+    /// hash iteration order would otherwise make the crash image differ between
+    /// two runs of the same seed.
     fn trip_power_cut(&mut self) {
-        for file in self.files.values_mut() {
-            let image = crash_image(file, &mut self.rng);
+        let mut paths: Vec<PathBuf> = self.files.keys().cloned().collect();
+        paths.sort();
+        for path in paths {
+            let Self { files, rng, .. } = self;
+            let Some(file) = files.get_mut(&path) else {
+                continue;
+            };
+            let image = crash_image(file, rng);
             file.durable = image.clone();
             file.live = image;
             file.dirty.clear();
