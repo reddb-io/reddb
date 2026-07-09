@@ -333,6 +333,23 @@ impl UnifiedStore {
             .map_or(0, |commit| commit.buffered_bytes())
     }
 
+    /// Approximate resident bytes across every collection's segment arena
+    /// (ADR 0073 §2). Same number `stats().total_memory_bytes` reports, without
+    /// building the per-collection stats map a sampler would throw away.
+    pub fn segment_memory_bytes(&self) -> u64 {
+        let managers: Vec<Arc<SegmentManager>> = self
+            .collections
+            .read()
+            .values()
+            .map(Arc::clone)
+            .collect();
+
+        managers
+            .iter()
+            .map(|manager| manager.memory_bytes())
+            .fold(0, u64::saturating_add)
+    }
+
     /// Borrow the immutable store configuration. Runtime hooks (e.g. the
     /// `auto_index_id` first-insert hook in `MutationEngine`) read knobs
     /// off this struct without going through the legacy global config tree.
