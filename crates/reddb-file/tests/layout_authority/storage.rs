@@ -488,7 +488,7 @@ fn embedded_rdb_artifact_contract_tests_live_in_reddb_file() {
 
     for required in [
         "open_falls_back_to_older_superblock_when_newer_copy_is_invalid",
-        "open_validates_manifest_checksum_from_selected_superblock",
+        "manifest_bit_rot_fails_the_open_didactically_instead_of_falling_back",
         "embedded_wal_frames_are_versioned_ordered_and_chained",
         "embedded_snapshot_crash_injection_preserves_published_snapshot",
     ] {
