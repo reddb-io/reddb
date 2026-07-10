@@ -198,6 +198,8 @@ pub enum StoreError {
     Segment(SegmentError),
     /// I/O error
     Io(std::io::Error),
+    /// Checksummed storage bytes failed validation.
+    StorageIntegrity(crate::api::StorageIntegrityError),
     /// Serialization error
     Serialization(String),
     /// Internal error (lock poisoning, invariant violation)
@@ -213,6 +215,7 @@ impl std::fmt::Display for StoreError {
             Self::TooManyRefs(id) => write!(f, "Too many cross-references for entity: {}", id),
             Self::Segment(e) => write!(f, "Segment error: {:?}", e),
             Self::Io(e) => write!(f, "I/O error: {}", e),
+            Self::StorageIntegrity(e) => write!(f, "{e}"),
             Self::Serialization(msg) => write!(f, "Serialization error: {}", msg),
             Self::Internal(msg) => write!(f, "Internal error: {}", msg),
         }

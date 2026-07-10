@@ -197,10 +197,12 @@ impl RedDBRuntime {
         let embedded_single_file = options.storage_profile.deploy_profile
             == crate::storage::DeployProfile::Embedded
             && options.storage_profile.packaging == crate::storage::StoragePackaging::SingleFile;
-        let db = Arc::new(
-            RedDB::open_with_options(&options)
-                .map_err(|err| RedDBError::Internal(err.to_string()))?,
-        );
+        let db = Arc::new(RedDB::open_with_options(&options).map_err(|err| {
+            match err.downcast::<crate::storage::StoreError>() {
+                Ok(store_err) => RedDBError::from(*store_err),
+                Err(err) => RedDBError::Internal(err.to_string()),
+            }
+        })?);
         let result_blob_cache_config = if embedded_single_file {
             crate::storage::cache::BlobCacheConfig::default()
         } else {

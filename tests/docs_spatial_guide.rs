@@ -202,7 +202,7 @@ fn guide_quotes_the_real_coverage_messages() {
     rt.execute_query(
         r#"INSERT INTO sensors DOCUMENT VALUES
              ({"id":1,"spot":"38.76,-77.15"}),
-             ({"id":2,"spot":{"type":"Point","coordinates":[-77.15,38.76]}}),
+             ({"id":2,"spot":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}}),
              ({"id":3,"spot":{"lat":38.76}})"#,
     )
     .unwrap();
@@ -223,7 +223,7 @@ fn guide_quotes_the_real_zero_geo_notice() {
     rt.execute_query(
         r#"INSERT INTO sensors DOCUMENT VALUES
              ({"id":1,"spot":"38.76,-77.15"}),
-             ({"id":2,"spot":{"type":"Point","coordinates":[-77.15,38.76]}}),
+             ({"id":2,"spot":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}}),
              ({"id":3,"spot":{"lat":38.76}})"#,
     )
     .unwrap();
@@ -292,6 +292,8 @@ fn guide_recognized_shapes_table_matches_the_seam() {
         r#"{"lat":38.76,"lng":-77.15}"#,
         r#"{"lat":39,"lon":-77}"#,
         r#"{"lat":38.76,"lon":-77.15,"accuracy":5}"#,
+        // GeoJSON Point, longitude-first per RFC 7946 (gh-1943).
+        r#"{"type":"Point","coordinates":[-77.15,38.76]}"#,
     ] {
         assert_guide_quotes(body);
         assert_eq!(
@@ -316,9 +318,11 @@ fn guide_recognized_shapes_table_matches_the_seam() {
 #[test]
 fn guide_rejected_shapes_table_matches_the_seam() {
     // Object-shaped rejects, quoted in the guide's "Rejected shapes" table.
+    // GeoJSON `Point` moved to the recognized table (gh-1943); non-`Point`
+    // GeoJSON geometries stay out.
     for body in [
         r#"{"lat":"38.76","lon":"-77.15"}"#,
-        r#"{"type":"Point","coordinates":[-77.15,38.76]}"#,
+        r#"{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}"#,
         r#"{"lat":38.76}"#,
         r#"{"lat":38.76,"lon":null}"#,
         r#"{"lat":91,"lon":0}"#,
@@ -504,8 +508,16 @@ fn guide_promise_that_the_index_is_a_pure_optimization_holds() {
         .unwrap();
 
     for query in QUERIES {
-        let without = rows(&scan, query);
-        let with = rows(&indexed, query);
+        let mut without = rows(&scan, query);
+        let mut with = rows(&indexed, query);
+        // BBOX promises the same row SET, not an order — it has no centre to
+        // sort by, and the scan path inherits map iteration order. RADIUS and
+        // NEAREST do promise distance-ascending order, so only BBOX may be
+        // normalized before the strict comparison.
+        if query.contains("BBOX") {
+            without.sort_by_key(|row| row.0);
+            with.sort_by_key(|row| row.0);
+        }
         // Same rows, same order, bit-for-bit identical distances.
         assert_eq!(without.len(), with.len(), "{query}: row count diverged");
         for (a, b) in without.iter().zip(with.iter()) {

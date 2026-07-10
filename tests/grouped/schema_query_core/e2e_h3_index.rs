@@ -382,9 +382,14 @@ fn seed_document_geo_corpus(collection: &str) -> RedDBRuntime {
         let (lat, lon) = loc
             .split_once(',')
             .unwrap_or_else(|| panic!("invalid test coordinate: {loc}"));
+        let gps_location = if id % 2 == 0 {
+            format!(r#"{{"type":"Point","coordinates":[{lon},{lat}]}}"#)
+        } else {
+            format!(r#"{{"lat":{lat},"lon":{lon}}}"#)
+        };
         rt.execute_query(&format!(
             r#"INSERT INTO {collection} DOCUMENT VALUES
-               ({{"id":{id},"gpsLocation":{{"lat":{lat},"lon":{lon}}}}})"#
+               ({{"id":{id},"gpsLocation":{gps_location}}})"#
         ))
         .unwrap();
     }
@@ -898,7 +903,8 @@ fn spatial_full_scan_skips_non_geo_named_document_values() {
         r#"INSERT INTO events DOCUMENT VALUES
         ({"gpsLocation":"not-geo","fallback":{"lat":38.76,"lon":-77.15}}),
         ({"fallback":{"lat":38.76,"lon":-77.15}}),
-        ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+        ({"gpsLocation":{"type":"Polygon","coordinates":[[[-77.15,38.76]]]}}),
+        ({"gpsLocation":{"type":"Point","coordinates":[-77.15]}})"#,
     )
     .unwrap();
 
@@ -908,7 +914,39 @@ fn spatial_full_scan_skips_non_geo_named_document_values() {
     );
     assert!(
         hits.is_empty(),
-        "non-geo, missing, and GeoJSON named document values must be skipped"
+        "non-geo, missing, non-Point GeoJSON, and malformed Point values must be skipped"
+    );
+}
+
+#[test]
+fn spatial_full_scan_document_column_accepts_geojson_point_lon_lat_order() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"name":"dc","gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}}),
+        ({"name":"antarctic-mirror","gpsLocation":{"type":"Point","coordinates":[38.76,-77.15]}})"#,
+    )
+    .unwrap();
+
+    let dc = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(dc.len(), 1, "GeoJSON Point must use [lon, lat] order");
+
+    let swapped = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS -77.15 38.76 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(
+        swapped.len(),
+        1,
+        "the mirrored fixture proves swapped coordinates land elsewhere"
+    );
+    assert!(
+        dc[0].0 < swapped[0].0,
+        "the first inserted document is the DC point; a swapped implementation returns the mirror"
     );
 }
 
@@ -934,11 +972,13 @@ fn h3_create_index_reports_existing_geo_coverage() {
 fn h3_create_index_reports_zero_coverage_shape_hint_for_non_empty_collection() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     rt.execute_query("CREATE DOCUMENT events").unwrap();
+    // A GeoJSON Point would index since gh-1943; LineString stays out of
+    // the recognized-point set, keeping this fixture shape-mismatched.
     rt.execute_query(
         r#"INSERT INTO events DOCUMENT VALUES
            ({"gpsLocation":"not-geo"}),
            ({"name":"missing"}),
-           ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+           ({"gpsLocation":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}})"#,
     )
     .unwrap();
 
@@ -947,7 +987,7 @@ fn h3_create_index_reports_zero_coverage_shape_hint_for_non_empty_collection() {
         .unwrap();
     assert_eq!(
         result_message(&res),
-        "index 'idx_loc' created on 'events' (gpsLocation) using H3 (0 of 3 entities indexed — no indexable geo value in 'gpsLocation'; expected GEO_POINT or {lat, lon} object)"
+        "index 'idx_loc' created on 'events' (gpsLocation) using H3 (0 of 3 entities indexed — no indexable geo value in 'gpsLocation'; expected GEO_POINT, {lat, lon} object, or GeoJSON Point)"
     );
 }
 
@@ -969,11 +1009,13 @@ fn h3_create_index_reports_plain_zero_for_empty_collection() {
 fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     rt.execute_query("CREATE DOCUMENT events").unwrap();
+    // A GeoJSON Point would match since gh-1943; LineString stays out of
+    // the recognized-point set, keeping this fixture shape-mismatched.
     rt.execute_query(
         r#"INSERT INTO events DOCUMENT VALUES
            ({"gpsLocation":"not-geo"}),
            ({"name":"missing"}),
-           ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+           ({"gpsLocation":{"type":"LineString","coordinates":[[-77.15,38.76],[-77.2,38.8]]}})"#,
     )
     .unwrap();
 
@@ -986,7 +1028,7 @@ fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
     assert_eq!(
         res.notice.as_deref(),
         Some(
-            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT or {lat, lon} object)."
+            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT, {lat, lon} object, or GeoJSON Point)."
         )
     );
     rt.execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
@@ -1000,7 +1042,7 @@ fn spatial_search_reports_zero_geo_notice_only_for_shape_mismatch() {
     assert_eq!(
         res.notice.as_deref(),
         Some(
-            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT or {lat, lon} object)."
+            "no entity in 'events' has an indexable geo value in column 'gpsLocation' (expected GEO_POINT, {lat, lon} object, or GeoJSON Point)."
         )
     );
 
@@ -1074,7 +1116,7 @@ fn h3_document_body_repro_backfills_existing_documents() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     rt.execute_query("CREATE DOCUMENT events").unwrap();
     rt.execute_query(
-        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":38.76,"lon":-77.15}})"#,
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
     )
     .unwrap();
 
@@ -1097,7 +1139,7 @@ fn h3_document_body_repro_backfills_existing_documents() {
     assert_eq!(
         hits[0].1,
         0.0_f64.to_bits(),
-        "exact document hit must report zero distance"
+        "exact GeoJSON Point document hit must report zero distance"
     );
 }
 
@@ -1109,7 +1151,7 @@ fn h3_document_body_indexes_live_inserts() {
         .unwrap();
 
     rt.execute_query(
-        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":38.76,"lon":-77.15}})"#,
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
     )
     .unwrap();
 
@@ -1124,6 +1166,38 @@ fn h3_document_body_indexes_live_inserts() {
     );
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].1, 0.0_f64.to_bits());
+}
+
+#[test]
+fn h3_document_geojson_point_lon_lat_order_is_adversarial() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query("CREATE INDEX idx_loc ON events (gpsLocation) USING H3")
+        .unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES
+        ({"name":"dc","gpsLocation":{"type":"Point","coordinates":[-77.15,38.76]}})"#,
+    )
+    .unwrap();
+
+    let correct = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76 -77.15 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(
+        correct.len(),
+        1,
+        "H3 index must encode coordinates[1] as latitude and coordinates[0] as longitude"
+    );
+
+    let mirrored = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS -77.15 38.76 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert!(
+        mirrored.is_empty(),
+        "a swapped implementation would index this point near the mirrored continent"
+    );
 }
 
 #[test]
@@ -1426,6 +1500,321 @@ fn h3_polygon_cover_is_superset_for_generated_rectangles() {
     })
     .collect();
     assert_polygon_parity("CREATE INDEX idx ON couriers (loc) USING H3 (9)", &queries);
+}
+
+// ── GEO_WITHIN predicate (PRD #1939 / #1945) ─────────────────────────────────
+//
+// `GEO_WITHIN(col, POLYGON(...))` is an ordinary boolean predicate. Its truth
+// value per entity is the `SEARCH SPATIAL WITHIN POLYGON` verb's inside-test,
+// and its planner treatment mirrors the GEO_DISTANCE predicate: H3-accelerated
+// when the column is indexed and the polygon is constant, exact scan otherwise,
+// byte-identical either way.
+
+/// The rectangle from the issue, spelled for the predicate.
+const GEOFENCE_POLYGON: &str =
+    "POLYGON((38.70 -77.20), (38.80 -77.20), (38.80 -77.05), (38.70 -77.05))";
+
+/// The same rectangle spelled for the `SEARCH SPATIAL WITHIN POLYGON` verb.
+const GEOFENCE_VERB_POLYGON: &str =
+    "POLYGON ((38.70 -77.20), (38.80 -77.20), (38.80 -77.05), (38.70 -77.05))";
+
+fn int_ids(rt: &RedDBRuntime, query: &str) -> Vec<i64> {
+    rt.execute_query(query)
+        .unwrap_or_else(|err| panic!("query must execute: {query}\n  error: {err}"))
+        .result
+        .records
+        .iter()
+        .map(|record| match record.get("id") {
+            Some(Value::Integer(value)) => *value,
+            other => panic!("expected id integer field, got {other:?} in {record:?}"),
+        })
+        .collect()
+}
+
+fn names(rt: &RedDBRuntime, query: &str) -> Vec<String> {
+    rt.execute_query(query)
+        .unwrap_or_else(|err| panic!("query must execute: {query}\n  error: {err}"))
+        .result
+        .records
+        .iter()
+        .map(|record| text_field(record, "name").to_string())
+        .collect()
+}
+
+/// Couriers carrying the non-spatial attributes the predicate has to
+/// compose with. Ids are laid out so that geofence membership, `status`
+/// and `shift` each cut the set differently.
+fn seed_courier_fleet() -> RedDBRuntime {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query(
+        "CREATE TABLE couriers (id INT, name TEXT, status TEXT, shift TEXT, loc GEOPOINT)",
+    )
+    .unwrap();
+    for (id, name, status, shift, loc) in [
+        (1, "ada", "available", "night", "38.75,-77.15"),
+        (2, "bo", "available", "night", "38.79,-77.19"),
+        (3, "cy", "busy", "night", "38.75,-77.10"),
+        (4, "di", "available", "day", "38.75,-77.10"),
+        (5, "eve", "available", "night", "38.69,-77.15"),
+        (6, "fen", "available", "night", "39.00,-77.15"),
+        (7, "gus", "available", "night", "38.70,-77.20"),
+    ] {
+        rt.execute_query(&format!(
+            "INSERT INTO couriers (id, name, status, shift, loc) \
+             VALUES ({id}, '{name}', '{status}', '{shift}', '{loc}')"
+        ))
+        .unwrap();
+    }
+    rt
+}
+
+/// Documents whose geo field is spelled `current` — a word the lexer reads
+/// as the window-frame keyword. The predicate must keep the typed spelling
+/// or the case-sensitive body lookup misses.
+fn seed_courier_documents() -> RedDBRuntime {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT couriers").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO couriers DOCUMENT VALUES
+        ({"name":"ada","status":"available","current":{"lat":38.75,"lon":-77.15}}),
+        ({"name":"bo","status":"available","current":{"lat":38.79,"lon":-77.19}}),
+        ({"name":"cy","status":"busy","current":{"lat":38.75,"lon":-77.10}}),
+        ({"name":"eve","status":"available","current":{"lat":38.69,"lon":-77.15}}),
+        ({"name":"hal","status":"available","home":{"lat":38.75,"lon":-77.15}})"#,
+    )
+    .unwrap();
+    rt
+}
+
+#[test]
+fn geo_within_predicate_composes_with_filters_projections_and_order_by() {
+    let rt = seed_courier_fleet();
+    let selected = names(
+        &rt,
+        &format!(
+            "SELECT id, name FROM couriers \
+             WHERE GEO_WITHIN(loc, {GEOFENCE_POLYGON}) \
+               AND status = 'available' \
+               AND shift = 'night' \
+             ORDER BY name"
+        ),
+    );
+    assert_eq!(
+        selected,
+        ["ada", "bo", "gus"],
+        "geofence membership must intersect with the ordinary predicates"
+    );
+
+    let limited = names(
+        &rt,
+        &format!(
+            "SELECT name FROM couriers \
+             WHERE GEO_WITHIN(loc, {GEOFENCE_POLYGON}) \
+             ORDER BY name DESC LIMIT 2"
+        ),
+    );
+    assert_eq!(
+        limited,
+        ["gus", "di"],
+        "ORDER BY / LIMIT apply on top of the predicate"
+    );
+
+    let negated = names(
+        &rt,
+        &format!(
+            "SELECT name FROM couriers \
+             WHERE NOT GEO_WITHIN(loc, {GEOFENCE_POLYGON}) \
+             ORDER BY name"
+        ),
+    );
+    assert_eq!(
+        negated,
+        ["eve", "fen"],
+        "NOT over the predicate returns exactly the entities outside the fence"
+    );
+}
+
+#[test]
+fn geo_within_predicate_composes_over_documents_with_keyword_column() {
+    let rt = seed_courier_documents();
+    let query = format!(
+        "SELECT name FROM couriers \
+         WHERE GEO_WITHIN(current, {GEOFENCE_POLYGON}) \
+           AND status = 'available' \
+         ORDER BY name"
+    );
+    assert_eq!(
+        names(&rt, &query),
+        ["ada", "bo"],
+        "the document body field `current` must survive the keyword token"
+    );
+
+    rt.execute_query("CREATE INDEX idx_current ON couriers (current) USING H3")
+        .unwrap();
+    assert_eq!(
+        names(&rt, &query),
+        ["ada", "bo"],
+        "indexed document route must match the full scan"
+    );
+
+    // A courier with a `home` but no `current` is outside every fence,
+    // exactly as the verb skips an entity with no geo value.
+    let home_only = names(
+        &rt,
+        &format!("SELECT name FROM couriers WHERE GEO_WITHIN(home, {GEOFENCE_POLYGON})"),
+    );
+    assert_eq!(
+        home_only,
+        ["hal"],
+        "the predicate reads the named field, not any geo field"
+    );
+}
+
+/// The verb's polygon corpus, re-spelled as predicates. Indexed and
+/// unindexed routes must agree row for row.
+#[test]
+fn geo_within_predicate_indexed_and_scan_routes_are_identical() {
+    let polygons = [
+        // Rectangle from the issue: interior points plus vertex/edge ties.
+        "POLYGON((38.70 -77.20), (38.80 -77.20), (38.80 -77.05), (38.70 -77.05))",
+        // Tiny polygon inside one H3 cell: the cover only prunes.
+        "POLYGON((38.7499 -77.1501), (38.7501 -77.1501), (38.7501 -77.1499), (38.7499 -77.1499))",
+        // Non-convex shape, resolved by the exact even-odd post-filter.
+        "POLYGON((38.70 -77.20), (38.80 -77.20), (38.74 -77.12), (38.80 -77.05), (38.70 -77.05))",
+        // Region-scale polygon whose cover exceeds the cap: falls back to
+        // the exact scan even though the column is indexed.
+        "POLYGON((-80.0 -80.0), (80.0 -80.0), (80.0 80.0), (-80.0 80.0))",
+    ];
+    let queries: Vec<String> = polygons
+        .iter()
+        .map(|polygon| {
+            format!("SELECT id FROM couriers WHERE GEO_WITHIN(loc, {polygon}) ORDER BY id")
+        })
+        .collect();
+
+    let rt = seed_geofence_rows();
+    let baseline: Vec<Vec<i64>> = queries.iter().map(|q| int_ids(&rt, q)).collect();
+    rt.execute_query("CREATE INDEX idx ON couriers (loc) USING H3 (15)")
+        .unwrap();
+    for (query, expected) in queries.iter().zip(&baseline) {
+        assert_eq!(
+            &int_ids(&rt, query),
+            expected,
+            "H3-accelerated GEO_WITHIN diverged from the scan for: {query}"
+        );
+    }
+}
+
+/// One inside-test authority: the predicate and the verb must select the
+/// same entities from the same data, indexed or not.
+#[test]
+fn geo_within_predicate_agrees_with_within_polygon_verb() {
+    for create_index in [
+        None,
+        Some("CREATE INDEX idx ON couriers (loc) USING H3 (9)"),
+    ] {
+        let rt = seed_geofence_rows();
+        if let Some(create_index) = create_index {
+            rt.execute_query(create_index).unwrap();
+        }
+
+        let verb_hits = spatial_hit_keys(
+            &rt,
+            "couriers",
+            &format!(
+                "SEARCH SPATIAL WITHIN {GEOFENCE_VERB_POLYGON} COLLECTION couriers COLUMN loc"
+            ),
+        );
+        let predicate_hits: HashSet<String> = int_ids(
+            &rt,
+            &format!("SELECT id FROM couriers WHERE GEO_WITHIN(loc, {GEOFENCE_POLYGON})"),
+        )
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect();
+
+        assert!(
+            !verb_hits.is_empty(),
+            "the shared corpus must produce hits, indexed={}",
+            create_index.is_some()
+        );
+        assert_eq!(
+            predicate_hits,
+            verb_hits,
+            "predicate and verb must share one inside-test, indexed={}",
+            create_index.is_some()
+        );
+    }
+}
+
+#[test]
+fn geo_within_explain_distinguishes_accelerated_from_scan_plans() {
+    let unindexed = seed_geofence_rows();
+    let scan_ops = explain_ops(
+        &unindexed,
+        &format!("EXPLAIN SELECT id FROM couriers WHERE GEO_WITHIN(loc, {GEOFENCE_POLYGON})"),
+    );
+    assert!(
+        scan_ops.iter().all(|op| op != "geo_h3_index_seek"),
+        "an unindexed column must keep the scan path: {scan_ops:?}"
+    );
+
+    let indexed = seed_geofence_rows();
+    indexed
+        .execute_query("CREATE INDEX idx ON couriers (loc) USING H3 (9)")
+        .unwrap();
+    let indexed_ops = explain_ops(
+        &indexed,
+        &format!("EXPLAIN SELECT id FROM couriers WHERE GEO_WITHIN(loc, {GEOFENCE_POLYGON})"),
+    );
+    assert!(
+        indexed_ops.iter().any(|op| op == "geo_h3_index_seek"),
+        "an indexed constant polygon must explain the H3 route: {indexed_ops:?}"
+    );
+
+    // A polygon whose first vertex latitude comes from a column differs
+    // per row, so no single covering set describes it: scan path.
+    let non_constant_ops = explain_ops(
+        &indexed,
+        "EXPLAIN SELECT id FROM couriers \
+         WHERE GEO_WITHIN(loc, POLYGON((id -77.20), (38.80 -77.20), (38.80 -77.05)))",
+    );
+    assert!(
+        non_constant_ops.iter().all(|op| op != "geo_h3_index_seek"),
+        "a non-constant polygon must keep the scan path: {non_constant_ops:?}"
+    );
+
+    // A negated predicate says nothing about where non-matches live, so
+    // the covering cells cannot prune it.
+    let negated_ops = explain_ops(
+        &indexed,
+        &format!("EXPLAIN SELECT id FROM couriers WHERE NOT GEO_WITHIN(loc, {GEOFENCE_POLYGON})"),
+    );
+    assert!(
+        negated_ops.iter().all(|op| op != "geo_h3_index_seek"),
+        "a negated predicate must keep the scan path: {negated_ops:?}"
+    );
+}
+
+#[test]
+fn geo_within_predicate_rejects_degenerate_and_antimeridian_polygons() {
+    let rt = seed_geofence_rows();
+    for (polygon, needle) in [
+        ("POLYGON((0 0), (1 1))", "at least 3 vertices"),
+        ("POLYGON((91 0), (0 0), (1 1))", "lat"),
+        ("POLYGON((0 170), (10 -170), (0 -160))", "antimeridian"),
+    ] {
+        let err = rt
+            .execute_query(&format!(
+                "SELECT id FROM couriers WHERE GEO_WITHIN(loc, {polygon})"
+            ))
+            .expect_err("invalid polygon must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains(needle),
+            "expected {needle:?} in error message, got {message:?}"
+        );
+    }
 }
 
 // ── Slice 4 (PRD #1574 / #1578): H3 is the DEFAULT spatial index ─────────────

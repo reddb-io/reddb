@@ -58,7 +58,7 @@ CREATE INDEX idx_location ON sites (location) USING H3
 CREATE INDEX idx_location ON sites (location) USING H3 (9)   -- explicit resolution, 0..=15
 ```
 
-Indexes `GEOPOINT` columns and document fields holding a `{lat, lon}` object, including dotted paths (`telemetry.gps`). The resolution defaults to `9`. `USING SPATIAL` is an alias for the default spatial backend, which is H3 at resolution 9.
+Indexes `GEOPOINT` columns and document fields holding a `{lat, lon}` object or a GeoJSON `Point`, including dotted paths (`telemetry.gps`). The resolution defaults to `9`. `USING SPATIAL` is an alias for the default spatial backend, which is H3 at resolution 9.
 
 **Best for:** Radius search, bounding box queries, nearest-neighbor, polygon geofences. See the [Spatial Search guide](/guides/spatial-search.md).
 **Complexity:** O(cover + candidates) — the index is a pure optimization, so results match a full scan exactly.

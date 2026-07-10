@@ -22,6 +22,7 @@ use super::indexed_scan::{
 };
 use super::*;
 use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
+use crate::storage::query::ast::geo_predicate::{geo_within_truth_test, GeoWithinPredicate};
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections,
@@ -65,7 +66,7 @@ struct GeoDistancePredicate<'a> {
     radius_km: f64,
 }
 
-fn execute_geo_distance_candidate_scan(
+fn execute_geo_candidate_scan(
     db: &RedDB,
     query: &TableQuery,
     filter: &Filter,
@@ -163,20 +164,30 @@ fn execute_geo_distance_candidate_scan(
     Ok(records)
 }
 
-fn geo_distance_h3_candidate_ids(
+/// Candidate ids for any geo predicate in `filter` that an H3 index can
+/// prune: `GEO_DISTANCE(col, lat, lon) < r` and
+/// `GEO_WITHIN(col, POLYGON(...))`. The returned set is a *superset* of
+/// the matching rows — the full WHERE expression still runs over every
+/// candidate, so the index only ever removes work, never answers.
+fn geo_h3_candidate_ids(
     filter: &Filter,
     table: &str,
     idx_store: &super::index_store::IndexStore,
 ) -> Option<std::collections::HashSet<u64>> {
     match filter {
         Filter::CompareExpr { lhs, op, rhs } => {
-            let predicate = geo_distance_predicate(lhs, *op, rhs)
-                .or_else(|| geo_distance_predicate(rhs, flipped_compare_op_for_geo(*op), lhs))?;
-            geo_distance_predicate_candidate_ids(predicate, table, idx_store)
+            if let Some(predicate) = geo_distance_predicate(lhs, *op, rhs)
+                .or_else(|| geo_distance_predicate(rhs, flipped_compare_op_for_geo(*op), lhs))
+            {
+                return geo_distance_predicate_candidate_ids(predicate, table, idx_store);
+            }
+            let predicate = geo_within_truth_test(lhs, *op, rhs)
+                .or_else(|| geo_within_truth_test(rhs, flipped_compare_op_for_geo(*op), lhs))?;
+            geo_within_predicate_candidate_ids(&predicate, table, idx_store)
         }
         Filter::And(left, right) => {
-            let left_ids = geo_distance_h3_candidate_ids(left, table, idx_store);
-            let right_ids = geo_distance_h3_candidate_ids(right, table, idx_store);
+            let left_ids = geo_h3_candidate_ids(left, table, idx_store);
+            let right_ids = geo_h3_candidate_ids(right, table, idx_store);
             match (left_ids, right_ids) {
                 (Some(mut left), Some(right)) => {
                     left.retain(|id| right.contains(id));
@@ -187,8 +198,8 @@ fn geo_distance_h3_candidate_ids(
             }
         }
         Filter::Or(left, right) => {
-            let mut left_ids = geo_distance_h3_candidate_ids(left, table, idx_store)?;
-            let right_ids = geo_distance_h3_candidate_ids(right, table, idx_store)?;
+            let mut left_ids = geo_h3_candidate_ids(left, table, idx_store)?;
+            let right_ids = geo_h3_candidate_ids(right, table, idx_store)?;
             left_ids.extend(right_ids);
             Some(left_ids)
         }
@@ -264,16 +275,53 @@ fn geo_distance_predicate_candidate_ids(
     table: &str,
     idx_store: &super::index_store::IndexStore,
 ) -> Option<std::collections::HashSet<u64>> {
-    let index = idx_store.find_index_for_column(table, predicate.column)?;
-    let super::index_store::IndexMethodKind::H3 { resolution } = index.method else {
-        return None;
-    };
+    let resolution = h3_index_resolution(table, predicate.column, idx_store)?;
     let cells = h3_cover_cells_for_geo_predicate(
         predicate.center_lat,
         predicate.center_lon,
         predicate.radius_km,
         resolution,
     );
+    h3_cell_candidate_ids(&cells, table, predicate.column, idx_store)
+}
+
+/// Candidate ids for `GEO_WITHIN(col, POLYGON(...))`, taken from the same
+/// H3 polyfill cover the `SEARCH SPATIAL WITHIN POLYGON` verb uses. A
+/// polygon whose cover exceeds the shared cap yields `None`, sending the
+/// query down the exact full scan.
+fn geo_within_predicate_candidate_ids(
+    predicate: &GeoWithinPredicate<'_>,
+    table: &str,
+    idx_store: &super::index_store::IndexStore,
+) -> Option<std::collections::HashSet<u64>> {
+    let resolution = h3_index_resolution(table, predicate.column, idx_store)?;
+    let cells = crate::geo::h3::polygon_to_cover_cells(
+        &predicate.vertices,
+        resolution,
+        crate::geo::h3::MAX_POLYGON_COVER_CELLS,
+    )?;
+    h3_cell_candidate_ids(&cells, table, predicate.column, idx_store)
+}
+
+/// The resolution of the H3 index registered on `(table, column)`, if any.
+fn h3_index_resolution(
+    table: &str,
+    column: &str,
+    idx_store: &super::index_store::IndexStore,
+) -> Option<u8> {
+    match idx_store.find_index_for_column(table, column)?.method {
+        super::index_store::IndexMethodKind::H3 { resolution } => Some(resolution),
+        _ => None,
+    }
+}
+
+/// Entity ids stored under `cells` in the column's disk B-tree index.
+fn h3_cell_candidate_ids(
+    cells: &[u64],
+    table: &str,
+    column: &str,
+    idx_store: &super::index_store::IndexStore,
+) -> Option<std::collections::HashSet<u64>> {
     if cells.is_empty() {
         return None;
     }
@@ -288,7 +336,7 @@ fn geo_distance_predicate_candidate_ids(
     }
     let ids = idx_store
         .sorted
-        .in_lookup_limited(table, predicate.column, &keys, usize::MAX)?;
+        .in_lookup_limited(table, column, &keys, usize::MAX)?;
     Some(ids.into_iter().map(|id| id.raw()).collect())
 }
 
@@ -474,19 +522,18 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let requires_mvcc_index_fallback =
         crate::runtime::impl_core::current_snapshot_requires_index_fallback();
 
-    // ── GEO_DISTANCE H3 CANDIDATE PATH ────────────────────────────────────────
+    // ── GEO H3 CANDIDATE PATH ─────────────────────────────────────────────────
     // `WHERE GEO_DISTANCE(col, lat, lon) < r` over an H3-indexed column can
-    // use the same covering-ring candidate set as SEARCH SPATIAL RADIUS. The
-    // full WHERE expression is still evaluated after candidate pruning, so
-    // the index remains a pure optimization.
+    // use the same covering-ring candidate set as SEARCH SPATIAL RADIUS, and
+    // `WHERE GEO_WITHIN(col, POLYGON(...))` the same polyfill cover as SEARCH
+    // SPATIAL WITHIN POLYGON. The full WHERE expression is still evaluated
+    // after candidate pruning, so the index remains a pure optimization.
     if let (false, Some(idx_store), Some(ref filter)) =
         (requires_mvcc_index_fallback, index_store, &effective_filter)
     {
         if !is_universal_query_source(&query.table) {
-            if let Some(candidate_ids) =
-                geo_distance_h3_candidate_ids(filter, &query.table, idx_store)
-            {
-                return execute_geo_distance_candidate_scan(
+            if let Some(candidate_ids) = geo_h3_candidate_ids(filter, &query.table, idx_store) {
+                return execute_geo_candidate_scan(
                     db,
                     query,
                     filter,
