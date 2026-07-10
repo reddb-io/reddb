@@ -530,12 +530,7 @@ pub(super) fn stats_snapshot(
     let pending_wal_records = runtime.db().embedded_pending_wal_records().unwrap_or(0);
 
     let mut rows = Vec::new();
-    append_memory_budget_stats(
-        &mut rows,
-        &schema,
-        &runtime.memory_budget(),
-        target.as_deref(),
-    );
+    append_memory_budget_stats(&mut rows, &schema, runtime, target.as_deref());
     append_consolidation_thresholds(&mut rows, &schema, target.as_deref());
     for collection in snapshot.collections {
         if let Some(target) = target.as_deref() {
@@ -623,34 +618,43 @@ pub(super) fn stats_snapshot(
     rows
 }
 
-/// Memory-budget section of `red.stats` (ADR 0073 §1, issue #1958).
+/// Memory-budget section of `red.stats` (ADR 0073 §1–§2, issues #1958/#1962).
 ///
-/// Four rows under the `red.memory_budget` collection label, all with a NULL
-/// `entity`:
+/// Rows live under the `red.memory_budget` collection label:
 ///
-/// * `resolved_bytes` — the one budget this process runs under.
-/// * `source` — which precedence tier produced it (`config`,
+/// * `resolved_bytes` (entity NULL) — the one budget this process runs under.
+/// * `source` (entity NULL) — which precedence tier produced it (`config`,
 ///   `profile-default`, `cgroup-v2`, `cgroup-v1`, `physical-fraction`).
-/// * `pool_shares` — per-pool budget shares. Empty until the pool-sizing
-///   slice fills it; present from day one so the surface shape is stable.
-/// * `live_accounting` — live per-pool usage. Empty until the enforcement
-///   slice fills it.
+/// * `share_bytes` / `used_bytes` (entity = pool name) — one pair per governed
+///   pool, in `MEMORY_POOLS` order.
+/// * `total_share_bytes` / `total_used_bytes` (entity NULL) — the shared
+///   accounting totals. `total_share_bytes` never exceeds `resolved_bytes`;
+///   that is the property the boot assertion and the share property test both
+///   guard.
 ///
-/// The two placeholders are empty arrays rather than zeros: this slice
-/// resolves the number, it does not size or account anything, and a `0` would
-/// claim otherwise.
+/// The `pool_shares` / `live_accounting` empty-array placeholders #1958 shipped
+/// are gone: the pools are real now, so the surface reports numbers rather than
+/// promising them.
+///
+/// `used_bytes` is sampled here rather than pushed by each subsystem — see
+/// `runtime::memory_accounting`. A pool over its share is visible and nothing
+/// more; admission enforcement is the next slice (ADR 0073 §4).
 ///
 /// Budget rows are process-scoped, so a `SHOW STATS <collection>` scan that
 /// targets a user collection skips them entirely.
 fn append_memory_budget_stats(
     rows: &mut Vec<UnifiedRecord>,
     schema: &Arc<Vec<Arc<str>>>,
-    budget: &crate::storage::memory_budget::MemoryBudget,
+    runtime: &RedDBRuntime,
     target: Option<&str>,
 ) {
     if target.is_some_and(|target| target != MEMORY_BUDGET_COLLECTION) {
         return;
     }
+
+    runtime.refresh_memory_accounting();
+    let budget = runtime.memory_budget();
+    let accounting = runtime.memory_accounting();
 
     rows.push(stats_row(
         schema,
@@ -666,19 +670,35 @@ fn append_memory_budget_stats(
         "source",
         Value::text(budget.source.as_str()),
     ));
+    for usage in accounting.snapshot() {
+        rows.push(stats_row(
+            schema,
+            MEMORY_BUDGET_COLLECTION,
+            Value::text(usage.pool.as_str()),
+            "share_bytes",
+            Value::UnsignedInteger(usage.share_bytes),
+        ));
+        rows.push(stats_row(
+            schema,
+            MEMORY_BUDGET_COLLECTION,
+            Value::text(usage.pool.as_str()),
+            "used_bytes",
+            Value::UnsignedInteger(usage.used_bytes),
+        ));
+    }
     rows.push(stats_row(
         schema,
         MEMORY_BUDGET_COLLECTION,
         Value::Null,
-        "pool_shares",
-        Value::Array(Vec::new()),
+        "total_share_bytes",
+        Value::UnsignedInteger(accounting.total_share_bytes()),
     ));
     rows.push(stats_row(
         schema,
         MEMORY_BUDGET_COLLECTION,
         Value::Null,
-        "live_accounting",
-        Value::Array(Vec::new()),
+        "total_used_bytes",
+        Value::UnsignedInteger(accounting.total_used_bytes()),
     ));
 }
 

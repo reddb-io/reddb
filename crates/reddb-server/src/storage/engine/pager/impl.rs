@@ -1024,6 +1024,18 @@ impl Pager {
         self.cache.stats()
     }
 
+    /// Pages currently resident in the page cache. Slots are fixed size, so
+    /// this times the page size is the cache's memory footprint (ADR 0073 §2).
+    pub fn cache_len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Preallocated page-cache slots — the sizing this process derived from
+    /// its page-cache budget share.
+    pub fn cache_capacity(&self) -> usize {
+        self.cache.capacity()
+    }
+
     /// Count dirty pages currently in the page cache.
     pub fn dirty_page_count(&self) -> usize {
         self.cache.dirty_count()

@@ -29,6 +29,42 @@ fn write_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
     lock.write()
 }
 
+/// Per-entry constant charged to a `BTreeMap` entry: node slot, the `Vec`
+/// header of its posting list, and allocator overhead. Matches the constant
+/// the hash and bitmap estimators already use so the `index_memory` pool sums
+/// comparable numbers across families (ADR 0073 §2).
+const BTREE_ENTRY_OVERHEAD_BYTES: usize = 48;
+
+/// Heap bytes a canonical key owns beyond its inline enum footprint.
+fn canonical_key_bytes(key: &CanonicalKey) -> usize {
+    let heap = match key {
+        CanonicalKey::Text(_, text) => text.len(),
+        CanonicalKey::Bytes(_, bytes) => bytes.len(),
+        CanonicalKey::PairTextU64(_, text, _) => text.len(),
+        CanonicalKey::PairTextText(_, left, right) => left.len() + right.len(),
+        CanonicalKey::Null
+        | CanonicalKey::Boolean(_)
+        | CanonicalKey::Signed(_, _)
+        | CanonicalKey::Unsigned(_, _)
+        | CanonicalKey::Float(_)
+        | CanonicalKey::PairU32U8(_, _, _)
+        | CanonicalKey::PairU32U32(_, _, _)
+        | CanonicalKey::PairI32I32(_, _, _) => 0,
+    };
+    std::mem::size_of::<CanonicalKey>() + heap
+}
+
+/// Approximate bytes for one sorted-index entry: its key (single or composite)
+/// plus the entity IDs posted under it.
+fn btree_entry_bytes<'a>(
+    key_parts: impl Iterator<Item = &'a CanonicalKey>,
+    posted_ids: usize,
+) -> usize {
+    key_parts.map(canonical_key_bytes).sum::<usize>()
+        + posted_ids * std::mem::size_of::<EntityId>()
+        + BTREE_ENTRY_OVERHEAD_BYTES
+}
+
 /// In-memory sorted index for exact range scans over a single canonical family.
 ///
 /// Point lookups remain safe even when the column contains mixed families,
@@ -124,6 +160,17 @@ impl SortedColumnIndex {
 
     pub fn len(&self) -> usize {
         self.entries.values().map(|v| v.len()).sum()
+    }
+
+    /// Approximate resident bytes (ADR 0073 §2). Same shape as the hash and
+    /// bitmap estimators: keys plus posting lists plus a per-node constant.
+    pub fn memory_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .entries
+                .iter()
+                .map(|(key, ids)| btree_entry_bytes(std::iter::once(key), ids.len()))
+                .sum::<usize>()
     }
 
     /// Range scan with early stop at `limit` entity IDs.
@@ -390,6 +437,17 @@ impl SortedCompositeIndex {
         self.entries.values().map(|v| v.len()).sum()
     }
 
+    /// Approximate resident bytes (ADR 0073 §2). Every column of the composite
+    /// key is charged, so a wide index costs what it weighs.
+    pub fn memory_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .entries
+                .iter()
+                .map(|(key, ids)| btree_entry_bytes(key.iter(), ids.len()))
+                .sum::<usize>()
+    }
+
     /// Range scan with an exact prefix on the first `prefix.len()` columns
     /// and a range on the column at index `prefix.len()`. Returns up to
     /// `limit` entity IDs in key order.
@@ -463,6 +521,20 @@ impl SortedIndexManager {
             indices: RwLock::new(HashMap::new()),
             composite: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Approximate resident bytes across every sorted and composite index —
+    /// this manager's contribution to the `index_memory` pool (ADR 0073 §2).
+    pub fn memory_bytes(&self) -> u64 {
+        let single: usize = read_unpoisoned(&self.indices)
+            .values()
+            .map(SortedColumnIndex::memory_bytes)
+            .sum();
+        let composite: usize = read_unpoisoned(&self.composite)
+            .values()
+            .map(SortedCompositeIndex::memory_bytes)
+            .sum();
+        (single + composite) as u64
     }
 
     /// Build a composite (multi-column) sorted index from existing entities.
@@ -1182,6 +1254,19 @@ impl IndexStore {
             sorted: SortedIndexManager::new(),
             registry: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Approximate resident bytes across every in-RAM secondary index — the
+    /// `index_memory` pool's live usage (ADR 0073 §2).
+    ///
+    /// `BTree` and `H3` methods are disk-resident (they live under the pager
+    /// and are accounted by the `page_cache` pool), so they contribute nothing
+    /// here. Only the RAM families do: hash, bitmap, sorted, composite.
+    pub fn memory_bytes(&self) -> u64 {
+        self.hash
+            .memory_bytes()
+            .saturating_add(self.bitmap.memory_bytes())
+            .saturating_add(self.sorted.memory_bytes())
     }
 
     /// Register and build an index from existing entities.

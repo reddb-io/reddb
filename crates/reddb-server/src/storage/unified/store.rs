@@ -124,6 +124,11 @@ pub struct UnifiedStoreConfig {
     pub data_dir: Option<std::path::PathBuf>,
     /// Embedded single-file artifact used for the internal WAL stream.
     pub embedded_wal_path: Option<std::path::PathBuf>,
+    /// Preallocated page-cache slot count (ADR 0073 §2). `None` leaves the
+    /// pager on its own structural default; the promoted boot path always
+    /// supplies a count derived from the page-cache budget share, so the
+    /// default is reached only by direct library callers.
+    pub page_cache_slots: Option<usize>,
 }
 
 impl Default for UnifiedStoreConfig {
@@ -140,6 +145,7 @@ impl Default for UnifiedStoreConfig {
             group_commit: GroupCommitOptions::default(),
             data_dir: None,
             embedded_wal_path: None,
+            page_cache_slots: None,
         }
     }
 }
@@ -169,6 +175,12 @@ impl UnifiedStoreConfig {
 
     pub fn with_embedded_wal_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.embedded_wal_path = Some(path.into());
+        self
+    }
+
+    /// Pre-size the page cache from its budget share (ADR 0073 §2).
+    pub fn with_page_cache_slots(mut self, slots: usize) -> Self {
+        self.page_cache_slots = Some(slots);
         self
     }
 

@@ -31,7 +31,7 @@ pub use reader::WalReader;
 pub use record::{RecordType, WalRecord};
 pub use recovery::{PointInTimeRecovery, RecoveryResult, RestorePoint};
 pub use transaction::{Transaction, TransactionManager, TxError, TxState};
-pub use writer::WalWriter;
+pub use writer::{WalWriter, WAL_BUFFER_BYTES};
 
 #[cfg(test)]
 mod tests {

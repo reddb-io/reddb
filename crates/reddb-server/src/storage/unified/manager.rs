@@ -305,6 +305,26 @@ impl SegmentManager {
         bytes
     }
 
+    /// Approximate resident *payload* bytes across this collection's growing
+    /// and sealed segments — the arena's contribution to the shared accounting
+    /// pool (ADR 0073 §2). Unlike [`Self::resident_bytes`] this excludes the
+    /// tombstone sets: the pool tracks payload memory, not reclaim potential.
+    ///
+    /// One relaxed load per segment under a read lock; no entity is touched.
+    pub fn memory_bytes(&self) -> u64 {
+        let growing = self
+            .growing
+            .read()
+            .as_ref()
+            .map_or(0, |segment| segment.read().memory_bytes());
+
+        self.sealed
+            .read()
+            .iter()
+            .map(|segment| segment.read().memory_bytes())
+            .fold(growing, u64::saturating_add)
+    }
+
     /// Generate a new entity ID
     pub fn next_entity_id(&self) -> EntityId {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))

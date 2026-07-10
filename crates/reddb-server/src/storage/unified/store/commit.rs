@@ -277,6 +277,11 @@ pub(crate) struct WalAppendQueue {
     /// missing enqueuer was preempted indefinitely and the
     /// drain loop busy-waited forever (WAL stayed at 8 bytes).
     pending: parking_lot::Mutex<WalQueueState>,
+    /// Bytes of encoded records sitting in `pending.entries` (ADR 0073 §2,
+    /// the `wal_buffers` pool). A relaxed atomic rather than a field inside
+    /// `WalQueueState` so a reader sampling the accounting never contends
+    /// with an enqueuer for the queue mutex.
+    queued_bytes: AtomicU64,
 }
 
 struct WalQueueState {
@@ -291,6 +296,7 @@ impl WalAppendQueue {
                 next_lsn: initial_lsn,
                 entries: Vec::with_capacity(64),
             }),
+            queued_bytes: AtomicU64::new(0),
         }
     }
 
@@ -305,6 +311,7 @@ impl WalAppendQueue {
         let start_lsn = state.next_lsn;
         state.next_lsn = start_lsn + len;
         state.entries.push((start_lsn, bytes));
+        self.queued_bytes.fetch_add(len, Ordering::Relaxed);
         start_lsn + len
     }
 
@@ -314,7 +321,16 @@ impl WalAppendQueue {
     fn drain_sorted(&self) -> Vec<(u64, Vec<u8>)> {
         let mut state = self.pending.lock();
         let mut v = std::mem::take(&mut state.entries);
+        let drained: u64 = v.iter().map(|(_, bytes)| bytes.len() as u64).sum();
         drop(state);
+        // Saturating: the drain is the only consumer, so `queued_bytes` can
+        // never sit below what this call took, but an accounting counter that
+        // wraps would poison `red.stats` far past the bug that caused it.
+        let _ = self
+            .queued_bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
+                Some(queued.saturating_sub(drained))
+            });
         v.sort_by_key(|(lsn, _)| *lsn);
         v
     }
@@ -323,6 +339,11 @@ impl WalAppendQueue {
     /// whether to spin once more or go back to the condvar.
     fn has_pending(&self) -> bool {
         !self.pending.lock().entries.is_empty()
+    }
+
+    /// Encoded record bytes currently buffered in memory.
+    fn queued_bytes(&self) -> u64 {
+        self.queued_bytes.load(Ordering::Relaxed)
     }
 
     /// Reset the LSN cursor and discard any queued entries. Used
@@ -334,6 +355,8 @@ impl WalAppendQueue {
         let mut state = self.pending.lock();
         state.next_lsn = next_lsn;
         state.entries.clear();
+        drop(state);
+        self.queued_bytes.store(0, Ordering::Relaxed);
     }
 }
 
@@ -457,6 +480,13 @@ impl StoreCommitCoordinator {
     #[cfg(test)]
     pub(crate) fn fsync_count(&self) -> u64 {
         self.fsync_count.load(Ordering::Relaxed)
+    }
+
+    /// WAL buffer memory held right now: encoded records waiting in the
+    /// group-commit queue plus the writer's fixed append buffer, which exists
+    /// for the coordinator's whole life (ADR 0073 §2, the `wal_buffers` pool).
+    pub(crate) fn buffered_bytes(&self) -> u64 {
+        self.queue.queued_bytes() + crate::storage::wal::WAL_BUFFER_BYTES as u64
     }
 
     pub(crate) fn append_actions(&self, actions: &[StoreWalAction]) -> io::Result<()> {

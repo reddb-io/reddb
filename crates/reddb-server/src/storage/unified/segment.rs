@@ -781,6 +781,14 @@ impl GrowingSegment {
         self.memory_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    /// This segment's approximate resident bytes. One relaxed load — the
+    /// arena's contribution to the shared accounting pool (ADR 0073 §2).
+    /// Unlike `stats()` this never walks the entity map, so a stats reader
+    /// does not pay `O(entities)` to observe memory.
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory_bytes.load(Ordering::Relaxed)
+    }
+
     /// Release a resident entity's payload from the memory estimate. Only for
     /// paths that physically drop the entity (HashMap removal, eviction).
     fn release_memory(&self, bytes: usize) {

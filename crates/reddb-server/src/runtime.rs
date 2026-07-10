@@ -1002,6 +1002,9 @@ struct RuntimeInner {
     /// The one memory budget this process runs under (ADR 0073 §1),
     /// resolved once at boot and immutable for the process lifetime.
     pub(crate) memory_budget: crate::storage::memory_budget::MemoryBudget,
+    /// The one shared accounting pool (ADR 0073 §2): each big consumer's share
+    /// of the budget above, and the live usage they report into it.
+    pub(crate) memory_accounting: Arc<crate::storage::memory_pools::MemoryAccounting>,
     indices: IndexCatalog,
     pool_config: ConnectionPoolConfig,
     pool: Mutex<PoolState>,
@@ -1493,6 +1496,9 @@ pub mod lifecycle;
 pub mod lock_manager;
 pub mod locking;
 pub(crate) mod materialization_limit;
+/// Samples every governed pool's live usage into the shared accounting
+/// (ADR 0073 §2).
+pub mod memory_accounting;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
 pub(crate) mod mvcc_lifecycle;

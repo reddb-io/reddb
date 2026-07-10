@@ -326,8 +326,9 @@ Timeseries (`TIME_SERIES` model) metric set:
 ### Memory budget section
 
 Every RedDB process runs under exactly one memory budget, resolved at boot
-(ADR 0073 §1). It is not a property of any collection, so it is reported under
-the reserved `red.memory_budget` collection label with a `NULL` `entity`:
+(ADR 0073 §1) and divided into per-pool shares (ADR 0073 §2). It is not a
+property of any collection, so it is reported under the reserved
+`red.memory_budget` collection label:
 
 ```sql
 SELECT * FROM red.stats WHERE collection = 'red.memory_budget';
@@ -337,8 +338,25 @@ SELECT * FROM red.stats WHERE collection = 'red.memory_budget';
 |--------|--------|-------|
 | `resolved_bytes` | `NULL` | The budget this process runs under, in bytes. Always greater than zero — there is no unlimited mode. |
 | `source` | `NULL` | The precedence tier that produced the budget: `config`, `profile-default`, `cgroup-v2`, `cgroup-v1`, or `physical-fraction`. |
-| `pool_shares` | `NULL` | Per-pool budget shares. Empty until the pool-sizing slice populates it. |
-| `live_accounting` | `NULL` | Live per-pool usage. Empty until the enforcement slice populates it. |
+| `share_bytes` | pool name | That pool's slice of the budget, fixed at boot. |
+| `used_bytes` | pool name | That pool's live memory usage, sampled when the view is read. |
+| `total_share_bytes` | `NULL` | Σ of every pool's share. Never exceeds `resolved_bytes`. |
+| `total_used_bytes` | `NULL` | Σ of every pool's live usage — the one shared accounting total. |
+
+The governed pools, in report order, are `page_cache` (preallocated 16 KiB
+slots), `blob_cache_l1` (the blob cache's RAM tier plus L2's resident metadata;
+L2's disk extent is not memory and is excluded), `segment_arena` (growing and
+sealed segments), `index_memory` (hash, bitmap, sorted and composite secondary
+indexes) and `wal_buffers` (the group-commit queue plus the writer's append
+buffer). Shares come from one allocation policy of named fractions,
+profile-adjustable, which always leaves an unpooled reserve for plan caches,
+connection state and allocator slack — so `total_share_bytes` is strictly less
+than `resolved_bytes`.
+
+Doubling the configured budget doubles every share, and with it the page-cache
+slot count and the blob L1 ceiling. A pool whose `used_bytes` exceeds its
+`share_bytes` is visible here and not otherwise acted on: admission enforcement
+(ADR 0073 §4) is a separate mechanism.
 
 The budget is resolved once and is immutable for the process lifetime. The
 resolution order is first-hit-wins: explicit operator configuration (the
