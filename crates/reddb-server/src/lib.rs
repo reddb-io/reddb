@@ -45,6 +45,7 @@ pub mod mcp;
 pub mod modules;
 pub mod notifications;
 pub mod operational_bootstrap;
+pub mod pager_zone_migration;
 pub mod physical;
 pub(crate) mod presentation;
 pub mod regress;
@@ -153,14 +154,14 @@ pub use crate::index::{
     IndexStats,
 };
 pub use crate::physical::{
-    fold_dwb_into_wal_enabled, fold_pager_meta_enabled, meta_json_sidecar_enabled, provision_shm,
-    read_shm_header, seqn_journal_enabled, seqn_journal_retention, set_fold_dwb_into_wal_enabled,
-    set_fold_pager_meta_enabled, set_meta_json_sidecar_enabled, set_seqn_journal_enabled,
-    set_seqn_journal_retention, set_shm_provisioning_enabled, shm_path_for,
-    shm_provisioning_enabled, ArtifactState, BlockReference, CompactionPolicy, ExportDescriptor,
-    GridLayout, ManifestEvent, ManifestEventKind, ManifestPointers, PhysicalAnalyticsJob,
-    PhysicalGraphProjection, PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile, ShmHandle,
-    ShmHeader, ShmProvisionState, SnapshotDescriptor, SuperblockHeader, WalPolicy,
+    fold_dwb_into_wal_enabled, meta_json_sidecar_enabled, provision_shm, read_shm_header,
+    seqn_journal_enabled, seqn_journal_retention, set_fold_dwb_into_wal_enabled,
+    set_meta_json_sidecar_enabled, set_seqn_journal_enabled, set_seqn_journal_retention,
+    set_shm_provisioning_enabled, shm_path_for, shm_provisioning_enabled, ArtifactState,
+    BlockReference, CompactionPolicy, ExportDescriptor, GridLayout, ManifestEvent,
+    ManifestEventKind, ManifestPointers, PhysicalAnalyticsJob, PhysicalGraphProjection,
+    PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile, ShmHandle, ShmHeader,
+    ShmProvisionState, SnapshotDescriptor, SuperblockHeader, WalPolicy,
     DEFAULT_MANIFEST_EVENT_HISTORY, DEFAULT_METADATA_JOURNAL_RETENTION,
     OPT_IN_METADATA_JOURNAL_RETENTION, PHYSICAL_METADATA_PROTOCOL_VERSION, SHM_FILE_SIZE,
     SHM_HEADER_SIZE, SHM_MAGIC, SHM_VERSION,

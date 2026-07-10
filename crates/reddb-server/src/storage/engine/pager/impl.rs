@@ -4,6 +4,24 @@ pub(super) const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
 pub(super) const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
 pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
 
+/// The superblock zone occupies the head of page 0 (ADR 0038 §2 phase 1).
+pub(super) const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
+pub(super) const SUPERBLOCK_ZONE_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE;
+
+/// The newest valid superblock copy together with its slot image.
+type NewestSuperblock = (
+    reddb_file::PagedSuperblockSelection,
+    [u8; SUPERBLOCK_SLOT_SIZE],
+);
+
+/// Take the first slot's worth of a freshly-built page-0 image. The database
+/// header and the encryption header both live well inside this prefix.
+fn superblock_slot_image(page: &[u8; PAGE_SIZE]) -> [u8; SUPERBLOCK_SLOT_SIZE] {
+    let mut image = [0u8; SUPERBLOCK_SLOT_SIZE];
+    image.copy_from_slice(&page[..SUPERBLOCK_SLOT_SIZE]);
+    image
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CowFilesystemKind {
     Zfs,
@@ -146,6 +164,16 @@ impl Pager {
             return Err(PagerError::InvalidDatabase(
                 "Database does not exist".into(),
             ));
+        }
+
+        // ADR 0038 §4 phase 1 is a clean break: a store still carrying the
+        // retired `rdb-hdr`/`rdb-meta` sidecars is never read by the engine.
+        // The offline migration tool is the only path forward.
+        if exists {
+            if let Some(sidecar) = reddb_file::layout::retired::first_present_phase1_sidecar(&path)
+            {
+                return Err(PagerError::LegacySidecarStore { sidecar });
+            }
         }
 
         if !exists && config.read_only {
@@ -332,8 +360,8 @@ impl Pager {
         if self.page_count().unwrap_or(0) == 0 {
             return self.bind_encryption_for_new();
         }
-        let header_page = self.read_page_no_checksum(0)?;
-        let data = header_page.as_bytes();
+        let (_, image) = self.newest_superblock()?;
+        let data = &image[..];
         let has_marker = reddb_file::paged_encryption_marker_present(data);
 
         let key = self.config.encryption.clone();
@@ -369,15 +397,14 @@ impl Pager {
         let header = crate::storage::encryption::EncryptionHeader::new(&key);
         let encryptor = crate::storage::encryption::PageEncryptor::new(key);
 
-        // Stamp the marker + header into page 0 if it's been
-        // initialised by `initialize()` already.
+        // Stamp the marker + header into the superblock zone if `initialize()`
+        // has already published it.
         if self.page_count().unwrap_or(0) > 0 {
-            let mut page = self.read_page_no_checksum(0)?;
-            let data = page.as_bytes_mut();
             let header_bytes = header.to_bytes();
-            reddb_file::write_paged_encryption_marker_and_header(data, &header_bytes)
-                .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-            self.write_page_no_checksum(0, page)?;
+            self.commit_superblock(|image| {
+                reddb_file::write_paged_encryption_marker_and_header(image, &header_bytes)
+                    .map_err(|err| PagerError::InvalidDatabase(err.to_string()))
+            })?;
         }
         self.encryption = Some((encryptor, header));
         Ok(())
@@ -401,8 +428,10 @@ impl Pager {
         let header_page = Page::new_header_page(initial_page_count);
         self.header_write()?.page_count = initial_page_count;
 
-        // Write header and reserved pages so any scan over 0..page_count
-        // can read every allocated page in a brand-new database.
+        // Reserve page 0 (the superblock zone) plus the reserved pages so any
+        // scan over 0..page_count can read every allocated page in a brand-new
+        // database. The zone's own bytes are published below, one slot at a
+        // time; this first whole-page write only sizes the file.
         self.write_page_raw(0, &header_page)?;
         let mut metadata_page = Page::new(PageType::Header, 1);
         metadata_page.update_checksum();
@@ -410,6 +439,13 @@ impl Pager {
         let mut vault_page = Page::new(PageType::Vault, 2);
         vault_page.update_checksum();
         self.write_page_raw(2, &vault_page)?;
+
+        // Publish both superblock copies so the ping-pong invariant — one
+        // valid copy always survives a crash — holds from the very first
+        // update onward, not just from the second.
+        let mut slot = superblock_slot_image(header_page.as_bytes());
+        self.write_superblock_slot(&mut slot, 0, 1)?;
+        self.write_superblock_slot(&mut slot, 1, 2)?;
 
         // Sync to disk
         self.sync()?;
@@ -444,23 +480,83 @@ impl Pager {
             .map_err(|_| PagerError::LockPoisoned)
     }
 
-    /// Load database header from page 0 (with shadow fallback)
-    fn load_header(&self) -> Result<(), PagerError> {
-        // Read page 0 — fall back to shadow if corrupted
-        let header_page = match self.read_page_raw(0) {
-            Ok(page) => {
-                // Verify magic bytes
-                if reddb_file::database_header_magic_matches(page.as_bytes()) {
-                    page
-                } else {
-                    // Page 0 corrupted — try shadow
-                    self.recover_header_from_shadow()?
-                }
-            }
-            Err(_) => self.recover_header_from_shadow()?,
-        };
+    /// Read the whole superblock zone (both ping-pong copies) from the head of
+    /// the file. A file shorter than the zone yields zero-filled tail bytes,
+    /// which decode as "slot never written".
+    fn read_superblock_zone(&self) -> Result<[u8; SUPERBLOCK_ZONE_SIZE], PagerError> {
+        let mut file = self.file_lock()?;
+        let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let mut zone = [0u8; SUPERBLOCK_ZONE_SIZE];
+        let readable = len.min(SUPERBLOCK_ZONE_SIZE as u64) as usize;
+        if readable > 0 {
+            file.seek(SeekFrom::Start(0))?;
+            file.read_exact(&mut zone[..readable])?;
+        }
+        Ok(zone)
+    }
 
-        let decoded_header = reddb_file::decode_database_header(header_page.as_bytes())
+    /// The newest valid superblock copy, with its slot image.
+    ///
+    /// Both copies invalid is the one unrecoverable superblock state (ADR 0074
+    /// §2): the store does not open, and the error names the zone and points
+    /// at salvage rather than panicking or silently re-initialising.
+    fn newest_superblock(&self) -> Result<NewestSuperblock, PagerError> {
+        let zone = self.read_superblock_zone()?;
+        let selection = reddb_file::select_paged_superblock(&zone)
+            .ok_or_else(|| PagerError::SuperblockZoneUnrecoverable(self.path.clone()))?;
+
+        let start = selection.copy_index * SUPERBLOCK_SLOT_SIZE;
+        let mut image = [0u8; SUPERBLOCK_SLOT_SIZE];
+        image.copy_from_slice(&zone[start..start + SUPERBLOCK_SLOT_SIZE]);
+        Ok((selection, image))
+    }
+
+    /// Seal `slot` for `copy_index`/`generation` and write exactly that slot,
+    /// then fsync. The caller guarantees `copy_index` is the stale copy.
+    fn write_superblock_slot(
+        &self,
+        slot: &mut [u8; SUPERBLOCK_SLOT_SIZE],
+        copy_index: usize,
+        generation: u64,
+    ) -> Result<(), PagerError> {
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        reddb_file::seal_paged_superblock_slot(slot, copy_index, generation)
+            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+
+        let mut file = self.file_lock()?;
+        file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+            copy_index,
+        )))?;
+        file.write_all(slot)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// Publish `mutate`'s edit of the newest slot image into the *stale* copy.
+    ///
+    /// Reading the newest image first means every byte the pager does not
+    /// explicitly rewrite — most importantly the encryption marker and header —
+    /// carries forward untouched.
+    fn commit_superblock(
+        &self,
+        mutate: impl FnOnce(&mut [u8; SUPERBLOCK_SLOT_SIZE]) -> Result<(), PagerError>,
+    ) -> Result<(), PagerError> {
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        let (newest, mut image) = self.newest_superblock()?;
+        mutate(&mut image)?;
+        let next_copy = reddb_file::paged_superblock_next_copy(Some(newest));
+        self.write_superblock_slot(&mut image, next_copy, newest.generation.saturating_add(1))
+    }
+
+    /// Load the database header from the newest valid superblock copy.
+    fn load_header(&self) -> Result<(), PagerError> {
+        let (_, image) = self.newest_superblock()?;
+
+        let decoded_header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
         let freelist_head = decoded_header.freelist_head;
 
@@ -478,46 +574,17 @@ impl Pager {
         Ok(())
     }
 
-    /// Write header page
-    ///
-    /// Note: This merges database header fields into the existing page 0 content
-    /// to preserve any additional data (like encryption headers) that may be stored there.
+    /// Publish the in-memory database header as a new superblock generation.
     fn write_header(&self) -> Result<(), PagerError> {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
 
-        let header = self.header_read()?;
-
-        // Read existing page 0 to preserve any additional data (e.g., encryption header)
-        // First check cache, then fall back to disk
-        let mut page = if let Some(cached) = self.cache.get(0) {
-            cached
-        } else {
-            // Try to read from disk if file is large enough
-            let file = self.file_lock()?;
-            let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-            drop(file);
-
-            if len >= PAGE_SIZE as u64 {
-                self.read_page_raw(0)?
-            } else {
-                // File is new/empty, create fresh header page
-                Page::new(PageType::Header, 0)
-            }
-        };
-
-        let data = page.as_bytes_mut();
-
-        reddb_file::encode_database_header(data, &header)
-            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-
-        page.update_checksum();
-
-        // Write header shadow FIRST (so it's intact if main write is interrupted)
-        self.write_header_shadow(&page)?;
-
-        self.write_page_raw(0, &page)?;
+        let header = self.header_read()?.clone();
+        self.commit_superblock(|image| {
+            reddb_file::encode_database_header(image, &header)
+                .map_err(|err| PagerError::InvalidDatabase(err.to_string()))
+        })?;
         *self.header_dirty_lock()? = false;
 
         Ok(())
@@ -535,8 +602,10 @@ impl Pager {
 
         let page = Page::from_bytes(buf);
 
-        // Verify checksum if configured (including page 0)
-        if self.config.verify_checksums {
+        // Page 0 is the superblock zone, not a checksummed page: its two slots
+        // are sealed independently, so no whole-page checksum can hold across
+        // a ping-pong write. Slot CRCs are its integrity contract.
+        if self.config.verify_checksums && page_id != 0 {
             page.verify_checksum()?;
         }
 
@@ -1027,16 +1096,6 @@ impl Pager {
 
     // ── Corruption defense helpers ──────────────────────────────────
 
-    /// Path for the header shadow file
-    fn shadow_path(db_path: &Path) -> PathBuf {
-        reddb_file::layout::pager_header_shadow_path(db_path)
-    }
-
-    /// Path for the metadata shadow file
-    fn meta_shadow_path(db_path: &Path) -> PathBuf {
-        reddb_file::layout::pager_meta_shadow_path(db_path)
-    }
-
     /// Path for the double-write buffer file
     fn dwb_path(db_path: &Path) -> PathBuf {
         reddb_file::layout::pager_dwb_shadow_path(db_path)
@@ -1063,95 +1122,13 @@ impl Pager {
         Ok(())
     }
 
-    /// Write a shadow copy of the header page.
-    fn write_header_shadow(&self, page: &Page) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Ok(());
-        }
-        let shadow = Self::shadow_path(&self.path);
-        let mut f = File::create(&shadow)?;
-        f.write_all(page.as_bytes())?;
-        f.sync_all()?;
-        Ok(())
-    }
-
-    /// Recover header from shadow file when page 0 is corrupted
-    fn recover_header_from_shadow(&self) -> Result<Page, PagerError> {
-        let shadow = Self::shadow_path(&self.path);
-        if !shadow.exists() {
-            return Err(PagerError::InvalidDatabase(
-                "Page 0 corrupted and no header shadow found".into(),
-            ));
-        }
-        let mut f = File::open(&shadow)?;
-        let mut buf = [0u8; PAGE_SIZE];
-        f.read_exact(&mut buf)?;
-        let page = Page::from_bytes(buf);
-
-        // Verify shadow is valid
-        if !reddb_file::database_header_magic_matches(page.as_bytes()) {
-            return Err(PagerError::InvalidDatabase(
-                "Header shadow also corrupted".into(),
-            ));
-        }
-
-        // Restore page 0 from shadow
-        if !self.config.read_only {
-            self.write_page_raw(0, &page)?;
-            let file = self.file_lock()?;
-            file.sync_all()?;
-        }
-
-        Ok(page)
-    }
-
-    /// Write a shadow copy of the metadata page.
+    /// Read the internal manifest page (page 1), the zone the superblock roots.
     ///
-    /// When the process-global `fold_pager_meta` policy is enabled (see
-    /// [`crate::physical::fold_pager_meta_enabled`]) the shadow is suppressed:
-    /// metadata is sourced exclusively from page 1 (plus its overflow chain).
-    /// Any pre-existing `<data>-meta` file is also removed so a flipped flag
-    /// cannot leave a stale shadow on disk. Reads still tolerate the sidecar
-    /// when present so databases written before the flag flipped remain
-    /// loadable.
-    pub fn write_meta_shadow(&self, page: &Page) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Ok(());
-        }
-        let shadow = Self::meta_shadow_path(&self.path);
-        if crate::physical::fold_pager_meta_enabled() {
-            // Best-effort cleanup of any prior shadow — a missing file is not
-            // an error condition here.
-            let _ = std::fs::remove_file(&shadow);
-            return Ok(());
-        }
-        let mut f = File::create(&shadow)?;
-        f.write_all(page.as_bytes())?;
-        f.sync_all()?;
-        Ok(())
-    }
-
-    /// Recover metadata page from shadow file when page 1 is corrupted
-    pub fn recover_meta_from_shadow(&self) -> Result<Page, PagerError> {
-        let shadow = Self::meta_shadow_path(&self.path);
-        if !shadow.exists() {
-            return Err(PagerError::InvalidDatabase(
-                "Page 1 corrupted and no metadata shadow found".into(),
-            ));
-        }
-        let mut f = File::open(&shadow)?;
-        let mut buf = [0u8; PAGE_SIZE];
-        f.read_exact(&mut buf)?;
-        let page = Page::from_bytes(buf);
-
-        // Restore page 1 from shadow
-        if !self.config.read_only {
-            self.write_page_raw(1, &page)?;
-            let file = self.file_lock()?;
-            file.sync_all()?;
-        }
-
-        Ok(page)
+    /// ADR 0074 §2: manifest corruption fails the open didactically, naming the
+    /// zone — it never falls back to a sidecar and never returns garbage.
+    pub fn read_manifest_page(&self) -> Result<Page, PagerError> {
+        self.read_page(1)
+            .map_err(|_| PagerError::ManifestZoneCorrupt(self.path.clone()))
     }
 
     /// Write pages through the double-write buffer for torn page protection.
@@ -1286,25 +1263,56 @@ mod tests {
         ))
     }
 
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(Pager::dwb_path(path));
+    }
+
+    fn read_zone(path: &Path) -> Vec<u8> {
+        let mut zone = vec![0u8; SUPERBLOCK_ZONE_SIZE];
+        let mut file = File::open(path).expect("open() should succeed");
+        file.read_exact(&mut zone)
+            .expect("read_exact() should succeed");
+        zone
+    }
+
+    /// Overwrite one superblock slot in place, leaving the sibling untouched.
+    fn poke_slot(path: &Path, copy_index: usize, bytes: &[u8]) {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open() should succeed");
+        file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+            copy_index,
+        )))
+        .expect("operation should succeed");
+        file.write_all(bytes).expect("write_all() should succeed");
+        file.sync_all().expect("sync_all() should succeed");
+    }
+
     #[test]
     fn open_refuses_future_database_version() {
         let path = temp_db_path("future-version");
-        let pager = Pager::open_default(&path).unwrap();
+        let pager = Pager::open_default(&path).expect("open_default() should succeed");
         drop(pager);
 
-        let mut future_header = Page::new_header_page(1);
-        reddb_file::set_database_header_version(
-            future_header.as_bytes_mut(),
-            reddb_file::PAGE_FILE_VERSION + 1,
+        // A *valid* superblock slot — correct magic, copy index and CRC — whose
+        // database header names a version we cannot read. The slot is intact;
+        // the header is from the future.
+        let selection = reddb_file::select_paged_superblock(&read_zone(&path))
+            .expect("operation should succeed");
+        let mut slot = vec![0u8; SUPERBLOCK_SLOT_SIZE];
+        reddb_file::init_database_header_page(&mut slot, 1)
+            .expect("init_database_header_page() should succeed");
+        reddb_file::set_database_header_version(&mut slot, reddb_file::PAGE_FILE_VERSION + 1)
+            .expect("operation should succeed");
+        reddb_file::seal_paged_superblock_slot(
+            &mut slot,
+            selection.copy_index,
+            selection.generation + 1,
         )
-        .unwrap();
-        future_header.update_checksum();
-
-        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
-        file.seek(SeekFrom::Start(0)).unwrap();
-        file.write_all(future_header.as_bytes()).unwrap();
-        file.sync_all().unwrap();
-        drop(file);
+        .expect("operation should succeed");
+        poke_slot(&path, selection.copy_index, &slot);
 
         let err = match Pager::open_default(&path) {
             Ok(_) => panic!("future database version should be rejected"),
@@ -1312,13 +1320,174 @@ mod tests {
         };
         match err {
             PagerError::InvalidDatabase(msg) => {
-                assert!(msg.contains("newer than supported"));
+                assert!(msg.contains("newer than supported"), "{msg}");
             }
             other => panic!("expected InvalidDatabase, got {other:?}"),
         }
 
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(Pager::shadow_path(&path));
-        let _ = std::fs::remove_file(Pager::dwb_path(&path));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_fresh_store_publishes_both_superblock_copies() {
+        // The ping-pong invariant must hold from the very first update, which
+        // means creation cannot leave one copy blank.
+        let path = temp_db_path("fresh-pair");
+        let pager = Pager::open_default(&path).expect("open_default() should succeed");
+        drop(pager);
+
+        let zone = read_zone(&path);
+        for copy_index in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+            let start = copy_index * SUPERBLOCK_SLOT_SIZE;
+            assert!(
+                reddb_file::paged_superblock_slot_generation(
+                    &zone[start..start + SUPERBLOCK_SLOT_SIZE],
+                    copy_index
+                )
+                .is_some(),
+                "copy {copy_index} must be valid on a fresh store"
+            );
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn an_update_writes_the_stale_copy_and_leaves_the_newest_one_intact() {
+        let path = temp_db_path("ping-pong");
+        let pager = Pager::open_default(&path).expect("open_default() should succeed");
+        let before = reddb_file::select_paged_superblock(&read_zone(&path))
+            .expect("operation should succeed");
+
+        pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate_page() should succeed");
+        pager.sync().expect("sync() should succeed");
+
+        let zone = read_zone(&path);
+        let after = reddb_file::select_paged_superblock(&zone)
+            .expect("select_paged_superblock() should succeed");
+        assert_ne!(
+            after.copy_index, before.copy_index,
+            "an update must target the stale copy"
+        );
+        assert!(after.generation > before.generation);
+
+        // The copy that was newest before the update is still readable — this
+        // is the byte-level statement of "a crash mid-write always leaves one
+        // valid copy".
+        let start = before.copy_index * SUPERBLOCK_SLOT_SIZE;
+        assert_eq!(
+            reddb_file::paged_superblock_slot_generation(
+                &zone[start..start + SUPERBLOCK_SLOT_SIZE],
+                before.copy_index
+            ),
+            Some(before.generation)
+        );
+
+        drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn open_recovers_from_the_older_copy_when_the_newest_is_torn() {
+        let path = temp_db_path("torn-newest");
+        {
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
+            pager.sync().expect("sync() should succeed");
+        }
+
+        let newest = reddb_file::select_paged_superblock(&read_zone(&path))
+            .expect("operation should succeed");
+        // Tear the newest copy: a torn write leaves its CRC broken.
+        let mut torn = vec![0u8; SUPERBLOCK_SLOT_SIZE];
+        torn.copy_from_slice(
+            &read_zone(&path)[newest.copy_index * SUPERBLOCK_SLOT_SIZE
+                ..newest.copy_index * SUPERBLOCK_SLOT_SIZE + SUPERBLOCK_SLOT_SIZE],
+        );
+        torn[64] ^= 0xFF;
+        poke_slot(&path, newest.copy_index, &torn);
+
+        let pager = Pager::open_default(&path).expect("older copy must root the store");
+        assert!(pager.page_count().expect("page_count() should succeed") >= 3);
+        drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn open_refuses_didactically_when_both_superblock_copies_are_invalid() {
+        let path = temp_db_path("both-invalid");
+        {
+            let _ = Pager::open_default(&path).expect("open_default() should succeed");
+        }
+
+        let zone = read_zone(&path);
+        for copy_index in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+            let start = copy_index * SUPERBLOCK_SLOT_SIZE;
+            let mut slot = zone[start..start + SUPERBLOCK_SLOT_SIZE].to_vec();
+            slot[64] ^= 0xFF;
+            poke_slot(&path, copy_index, &slot);
+        }
+
+        let err = match Pager::open_default(&path) {
+            Ok(_) => panic!("a rootless store must not open"),
+            Err(err) => err,
+        };
+        let rendered = err.to_string();
+        assert!(matches!(err, PagerError::SuperblockZoneUnrecoverable(_)));
+        assert!(rendered.contains("superblock zone"), "{rendered}");
+        assert!(rendered.contains("salvage"), "{rendered}");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn open_refuses_a_legacy_sidecar_store_and_names_the_migration_tool() {
+        let path = temp_db_path("legacy-sidecar");
+        {
+            let _ = Pager::open_default(&path).expect("open_default() should succeed");
+        }
+
+        let sidecar = reddb_file::layout::retired::pager_header_path_v0(&path);
+        std::fs::write(&sidecar, b"legacy header shadow").expect("write() should succeed");
+
+        let err = match Pager::open_default(&path) {
+            Ok(_) => panic!("legacy stores need migration first"),
+            Err(err) => err,
+        };
+        let rendered = err.to_string();
+        assert!(matches!(err, PagerError::LegacySidecarStore { .. }));
+        assert!(rendered.contains("migration tool"), "{rendered}");
+
+        let _ = std::fs::remove_file(&sidecar);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn no_phase_one_sidecar_survives_a_create_write_reopen_cycle() {
+        let path = temp_db_path("census");
+        {
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            let page = pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate_page() should succeed");
+            pager
+                .write_page(page.page_id(), page)
+                .expect("operation should succeed");
+            pager.sync().expect("sync() should succeed");
+        }
+        {
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            pager.sync().expect("sync() should succeed");
+        }
+
+        assert_eq!(
+            reddb_file::layout::retired::first_present_phase1_sidecar(&path),
+            None,
+            "the pager must never create a retired phase-1 sidecar"
+        );
+        cleanup(&path);
     }
 }

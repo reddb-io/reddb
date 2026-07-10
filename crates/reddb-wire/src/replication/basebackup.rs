@@ -118,8 +118,6 @@ pub struct BaseBackupChunk {
     pub snapshot_hex: Option<Vec<u8>>,
     pub metadata_binary: Option<Vec<u8>>,
     pub metadata_json: Option<Vec<u8>>,
-    pub header_shadow: Option<Vec<u8>>,
-    pub metadata_shadow: Option<Vec<u8>>,
     pub basebackup_available: bool,
     pub basebackup_timeline: Option<u64>,
     pub basebackup_start_lsn: Option<u64>,
@@ -155,8 +153,6 @@ impl BaseBackupChunk {
             snapshot_hex: None,
             metadata_binary: None,
             metadata_json: None,
-            header_shadow: None,
-            metadata_shadow: None,
             basebackup_available: false,
             basebackup_timeline: None,
             basebackup_start_lsn: None,
@@ -230,8 +226,6 @@ impl BaseBackupChunk {
         }
         insert_opt_hex(&mut obj, "metadata_binary_hex", &self.metadata_binary);
         insert_opt_hex(&mut obj, "metadata_json_hex", &self.metadata_json);
-        insert_opt_hex(&mut obj, "header_shadow_hex", &self.header_shadow);
-        insert_opt_hex(&mut obj, "metadata_shadow_hex", &self.metadata_shadow);
 
         obj.insert(
             "basebackup_available".to_string(),
@@ -315,8 +309,6 @@ impl BaseBackupChunk {
             snapshot_hex: decode_opt_hex(&obj, "snapshot_hex")?,
             metadata_binary: decode_opt_hex(&obj, "metadata_binary_hex")?,
             metadata_json: decode_opt_hex(&obj, "metadata_json_hex")?,
-            header_shadow: decode_opt_hex(&obj, "header_shadow_hex")?,
-            metadata_shadow: decode_opt_hex(&obj, "metadata_shadow_hex")?,
             basebackup_available: get_bool_default(&obj, "basebackup_available", false),
             basebackup_timeline: get_opt_u64(&obj, "basebackup_timeline"),
             basebackup_start_lsn: get_opt_u64(&obj, "basebackup_start_lsn"),
@@ -429,8 +421,6 @@ mod tests {
             snapshot_hex: None,
             metadata_binary: Some(b"metadata-binary".to_vec()),
             metadata_json: Some(b"metadata-json".to_vec()),
-            header_shadow: Some(b"header-shadow".to_vec()),
-            metadata_shadow: Some(b"metadata-shadow".to_vec()),
             basebackup_available: true,
             basebackup_timeline: Some(1),
             basebackup_start_lsn: Some(0),

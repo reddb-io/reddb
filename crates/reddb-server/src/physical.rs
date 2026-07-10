@@ -14,14 +14,13 @@ pub const DEFAULT_GRID_BLOCK_SIZE: usize = 512 * 1024;
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
 pub use reddb_file::layout::PHYSICAL_METADATA_BINARY_EXTENSION;
 pub use reddb_file::{
-    fold_dwb_into_wal_enabled, fold_pager_meta_enabled, meta_json_sidecar_enabled,
-    seqn_journal_enabled, seqn_journal_retention, set_fold_dwb_into_wal_enabled,
-    set_fold_pager_meta_enabled, set_meta_json_sidecar_enabled, set_seqn_journal_enabled,
-    set_seqn_journal_retention, BlockReference, ExportDescriptor, ManifestEvent, ManifestEventKind,
-    ManifestPointers, PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalTreeDefinition,
-    SnapshotDescriptor, SuperblockHeader, DEFAULT_METADATA_JOURNAL_RETENTION,
-    DEFAULT_SUPERBLOCK_COPIES, OPT_IN_METADATA_JOURNAL_RETENTION,
-    PHYSICAL_METADATA_PROTOCOL_VERSION,
+    fold_dwb_into_wal_enabled, meta_json_sidecar_enabled, seqn_journal_enabled,
+    seqn_journal_retention, set_fold_dwb_into_wal_enabled, set_meta_json_sidecar_enabled,
+    set_seqn_journal_enabled, set_seqn_journal_retention, BlockReference, ExportDescriptor,
+    ManifestEvent, ManifestEventKind, ManifestPointers, PhysicalAnalyticsJob,
+    PhysicalGraphProjection, PhysicalTreeDefinition, SnapshotDescriptor, SuperblockHeader,
+    DEFAULT_METADATA_JOURNAL_RETENTION, DEFAULT_SUPERBLOCK_COPIES,
+    OPT_IN_METADATA_JOURNAL_RETENTION, PHYSICAL_METADATA_PROTOCOL_VERSION,
 };
 pub const DEFAULT_MANIFEST_EVENT_HISTORY: usize = 256;
 

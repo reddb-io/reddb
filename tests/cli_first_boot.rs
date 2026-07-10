@@ -173,14 +173,16 @@ fn wait_for_exit(server: &mut ServerChild, timeout: Duration) -> Option<i32> {
     None
 }
 
-/// The paged operational-directory layout writes a `<path>-hdr` sidecar
-/// next to the main file; the embedded single-file layout does not. Its
-/// presence is therefore a reliable marker that the paged vault was
-/// created in place.
-fn paged_layout_marker(db_path: &Path) -> PathBuf {
-    let mut name = db_path.file_name().unwrap().to_os_string();
-    name.push("-hdr");
-    db_path.with_file_name(name)
+/// A paged store carries the `RDDB` magic at the start of page 0's payload
+/// (after the 32-byte page header, ADR 0038 §2); the embedded single-file
+/// layout does not. That in-file magic is the marker that the paged vault
+/// was created in place — the `-hdr` sidecar that used to serve this role
+/// is retired.
+fn paged_vault_created(db_path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(db_path) else {
+        return false;
+    };
+    bytes.get(32..36) == Some(b"RDDB".as_slice())
 }
 
 fn cloud_server_args<'a>(
@@ -250,9 +252,9 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
     );
     // The paged vault was created in place (operational-directory layout).
     assert!(
-        paged_layout_marker(&db_path).exists(),
-        "expected paged vault created in place ({} missing).\nstderr:\n{stderr}",
-        paged_layout_marker(&db_path).display()
+        paged_vault_created(&db_path),
+        "expected paged vault created in place ({} lacks the RDDB page-0 magic).\nstderr:\n{stderr}",
+        db_path.display()
     );
 
     drop(server); // kill + reap
@@ -321,7 +323,7 @@ fn no_intent_fresh_path_keeps_vault_gate_error() {
     );
     // It must NOT have silently created a paged vault.
     assert!(
-        !paged_layout_marker(&db_path).exists(),
+        !paged_vault_created(&db_path),
         "no-intent boot must not self-create a paged vault"
     );
 }
@@ -370,7 +372,7 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
         "--bootstrap-cert-out file was not written.\nstderr:\n{stderr}"
     );
     assert!(
-        paged_layout_marker(&db_path).exists(),
+        paged_vault_created(&db_path),
         "first boot must create the paged vault in place.\nstderr:\n{stderr}"
     );
     drop(server); // kill + reap

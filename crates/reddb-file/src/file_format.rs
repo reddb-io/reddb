@@ -786,6 +786,141 @@ pub fn encode_database_header(
     )
 }
 
+// ── Paged superblock zone (ADR 0038 §2 phase 1) ─────────────────────────
+//
+// The first two sectors of a paged `.rdb` are the superblock zone: a
+// ping-pong pair of fixed-size slots. Each slot holds the page-0 image (page
+// header + database header + encryption header) followed by a trailer that
+// carries the slot's copy index, generation counter and CRC.
+//
+// An update always writes the *older* slot and fsyncs before it becomes the
+// newest valid copy, so a crash mid-write can only ever damage the copy that
+// was already stale. `select_paged_superblock` picks the highest generation
+// whose CRC verifies; both invalid means the store does not open.
+//
+// The zone lives inside page 0's 16 KiB, whose tail was unused. Page 0 is
+// therefore no longer a checksummed `Page` — the slot CRCs are its integrity
+// contract.
+
+/// Bytes per superblock slot. Sector-aligned so one slot write never touches
+/// its sibling.
+pub const PAGED_SUPERBLOCK_SLOT_SIZE: usize = 4096;
+
+/// The ping-pong pair.
+pub const PAGED_SUPERBLOCK_SLOT_COUNT: usize = 2;
+
+/// Total bytes reserved for the superblock zone at the head of the file.
+pub const PAGED_SUPERBLOCK_ZONE_SIZE: usize =
+    PAGED_SUPERBLOCK_SLOT_SIZE * PAGED_SUPERBLOCK_SLOT_COUNT;
+
+const PAGED_SUPERBLOCK_MAGIC: [u8; 8] = *b"RDBPSBK1";
+const PAGED_SUPERBLOCK_SLOT_VERSION: u32 = 1;
+
+/// Offset of the trailer within a slot: magic(8) ‖ version(4) ‖ copy(4) ‖
+/// generation(8) ‖ crc(4) ‖ reserved(4). Everything before it is the page-0
+/// image, which is why the offline migration tool can strip the trailer to
+/// recover the sidecar-era page 0 byte for byte.
+pub const PAGED_SUPERBLOCK_TRAILER_OFFSET: usize = PAGED_SUPERBLOCK_SLOT_SIZE - 32;
+const PAGED_SUPERBLOCK_VERSION_OFFSET: usize = PAGED_SUPERBLOCK_TRAILER_OFFSET + 8;
+const PAGED_SUPERBLOCK_COPY_OFFSET: usize = PAGED_SUPERBLOCK_TRAILER_OFFSET + 12;
+const PAGED_SUPERBLOCK_GENERATION_OFFSET: usize = PAGED_SUPERBLOCK_TRAILER_OFFSET + 16;
+const PAGED_SUPERBLOCK_CRC_OFFSET: usize = PAGED_SUPERBLOCK_TRAILER_OFFSET + 24;
+
+/// The newest valid copy found in a superblock zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PagedSuperblockSelection {
+    pub copy_index: usize,
+    pub generation: u64,
+}
+
+/// Byte offset of `copy_index`'s slot from the start of the file.
+pub fn paged_superblock_slot_offset(copy_index: usize) -> u64 {
+    (copy_index % PAGED_SUPERBLOCK_SLOT_COUNT) as u64 * PAGED_SUPERBLOCK_SLOT_SIZE as u64
+}
+
+/// The copy a fresh update must target: always the one that is *not* newest,
+/// so the newest durable copy survives a crash during the write.
+pub fn paged_superblock_next_copy(newest: Option<PagedSuperblockSelection>) -> usize {
+    match newest {
+        Some(selection) => (selection.copy_index + 1) % PAGED_SUPERBLOCK_SLOT_COUNT,
+        None => 0,
+    }
+}
+
+/// Stamp `slot`'s trailer (copy index, generation) and seal it with a CRC over
+/// everything that precedes the checksum field.
+pub fn seal_paged_superblock_slot(
+    slot: &mut [u8],
+    copy_index: usize,
+    generation: u64,
+) -> Result<(), DatabaseHeaderError> {
+    ensure_len(slot, PAGED_SUPERBLOCK_SLOT_SIZE)?;
+    slot[PAGED_SUPERBLOCK_TRAILER_OFFSET..PAGED_SUPERBLOCK_TRAILER_OFFSET + 8]
+        .copy_from_slice(&PAGED_SUPERBLOCK_MAGIC);
+    write_u32(
+        slot,
+        PAGED_SUPERBLOCK_VERSION_OFFSET,
+        PAGED_SUPERBLOCK_SLOT_VERSION,
+    )?;
+    write_u32(
+        slot,
+        PAGED_SUPERBLOCK_COPY_OFFSET,
+        u32::try_from(copy_index).unwrap_or(u32::MAX),
+    )?;
+    write_u64(slot, PAGED_SUPERBLOCK_GENERATION_OFFSET, generation)?;
+    let crc = paged_superblock_crc(&slot[..PAGED_SUPERBLOCK_CRC_OFFSET]);
+    write_u32(slot, PAGED_SUPERBLOCK_CRC_OFFSET, crc)?;
+    // The 4 trailing reserved bytes stay zero.
+    write_u32(slot, PAGED_SUPERBLOCK_CRC_OFFSET + 4, 0)
+}
+
+/// Decode `slot`'s generation, or `None` when the slot was never written, is
+/// torn, carries a foreign copy index, or fails its CRC.
+pub fn paged_superblock_slot_generation(slot: &[u8], copy_index: usize) -> Option<u64> {
+    if slot.len() < PAGED_SUPERBLOCK_SLOT_SIZE {
+        return None;
+    }
+    if slot[PAGED_SUPERBLOCK_TRAILER_OFFSET..PAGED_SUPERBLOCK_TRAILER_OFFSET + 8]
+        != PAGED_SUPERBLOCK_MAGIC
+    {
+        return None;
+    }
+    if read_u32(slot, PAGED_SUPERBLOCK_VERSION_OFFSET).ok()? != PAGED_SUPERBLOCK_SLOT_VERSION {
+        return None;
+    }
+    // A slot that names a different copy is a misdirected write, not a
+    // legitimately older generation.
+    if read_u32(slot, PAGED_SUPERBLOCK_COPY_OFFSET).ok()? != u32::try_from(copy_index).ok()? {
+        return None;
+    }
+    let stored = read_u32(slot, PAGED_SUPERBLOCK_CRC_OFFSET).ok()?;
+    if paged_superblock_crc(&slot[..PAGED_SUPERBLOCK_CRC_OFFSET]) != stored {
+        return None;
+    }
+    read_u64(slot, PAGED_SUPERBLOCK_GENERATION_OFFSET).ok()
+}
+
+/// Pick the newest valid copy in a full superblock zone. `None` means both
+/// copies are invalid: the caller must refuse to open the store.
+pub fn select_paged_superblock(zone: &[u8]) -> Option<PagedSuperblockSelection> {
+    (0..PAGED_SUPERBLOCK_SLOT_COUNT)
+        .filter_map(|copy_index| {
+            let start = copy_index * PAGED_SUPERBLOCK_SLOT_SIZE;
+            let slot = zone.get(start..start + PAGED_SUPERBLOCK_SLOT_SIZE)?;
+            Some(PagedSuperblockSelection {
+                copy_index,
+                generation: paged_superblock_slot_generation(slot, copy_index)?,
+            })
+        })
+        .max_by_key(|selection| selection.generation)
+}
+
+fn paged_superblock_crc(bytes: &[u8]) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
 fn ensure_len(bytes: &[u8], need: usize) -> Result<(), DatabaseHeaderError> {
     if bytes.len() < need {
         return Err(DatabaseHeaderError::ShortPage {
@@ -838,6 +973,132 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) -> Result<(), Database
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sealed_zone(gen_a: Option<u64>, gen_b: Option<u64>) -> Vec<u8> {
+        let mut zone = vec![0u8; PAGED_SUPERBLOCK_ZONE_SIZE];
+        for (copy_index, generation) in [gen_a, gen_b].into_iter().enumerate() {
+            let Some(generation) = generation else {
+                continue;
+            };
+            let start = copy_index * PAGED_SUPERBLOCK_SLOT_SIZE;
+            let slot = &mut zone[start..start + PAGED_SUPERBLOCK_SLOT_SIZE];
+            init_database_header_page(slot, 3).expect("init header");
+            seal_paged_superblock_slot(slot, copy_index, generation).expect("seal slot");
+        }
+        zone
+    }
+
+    #[test]
+    fn superblock_zone_fits_two_sector_aligned_slots_before_page_one() {
+        assert_eq!(PAGED_SUPERBLOCK_SLOT_SIZE, 4096);
+        assert_eq!(PAGED_SUPERBLOCK_ZONE_SIZE, 8192);
+        // Both slots live inside page 0, so page 1 is never touched by a
+        // superblock update.
+        assert!(PAGED_SUPERBLOCK_ZONE_SIZE <= PAGED_PAGE_SIZE);
+        // The database header must not overrun into the slot trailer.
+        assert!(DB_HEADER_MIN_LEN < PAGED_SUPERBLOCK_TRAILER_OFFSET);
+        assert_eq!(paged_superblock_slot_offset(0), 0);
+        assert_eq!(paged_superblock_slot_offset(1), 4096);
+    }
+
+    #[test]
+    fn sealed_slot_round_trips_generation_and_keeps_the_header_readable() {
+        let mut slot = vec![0u8; PAGED_SUPERBLOCK_SLOT_SIZE];
+        init_database_header_page(&mut slot, 7).expect("init header");
+        seal_paged_superblock_slot(&mut slot, 1, 42).expect("seal slot");
+
+        assert_eq!(paged_superblock_slot_generation(&slot, 1), Some(42));
+        assert_eq!(
+            database_header_page_count(&slot).expect("database_header_page_count() should succeed"),
+            7
+        );
+    }
+
+    #[test]
+    fn selection_prefers_the_newest_valid_copy_and_survives_one_torn_slot() {
+        let zone = sealed_zone(Some(4), Some(5));
+        assert_eq!(
+            select_paged_superblock(&zone),
+            Some(PagedSuperblockSelection {
+                copy_index: 1,
+                generation: 5
+            })
+        );
+
+        // Tear the newer copy: open falls back to the older intact one.
+        let mut torn = zone.clone();
+        torn[PAGED_SUPERBLOCK_SLOT_SIZE + 64] ^= 0xFF;
+        assert_eq!(
+            select_paged_superblock(&torn),
+            Some(PagedSuperblockSelection {
+                copy_index: 0,
+                generation: 4
+            })
+        );
+    }
+
+    #[test]
+    fn a_misdirected_slot_copy_is_rejected_not_read_as_an_older_generation() {
+        // Slot 0's bytes written at slot 1's offset: right data, wrong place.
+        let zone = sealed_zone(Some(9), None);
+        let (slot_zero, _) = zone.split_at(PAGED_SUPERBLOCK_SLOT_SIZE);
+        assert_eq!(paged_superblock_slot_generation(slot_zero, 1), None);
+    }
+
+    #[test]
+    fn both_copies_invalid_yields_no_selection() {
+        assert_eq!(
+            select_paged_superblock(&vec![0u8; PAGED_SUPERBLOCK_ZONE_SIZE]),
+            None
+        );
+        assert_eq!(select_paged_superblock(&[]), None);
+
+        let mut zone = sealed_zone(Some(1), Some(2));
+        zone[64] ^= 0xFF;
+        zone[PAGED_SUPERBLOCK_SLOT_SIZE + 64] ^= 0xFF;
+        assert_eq!(select_paged_superblock(&zone), None);
+    }
+
+    #[test]
+    fn the_next_copy_to_write_is_always_the_stale_one() {
+        assert_eq!(paged_superblock_next_copy(None), 0);
+        assert_eq!(
+            paged_superblock_next_copy(Some(PagedSuperblockSelection {
+                copy_index: 0,
+                generation: 3
+            })),
+            1
+        );
+        assert_eq!(
+            paged_superblock_next_copy(Some(PagedSuperblockSelection {
+                copy_index: 1,
+                generation: 3
+            })),
+            0
+        );
+    }
+
+    #[test]
+    fn bit_rot_anywhere_in_the_slot_payload_fails_the_crc() {
+        let mut slot = vec![0u8; PAGED_SUPERBLOCK_SLOT_SIZE];
+        init_database_header_page(&mut slot, 3).expect("init header");
+        seal_paged_superblock_slot(&mut slot, 0, 1).expect("seal slot");
+
+        for offset in [
+            0,
+            40,
+            DB_HEADER_MIN_LEN - 1,
+            PAGED_SUPERBLOCK_SLOT_SIZE - 33,
+        ] {
+            let mut rotted = slot.clone();
+            rotted[offset] ^= 0x01;
+            assert_eq!(
+                paged_superblock_slot_generation(&rotted, 0),
+                None,
+                "bit rot at offset {offset} must fail the slot CRC"
+            );
+        }
+    }
 
     #[test]
     fn paged_page_header_round_trips_raw_layout() {

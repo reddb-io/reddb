@@ -216,8 +216,6 @@ fn ephemeral_data_artifacts(data_path: &Path) -> Vec<PathBuf> {
         result_cache_l2_path.clone(),
         reddb_file::layout::pager_legacy_wal_path(data_path),
         reddb_file::layout::engine_wal_path(data_path),
-        reddb_file::layout::pager_header_path(data_path),
-        reddb_file::layout::pager_meta_path(data_path),
         reddb_file::layout::pager_dwb_path(data_path),
         legacy_logical_slots_path.clone(),
         reddb_file::layout::legacy_logical_slots_temp_path(&legacy_logical_slots_path),

@@ -3417,12 +3417,6 @@ impl RedDb for GrpcRuntime {
                 chunk.metadata_json = read_snapshot_sidecar(
                     &crate::physical::PhysicalMetadataFile::metadata_path_for(path),
                 )?;
-
-                chunk.header_shadow =
-                    read_snapshot_sidecar(&reddb_file::layout::pager_header_shadow_path(path))?;
-
-                chunk.metadata_shadow =
-                    read_snapshot_sidecar(&reddb_file::layout::pager_meta_shadow_path(path))?;
             }
         }
         let payload = chunk.encode_json();
