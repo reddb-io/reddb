@@ -165,6 +165,15 @@ fn current_unix_secs() -> u64 {
 
 const SEALED_MULTI_ZONE_MAX_INTERVALS: usize = 4;
 
+/// Approximate cost of one entry in the `deleted` tombstone set: the 8-byte
+/// entity id plus hashbrown's control byte and load-factor slack.
+///
+/// Tombstones outlive the entity they bury — a sealed segment holds its
+/// `deleted` set for as long as the segment lives. That set is the memory
+/// consolidation reclaims even in HashMap mode, where the entity body itself
+/// was already freed by `force_delete`.
+const TOMBSTONE_ENTRY_BYTES: u64 = 16;
+
 #[derive(Debug, Clone)]
 struct UpdateIndexSnapshot {
     pk_column_name: Option<String>,
@@ -452,8 +461,16 @@ pub struct GrowingSegment {
 
     /// Sequence counter for ordering
     sequence: AtomicU64,
-    /// Approximate memory usage
+    /// Approximate payload bytes of the entities physically resident in this
+    /// segment. Resident means "still occupying memory", which includes
+    /// tombstoned entities in flat mode (their slot must stay so positional
+    /// lookup by `id - base_entity_id` keeps working).
     memory_bytes: AtomicU64,
+    /// Payload bytes of the tombstoned entities that are still resident.
+    /// `memory_bytes - dead_entity_bytes` is the live payload.
+    dead_entity_bytes: u64,
+    /// Count of tombstoned entities that are still resident.
+    dead_resident_count: usize,
 
     /// Epoch counter for lock-free reads of `flat_entities`.
     ///
@@ -529,6 +546,18 @@ impl GrowingSegment {
 
     /// Create a new growing segment
     pub fn new(id: SegmentId, collection: impl Into<String>) -> Self {
+        Self::with_bloom_capacity(id, collection, 100_000)
+    }
+
+    /// Create a growing segment whose bloom filter is sized for a known
+    /// entity count. Consolidation uses this: the merged segment's live
+    /// count is known up front, so its bloom need not be sized for the
+    /// 100k default when it holds a handful of rows.
+    pub(crate) fn with_bloom_capacity(
+        id: SegmentId,
+        collection: impl Into<String>,
+        expected_entities: usize,
+    ) -> Self {
         let now = current_unix_secs();
 
         Self {
@@ -547,11 +576,13 @@ impl GrowingSegment {
             kind_index: HashMap::new(),
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
-            bloom: BloomFilter::with_capacity(100_000, 0.01),
+            bloom: BloomFilter::with_capacity(expected_entities.max(1), 0.01),
             col_zones: HashMap::new(),
             sealed_col_zones: HashMap::new(),
             sequence: AtomicU64::new(0),
             memory_bytes: AtomicU64::new(0),
+            dead_entity_bytes: 0,
+            dead_resident_count: 0,
             published_flat_len: AtomicUsize::new(0),
         }
     }
@@ -671,6 +702,37 @@ impl GrowingSegment {
         Ok(())
     }
 
+    /// Tombstone a flat-mode entity in place. Its slot stays so that positional
+    /// lookup by `id - base_entity_id` keeps working, so its payload keeps
+    /// costing memory until consolidation merges the segment away.
+    ///
+    /// Returns `false` when the entity was already tombstoned.
+    fn tombstone_flat_entity(&mut self, idx: usize, id: EntityId) -> bool {
+        if !self.deleted.insert(id) {
+            return false;
+        }
+        let size = Self::estimate_entity_size(&self.flat_entities[idx]) as u64;
+        self.dead_entity_bytes += size;
+        self.dead_resident_count += 1;
+        self.metadata.remove_all(id);
+        true
+    }
+
+    /// Remove a HashMap-resident entity. The payload is freed immediately; only
+    /// the tombstone survives, and consolidation reclaims that.
+    ///
+    /// Returns `false` when the entity is not present.
+    fn remove_hashmap_entity(&mut self, id: EntityId) -> bool {
+        let Some(entity) = self.entities.remove(&id) else {
+            return false;
+        };
+        self.release_memory(Self::estimate_entity_size(&entity));
+        self.unindex_entity(&entity);
+        self.metadata.remove_all(id);
+        self.deleted.insert(id);
+        true
+    }
+
     pub fn delete_batch(&mut self, ids: &[EntityId]) -> Result<Vec<EntityId>, SegmentError> {
         if !self.state.is_writable() {
             return Err(SegmentError::NotWritable);
@@ -685,34 +747,23 @@ impl GrowingSegment {
             for &id in ids {
                 let raw = id.raw();
                 if raw < self.base_entity_id {
-                    if let Some(entity) = self.entities.remove(&id) {
-                        self.unindex_entity(&entity);
-                        self.metadata.remove_all(id);
-                        self.deleted.insert(id);
+                    if self.remove_hashmap_entity(id) {
                         deleted_ids.push(id);
                     }
                     continue;
                 }
                 let idx = (raw - self.base_entity_id) as usize;
                 if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
-                    if !self.deleted.contains(&id) {
-                        self.metadata.remove_all(id);
-                        self.deleted.insert(id);
+                    if self.tombstone_flat_entity(idx, id) {
                         deleted_ids.push(id);
                     }
-                } else if let Some(entity) = self.entities.remove(&id) {
-                    self.unindex_entity(&entity);
-                    self.metadata.remove_all(id);
-                    self.deleted.insert(id);
+                } else if self.remove_hashmap_entity(id) {
                     deleted_ids.push(id);
                 }
             }
         } else {
             for &id in ids {
-                if let Some(entity) = self.entities.remove(&id) {
-                    self.unindex_entity(&entity);
-                    self.metadata.remove_all(id);
-                    self.deleted.insert(id);
+                if self.remove_hashmap_entity(id) {
                     deleted_ids.push(id);
                 }
             }
@@ -728,6 +779,117 @@ impl GrowingSegment {
     /// Update memory estimate
     fn add_memory(&self, bytes: usize) {
         self.memory_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Release a resident entity's payload from the memory estimate. Only for
+    /// paths that physically drop the entity (HashMap removal, eviction).
+    fn release_memory(&self, bytes: usize) {
+        let mut current = self.memory_bytes.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(bytes as u64);
+            match self.memory_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Entities physically present, live or tombstoned-but-resident.
+    pub(crate) fn resident_entity_count(&self) -> usize {
+        self.flat_entities.len() + self.entities.len()
+    }
+
+    /// Entities visible to readers.
+    pub(crate) fn live_entity_count(&self) -> usize {
+        self.resident_entity_count()
+            .saturating_sub(self.dead_resident_count)
+    }
+
+    /// Tombstones this segment carries — including the ones whose entity body
+    /// was already freed. The set itself is what leaks without consolidation.
+    pub(crate) fn tombstone_count(&self) -> usize {
+        self.deleted.len()
+    }
+
+    /// Approximate bytes this segment holds: resident entity payloads plus the
+    /// tombstone set.
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.memory_bytes.load(Ordering::Relaxed)
+            + self.deleted.len() as u64 * TOMBSTONE_ENTRY_BYTES
+    }
+
+    /// Bytes a consolidation of this segment would return to the budget: the
+    /// payloads of resident tombstones plus the tombstone set that buries them.
+    pub(crate) fn reclaimable_bytes(&self) -> u64 {
+        self.dead_entity_bytes + self.deleted.len() as u64 * TOMBSTONE_ENTRY_BYTES
+    }
+
+    /// Snapshot the ids of every live entity, in iteration order.
+    ///
+    /// Consolidation copies a segment across several maintenance ticks, so it
+    /// needs a stable cursor into the segment that survives concurrent
+    /// tombstoning. Ids are stable; iteration position is not.
+    pub(crate) fn live_entity_ids(&self) -> Vec<EntityId> {
+        let mut ids = Vec::with_capacity(self.live_entity_count());
+        self.for_each_fast(|entity| {
+            ids.push(entity.id);
+            true
+        });
+        ids
+    }
+
+    /// Take an entity from another segment, preserving its identity.
+    ///
+    /// Unlike `insert`, this keeps `sequence_id` — the merged segment is the
+    /// same rows, not new ones, and callers (`physical_collection_roots`, MVCC
+    /// ordering) read that field. All derived structures are rebuilt: kind
+    /// index, primary-key index, cross-reference forward/reverse indexes, bloom
+    /// filter, and per-column zone maps.
+    pub(crate) fn adopt_entity(&mut self, entity: UnifiedEntity, metadata: Option<Metadata>) {
+        let id = entity.id;
+
+        // Keep the sequence counter ahead of every adopted entity, so a later
+        // insert into this segment cannot re-issue a live sequence number.
+        let next = entity.sequence_id.saturating_add(1);
+        if self.sequence.load(Ordering::Relaxed) < next {
+            self.sequence.store(next, Ordering::Relaxed);
+        }
+
+        self.add_memory(Self::estimate_entity_size(&entity));
+        self.index_entity(&entity);
+        self.update_col_zones_from_entity(&entity);
+        self.entities.insert(id, entity);
+
+        if let Some(metadata) = metadata {
+            if !metadata.is_empty() {
+                self.metadata.set_all(id, &metadata);
+            }
+        }
+    }
+
+    /// Physically remove an entity without leaving a tombstone.
+    ///
+    /// Only legal on a segment nobody can see yet — the half-built merged
+    /// segment, when the swap discovers a copied row was deleted from its
+    /// source mid-consolidation. A tombstone here would defeat the whole point.
+    pub(crate) fn evict_entity(&mut self, id: EntityId) -> bool {
+        let Some(entity) = self.entities.remove(&id) else {
+            return false;
+        };
+        self.release_memory(Self::estimate_entity_size(&entity));
+        self.unindex_entity(&entity);
+        for cross_ref in entity.cross_refs() {
+            if let Some(reverse) = self.cross_ref_reverse.get_mut(&cross_ref.target) {
+                reverse.retain(|(source, _)| *source != id);
+            }
+        }
+        self.metadata.remove_all(id);
+        true
     }
 
     /// Estimate memory for an entity
@@ -1125,6 +1287,12 @@ impl GrowingSegment {
         // no columnar shortcut.
         let mut named_zone_updates: Vec<(String, Value)> = Vec::new();
 
+        // Payload bytes for the whole batch, applied with one atomic add.
+        // `bulk_insert` used to skip memory tracking entirely, which left the
+        // budget blind to the rows that dominate a bulk-loaded store — and
+        // blind to what consolidation reclaims from them.
+        let mut batch_bytes: usize = 0;
+
         if self.use_flat {
             self.flat_entities.reserve(n);
             for (i, mut entity) in entities.into_iter().enumerate() {
@@ -1132,6 +1300,7 @@ impl GrowingSegment {
                 let id = entity.id;
                 kind_set.insert(id);
                 ids.push(id);
+                batch_bytes += Self::estimate_entity_size(&entity);
                 if let EntityData::Row(row) = &entity.data {
                     if row.schema.is_some() && !row.columns.is_empty() {
                         if columnar_zone_updates.is_empty() {
@@ -1184,6 +1353,7 @@ impl GrowingSegment {
                 let id = entity.id;
                 kind_set.insert(id);
                 ids.push(id);
+                batch_bytes += Self::estimate_entity_size(&entity);
                 if let EntityData::Row(row) = &entity.data {
                     for (col, val) in row.iter_fields() {
                         if !matches!(val, Value::Null) {
@@ -1234,6 +1404,7 @@ impl GrowingSegment {
                 .or_insert_with(|| ColZone::new(val));
         }
 
+        self.add_memory(batch_bytes);
         self.last_write_at = now;
 
         // Publish the new flat length so lock-free readers can see the new entities.
@@ -1253,22 +1424,14 @@ impl GrowingSegment {
             if raw >= self.base_entity_id {
                 let idx = (raw - self.base_entity_id) as usize;
                 if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
-                    self.deleted.insert(id);
-                    self.metadata.remove_all(id);
+                    self.tombstone_flat_entity(idx, id);
                     return true;
                 }
             }
-            return false;
+            return self.remove_hashmap_entity(id);
         }
 
-        if let Some(entity) = self.entities.remove(&id) {
-            self.unindex_entity(&entity);
-            self.metadata.remove_all(id);
-            self.deleted.insert(id);
-            true
-        } else {
-            false
-        }
+        self.remove_hashmap_entity(id)
     }
 
     /// Update an entity in this segment regardless of its seal state.
@@ -1298,9 +1461,9 @@ impl UnifiedSegment for GrowingSegment {
 
     fn stats(&self) -> SegmentStats {
         let mut stats = SegmentStats {
-            entity_count: self.entities.len(),
+            entity_count: self.live_entity_count(),
             deleted_count: self.deleted.len(),
-            memory_bytes: self.memory_bytes.load(Ordering::Relaxed) as usize,
+            memory_bytes: self.resident_bytes() as usize,
             ..Default::default()
         };
 
@@ -1320,12 +1483,7 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn entity_count(&self) -> usize {
-        let total = if self.use_flat {
-            self.flat_entities.len()
-        } else {
-            self.entities.len()
-        };
-        total.saturating_sub(self.deleted.len())
+        self.live_entity_count()
     }
 
     fn contains(&self, id: EntityId) -> bool {
@@ -1448,38 +1606,14 @@ impl UnifiedSegment for GrowingSegment {
             if raw >= self.base_entity_id {
                 let idx = (raw - self.base_entity_id) as usize;
                 if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
-                    self.metadata.remove_all(id);
-                    self.deleted.insert(id);
+                    self.tombstone_flat_entity(idx, id);
                     return Ok(true);
                 }
             }
-            if let Some(entity) = self.entities.remove(&id) {
-                self.unindex_entity(&entity);
-                self.metadata.remove_all(id);
-                self.deleted.insert(id);
-                return Ok(true);
-            }
-            return Ok(false);
+            return Ok(self.remove_hashmap_entity(id));
         }
 
-        // Remove entity from HashMap
-        let entity = self.entities.remove(&id);
-        if entity.is_none() {
-            return Ok(false);
-        }
-
-        // Unindex
-        if let Some(ref e) = entity {
-            self.unindex_entity(e);
-        }
-
-        // Remove metadata
-        self.metadata.remove_all(id);
-
-        // Mark as deleted (tombstone)
-        self.deleted.insert(id);
-
-        Ok(true)
+        Ok(self.remove_hashmap_entity(id))
     }
 
     fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
