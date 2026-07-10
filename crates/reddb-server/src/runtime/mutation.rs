@@ -102,6 +102,16 @@ impl<'rt> MutationEngine<'rt> {
         self.runtime
             .apply_sync_moderation_gate(&collection, &mut rows)?;
 
+        let growth_bytes = rows
+            .iter()
+            .map(|row| crate::runtime::memory_admission::estimate_row_growth(&row.fields))
+            .fold(0, u64::saturating_add);
+        self.runtime.admit_non_evictable_growth(
+            crate::storage::memory_pools::MemoryPool::SegmentArena,
+            &format!("insert into {collection}"),
+            growth_bytes,
+        )?;
+
         match rows.len() {
             0 => Ok(MutationResult::empty()),
             1 => self.append_one(collection, rows.remove(0)),

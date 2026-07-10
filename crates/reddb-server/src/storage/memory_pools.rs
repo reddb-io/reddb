@@ -298,6 +298,15 @@ pub struct PoolUsage {
     pub used_bytes: u64,
 }
 
+/// Process-level enforcement counters surfaced by `red.stats`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryEnforcementSnapshot {
+    pub admissions_denied: u64,
+    pub pressure_reclamations_triggered: u64,
+    pub pressure_bytes_reclaimed: u64,
+    pub high_water_bytes: u64,
+}
+
 /// The one shared accounting pool: fixed shares, live usage.
 ///
 /// Usage is a relaxed atomic per pool. Reporting is a single store or
@@ -309,6 +318,10 @@ pub struct MemoryAccounting {
     budget: MemoryBudget,
     shares: BudgetShares,
     used_bytes: [AtomicU64; MEMORY_POOL_COUNT],
+    admissions_denied: AtomicU64,
+    pressure_reclamations_triggered: AtomicU64,
+    pressure_bytes_reclaimed: AtomicU64,
+    high_water_bytes: AtomicU64,
 }
 
 impl MemoryAccounting {
@@ -327,6 +340,10 @@ impl MemoryAccounting {
             budget,
             shares,
             used_bytes: std::array::from_fn(|_| AtomicU64::new(0)),
+            admissions_denied: AtomicU64::new(0),
+            pressure_reclamations_triggered: AtomicU64::new(0),
+            pressure_bytes_reclaimed: AtomicU64::new(0),
+            high_water_bytes: AtomicU64::new(0),
         }
     }
 
@@ -394,12 +411,51 @@ impl MemoryAccounting {
             used_bytes: self.used_bytes(pool),
         })
     }
+
+    /// Record a sampled total as the shared accounting high-water mark.
+    pub fn observe_total_used(&self, total: u64) {
+        let mut current = self.high_water_bytes.load(Ordering::Relaxed);
+        while total > current {
+            match self.high_water_bytes.compare_exchange_weak(
+                current,
+                total,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    pub fn record_admission_denied(&self) {
+        self.admissions_denied.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_pressure_reclamation(&self, reclaimed_bytes: u64) {
+        self.pressure_reclamations_triggered
+            .fetch_add(1, Ordering::Relaxed);
+        self.pressure_bytes_reclaimed
+            .fetch_add(reclaimed_bytes, Ordering::Relaxed);
+    }
+
+    pub fn enforcement_snapshot(&self) -> MemoryEnforcementSnapshot {
+        MemoryEnforcementSnapshot {
+            admissions_denied: self.admissions_denied.load(Ordering::Relaxed),
+            pressure_reclamations_triggered: self
+                .pressure_reclamations_triggered
+                .load(Ordering::Relaxed),
+            pressure_bytes_reclaimed: self.pressure_bytes_reclaimed.load(Ordering::Relaxed),
+            high_water_bytes: self.high_water_bytes.load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::memory_budget::MemoryBudgetSource;
+    use proptest::prelude::*;
 
     const GIB: u64 = 1 << 30;
     const MIB: u64 = 1 << 20;
@@ -632,5 +688,31 @@ mod tests {
             accounting.total_share_bytes()
         );
         assert!(accounting.total_share_bytes() <= accounting.budget().resolved_bytes);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn randomized_accounting_sequences_never_underflow_or_exceed_when_admitted(
+            ops in proptest::collection::vec((0usize..MEMORY_POOL_COUNT, 0u8..3, 0u64..4096), 1..256)
+        ) {
+            let accounting = MemoryAccounting::new(budget(64 * MIB), DeployProfile::Embedded);
+            let budget = accounting.budget().resolved_bytes;
+
+            for (pool_idx, op, bytes) in ops {
+                let pool = MEMORY_POOLS[pool_idx];
+                match op {
+                    0 => {
+                        if accounting.total_used_bytes().saturating_add(bytes) <= budget {
+                            accounting.charge(pool, bytes);
+                        }
+                    }
+                    1 => accounting.release(pool, bytes),
+                    _ => accounting.report(pool, accounting.used_bytes(pool).saturating_sub(bytes)),
+                }
+
+                prop_assert!(accounting.used_bytes(pool) <= budget);
+                prop_assert!(accounting.total_used_bytes() <= budget);
+            }
+        }
     }
 }

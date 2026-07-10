@@ -325,6 +325,15 @@ impl SegmentManager {
             .fold(growing, u64::saturating_add)
     }
 
+    /// Bytes a pressure-triggered consolidation could plausibly return.
+    pub fn reclaimable_bytes(&self) -> u64 {
+        self.sealed
+            .read()
+            .iter()
+            .map(|segment| segment.read().reclaimable_bytes())
+            .fold(0, u64::saturating_add)
+    }
+
     /// Generate a new entity ID
     pub fn next_entity_id(&self) -> EntityId {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
@@ -1643,6 +1652,10 @@ impl SegmentManager {
     /// Returns `true` when a run was started.
     fn start_consolidation(&self) -> bool {
         let sources = self.select_candidates();
+        self.start_consolidation_from_sources(sources)
+    }
+
+    fn start_consolidation_from_sources(&self, sources: Vec<SegmentId>) -> bool {
         if sources.len() < 2 && !self.candidates_carry_tombstones(&sources) {
             return false;
         }
@@ -1684,6 +1697,27 @@ impl SegmentManager {
         });
 
         self.stats.write().consolidation.runs_started += 1;
+        true
+    }
+
+    /// Run one paced consolidation tick because admission pressure needs
+    /// reclaimable bytes, even if the background thresholds have not fired.
+    ///
+    /// Returns true when the call started or advanced a consolidation run.
+    pub fn pressure_consolidation_tick(&self) -> bool {
+        if !self.config.enable_consolidation {
+            return false;
+        }
+
+        let running = self.consolidation.read().is_some();
+        if !running {
+            let sources = self.dirty_sealed_segments();
+            if !self.start_consolidation_from_sources(sources) {
+                return false;
+            }
+        }
+
+        self.consolidation_tick();
         true
     }
 
@@ -1747,6 +1781,17 @@ impl SegmentManager {
         }
 
         Vec::new()
+    }
+
+    fn dirty_sealed_segments(&self) -> Vec<SegmentId> {
+        self.sealed
+            .read()
+            .iter()
+            .filter_map(|segment_arc| {
+                let segment = segment_arc.read();
+                (segment.reclaimable_bytes() > 0).then(|| segment.id())
+            })
+            .collect()
     }
 
     /// A single candidate is still worth merging when it carries tombstones —
