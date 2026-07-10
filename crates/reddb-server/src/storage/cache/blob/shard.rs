@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use indexmap::IndexMap;
 
 use super::cache::{BlobCacheHit, BlobCacheKey};
 use super::entry::Entry;
@@ -11,7 +13,8 @@ use crate::storage::cache::extended_ttl::{EffectiveExpiry, ExpiryDecision, Exten
 /// still falls back to the normal `visited` sweep.
 #[derive(Debug)]
 pub(super) struct Shard {
-    entries: HashMap<BlobCacheKey, Entry>,
+    entries: IndexMap<BlobCacheKey, Entry>,
+    l2_second_hit_markers: HashSet<BlobCacheKey>,
     slots: Vec<Option<BlobCacheKey>>,
     free_slots: Vec<usize>,
     hand: usize,
@@ -21,7 +24,8 @@ pub(super) struct Shard {
 impl Shard {
     pub(super) fn new() -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: IndexMap::new(),
+            l2_second_hit_markers: HashSet::new(),
             slots: Vec::new(),
             free_slots: Vec::new(),
             hand: 0,
@@ -35,62 +39,69 @@ impl Shard {
         now_ms: u64,
         namespace_generation: u64,
     ) -> Lookup {
-        let Some(entry) = self.entries.get_mut(key) else {
-            return Lookup::Miss;
-        };
-        if entry.namespace_generation != namespace_generation {
-            let removed = self.remove(key).expect("entry exists");
-            return Lookup::Stale(removed);
-        }
-        // Fast path: extended is `off()` -- bypass `EffectiveExpiry::compute`
-        // entirely and use the legacy hard-only check. No idle/stale/jitter
-        // semantics, no last_access bookkeeping for callers that opted out.
-        if !entry.extended.is_active() {
-            if entry.is_expired_at(now_ms) {
-                let removed = self.remove(key).expect("entry exists");
-                return Lookup::Expired(removed);
-            }
-            entry.visited = true;
-            entry.last_access_unix_ms = now_ms;
-            return Lookup::Hit(entry.hit());
-        }
+        self.get_by_parts(&key.namespace, &key.key, now_ms, namespace_generation)
+    }
 
-        // Extended path: route through `EffectiveExpiry::compute` for
-        // idle / stale-while-revalidate decisions.
-        #[cfg(test)]
-        super::cache::EFFECTIVE_EXPIRY_COMPUTE_CALLS.with(|c| c.set(c.get() + 1));
-        let decision = EffectiveExpiry::compute(
-            entry.expires_at_unix_ms,
-            now_ms,
-            entry.last_access_unix_ms,
-            &entry.extended,
-        );
-        match decision {
-            ExpiryDecision::Fresh => {
-                entry.visited = true;
-                entry.last_access_unix_ms = now_ms;
-                Lookup::Hit(entry.hit())
-            }
-            ExpiryDecision::Stale {
-                window_remaining_ms,
-            } => {
-                entry.visited = true;
-                entry.last_access_unix_ms = now_ms;
-                Lookup::Hit(entry.hit_stale(window_remaining_ms))
-            }
-            ExpiryDecision::Expired => {
-                // Distinguish idle eviction from hard expiry so the caller
-                // can bump the right counter. Hard expiry implies a concrete
-                // `expires_at_unix_ms` already passed; otherwise the kill came
-                // from the idle-TTL gate.
-                let killed_by_idle = !entry.is_expired_at(now_ms);
-                let removed = self.remove(key).expect("entry exists");
-                if killed_by_idle {
-                    Lookup::IdleEvicted(removed)
+    pub(super) fn get_by_parts(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        now_ms: u64,
+        namespace_generation: u64,
+    ) -> Lookup {
+        let borrowed = BlobCacheKey::borrowed(namespace, key);
+        let remove = {
+            let Some(entry) = self.entries.get_mut(&borrowed) else {
+                return Lookup::Miss;
+            };
+            if entry.namespace_generation != namespace_generation {
+                Some(RemovalReason::Stale)
+            } else if !entry.extended.is_active() {
+                if entry.is_expired_at(now_ms) {
+                    Some(RemovalReason::Expired)
                 } else {
-                    Lookup::Expired(removed)
+                    entry.visited = true;
+                    entry.last_access_unix_ms = now_ms;
+                    return Lookup::Hit(entry.hit());
+                }
+            } else {
+                #[cfg(test)]
+                super::cache::EFFECTIVE_EXPIRY_COMPUTE_CALLS.with(|c| c.set(c.get() + 1));
+                match EffectiveExpiry::compute(
+                    entry.expires_at_unix_ms,
+                    now_ms,
+                    entry.last_access_unix_ms,
+                    &entry.extended,
+                ) {
+                    ExpiryDecision::Fresh => {
+                        entry.visited = true;
+                        entry.last_access_unix_ms = now_ms;
+                        return Lookup::Hit(entry.hit());
+                    }
+                    ExpiryDecision::Stale {
+                        window_remaining_ms,
+                    } => {
+                        entry.visited = true;
+                        entry.last_access_unix_ms = now_ms;
+                        return Lookup::Hit(entry.hit_stale(window_remaining_ms));
+                    }
+                    ExpiryDecision::Expired => {
+                        if entry.is_expired_at(now_ms) {
+                            Some(RemovalReason::Expired)
+                        } else {
+                            Some(RemovalReason::IdleEvicted)
+                        }
+                    }
                 }
             }
+        };
+
+        let key = BlobCacheKey::new(namespace, key);
+        let removed = self.remove(&key).expect("entry exists");
+        match remove.expect("removal reason") {
+            RemovalReason::Expired => Lookup::Expired(removed),
+            RemovalReason::IdleEvicted => Lookup::IdleEvicted(removed),
+            RemovalReason::Stale => Lookup::Stale(removed),
         }
     }
 
@@ -100,19 +111,38 @@ impl Shard {
         now_ms: u64,
         namespace_generation: u64,
     ) -> Lookup {
-        let Some(entry) = self.entries.get_mut(key) else {
-            return Lookup::Miss;
+        self.contains_by_parts(&key.namespace, &key.key, now_ms, namespace_generation)
+    }
+
+    pub(super) fn contains_by_parts(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        now_ms: u64,
+        namespace_generation: u64,
+    ) -> Lookup {
+        let borrowed = BlobCacheKey::borrowed(namespace, key);
+        let remove = {
+            let Some(entry) = self.entries.get_mut(&borrowed) else {
+                return Lookup::Miss;
+            };
+            if entry.namespace_generation != namespace_generation {
+                Some(RemovalReason::Stale)
+            } else if entry.is_expired_at(now_ms) {
+                Some(RemovalReason::Expired)
+            } else {
+                entry.visited = true;
+                return Lookup::Present;
+            }
         };
-        if entry.namespace_generation != namespace_generation {
-            let removed = self.remove(key).expect("entry exists");
-            return Lookup::Stale(removed);
+
+        let key = BlobCacheKey::new(namespace, key);
+        let removed = self.remove(&key).expect("entry exists");
+        match remove.expect("removal reason") {
+            RemovalReason::Expired => Lookup::Expired(removed),
+            RemovalReason::Stale => Lookup::Stale(removed),
+            RemovalReason::IdleEvicted => unreachable!("contains does not evaluate idle TTL"),
         }
-        if entry.is_expired_at(now_ms) {
-            let removed = self.remove(key).expect("entry exists");
-            return Lookup::Expired(removed);
-        }
-        entry.visited = true;
-        Lookup::Present
     }
 
     pub(super) fn existing_version(
@@ -130,7 +160,8 @@ impl Shard {
     }
 
     pub(super) fn insert(&mut self, key: BlobCacheKey, mut entry: Entry) -> InsertOutcome {
-        let old_entry = if let Some(old) = self.entries.remove(&key) {
+        self.l2_second_hit_markers.remove(&key);
+        let old_entry = if let Some(old) = self.entries.shift_remove(&key) {
             let slot_index = old.slot_index;
             self.bytes = self.bytes.saturating_sub(old.size);
             entry.slot_index = slot_index;
@@ -190,7 +221,10 @@ impl Shard {
                 continue;
             }
 
-            let removed = self.entries.remove(&candidate).expect("candidate exists");
+            let removed = self
+                .entries
+                .shift_remove(&candidate)
+                .expect("candidate exists");
             self.bytes = self.bytes.saturating_sub(removed.size);
             self.slots[self.hand] = None;
             self.free_slots.push(self.hand);
@@ -205,7 +239,8 @@ impl Shard {
     }
 
     pub(super) fn remove(&mut self, key: &BlobCacheKey) -> Option<Entry> {
-        let removed = self.entries.remove(key)?;
+        self.l2_second_hit_markers.remove(key);
+        let removed = self.entries.shift_remove(key)?;
         self.bytes = self.bytes.saturating_sub(removed.size);
         self.slots[removed.slot_index] = None;
         self.free_slots.push(removed.slot_index);
@@ -213,6 +248,19 @@ impl Shard {
             self.hand = 0;
         }
         Some(removed)
+    }
+
+    pub(super) fn clear_l2_hit_marker(&mut self, key: &BlobCacheKey) {
+        self.l2_second_hit_markers.remove(key);
+    }
+
+    pub(super) fn l2_hit_should_promote_on_second_hit(&mut self, key: &BlobCacheKey) -> bool {
+        if self.l2_second_hit_markers.remove(key) {
+            true
+        } else {
+            self.l2_second_hit_markers.insert(key.clone());
+            false
+        }
     }
 
     pub(super) fn keys_matching(
@@ -269,6 +317,12 @@ pub(super) enum Lookup {
     IdleEvicted(Entry),
     Stale(Entry),
     Miss,
+}
+
+enum RemovalReason {
+    Expired,
+    IdleEvicted,
+    Stale,
 }
 
 pub(super) struct InsertOutcome {
