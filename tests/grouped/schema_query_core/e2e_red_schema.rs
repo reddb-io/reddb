@@ -1642,11 +1642,18 @@ fn scrub_background_tick_is_bounded_and_visible_in_red_stats() {
     };
     assert!(total > 1, "small budget should leave work for later ticks");
 
-    for _ in 0..16 {
-        if stat_value(&rt, "red.scrub", Value::Null, "background_status") == Value::text("complete")
-        {
-            break;
-        }
+    // Drain the rest with small paced ticks. The object census includes the
+    // store's system catalog and grows with the engine, so bound the loop by
+    // the reported total rather than a magic constant — BUDGET 2 per tick
+    // means `total` ticks always suffice.
+    let mut ticks = 0;
+    while stat_value(&rt, "red.scrub", Value::Null, "background_status") != Value::text("complete")
+    {
+        ticks += 1;
+        assert!(
+            ticks <= total,
+            "background scrub still running after {ticks} BUDGET-2 ticks over {total} objects"
+        );
         rt.execute_query("SCRUB BACKGROUND BUDGET 2")
             .expect("background scrub follow-up tick");
     }

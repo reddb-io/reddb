@@ -69,6 +69,16 @@ pub fn scrub_embedded_store(
     };
 
     let mut superblocks = Vec::new();
+    // A resumed pass (cursor past a superblock) still needs the superblock
+    // authority that an earlier tick verified: reload it silently — no
+    // findings, no verified counters — since the tick that verified it
+    // already reported any corruption. Without this, every zone after the
+    // split would report a false missing-authority finding.
+    for copy_index in 0..start_cursor.min(2) {
+        if let Some(parsed) = load_superblock(&mut file, copy_index as u8)? {
+            superblocks.push(parsed);
+        }
+    }
     let end_cursor = start_cursor.saturating_add(max_objects.max(1)).min(5);
     for object_index in start_cursor..end_cursor {
         match object_index {
@@ -85,6 +95,25 @@ pub fn scrub_embedded_store(
     report.complete = report.next_cursor >= 5;
     report.duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(report)
+}
+
+/// Read and parse a superblock copy for use as zone authority, reporting
+/// nothing: a checksum-invalid copy yields `None` exactly as it yields no
+/// authority in the verifying path.
+fn load_superblock(file: &mut File, copy_index: u8) -> RdbFileResult<Option<ParsedSuperblock>> {
+    let offset = match copy_index {
+        0 => EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
+        1 => EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
+        _ => unreachable!(),
+    };
+    let mut bytes = vec![0u8; EMBEDDED_RDB_SUPERBLOCK_SIZE as usize];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut bytes)?;
+    let stored = checksum_trailer(&bytes)?;
+    if stored != crc32(&bytes[..bytes.len() - CHECKSUM_LEN]) {
+        return Ok(None);
+    }
+    Ok(parse_superblock(copy_index, &bytes))
 }
 
 fn verify_superblock(
