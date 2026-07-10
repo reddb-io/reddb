@@ -931,10 +931,19 @@ impl UnifiedStore {
         let payloads: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
         let encoded_len = crate::storage::EmbeddedRdbArtifact::wal_payloads_encoded_len(&payloads)
             .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
+        let artifact = crate::storage::EmbeddedRdbArtifact::open(path)
+            .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
+        if encoded_len > artifact.manifest.wal_region_bytes {
+            return Err(StoreError::Io(std::io::Error::other(format!(
+                "embedded circular wal region full: write requires {encoded_len} bytes; \
+                 region size {} bytes",
+                artifact.manifest.wal_region_bytes
+            ))));
+        }
         match crate::storage::EmbeddedRdbArtifact::append_wal_payloads(path, &payloads) {
             Ok(_) => Ok(()),
             Err(crate::api::RedDBError::InvalidOperation(msg))
-                if msg.contains("embedded wal region full") =>
+                if msg.contains("embedded circular wal region full") =>
             {
                 let snapshot = self.to_binary_dump_bytes();
                 crate::storage::EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(
