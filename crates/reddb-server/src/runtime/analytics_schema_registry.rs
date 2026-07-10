@@ -479,6 +479,7 @@ fn json_type_name(v: &JsonValue) -> &'static str {
     match v {
         JsonValue::Null => "null",
         JsonValue::Bool(_) => "boolean",
+        JsonValue::Integer(_) => "number",
         JsonValue::Number(_) => "number",
         JsonValue::String(_) => "string",
         JsonValue::Array(_) => "array",
@@ -493,8 +494,9 @@ fn type_matches(expected: &str, got: &JsonValue) -> bool {
         "array" => matches!(got, JsonValue::Array(_)),
         "object" => matches!(got, JsonValue::Object(_)),
         "null" => matches!(got, JsonValue::Null),
-        "number" => matches!(got, JsonValue::Number(_)),
+        "number" => matches!(got, JsonValue::Integer(_) | JsonValue::Number(_)),
         "integer" => match got {
+            JsonValue::Integer(_) => true,
             JsonValue::Number(n) => *n == n.trunc(),
             _ => false,
         },
