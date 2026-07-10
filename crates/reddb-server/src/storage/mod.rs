@@ -111,8 +111,10 @@ pub mod columnar_projection;
 pub use backend::{BackendError, LocalBackend, RemoteBackend};
 pub use embedded::{
     EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock,
-    EMBEDDED_RDB_MANIFEST_OFFSET, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
-    EMBEDDED_RDB_SUPERBLOCK_1_OFFSET, EMBEDDED_RDB_SUPERBLOCK_SIZE,
+    EMBEDDED_RDB_MANIFEST_0_OFFSET, EMBEDDED_RDB_MANIFEST_1_OFFSET,
+    EMBEDDED_RDB_MANIFEST_SLOT_SIZE, EMBEDDED_RDB_MANIFEST_ZONE_END,
+    EMBEDDED_RDB_SUPERBLOCK_0_OFFSET, EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
+    EMBEDDED_RDB_SUPERBLOCK_SIZE,
 };
 pub use keyring::{
     clear_keyring, has_keyring_password, resolve_password, save_to_keyring, PasswordSource,

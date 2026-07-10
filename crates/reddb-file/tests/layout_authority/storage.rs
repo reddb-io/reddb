@@ -488,7 +488,7 @@ fn embedded_rdb_artifact_contract_tests_live_in_reddb_file() {
 
     for required in [
         "open_falls_back_to_older_superblock_when_newer_copy_is_invalid",
-        "open_validates_manifest_checksum_from_selected_superblock",
+        "manifest_bit_rot_fails_the_open_didactically_instead_of_falling_back",
         "embedded_wal_frames_are_versioned_ordered_and_chained",
         "embedded_snapshot_crash_injection_preserves_published_snapshot",
     ] {
@@ -695,11 +695,9 @@ fn server_does_not_redeclare_physical_metadata_core_contracts() {
         "pub const DEFAULT_SUPERBLOCK_COPIES",
         "static META_JSON_SIDECAR_POLICY",
         "static SEQN_JOURNAL_POLICY",
-        "static FOLD_PAGER_META_POLICY",
         "static FOLD_DWB_INTO_WAL_POLICY",
         "pub fn meta_json_sidecar_enabled",
         "pub fn seqn_journal_enabled",
-        "pub fn fold_pager_meta_enabled",
         "pub fn fold_dwb_into_wal_enabled",
     ] {
         assert!(
@@ -722,11 +720,9 @@ fn server_does_not_redeclare_physical_metadata_core_contracts() {
         "pub const DEFAULT_SUPERBLOCK_COPIES",
         "static META_JSON_SIDECAR_POLICY",
         "static SEQN_JOURNAL_POLICY",
-        "static FOLD_PAGER_META_POLICY",
         "static FOLD_DWB_INTO_WAL_POLICY",
         "pub fn meta_json_sidecar_enabled",
         "pub fn seqn_journal_enabled",
-        "pub fn fold_pager_meta_enabled",
         "pub fn fold_dwb_into_wal_enabled",
     ] {
         assert!(

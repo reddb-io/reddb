@@ -1,10 +1,10 @@
 //! Issue gh-477: fold pager meta into page 1 of the datafile.
 //!
-//! Acceptance:
-//!  - flag `fold_pager_meta` controls behaviour;
-//!  - ON: page 1 (+ overflow chain when needed) is the sole source of truth;
-//!    `<data>-meta` sidecar is not written;
-//!  - OFF: legacy behaviour preserved — `<data>-meta` shadow is emitted;
+//! The `fold_pager_meta` toggle is gone — ADR 0038 §4 phase 1 folds the pager
+//! manifest into the `.rdb` unconditionally and retired the `<data>-meta`
+//! sidecar. What remains to pin:
+//!  - page 1 (+ overflow chain when needed) is the sole source of truth;
+//!    `<data>-meta` sidecar is never written;
 //!  - free list overflow works for > N pages (one trunk holds 1014 ids);
 //!  - tests cover massive allocation forcing overflow.
 
@@ -12,15 +12,8 @@
 #[path = "../../support/mod.rs"]
 mod support;
 
-use reddb::{
-    fold_pager_meta_enabled, set_fold_pager_meta_enabled, RedDBOptions, RedDBRuntime,
-    StorageDeployPreset,
-};
+use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-
-// Serialise tests that flip the process-global toggle.
-static POLICY_GUARD: Mutex<()> = Mutex::new(());
 
 fn meta_shadow_path(data: &Path) -> PathBuf {
     let mut p = data.to_path_buf().into_os_string();
@@ -35,35 +28,7 @@ fn pager_meta_options(path: &Path) -> RedDBOptions {
 }
 
 #[test]
-fn fold_off_default_preserves_meta_shadow() {
-    let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    set_fold_pager_meta_enabled(false);
-    std::env::remove_var("REDDB_FOLD_PAGER_META");
-    assert!(!fold_pager_meta_enabled(), "default policy must be OFF");
-
-    let db = support::temp_db_file("fold_off");
-    let path = db.path();
-
-    {
-        let rt =
-            RedDBRuntime::with_options(pager_meta_options(path)).expect("persistent runtime opens");
-        rt.execute_query("CREATE TABLE fold_off_a (name TEXT)")
-            .expect("ddl");
-        rt.checkpoint().expect("flush");
-    }
-
-    let shadow = meta_shadow_path(path);
-    assert!(
-        shadow.exists(),
-        "legacy <data>-meta shadow must be written when fold is OFF: {shadow:?}",
-    );
-}
-
-#[test]
-fn fold_on_skips_meta_shadow_and_data_round_trips() {
-    let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    set_fold_pager_meta_enabled(true);
-
+fn folded_meta_skips_meta_shadow_and_data_round_trips() {
     let db = support::temp_db_file("fold_on");
     let path = db.path();
 
@@ -80,7 +45,7 @@ fn fold_on_skips_meta_shadow_and_data_round_trips() {
     let shadow = meta_shadow_path(path);
     assert!(
         !shadow.exists(),
-        "<data>-meta shadow must be absent when fold is ON: {shadow:?}",
+        "<data>-meta shadow must never be written: {shadow:?}",
     );
 
     // Reopen: catalog and data must survive without the shadow.
@@ -91,8 +56,6 @@ fn fold_on_skips_meta_shadow_and_data_round_trips() {
             .execute_query("SELECT name FROM fold_on_a")
             .expect("select");
     }
-
-    set_fold_pager_meta_enabled(false);
 }
 
 /// Forces the metadata blob past a single 4 KiB page so the overflow chain
@@ -100,9 +63,6 @@ fn fold_on_skips_meta_shadow_and_data_round_trips() {
 /// runtime must see every catalog entry.
 #[test]
 fn massive_catalog_forces_meta_overflow_chain() {
-    let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-    set_fold_pager_meta_enabled(true);
-
     let db = support::temp_db_file("fold_overflow");
     let path = db.path();
 
@@ -134,8 +94,6 @@ fn massive_catalog_forces_meta_overflow_chain() {
                 .unwrap_or_else(|e| panic!("collection {name} missing after reopen: {e}"));
         }
     }
-
-    set_fold_pager_meta_enabled(false);
 }
 
 /// Free list trunk chain must hold many more than `FREE_IDS_PER_TRUNK` ids

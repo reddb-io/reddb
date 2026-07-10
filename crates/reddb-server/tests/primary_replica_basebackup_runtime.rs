@@ -98,8 +98,6 @@ fn runtime_creates_chunked_primary_replica_basebackup() {
             snapshot_hex: None,
             metadata_binary: None,
             metadata_json: None,
-            header_shadow: None,
-            metadata_shadow: None,
             basebackup_available: true,
             basebackup_timeline: Some(manifest.timeline.0),
             basebackup_start_lsn: Some(manifest.start_lsn),

@@ -15,8 +15,9 @@
 //!      fail this test at the right boundary.
 //!   2. The currently-promoted state matches the `apply_tier_defaults`
 //!      truth table — Phase A live for performance/max, `-shm` on
-//!      standard, `fold_pager_meta` / `fold_dwb_into_wal` / meta.json /
-//!      seq-N journal still max-only pending their gates.
+//!      standard, `fold_dwb_into_wal` / meta.json / seq-N journal still
+//!      max-only pending their gates. (`fold_pager_meta` left the table:
+//!      ADR 0038 §4 phase 1 made folding unconditional on every tier.)
 //!   3. The override-stability commitment ("override surface for a
 //!      promoted flag remains available for at least 2 further releases")
 //!      is encoded by the continued presence of the env hatch +
@@ -30,9 +31,9 @@
 mod support;
 
 use reddb::{
-    fold_dwb_into_wal_enabled, fold_pager_meta_enabled, meta_json_sidecar_enabled,
-    seqn_journal_enabled, shm_provisioning_enabled, tier_wiring, LogDestination, RedDBOptions,
-    RedDBRuntime, StorageLayout,
+    fold_dwb_into_wal_enabled, meta_json_sidecar_enabled, seqn_journal_enabled,
+    shm_provisioning_enabled, tier_wiring, LogDestination, RedDBOptions, RedDBRuntime,
+    StorageLayout,
 };
 
 fn reset_env() {
@@ -40,7 +41,6 @@ fn reset_env() {
     std::env::remove_var("REDDB_SEQN_JOURNAL");
     std::env::remove_var("REDDB_SEQN_JOURNAL_RETENTION");
     std::env::remove_var("REDDB_SHM_PROVISION");
-    std::env::remove_var("REDDB_FOLD_PAGER_META");
     std::env::remove_var("REDDB_FOLD_DWB_INTO_WAL");
 }
 
@@ -172,9 +172,10 @@ fn phase_a_minimal_and_standard_keep_stderr() {
 // ---------------------------------------------------------------------------
 // Acceptance bullet 3: Phase B partial promotion.
 //   - `-shm`: promoted to Standard (gh-475). Anchored under #480 here.
-//   - `fold_pager_meta` / `fold_dwb_into_wal`: NOT yet promoted to
-//     Standard. ADR explicitly notes they remain Max-only pending gates 1
-//     and 2 (the `fold_pager_meta` benchmark is the still-open dependency).
+//   - `fold_dwb_into_wal`: NOT yet promoted to Standard. ADR explicitly
+//     notes it remains Max-only pending gates 1 and 2.
+//   - `fold_pager_meta`: no longer a flag — ADR 0038 §4 phase 1 folded the
+//     pager manifest into the `.rdb` unconditionally on every tier.
 //   - `.meta.json` sidecar / seq-N journal: also Max-only.
 // ---------------------------------------------------------------------------
 
@@ -186,32 +187,6 @@ fn phase_b_shm_promoted_to_standard() {
     assert!(
         shm_provisioning_enabled(),
         "Phase B partial promotion: -shm ON for Standard"
-    );
-}
-
-#[test]
-fn phase_b_fold_pager_meta_remains_max_only() {
-    let _g = crate::config_tier_shared::tier_state_lock();
-
-    reset_env();
-    let _rt_std = open_at_layout("phaseB_fpm_std", StorageLayout::Standard);
-    assert!(
-        !fold_pager_meta_enabled(),
-        "fold_pager_meta must not be promoted to Standard before its gates clear"
-    );
-
-    reset_env();
-    let _rt_perf = open_at_layout("phaseB_fpm_perf", StorageLayout::Performance);
-    assert!(
-        !fold_pager_meta_enabled(),
-        "fold_pager_meta must not be promoted to Performance before its gates clear"
-    );
-
-    reset_env();
-    let _rt_max = open_at_layout("phaseB_fpm_max", StorageLayout::Max);
-    assert!(
-        fold_pager_meta_enabled(),
-        "fold_pager_meta still ON for Max — Max is the opt-in surface today"
     );
 }
 

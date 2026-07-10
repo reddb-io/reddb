@@ -75,6 +75,12 @@ pub enum PagerError {
     PlainDatabaseRefusesKey,
     /// Encryption key validation failed for an encrypted database.
     InvalidKey,
+    /// Both superblock copies failed validation (ADR 0074 §2).
+    SuperblockZoneUnrecoverable(PathBuf),
+    /// The internal manifest zone failed its checksum (ADR 0074 §2).
+    ManifestZoneCorrupt(PathBuf),
+    /// The store still carries a retired phase-1 pager sidecar (ADR 0038 §4).
+    LegacySidecarStore { sidecar: PathBuf },
 }
 
 /// A contiguous run of database pages reserved for vector-turbo payloads.
@@ -103,6 +109,32 @@ impl std::fmt::Display for PagerError {
                 "Plain (unencrypted) database opened with an encryption key — refusing"
             ),
             Self::InvalidKey => write!(f, "Encryption key validation failed for this database"),
+            Self::SuperblockZoneUnrecoverable(path) => write!(
+                f,
+                "superblock zone of {} is unrecoverable: both ping-pong copies failed \
+                 validation, so no generation can be trusted to root the store. The store \
+                 will not be opened. Recover what survives with the salvage tool \
+                 (ADR 0074 §4); it reads the damaged file without writing to it and \
+                 reports what it could not verify.",
+                path.display()
+            ),
+            Self::ManifestZoneCorrupt(path) => write!(
+                f,
+                "internal manifest zone of {} failed its checksum: the zone that names \
+                 collections, indexes and the checkpoint boundary cannot be trusted, so no \
+                 rows are returned rather than garbage ones. Run scrub to classify the fault \
+                 and salvage to extract what survives (ADR 0074 §2/§4).",
+                path.display()
+            ),
+            Self::LegacySidecarStore { sidecar } => write!(
+                f,
+                "refusing to open a legacy sidecar-backed store: found {}. The superblock \
+                 pair and the internal manifest now live inside the .rdb file (ADR 0038 §2), \
+                 and the engine never reads the retired sidecars silently. Convert the store \
+                 first with the offline migration tool \
+                 (`reddb_server::pager_zone_migration::migrate_to_zoned`); it is reversible.",
+                sidecar.display()
+            ),
         }
     }
 }

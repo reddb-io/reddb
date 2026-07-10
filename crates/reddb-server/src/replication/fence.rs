@@ -154,6 +154,11 @@ impl From<reddb_file::RdbFileError> for TermStoreError {
         match value {
             reddb_file::RdbFileError::Io(err) => Self::Io(err),
             reddb_file::RdbFileError::InvalidOperation(msg) => Self::InvalidFormat(msg),
+            // The zone message names the zone and points at scrub/salvage
+            // (ADR 0074 §2/§4); keep it verbatim rather than flattening it.
+            err @ reddb_file::RdbFileError::ZoneUnrecoverable { .. } => {
+                Self::InvalidFormat(err.to_string())
+            }
         }
     }
 }

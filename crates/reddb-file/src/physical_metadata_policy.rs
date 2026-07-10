@@ -55,27 +55,9 @@ pub fn seqn_journal_enabled() -> bool {
     }
 }
 
-// Pager-meta sidecar policy (#477). 0 = unset (consult env, default off: keep
-// `<data>-meta` shadow), 1 = enabled (fold meta into page 1 + overflow chain;
-// no `-meta` sidecar), 2 = disabled (current behavior).
-static FOLD_PAGER_META_POLICY: AtomicU8 = AtomicU8::new(0);
-
-/// Process-wide opt-in for folding pager metadata (page 1) into the datafile
-/// without an adjacent `<data>-meta` shadow.
-pub fn set_fold_pager_meta_enabled(enabled: bool) {
-    FOLD_PAGER_META_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
-}
-
-/// Whether the pager should fold metadata into page 1 only and skip the
-/// `<data>-meta` sidecar shadow. Reads still tolerate the sidecar so existing
-/// databases keep working through the flag flip.
-pub fn fold_pager_meta_enabled() -> bool {
-    match FOLD_PAGER_META_POLICY.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => env_flag("REDDB_FOLD_PAGER_META"),
-    }
-}
+// The `fold_pager_meta` toggle (#477) is gone: ADR 0038 §4 phase 1 folded the
+// pager manifest into the `.rdb` unconditionally and retired the `-meta`
+// sidecar, so there is no longer a policy to express.
 
 // Fold-DWB-into-WAL policy (#478). 0 = unset (consult env, default off: keep
 // `-dwb` sidecar), 1 = enabled (emit FullPageImage WAL records before first
@@ -131,7 +113,6 @@ fn env_flag(name: &str) -> bool {
 fn reset_physical_metadata_policy_for_test() {
     META_JSON_SIDECAR_POLICY.store(0, Ordering::Relaxed);
     SEQN_JOURNAL_POLICY.store(0, Ordering::Relaxed);
-    FOLD_PAGER_META_POLICY.store(0, Ordering::Relaxed);
     FOLD_DWB_INTO_WAL_POLICY.store(0, Ordering::Relaxed);
     SEQN_JOURNAL_RETENTION.store(0, Ordering::Relaxed);
 }
@@ -188,14 +169,6 @@ mod tests {
         set_seqn_journal_enabled(true);
         assert!(seqn_journal_enabled());
         remove_env("REDDB_SEQN_JOURNAL");
-
-        set_env("REDDB_FOLD_PAGER_META", "yes");
-        assert!(fold_pager_meta_enabled());
-        set_fold_pager_meta_enabled(false);
-        assert!(!fold_pager_meta_enabled());
-        set_fold_pager_meta_enabled(true);
-        assert!(fold_pager_meta_enabled());
-        remove_env("REDDB_FOLD_PAGER_META");
 
         set_env("REDDB_FOLD_DWB_INTO_WAL", "on");
         assert!(fold_dwb_into_wal_enabled());

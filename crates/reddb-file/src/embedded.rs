@@ -21,6 +21,13 @@ pub const DEFAULT_FORMAT_VERSION: u32 = 1;
 pub enum RdbFileError {
     InvalidOperation(String),
     Io(std::io::Error),
+    /// A named zone of the `.rdb` cannot be trusted, so the store does not
+    /// open. ADR 0074 §2 requires the zone be named and §4 requires the
+    /// operator be pointed at salvage rather than left with a panic.
+    ZoneUnrecoverable {
+        zone: &'static str,
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for RdbFileError {
@@ -28,6 +35,15 @@ impl std::fmt::Display for RdbFileError {
         match self {
             Self::InvalidOperation(msg) => write!(f, "INVALID_OPERATION: {msg}"),
             Self::Io(err) => write!(f, "io error: {err}"),
+            Self::ZoneUnrecoverable { zone, path } => write!(
+                f,
+                "{zone} zone of {} failed validation, so the store will not be opened \
+                 (opening it could only return data the zone can no longer vouch for). \
+                 Run scrub to classify the fault and salvage to extract every entity the \
+                 damage did not touch; salvage never writes into the damaged file \
+                 (ADR 0074 §2/§4).",
+                path.display()
+            ),
         }
     }
 }
@@ -49,14 +65,28 @@ fn crc32(data: &[u8]) -> u32 {
 pub const EMBEDDED_RDB_SUPERBLOCK_SIZE: u64 = 4096;
 pub const EMBEDDED_RDB_SUPERBLOCK_0_OFFSET: u64 = 0;
 pub const EMBEDDED_RDB_SUPERBLOCK_1_OFFSET: u64 = EMBEDDED_RDB_SUPERBLOCK_SIZE;
-pub const EMBEDDED_RDB_MANIFEST_OFFSET: u64 = EMBEDDED_RDB_SUPERBLOCK_SIZE * 2;
+
+/// The manifest zone is a ping-pong pair, exactly like the superblock zone.
+///
+/// A single in-place manifest could not satisfy "never torn": overwriting it
+/// leaves a window in which the durable superblock still names the old
+/// checksum while the bytes are already the new ones. Publishing into the
+/// *inactive* slot and only then pointing a fresh superblock at it means every
+/// valid superblock always references an intact manifest — pre-update or
+/// post-update, never a mixture.
+pub const EMBEDDED_RDB_MANIFEST_SLOT_SIZE: u64 = 4096;
+pub const EMBEDDED_RDB_MANIFEST_0_OFFSET: u64 = EMBEDDED_RDB_SUPERBLOCK_SIZE * 2;
+pub const EMBEDDED_RDB_MANIFEST_1_OFFSET: u64 =
+    EMBEDDED_RDB_MANIFEST_0_OFFSET + EMBEDDED_RDB_MANIFEST_SLOT_SIZE;
+pub const EMBEDDED_RDB_MANIFEST_ZONE_END: u64 =
+    EMBEDDED_RDB_MANIFEST_1_OFFSET + EMBEDDED_RDB_MANIFEST_SLOT_SIZE;
 
 const SUPERBLOCK_MAGIC: &[u8; 8] = b"RDBSBLK1";
 const MANIFEST_MAGIC: &[u8; 8] = b"RDBMNFS1";
 const SUPERBLOCK_VERSION: u32 = 1;
 const MANIFEST_VERSION: u32 = 1;
 const CHECKSUM_LEN: usize = 4;
-const MANIFEST_REGION_BYTES: u64 = 4096;
+const MANIFEST_REGION_BYTES: u64 = EMBEDDED_RDB_MANIFEST_SLOT_SIZE;
 const WAL_REGION_BYTES: u64 = 64 * 1024;
 const SNAPSHOT_ALIGNMENT: u64 = 4096;
 const SNAPSHOT_MAGIC: &[u8; 4] = b"RDST";
@@ -130,7 +160,7 @@ impl EmbeddedRdbArtifact {
         }
 
         let created_at_unix_ms = now_unix_ms();
-        let wal_region_offset = EMBEDDED_RDB_MANIFEST_OFFSET + MANIFEST_REGION_BYTES;
+        let wal_region_offset = EMBEDDED_RDB_MANIFEST_ZONE_END;
         let snapshot_offset = wal_region_offset + WAL_REGION_BYTES;
         let manifest = EmbeddedRdbManifest {
             version: MANIFEST_VERSION,
@@ -153,7 +183,7 @@ impl EmbeddedRdbArtifact {
             .write(true)
             .open(path)?;
         file.set_len(snapshot_offset + snapshot.len() as u64)?;
-        write_at(&mut file, EMBEDDED_RDB_MANIFEST_OFFSET, &manifest_bytes)?;
+        write_at(&mut file, EMBEDDED_RDB_MANIFEST_0_OFFSET, &manifest_bytes)?;
         if !snapshot.is_empty() {
             write_at(&mut file, snapshot_offset, snapshot)?;
         }
@@ -162,7 +192,7 @@ impl EmbeddedRdbArtifact {
             copy_index: 0,
             generation: 1,
             format_version: DEFAULT_FORMAT_VERSION,
-            manifest_offset: EMBEDDED_RDB_MANIFEST_OFFSET,
+            manifest_offset: EMBEDDED_RDB_MANIFEST_0_OFFSET,
             manifest_len: manifest_bytes.len() as u64,
             manifest_checksum,
             wal_region_offset,
@@ -210,14 +240,26 @@ impl EmbeddedRdbArtifact {
         .collect();
         superblocks.sort_by_key(|superblock| std::cmp::Reverse(superblock.generation));
 
+        if superblocks.is_empty() {
+            return Err(RdbFileError::ZoneUnrecoverable {
+                zone: "superblock",
+                path: path.to_path_buf(),
+            });
+        }
+
         for selected_superblock in superblocks {
-            let manifest = match read_manifest(&mut file, selected_superblock) {
-                Ok(mut manifest) => {
-                    manifest.wal_recovery_boundary = selected_superblock.wal_recovery_boundary;
-                    manifest
+            // The manifest a valid superblock names is always intact: it was
+            // fsynced into an inactive slot before this generation existed. A
+            // checksum failure here is therefore bit rot, not a torn update,
+            // and ADR 0074 §2 says it fails the open by name — never falls
+            // back to a stale root that would resurrect superseded state.
+            let mut manifest = read_manifest(&mut file, selected_superblock).map_err(|_| {
+                RdbFileError::ZoneUnrecoverable {
+                    zone: "manifest",
+                    path: path.to_path_buf(),
                 }
-                Err(_) => manifest_from_superblock(selected_superblock),
-            };
+            })?;
+            manifest.wal_recovery_boundary = selected_superblock.wal_recovery_boundary;
             if validate_snapshot_refs && !snapshot_reference_valid(&mut file, &manifest)? {
                 continue;
             }
@@ -228,9 +270,10 @@ impl EmbeddedRdbArtifact {
             });
         }
 
-        Err(RdbFileError::InvalidOperation(
-            "no valid embedded superblock".into(),
-        ))
+        Err(RdbFileError::ZoneUnrecoverable {
+            zone: "snapshot",
+            path: path.to_path_buf(),
+        })
     }
 
     pub fn wal_payloads_encoded_len(payloads: &[Vec<u8>]) -> RdbFileResult<u64> {
@@ -285,8 +328,16 @@ impl EmbeddedRdbArtifact {
         crash_inject("snapshot_after_image_write");
         file.sync_data()?;
         crash_inject("snapshot_after_image_sync");
-        write_at(&mut file, EMBEDDED_RDB_MANIFEST_OFFSET, &manifest_bytes)?;
+
+        // Publish the manifest into the slot the live superblock does NOT
+        // reference, and make it durable before any superblock names it. Until
+        // the superblock write below lands, the durable state still roots
+        // through the old manifest slot, which these bytes never touched.
+        let next_manifest_offset = inactive_manifest_offset(open.selected_superblock)?;
+        write_at(&mut file, next_manifest_offset, &manifest_bytes)?;
         crash_inject("snapshot_after_manifest_write");
+        file.sync_data()?;
+        crash_inject("snapshot_after_manifest_sync");
 
         let next_copy_index = if open.selected_superblock.copy_index == 0 {
             1
@@ -296,6 +347,7 @@ impl EmbeddedRdbArtifact {
         let next_superblock = EmbeddedRdbSuperblock {
             copy_index: next_copy_index,
             generation: open.selected_superblock.generation.saturating_add(1),
+            manifest_offset: next_manifest_offset,
             manifest_len: manifest_bytes.len() as u64,
             manifest_checksum,
             wal_region_bytes,
@@ -456,6 +508,22 @@ fn read_superblock_copy(file: &mut File, copy_index: u8) -> Option<EmbeddedRdbSu
     decode_superblock(copy_index, &bytes).ok()
 }
 
+/// The manifest slot the given superblock does not reference.
+///
+/// With two superblock copies and two manifest slots this is always the slot
+/// belonging to the *stale* superblock copy — the same copy the update is about
+/// to overwrite. That coincidence is what makes the pair safe: a crash can only
+/// ever clobber the manifest of a superblock that was already being replaced.
+fn inactive_manifest_offset(superblock: EmbeddedRdbSuperblock) -> RdbFileResult<u64> {
+    match superblock.manifest_offset {
+        EMBEDDED_RDB_MANIFEST_0_OFFSET => Ok(EMBEDDED_RDB_MANIFEST_1_OFFSET),
+        EMBEDDED_RDB_MANIFEST_1_OFFSET => Ok(EMBEDDED_RDB_MANIFEST_0_OFFSET),
+        other => Err(RdbFileError::InvalidOperation(format!(
+            "superblock names a manifest offset outside the zone: {other}"
+        ))),
+    }
+}
+
 fn read_manifest(
     file: &mut File,
     superblock: EmbeddedRdbSuperblock,
@@ -466,6 +534,17 @@ fn read_manifest(
         return Err(RdbFileError::InvalidOperation(format!(
             "invalid embedded manifest length {}",
             superblock.manifest_len
+        )));
+    }
+    // A superblock that points outside the manifest zone is a misdirected or
+    // forged write; never chase the pointer.
+    if !matches!(
+        superblock.manifest_offset,
+        EMBEDDED_RDB_MANIFEST_0_OFFSET | EMBEDDED_RDB_MANIFEST_1_OFFSET
+    ) {
+        return Err(RdbFileError::InvalidOperation(format!(
+            "superblock names a manifest offset outside the zone: {}",
+            superblock.manifest_offset
         )));
     }
 
@@ -509,20 +588,6 @@ fn snapshot_reference_valid(
         return Ok(false);
     }
     Ok(true)
-}
-
-fn manifest_from_superblock(superblock: EmbeddedRdbSuperblock) -> EmbeddedRdbManifest {
-    EmbeddedRdbManifest {
-        version: MANIFEST_VERSION,
-        wal_region_offset: superblock.wal_region_offset,
-        wal_region_bytes: superblock.wal_region_bytes,
-        wal_recovery_boundary: superblock.wal_recovery_boundary,
-        snapshot_offset: superblock.snapshot_offset,
-        snapshot_bytes: superblock.snapshot_bytes,
-        snapshot_checksum: superblock.snapshot_checksum,
-        created_at_unix_ms: 0,
-        checksum: 0,
-    }
 }
 
 fn grow_wal_region_bytes(current: u64, min_required: u64) -> RdbFileResult<u64> {
