@@ -860,7 +860,7 @@ impl fmt::Display for StorageIntegrityError {
         }
         write!(
             f,
-            ": {}. RedDB refused to serve unverified bytes; run scrub when available, or use salvage to recover trusted rows.",
+            ": {}. RedDB refused to serve unverified bytes; run scrub when available, or use red salvage to recover trusted rows.",
             self.detail
         )
     }
