@@ -5,7 +5,7 @@
 //! eviction, namespace caps, and opaque content metadata. Durable L2 storage,
 //! dependency invalidation, and public APIs land in follow-up slices.
 
-use super::config::{BlobCacheConfig, L2Compression};
+use super::config::{BlobCacheConfig, L2Compression, L2PromotionPolicy};
 use super::entry::{effective_expires_at_unix_ms, jitter_seed, Entry};
 use super::l2::BlobCacheL2;
 use super::shard::{InsertOutcome, Lookup, Shard};
@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use indexmap::Equivalent;
 use parking_lot::RwLock;
 
 use super::super::compressor::{CompressOpts, Compressed, L2BlobCompressor};
@@ -73,6 +74,28 @@ impl BlobCacheKey {
             namespace: namespace.into(),
             key: key.into(),
         }
+    }
+
+    pub(super) fn borrowed<'a>(namespace: &'a str, key: &'a str) -> BlobCacheKeyRef<'a> {
+        BlobCacheKeyRef { namespace, key }
+    }
+}
+
+pub(super) struct BlobCacheKeyRef<'a> {
+    pub(super) namespace: &'a str,
+    pub(super) key: &'a str,
+}
+
+impl Hash for BlobCacheKeyRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.namespace.hash(state);
+        self.key.hash(state);
+    }
+}
+
+impl Equivalent<BlobCacheKey> for BlobCacheKeyRef<'_> {
+    fn equivalent(&self, key: &BlobCacheKey) -> bool {
+        self.namespace == key.namespace && self.key == key.key
     }
 }
 
@@ -735,6 +758,7 @@ impl BlobCache {
 
         let shard_idx = self.shard_index(&key);
         let mut shard = self.shards[shard_idx].write();
+        shard.clear_l2_hit_marker(&key);
         self.check_version(
             &shard,
             &key,
@@ -826,11 +850,10 @@ impl BlobCache {
     }
 
     fn get_at(&self, namespace: &str, key: &str, now_ms: u64) -> Option<BlobCacheHit> {
-        let cache_key = BlobCacheKey::new(namespace, key);
         let namespace_generation = self.current_generation(namespace);
-        let shard_idx = self.shard_index(&cache_key);
+        let shard_idx = self.shard_index_parts(namespace, key);
         let mut shard = self.shards[shard_idx].write();
-        match shard.get(&cache_key, now_ms, namespace_generation) {
+        match shard.get_by_parts(namespace, key, now_ms, namespace_generation) {
             Lookup::Hit(hit) => {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 if hit.is_stale() {
@@ -840,6 +863,7 @@ impl BlobCache {
             }
             Lookup::Expired(entry) => {
                 drop(shard);
+                let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
@@ -850,6 +874,7 @@ impl BlobCache {
             }
             Lookup::IdleEvicted(entry) => {
                 drop(shard);
+                let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
@@ -861,12 +886,14 @@ impl BlobCache {
             }
             Lookup::Stale(entry) => {
                 drop(shard);
+                let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
             Lookup::Miss => {
                 drop(shard);
+                let cache_key = BlobCacheKey::new(namespace, key);
                 if let Some(pool) = self.promotion_pool.get() {
                     // Async path: do the L2 read (we owe the bytes to the
                     // caller right now) but defer the L1 install onto the
@@ -874,19 +901,20 @@ impl BlobCache {
                     if let Some(l2) = self.l2.as_ref() {
                         if let Some(entry) = l2.get(&cache_key, now_ms, namespace_generation) {
                             let hit = entry.hit();
-                            // Drop the freshly-fetched Entry — the worker will
-                            // re-fetch it. Cost: one extra L2 metadata read +
-                            // blob read per L2 hit while async mode is on.
-                            // Acceptable trade-off for opt-in mode; documented
-                            // in the PR.
-                            drop(entry);
-                            let request = PromotionRequest {
-                                namespace: cache_key.namespace.clone(),
-                                key: cache_key.key.clone(),
-                                bytes: Arc::clone(hit.bytes()),
-                                policy: BlobCachePolicy::default(),
-                            };
-                            let _ = pool.schedule(request);
+                            if self.should_promote_l2_hit(&cache_key, shard_idx) {
+                                // Drop the freshly-fetched Entry — the worker will
+                                // re-fetch it. Cost: one extra L2 metadata read +
+                                // blob read per promoted L2 hit while async mode is on.
+                                // Acceptable trade-off for opt-in mode.
+                                drop(entry);
+                                let request = PromotionRequest {
+                                    namespace: cache_key.namespace.clone(),
+                                    key: cache_key.key.clone(),
+                                    bytes: Arc::clone(hit.bytes()),
+                                    policy: BlobCachePolicy::default(),
+                                };
+                                let _ = pool.schedule(request);
+                            }
                             self.stats.hits.fetch_add(1, Ordering::Relaxed);
                             return Some(hit);
                         }
@@ -929,17 +957,17 @@ impl BlobCache {
     }
 
     fn exists_at(&self, namespace: &str, key: &str, now_ms: u64) -> CachePresence {
-        let cache_key = BlobCacheKey::new(namespace, key);
         let namespace_generation = self.current_generation(namespace);
-        let shard_idx = self.shard_index(&cache_key);
+        let shard_idx = self.shard_index_parts(namespace, key);
         let mut shard = self.shards[shard_idx].write();
-        match shard.contains(&cache_key, now_ms, namespace_generation) {
+        match shard.contains_by_parts(namespace, key, now_ms, namespace_generation) {
             Lookup::Present => {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 CachePresence::Present
             }
             Lookup::Expired(entry) => {
                 drop(shard);
+                let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
@@ -950,6 +978,7 @@ impl BlobCache {
             }
             Lookup::IdleEvicted(entry) => {
                 drop(shard);
+                let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
@@ -961,6 +990,7 @@ impl BlobCache {
             }
             Lookup::Stale(entry) => {
                 drop(shard);
+                let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 CachePresence::Absent
@@ -1321,8 +1351,19 @@ impl BlobCache {
         let l2 = self.l2.as_ref()?;
         let entry = l2.get(key, now_ms, namespace_generation)?;
         let hit = entry.hit();
-        self.do_l1_promotion_sync(key, entry, shard_idx);
+        if self.should_promote_l2_hit(key, shard_idx) {
+            self.do_l1_promotion_sync(key, entry, shard_idx);
+        }
         Some(hit)
+    }
+
+    fn should_promote_l2_hit(&self, key: &BlobCacheKey, shard_idx: usize) -> bool {
+        match self.config.l2_promotion_policy {
+            L2PromotionPolicy::Immediate => true,
+            L2PromotionPolicy::OnSecondHit => self.shards[shard_idx]
+                .write()
+                .l2_hit_should_promote_on_second_hit(key),
+        }
     }
 
     /// Pure L1 install bookkeeping: shard write-lock, byte accounting,
@@ -1552,7 +1593,12 @@ impl BlobCache {
     }
 
     fn shard_index(&self, key: &BlobCacheKey) -> usize {
+        self.shard_index_parts(&key.namespace, &key.key)
+    }
+
+    fn shard_index_parts(&self, namespace: &str, key: &str) -> usize {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        namespace.hash(&mut hasher);
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.shards.len()
     }
