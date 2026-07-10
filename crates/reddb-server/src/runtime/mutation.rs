@@ -843,6 +843,7 @@ fn event_item_kind_for_entity(
 fn json_id_for_hash(value: &JsonValue) -> String {
     match value {
         JsonValue::String(value) => value.clone(),
+        JsonValue::Integer(value) => value.to_string(),
         JsonValue::Number(value) => value.to_string(),
         JsonValue::Bool(value) => value.to_string(),
         JsonValue::Null => "null".to_string(),
@@ -1348,6 +1349,7 @@ fn compare_json_to_store_value(
     let lhs: Value = match json {
         None | Some(JsonValue::Null) => Value::Null,
         Some(JsonValue::Bool(b)) => Value::Boolean(*b),
+        Some(JsonValue::Integer(n)) => Value::Integer(*n),
         Some(JsonValue::Number(n)) => {
             let n = *n;
             if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
