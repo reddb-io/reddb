@@ -367,9 +367,15 @@ impl UnifiedStore {
     /// Bytes of WAL buffer memory held by this store's group-commit
     /// coordinator: queued records plus the writer's fixed append buffer.
     pub fn wal_buffer_bytes_in_use(&self) -> u64 {
-        self.commit
-            .as_ref()
-            .map_or(0, |commit| commit.buffered_bytes())
+        if let Some(commit) = &self.commit {
+            return commit.buffered_bytes();
+        }
+        let Some(path) = self.config.embedded_wal_path.as_deref() else {
+            return 0;
+        };
+        crate::storage::EmbeddedRdbArtifact::open(path)
+            .map(|open| crate::storage::EmbeddedRdbArtifact::wal_bytes_in_use(&open))
+            .unwrap_or(0)
     }
 
     /// Approximate resident bytes across every collection's segment arena
