@@ -110,6 +110,11 @@ pub enum QueryExpr {
         prefix: Option<String>,
         as_json: bool,
     },
+    /// SCRUB [BACKGROUND BUDGET n]
+    Scrub {
+        background: bool,
+        budget: Option<u64>,
+    },
     /// SET SECRET key = value
     SetSecret { key: String, value: Value },
     /// DELETE SECRET key

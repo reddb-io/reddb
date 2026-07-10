@@ -428,6 +428,11 @@ impl StatementExecutionFrame {
             // producer push to invalidate the cache, so a cached empty
             // result would hide it. Skip caching entirely.
             && result.statement != "queue_group_read"
+            // SCRUB is a stateful read too: the background form advances
+            // a pacing cursor per tick (a cached tick would replay the
+            // summary and never advance), and even a full pass must
+            // re-read the file to see new corruption. Never cache.
+            && result.engine != "runtime-scrub"
             && result.result.pre_serialized_json.is_none()
             // Graph-analytics TVF output (issue #802) is deterministic and
             // expensive to recompute, so it is cached at any row count. The

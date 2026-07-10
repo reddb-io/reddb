@@ -634,6 +634,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::Ask(_)
         | QueryExpr::SetConfig { .. }
         | QueryExpr::ShowConfig { .. }
+        | QueryExpr::Scrub { .. }
         | QueryExpr::SetSecret { .. }
         | QueryExpr::DeleteSecret { .. }
         | QueryExpr::SetKv { .. }

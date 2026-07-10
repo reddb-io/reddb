@@ -317,6 +317,7 @@ impl CostEstimator {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::Scrub { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
             | QueryExpr::SetKv { .. }
@@ -420,6 +421,7 @@ impl CostEstimator {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::Scrub { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
             | QueryExpr::SetKv { .. }
