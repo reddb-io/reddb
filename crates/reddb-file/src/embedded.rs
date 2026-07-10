@@ -23,7 +23,7 @@ pub enum RdbFileError {
     Io(std::io::Error),
     /// A named zone of the `.rdb` cannot be trusted, so the store does not
     /// open. ADR 0074 §2 requires the zone be named and §4 requires the
-    /// operator be pointed at salvage rather than left with a panic.
+    /// operator be pointed at `red salvage` rather than left with a panic.
     ZoneUnrecoverable {
         zone: &'static str,
         path: PathBuf,
@@ -39,8 +39,8 @@ impl std::fmt::Display for RdbFileError {
                 f,
                 "{zone} zone of {} failed validation, so the store will not be opened \
                  (opening it could only return data the zone can no longer vouch for). \
-                 Run scrub to classify the fault and salvage to extract every entity the \
-                 damage did not touch; salvage never writes into the damaged file \
+                 Run scrub to classify the fault and red salvage to extract every entity the \
+                 damage did not touch; red salvage never writes into the damaged file \
                  (ADR 0074 §2/§4).",
                 path.display()
             ),

@@ -42,5 +42,6 @@ impl RedDBRuntime {
             self.index_store_ref().memory_bytes(),
         );
         accounting.report(MemoryPool::WalBuffers, store.wal_buffer_bytes_in_use());
+        accounting.observe_total_used(accounting.total_used_bytes());
     }
 }

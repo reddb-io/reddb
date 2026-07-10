@@ -732,6 +732,8 @@ fn append_scrub_stats(
 ///   accounting totals. `total_share_bytes` never exceeds `resolved_bytes`;
 ///   that is the property the boot assertion and the share property test both
 ///   guard.
+/// * enforcement counters (entity NULL) — admissions denied, pressure
+///   reclamations, bytes reclaimed under pressure, and shared-total high-water.
 ///
 /// The `pool_shares` / `live_accounting` empty-array placeholders #1958 shipped
 /// are gone: the pools are real now, so the surface reports numbers rather than
@@ -801,6 +803,27 @@ fn append_memory_budget_stats(
         "total_used_bytes",
         Value::UnsignedInteger(accounting.total_used_bytes()),
     ));
+    let enforcement = accounting.enforcement_snapshot();
+    for (metric, value) in [
+        ("admissions_denied", enforcement.admissions_denied),
+        (
+            "pressure_reclamations_triggered",
+            enforcement.pressure_reclamations_triggered,
+        ),
+        (
+            "pressure_bytes_reclaimed",
+            enforcement.pressure_bytes_reclaimed,
+        ),
+        ("high_water_bytes", enforcement.high_water_bytes),
+    ] {
+        rows.push(stats_row(
+            schema,
+            MEMORY_BUDGET_COLLECTION,
+            Value::Null,
+            metric,
+            Value::UnsignedInteger(value),
+        ));
+    }
 }
 
 /// Consolidation thresholds (ADR 0073 §5, issue #1961).

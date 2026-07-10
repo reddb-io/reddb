@@ -1593,6 +1593,19 @@ impl RedDBRuntime {
                 })
                 .collect();
 
+        let index_growth_rows = entity_fields
+            .iter()
+            .map(|(_, fields)| fields.clone())
+            .collect::<Vec<_>>();
+        self.admit_non_evictable_growth(
+            crate::storage::memory_pools::MemoryPool::IndexMemory,
+            &format!("create index {}", query.name),
+            crate::runtime::memory_admission::estimate_index_growth(
+                &index_growth_rows,
+                &query.columns,
+            ),
+        )?;
+
         // Build the index
         let indexed_count = self
             .inner

@@ -123,6 +123,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: migrate_from_redis_flags(),
     },
     CommandDef {
+      name: "salvage",
+      summary: "Extract verified data from a damaged embedded store into a fresh .rdb",
+      usage: "red salvage --source damaged.rdb --destination recovered.rdb [--json]",
+      flags: salvage_flags(),
+    },
+    CommandDef {
       name: "replica",
       summary: "Start as a read replica connected to a primary",
       usage: "red replica --primary-addr http://primary:55055 [--grpc] [--http] [--grpc-bind 127.0.0.1:55055] [--http-bind 127.0.0.1:5000] [--path ./data/reddb.rdb]",
@@ -729,6 +735,13 @@ fn migrate_from_redis_flags() -> Vec<FlagSchema> {
     ]
 }
 
+fn salvage_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("source").with_description("Damaged source .rdb file to read"),
+        FlagSchema::new("destination").with_description("Fresh destination .rdb file to create"),
+    ]
+}
+
 fn status_flags() -> Vec<FlagSchema> {
     vec![FlagSchema::new("bind")
         .with_short('b')
@@ -817,6 +830,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("status".to_string(), vec![]),
         ("inspect".to_string(), vec![]),
         ("migrate-from-redis".to_string(), vec![]),
+        ("salvage".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
         ("connect".to_string(), vec![]),
@@ -852,6 +866,7 @@ mod tests {
         assert!(names.contains(&"health"));
         assert!(names.contains(&"tick"));
         assert!(names.contains(&"migrate-from-redis"));
+        assert!(names.contains(&"salvage"));
         assert!(names.contains(&"status"));
         assert!(names.contains(&"inspect"));
         assert!(names.contains(&"connect"));

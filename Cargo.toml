@@ -163,6 +163,7 @@ reddb-wire = { workspace = true }
 reddb-grpc-proto = { workspace = true }
 reddb-client = { workspace = true }
 reddb-server = { workspace = true }
+reddb-file = { workspace = true }
 # `red` bin spins up its own multi-thread tokio runtime (server
 # subcommand needs explicit Builder configuration with custom
 # stack size). All other reddb modules pull tokio transitively
