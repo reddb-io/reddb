@@ -1459,6 +1459,10 @@ fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() 
     }
     expected_metrics.push("total_share_bytes");
     expected_metrics.push("total_used_bytes");
+    expected_metrics.push("admissions_denied");
+    expected_metrics.push("pressure_reclamations_triggered");
+    expected_metrics.push("pressure_bytes_reclaimed");
+    expected_metrics.push("high_water_bytes");
     assert_eq!(
         metrics, expected_metrics,
         "documented budget field names, in order"
@@ -1654,6 +1658,107 @@ fn red_stats_echoes_an_explicitly_configured_memory_budget() {
         Value::UnsignedInteger(512 << 20)
     );
     assert_eq!(budget_metric(&rt, "source"), Value::text("config"));
+
+    cleanup_scope();
+}
+
+#[test]
+fn small_budget_denies_live_entity_growth_didactically_and_keeps_serving() {
+    cleanup_scope();
+    let budget = 32 * 1024;
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
+        .expect("runtime with a tiny explicit budget");
+
+    exec(&rt, "CREATE TABLE budget_gate (id INT, body TEXT)");
+
+    let mut denied = None;
+    for id in 0..1_000 {
+        let sql = format!(
+            "INSERT INTO budget_gate (id, body) VALUES ({id}, '{}')",
+            "x".repeat(512)
+        );
+        if let Err(err) = rt.execute_query(&sql) {
+            denied = Some(err.to_string());
+            break;
+        }
+    }
+    let err = denied.expect("small budget eventually denies live growth");
+    assert!(
+        err.contains("operation needs ~") && err.contains("bytes over budget 32768"),
+        "{err}"
+    );
+    assert!(err.contains("largest consumers:"), "{err}");
+    assert!(err.contains("segments"), "{err}");
+    assert!(err.contains("page-cache"), "{err}");
+    assert!(err.contains("indexes"), "{err}");
+    assert!(
+        err.contains("raise the budget or reclaim (see red.stats budget)"),
+        "{err}"
+    );
+
+    let readback = rt
+        .execute_query("SELECT COUNT(*) FROM budget_gate")
+        .expect("reads keep serving after a denial");
+    assert_eq!(
+        readback.result.records.len(),
+        1,
+        "denial must be per-operation, not a shutdown"
+    );
+    rt.execute_query("CREATE TABLE still_writable (id INT)")
+        .expect("within-budget writes keep serving after a denial");
+
+    assert_eq!(budget_unsigned(&rt, "admissions_denied"), 1);
+    assert!(budget_unsigned(&rt, "high_water_bytes") <= budget);
+
+    cleanup_scope();
+}
+
+#[test]
+fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
+    cleanup_scope();
+    let budget = 112 * 1024;
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
+        .expect("runtime with a small explicit budget");
+
+    exec(&rt, "CREATE TABLE reclaim_gate (id INT, body TEXT)");
+    let rows = (0..160)
+        .map(|id| format!("({id}, '{}')", "x".repeat(96)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    exec(
+        &rt,
+        &format!("INSERT INTO reclaim_gate (id, body) VALUES {rows}"),
+    );
+    rt.db()
+        .store()
+        .get_collection("reclaim_gate")
+        .expect("collection exists")
+        .force_seal()
+        .expect("force seal");
+    exec(&rt, "DELETE FROM reclaim_gate WHERE id < 159");
+    assert!(
+        rt.db().store().reclaimable_segment_bytes() > 0,
+        "bulk-seeded sealed deletes should be reclaimable"
+    );
+
+    let before_reclamations = budget_unsigned(&rt, "pressure_reclamations_triggered");
+    let pressure_rows = (10_000..10_080)
+        .map(|id| format!("({id}, 'pressure')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    rt.execute_query(&format!(
+        "INSERT INTO reclaim_gate (id, body) VALUES {pressure_rows}"
+    ))
+    .expect("pressure-triggered consolidation should admit the write");
+
+    assert!(
+        budget_unsigned(&rt, "pressure_reclamations_triggered") > before_reclamations,
+        "admission pressure should trigger consolidation"
+    );
+    assert!(
+        budget_unsigned(&rt, "pressure_bytes_reclaimed") > 0,
+        "pressure consolidation should report reclaimed bytes"
+    );
 
     cleanup_scope();
 }
