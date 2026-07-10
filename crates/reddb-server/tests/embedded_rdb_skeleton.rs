@@ -103,10 +103,7 @@ fn embedded_runtime_replays_internal_wal_without_flush_or_drop() {
     rt.flush().expect("checkpoint replayed state");
 
     let checkpointed = EmbeddedRdbArtifact::open(&path).expect("open checkpointed artifact");
-    assert_eq!(
-        checkpointed.manifest.wal_recovery_boundary,
-        checkpointed.manifest.wal_region_offset
-    );
+    assert_eq!(checkpointed.manifest.wal_live_bytes, 0);
     assert!(checkpointed.manifest.snapshot_bytes > 0);
     assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
 }
