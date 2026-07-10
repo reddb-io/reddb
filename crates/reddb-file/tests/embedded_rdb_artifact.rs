@@ -292,6 +292,49 @@ fn embedded_wal_recovery_ignores_corrupt_or_truncated_tail_frame() {
 }
 
 #[test]
+fn embedded_wal_checkpoint_fence_allows_wrap_after_quiescing_region() {
+    let dir = temp_dir("wal_wrap_after_checkpoint");
+    let path = dir.path().join("data.rdb");
+    let created = EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
+
+    let empty_frame_len = EmbeddedRdbArtifact::wal_payloads_encoded_len(&[Vec::new()]).unwrap();
+    let prefill_payload_len = created.manifest.wal_region_bytes - empty_frame_len - 8;
+    let prefill = vec![0xA5; prefill_payload_len as usize];
+    EmbeddedRdbArtifact::append_wal_payloads(&path, &[prefill]).expect("append prefill frame");
+
+    let pre_checkpoint = EmbeddedRdbArtifact::open(&path).expect("open before checkpoint");
+    assert_eq!(
+        pre_checkpoint.manifest.wal_recovery_boundary,
+        pre_checkpoint.manifest.wal_region_offset + pre_checkpoint.manifest.wal_region_bytes - 8
+    );
+
+    let checkpointed =
+        EmbeddedRdbArtifact::write_snapshot(&path, b"RDST-checkpoint").expect("checkpoint");
+    assert_eq!(
+        checkpointed.manifest.wal_recovery_boundary,
+        pre_checkpoint.manifest.wal_recovery_boundary,
+        "checkpointing proves the old frames reclaimable but keeps the append fence at the tail"
+    );
+    assert_eq!(checkpointed.manifest.wal_live_bytes, 0);
+
+    let wrapped = b"after-wrap".to_vec();
+    EmbeddedRdbArtifact::append_wal_payloads(&path, std::slice::from_ref(&wrapped))
+        .expect("append wrapped frame");
+
+    let artifact = EmbeddedRdbArtifact::open(&path).expect("open after wrapped append");
+    assert!(
+        artifact.manifest.wal_recovery_boundary < artifact.manifest.wal_region_offset + 64,
+        "the append boundary should wrap to the start of the region"
+    );
+    assert_eq!(
+        artifact.manifest.wal_live_bytes,
+        EmbeddedRdbArtifact::wal_payloads_encoded_len(std::slice::from_ref(&wrapped)).unwrap()
+    );
+    let payloads = EmbeddedRdbArtifact::read_wal_payloads(&artifact).expect("read wrapped wal");
+    assert_eq!(payloads, vec![wrapped]);
+}
+
+#[test]
 fn embedded_wal_crash_injection_preserves_last_published_prefix() {
     const TEST_NAME: &str = "embedded_wal_crash_injection_preserves_last_published_prefix";
     if std::env::var("REDDB_EMBEDDED_RDB_CRASH_CHILD_OP")
