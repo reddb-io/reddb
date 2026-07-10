@@ -1004,6 +1004,7 @@ fn json_to_storage_value(value: &JsonValue) -> Result<Value, String> {
     Ok(match value {
         JsonValue::Null => Value::Null,
         JsonValue::Bool(value) => Value::Boolean(*value),
+        JsonValue::Integer(value) => Value::Integer(*value),
         JsonValue::Number(value) => {
             if value.fract().abs() < f64::EPSILON && *value >= 0.0 {
                 Value::UnsignedInteger(*value as u64)
