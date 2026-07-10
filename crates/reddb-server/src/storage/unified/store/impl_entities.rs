@@ -1653,9 +1653,13 @@ impl UnifiedStore {
     /// collection. Returns true if any collection started or advanced a run.
     pub fn pressure_consolidation_tick(&self) -> bool {
         let managers: Vec<_> = self.collections.read().values().cloned().collect();
-        managers.iter().fold(false, |advanced, manager| {
-            manager.pressure_consolidation_tick() || advanced
-        })
+        // A plain loop, not `any()`: every collection must receive its tick —
+        // short-circuiting on the first advanced run would starve the rest.
+        let mut advanced = false;
+        for manager in &managers {
+            advanced |= manager.pressure_consolidation_tick();
+        }
+        advanced
     }
 }
 

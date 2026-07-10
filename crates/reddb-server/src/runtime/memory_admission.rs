@@ -71,13 +71,9 @@ impl crate::RedDBRuntime {
         let budget = accounting.budget().resolved_bytes;
         let used = accounting.total_used_bytes();
         let shortfall = used.saturating_add(growth_bytes).saturating_sub(budget);
-        let percent_used = if budget == 0 {
-            100
-        } else {
-            used.saturating_mul(100) / budget
-        };
+        let percent_used = used.saturating_mul(100).checked_div(budget).unwrap_or(100);
         let mut pools = accounting.snapshot();
-        pools.sort_by(|left, right| right.used_bytes.cmp(&left.used_bytes));
+        pools.sort_by_key(|usage| std::cmp::Reverse(usage.used_bytes));
         let consumers = pools
             .iter()
             .take(3)
@@ -105,7 +101,8 @@ pub(crate) fn estimate_row_growth(fields: &[(String, Value)]) -> u64 {
             fields
                 .iter()
                 .map(|(name, _)| name.len() as u64)
-                .fold(0, u64::saturating_add),
+                .reduce(u64::saturating_add)
+                .unwrap_or(0),
         )
 }
 
