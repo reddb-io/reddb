@@ -1639,6 +1639,24 @@ impl UnifiedStore {
         }
         Ok(())
     }
+
+    /// Bytes pressure consolidation could plausibly return across collections.
+    pub fn reclaimable_segment_bytes(&self) -> u64 {
+        let collections = self.collections.read();
+        collections
+            .values()
+            .map(|manager| manager.reclaimable_bytes())
+            .fold(0, u64::saturating_add)
+    }
+
+    /// Advance pressure-triggered consolidation by one paced tick per
+    /// collection. Returns true if any collection started or advanced a run.
+    pub fn pressure_consolidation_tick(&self) -> bool {
+        let managers: Vec<_> = self.collections.read().values().cloned().collect();
+        managers.iter().fold(false, |advanced, manager| {
+            manager.pressure_consolidation_tick() || advanced
+        })
+    }
 }
 
 /// Flatten a JSON value into dot-notation key-value pairs for red_config.
