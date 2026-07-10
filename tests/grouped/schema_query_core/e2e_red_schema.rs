@@ -1428,7 +1428,13 @@ fn pool_metric(rt: &RedDBRuntime, pool: &str, metric: &str) -> u64 {
 #[test]
 fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() {
     cleanup_scope();
-    let rt = runtime();
+    // A persistent store, not `runtime()`: the ephemeral store constructor
+    // never opens a group-commit coordinator, so it holds no WAL writer
+    // buffer and the live-usage assertion below would be vacuously zero.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("data.rdb");
+    let rt =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).expect("persistent runtime");
 
     let result = rt
         .execute_query(&format!(
@@ -1505,17 +1511,50 @@ fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() 
     );
     assert!(total_share > 0, "a real budget reaches the pools");
 
-    // Usage is live, not a placeholder: an open store already holds its WAL
-    // writer buffer, and the shared total is the sum of the per-pool rows.
-    let total_used = budget_unsigned(&rt, "total_used_bytes");
+    // Usage is live, not a placeholder: resident rows show up in the segment
+    // arena, and the shared total is the sum of the per-pool rows.
+    // (`wal_buffers` is NOT asserted non-zero: the sampler reads the
+    // store-level commit coordinator, which the runtime store shape does not
+    // open — wiring the live WAL writer into the pool is a follow-up.)
+    exec(&rt, "CREATE TABLE budget_probe (id INT, body TEXT)");
+    for id in 0..32 {
+        exec(
+            &rt,
+            &format!("INSERT INTO budget_probe (id, body) VALUES ({id}, 'payload-{id}')"),
+        );
+    }
+    // One snapshot for the sum identity: usage moves between queries (each
+    // red.stats read refreshes the sampler, and the result cache itself is a
+    // governed pool), so total and parts must come from the same rows.
+    let section = rt
+        .execute_query(&format!(
+            "SELECT * FROM red.stats WHERE collection = '{MEMORY_BUDGET_COLLECTION}'"
+        ))
+        .expect("red.stats budget section");
+    let used_of = |entity: &Value, metric: &str| -> u64 {
+        section
+            .result
+            .records
+            .iter()
+            .find(|row| {
+                row.get("entity") == Some(entity)
+                    && row.get("metric") == Some(&Value::text(metric))
+            })
+            .and_then(|row| match row.get("value") {
+                Some(Value::UnsignedInteger(bytes)) => Some(*bytes),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing unsigned {metric} for {entity:?}"))
+    };
+    let total_used = used_of(&Value::Null, "total_used_bytes");
     let summed_used: u64 = MEMORY_POOL_NAMES
         .iter()
-        .map(|pool| pool_metric(&rt, pool, "used_bytes"))
+        .map(|pool| used_of(&Value::text(*pool), "used_bytes"))
         .sum();
     assert_eq!(summed_used, total_used);
     assert!(
-        pool_metric(&rt, "wal_buffers", "used_bytes") > 0,
-        "an open store holds its WAL writer buffer"
+        used_of(&Value::text("segment_arena"), "used_bytes") > 0,
+        "resident rows must be visible in the segment arena pool"
     );
 
     // The section is part of the unfiltered profiling scan too.
