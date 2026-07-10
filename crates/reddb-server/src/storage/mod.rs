@@ -89,6 +89,9 @@ pub mod memory_budget;
 // accounting only — admission enforcement is the downstream slice.
 pub mod memory_pools;
 
+#[cfg(test)]
+mod no_malloc_hot_paths;
+
 // Embedded single-file `.rdb` artifact skeleton.
 pub mod embedded;
 
