@@ -1537,8 +1537,7 @@ fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() 
             .records
             .iter()
             .find(|row| {
-                row.get("entity") == Some(entity)
-                    && row.get("metric") == Some(&Value::text(metric))
+                row.get("entity") == Some(entity) && row.get("metric") == Some(&Value::text(metric))
             })
             .and_then(|row| match row.get("value") {
                 Some(Value::UnsignedInteger(bytes)) => Some(*bytes),
