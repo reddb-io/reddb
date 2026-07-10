@@ -74,6 +74,12 @@ impl EmbeddedRdbArtifact {
         map_result(reddb_file::EmbeddedRdbArtifact::read_wal_payloads(open))
     }
 
+    pub fn wal_bytes_in_use(open: &EmbeddedRdbOpen) -> u64 {
+        open.manifest
+            .wal_recovery_boundary
+            .saturating_sub(open.manifest.wal_region_offset)
+    }
+
     pub fn append_wal_payloads(
         path: impl AsRef<Path>,
         payloads: &[Vec<u8>],
