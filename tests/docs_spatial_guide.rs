@@ -508,8 +508,16 @@ fn guide_promise_that_the_index_is_a_pure_optimization_holds() {
         .unwrap();
 
     for query in QUERIES {
-        let without = rows(&scan, query);
-        let with = rows(&indexed, query);
+        let mut without = rows(&scan, query);
+        let mut with = rows(&indexed, query);
+        // BBOX promises the same row SET, not an order — it has no centre to
+        // sort by, and the scan path inherits map iteration order. RADIUS and
+        // NEAREST do promise distance-ascending order, so only BBOX may be
+        // normalized before the strict comparison.
+        if query.contains("BBOX") {
+            without.sort_by_key(|row| row.0);
+            with.sort_by_key(|row| row.0);
+        }
         // Same rows, same order, bit-for-bit identical distances.
         assert_eq!(without.len(), with.len(), "{query}: row count diverged");
         for (a, b) in without.iter().zip(with.iter()) {

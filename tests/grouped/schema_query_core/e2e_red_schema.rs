@@ -2114,3 +2114,143 @@ fn red_schema_dml_is_read_only() {
     }
     cleanup_scope();
 }
+
+// Issue #1961 (ADR 0073 §5) — consolidation is the budget's reclamation tool,
+// so what it reclaimed and what arms it are both queryable through the public
+// RQL surface.
+const CONSOLIDATION_COLLECTION: &str = "red.consolidation";
+
+const CONSOLIDATION_COUNTERS: [&str; 5] = [
+    "consolidation_runs_started",
+    "consolidation_runs_completed",
+    "consolidation_segments_merged",
+    "consolidation_tombstones_reclaimed",
+    "consolidation_bytes_reclaimed",
+];
+
+#[test]
+fn red_stats_exposes_the_process_consolidation_thresholds() {
+    cleanup_scope();
+    let rt = runtime();
+
+    let result = rt
+        .execute_query(&format!(
+            "SELECT * FROM red.stats WHERE collection = '{CONSOLIDATION_COLLECTION}'"
+        ))
+        .expect("red.stats consolidation section");
+    assert_eq!(result.result.columns, STATS_COLUMNS.map(str::to_string));
+
+    let metrics = result
+        .result
+        .records
+        .iter()
+        .filter_map(|row| match row.get("metric") {
+            Some(Value::Text(metric)) => Some(metric.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        metrics,
+        vec![
+            "tombstone_ratio_threshold",
+            "fragmentation_ratio_threshold",
+            "entities_per_tick",
+        ],
+        "documented threshold names, in order"
+    );
+
+    for row in &result.result.records {
+        assert_eq!(row.get("entity"), Some(&Value::Null));
+    }
+
+    // The two ratios are fractions; the pacing bound is a positive entity count.
+    for metric in ["tombstone_ratio_threshold", "fragmentation_ratio_threshold"] {
+        let value = result
+            .result
+            .records
+            .iter()
+            .find(|row| row.get("metric") == Some(&Value::text(metric)))
+            .and_then(|row| row.get("value").cloned())
+            .unwrap_or_else(|| panic!("{metric} present"));
+        match value {
+            Value::Float(ratio) => assert!(
+                ratio > 0.0 && ratio < 1.0,
+                "{metric} should be a fraction, got {ratio}"
+            ),
+            other => panic!("{metric} should be a float, got {other:?}"),
+        }
+    }
+
+    let per_tick = result
+        .result
+        .records
+        .iter()
+        .find(|row| row.get("metric") == Some(&Value::text("entities_per_tick")))
+        .and_then(|row| row.get("value").cloned())
+        .expect("entities_per_tick present");
+    match per_tick {
+        Value::UnsignedInteger(bound) => assert!(bound > 0, "pacing bound must be positive"),
+        other => panic!("entities_per_tick should be an unsigned integer, got {other:?}"),
+    }
+
+    cleanup_scope();
+}
+
+#[test]
+fn red_stats_exposes_per_collection_consolidation_counters() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE users (id INT, name TEXT)");
+    exec(&rt, "INSERT INTO users (id, name) VALUES (1, 'alice')");
+
+    let result = rt
+        .execute_query("SELECT * FROM red.stats WHERE collection = 'users'")
+        .expect("red.stats select");
+
+    for metric in CONSOLIDATION_COUNTERS {
+        let row = result
+            .result
+            .records
+            .iter()
+            .find(|row| row.get("metric") == Some(&Value::text(metric)))
+            .unwrap_or_else(|| panic!("{metric} present for a user collection"));
+        assert_eq!(row.get("entity"), Some(&Value::Null));
+        // A fresh collection has consolidated nothing — a real zero, not an
+        // absent row.
+        assert_eq!(row.get("value"), Some(&Value::UnsignedInteger(0)));
+    }
+
+    // The dead `compact_ops` counter is gone: nothing reports it any more.
+    assert!(
+        !result
+            .result
+            .records
+            .iter()
+            .any(|row| row.get("metric") == Some(&Value::text("compact_ops"))),
+        "compact_ops was replaced by the consolidation counters"
+    );
+
+    cleanup_scope();
+}
+
+#[test]
+fn red_stats_scoped_to_a_collection_omits_the_process_consolidation_thresholds() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE users (id INT)");
+    exec(&rt, "INSERT INTO users (id) VALUES (1)");
+
+    let scoped = rt
+        .execute_query("SHOW STATS users")
+        .expect("show stats users");
+    assert!(
+        scoped
+            .result
+            .records
+            .iter()
+            .all(|row| row.get("collection") == Some(&Value::text("users"))),
+        "a collection-scoped scan carries no process-scoped threshold rows"
+    );
+
+    cleanup_scope();
+}

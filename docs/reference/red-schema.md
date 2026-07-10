@@ -400,6 +400,46 @@ SELECT * FROM red.stats WHERE collection = 'red.scrub';
 | `background_total_objects` | `NULL` | Total objects in the current scrub pass. |
 | `verified_objects` | zone kind | Objects verified by the last scrub result for each zone. |
 
+### Consolidation section
+
+Consolidation is how memory comes back to the budget (ADR 0073 §5): a
+collection's sealed segments merge into one segment holding only live entities,
+and the tombstones they carried are garbage-collected. The merge is paced — a
+maintenance tick copies a bounded number of entities and stops, carrying the
+half-built segment to the next tick.
+
+Every collection reports what its consolidations reclaimed, with a `NULL`
+`entity`:
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `consolidation_runs_started` | `NULL` | Consolidations that crossed a threshold and began copying. |
+| `consolidation_runs_completed` | `NULL` | Consolidations that finished the swap. A started run that never completes was discarded by a restart. |
+| `consolidation_segments_merged` | `NULL` | Source segments retired by completed swaps. |
+| `consolidation_tombstones_reclaimed` | `NULL` | Tombstones garbage-collected by completed swaps. |
+| `consolidation_bytes_reclaimed` | `NULL` | Bytes returned to the memory budget by completed swaps. |
+
+The thresholds that arm a consolidation are engine constants shared by every
+collection, so they are reported once under the reserved `red.consolidation`
+collection label:
+
+```sql
+SELECT * FROM red.stats WHERE collection = 'red.consolidation';
+```
+
+| Metric | Entity | Value |
+|--------|--------|-------|
+| `tombstone_ratio_threshold` | `NULL` | Dead entities over total entities across the sealed set, above which consolidation arms. |
+| `fragmentation_ratio_threshold` | `NULL` | Reclaimable bytes over held bytes, above which consolidation arms. |
+| `entities_per_tick` | `NULL` | Entities copied per maintenance tick — the pacing bound of ADR 0038 §3. |
+
+A sealed-segment count above the collection's `max_sealed_segments` also arms a
+consolidation, regardless of tombstones.
+
+These three values are observable, not contract: they are tunable
+implementation constants and may change between releases. Read them to
+understand what the engine decided; do not build against them.
+
 ### Freshness tiers
 
 `red.*` columns and views split across three consistency tiers:

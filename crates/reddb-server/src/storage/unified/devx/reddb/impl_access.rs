@@ -994,7 +994,7 @@ impl RedDB {
             fnv1a_hash_value(&mut root, &stats.archived_count);
             fnv1a_hash_value(&mut root, &stats.total_memory_bytes);
             fnv1a_hash_value(&mut root, &stats.seal_ops);
-            fnv1a_hash_value(&mut root, &stats.compact_ops);
+            fnv1a_hash_value(&mut root, &stats.consolidation.runs_completed);
 
             let mut entities = manager.query_all(|_| true);
             entities.sort_by_key(|entity| entity.id.raw());
