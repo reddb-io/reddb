@@ -296,9 +296,11 @@ fn parse_superblock(copy_index: u8, bytes: &[u8]) -> Option<ParsedSuperblock> {
         manifest_len: read_u64(bytes, 33)?,
         manifest_checksum: read_u32(bytes, 41)?,
         wal_recovery_boundary: read_u64(bytes, 61)?,
-        snapshot_offset: read_u64(bytes, 69)?,
-        snapshot_bytes: read_u64(bytes, 77)?,
-        snapshot_checksum: read_u32(bytes, 85)?,
+        // offset 69..77 is wal_live_bytes (superblock v2); the census does
+        // not need it, but the snapshot fields sit 8 bytes further out.
+        snapshot_offset: read_u64(bytes, 77)?,
+        snapshot_bytes: read_u64(bytes, 85)?,
+        snapshot_checksum: read_u32(bytes, 93)?,
     })
 }
 

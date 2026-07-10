@@ -390,6 +390,10 @@ impl EmbeddedRdbArtifact {
 
         let mut manifest = read_manifest(&mut file, selected_superblock)?;
         manifest.wal_recovery_boundary = selected_superblock.wal_recovery_boundary;
+        // The superblock is the WAL authority: appends update it without
+        // rewriting the manifest zone, so a stale manifest wal_live_bytes
+        // would make the scan see an empty region and drop live records.
+        manifest.wal_live_bytes = selected_superblock.wal_live_bytes;
         Ok(EmbeddedRdbOpen {
             path: path.to_path_buf(),
             selected_superblock,
