@@ -489,6 +489,11 @@ const STATS_MCV_LIMIT: usize = 10;
 /// being repeated once per collection.
 const MEMORY_BUDGET_COLLECTION: &str = "red.memory_budget";
 
+/// Synthetic `collection` label carrying the process-scoped consolidation
+/// thresholds in `red.stats`. The thresholds are engine constants shared by
+/// every collection, so they get one reserved label rather than N copies.
+const CONSOLIDATION_COLLECTION: &str = "red.consolidation";
+
 /// Long-format `red.stats` profiling view (issue #1787). This is the
 /// **computed** freshness tier: every read runs an on-demand profiling
 /// scan over the target collections rather than serving a cached
@@ -526,6 +531,7 @@ pub(super) fn stats_snapshot(
 
     let mut rows = Vec::new();
     append_memory_budget_stats(&mut rows, &schema, runtime, target.as_deref());
+    append_consolidation_thresholds(&mut rows, &schema, target.as_deref());
     for collection in snapshot.collections {
         if let Some(target) = target.as_deref() {
             if collection.name != target {
@@ -578,6 +584,7 @@ pub(super) fn stats_snapshot(
             "last_checkpoint_duration_ms",
             Value::UnsignedInteger(checkpoint_stats.last_checkpoint_duration_ms),
         ));
+        append_consolidation_stats(&mut rows, &schema, store.as_ref(), &collection.name);
 
         match collection.model {
             CollectionModel::Table => {
@@ -693,6 +700,92 @@ fn append_memory_budget_stats(
         "total_used_bytes",
         Value::UnsignedInteger(accounting.total_used_bytes()),
     ));
+}
+
+/// Consolidation thresholds (ADR 0073 §5, issue #1961).
+///
+/// The three thresholds that arm a paced sealed-segment merge. They are
+/// implementation constants shared by every collection, surfaced so an operator
+/// can see what the engine decided — read-only, and free to move between
+/// releases. Nothing here is a compatibility contract.
+fn append_consolidation_thresholds(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    target: Option<&str>,
+) {
+    use crate::storage::unified::manager::{
+        CONSOLIDATION_ENTITIES_PER_TICK, CONSOLIDATION_FRAGMENTATION_RATIO,
+        CONSOLIDATION_TOMBSTONE_RATIO,
+    };
+
+    if target.is_some_and(|target| target != CONSOLIDATION_COLLECTION) {
+        return;
+    }
+
+    rows.push(stats_row(
+        schema,
+        CONSOLIDATION_COLLECTION,
+        Value::Null,
+        "tombstone_ratio_threshold",
+        Value::Float(CONSOLIDATION_TOMBSTONE_RATIO),
+    ));
+    rows.push(stats_row(
+        schema,
+        CONSOLIDATION_COLLECTION,
+        Value::Null,
+        "fragmentation_ratio_threshold",
+        Value::Float(CONSOLIDATION_FRAGMENTATION_RATIO),
+    ));
+    rows.push(stats_row(
+        schema,
+        CONSOLIDATION_COLLECTION,
+        Value::Null,
+        "entities_per_tick",
+        Value::UnsignedInteger(CONSOLIDATION_ENTITIES_PER_TICK as u64),
+    ));
+}
+
+/// Per-collection consolidation counters (ADR 0073 §5, issue #1961).
+///
+/// Consolidation is the budget's reclamation tool, so what it reclaimed is part
+/// of the memory story: `tombstones_reclaimed` and `bytes_reclaimed` are the
+/// memory that came back. These replace the `compact_ops` counter, which only
+/// ever counted a do-nothing branch.
+fn append_consolidation_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    store: &UnifiedStore,
+    collection: &str,
+) {
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    let consolidation = manager.stats().consolidation;
+
+    for (metric, value) in [
+        ("consolidation_runs_started", consolidation.runs_started),
+        ("consolidation_runs_completed", consolidation.runs_completed),
+        (
+            "consolidation_segments_merged",
+            consolidation.segments_merged,
+        ),
+        (
+            "consolidation_tombstones_reclaimed",
+            consolidation.tombstones_reclaimed,
+        ),
+        (
+            "consolidation_bytes_reclaimed",
+            consolidation.bytes_reclaimed,
+        ),
+    ] {
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::Null,
+            metric,
+            Value::UnsignedInteger(value),
+        ));
+    }
 }
 
 fn append_table_stats(
