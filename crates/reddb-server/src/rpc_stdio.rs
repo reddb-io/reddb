@@ -1517,6 +1517,7 @@ pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
     match v {
         Value::Null => SchemaValue::Null,
         Value::Bool(b) => SchemaValue::Boolean(*b),
+        Value::Integer(n) => SchemaValue::Integer(*n),
         Value::Number(n) => {
             if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
                 SchemaValue::Integer(*n as i64)
@@ -1529,7 +1530,10 @@ pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
             // A JSON array of numbers (or empty) is taken as `Vector`
             // for the #355 query-param contract. Other arrays are
             // JSON values, so JSON columns can bind array payloads.
-            if items.iter().all(|v| matches!(v, Value::Number(_))) {
+            if items
+                .iter()
+                .all(|v| matches!(v, Value::Integer(_) | Value::Number(_)))
+            {
                 let floats: Vec<f32> = items
                     .iter()
                     .map(|v| v.as_f64().unwrap_or(0.0) as f32)
