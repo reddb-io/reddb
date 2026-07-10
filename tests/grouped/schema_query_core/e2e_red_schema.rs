@@ -1587,16 +1587,18 @@ fn scrub_reports_corrupt_manifest_finding_without_repairing_store() {
     file.sync_all().expect("sync corruption");
     drop(file);
 
-    // A corrupt manifest fails the open didactically (ADR 0038 §2 fail-closed
-    // reads) — the SQL surface is unreachable on this store by design, so the
-    // scrub over a manifest-corrupt store is the OFFLINE pass.
+    // With both slots corrupt, neither superblock generation can be
+    // validated, so the open fails didactically at the zone that roots the
+    // store (ADR 0038 §2 fail-closed reads) and points at the salvage tool
+    // (ADR 0074 §4). The SQL surface is unreachable on this store by design,
+    // so the scrub over a manifest-corrupt store is the OFFLINE pass.
     let open_err = reddb::RedDBRuntime::with_options(reddb::RedDBOptions::persistent(&db_path))
         .err()
         .expect("a corrupt manifest must fail the open");
     let rendered = format!("{open_err:?}");
     assert!(
-        rendered.contains("manifest"),
-        "open error should name the manifest zone: {rendered}"
+        rendered.contains("unrecoverable") && rendered.contains("salvage"),
+        "open error should be the didactic unrecoverable-zone message: {rendered}"
     );
 
     let before = file_snapshot(dir.path());
