@@ -898,7 +898,6 @@ impl GrowingSegment {
         }
         self.metadata.remove_all(id);
         true
->>>>>>> origin/main
     }
 
     /// Estimate memory for an entity
