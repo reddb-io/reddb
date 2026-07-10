@@ -1478,9 +1478,8 @@ fn pool_metric(rt: &RedDBRuntime, pool: &str, metric: &str) -> u64 {
 #[test]
 fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() {
     cleanup_scope();
-    // A persistent store, not `runtime()`: the ephemeral store constructor
-    // never opens a group-commit coordinator, so it holds no WAL writer
-    // buffer and the live-usage assertion below would be vacuously zero.
+    // Default persistent runtimes use the embedded single-file artifact: WAL
+    // appends are synchronous artifact writes, not a resident writer/queue.
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("data.rdb");
     let rt =
@@ -1566,10 +1565,8 @@ fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() 
     assert!(total_share > 0, "a real budget reaches the pools");
 
     // Usage is live, not a placeholder: resident rows show up in the segment
-    // arena, and the shared total is the sum of the per-pool rows.
-    // (`wal_buffers` is NOT asserted non-zero: the sampler reads the
-    // store-level commit coordinator, which the runtime store shape does not
-    // open — wiring the live WAL writer into the pool is a follow-up.)
+    // arena, embedded WAL appends retain no resident buffer to report, and the
+    // shared total is the sum of the per-pool rows.
     exec(&rt, "CREATE TABLE budget_probe (id INT, body TEXT)");
     for id in 0..32 {
         exec(
@@ -1608,6 +1605,11 @@ fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() 
     assert!(
         used_of(&Value::text("segment_arena"), "used_bytes") > 0,
         "resident rows must be visible in the segment arena pool"
+    );
+    assert_eq!(
+        used_of(&Value::text("wal_buffers"), "used_bytes"),
+        0,
+        "embedded artifact WAL writes should not report disk occupancy as memory"
     );
 
     // The section is part of the unfiltered profiling scan too.
