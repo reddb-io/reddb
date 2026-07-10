@@ -1822,6 +1822,10 @@ fn main() {
             std::process::exit(run_migrate_from_redis_command(&result.flags));
         }
 
+        "salvage" => {
+            std::process::exit(run_salvage_command(&result.flags));
+        }
+
         "status" => {
             let json_mode = wants_json(&result.flags);
             let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
@@ -3120,6 +3124,51 @@ fn run_migrate_from_redis_command(flags: &HashMap<String, FlagValue>) -> i32 {
     0
 }
 
+fn run_salvage_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let Some(source) = flag_string(flags, "source").filter(|value| !value.is_empty()) else {
+        let msg = "--source is required for salvage";
+        if json_mode {
+            json_error("salvage", msg);
+        }
+        eprintln!("salvage: {msg}");
+        return 2;
+    };
+    let Some(destination) = flag_string(flags, "destination").filter(|value| !value.is_empty())
+    else {
+        let msg = "--destination is required for salvage";
+        if json_mode {
+            json_error("salvage", msg);
+        }
+        eprintln!("salvage: {msg}");
+        return 2;
+    };
+
+    match reddb_file::salvage_embedded_store(&source, &destination) {
+        Ok(report) => {
+            if json_mode {
+                match report.machine_json() {
+                    Ok(data) => json_ok("salvage", &data),
+                    Err(err) => {
+                        json_error("salvage", &err.to_string());
+                    }
+                }
+            } else {
+                println!("{}", report.human_summary());
+            }
+            0
+        }
+        Err(err) => {
+            let msg = err.to_string();
+            if json_mode {
+                json_error("salvage", &msg);
+            }
+            eprintln!("salvage: {msg}");
+            1
+        }
+    }
+}
+
 fn validate_redis_tcp_connectivity(redis_url: &str) -> Result<(), String> {
     let addr = redis_socket_addr(redis_url)?;
     let mut addrs = addr
@@ -4086,6 +4135,14 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_default("redis-migration"),
             ]);
         }
+        Some("salvage") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::new("source")
+                    .with_description("Damaged source .rdb file to read"),
+                cli::types::FlagSchema::new("destination")
+                    .with_description("Fresh destination .rdb file to create"),
+            ]);
+        }
         Some("rpc") => {
             flags.extend(vec![
                 cli::types::FlagSchema::boolean("stdio")
@@ -4180,6 +4237,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("delete".to_string(), vec![]),
         ("tick".to_string(), vec![]),
         ("migrate-from-redis".to_string(), vec![]),
+        ("salvage".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),

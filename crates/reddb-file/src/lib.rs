@@ -44,6 +44,7 @@ pub mod physical_metadata;
 pub mod physical_metadata_policy;
 pub mod primary_replica;
 pub mod profile;
+pub mod salvage;
 pub mod scrub;
 pub mod serverless;
 pub mod shm;
@@ -340,6 +341,10 @@ pub use primary_replica::{
     TimelineHistoryEntry, TimelineId, WalPruneResult, WalRetentionPlan, WalRetentionPolicy,
 };
 pub use profile::{FileArtifactKind, FileProfile};
+pub use salvage::{
+    salvage_embedded_store, StorageSalvageCollection, StorageSalvageMode, StorageSalvageReport,
+    StorageSalvageSkippedRegion,
+};
 pub use scrub::{
     scrub_embedded_store, StorageScrubFinding, StorageScrubReport, StorageScrubVerifiedCounters,
 };

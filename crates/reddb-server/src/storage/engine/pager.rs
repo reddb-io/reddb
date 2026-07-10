@@ -113,7 +113,7 @@ impl std::fmt::Display for PagerError {
                 f,
                 "superblock zone of {} is unrecoverable: both ping-pong copies failed \
                  validation, so no generation can be trusted to root the store. The store \
-                 will not be opened. Recover what survives with the salvage tool \
+                 will not be opened. Recover what survives with red salvage \
                  (ADR 0074 §4); it reads the damaged file without writing to it and \
                  reports what it could not verify.",
                 path.display()
@@ -123,7 +123,7 @@ impl std::fmt::Display for PagerError {
                 "internal manifest zone of {} failed its checksum: the zone that names \
                  collections, indexes and the checkpoint boundary cannot be trusted, so no \
                  rows are returned rather than garbage ones. Run scrub to classify the fault \
-                 and salvage to extract what survives (ADR 0074 §2/§4).",
+                 and red salvage to extract what survives (ADR 0074 §2/§4).",
                 path.display()
             ),
             Self::LegacySidecarStore { sidecar } => write!(

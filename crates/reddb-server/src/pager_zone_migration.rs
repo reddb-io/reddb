@@ -86,7 +86,7 @@ impl std::fmt::Display for ZoneMigrationError {
                 f,
                 "neither page 0 of {} nor its rdb-hdr shadow holds a readable database \
                  header, so no superblock can be seeded from this store. This is a damaged \
-                 store, not a legacy one: reach for salvage (ADR 0074 §4)",
+                 store, not a legacy one: reach for red salvage (ADR 0074 §4)",
                 path.display()
             ),
             Self::Io(err) => write!(f, "io error: {err}"),
