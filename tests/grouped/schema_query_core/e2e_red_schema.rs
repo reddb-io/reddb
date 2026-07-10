@@ -1566,10 +1566,8 @@ fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() 
     assert!(total_share > 0, "a real budget reaches the pools");
 
     // Usage is live, not a placeholder: resident rows show up in the segment
-    // arena, and the shared total is the sum of the per-pool rows.
-    // (`wal_buffers` is NOT asserted non-zero: the sampler reads the
-    // store-level commit coordinator, which the runtime store shape does not
-    // open — wiring the live WAL writer into the pool is a follow-up.)
+    // arena, WAL writes show up in wal_buffers, and the shared total is the
+    // sum of the per-pool rows.
     exec(&rt, "CREATE TABLE budget_probe (id INT, body TEXT)");
     for id in 0..32 {
         exec(
@@ -1608,6 +1606,10 @@ fn red_stats_exposes_the_memory_budget_section_with_per_pool_shares_and_usage() 
     assert!(
         used_of(&Value::text("segment_arena"), "used_bytes") > 0,
         "resident rows must be visible in the segment arena pool"
+    );
+    assert!(
+        used_of(&Value::text("wal_buffers"), "used_bytes") > 0,
+        "the live WAL writer must be visible in the wal_buffers pool"
     );
 
     // The section is part of the unfiltered profiling scan too.
