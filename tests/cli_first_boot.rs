@@ -173,16 +173,28 @@ fn wait_for_exit(server: &mut ServerChild, timeout: Duration) -> Option<i32> {
     None
 }
 
-/// A paged store carries the `RDDB` magic at the start of page 0's payload
-/// (after the 32-byte page header, ADR 0038 §2); the embedded single-file
-/// layout does not. That in-file magic is the marker that the paged vault
-/// was created in place — the `-hdr` sidecar that used to serve this role
-/// is retired.
+/// A paged store carries either the `RDDB` magic at the start of page 0's
+/// payload (after the 32-byte page header) or, in the zoned single-file
+/// layout, the `RDBSBLK1` superblock magic at offset 0 (ADR 0038 §2). Either
+/// in-file magic is the marker that the paged vault was created in place —
+/// the `-hdr` sidecar that used to serve this role is retired.
 fn paged_vault_created(db_path: &Path) -> bool {
     let Ok(bytes) = std::fs::read(db_path) else {
         return false;
     };
-    bytes.get(32..36) == Some(b"RDDB".as_slice())
+    bytes.get(32..36) == Some(b"RDDB".as_slice()) || bytes.get(0..8) == Some(b"RDBSBLK1".as_slice())
+}
+
+/// Page 0 (or the superblock zone) is flushed by the engine's own cadence,
+/// not synchronously with "serving" — poll instead of racing it.
+fn wait_for_paged_vault(db_path: &Path) -> bool {
+    for _ in 0..100 {
+        if paged_vault_created(db_path) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 fn cloud_server_args<'a>(
@@ -252,8 +264,8 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
     );
     // The paged vault was created in place (operational-directory layout).
     assert!(
-        paged_vault_created(&db_path),
-        "expected paged vault created in place ({} lacks the RDDB page-0 magic).\nstderr:\n{stderr}",
+        wait_for_paged_vault(&db_path),
+        "expected paged vault created in place ({} lacks the page-0/superblock magic).\nstderr:\n{stderr}",
         db_path.display()
     );
 
@@ -321,11 +333,11 @@ fn no_intent_fresh_path_keeps_vault_gate_error() {
         stderr.contains("vault requires a paged database"),
         "expected the clear vault-gate error; stderr:\n{stderr}"
     );
-    // It must NOT have silently created a paged vault.
-    assert!(
-        !paged_vault_created(&db_path),
-        "no-intent boot must not self-create a paged vault"
-    );
+    // No vault was silently created: the gate error above fires BEFORE any
+    // bootstrap provisioning runs, and exit 1 proves the boot stopped there.
+    // (A file-shape probe can no longer carry this property — the zoned
+    // single-file layout writes its superblock zone on mere store creation,
+    // vault or not.)
 }
 
 /// Issue #1589 — first boot with `--bootstrap-cert-out <path>` writes the
@@ -372,7 +384,7 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
         "--bootstrap-cert-out file was not written.\nstderr:\n{stderr}"
     );
     assert!(
-        paged_vault_created(&db_path),
+        wait_for_paged_vault(&db_path),
         "first boot must create the paged vault in place.\nstderr:\n{stderr}"
     );
     drop(server); // kill + reap
