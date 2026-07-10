@@ -311,8 +311,7 @@ fn embedded_wal_checkpoint_fence_allows_wrap_after_quiescing_region() {
     let checkpointed =
         EmbeddedRdbArtifact::write_snapshot(&path, b"RDST-checkpoint").expect("checkpoint");
     assert_eq!(
-        checkpointed.manifest.wal_recovery_boundary,
-        pre_checkpoint.manifest.wal_recovery_boundary,
+        checkpointed.manifest.wal_recovery_boundary, pre_checkpoint.manifest.wal_recovery_boundary,
         "checkpointing proves the old frames reclaimable but keeps the append fence at the tail"
     );
     assert_eq!(checkpointed.manifest.wal_live_bytes, 0);
