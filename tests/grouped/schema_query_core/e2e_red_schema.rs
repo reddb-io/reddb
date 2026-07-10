@@ -16,7 +16,6 @@ use reddb::storage::schema::Value;
 use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-
 const INDEX_COLUMNS: [&str; 10] = [
     "collection",
     "name",
