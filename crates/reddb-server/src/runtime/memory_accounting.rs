@@ -41,6 +41,9 @@ impl RedDBRuntime {
             MemoryPool::IndexMemory,
             self.index_store_ref().memory_bytes(),
         );
+        // Paged stores keep a resident group-commit writer and queue; embedded
+        // single-file stores append WAL payloads synchronously to the artifact
+        // and retain no live WAL buffer between mutations.
         accounting.report(MemoryPool::WalBuffers, store.wal_buffer_bytes_in_use());
         accounting.observe_total_used(accounting.total_used_bytes());
     }
