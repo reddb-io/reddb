@@ -174,9 +174,17 @@ impl BlobCacheL2 {
         let stored_len = compressed.stored_len() as u64;
         let was_compressed = compressed.is_compressed();
         let current = self.bytes_in_use.load(Ordering::Relaxed);
-        let projected = current
+        let mut projected = current
             .saturating_sub(old_entry_size)
             .saturating_add(stored_len);
+        if projected > self.bytes_max && stored_len <= self.bytes_max {
+            self.evict_until_fits(key, projected.saturating_sub(self.bytes_max));
+            projected = self
+                .bytes_in_use
+                .load(Ordering::Relaxed)
+                .saturating_sub(old_entry_size)
+                .saturating_add(stored_len);
+        }
         if projected > self.bytes_max {
             return Err(CacheError::L2Full {
                 size: projected,
@@ -332,6 +340,43 @@ impl BlobCacheL2 {
         }
         self.persist_control();
         removed
+    }
+
+    fn evict_until_fits(&self, protected_key: &BlobCacheKey, needed_bytes: u64) -> u64 {
+        let mut reclaimed = 0_u64;
+        while reclaimed < needed_bytes {
+            let Some((encoded, record)) = self.first_evictable_record(protected_key) else {
+                break;
+            };
+            let metadata = self.metadata.write();
+            let removed = metadata.delete(&encoded).ok().unwrap_or(false);
+            drop(metadata);
+            if !removed {
+                continue;
+            }
+            reclaimed = reclaimed.saturating_add(record.byte_len);
+            self.bytes_in_use
+                .fetch_sub(record.byte_len, Ordering::Relaxed);
+        }
+        if reclaimed > 0 {
+            self.persist_control();
+        }
+        reclaimed
+    }
+
+    fn first_evictable_record(&self, protected_key: &BlobCacheKey) -> Option<(Vec<u8>, L2Record)> {
+        let metadata = self.metadata.read();
+        let mut cursor = metadata.cursor_first().ok()?;
+        while let Ok(Some((encoded, value))) = cursor.next() {
+            let Ok(record) = L2Record::decode(&value) else {
+                continue;
+            };
+            if record.namespace == protected_key.namespace && record.key == protected_key.key {
+                continue;
+            }
+            return Some((encoded, record));
+        }
+        None
     }
 
     fn persist_control(&self) {

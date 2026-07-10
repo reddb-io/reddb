@@ -1,7 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 
-use super::cache::blob::{BlobCache, BlobCachePut};
+use super::cache::blob::{BlobCache, BlobCacheConfig, BlobCachePolicy, BlobCachePut, L1Admission};
 use super::engine::page::{Page, PageType};
 use super::engine::page_cache::PageCacheShard;
 use super::unified::hash_index::HashIndex;
@@ -148,12 +148,15 @@ const COVERED_OPERATIONS: &[CoveredOperation] = &[
     },
     CoveredOperation {
         name: "blob-cache-l1-hit",
-        allowed_allocs: 2,
-        exception: Some(AllocationException {
-            reason: "BlobCache::get builds the owned namespace/key lookup key on the hit path",
-            follow_up_issue: 1956,
-        }),
+        allowed_allocs: 0,
+        exception: None,
         measure: measure_blob_cache_l1_hit,
+    },
+    CoveredOperation {
+        name: "blob-cache-promote-on-second-hit-l1-hit",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_blob_cache_promote_on_second_hit_l1_hit,
     },
     CoveredOperation {
         name: "wal-record-encode-into-group-commit-buffer",
@@ -255,6 +258,33 @@ fn measure_blob_cache_l1_hit() -> AllocationCount {
     cache
         .put("sessions", "abc", BlobCachePut::new(b"payload".to_vec()))
         .unwrap();
+
+    let (hit, count) = measure_allocations(|| cache.get("sessions", "abc"));
+
+    assert_eq!(hit.unwrap().value(), b"payload");
+    count
+}
+
+fn measure_blob_cache_promote_on_second_hit_l1_hit() -> AllocationCount {
+    let tmp = tempfile::tempdir().expect("blob cache l2 tempdir");
+    let cache = BlobCache::open_with_l2(
+        BlobCacheConfig::default()
+            .with_l1_bytes_max(128)
+            .with_shard_count(1)
+            .with_max_namespaces(4)
+            .with_l2_path(tmp.path().join("cache.rdb")),
+    )
+    .expect("blob cache l2");
+    cache
+        .put(
+            "sessions",
+            "abc",
+            BlobCachePut::new(b"payload".to_vec())
+                .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+        )
+        .unwrap();
+    assert!(cache.get("sessions", "abc").is_some());
+    assert!(cache.get("sessions", "abc").is_some());
 
     let (hit, count) = measure_allocations(|| cache.get("sessions", "abc"));
 

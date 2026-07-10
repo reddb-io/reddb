@@ -26,12 +26,17 @@ fn l2_path(name: &str) -> PathBuf {
 }
 
 fn l2_cache(path: &Path) -> BlobCache {
+    l2_cache_with_promotion_policy(path, L2PromotionPolicy::OnSecondHit)
+}
+
+fn l2_cache_with_promotion_policy(path: &Path, promotion_policy: L2PromotionPolicy) -> BlobCache {
     BlobCache::open_with_l2(
         BlobCacheConfig::default()
             .with_l1_bytes_max(128)
             .with_shard_count(1)
             .with_max_namespaces(4)
-            .with_l2_path(path),
+            .with_l2_path(path)
+            .with_l2_promotion_policy(promotion_policy),
     )
     .expect("l2_cache test helper")
 }
@@ -311,6 +316,85 @@ fn l1_admission_always_and_auto_store_entries() {
 
     assert_eq!(&*cache.get("n", "always").unwrap().bytes, b"a");
     assert_eq!(&*cache.get("n", "auto").unwrap().bytes, b"b");
+}
+
+#[test]
+fn l2_hit_promotes_to_l1_only_after_second_hit() {
+    let path = l2_path("second-hit-promotion");
+    let cache = l2_cache(&path);
+    cache
+        .put(
+            "ns",
+            "hot",
+            BlobCachePut::new(b"hello".to_vec())
+                .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+        )
+        .unwrap();
+    assert_eq!(cache.stats().entries(), 0);
+
+    let first = cache.get("ns", "hot").expect("first L2 hit");
+    assert_eq!(first.value(), b"hello");
+    let after_first = cache.stats();
+    assert_eq!(after_first.entries(), 0, "first L2 hit only marks the key");
+    assert_eq!(after_first.l2_metadata_reads(), 1);
+
+    let second = cache.get("ns", "hot").expect("second L2 hit");
+    assert_eq!(second.value(), b"hello");
+    let after_second = cache.stats();
+    assert_eq!(after_second.entries(), 1, "second L2 hit promotes to L1");
+    assert_eq!(after_second.l2_metadata_reads(), 2);
+
+    let third = cache.get("ns", "hot").expect("promoted L1 hit");
+    assert_eq!(third.value(), b"hello");
+    assert_eq!(
+        cache.stats().l2_metadata_reads(),
+        2,
+        "promoted hit must not read L2 again"
+    );
+
+    drop(cache);
+    remove_l2(&path);
+}
+
+#[test]
+fn l2_pressure_evicts_entries_instead_of_rejecting_admission() {
+    let path = l2_path("evict-not-fail");
+    let cache = BlobCache::open_with_l2(
+        BlobCacheConfig::default()
+            .with_l1_bytes_max(16)
+            .with_l2_bytes_max(6)
+            .with_l2_path(&path)
+            .with_shard_count(1)
+            .with_max_namespaces(4),
+    )
+    .expect("l2 cache");
+    let policy = BlobCachePolicy::default().l1_admission(L1Admission::Never);
+
+    for key in ["a", "b", "c"] {
+        cache
+            .put(
+                "ns",
+                key,
+                BlobCachePut::new(vec![key.as_bytes()[0]; 3]).with_policy(policy),
+            )
+            .expect("cache pressure should evict, not fail");
+    }
+
+    let stats = cache.stats();
+    assert_eq!(stats.l2_full_rejections(), 0);
+    assert!(
+        stats.l2_bytes_in_use() <= stats.l2_bytes_max(),
+        "L2 bytes {} exceeded max {}",
+        stats.l2_bytes_in_use(),
+        stats.l2_bytes_max()
+    );
+    assert_eq!(
+        cache.get("ns", "c").expect("newest entry remains").value(),
+        b"ccc"
+    );
+
+    drop(cache);
+    remove_l2(&path);
 }
 
 #[test]
@@ -1119,7 +1203,10 @@ fn slow_executor(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn l2_hit_with_async_on_returns_immediately() {
     let path = l2_path("async-on");
-    let cache = Arc::new(l2_cache(&path));
+    let cache = Arc::new(l2_cache_with_promotion_policy(
+        &path,
+        L2PromotionPolicy::Immediate,
+    ));
     // Seed L2: put then evict from L1 by namespace flush so next get
     // misses L1 and re-reads L2.
     cache
@@ -1173,7 +1260,10 @@ async fn l2_hit_with_async_on_returns_immediately() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn l2_hit_with_async_off_uses_legacy_sync_path() {
     let path = l2_path("async-off");
-    let cache = Arc::new(l2_cache(&path));
+    let cache = Arc::new(l2_cache_with_promotion_policy(
+        &path,
+        L2PromotionPolicy::Immediate,
+    ));
     cache
         .put("ns", "k", BlobCachePut::new(b"hello".to_vec()))
         .expect("put");
@@ -1211,7 +1301,10 @@ async fn l2_hit_with_async_off_uses_legacy_sync_path() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drop_on_saturation_never_loses_correctness() {
     let path = l2_path("async-saturate");
-    let cache = Arc::new(l2_cache(&path));
+    let cache = Arc::new(l2_cache_with_promotion_policy(
+        &path,
+        L2PromotionPolicy::Immediate,
+    ));
     // Seed many distinct keys in L2.
     for i in 0..32 {
         cache
@@ -1260,7 +1353,10 @@ async fn drop_on_saturation_never_loses_correctness() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_drains_pool_within_budget() {
     let path = l2_path("async-shutdown");
-    let cache = Arc::new(l2_cache(&path));
+    let cache = Arc::new(l2_cache_with_promotion_policy(
+        &path,
+        L2PromotionPolicy::Immediate,
+    ));
     for i in 0..20 {
         cache
             .put("ns", &format!("k{i}"), BlobCachePut::new(vec![i as u8; 4]))
