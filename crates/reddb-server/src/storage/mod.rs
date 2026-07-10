@@ -83,6 +83,12 @@ pub mod profile;
 // and admission enforcement are downstream slices consuming the number.
 pub mod memory_budget;
 
+// Budget shares over one shared accounting pool (ADR 0073 §2). Divides the
+// resolved budget among the big memory consumers by a single allocation
+// policy, and owns the one pool they report live usage into. Sizing and
+// accounting only — admission enforcement is the downstream slice.
+pub mod memory_pools;
+
 // Embedded single-file `.rdb` artifact skeleton.
 pub mod embedded;
 
@@ -125,6 +131,10 @@ pub use layout::{
 };
 pub use memory_budget::{
     InvalidMemoryBudget, MemoryBudget, MemoryBudgetInputs, MemoryBudgetSource,
+};
+pub use memory_pools::{
+    BudgetSharePolicy, BudgetShares, MemoryAccounting, MemoryPool, PoolUsage, MEMORY_POOLS,
+    MEMORY_POOL_COUNT,
 };
 pub use profile::{DeployProfile, StorageDeployPreset, StoragePackaging, StorageProfileSelection};
 pub use unified::RedDB;

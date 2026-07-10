@@ -266,6 +266,16 @@ impl HashIndexManager {
                 memory_bytes: idx.memory_bytes(),
             })
     }
+
+    /// Approximate resident bytes across every hash index — this manager's
+    /// contribution to the `index_memory` pool (ADR 0073 §2).
+    pub fn memory_bytes(&self) -> u64 {
+        self.indices
+            .read()
+            .values()
+            .map(|idx| idx.memory_bytes() as u64)
+            .sum()
+    }
 }
 
 impl Default for HashIndexManager {
