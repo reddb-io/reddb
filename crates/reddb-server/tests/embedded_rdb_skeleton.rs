@@ -105,15 +105,15 @@ fn embedded_runtime_replays_internal_wal_without_flush_or_drop() {
     let checkpointed = EmbeddedRdbArtifact::open(&path).expect("open checkpointed artifact");
     assert_eq!(
         checkpointed.manifest.wal_recovery_boundary,
-        checkpointed.manifest.wal_region_offset
+        checkpointed.manifest.wal_checkpoint_boundary
     );
     assert!(checkpointed.manifest.snapshot_bytes > 0);
     assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
 }
 
 #[test]
-fn embedded_runtime_checkpoints_expands_and_retries_when_internal_wal_fills() {
-    let dir = temp_dir("internal_wal_expand");
+fn embedded_runtime_checkpoints_and_retries_when_internal_wal_fills() {
+    let dir = temp_dir("internal_wal_checkpoint_retry");
     let path = dir.path().join("data.rdb");
 
     EmbeddedRdbArtifact::create(&path).expect("create embedded artifact");
@@ -121,7 +121,7 @@ fn embedded_runtime_checkpoints_expands_and_retries_when_internal_wal_fills() {
         UnifiedStore::with_config(UnifiedStoreConfig::default().with_embedded_wal_path(&path));
     store.create_collection("blobs").expect("create collection");
     let mut seed = 0xD00D_F00D_CAFE_BABEu64;
-    let body: Vec<u8> = (0..100_000)
+    let body: Vec<u8> = (0..40_000)
         .map(|_| {
             seed ^= seed << 7;
             seed ^= seed >> 9;
@@ -129,20 +129,22 @@ fn embedded_runtime_checkpoints_expands_and_retries_when_internal_wal_fills() {
             (seed & 0xFF) as u8
         })
         .collect();
-    let entity = reddb_server::storage::UnifiedEntity::table_row(
-        EntityId::new(1),
-        "blobs",
-        1,
-        vec![Value::Blob(body)],
-    );
-    store
-        .insert_auto("blobs", entity)
-        .expect("insert large row");
+    for id in 1..=2 {
+        let entity = reddb_server::storage::UnifiedEntity::table_row(
+            EntityId::new(id),
+            "blobs",
+            id as u64,
+            vec![Value::Blob(body.clone())],
+        );
+        store
+            .insert_auto("blobs", entity)
+            .expect("insert large row");
+    }
 
     assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
     let artifact = EmbeddedRdbArtifact::open(&path).expect("open embedded artifact");
     assert!(artifact.manifest.snapshot_bytes > 0);
-    assert!(artifact.manifest.wal_region_bytes > 64 * 1024);
+    assert_eq!(artifact.manifest.wal_region_bytes, 64 * 1024);
     assert!(
         artifact.manifest.wal_recovery_boundary > artifact.manifest.wal_region_offset,
         "expected retried frame after checkpoint"
@@ -150,4 +152,68 @@ fn embedded_runtime_checkpoints_expands_and_retries_when_internal_wal_fills() {
 
     let frames = EmbeddedRdbArtifact::read_wal_payloads(&artifact).expect("read wal payloads");
     assert!(!frames.is_empty(), "expected retried wal frame");
+}
+
+#[test]
+fn embedded_runtime_wraps_internal_wal_without_sidecars() {
+    let dir = temp_dir("internal_wal_wrap");
+    let path = dir.path().join("data.rdb");
+
+    EmbeddedRdbArtifact::create(&path).expect("create embedded artifact");
+    let store =
+        UnifiedStore::with_config(UnifiedStoreConfig::default().with_embedded_wal_path(&path));
+    store
+        .create_collection("events")
+        .expect("create collection");
+
+    let mut seed = 0xA11C_E5ED_1234_5678u64;
+    let body: Vec<u8> = (0..40 * 1024)
+        .map(|_| {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            seed ^= seed << 8;
+            (seed & 0xFF) as u8
+        })
+        .collect();
+    for id in 1..=2 {
+        let entity = reddb_server::storage::UnifiedEntity::table_row(
+            EntityId::new(id),
+            "events",
+            id as u64,
+            vec![Value::Blob(body.clone())],
+        );
+        store.insert_auto("events", entity).expect("insert row");
+    }
+
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
+    let artifact = EmbeddedRdbArtifact::open(&path).expect("open embedded artifact");
+    assert!(
+        artifact.manifest.wal_recovery_boundary
+            > artifact.manifest.wal_region_offset + artifact.manifest.wal_region_bytes,
+        "expected logical wal boundary to wrap past the physical region"
+    );
+
+    let replayed =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen runtime");
+    let rows = replayed
+        .execute_query("SELECT * FROM events")
+        .expect("select replayed rows");
+    assert_eq!(rows.result.records.len(), 2);
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
+}
+
+#[test]
+fn embedded_runtime_reports_region_size_when_internal_wal_remains_full_after_checkpoint() {
+    let dir = temp_dir("internal_wal_full");
+    let path = dir.path().join("data.rdb");
+
+    EmbeddedRdbArtifact::create(&path).expect("create embedded artifact");
+    let err = EmbeddedRdbArtifact::append_wal_payloads(&path, &[vec![b'z'; 80 * 1024]])
+        .expect_err("oversized write should not silently grow the wal region");
+    let msg = err.to_string();
+    assert!(msg.contains("embedded circular wal region full"), "{msg}");
+    assert!(msg.contains("region size 65536 bytes"), "{msg}");
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
+
+    EmbeddedRdbArtifact::open(&path).expect("store remains readable after full wal failure");
 }
