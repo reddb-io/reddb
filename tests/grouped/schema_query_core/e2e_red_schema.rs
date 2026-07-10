@@ -15,7 +15,7 @@ use reddb::runtime::mvcc::{
 use reddb::storage::schema::Value;
 use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
-use reddb_file::EMBEDDED_RDB_MANIFEST_OFFSET;
+
 
 const INDEX_COLUMNS: [&str; 10] = [
     "collection",
@@ -1565,41 +1565,53 @@ fn scrub_reports_corrupt_manifest_finding_without_repairing_store() {
         rt.checkpoint().expect("checkpoint before corruption");
     }
 
+    // Flip one byte in BOTH manifest slots: the ping-pong (ADR 0038 §2)
+    // means either slot may be the active one, and the inactive slot is
+    // not consulted.
     let mut file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&db_path)
         .expect("open embedded store");
-    file.seek(SeekFrom::Start(EMBEDDED_RDB_MANIFEST_OFFSET + 20))
-        .expect("seek manifest");
-    let mut byte = [0u8; 1];
-    file.read_exact(&mut byte).expect("read manifest byte");
-    file.seek(SeekFrom::Start(EMBEDDED_RDB_MANIFEST_OFFSET + 20))
-        .expect("seek manifest rewrite");
-    file.write_all(&[byte[0] ^ 0x01])
-        .expect("corrupt manifest byte");
+    for offset in [
+        reddb_file::EMBEDDED_RDB_MANIFEST_0_OFFSET + 20,
+        reddb_file::EMBEDDED_RDB_MANIFEST_1_OFFSET + 20,
+    ] {
+        file.seek(SeekFrom::Start(offset)).expect("seek manifest");
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).expect("read manifest byte");
+        file.seek(SeekFrom::Start(offset))
+            .expect("seek manifest rewrite");
+        file.write_all(&[byte[0] ^ 0x01])
+            .expect("corrupt manifest byte");
+    }
     file.sync_all().expect("sync corruption");
     drop(file);
 
-    let rt = persistent_runtime_at(&db_path);
+    // A corrupt manifest fails the open didactically (ADR 0038 §2 fail-closed
+    // reads) — the SQL surface is unreachable on this store by design, so the
+    // scrub over a manifest-corrupt store is the OFFLINE pass.
+    let open_err = reddb::RedDBRuntime::with_options(reddb::RedDBOptions::persistent(&db_path))
+        .err()
+        .expect("a corrupt manifest must fail the open");
+    let rendered = format!("{open_err:?}");
+    assert!(
+        rendered.contains("manifest"),
+        "open error should name the manifest zone: {rendered}"
+    );
+
     let before = file_snapshot(dir.path());
-    let scrub = rt.execute_query("SCRUB").expect("SCRUB corrupt store");
+    let report = reddb_file::scrub_embedded_store(&db_path, 0, usize::MAX)
+        .expect("offline scrub over a corrupt store");
     let after = file_snapshot(dir.path());
 
-    let finding = scrub
-        .result
-        .records
+    let finding = report
+        .findings
         .iter()
-        .find(|row| {
-            row.get("row_kind") == Some(&Value::text("finding"))
-                && row.get("zone_kind") == Some(&Value::text("manifest"))
-        })
-        .unwrap_or_else(|| panic!("manifest finding missing: {:?}", scrub.result.records));
-    assert!(text_field(finding, "physical_identity").contains("manifest"));
-    assert_ne!(
-        finding.get("expected_checksum"),
-        finding.get("actual_checksum")
-    );
+        .find(|finding| finding.zone_kind == "manifest")
+        .unwrap_or_else(|| panic!("manifest finding missing: {:?}", report.findings));
+    assert!(finding.physical_identity.contains("manifest"));
+    assert_ne!(finding.expected_checksum, finding.actual_checksum);
     assert_eq!(before, after, "SCRUB reports corruption without repair");
 
     cleanup_scope();
