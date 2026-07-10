@@ -101,6 +101,7 @@ pub struct EmbeddedRdbManifest {
     pub version: u32,
     pub wal_region_offset: u64,
     pub wal_region_bytes: u64,
+    pub wal_checkpoint_boundary: u64,
     pub wal_recovery_boundary: u64,
     pub snapshot_offset: u64,
     pub snapshot_bytes: u64,
@@ -119,6 +120,7 @@ pub struct EmbeddedRdbSuperblock {
     pub manifest_checksum: u32,
     pub wal_region_offset: u64,
     pub wal_region_bytes: u64,
+    pub wal_checkpoint_boundary: u64,
     pub wal_recovery_boundary: u64,
     pub snapshot_offset: u64,
     pub snapshot_bytes: u64,
@@ -166,6 +168,7 @@ impl EmbeddedRdbArtifact {
             version: MANIFEST_VERSION,
             wal_region_offset,
             wal_region_bytes: WAL_REGION_BYTES,
+            wal_checkpoint_boundary: wal_region_offset,
             wal_recovery_boundary: wal_region_offset,
             snapshot_offset,
             snapshot_bytes: snapshot.len() as u64,
@@ -197,6 +200,7 @@ impl EmbeddedRdbArtifact {
             manifest_checksum,
             wal_region_offset,
             wal_region_bytes: WAL_REGION_BYTES,
+            wal_checkpoint_boundary: wal_region_offset,
             wal_recovery_boundary: wal_region_offset,
             snapshot_offset,
             snapshot_bytes: snapshot.len() as u64,
@@ -259,6 +263,7 @@ impl EmbeddedRdbArtifact {
                     path: path.to_path_buf(),
                 }
             })?;
+            manifest.wal_checkpoint_boundary = selected_superblock.wal_checkpoint_boundary;
             manifest.wal_recovery_boundary = selected_superblock.wal_recovery_boundary;
             if validate_snapshot_refs && !snapshot_reference_valid(&mut file, &manifest)? {
                 continue;
@@ -293,7 +298,7 @@ impl EmbeddedRdbArtifact {
     pub fn write_snapshot_with_wal_capacity(
         path: impl AsRef<Path>,
         snapshot: &[u8],
-        min_wal_bytes: u64,
+        _min_wal_bytes: u64,
     ) -> RdbFileResult<EmbeddedRdbOpen> {
         let path = path.as_ref();
         let path_lock = embedded_path_lock(path);
@@ -304,13 +309,13 @@ impl EmbeddedRdbArtifact {
         lock_file.lock_exclusive()?;
 
         let open = Self::open(path)?;
-        let wal_region_bytes =
-            grow_wal_region_bytes(open.manifest.wal_region_bytes, min_wal_bytes)?;
+        let wal_region_bytes = open.manifest.wal_region_bytes;
         let snapshot_offset = next_snapshot_offset(path, &open, wal_region_bytes, snapshot)?;
         let snapshot_checksum = crc32(snapshot);
         let manifest = EmbeddedRdbManifest {
             wal_region_bytes,
-            wal_recovery_boundary: open.manifest.wal_region_offset,
+            wal_checkpoint_boundary: open.manifest.wal_recovery_boundary,
+            wal_recovery_boundary: open.manifest.wal_recovery_boundary,
             snapshot_offset,
             snapshot_bytes: snapshot.len() as u64,
             snapshot_checksum,
@@ -351,7 +356,8 @@ impl EmbeddedRdbArtifact {
             manifest_len: manifest_bytes.len() as u64,
             manifest_checksum,
             wal_region_bytes,
-            wal_recovery_boundary: open.manifest.wal_region_offset,
+            wal_checkpoint_boundary: open.manifest.wal_recovery_boundary,
+            wal_recovery_boundary: open.manifest.wal_recovery_boundary,
             snapshot_offset,
             snapshot_bytes: snapshot.len() as u64,
             snapshot_checksum,
@@ -378,6 +384,7 @@ impl EmbeddedRdbArtifact {
         .ok_or_else(|| RdbFileError::InvalidOperation("no valid embedded superblock".into()))?;
 
         let mut manifest = read_manifest(&mut file, selected_superblock)?;
+        manifest.wal_checkpoint_boundary = selected_superblock.wal_checkpoint_boundary;
         manifest.wal_recovery_boundary = selected_superblock.wal_recovery_boundary;
         Ok(EmbeddedRdbOpen {
             path: path.to_path_buf(),
@@ -448,28 +455,34 @@ impl EmbeddedRdbArtifact {
             sequence = sequence.saturating_add(1);
         }
 
-        let wal_start = open.manifest.wal_region_offset;
-        let wal_end = wal_start.checked_add(wal_scan.valid_bytes).ok_or_else(|| {
+        let encoded_len = encoded.len() as u64;
+        let live_bytes = wal_scan.valid_bytes;
+        let next_live_bytes = live_bytes.checked_add(encoded_len).ok_or_else(|| {
             RdbFileError::InvalidOperation("embedded wal boundary overflow".into())
         })?;
-        let max_end = open
-            .manifest
-            .wal_region_offset
-            .saturating_add(open.manifest.wal_region_bytes);
-        let next_boundary = wal_end.checked_add(encoded.len() as u64).ok_or_else(|| {
-            RdbFileError::InvalidOperation("embedded wal boundary overflow".into())
-        })?;
-        if wal_end < wal_start || next_boundary > max_end {
-            return Err(RdbFileError::InvalidOperation(
-                "embedded wal region full".into(),
-            ));
+        if next_live_bytes > open.manifest.wal_region_bytes {
+            return Err(RdbFileError::InvalidOperation(format!(
+                "embedded circular wal region full: write requires {encoded_len} bytes with \
+                 {live_bytes} bytes still ahead of the checkpoint fence; region size {} bytes",
+                open.manifest.wal_region_bytes
+            )));
         }
 
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        write_at(&mut file, wal_end, &encoded)?;
+        let write_boundary = open
+            .manifest
+            .wal_checkpoint_boundary
+            .checked_add(wal_scan.valid_bytes)
+            .ok_or_else(|| {
+                RdbFileError::InvalidOperation("embedded wal boundary overflow".into())
+            })?;
+        write_circular_wal_bytes(&mut file, &open.manifest, write_boundary, &encoded)?;
         crash_inject("wal_after_frame_write");
         file.sync_data()?;
         crash_inject("wal_after_frame_sync");
+        let next_boundary = write_boundary.checked_add(encoded_len).ok_or_else(|| {
+            RdbFileError::InvalidOperation("embedded wal boundary overflow".into())
+        })?;
 
         let next_copy_index = if open.selected_superblock.copy_index == 0 {
             1
@@ -590,16 +603,6 @@ fn snapshot_reference_valid(
     Ok(true)
 }
 
-fn grow_wal_region_bytes(current: u64, min_required: u64) -> RdbFileResult<u64> {
-    let mut next = current.max(WAL_REGION_BYTES);
-    while next < min_required {
-        next = next.checked_mul(2).ok_or_else(|| {
-            RdbFileError::InvalidOperation("embedded wal region size overflow".into())
-        })?;
-    }
-    Ok(next)
-}
-
 fn embedded_path_lock(path: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
     let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -657,17 +660,24 @@ fn align_up(value: u64, alignment: u64) -> RdbFileResult<u64> {
 
 fn scan_wal(open: &EmbeddedRdbOpen) -> RdbFileResult<WalScan> {
     let wal_start = open.manifest.wal_region_offset;
+    let wal_checkpoint = open.manifest.wal_checkpoint_boundary;
     let wal_end = open.manifest.wal_recovery_boundary;
-    let max_end = open
-        .manifest
-        .wal_region_offset
-        .saturating_add(open.manifest.wal_region_bytes);
-    if wal_end < wal_start || wal_end > max_end {
+    if wal_checkpoint < wal_start || wal_end < wal_checkpoint {
         return Err(RdbFileError::InvalidOperation(format!(
             "invalid embedded wal boundary {wal_end}"
         )));
     }
-    if wal_end == wal_start {
+    let live_bytes = wal_end
+        .checked_sub(wal_checkpoint)
+        .ok_or_else(|| RdbFileError::InvalidOperation("embedded wal boundary overflow".into()))?;
+    if live_bytes > open.manifest.wal_region_bytes {
+        return Err(RdbFileError::InvalidOperation(format!(
+            "embedded circular wal region overran its checkpoint fence: live bytes {live_bytes}, \
+             region size {} bytes",
+            open.manifest.wal_region_bytes
+        )));
+    }
+    if live_bytes == 0 {
         return Ok(WalScan {
             next_sequence: 1,
             ..WalScan::default()
@@ -682,11 +692,57 @@ fn scan_wal(open: &EmbeddedRdbOpen) -> RdbFileResult<WalScan> {
             ..WalScan::default()
         });
     }
-    let read_end = wal_end.min(file_len);
-    file.seek(SeekFrom::Start(wal_start))?;
-    let mut bytes = vec![0u8; (read_end - wal_start) as usize];
-    file.read_exact(&mut bytes)?;
+    let mut bytes = vec![0u8; live_bytes as usize];
+    read_circular_wal_bytes(&mut file, &open.manifest, wal_checkpoint, &mut bytes)?;
     Ok(scan_wal_bytes(&bytes))
+}
+
+fn circular_wal_physical_offset(
+    manifest: &EmbeddedRdbManifest,
+    logical_boundary: u64,
+) -> RdbFileResult<u64> {
+    if logical_boundary < manifest.wal_region_offset {
+        return Err(RdbFileError::InvalidOperation(format!(
+            "embedded wal logical boundary precedes region: {logical_boundary}"
+        )));
+    }
+    let relative = logical_boundary - manifest.wal_region_offset;
+    Ok(manifest.wal_region_offset + (relative % manifest.wal_region_bytes))
+}
+
+fn read_circular_wal_bytes(
+    file: &mut File,
+    manifest: &EmbeddedRdbManifest,
+    logical_boundary: u64,
+    out: &mut [u8],
+) -> RdbFileResult<()> {
+    let mut copied = 0usize;
+    while copied < out.len() {
+        let physical = circular_wal_physical_offset(manifest, logical_boundary + copied as u64)?;
+        let region_remaining = (manifest.wal_region_offset + manifest.wal_region_bytes) - physical;
+        let chunk_len = (out.len() - copied).min(region_remaining as usize);
+        file.seek(SeekFrom::Start(physical))?;
+        file.read_exact(&mut out[copied..copied + chunk_len])?;
+        copied += chunk_len;
+    }
+    Ok(())
+}
+
+fn write_circular_wal_bytes(
+    file: &mut File,
+    manifest: &EmbeddedRdbManifest,
+    logical_boundary: u64,
+    bytes: &[u8],
+) -> RdbFileResult<()> {
+    let mut copied = 0usize;
+    while copied < bytes.len() {
+        let physical = circular_wal_physical_offset(manifest, logical_boundary + copied as u64)?;
+        let region_remaining = (manifest.wal_region_offset + manifest.wal_region_bytes) - physical;
+        let chunk_len = (bytes.len() - copied).min(region_remaining as usize);
+        write_at(file, physical, &bytes[copied..copied + chunk_len])?;
+        copied += chunk_len;
+    }
+    Ok(())
 }
 
 fn scan_wal_bytes(bytes: &[u8]) -> WalScan {
@@ -869,6 +925,7 @@ fn encode_superblock(superblock: EmbeddedRdbSuperblock) -> RdbFileResult<Vec<u8>
     put_u32(&mut bytes, &mut cursor, superblock.manifest_checksum);
     put_u64(&mut bytes, &mut cursor, superblock.wal_region_offset);
     put_u64(&mut bytes, &mut cursor, superblock.wal_region_bytes);
+    put_u64(&mut bytes, &mut cursor, superblock.wal_checkpoint_boundary);
     put_u64(&mut bytes, &mut cursor, superblock.wal_recovery_boundary);
     put_u64(&mut bytes, &mut cursor, superblock.snapshot_offset);
     put_u64(&mut bytes, &mut cursor, superblock.snapshot_bytes);
@@ -923,6 +980,7 @@ fn decode_superblock(copy_index: u8, bytes: &[u8]) -> RdbFileResult<EmbeddedRdbS
         manifest_checksum: take_u32(bytes, &mut cursor)?,
         wal_region_offset: take_u64(bytes, &mut cursor)?,
         wal_region_bytes: take_u64(bytes, &mut cursor)?,
+        wal_checkpoint_boundary: take_u64(bytes, &mut cursor)?,
         wal_recovery_boundary: take_u64(bytes, &mut cursor)?,
         snapshot_offset: take_u64(bytes, &mut cursor)?,
         snapshot_bytes: take_u64(bytes, &mut cursor)?,
@@ -932,12 +990,13 @@ fn decode_superblock(copy_index: u8, bytes: &[u8]) -> RdbFileResult<EmbeddedRdbS
 }
 
 fn encode_manifest(manifest: EmbeddedRdbManifest) -> Vec<u8> {
-    let mut bytes = vec![0u8; 8 + 4 + 8 + 8 + 8 + 8 + 8 + 4 + 16 + CHECKSUM_LEN];
+    let mut bytes = vec![0u8; 8 + 4 + 8 + 8 + 8 + 8 + 8 + 8 + 4 + 16 + CHECKSUM_LEN];
     let mut cursor = 0usize;
     put_bytes(&mut bytes, &mut cursor, MANIFEST_MAGIC);
     put_u32(&mut bytes, &mut cursor, manifest.version);
     put_u64(&mut bytes, &mut cursor, manifest.wal_region_offset);
     put_u64(&mut bytes, &mut cursor, manifest.wal_region_bytes);
+    put_u64(&mut bytes, &mut cursor, manifest.wal_checkpoint_boundary);
     put_u64(&mut bytes, &mut cursor, manifest.wal_recovery_boundary);
     put_u64(&mut bytes, &mut cursor, manifest.snapshot_offset);
     put_u64(&mut bytes, &mut cursor, manifest.snapshot_bytes);
@@ -979,6 +1038,7 @@ fn decode_manifest(bytes: &[u8]) -> RdbFileResult<EmbeddedRdbManifest> {
         version,
         wal_region_offset: take_u64(bytes, &mut cursor)?,
         wal_region_bytes: take_u64(bytes, &mut cursor)?,
+        wal_checkpoint_boundary: take_u64(bytes, &mut cursor)?,
         wal_recovery_boundary: take_u64(bytes, &mut cursor)?,
         snapshot_offset: take_u64(bytes, &mut cursor)?,
         snapshot_bytes: take_u64(bytes, &mut cursor)?,
