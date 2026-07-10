@@ -311,6 +311,7 @@ impl JoinReorderingPass {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::Scrub { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
             | QueryExpr::ShowSecrets { .. }

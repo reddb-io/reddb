@@ -95,7 +95,9 @@ back-of-the-envelope performance sketches is the root of all evil."
   gets large, predictable chunks of work instead of zig-zagging per event.
 - On hot paths, don't allocate per operation — pre-size, pool, and reuse buffers (the
   transferable half of TigerBeetle's static-allocation rule; the wholesale rule is rejected, see
-  ADR 0056). The control plane stays idiomatic.
+  ADR 0056). The storage data-plane ratchet is measured by the
+  [no-malloc hot-path manifest](docs/perf/no-malloc-hot-paths.md), which is the mechanical form of
+  ADR 0073 section 3. The control plane stays idiomatic.
 
 **Requirement:** a PRD or ADR that changes the **data plane** (WAL, pager, query execution)
 must carry a one-line back-of-the-envelope sketch (e.g. "N rows × fsync latency = …"). It is

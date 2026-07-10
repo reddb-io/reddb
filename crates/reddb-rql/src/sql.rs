@@ -100,6 +100,10 @@ pub enum SqlCommand {
         prefix: Option<String>,
         as_json: bool,
     },
+    Scrub {
+        background: bool,
+        budget: Option<u64>,
+    },
     SetSecret {
         key: String,
         value: Value,
@@ -1458,6 +1462,10 @@ pub enum SqlAdminCommand {
         prefix: Option<String>,
         as_json: bool,
     },
+    Scrub {
+        background: bool,
+        budget: Option<u64>,
+    },
     SetSecret {
         key: String,
         value: Value,
@@ -1578,6 +1586,9 @@ impl SqlStatement {
             }
             SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix, as_json }) => {
                 SqlCommand::ShowConfig { prefix, as_json }
+            }
+            SqlStatement::Admin(SqlAdminCommand::Scrub { background, budget }) => {
+                SqlCommand::Scrub { background, budget }
             }
             SqlStatement::Admin(SqlAdminCommand::SetSecret { key, value }) => {
                 SqlCommand::SetSecret { key, value }
@@ -1742,6 +1753,7 @@ impl SqlCommand {
             SqlCommand::Probabilistic(command) => QueryExpr::ProbabilisticCommand(command),
             SqlCommand::SetConfig { key, value } => QueryExpr::SetConfig { key, value },
             SqlCommand::ShowConfig { prefix, as_json } => QueryExpr::ShowConfig { prefix, as_json },
+            SqlCommand::Scrub { background, budget } => QueryExpr::Scrub { background, budget },
             SqlCommand::SetSecret { key, value } => QueryExpr::SetSecret { key, value },
             SqlCommand::DeleteSecret { key } => QueryExpr::DeleteSecret { key },
             SqlCommand::ShowSecrets { prefix } => QueryExpr::ShowSecrets { prefix },
@@ -1868,6 +1880,9 @@ impl SqlCommand {
             }
             SqlCommand::ShowConfig { prefix, as_json } => {
                 SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix, as_json })
+            }
+            SqlCommand::Scrub { background, budget } => {
+                SqlStatement::Admin(SqlAdminCommand::Scrub { background, budget })
             }
             SqlCommand::SetSecret { key, value } => {
                 SqlStatement::Admin(SqlAdminCommand::SetSecret { key, value })
@@ -2122,6 +2137,9 @@ impl<'a> Parser<'a> {
                 }
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
+                self.parse_sql_statement().map(FrontendStatement::Sql)
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("SCRUB") => {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("RESET") => {
@@ -2547,7 +2565,9 @@ impl<'a> Parser<'a> {
                 .map(SqlCommand::into_statement)
                 .map(FrontendStatement::Sql),
             Token::Ident(name)
-                if is_vcs_command_head(name) || name.eq_ignore_ascii_case("RESET") =>
+                if is_vcs_command_head(name)
+                    || name.eq_ignore_ascii_case("RESET")
+                    || name.eq_ignore_ascii_case("SCRUB") =>
             {
                 self.parse_sql_command()
                     .map(SqlCommand::into_statement)
@@ -2580,6 +2600,7 @@ impl<'a> Parser<'a> {
                     "FILTER",
                     "SET",
                     "SHOW",
+                    "SCRUB",
                     "RESET",
                     "CHECKPOINT",
                     "CHECKOUT",
@@ -4131,6 +4152,16 @@ impl<'a> Parser<'a> {
                     Value::text(collection),
                 ));
                 Ok(SqlCommand::Select(query))
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("SCRUB") => {
+                self.advance()?;
+                let background = self.consume_ident_ci("BACKGROUND")?;
+                let budget = if self.consume_ident_ci("BUDGET")? {
+                    Some(self.parse_positive_u64_slot("scrub budget")?)
+                } else {
+                    None
+                };
+                Ok(SqlCommand::Scrub { background, budget })
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
                 self.advance()?;

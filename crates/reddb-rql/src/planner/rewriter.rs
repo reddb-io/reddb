@@ -213,6 +213,7 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::Scrub { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
             | QueryExpr::ShowSecrets { .. }
@@ -359,6 +360,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::Scrub { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
             | QueryExpr::ShowSecrets { .. }
@@ -461,6 +463,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::Scrub { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
             | QueryExpr::ShowSecrets { .. }

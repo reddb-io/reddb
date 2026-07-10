@@ -613,6 +613,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::TreeCommand(_) => "tree_command",
         QueryExpr::SetConfig { .. } => "set_config",
         QueryExpr::ShowConfig { .. } => "show_config",
+        QueryExpr::Scrub { .. } => "scrub",
         QueryExpr::SetSecret { .. } => "set_secret",
         QueryExpr::DeleteSecret { .. } => "delete_secret",
         QueryExpr::SetKv { .. } => "set_kv",
