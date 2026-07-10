@@ -924,6 +924,7 @@ fn json_extract_value(input: &Value, path: &Value, as_text: bool) -> Value {
             crate::serde_json::Value::String(value) => Value::text(value.clone()),
             crate::serde_json::Value::Null => Value::Null,
             crate::serde_json::Value::Bool(value) => Value::text(value.to_string()),
+            crate::serde_json::Value::Integer(value) => Value::text(value.to_string()),
             crate::serde_json::Value::Number(value) => Value::text(value.to_string()),
             other => Value::text(other.to_string_compact()),
         }
@@ -978,6 +979,7 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
             map.values().any(|value| json_value_contains(value, needle))
         }
         crate::serde_json::Value::String(value) => value == needle,
+        crate::serde_json::Value::Integer(value) => value.to_string() == needle,
         crate::serde_json::Value::Number(value) => value.to_string() == needle,
         crate::serde_json::Value::Bool(value) => value.to_string() == needle,
         crate::serde_json::Value::Null => false,
