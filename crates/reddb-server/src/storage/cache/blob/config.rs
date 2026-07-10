@@ -20,6 +20,14 @@ pub const METRIC_CACHE_BLOB_SYNOPSIS_BYTES: &str = "cache_blob_synopsis_bytes";
 /// Bloom primitive.
 pub const DEFAULT_BLOB_SYNOPSIS_CAPACITY: usize = 10_000;
 
+/// L2-to-L1 promotion topology.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum L2PromotionPolicy {
+    Immediate,
+    #[default]
+    OnSecondHit,
+}
+
 /// Switch for L2 zstd compression (issue #192, lane 2/5).
 ///
 /// `On` (default) routes every L2 spill through [`L2BlobCompressor`]; payloads
@@ -44,6 +52,7 @@ pub struct BlobCacheConfig {
     pub(super) content_metadata_keys_max: usize,
     pub(super) content_metadata_bytes_max: usize,
     pub(super) l2_compression: L2Compression,
+    pub(super) l2_promotion_policy: L2PromotionPolicy,
 }
 
 impl Default for BlobCacheConfig {
@@ -57,6 +66,7 @@ impl Default for BlobCacheConfig {
             content_metadata_keys_max: DEFAULT_CONTENT_METADATA_KEYS_MAX,
             content_metadata_bytes_max: DEFAULT_CONTENT_METADATA_BYTES_MAX,
             l2_compression: L2Compression::default(),
+            l2_promotion_policy: L2PromotionPolicy::default(),
         }
     }
 }
@@ -106,6 +116,11 @@ impl BlobCacheConfig {
         self
     }
 
+    pub fn with_l2_promotion_policy(mut self, policy: L2PromotionPolicy) -> Self {
+        self.l2_promotion_policy = policy;
+        self
+    }
+
     pub fn l1_bytes_max(&self) -> usize {
         self.l1_bytes_max
     }
@@ -136,6 +151,10 @@ impl BlobCacheConfig {
 
     pub fn l2_compression(&self) -> L2Compression {
         self.l2_compression
+    }
+
+    pub fn l2_promotion_policy(&self) -> L2PromotionPolicy {
+        self.l2_promotion_policy
     }
 }
 
@@ -200,6 +219,11 @@ impl BlobCacheConfigBuilder {
 
     pub fn l2_compression(mut self, value: L2Compression) -> Self {
         self.inner.l2_compression = value;
+        self
+    }
+
+    pub fn l2_promotion_policy(mut self, value: L2PromotionPolicy) -> Self {
+        self.inner.l2_promotion_policy = value;
         self
     }
 
