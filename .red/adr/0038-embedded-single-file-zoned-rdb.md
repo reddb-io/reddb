@@ -1,7 +1,8 @@
 # Storage Packaging by Profile — Single-file Zoned RDB and Its Siblings
 
 Status: accepted
-Date: 2026-07-08 (rewritten; originally proposed as "Embedded Single-file Zoned RDB")
+Date: 2026-07-08 (rewritten; originally proposed as "Embedded Single-file Zoned RDB");
+amended 2026-07-10 (§5: WAL region sizing presets + overflow policy)
 
 RedDB's physical storage packaging is a **per-profile contract**. This ADR is the
 umbrella: it names each profile's packaging and scale contract, fixes the zoned
@@ -77,6 +78,39 @@ Ordering within phases 1–3 may be re-sequenced by an ADR amendment with one
 line of rationale; silently skipping a phase is not allowed. Phase 4 is gated
 on ADR 0073 landing first (the cache hierarchy it pages through is
 budget-governed).
+
+### 5. WAL region sizing and overflow are per-profile presets
+
+The circular WAL region (phase 2) is sized by the deployment profile, not by
+one global constant. Initial sizes and growth are presets; the values below
+are the starting defaults and may be retuned by a one-line amendment with a
+measurement attached.
+
+| Profile | Initial region | Growth | Cap |
+|---|---|---|---|
+| Embedded | 64 KiB | doubles on demand | none (disk-bound) |
+| Serverless | 64 KiB | doubles on demand | 1 MiB (bounded-everything contract) |
+| Primary-replica | 16 MiB | doubles on demand | none |
+| Cluster | follows primary-replica until measured otherwise | | |
+
+Overflow policy, in order, when an append does not fit the free span:
+
+1. **Checkpoint-then-retry** — if the region holds reclaimable bytes (records
+   behind the checkpoint fence), advance the reclamation fence and retry the
+   append once. This is the common case and must not error.
+2. **Grow at the fence** — if the record still does not fit and the profile
+   preset allows growth, resize the region at a checkpoint fence (region
+   quiesced/empty), doubling until the record fits or the cap is reached.
+   The snapshot zone relocates behind the grown region, as today.
+3. **Didactic error** — only when a single record cannot fit an EMPTY region
+   at the profile's cap. The error names the record size, the region size,
+   the cap, and the profile, and points at the preset. Never a silent
+   truncation, never a partial append.
+
+Sizing rationale: 64 KiB keeps a fresh embedded/serverless store small on
+disk; 16 MiB for the fleet follows the industry reference points (SQLite
+auto-checkpoints at ~4 MiB of WAL; Postgres segments are 16 MiB) where boot
+footprint matters less than checkpoint pressure under sustained writes.
 
 ## Considered Options
 
