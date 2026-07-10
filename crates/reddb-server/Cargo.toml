@@ -196,6 +196,10 @@ name = "cache_ring_contention_bench"
 harness = false
 
 [[bench]]
+name = "cache_topology_spike_bench"
+harness = false
+
+[[bench]]
 name = "concurrent_commit_bench"
 harness = false
 
