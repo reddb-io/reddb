@@ -821,6 +821,39 @@ pub fn match_schema(
     })
 }
 
+/// Keep the top `k` items under `cmp` without a full O(n log n) sort when it
+/// pays off. Output is **bit-identical** to `items.sort_by(cmp);
+/// items.truncate(k)` for any input: the small-`n` branch performs exactly
+/// that stable sort, and the quickselect branch appends the original index as
+/// the final tie-break, making the comparator a strict total order so the
+/// unstable partition/sort reproduces the stable sort's first `k` elements
+/// (including the caller's own tie-breaks and any NaN/None fallback baked into
+/// `cmp`). Mirrors `join_filter::ordering::top_k_records_by_order_by_with_db`.
+fn partial_top_k<T: Clone>(
+    items: &mut Vec<T>,
+    k: usize,
+    cmp: impl Fn(&T, &T) -> std::cmp::Ordering,
+) {
+    let n = items.len();
+    if k == 0 {
+        items.clear();
+        return;
+    }
+    // Quickselect only beats a full sort with headroom (n > 2k); below that,
+    // reproduce the original stable sort + truncate verbatim.
+    if n <= k.saturating_mul(2) {
+        items.sort_by(|a, b| cmp(a, b));
+        items.truncate(k);
+        return;
+    }
+    let mut idxs: Vec<usize> = (0..n).collect();
+    idxs.select_nth_unstable_by(k - 1, |&a, &b| cmp(&items[a], &items[b]).then_with(|| a.cmp(&b)));
+    idxs.truncate(k);
+    idxs.sort_by(|&a, &b| cmp(&items[a], &items[b]).then_with(|| a.cmp(&b)));
+    let orig = std::mem::take(items);
+    *items = idxs.into_iter().map(|i| orig[i].clone()).collect();
+}
+
 // ---------------------------------------------------------------------------
 // Stage 3 — vector search scoped to the candidate collections.
 // ---------------------------------------------------------------------------
@@ -890,13 +923,12 @@ pub fn vector_search_scoped(
             }
         }
     }
-    hits.sort_by(|a, b| {
+    partial_top_k(&mut hits, top_k, |a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.entity_id.cmp(&b.entity_id))
     });
-    hits.truncate(top_k);
     hits
 }
 
@@ -972,7 +1004,7 @@ pub fn graph_search_scoped(
             kind,
         });
     }
-    hits.sort_by(|a, b| {
+    partial_top_k(&mut hits, top_k, |a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -980,7 +1012,6 @@ pub fn graph_search_scoped(
             .then_with(|| a.collection.cmp(&b.collection))
             .then_with(|| a.entity_id.cmp(&b.entity_id))
     });
-    hits.truncate(top_k);
     hits
 }
 
