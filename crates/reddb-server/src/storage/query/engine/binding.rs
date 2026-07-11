@@ -18,16 +18,22 @@ use crate::json;
 use crate::serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// A variable in a query
+///
+/// The name is interned behind an `Arc<str>` so that cloning a `Var` — which
+/// happens once per joined row in `Binding::merge`/`extend`/`project` and per
+/// hash-join key extraction — is a refcount bump rather than a fresh string
+/// allocation. Equality and hashing still compare the underlying `str`, so the
+/// observable semantics are identical to an owned `String`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Var {
-    name: String,
+    name: Arc<str>,
 }
 
 impl Var {
     /// Create a new variable
     pub fn new(name: &str) -> Self {
         Self {
-            name: name.to_string(),
+            name: Arc::from(name),
         }
     }
 
