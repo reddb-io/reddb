@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::{RedDBRuntime, RuntimeQueryResult, RuntimeResultCacheEntry};
@@ -409,17 +410,21 @@ impl RedDBRuntime {
         let (result, scopes) = decode_result_cache_payload(hit.value())?;
         let mut cache = self.inner.result_blob_entries.write();
         let (ref mut map, ref mut order) = *cache;
-        if !map.contains_key(key) {
-            order.push_back(key.to_string());
+        let new_entry = RuntimeResultCacheEntry {
+            result: result.clone(),
+            cached_at: std::time::Instant::now(),
+            scopes,
+        };
+        // Single hash lookup: drive the LRU-order push_back only on Vacant.
+        match map.entry(key.to_string()) {
+            Entry::Occupied(mut slot) => {
+                slot.insert(new_entry);
+            }
+            Entry::Vacant(slot) => {
+                order.push_back(slot.key().clone());
+                slot.insert(new_entry);
+            }
         }
-        map.insert(
-            key.to_string(),
-            RuntimeResultCacheEntry {
-                result: result.clone(),
-                cached_at: std::time::Instant::now(),
-                scopes,
-            },
-        );
         let evicted = trim_result_cache(map, order, self.result_cache_capacity());
         drop(cache);
         self.record_result_cache_evictions(evicted);
@@ -480,10 +485,16 @@ impl RedDBRuntime {
         let capacity = self.result_cache_capacity();
         let mut cache = self.inner.result_cache.write();
         let (ref mut map, ref mut order) = *cache;
-        if !map.contains_key(key) {
-            order.push_back(key.to_string());
+        // Single hash lookup: drive the LRU-order push_back only on Vacant.
+        match map.entry(key.to_string()) {
+            Entry::Occupied(mut slot) => {
+                slot.insert(entry);
+            }
+            Entry::Vacant(slot) => {
+                order.push_back(slot.key().clone());
+                slot.insert(entry);
+            }
         }
-        map.insert(key.to_string(), entry);
         let evicted = trim_result_cache(map, order, capacity);
         drop(cache);
         self.record_result_cache_evictions(evicted);
@@ -514,10 +525,16 @@ impl RedDBRuntime {
         let capacity = self.result_cache_capacity();
         let mut cache = self.inner.result_blob_entries.write();
         let (ref mut map, ref mut order) = *cache;
-        if !map.contains_key(key) {
-            order.push_back(key.to_string());
+        // Single hash lookup: drive the LRU-order push_back only on Vacant.
+        match map.entry(key.to_string()) {
+            Entry::Occupied(mut slot) => {
+                slot.insert(entry);
+            }
+            Entry::Vacant(slot) => {
+                order.push_back(slot.key().clone());
+                slot.insert(entry);
+            }
         }
-        map.insert(key.to_string(), entry);
         let evicted = trim_result_cache(map, order, capacity);
         drop(cache);
         self.record_result_cache_evictions(evicted);
