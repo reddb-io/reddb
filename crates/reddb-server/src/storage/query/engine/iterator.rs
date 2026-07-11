@@ -153,7 +153,11 @@ impl BindingIterator for QueryIterBase {
         check_shared_cancel(&self.cancel)?;
 
         if self.index < self.bindings.len() {
-            let binding = self.bindings[self.index].clone();
+            // Each binding is emitted exactly once, so move it out of the
+            // backing store instead of cloning per row. `reset()` remains
+            // structurally valid (index rewinds); it just re-emits the moved
+            // slots as defaults — and it is never invoked on this iterator.
+            let binding = std::mem::take(&mut self.bindings[self.index]);
             self.index += 1;
             Ok(Some(binding))
         } else {
