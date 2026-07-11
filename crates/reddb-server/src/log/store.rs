@@ -49,6 +49,36 @@ pub struct LogEntry {
     pub fields: HashMap<String, Value>,
 }
 
+/// Keep the top `k` items under `cmp` without a full sort when it pays off.
+/// Output is **bit-identical** to `items.sort_by(cmp); items.truncate(k)` for
+/// any input: the small-`n` branch is exactly that stable sort, and the
+/// quickselect branch appends the original index as the final tie-break so the
+/// unstable partition/sort reproduces the stable sort's first `k` elements,
+/// preserving `cmp`'s own tie-breaks. Mirrors
+/// `join_filter::ordering::top_k_records_by_order_by_with_db`.
+fn partial_top_k<T: Clone>(
+    items: &mut Vec<T>,
+    k: usize,
+    cmp: impl Fn(&T, &T) -> std::cmp::Ordering,
+) {
+    let n = items.len();
+    if k == 0 {
+        items.clear();
+        return;
+    }
+    if n <= k.saturating_mul(2) {
+        items.sort_by(|a, b| cmp(a, b));
+        items.truncate(k);
+        return;
+    }
+    let mut idxs: Vec<usize> = (0..n).collect();
+    idxs.select_nth_unstable_by(k - 1, |&a, &b| cmp(&items[a], &items[b]).then_with(|| a.cmp(&b)));
+    idxs.truncate(k);
+    idxs.sort_by(|&a, &b| cmp(&items[a], &items[b]).then_with(|| a.cmp(&b)));
+    let orig = std::mem::take(items);
+    *items = idxs.into_iter().map(|i| orig[i].clone()).collect();
+}
+
 /// Append-only log collection.
 pub struct LogCollection {
     config: LogCollectionConfig,
@@ -252,8 +282,7 @@ impl LogCollection {
             true
         });
 
-        entries.sort_by_key(|a| a.id);
-        entries.truncate(limit);
+        partial_top_k(&mut entries, limit, |a, b| a.id.cmp(&b.id));
         entries
     }
 
