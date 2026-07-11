@@ -4,6 +4,11 @@ use std::cell::{Cell, RefCell};
 use super::cache::blob::{BlobCache, BlobCacheConfig, BlobCachePolicy, BlobCachePut, L1Admission};
 use super::engine::page::{Page, PageType};
 use super::engine::page_cache::PageCacheShard;
+use super::query::ast::{Projection, QueryExpr, TableQuery};
+use super::query::engine::binding::{Binding, Value as BindingValue, Var};
+use super::query::planner::cache::{CachedPlan, PlanCache};
+use super::query::planner::cost::PlanCost;
+use super::query::planner::QueryPlan;
 use super::unified::hash_index::HashIndex;
 use super::unified::segment::{GrowingSegment, UnifiedSegment};
 use super::unified::{EntityId, UnifiedEntity};
@@ -164,6 +169,21 @@ const COVERED_OPERATIONS: &[CoveredOperation] = &[
         exception: None,
         measure: measure_wal_record_encode_into_group_commit_buffer,
     },
+    // Ratchet additions from the #2011 structural hot-path sweep. Both paths
+    // are allocation-free in steady state; see docs/perf for the baseline and
+    // the `structural_hot_path_report` micro-measurement for the wider set.
+    CoveredOperation {
+        name: "group-by-row-into-existing-group-key-buffer",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_group_by_existing_group_key_write,
+    },
+    CoveredOperation {
+        name: "plan-cache-hit",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_plan_cache_hit,
+    },
 ];
 
 #[test]
@@ -300,4 +320,308 @@ fn measure_wal_record_encode_into_group_commit_buffer() -> AllocationCount {
 
     assert!(!group_commit_buffer.is_empty());
     count
+}
+
+/// Two-variable binding used across the structural hot-path fixtures.
+fn two_var_binding() -> Binding {
+    Binding::two(
+        Var::new("x"),
+        BindingValue::String("alpha".to_string()),
+        Var::new("y"),
+        BindingValue::Integer(42),
+    )
+}
+
+/// Mirrors the hot body of `executors::aggregation::write_group_key`: a row
+/// that lands in an *existing* group reuses one scratch `String`, so no
+/// allocation happens once the buffer has grown. This measures a steady-state
+/// row (buffer already sized, cleared before the call).
+fn measure_group_by_existing_group_key_write() -> AllocationCount {
+    let binding = two_var_binding();
+    let group_vars = [Var::new("x"), Var::new("y")];
+    let mut key = String::with_capacity(64);
+    // Warm the buffer so its backing allocation already exists.
+    write_group_key_into(&binding, &group_vars, &mut key);
+
+    let ((), count) = measure_allocations(|| {
+        key.clear();
+        write_group_key_into(&binding, &group_vars, &mut key);
+    });
+
+    assert!(!key.is_empty());
+    count
+}
+
+/// Faithful copy of `write_group_key`'s hot loop, kept local so the manifest
+/// does not need to widen that helper's visibility.
+fn write_group_key_into(binding: &Binding, group_vars: &[Var], key: &mut String) {
+    use std::fmt::Write as _;
+    for (i, var) in group_vars.iter().enumerate() {
+        if i > 0 {
+            key.push('|');
+        }
+        key.push_str(var.name());
+        key.push('=');
+        match binding.get(var) {
+            None => key.push_str("NULL"),
+            Some(BindingValue::Null) => key.push_str("null"),
+            Some(BindingValue::String(s)) => key.push_str(s),
+            Some(BindingValue::Integer(n)) => {
+                let _ = write!(key, "{n}");
+            }
+            Some(BindingValue::Float(f)) => {
+                let _ = write!(key, "{f}");
+            }
+            Some(BindingValue::Boolean(b)) => {
+                let _ = write!(key, "{b}");
+            }
+            Some(BindingValue::Node(id)) => {
+                key.push_str("node:");
+                key.push_str(id);
+            }
+            Some(BindingValue::Edge(id)) => {
+                key.push_str("edge:");
+                key.push_str(id);
+            }
+            Some(BindingValue::Uri(u)) => key.push_str(u),
+        }
+    }
+}
+
+/// Minimal `QueryPlan` fixture (parameter-free) used only as cache ballast.
+fn tiny_query_plan() -> QueryPlan {
+    fn table() -> QueryExpr {
+        QueryExpr::Table(TableQuery {
+            table: "t".to_string(),
+            source: None,
+            alias: None,
+            select_items: Vec::new(),
+            columns: vec![Projection::All],
+            where_expr: None,
+            filter: None,
+            group_by_exprs: Vec::new(),
+            group_by: Vec::new(),
+            having_expr: None,
+            having: None,
+            order_by: vec![],
+            limit: None,
+            limit_param: None,
+            offset: None,
+            offset_param: None,
+            expand: None,
+            as_of: None,
+            sessionize: None,
+            distinct: false,
+        })
+    }
+    QueryPlan::new(table(), table(), PlanCost::default())
+}
+
+/// A warm plan-cache lookup that hits an existing, active entry. After the
+/// #2011 LRU rework the promotion is a recency-counter bump, so the hit path
+/// allocates nothing (previously it scanned + rebuilt a `Vec<String>`).
+fn measure_plan_cache_hit() -> AllocationCount {
+    let mut cache = PlanCache::new(8);
+    cache.insert("q".to_string(), CachedPlan::new(tiny_query_plan()));
+    // Warm the entry so it is live and not first-touch.
+    assert!(cache.get("q").is_some());
+
+    let (hit, count) = measure_allocations(|| cache.get("q").is_some());
+
+    assert!(hit);
+    count
+}
+
+/// Mirrors the probe side of `executors::join::extract_key`: the values behind
+/// the join keys are cloned into an owned key vector on *every* probe row. This
+/// is the item-3 candidate (skipped as too invasive); measured here to record
+/// its baseline cost.
+#[cfg(test)]
+fn measure_hash_join_probe_key_extract() -> AllocationCount {
+    let binding = two_var_binding();
+    let keys = [Var::new("x"), Var::new("y")];
+
+    let (key, count) = measure_allocations(|| {
+        keys.iter()
+            .map(|v| binding.get(v).cloned())
+            .collect::<Vec<Option<BindingValue>>>()
+    });
+
+    assert_eq!(key.len(), 2);
+    count
+}
+
+/// Measures `Binding::merge` for one joined row (item 1). With `Var` interned
+/// behind `Arc<str>`, cloning the keys during the merge is a refcount bump
+/// rather than a fresh string allocation.
+#[cfg(test)]
+fn measure_binding_merge_per_joined_row() -> AllocationCount {
+    let left = Binding::one(Var::new("x"), BindingValue::String("alpha".to_string()));
+    let right = Binding::one(Var::new("y"), BindingValue::Integer(7));
+
+    let (merged, count) = measure_allocations(|| left.merge(&right));
+
+    assert!(merged.is_some());
+    count
+}
+
+/// Measures the columnar transpose (item 5) under both the old per-cell clone
+/// and the new move-based lockstep drain, over heap-owning cells.
+#[cfg(test)]
+fn measure_columnar_transpose_variants() -> (AllocationCount, AllocationCount) {
+    fn columns() -> Vec<Vec<String>> {
+        let row_count = 8;
+        let col_count = 4;
+        (0..col_count)
+            .map(|c| (0..row_count).map(|r| format!("cell-{c}-{r}")).collect())
+            .collect()
+    }
+    let row_count = 8;
+
+    let clone_columns = columns();
+    let ((), clone_count) = measure_allocations(|| {
+        let mut out: Vec<Vec<String>> = Vec::new();
+        for r in 0..row_count {
+            let mut row = Vec::with_capacity(clone_columns.len());
+            for column in &clone_columns {
+                row.push(column[r].clone());
+            }
+            out.push(row);
+        }
+        assert_eq!(out.len(), row_count);
+    });
+
+    let move_columns = columns();
+    let ((), move_count) = measure_allocations(|| {
+        let mut out: Vec<Vec<String>> = Vec::new();
+        let base = out.len();
+        for _ in 0..row_count {
+            out.push(Vec::with_capacity(4));
+        }
+        for column in move_columns {
+            for (r, value) in column.into_iter().take(row_count).enumerate() {
+                out[base + r].push(value);
+            }
+        }
+        assert_eq!(out.len(), row_count);
+    });
+
+    (clone_count, move_count)
+}
+
+/// Informational micro-measurement for the #2011 structural hot-path sweep.
+///
+/// Prints allocations/op and ns/op for each covered operation. It never asserts
+/// on timing (which is machine-dependent) — the load-bearing invariants are the
+/// zero-alloc entries in [`COVERED_OPERATIONS`]. Run with:
+/// `cargo test -p reddb-io-server structural_hot_path_report -- --nocapture`.
+#[test]
+fn structural_hot_path_report() {
+    use std::time::Instant;
+
+    fn time_ns(iters: u32, mut op: impl FnMut()) -> f64 {
+        let start = Instant::now();
+        for _ in 0..iters {
+            op();
+        }
+        start.elapsed().as_nanos() as f64 / iters as f64
+    }
+
+    let iters = 2_000u32;
+    eprintln!("\n[structural hot-path baseline #2011]");
+    eprintln!("operation,allocations_per_op,ns_per_op,note");
+
+    let merge = measure_binding_merge_per_joined_row();
+    let binding = two_var_binding();
+    let group_vars = [Var::new("x"), Var::new("y")];
+    let mut scratch = String::with_capacity(64);
+    write_group_key_into(&binding, &group_vars, &mut scratch);
+    eprintln!(
+        "binding-merge-per-joined-row,{},{:.1},item-1 Var interned (Arc<str>)",
+        merge.allocs,
+        time_ns(iters, || {
+            let left = Binding::one(Var::new("x"), BindingValue::Integer(1));
+            let right = Binding::one(Var::new("y"), BindingValue::Integer(2));
+            let _ = std::hint::black_box(left.merge(&right));
+        })
+    );
+
+    let probe = measure_hash_join_probe_key_extract();
+    eprintln!(
+        "hash-join-probe-key-extract,{},{:.1},item-3 SKIPPED (invasive HashKey change)",
+        probe.allocs,
+        time_ns(iters, || {
+            let _ = std::hint::black_box(
+                group_vars
+                    .iter()
+                    .map(|v| binding.get(v).cloned())
+                    .collect::<Vec<Option<BindingValue>>>(),
+            );
+        })
+    );
+
+    let gbk = measure_group_by_existing_group_key_write();
+    eprintln!(
+        "group-by-existing-group-key-write,{},{:.1},steady-state buffer reuse (0-alloc, ratcheted)",
+        gbk.allocs,
+        time_ns(iters, || {
+            scratch.clear();
+            write_group_key_into(&binding, &group_vars, &mut scratch);
+            std::hint::black_box(&scratch);
+        })
+    );
+
+    let plan_hit = measure_plan_cache_hit();
+    let mut cache = PlanCache::new(8);
+    cache.insert("q".to_string(), CachedPlan::new(tiny_query_plan()));
+    let _ = cache.get("q");
+    eprintln!(
+        "plan-cache-hit,{},{:.1},item-4 recency-counter LRU (0-alloc, ratcheted)",
+        plan_hit.allocs,
+        time_ns(iters, || {
+            let _ = std::hint::black_box(cache.get("q").is_some());
+        })
+    );
+
+    let wal = measure_wal_record_encode_into_group_commit_buffer();
+    eprintln!(
+        "wal-commit-encode-into,{},{:.1},item-2 SKIPPED (PageWrite path clones; guard covers Commit only)",
+        wal.allocs,
+        time_ns(iters, || {
+            let record = WalRecord::Commit { tx_id: 9 };
+            let mut buf = Vec::with_capacity(128);
+            record.encode_into(&mut buf);
+            std::hint::black_box(&buf);
+        })
+    );
+
+    // Item 2 evidence: the PageWrite append path clones its page payload, which
+    // the existing zero-alloc guard (Commit-only) does not cover.
+    let page_write = WalRecord::PageWrite {
+        tx_id: 1,
+        page_id: 2,
+        data: vec![7u8; 256],
+    };
+    let mut buf = Vec::with_capacity(512);
+    let ((), page_count) = measure_allocations(|| page_write.encode_into(&mut buf));
+    eprintln!(
+        "wal-pagewrite-encode-into,{},-,item-2 evidence: page payload cloned into file frame",
+        page_count.allocs
+    );
+
+    let (clone_count, move_count) = measure_columnar_transpose_variants();
+    eprintln!(
+        "columnar-transpose-clone(old),{},-,item-5 before: per-cell clone",
+        clone_count.allocs
+    );
+    eprintln!(
+        "columnar-transpose-move(new),{},-,item-5 after: move via lockstep drain",
+        move_count.allocs
+    );
+    assert!(
+        move_count.allocs < clone_count.allocs,
+        "columnar transpose move ({}) must allocate less than clone ({})",
+        move_count.allocs,
+        clone_count.allocs
+    );
 }

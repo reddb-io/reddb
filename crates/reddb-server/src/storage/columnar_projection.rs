@@ -580,12 +580,18 @@ impl ColumnarProjection {
             decoded_columns.push(decode_column(col.data_type, &decoded.data, row_count)?);
         }
 
-        for r in 0..row_count {
-            let mut row = Vec::with_capacity(self.schema.columns.len());
-            for column in &decoded_columns {
-                row.push(column[r].clone());
+        // Transpose column-major decode into row-major output by *moving* each
+        // cell out of `decoded_columns` (which is local and dies here) instead
+        // of cloning it. Rows are pre-allocated, then every column is drained in
+        // lockstep into the matching cell, preserving schema column order.
+        let base = out.len();
+        for _ in 0..row_count {
+            out.push(Vec::with_capacity(self.schema.columns.len()));
+        }
+        for column in decoded_columns {
+            for (r, value) in column.into_iter().take(row_count).enumerate() {
+                out[base + r].push(value);
             }
-            out.push(row);
         }
         Ok(())
     }
