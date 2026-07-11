@@ -678,10 +678,16 @@ pub fn execute_group_by(
     //              incremental aggregator state for each agg_def)
     let mut groups: HashMap<String, (Binding, Vec<Box<dyn Aggregator>>)> = HashMap::new();
 
+    // Reused scratch buffer for the group key. Rows falling into an existing
+    // group only borrow it for the lookup, so the key String is cloned once
+    // per *distinct* group (on insert) rather than once per row.
+    let mut scratch = String::with_capacity(64);
+
     for binding in &bindings {
-        let key = make_group_key(binding, group_vars);
-        let entry = groups.entry(key).or_insert_with(|| {
-            // Capture group key values once from the first binding in this group.
+        scratch.clear();
+        write_group_key(binding, group_vars, &mut scratch);
+        if !groups.contains_key(scratch.as_str()) {
+            // New group: capture group key values once from this first binding.
             let mut key_binding = Binding::empty();
             for var in group_vars {
                 if let Some(value) = binding.get(var) {
@@ -694,8 +700,11 @@ pub fn execute_group_by(
                 .iter()
                 .map(|a| a.aggregator.new_instance())
                 .collect();
-            (key_binding, agg_instances)
-        });
+            groups.insert(scratch.clone(), (key_binding, agg_instances));
+        }
+        let entry = groups
+            .get_mut(scratch.as_str())
+            .expect("group inserted above when absent");
 
         // Accumulate each aggregation in a single pass over the binding.
         for (i, agg_def) in aggregations.iter().enumerate() {
@@ -755,7 +764,7 @@ where
 /// Format a single `Value` as a String. **Cold path** — used by
 /// non-hot consumers like GROUP_CONCAT result formatting. The
 /// hot group-by key path inlines this logic into a shared buffer
-/// in [`make_group_key`] to avoid per-row allocations.
+/// in [`write_group_key`] to avoid per-row allocations.
 fn value_to_string(value: &Value) -> String {
     match value {
         Value::Node(id) => format!("node:{}", id),
@@ -769,22 +778,16 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
-/// Build a group-by key for one row.
+/// Build a group-by key for one row into a caller-provided buffer.
 ///
-/// **Hot path** — called once per row in `execute_group_by`. The
-/// previous implementation paid `N+2` String allocations per row
-/// (one per `value_to_string`, one per `format!`, one for the final
-/// `join("|")`). This version writes everything into a single
-/// `String` buffer with one allocation.
-///
-/// On a 3-column GROUP BY the difference is ~5 allocations vs 1,
-/// which on a 1M-row aggregation saves ~4M small allocations.
-fn make_group_key(binding: &Binding, group_vars: &[Var]) -> String {
+/// **Hot path** — called once per row in `execute_group_by`. The caller
+/// reuses a single scratch `String` across all rows (clearing it before
+/// each call), so rows landing in an existing group allocate nothing:
+/// the buffer is only cloned when a *new* group is inserted. Everything
+/// for one key is written into the shared buffer with no intermediate
+/// per-value String allocations.
+fn write_group_key(binding: &Binding, group_vars: &[Var], key: &mut String) {
     use std::fmt::Write;
-    // Tunable initial capacity. 64 bytes covers most numeric / short
-    // text group keys in one allocation; longer text grows in place
-    // through String's exponential growth.
-    let mut key = String::with_capacity(64);
     for (i, var) in group_vars.iter().enumerate() {
         if i > 0 {
             key.push('|');
@@ -815,7 +818,6 @@ fn make_group_key(binding: &Binding, group_vars: &[Var]) -> String {
             Some(Value::Uri(u)) => key.push_str(u),
         }
     }
-    key
 }
 
 fn value_to_number(value: &Value) -> Option<f64> {
