@@ -564,8 +564,12 @@ impl RedDBRuntime {
                     item.components.text_relevance = Some(current);
                 }
                 let id = item.entity.id.raw();
-                match merged_scores.get_mut(&id) {
-                    Some(existing) => {
+                // Single hash lookup. `and_modify`/`or_insert` don't fit: the
+                // occupied arm reads several fields of `item`, while the vacant
+                // arm moves `item` whole.
+                match merged_scores.entry(id) {
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        let existing = slot.get_mut();
                         existing.score += item.score;
                         if let Some(text_relevance) = item.components.text_relevance {
                             existing.components.text_relevance = existing
@@ -576,8 +580,8 @@ impl RedDBRuntime {
                         }
                         existing.components.final_score = Some(existing.score);
                     }
-                    None => {
-                        merged_scores.insert(id, item);
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(item);
                     }
                 }
             }
