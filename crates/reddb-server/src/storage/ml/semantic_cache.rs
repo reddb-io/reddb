@@ -274,7 +274,9 @@ impl SemanticCache {
                         .enumerate()
                         .min_by_key(|(_, e)| e.inserted_at_ms)
                     {
-                        let gone = guard.entries.remove(oldest_idx);
+                        // Victim is chosen by the min_by_key scan above, so the
+                        // vector's order is irrelevant: swap_remove is O(1).
+                        let gone = guard.entries.swap_remove(oldest_idx);
                         guard.stats.capacity_evictions += 1;
                         pruned.push(cache_key(&gone));
                     } else {
