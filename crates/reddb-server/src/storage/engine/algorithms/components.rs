@@ -26,8 +26,9 @@ impl UnionFind {
     }
 
     pub fn make_set(&mut self, x: &str) {
-        if !self.parent.contains_key(x) {
-            self.parent.insert(x.to_string(), x.to_string());
+        // Single hash lookup on `parent`: initialise the set only when absent.
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.parent.entry(x.to_string()) {
+            slot.insert(x.to_string());
             self.rank.insert(x.to_string(), 0);
         }
     }

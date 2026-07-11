@@ -191,9 +191,13 @@ impl ClosenessCentrality {
 
             while let Some((current, dist)) = queue.pop_front() {
                 for (_, neighbor, _) in graph.outgoing_edges(&current) {
-                    if !distances.contains_key(&neighbor) {
-                        distances.insert(neighbor.clone(), dist + 1);
-                        queue.push_back((neighbor, dist + 1));
+                    // Single hash lookup: enqueue only on first visit.
+                    if let std::collections::hash_map::Entry::Vacant(slot) =
+                        distances.entry(neighbor)
+                    {
+                        let next_dist = dist + 1;
+                        queue.push_back((slot.key().clone(), next_dist));
+                        slot.insert(next_dist);
                     }
                 }
             }

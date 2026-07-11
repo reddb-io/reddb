@@ -41,9 +41,11 @@ impl RedDBRuntime {
 
             for (neighbor, edge) in adjacent {
                 push_runtime_edge(&mut edges, &mut seen_edges, edge);
-                if !visited.contains_key(&neighbor) {
-                    visited.insert(neighbor.clone(), depth + 1);
-                    queue.push_back((neighbor, depth + 1));
+                // Single hash lookup: enqueue only on first visit.
+                if let std::collections::hash_map::Entry::Vacant(slot) = visited.entry(neighbor) {
+                    let next_depth = depth + 1;
+                    queue.push_back((slot.key().clone(), next_depth));
+                    slot.insert(next_depth);
                 }
             }
         }

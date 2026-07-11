@@ -313,12 +313,14 @@ impl ContextFusion {
             }
         }
 
-        // Remove duplicates (in reverse order to maintain indices)
-        let mut indices: Vec<usize> = to_remove.into_iter().collect();
-        indices.sort_by(|a, b| b.cmp(a));
-        for idx in indices {
-            context.chunks.remove(idx);
-        }
+        // Drop the marked duplicates in a single O(n) retain, preserving the
+        // original relevance order of the survivors.
+        let mut idx = 0;
+        context.chunks.retain(|_| {
+            let keep = !to_remove.contains(&idx);
+            idx += 1;
+            keep
+        });
     }
 
     /// Calculate content similarity using Jaccard on n-grams
@@ -378,12 +380,14 @@ impl ContextFusion {
             }
         }
 
-        // Remove excess chunks
-        let mut indices: Vec<usize> = to_remove.into_iter().collect();
-        indices.sort_by(|a, b| b.cmp(a));
-        for idx in indices {
-            context.chunks.remove(idx);
-        }
+        // Drop the excess chunks in a single O(n) retain, preserving the
+        // original relevance order of the survivors.
+        let mut idx = 0;
+        context.chunks.retain(|_| {
+            let keep = !to_remove.contains(&idx);
+            idx += 1;
+            keep
+        });
     }
 }
 
