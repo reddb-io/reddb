@@ -45,6 +45,11 @@ pub struct CachedPlan {
     pub parameter_count: usize,
     /// When true, the next cache lookup forces a fresh replan.
     pub replan_pending: bool,
+    /// Monotonic recency stamp assigned by the owning [`PlanCache`] on every
+    /// insert and hit. The least-recently-used entry is the one with the
+    /// smallest stamp; this replaces the old `Vec<String>` scan so promotion is
+    /// O(1) and allocation-free on the cache-hit hot path.
+    lru_seq: u64,
 }
 
 impl CachedPlan {
@@ -63,6 +68,7 @@ impl CachedPlan {
             last_observed_rows_scanned: None,
             parameter_count: 0,
             replan_pending: false,
+            lru_seq: 0,
         }
     }
 
@@ -132,11 +138,18 @@ impl CachedPlan {
 }
 
 /// LRU cache for query plans
+///
+/// Recency is tracked by a monotonic `clock` counter stamped onto each entry's
+/// `lru_seq` on insert and hit, rather than a `Vec<String>` that had to be
+/// linearly scanned (`position()` + `remove()`) on every promotion and removal.
+/// Promotion (the cache-hit hot path) is now O(1) and allocation-free; eviction
+/// picks the entry with the smallest stamp, which is the exact same victim the
+/// old front-of-`Vec` policy would have chosen for any given access sequence.
 pub struct PlanCache {
     /// Cached plans by key
     entries: HashMap<String, CachedPlan>,
-    /// LRU tracking - key ordering
-    lru_order: Vec<String>,
+    /// Monotonic recency clock; larger means more recently used.
+    clock: u64,
     /// Maximum cache size
     capacity: usize,
     /// Time-to-live for entries
@@ -151,12 +164,18 @@ impl PlanCache {
     pub fn new(capacity: usize) -> Self {
         Self {
             entries: HashMap::with_capacity(capacity),
-            lru_order: Vec::with_capacity(capacity),
+            clock: 0,
             capacity,
             ttl: Duration::from_secs(3600), // 1 hour default TTL
             hits: 0,
             misses: 0,
         }
+    }
+
+    /// Advance the recency clock and return the fresh stamp.
+    fn next_seq(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
     }
 
     /// Set the TTL for cache entries
@@ -193,46 +212,49 @@ impl PlanCache {
         }
 
         // Check if entry exists and is not expired
-        if let Some(entry) = self.entries.get_mut(key) {
-            if entry.is_expired(self.ttl) {
-                // Remove expired entry
-                self.remove(key);
+        let expired = match self.entries.get(key) {
+            Some(entry) => entry.is_expired(self.ttl),
+            None => {
                 self.misses += 1;
                 return None;
             }
-
-            entry.touch();
-            self.promote(key);
-            self.hits += 1;
-            return self.entries.get(key);
+        };
+        if expired {
+            // Remove expired entry
+            self.remove(key);
+            self.misses += 1;
+            return None;
         }
 
-        self.misses += 1;
-        None
+        // Hit: stamp the entry as most-recently-used. O(1), no allocation.
+        let seq = self.next_seq();
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.touch();
+            entry.lru_seq = seq;
+        }
+        self.hits += 1;
+        self.entries.get(key)
     }
 
     /// Insert a plan into the cache
-    pub fn insert(&mut self, key: String, plan: CachedPlan) {
+    pub fn insert(&mut self, key: String, mut plan: CachedPlan) {
         // Remove existing entry if present
         if self.entries.contains_key(&key) {
             self.remove(&key);
         }
 
         // Evict if at capacity
-        while self.entries.len() >= self.capacity {
+        while self.entries.len() >= self.capacity && !self.entries.is_empty() {
             self.evict_lru();
         }
 
-        // Insert new entry
-        self.entries.insert(key.clone(), plan);
-        self.lru_order.push(key);
+        // Insert new entry, stamped as most-recently-used.
+        plan.lru_seq = self.next_seq();
+        self.entries.insert(key, plan);
     }
 
     /// Remove an entry from the cache
     pub fn remove(&mut self, key: &str) -> Option<CachedPlan> {
-        if let Some(pos) = self.lru_order.iter().position(|k| k == key) {
-            self.lru_order.remove(pos);
-        }
         self.entries.remove(key)
     }
 
@@ -256,7 +278,6 @@ impl PlanCache {
     /// Clear all entries
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.lru_order.clear();
     }
 
     /// Get cache statistics
@@ -269,17 +290,14 @@ impl PlanCache {
         }
     }
 
-    /// Promote a key to most recently used
-    fn promote(&mut self, key: &str) {
-        if let Some(pos) = self.lru_order.iter().position(|k| k == key) {
-            let key = self.lru_order.remove(pos);
-            self.lru_order.push(key);
-        }
-    }
-
-    /// Evict the least recently used entry
+    /// Evict the least recently used entry (smallest recency stamp).
     fn evict_lru(&mut self) {
-        if let Some(key) = self.lru_order.first().cloned() {
+        let victim = self
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.lru_seq)
+            .map(|(key, _)| key.clone());
+        if let Some(key) = victim {
             self.remove(&key);
         }
     }
@@ -428,6 +446,32 @@ mod tests {
         assert!(cache.get("hosts_query1").is_none());
         assert!(cache.get("hosts_query2").is_none());
         assert!(cache.get("users_query").is_some());
+    }
+
+    #[test]
+    fn lru_eviction_picks_least_recently_used_victim() {
+        // Regression guard for the #2011 recency-counter LRU: eviction must pick
+        // the same victim the old front-of-`Vec` policy would have, for a given
+        // access sequence. `peek` is used for verification so it does not itself
+        // perturb recency.
+        let mut cache = PlanCache::new(3);
+        for k in ["a", "b", "c"] {
+            cache.insert(k.to_string(), CachedPlan::new(make_test_plan()));
+        }
+        // Touch a and c, leaving b as the least-recently-used entry.
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("c").is_some());
+
+        // Inserting a fourth entry at capacity evicts b.
+        cache.insert("d".to_string(), CachedPlan::new(make_test_plan()));
+
+        assert!(
+            cache.peek("b").is_none(),
+            "b was least-recently-used and must be the eviction victim"
+        );
+        assert!(cache.peek("a").is_some());
+        assert!(cache.peek("c").is_some());
+        assert!(cache.peek("d").is_some());
     }
 
     #[test]
