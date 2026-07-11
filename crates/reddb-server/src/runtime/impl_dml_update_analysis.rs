@@ -156,6 +156,32 @@ pub(super) fn update_cdc_item_kind(
     }
 }
 
+/// Keep the top `k` items under `cmp` without a full sort when it pays off.
+/// Output is **bit-identical** to `items.sort_by(cmp); items.truncate(k)` for
+/// any input: the small-`n` branch is exactly that stable sort, and the
+/// quickselect branch appends the original index as the final tie-break so the
+/// unstable partition/sort reproduces the stable sort's first `k` elements,
+/// preserving `cmp`'s own tie-breaks and NaN/None handling. Mirrors
+/// `join_filter::ordering::top_k_records_by_order_by_with_db`.
+fn partial_top_k<T: Clone>(items: &mut Vec<T>, k: usize, cmp: impl Fn(&T, &T) -> Ordering) {
+    let n = items.len();
+    if k == 0 {
+        items.clear();
+        return;
+    }
+    if n <= k.saturating_mul(2) {
+        items.sort_by(|a, b| cmp(a, b));
+        items.truncate(k);
+        return;
+    }
+    let mut idxs: Vec<usize> = (0..n).collect();
+    idxs.select_nth_unstable_by(k - 1, |&a, &b| cmp(&items[a], &items[b]).then_with(|| a.cmp(&b)));
+    idxs.truncate(k);
+    idxs.sort_by(|&a, &b| cmp(&items[a], &items[b]).then_with(|| a.cmp(&b)));
+    let orig = std::mem::take(items);
+    *items = idxs.into_iter().map(|i| orig[i].clone()).collect();
+}
+
 pub(super) fn ordered_update_target_ids(
     manager: &Arc<crate::storage::SegmentManager>,
     entity_ids: &[EntityId],
@@ -164,9 +190,14 @@ pub(super) fn ordered_update_target_ids(
 ) -> Vec<EntityId> {
     let mut entities: Vec<UnifiedEntity> =
         manager.get_many(entity_ids).into_iter().flatten().collect();
-    entities.sort_by(|left, right| compare_update_order(left, right, order_by));
-    if let Some(limit) = limit {
-        entities.truncate(limit);
+    match limit {
+        // Top-k path only when a LIMIT bounds the output.
+        Some(limit) => {
+            partial_top_k(&mut entities, limit, |left, right| {
+                compare_update_order(left, right, order_by)
+            });
+        }
+        None => entities.sort_by(|left, right| compare_update_order(left, right, order_by)),
     }
     entities.into_iter().map(|entity| entity.id).collect()
 }
