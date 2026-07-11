@@ -338,8 +338,10 @@ impl IvfIndex {
         if let Some(list_idx) = self.id_to_list.remove(&id) {
             let list = &mut self.lists[list_idx];
             if let Some(pos) = list.ids.iter().position(|&x| x == id) {
-                list.ids.remove(pos);
-                list.vectors.remove(pos);
+                // IVF lists are unordered bags; swap_remove the same pos in both
+                // parallel vectors keeps ids/vectors aligned in O(1).
+                list.ids.swap_remove(pos);
+                list.vectors.swap_remove(pos);
                 self.count = self.count.saturating_sub(1);
                 return true;
             }
