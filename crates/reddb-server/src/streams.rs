@@ -263,19 +263,25 @@ impl DurableStream {
     }
 
     fn apply_retention(&mut self, now_ms: u128) {
+        // Drop expired events from the front in a single O(n) shift rather than
+        // repeated O(n) remove(0) calls. Chronological order is preserved.
         if let Some(max_events) = self.retention.max_events {
-            while self.events.len() > max_events {
-                self.events.remove(0);
+            let overflow = self.events.len().saturating_sub(max_events);
+            if overflow > 0 {
+                self.events.drain(0..overflow);
             }
         }
         if let Some(max_age_ms) = self.retention.max_age_ms {
             let cutoff = now_ms.saturating_sub(max_age_ms as u128);
-            while let Some(first) = self.events.first() {
-                if first.appended_at_ms < cutoff {
-                    self.events.remove(0);
-                } else {
-                    break;
-                }
+            // Count the contiguous leading run older than the cutoff — exactly
+            // the events the original break-on-first-fresh loop would remove.
+            let expired = self
+                .events
+                .iter()
+                .take_while(|e| e.appended_at_ms < cutoff)
+                .count();
+            if expired > 0 {
+                self.events.drain(0..expired);
             }
         }
     }
