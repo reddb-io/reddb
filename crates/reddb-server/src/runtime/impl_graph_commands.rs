@@ -1154,7 +1154,9 @@ fn partial_top_k<T: Clone>(items: &mut Vec<T>, k: usize, cmp: impl Fn(&T, &T) ->
         return;
     }
     let mut idxs: Vec<usize> = (0..n).collect();
-    idxs.select_nth_unstable_by(k - 1, |&a, &b| cmp(&items[a], &items[b]).then_with(|| a.cmp(&b)));
+    idxs.select_nth_unstable_by(k - 1, |&a, &b| {
+        cmp(&items[a], &items[b]).then_with(|| a.cmp(&b))
+    });
     idxs.truncate(k);
     idxs.sort_by(|&a, &b| cmp(&items[a], &items[b]).then_with(|| a.cmp(&b)));
     let orig = std::mem::take(items);
