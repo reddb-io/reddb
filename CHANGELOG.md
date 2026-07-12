@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.1
+
+### Patch Changes
+
+- Hot-path performance sweep (PRs [#2010](https://github.com/reddb-io/reddb/issues/2010), [#2012](https://github.com/reddb-io/reddb/issues/2012), [#2014](https://github.com/reddb-io/reddb/issues/2014)): allocation-free probe keys and group-by steady state, `entry()`-based single lookups, `swap_remove`/`retain`/`drain` in maintenance structures, top-K without full sorts, `Var` interned behind `Arc<str>`, O(1) zero-alloc plan-cache hits, columnar transpose by move, and a borrowed WAL encode path (byte-format unchanged, proven byte-identical). Zero-alloc ratchet extended to cover the new hot paths. No API, wire, or on-disk format changes.
+
 ## 1.23.0
 
 ### Minor Changes

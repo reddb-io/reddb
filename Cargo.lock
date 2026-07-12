@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "jsonwebtoken",
  "proptest",
@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "async-trait",
  "csv",
@@ -2807,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "reddb-io-grpc-proto",
  "reddb-io-wire",
@@ -2816,14 +2816,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "aes-gcm",
 ]
 
 [[package]]
 name = "reddb-io-file"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2840,7 +2840,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "prost",
  "reddb-io-wire",
@@ -2852,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "proptest",
  "reddb-io-types",
@@ -2861,7 +2861,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-server"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2931,7 +2931,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "criterion",
  "proptest",
@@ -2940,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.23.0"
+version = "1.23.1"
 dependencies = [
  "insta",
  "proptest",

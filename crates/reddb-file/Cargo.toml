@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-file"
-version = "1.23.0"
+version = "1.23.1"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB file artifact layer: single-file .rdb layout, WAL, snapshots, checkpoints, locks, and recovery."
