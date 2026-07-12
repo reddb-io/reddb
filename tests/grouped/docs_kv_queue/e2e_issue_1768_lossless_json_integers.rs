@@ -77,8 +77,21 @@ fn genuine_float_keeps_float_behaviour() {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        ..ProptestConfig::default()
+    })]
+
     #[test]
-    fn integer_extremes_round_trip_through_rql_surface(n in any::<i64>()) {
+    fn integer_extremes_round_trip_through_rql_surface(n in prop_oneof![
+        Just(i64::MIN),
+        Just(i64::MIN + 1),
+        Just(-9_007_199_254_740_993_i64),
+        Just(9_007_199_254_740_993_i64),
+        Just(i64::MAX - 1),
+        Just(i64::MAX),
+        any::<i64>(),
+    ]) {
         let rt = runtime();
         rt.execute_query("CREATE DOCUMENT issue1768_prop")
             .expect("CREATE DOCUMENT");
