@@ -768,6 +768,7 @@ fn parse_ts_field(obj: &Map<String, Value>, key: &str) -> Option<u128> {
 
 fn parse_ts_value(v: &Value) -> Result<u128, PolicyError> {
     match v {
+        Value::Integer(n) if *n >= 0 => Ok(*n as u128),
         Value::Number(n) if *n >= 0.0 => Ok(*n as u128),
         Value::String(s) => parse_rfc3339_ms(s),
         _ => Err(PolicyError::InvalidCondition(format!(
