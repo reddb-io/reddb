@@ -589,6 +589,14 @@ impl ColumnarProjection {
             out.push(Vec::with_capacity(self.schema.columns.len()));
         }
         for column in decoded_columns {
+            // `decode_column` yields exactly `row_count` values; the drain below
+            // relies on that to keep rows rectangular. Fail loud in debug if the
+            // decoder ever breaks the invariant.
+            debug_assert_eq!(
+                column.len(),
+                row_count,
+                "decoded column is not row_count long"
+            );
             for (r, value) in column.into_iter().take(row_count).enumerate() {
                 out[base + r].push(value);
             }

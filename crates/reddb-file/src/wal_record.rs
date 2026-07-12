@@ -107,6 +107,116 @@ pub enum MainWalRecordFrame {
     },
 }
 
+/// Borrowed view of a [`MainWalRecordFrame`].
+///
+/// The append path encodes straight out of the runtime record, so the payload
+/// of a `PageWrite`, `FullPageImage` or `TxCommitBatch` never has to be cloned
+/// into an owned frame first. The encoder works exclusively on this view — the
+/// owned frame encodes by borrowing itself — so both paths emit the same bytes
+/// by construction, not by convention.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MainWalRecordFrameRef<'a> {
+    Begin {
+        tx_id: u64,
+    },
+    Commit {
+        tx_id: u64,
+    },
+    Rollback {
+        tx_id: u64,
+    },
+    PageWrite {
+        tx_id: u64,
+        page_id: u32,
+        data: &'a [u8],
+    },
+    TxCommitBatch {
+        tx_id: u64,
+        actions: &'a [Vec<u8>],
+    },
+    FullPageImage {
+        tx_id: u64,
+        page_id: u32,
+        ckpt_epoch: u64,
+        data: &'a [u8],
+    },
+    VectorInsert {
+        collection: &'a str,
+        entity_id: u64,
+        vector: &'a [f32],
+    },
+    ProbabilisticDelta {
+        kind: u8,
+        operation: u8,
+        name: &'a str,
+        operands: &'a [Vec<u8>],
+    },
+    Checkpoint {
+        lsn: u64,
+    },
+}
+
+impl<'a> From<&'a MainWalRecordFrame> for MainWalRecordFrameRef<'a> {
+    fn from(frame: &'a MainWalRecordFrame) -> Self {
+        match frame {
+            MainWalRecordFrame::Begin { tx_id } => MainWalRecordFrameRef::Begin { tx_id: *tx_id },
+            MainWalRecordFrame::Commit { tx_id } => MainWalRecordFrameRef::Commit { tx_id: *tx_id },
+            MainWalRecordFrame::Rollback { tx_id } => {
+                MainWalRecordFrameRef::Rollback { tx_id: *tx_id }
+            }
+            MainWalRecordFrame::PageWrite {
+                tx_id,
+                page_id,
+                data,
+            } => MainWalRecordFrameRef::PageWrite {
+                tx_id: *tx_id,
+                page_id: *page_id,
+                data,
+            },
+            MainWalRecordFrame::TxCommitBatch { tx_id, actions } => {
+                MainWalRecordFrameRef::TxCommitBatch {
+                    tx_id: *tx_id,
+                    actions,
+                }
+            }
+            MainWalRecordFrame::FullPageImage {
+                tx_id,
+                page_id,
+                ckpt_epoch,
+                data,
+            } => MainWalRecordFrameRef::FullPageImage {
+                tx_id: *tx_id,
+                page_id: *page_id,
+                ckpt_epoch: *ckpt_epoch,
+                data,
+            },
+            MainWalRecordFrame::VectorInsert {
+                collection,
+                entity_id,
+                vector,
+            } => MainWalRecordFrameRef::VectorInsert {
+                collection,
+                entity_id: *entity_id,
+                vector,
+            },
+            MainWalRecordFrame::ProbabilisticDelta {
+                kind,
+                operation,
+                name,
+                operands,
+            } => MainWalRecordFrameRef::ProbabilisticDelta {
+                kind: *kind,
+                operation: *operation,
+                name,
+                operands,
+            },
+            MainWalRecordFrame::Checkpoint { lsn } => {
+                MainWalRecordFrameRef::Checkpoint { lsn: *lsn }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MainWalRecordAuthority {
     pub term: u64,
@@ -132,8 +242,11 @@ pub fn encode_main_wal_record_frame_with_authority(
     Ok(out)
 }
 
-pub fn encode_main_wal_record_frame_into(
-    frame: &MainWalRecordFrame,
+/// Encode a frame into `out`. Accepts an owned `&MainWalRecordFrame` or a
+/// borrowed [`MainWalRecordFrameRef`] — the append path passes the latter, so
+/// the payload is written straight from the caller's buffers with no copy.
+pub fn encode_main_wal_record_frame_into<'a>(
+    frame: impl Into<MainWalRecordFrameRef<'a>>,
     term: u64,
     out: &mut Vec<u8>,
 ) -> io::Result<()> {
@@ -147,32 +260,34 @@ pub fn encode_main_wal_record_frame_into(
     )
 }
 
-pub fn encode_main_wal_record_frame_with_authority_into(
-    frame: &MainWalRecordFrame,
+/// The single encoder. Every other encode entry point funnels here, so the
+/// owned and borrowed paths cannot drift in the bytes they persist.
+pub fn encode_main_wal_record_frame_with_authority_into<'a>(
+    frame: impl Into<MainWalRecordFrameRef<'a>>,
     authority: MainWalRecordAuthority,
     out: &mut Vec<u8>,
 ) -> io::Result<()> {
     let start = out.len();
-    match frame {
-        MainWalRecordFrame::Begin { tx_id } => {
+    match frame.into() {
+        MainWalRecordFrameRef::Begin { tx_id } => {
             write_type_and_authority(out, MainWalRecordType::Begin, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
         }
-        MainWalRecordFrame::Commit { tx_id } => {
+        MainWalRecordFrameRef::Commit { tx_id } => {
             write_type_and_authority(out, MainWalRecordType::Commit, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
         }
-        MainWalRecordFrame::Rollback { tx_id } => {
+        MainWalRecordFrameRef::Rollback { tx_id } => {
             write_type_and_authority(out, MainWalRecordType::Rollback, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
         }
-        MainWalRecordFrame::PageWrite {
+        MainWalRecordFrameRef::PageWrite {
             tx_id,
             page_id,
             data,
         } => {
             if data.len() >= MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD {
-                if let Ok(compressed) = zstd::bulk::compress(data.as_slice(), 3) {
+                if let Ok(compressed) = zstd::bulk::compress(data, 3) {
                     if compressed.len() < data.len() {
                         write_type_and_authority(
                             out,
@@ -197,7 +312,7 @@ pub fn encode_main_wal_record_frame_with_authority_into(
             write_u32_len(out, data.len(), "main wal page length")?;
             out.extend_from_slice(data);
         }
-        MainWalRecordFrame::TxCommitBatch { tx_id, actions } => {
+        MainWalRecordFrameRef::TxCommitBatch { tx_id, actions } => {
             write_type_and_authority(out, MainWalRecordType::TxCommitBatch, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
             write_u32_len(out, actions.len(), "main wal action count")?;
@@ -206,7 +321,7 @@ pub fn encode_main_wal_record_frame_with_authority_into(
                 out.extend_from_slice(action);
             }
         }
-        MainWalRecordFrame::FullPageImage {
+        MainWalRecordFrameRef::FullPageImage {
             tx_id,
             page_id,
             ckpt_epoch,
@@ -219,7 +334,7 @@ pub fn encode_main_wal_record_frame_with_authority_into(
             write_u32_len(out, data.len(), "main wal full-page image length")?;
             out.extend_from_slice(data);
         }
-        MainWalRecordFrame::VectorInsert {
+        MainWalRecordFrameRef::VectorInsert {
             collection,
             entity_id,
             vector,
@@ -233,15 +348,15 @@ pub fn encode_main_wal_record_frame_with_authority_into(
                 out.extend_from_slice(&value.to_le_bytes());
             }
         }
-        MainWalRecordFrame::ProbabilisticDelta {
+        MainWalRecordFrameRef::ProbabilisticDelta {
             kind,
             operation,
             name,
             operands,
         } => {
             write_type_and_authority(out, MainWalRecordType::ProbabilisticDelta, authority);
-            out.push(*kind);
-            out.push(*operation);
+            out.push(kind);
+            out.push(operation);
             write_u32_len(out, name.len(), "main wal probabilistic name length")?;
             out.extend_from_slice(name.as_bytes());
             write_u32_len(out, operands.len(), "main wal probabilistic operand count")?;
@@ -250,7 +365,7 @@ pub fn encode_main_wal_record_frame_with_authority_into(
                 out.extend_from_slice(operand);
             }
         }
-        MainWalRecordFrame::Checkpoint { lsn } => {
+        MainWalRecordFrameRef::Checkpoint { lsn } => {
             write_type_and_authority(out, MainWalRecordType::Checkpoint, authority);
             out.extend_from_slice(&lsn.to_le_bytes());
         }

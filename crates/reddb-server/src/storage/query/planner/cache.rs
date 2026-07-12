@@ -161,7 +161,12 @@ pub struct PlanCache {
 
 impl PlanCache {
     /// Create a new plan cache with the given capacity
+    ///
+    /// A capacity of 0 is meaningless and unreachable from every call site
+    /// today. If one ever appears, the LRU keeps a single entry rather than
+    /// evicting forever (the pre-#2012 code looped indefinitely on it).
     pub fn new(capacity: usize) -> Self {
+        debug_assert!(capacity > 0, "plan cache capacity must be positive");
         Self {
             entries: HashMap::with_capacity(capacity),
             clock: 0,

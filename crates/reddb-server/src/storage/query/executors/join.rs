@@ -25,8 +25,9 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 
 use super::super::engine::binding::{Binding, Value, Var};
 use super::value_compare::total_compare_values;
@@ -154,46 +155,79 @@ pub fn choose_strategy(stats: &JoinStats, condition: &JoinCondition) -> JoinStra
 
 /// Hash key for join matching
 #[derive(Clone, PartialEq, Eq)]
-struct HashKey(Vec<Option<Value>>);
+pub(crate) struct HashKey(Vec<Option<Value>>);
 
 impl Hash for HashKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         for value in &self.0 {
-            match value {
-                Some(Value::String(s)) => {
-                    1u8.hash(state);
-                    s.hash(state);
-                }
-                Some(Value::Integer(i)) => {
-                    2u8.hash(state);
-                    i.hash(state);
-                }
-                Some(Value::Float(f)) => {
-                    3u8.hash(state);
-                    f.to_bits().hash(state);
-                }
-                Some(Value::Boolean(b)) => {
-                    4u8.hash(state);
-                    b.hash(state);
-                }
-                Some(Value::Uri(u)) => {
-                    5u8.hash(state);
-                    u.hash(state);
-                }
-                Some(Value::Node(n)) => {
-                    6u8.hash(state);
-                    n.hash(state);
-                }
-                Some(Value::Edge(e)) => {
-                    7u8.hash(state);
-                    e.hash(state);
-                }
-                Some(Value::Null) | None => {
-                    0u8.hash(state);
-                }
-            }
+            hash_key_value(value.as_ref(), state);
         }
     }
+}
+
+/// Hash one join-key column. `NULL` and an absent binding hash alike (tag 0) —
+/// they are also equal-by-absence nowhere, so a null key still finds its bucket
+/// and is then rejected by the element-wise equality check.
+fn hash_key_value<H: Hasher>(value: Option<&Value>, state: &mut H) {
+    match value {
+        Some(Value::String(s)) => {
+            1u8.hash(state);
+            s.hash(state);
+        }
+        Some(Value::Integer(i)) => {
+            2u8.hash(state);
+            i.hash(state);
+        }
+        Some(Value::Float(f)) => {
+            3u8.hash(state);
+            f.to_bits().hash(state);
+        }
+        Some(Value::Boolean(b)) => {
+            4u8.hash(state);
+            b.hash(state);
+        }
+        Some(Value::Uri(u)) => {
+            5u8.hash(state);
+            u.hash(state);
+        }
+        Some(Value::Node(n)) => {
+            6u8.hash(state);
+            n.hash(state);
+        }
+        Some(Value::Edge(e)) => {
+            7u8.hash(state);
+            e.hash(state);
+        }
+        Some(Value::Null) | None => {
+            0u8.hash(state);
+        }
+    }
+}
+
+/// Hash a row's join key *in place* — without materializing an owned `HashKey`.
+/// This is the probe-side hot path: one hash per probe row, zero allocations.
+///
+/// The caller supplies a `RandomState` (one per join) so bucket hashes stay
+/// randomly seeded like the `HashMap<HashKey, _>` this replaced — a fixed-key
+/// hasher would let precomputed collisions degrade the build to O(n²).
+pub(crate) fn key_hash(state: &RandomState, binding: &Binding, vars: &[Var]) -> u64 {
+    let mut hasher = state.build_hasher();
+    for var in vars {
+        hash_key_value(binding.get(var), &mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Element-wise equality between a stored build key and a probe row's key,
+/// compared through references so the probe key is never cloned. Identical to
+/// `extract_key(binding, vars) == *key`, including `None`/`NULL` columns.
+pub(crate) fn key_matches(key: &HashKey, binding: &Binding, vars: &[Var]) -> bool {
+    key.0.len() == vars.len()
+        && key
+            .0
+            .iter()
+            .zip(vars)
+            .all(|(stored, var)| stored.as_ref() == binding.get(var))
 }
 
 /// Execute a hash join
@@ -219,11 +253,24 @@ pub fn hash_join(
             (&right, &left, &right_keys, &left_keys, false)
         };
 
-    // Build hash table
-    let mut hash_table: HashMap<HashKey, Vec<&Binding>> = HashMap::new();
+    // Build hash table, bucketed by the key's precomputed hash. The build side
+    // owns its keys; collisions inside a bucket are resolved by element-wise
+    // equality, exactly as the `HashMap<HashKey, _>` it replaces did. Keeping
+    // the hash explicit is what lets the probe side look a row up *without*
+    // cloning its key values (see `key_hash` / `key_matches`).
+    #[allow(clippy::type_complexity)]
+    let mut hash_table: HashMap<u64, Vec<(HashKey, Vec<&Binding>)>> = HashMap::new();
+    let hash_state = RandomState::new();
     for binding in build_side {
-        let key = extract_key(binding, build_keys);
-        hash_table.entry(key).or_default().push(binding);
+        let hash = key_hash(&hash_state, binding, build_keys);
+        let bucket = hash_table.entry(hash).or_default();
+        match bucket
+            .iter_mut()
+            .find(|(key, _)| key_matches(key, binding, build_keys))
+        {
+            Some((_, bindings)) => bindings.push(binding),
+            None => bucket.push((extract_key(binding, build_keys), vec![binding])),
+        }
     }
 
     // Probe phase
@@ -231,8 +278,16 @@ pub fn hash_join(
     let mut matched_build: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     for (probe_idx, probe_binding) in probe_side.iter().enumerate() {
-        let key = extract_key(probe_binding, probe_keys);
-        let matches = hash_table.get(&key);
+        // Probe with a borrowed key: hash the row's join columns in place, then
+        // confirm the match element-wise. No `Value` is cloned per probe row.
+        let matches = hash_table
+            .get(&key_hash(&hash_state, probe_binding, probe_keys))
+            .and_then(|bucket: &Vec<(HashKey, Vec<&Binding>)>| {
+                bucket
+                    .iter()
+                    .find(|(key, _)| key_matches(key, probe_binding, probe_keys))
+                    .map(|(_, bindings)| bindings)
+            });
 
         let mut had_match = false;
         if let Some(build_bindings) = matches {
@@ -331,7 +386,7 @@ pub fn hash_join(
     results
 }
 
-fn extract_key(binding: &Binding, vars: &[Var]) -> HashKey {
+pub(crate) fn extract_key(binding: &Binding, vars: &[Var]) -> HashKey {
     HashKey(vars.iter().map(|v| binding.get(v).cloned()).collect())
 }
 
@@ -782,5 +837,131 @@ mod tests {
             choose_strategy(&stats, &JoinCondition::Eq(Var::new("a"), Var::new("b"))),
             JoinStrategy::Merge
         );
+    }
+
+    // ===================== borrowed probe-key equivalence (#2013) ============
+
+    /// Bind `k` to the given value (or leave `k` unbound when `None`), plus a
+    /// side-local tag var so merged rows stay distinguishable and never conflict.
+    fn key_row(k: Option<Value>, tag_var: &str, tag: &str) -> Binding {
+        let row = Binding::one(Var::new(tag_var), Value::String(tag.to_string()));
+        match k {
+            Some(value) => row
+                .merge(&Binding::one(Var::new("k"), value))
+                .expect("no conflicting binding"),
+            None => row,
+        }
+    }
+
+    fn left_row(k: Option<Value>, tag: &str) -> Binding {
+        key_row(k, "lt", tag)
+    }
+
+    fn right_row(k: Option<Value>, tag: &str) -> Binding {
+        key_row(k, "rt", tag)
+    }
+
+    /// Order-independent fingerprint of a joined row (`Binding` is backed by a
+    /// `HashMap`, so its `Debug` order is not stable).
+    fn fingerprint(binding: &Binding) -> String {
+        let field = |name: &str| match binding.get(&Var::new(name)) {
+            Some(value) => format!("{value:?}"),
+            None => "-".to_string(),
+        };
+        format!("lt={} rt={} k={}", field("lt"), field("rt"), field("k"))
+    }
+
+    /// Reference semantics for an inner equi-join: every (left, right) pair
+    /// whose *owned* join keys compare equal. This is deliberately independent
+    /// of the hash table under test.
+    fn reference_inner_matches(left: &[Binding], right: &[Binding], keys: &[Var]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for l in left {
+            for r in right {
+                if extract_key(l, keys) == extract_key(r, keys) {
+                    out.push(fingerprint(&merge_bindings(l, r)));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// An absent column and an explicit `NULL` hash to the same bucket, so the
+    /// probe path *must* resolve the collision by element-wise equality — which
+    /// keeps them distinct, exactly as the old owned-`HashKey` map did.
+    #[test]
+    fn null_and_absent_keys_collide_in_hash_but_stay_distinct_in_equality() {
+        let keys = [Var::new("k")];
+        let null_row = left_row(Some(Value::Null), "null");
+        let absent_row = left_row(None, "absent");
+
+        let state = RandomState::new();
+        assert_eq!(
+            key_hash(&state, &null_row, &keys),
+            key_hash(&state, &absent_row, &keys),
+            "NULL and an absent column are expected to share a hash bucket"
+        );
+        assert!(key_matches(
+            &extract_key(&null_row, &keys),
+            &null_row,
+            &keys
+        ));
+        assert!(!key_matches(
+            &extract_key(&null_row, &keys),
+            &absent_row,
+            &keys
+        ));
+        assert!(!key_matches(
+            &extract_key(&absent_row, &keys),
+            &null_row,
+            &keys
+        ));
+    }
+
+    /// The borrowed probe key produces exactly the matches the owned key does —
+    /// over string keys, explicit `NULL`s, absent columns, and rows that share a
+    /// hash bucket while holding different values.
+    #[test]
+    fn hash_join_matches_are_identical_to_the_owned_key_reference() {
+        let left = vec![
+            left_row(Some(Value::String("a".into())), "L-a"),
+            left_row(Some(Value::Integer(1)), "L-1"),
+            left_row(Some(Value::Null), "L-null"),
+            left_row(None, "L-absent"),
+            left_row(Some(Value::String("a".into())), "L-a2"),
+        ];
+        let right = vec![
+            right_row(Some(Value::String("a".into())), "R-a"),
+            right_row(Some(Value::Null), "R-null"),
+            right_row(None, "R-absent"),
+            right_row(Some(Value::Boolean(true)), "R-true"),
+            right_row(Some(Value::Integer(1)), "R-1"),
+            right_row(Some(Value::Integer(1)), "R-1b"),
+        ];
+        let keys = [Var::new("k")];
+        let condition = JoinCondition::Eq(Var::new("k"), Var::new("k"));
+
+        // Cover both build-side choices: `left` is the smaller side (built), the
+        // swapped call builds on the right input, and equal-size inputs exercise
+        // the `<=` tie rule.
+        for (l, r) in [
+            (left.clone(), right.clone()),
+            (right.clone(), left.clone()),
+            (left.clone(), right[..left.len()].to_vec()),
+        ] {
+            let expected = reference_inner_matches(&l, &r, &keys);
+
+            let mut actual: Vec<String> = hash_join(l, r, &condition, JoinType::Inner)
+                .iter()
+                .map(fingerprint)
+                .collect();
+            actual.sort();
+
+            assert_eq!(
+                actual, expected,
+                "hash join diverged from the owned-key reference"
+            );
+        }
     }
 }

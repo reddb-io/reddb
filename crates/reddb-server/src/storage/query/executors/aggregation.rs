@@ -786,7 +786,7 @@ fn value_to_string(value: &Value) -> String {
 /// the buffer is only cloned when a *new* group is inserted. Everything
 /// for one key is written into the shared buffer with no intermediate
 /// per-value String allocations.
-fn write_group_key(binding: &Binding, group_vars: &[Var], key: &mut String) {
+pub(crate) fn write_group_key(binding: &Binding, group_vars: &[Var], key: &mut String) {
     use std::fmt::Write;
     for (i, var) in group_vars.iter().enumerate() {
         if i > 0 {

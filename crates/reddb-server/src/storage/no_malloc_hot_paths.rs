@@ -6,6 +6,10 @@ use super::engine::page::{Page, PageType};
 use super::engine::page_cache::PageCacheShard;
 use super::query::ast::{Projection, QueryExpr, TableQuery};
 use super::query::engine::binding::{Binding, Value as BindingValue, Var};
+use super::query::executors::aggregation::write_group_key;
+use super::query::executors::join::{
+    extract_key as join_extract_key, key_hash as join_key_hash, key_matches as join_key_matches,
+};
 use super::query::planner::cache::{CachedPlan, PlanCache};
 use super::query::planner::cost::PlanCost;
 use super::query::planner::QueryPlan;
@@ -184,6 +188,36 @@ const COVERED_OPERATIONS: &[CoveredOperation] = &[
         exception: None,
         measure: measure_plan_cache_hit,
     },
+    // Ratchet additions from the #2013 follow-up sweep. `encode_into` now
+    // encodes straight out of the borrowed record, so a page payload is no
+    // longer cloned into an owned file frame on every append.
+    CoveredOperation {
+        name: "wal-pagewrite-encode",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_wal_pagewrite_encode,
+    },
+    CoveredOperation {
+        name: "wal-pagewrite-encode-compressed",
+        allowed_allocs: 1,
+        exception: Some(AllocationException {
+            reason: "zstd::bulk::compress returns an owned buffer for pages at or above the compression threshold; the payload itself is no longer cloned",
+            follow_up_issue: 2013,
+        }),
+        measure: measure_wal_pagewrite_encode_compressed,
+    },
+    CoveredOperation {
+        name: "wal-tx-commit-batch-encode",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_wal_tx_commit_batch_encode,
+    },
+    CoveredOperation {
+        name: "hash-join-probe-key-lookup",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_hash_join_probe_key_lookup,
+    },
 ];
 
 #[test]
@@ -322,6 +356,80 @@ fn measure_wal_record_encode_into_group_commit_buffer() -> AllocationCount {
     count
 }
 
+/// A `PageWrite` append below the compression threshold: the frame is written
+/// literally, straight out of the record's own payload buffer. Since #2013 the
+/// page bytes are borrowed rather than cloned into an owned file frame, so a
+/// warmed group-commit buffer absorbs the whole record with zero allocations.
+fn measure_wal_pagewrite_encode() -> AllocationCount {
+    let record = WalRecord::PageWrite {
+        tx_id: 1,
+        page_id: 2,
+        // Below MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD (256) → literal frame.
+        data: vec![7u8; 200],
+    };
+    let mut group_commit_buffer = Vec::with_capacity(1024);
+
+    let ((), count) = measure_allocations(|| record.encode_into(&mut group_commit_buffer));
+
+    assert!(!group_commit_buffer.is_empty());
+    count
+}
+
+/// The same append for a page at/above the compression threshold. The payload
+/// clone is gone, but `zstd::bulk::compress` still hands back an owned buffer —
+/// that single allocation is the documented residual floor.
+fn measure_wal_pagewrite_encode_compressed() -> AllocationCount {
+    let record = WalRecord::PageWrite {
+        tx_id: 1,
+        page_id: 2,
+        data: vec![7u8; 4096],
+    };
+    let mut group_commit_buffer = Vec::with_capacity(8192);
+
+    let ((), count) = measure_allocations(|| record.encode_into(&mut group_commit_buffer));
+
+    assert!(!group_commit_buffer.is_empty());
+    count
+}
+
+/// A logical commit batch append. Its action payloads are borrowed too, so the
+/// record encodes into a warmed buffer without allocating.
+fn measure_wal_tx_commit_batch_encode() -> AllocationCount {
+    let record = WalRecord::TxCommitBatch {
+        tx_id: 9,
+        actions: vec![b"insert:orders:1".to_vec(), b"update:orders:2".to_vec()],
+    };
+    let mut group_commit_buffer = Vec::with_capacity(512);
+
+    let ((), count) = measure_allocations(|| record.encode_into(&mut group_commit_buffer));
+
+    assert!(!group_commit_buffer.is_empty());
+    count
+}
+
+/// The hash-join probe hot path (#2013): hash the probe row's join key in place
+/// and confirm the bucket match element-wise. Neither step clones a `Value`.
+fn measure_hash_join_probe_key_lookup() -> AllocationCount {
+    let binding = two_var_binding();
+    let keys = [Var::new("x"), Var::new("y")];
+    // The build side owns its key; only the probe side must stay allocation-free.
+    let build_key = join_extract_key(&binding, &keys);
+    // One seeded state per join, created outside the measured probe (as in
+    // `hash_join` itself, where it is per-call, not per-row).
+    let hash_state = std::collections::hash_map::RandomState::new();
+
+    let (hit, count) = measure_allocations(|| {
+        let hash = join_key_hash(&hash_state, &binding, &keys);
+        (hash, join_key_matches(&build_key, &binding, &keys))
+    });
+
+    assert!(
+        hit.1,
+        "probe key must match the build key it was derived from"
+    );
+    count
+}
+
 /// Two-variable binding used across the structural hot-path fixtures.
 fn two_var_binding() -> Binding {
     Binding::two(
@@ -332,60 +440,24 @@ fn two_var_binding() -> Binding {
     )
 }
 
-/// Mirrors the hot body of `executors::aggregation::write_group_key`: a row
-/// that lands in an *existing* group reuses one scratch `String`, so no
-/// allocation happens once the buffer has grown. This measures a steady-state
-/// row (buffer already sized, cleared before the call).
+/// Measures the *real* `executors::aggregation::write_group_key`: a row that
+/// lands in an *existing* group reuses one scratch `String`, so no allocation
+/// happens once the buffer has grown. This measures a steady-state row (buffer
+/// already sized, cleared before the call).
 fn measure_group_by_existing_group_key_write() -> AllocationCount {
     let binding = two_var_binding();
     let group_vars = [Var::new("x"), Var::new("y")];
     let mut key = String::with_capacity(64);
     // Warm the buffer so its backing allocation already exists.
-    write_group_key_into(&binding, &group_vars, &mut key);
+    write_group_key(&binding, &group_vars, &mut key);
 
     let ((), count) = measure_allocations(|| {
         key.clear();
-        write_group_key_into(&binding, &group_vars, &mut key);
+        write_group_key(&binding, &group_vars, &mut key);
     });
 
     assert!(!key.is_empty());
     count
-}
-
-/// Faithful copy of `write_group_key`'s hot loop, kept local so the manifest
-/// does not need to widen that helper's visibility.
-fn write_group_key_into(binding: &Binding, group_vars: &[Var], key: &mut String) {
-    use std::fmt::Write as _;
-    for (i, var) in group_vars.iter().enumerate() {
-        if i > 0 {
-            key.push('|');
-        }
-        key.push_str(var.name());
-        key.push('=');
-        match binding.get(var) {
-            None => key.push_str("NULL"),
-            Some(BindingValue::Null) => key.push_str("null"),
-            Some(BindingValue::String(s)) => key.push_str(s),
-            Some(BindingValue::Integer(n)) => {
-                let _ = write!(key, "{n}");
-            }
-            Some(BindingValue::Float(f)) => {
-                let _ = write!(key, "{f}");
-            }
-            Some(BindingValue::Boolean(b)) => {
-                let _ = write!(key, "{b}");
-            }
-            Some(BindingValue::Node(id)) => {
-                key.push_str("node:");
-                key.push_str(id);
-            }
-            Some(BindingValue::Edge(id)) => {
-                key.push_str("edge:");
-                key.push_str(id);
-            }
-            Some(BindingValue::Uri(u)) => key.push_str(u),
-        }
-    }
 }
 
 /// Minimal `QueryPlan` fixture (parameter-free) used only as cache ballast.
@@ -432,10 +504,9 @@ fn measure_plan_cache_hit() -> AllocationCount {
     count
 }
 
-/// Mirrors the probe side of `executors::join::extract_key`: the values behind
-/// the join keys are cloned into an owned key vector on *every* probe row. This
-/// is the item-3 candidate (skipped as too invasive); measured here to record
-/// its baseline cost.
+/// The *retired* probe-key shape: the values behind the join keys were cloned
+/// into an owned key vector on every probe row. Kept as the before-number the
+/// borrowed lookup (#2013) is compared against in the report.
 #[cfg(test)]
 fn measure_hash_join_probe_key_extract() -> AllocationCount {
     let binding = two_var_binding();
@@ -535,7 +606,7 @@ fn structural_hot_path_report() {
     let binding = two_var_binding();
     let group_vars = [Var::new("x"), Var::new("y")];
     let mut scratch = String::with_capacity(64);
-    write_group_key_into(&binding, &group_vars, &mut scratch);
+    write_group_key(&binding, &group_vars, &mut scratch);
     eprintln!(
         "binding-merge-per-joined-row,{},{:.1},item-1 Var interned (Arc<str>)",
         merge.allocs,
@@ -548,7 +619,7 @@ fn structural_hot_path_report() {
 
     let probe = measure_hash_join_probe_key_extract();
     eprintln!(
-        "hash-join-probe-key-extract,{},{:.1},item-3 SKIPPED (invasive HashKey change)",
+        "hash-join-probe-key-extract(old),{},{:.1},#2013 before: key cloned into an owned HashKey (clone only; the map then hashed it too)",
         probe.allocs,
         time_ns(iters, || {
             let _ = std::hint::black_box(
@@ -560,13 +631,26 @@ fn structural_hot_path_report() {
         })
     );
 
+    let probe_lookup = measure_hash_join_probe_key_lookup();
+    let build_key = join_extract_key(&binding, &group_vars);
+    let hash_state = std::collections::hash_map::RandomState::new();
+    eprintln!(
+        "hash-join-probe-key-lookup(new),{},{:.1},#2013 after: borrowed hash + element-wise match — includes the hashing the row above excludes (0-alloc, ratcheted)",
+        probe_lookup.allocs,
+        time_ns(iters, || {
+            let hash = join_key_hash(&hash_state, &binding, &group_vars);
+            let hit = join_key_matches(&build_key, &binding, &group_vars);
+            std::hint::black_box((hash, hit));
+        })
+    );
+
     let gbk = measure_group_by_existing_group_key_write();
     eprintln!(
         "group-by-existing-group-key-write,{},{:.1},steady-state buffer reuse (0-alloc, ratcheted)",
         gbk.allocs,
         time_ns(iters, || {
             scratch.clear();
-            write_group_key_into(&binding, &group_vars, &mut scratch);
+            write_group_key(&binding, &group_vars, &mut scratch);
             std::hint::black_box(&scratch);
         })
     );
@@ -585,7 +669,7 @@ fn structural_hot_path_report() {
 
     let wal = measure_wal_record_encode_into_group_commit_buffer();
     eprintln!(
-        "wal-commit-encode-into,{},{:.1},item-2 SKIPPED (PageWrite path clones; guard covers Commit only)",
+        "wal-commit-encode-into,{},{:.1},0-alloc, ratcheted",
         wal.allocs,
         time_ns(iters, || {
             let record = WalRecord::Commit { tx_id: 9 };
@@ -595,18 +679,33 @@ fn structural_hot_path_report() {
         })
     );
 
-    // Item 2 evidence: the PageWrite append path clones its page payload, which
-    // the existing zero-alloc guard (Commit-only) does not cover.
-    let page_write = WalRecord::PageWrite {
-        tx_id: 1,
-        page_id: 2,
-        data: vec![7u8; 256],
-    };
-    let mut buf = Vec::with_capacity(512);
-    let ((), page_count) = measure_allocations(|| page_write.encode_into(&mut buf));
+    // #2013: the PageWrite append path no longer clones its page payload. The
+    // literal frame is fully allocation-free; the compressed frame keeps one
+    // allocation for zstd's owned output buffer (documented in the manifest).
+    let page_literal = measure_wal_pagewrite_encode();
     eprintln!(
-        "wal-pagewrite-encode-into,{},-,item-2 evidence: page payload cloned into file frame",
-        page_count.allocs
+        "wal-pagewrite-encode(literal),{},{:.1},#2013 after: payload borrowed (0-alloc, ratcheted)",
+        page_literal.allocs,
+        time_ns(iters, || {
+            let record = WalRecord::PageWrite {
+                tx_id: 1,
+                page_id: 2,
+                data: vec![7u8; 200],
+            };
+            let mut buf = Vec::with_capacity(1024);
+            record.encode_into(&mut buf);
+            std::hint::black_box(&buf);
+        })
+    );
+    let page_compressed = measure_wal_pagewrite_encode_compressed();
+    eprintln!(
+        "wal-pagewrite-encode(compressed),{},-,#2013 after: 1 residual alloc = zstd output buffer",
+        page_compressed.allocs
+    );
+    let commit_batch = measure_wal_tx_commit_batch_encode();
+    eprintln!(
+        "wal-tx-commit-batch-encode,{},-,#2013 after: actions borrowed (0-alloc, ratcheted)",
+        commit_batch.allocs
     );
 
     let (clone_count, move_count) = measure_columnar_transpose_variants();
