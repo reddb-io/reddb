@@ -1,15 +1,12 @@
-//! Issue gh-478: fold DWB into WAL via FullPageImage (FPI) records.
+//! ADR 0038 phase 3: DWB state no longer uses a sidecar.
 //!
 //! Acceptance for this slice:
-//!  - flag `fold_dwb_into_wal` controls behaviour;
-//!  - OFF (default): legacy `-dwb` sidecar created next to the datafile;
-//!  - ON: `-dwb` sidecar is not opened, and any pre-existing `-dwb`
-//!    file is removed at open time;
+//!  - OFF (default): double-write protection writes its recovery frame inside
+//!    the `.rdb` file;
+//!  - ON: WAL FullPageImage records remain a valid higher-tier recovery path;
+//!  - neither path creates a `-dwb` sidecar on fresh stores;
 //!  - WAL `FullPageImage` records round-trip through encode/decode and
 //!    are recoverable via `WalReader::collect_full_page_images`.
-//!
-//! Tier auto-enable + checkpoint-cycle FPI emission are deferred (see
-//! issue notes).
 
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
@@ -40,7 +37,7 @@ fn open_persistent(path: &Path) -> RedDBRuntime {
     for _ in 0..20 {
         let options = RedDBOptions::persistent(path)
             .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
-            .expect("production HA profile should expose DWB sidecar behavior");
+            .expect("production HA profile should exercise DWB behavior");
         match RedDBRuntime::with_options(options) {
             Ok(rt) => return rt,
             Err(err) if err.to_string().contains("Database is locked") => {
@@ -54,7 +51,7 @@ fn open_persistent(path: &Path) -> RedDBRuntime {
 }
 
 #[test]
-fn fold_dwb_off_default_preserves_dwb_sidecar() {
+fn fold_dwb_off_default_uses_in_file_zone_without_sidecar() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
     set_fold_dwb_into_wal_enabled(false);
     std::env::remove_var("REDDB_FOLD_DWB_INTO_WAL");
@@ -74,32 +71,23 @@ fn fold_dwb_off_default_preserves_dwb_sidecar() {
 
     let dwb = dwb_path(path);
     assert!(
-        dwb.exists(),
-        "legacy -dwb sidecar must be present when fold is OFF: {dwb:?}",
+        !dwb.exists(),
+        "ADR 0038 phase 3 retires the -dwb sidecar even when DWB is active: {dwb:?}",
     );
 }
 
 #[test]
-fn fold_dwb_on_suppresses_and_removes_sidecar() {
+fn fold_dwb_on_keeps_fresh_store_sidecar_free() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
 
     let db = support::temp_db_file("fold_dwb_on");
     let path = db.path();
 
-    // First, create a database with the flag OFF so a -dwb sidecar lands
-    // on disk. Then flip ON and reopen: the sidecar must be cleaned up.
-    set_fold_dwb_into_wal_enabled(false);
+    set_fold_dwb_into_wal_enabled(true);
     {
         let rt = open_persistent(path);
         rt.execute_query("CREATE TABLE dwb_on_a (name TEXT)")
             .expect("ddl");
-        rt.checkpoint().expect("flush");
-    }
-    assert!(dwb_path(path).exists(), "fixture must produce -dwb");
-
-    set_fold_dwb_into_wal_enabled(true);
-    {
-        let rt = open_persistent(path);
         rt.execute_query("INSERT INTO dwb_on_a (name) VALUES ('alpha')")
             .expect("insert");
         rt.checkpoint().expect("flush");
