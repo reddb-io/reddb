@@ -674,6 +674,73 @@ fn show_stats_row_table_returns_long_format_metric_set() {
 }
 
 #[test]
+fn show_stats_document_collection_returns_promoted_and_body_key_metrics() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT docs");
+    exec(
+        &rt,
+        r#"INSERT INTO docs DOCUMENT VALUES ({"title":"alpha","Title":"caps","published":true,"nested":{"rank":1},"tags":["red","db"]})"#,
+    );
+    exec(
+        &rt,
+        r#"INSERT INTO docs DOCUMENT VALUES ({"title":"beta","published":false,"nested":{"rank":2},"tags":["rust"],"views":10})"#,
+    );
+    exec(
+        &rt,
+        r#"INSERT INTO docs DOCUMENT VALUES ({"Title":"only-caps","published":null,"views":20})"#,
+    );
+
+    let (columns, rows) = query_snapshot(&rt, "SHOW STATS docs");
+    assert_eq!(columns, STATS_COLUMNS.map(str::to_string));
+    assert!(
+        rows.iter().all(|row| row[0] == Value::text("docs")),
+        "every SHOW STATS row is scoped to the requested collection: {rows:?}"
+    );
+
+    assert_eq!(
+        stat_value(&rt, "docs", Value::Null, "row_count"),
+        Value::UnsignedInteger(3)
+    );
+
+    assert_eq!(
+        stat_value(&rt, "docs", Value::text("title"), "coverage"),
+        Value::Float(2.0 / 3.0)
+    );
+    assert_eq!(
+        stat_value(&rt, "docs", Value::text("Title"), "coverage"),
+        Value::Float(2.0 / 3.0)
+    );
+    assert_eq!(
+        stat_value(&rt, "docs", Value::text("nested"), "type_count:object"),
+        Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stat_value(&rt, "docs", Value::text("tags"), "type_count:array"),
+        Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stat_value(&rt, "docs", Value::text("published"), "type_count:null"),
+        Value::UnsignedInteger(1)
+    );
+
+    assert_eq!(
+        stat_value(&rt, "docs", Value::text("title"), "distinct_count"),
+        Value::UnsignedInteger(2)
+    );
+    assert_eq!(
+        stat_value(&rt, "docs", Value::text("Title"), "distinct_count"),
+        Value::UnsignedInteger(2)
+    );
+    assert!(
+        rows.iter().all(|row| row[1] != Value::text("rank")),
+        "nested object fields must not be descended into: {rows:?}"
+    );
+
+    cleanup_scope();
+}
+
+#[test]
 fn show_stats_returns_model_specific_metric_sets() {
     cleanup_scope();
     let rt = runtime();
