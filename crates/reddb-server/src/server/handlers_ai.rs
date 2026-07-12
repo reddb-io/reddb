@@ -194,6 +194,7 @@ impl RedDBServer {
 
         let store_value = match &value {
             JsonValue::String(s) => Value::text(s.clone()),
+            JsonValue::Integer(n) => Value::Integer(*n),
             JsonValue::Number(n) => {
                 if n.fract().abs() < f64::EPSILON {
                     Value::Integer(*n as i64)
@@ -266,6 +267,7 @@ impl RedDBServer {
                 .delete_kv(RED_CONFIG_COLLECTION, key);
             let store_value = match value {
                 JsonValue::String(s) => Value::text(s.clone()),
+                JsonValue::Integer(n) => Value::Integer(*n),
                 JsonValue::Number(n) => {
                     if n.fract().abs() < f64::EPSILON {
                         Value::Integer(*n as i64)
@@ -1908,6 +1910,8 @@ impl LocalAiModelSpec {
             .get("dimensions")
             .ok_or_else(|| "field 'dimensions' is required".to_string())?;
         let dimensions = match dimensions_value {
+            JsonValue::Integer(n) if *n >= 1 => u32::try_from(*n)
+                .map_err(|_| format!("field 'dimensions' must be between 1 and 65536 (got {n})"))?,
             JsonValue::Number(n)
                 if n.is_finite() && *n >= 1.0 && n.fract().abs() < f64::EPSILON =>
             {
