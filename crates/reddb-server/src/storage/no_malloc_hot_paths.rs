@@ -414,9 +414,12 @@ fn measure_hash_join_probe_key_lookup() -> AllocationCount {
     let keys = [Var::new("x"), Var::new("y")];
     // The build side owns its key; only the probe side must stay allocation-free.
     let build_key = join_extract_key(&binding, &keys);
+    // One seeded state per join, created outside the measured probe (as in
+    // `hash_join` itself, where it is per-call, not per-row).
+    let hash_state = std::collections::hash_map::RandomState::new();
 
     let (hit, count) = measure_allocations(|| {
-        let hash = join_key_hash(&binding, &keys);
+        let hash = join_key_hash(&hash_state, &binding, &keys);
         (hash, join_key_matches(&build_key, &binding, &keys))
     });
 
@@ -630,11 +633,12 @@ fn structural_hot_path_report() {
 
     let probe_lookup = measure_hash_join_probe_key_lookup();
     let build_key = join_extract_key(&binding, &group_vars);
+    let hash_state = std::collections::hash_map::RandomState::new();
     eprintln!(
         "hash-join-probe-key-lookup(new),{},{:.1},#2013 after: borrowed hash + element-wise match — includes the hashing the row above excludes (0-alloc, ratcheted)",
         probe_lookup.allocs,
         time_ns(iters, || {
-            let hash = join_key_hash(&binding, &group_vars);
+            let hash = join_key_hash(&hash_state, &binding, &group_vars);
             let hit = join_key_matches(&build_key, &binding, &group_vars);
             std::hint::black_box((hash, hit));
         })

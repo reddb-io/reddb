@@ -25,9 +25,9 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 
 use super::super::engine::binding::{Binding, Value, Var};
 use super::value_compare::total_compare_values;
@@ -206,8 +206,12 @@ fn hash_key_value<H: Hasher>(value: Option<&Value>, state: &mut H) {
 
 /// Hash a row's join key *in place* — without materializing an owned `HashKey`.
 /// This is the probe-side hot path: one hash per probe row, zero allocations.
-pub(crate) fn key_hash(binding: &Binding, vars: &[Var]) -> u64 {
-    let mut hasher = DefaultHasher::new();
+///
+/// The caller supplies a `RandomState` (one per join) so bucket hashes stay
+/// randomly seeded like the `HashMap<HashKey, _>` this replaced — a fixed-key
+/// hasher would let precomputed collisions degrade the build to O(n²).
+pub(crate) fn key_hash(state: &RandomState, binding: &Binding, vars: &[Var]) -> u64 {
+    let mut hasher = state.build_hasher();
     for var in vars {
         hash_key_value(binding.get(var), &mut hasher);
     }
@@ -256,8 +260,9 @@ pub fn hash_join(
     // cloning its key values (see `key_hash` / `key_matches`).
     #[allow(clippy::type_complexity)]
     let mut hash_table: HashMap<u64, Vec<(HashKey, Vec<&Binding>)>> = HashMap::new();
+    let hash_state = RandomState::new();
     for binding in build_side {
-        let hash = key_hash(binding, build_keys);
+        let hash = key_hash(&hash_state, binding, build_keys);
         let bucket = hash_table.entry(hash).or_default();
         match bucket
             .iter_mut()
@@ -276,7 +281,7 @@ pub fn hash_join(
         // Probe with a borrowed key: hash the row's join columns in place, then
         // confirm the match element-wise. No `Value` is cloned per probe row.
         let matches = hash_table
-            .get(&key_hash(probe_binding, probe_keys))
+            .get(&key_hash(&hash_state, probe_binding, probe_keys))
             .and_then(|bucket: &Vec<(HashKey, Vec<&Binding>)>| {
                 bucket
                     .iter()
@@ -891,9 +896,10 @@ mod tests {
         let null_row = left_row(Some(Value::Null), "null");
         let absent_row = left_row(None, "absent");
 
+        let state = RandomState::new();
         assert_eq!(
-            key_hash(&null_row, &keys),
-            key_hash(&absent_row, &keys),
+            key_hash(&state, &null_row, &keys),
+            key_hash(&state, &absent_row, &keys),
             "NULL and an absent column are expected to share a hash bucket"
         );
         assert!(key_matches(
