@@ -830,7 +830,7 @@ mod tests {
         assert_eq!(n(sys.get("cpu_cores").unwrap()), 8.0);
         assert!(matches!(
             sys.get("total_memory_bytes").unwrap(),
-            JsonValue::Number(_)
+            JsonValue::Number(_) | JsonValue::Integer(_)
         ));
         assert_eq!(
             unavail_reason(sys.get("cpu_usage").unwrap()),

@@ -1109,6 +1109,7 @@ impl McpServer {
                 .map(|(k, v)| {
                     let val_str = match v {
                         JsonValue::String(s) => format!("'{}'", s),
+                        JsonValue::Integer(n) => n.to_string(),
                         JsonValue::Number(n) => n.to_string(),
                         JsonValue::Bool(b) => b.to_string(),
                         _ => format!("'{}'", v),
@@ -1655,6 +1656,7 @@ fn mcp_keyed_ident(value: &str) -> Result<String, String> {
 fn mcp_value_literal(value: &JsonValue) -> Result<String, String> {
     match value {
         JsonValue::String(value) => Ok(format!("'{}'", value.replace('\'', "''"))),
+        JsonValue::Integer(value) => Ok(value.to_string()),
         JsonValue::Number(value) => Ok(value.to_string()),
         JsonValue::Bool(value) => Ok(value.to_string()),
         JsonValue::Null => Ok("NULL".to_string()),

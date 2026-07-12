@@ -9,6 +9,7 @@ pub type Map<K, V> = BTreeMap<K, V>;
 pub enum Value {
     Null,
     Bool(bool),
+    Integer(i64),
     Number(f64),
     String(String),
     Array(Vec<Value>),
@@ -32,12 +33,14 @@ impl Value {
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Number(n) => Some(*n),
+            Value::Integer(n) => Some(*n as f64),
             _ => None,
         }
     }
 
     pub fn as_i64(&self) -> Option<i64> {
         match self {
+            Value::Integer(n) => Some(*n),
             Value::Number(n) => Some(*n as i64),
             _ => None,
         }
@@ -45,6 +48,7 @@ impl Value {
 
     pub fn as_u64(&self) -> Option<u64> {
         match self {
+            Value::Integer(n) if *n >= 0 => Some(*n as u64),
             Value::Number(n) if *n >= 0.0 => Some(*n as u64),
             _ => None,
         }
@@ -95,6 +99,7 @@ impl Value {
         match self {
             Value::Null => out.push_str("null"),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Integer(n) => out.push_str(&format!("{n}")),
             Value::Number(n) => {
                 if n.fract() == 0.0 {
                     out.push_str(&format!("{}", *n as i64));
@@ -136,7 +141,11 @@ impl Value {
 
     fn write_pretty(&self, out: &mut String, indent: usize) {
         match self {
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            Value::Null
+            | Value::Bool(_)
+            | Value::Integer(_)
+            | Value::Number(_)
+            | Value::String(_) => {
                 out.push_str(&self.to_string_compact());
             }
             Value::Array(values) => {
@@ -435,6 +444,7 @@ impl From<JsonValue> for Value {
         match value {
             JsonValue::Null => Value::Null,
             JsonValue::Bool(b) => Value::Bool(b),
+            JsonValue::Integer(n) => Value::Integer(n),
             JsonValue::Number(n) => Value::Number(n),
             JsonValue::String(s) => Value::String(s),
             JsonValue::Array(values) => Value::Array(values.into_iter().map(Value::from).collect()),
@@ -638,6 +648,7 @@ impl JsonDecode for bool {
 impl JsonDecode for u8 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as u8),
             Value::Number(n) => Ok(n as u8),
             _ => Err("expected number".to_string()),
         }
@@ -647,6 +658,7 @@ impl JsonDecode for u8 {
 impl JsonDecode for u16 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as u16),
             Value::Number(n) => Ok(n as u16),
             _ => Err("expected number".to_string()),
         }
@@ -656,6 +668,7 @@ impl JsonDecode for u16 {
 impl JsonDecode for u32 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as u32),
             Value::Number(n) => Ok(n as u32),
             _ => Err("expected number".to_string()),
         }
@@ -665,6 +678,7 @@ impl JsonDecode for u32 {
 impl JsonDecode for u64 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as u64),
             Value::Number(n) => Ok(n as u64),
             _ => Err("expected number".to_string()),
         }
@@ -674,6 +688,7 @@ impl JsonDecode for u64 {
 impl JsonDecode for usize {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as usize),
             Value::Number(n) => Ok(n as usize),
             _ => Err("expected number".to_string()),
         }
@@ -683,6 +698,7 @@ impl JsonDecode for usize {
 impl JsonDecode for i64 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n),
             Value::Number(n) => Ok(n as i64),
             _ => Err("expected number".to_string()),
         }
@@ -692,6 +708,7 @@ impl JsonDecode for i64 {
 impl JsonDecode for i32 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as i32),
             Value::Number(n) => Ok(n as i32),
             _ => Err("expected number".to_string()),
         }
@@ -701,6 +718,7 @@ impl JsonDecode for i32 {
 impl JsonDecode for f32 {
     fn from_json_value(value: Value) -> Result<Self, String> {
         match value {
+            Value::Integer(n) => Ok(n as f32),
             Value::Number(n) => Ok(n as f32),
             _ => Err("expected number".to_string()),
         }

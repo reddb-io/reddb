@@ -1031,6 +1031,7 @@ fn auto_type_param(s: &str) -> reddb::storage::schema::Value {
         return match parsed {
             J::Null => Value::Null,
             J::Bool(b) => Value::Boolean(b),
+            J::Integer(n) => Value::Integer(n),
             J::Number(n) => {
                 if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
                     Value::Integer(n as i64)
@@ -1040,7 +1041,10 @@ fn auto_type_param(s: &str) -> reddb::storage::schema::Value {
             }
             J::String(t) => Value::text(t),
             J::Array(items) => {
-                if items.iter().all(|v| matches!(v, J::Number(_))) {
+                if items
+                    .iter()
+                    .all(|v| matches!(v, J::Integer(_) | J::Number(_)))
+                {
                     let floats: Vec<f32> = items
                         .iter()
                         .map(|v| v.as_f64().unwrap_or(0.0) as f32)
@@ -5757,6 +5761,7 @@ fn admin_json_value_display(value: &reddb::json::Value) -> String {
         reddb::json::Value::Null => "".to_string(),
         reddb::json::Value::String(s) => s.clone(),
         reddb::json::Value::Bool(b) => b.to_string(),
+        reddb::json::Value::Integer(n) => n.to_string(),
         reddb::json::Value::Number(n) if n.fract() == 0.0 => (*n as i64).to_string(),
         reddb::json::Value::Number(n) => n.to_string(),
         reddb::json::Value::Array(_) | reddb::json::Value::Object(_) => value.to_string_compact(),

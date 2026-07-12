@@ -39,7 +39,11 @@ pub(crate) fn decode_container_to_json(bytes: &[u8]) -> Option<JsonValue> {
     let fields = document_body_codec::decode(bytes).ok()?;
     let mut map = Map::new();
     for (key, value) in fields {
-        map.insert(key, storage_value_to_json(&value));
+        let json = match &value {
+            Value::Integer(n) => JsonValue::Integer(*n),
+            other => storage_value_to_json(other),
+        };
+        map.insert(key, json);
     }
     Some(JsonValue::Object(map))
 }

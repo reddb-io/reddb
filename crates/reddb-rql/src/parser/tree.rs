@@ -289,6 +289,7 @@ fn tree_json_value_to_storage_value(value: &JsonValue) -> Result<Value, ParseErr
     Ok(match value {
         JsonValue::Null => Value::Null,
         JsonValue::Bool(value) => Value::Boolean(*value),
+        JsonValue::Integer(value) => Value::Integer(*value),
         JsonValue::Number(value) => {
             if value.fract().abs() < f64::EPSILON {
                 Value::Integer(*value as i64)

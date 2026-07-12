@@ -1819,6 +1819,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             let name = match v {
                 crate::serde_json::Value::Null => "null",
                 crate::serde_json::Value::Bool(_) => "boolean",
+                crate::serde_json::Value::Integer(_) => "number",
                 crate::serde_json::Value::Number(_) => "number",
                 crate::serde_json::Value::String(_) => "string",
                 crate::serde_json::Value::Array(_) => "array",
@@ -1920,6 +1921,7 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
             map.values().any(|value| json_value_contains(value, needle))
         }
         crate::serde_json::Value::String(value) => value == needle,
+        crate::serde_json::Value::Integer(value) => value.to_string() == needle,
         crate::serde_json::Value::Number(value) => value.to_string() == needle,
         crate::serde_json::Value::Bool(value) => value.to_string() == needle,
         crate::serde_json::Value::Null => false,
@@ -2034,6 +2036,7 @@ fn json_extract_impl(input: &Value, path: &Value, as_text: bool) -> Option<Value
             crate::serde_json::Value::String(s) => Some(Value::text(s.clone())),
             crate::serde_json::Value::Null => Some(Value::Null),
             crate::serde_json::Value::Bool(b) => Some(Value::text(b.to_string())),
+            crate::serde_json::Value::Integer(n) => Some(Value::text(n.to_string())),
             crate::serde_json::Value::Number(n) => Some(Value::text(n.to_string())),
             other => Some(Value::text(other.to_string_compact())),
         }

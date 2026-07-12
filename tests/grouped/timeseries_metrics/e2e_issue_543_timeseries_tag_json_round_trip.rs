@@ -79,7 +79,7 @@ fn assert_representative_payload(tags: &JsonValue) {
 
     let port = object.get("port").unwrap_or(&JsonValue::Null);
     assert!(
-        matches!(port, JsonValue::Number(_)),
+        matches!(port, JsonValue::Number(_) | JsonValue::Integer(_)),
         "numeric tag value must round-trip as JSON number, got {port:?}"
     );
     assert_eq!(port.as_i64(), Some(8080));

@@ -217,6 +217,9 @@ fn parse_duration_field_ms(
     default_unit_ms: u64,
 ) -> RedDBResult<u64> {
     match value {
+        JsonValue::Integer(value) => {
+            parse_duration_number_ms(field, *value as f64, default_unit_ms)
+        }
         JsonValue::Number(value) => parse_duration_number_ms(field, *value, default_unit_ms),
         JsonValue::String(value) => parse_duration_text_ms(field, value, default_unit_ms),
         JsonValue::Null => Err(RedDBError::Query(format!(
@@ -290,6 +293,7 @@ fn resolve_duration_ms(field: &str, value: f64, multiplier_ms: f64) -> RedDBResu
 
 fn parse_epoch_ms(field: &str, value: &JsonValue) -> RedDBResult<u64> {
     match value {
+        JsonValue::Integer(value) => parse_epoch_ms_number(field, *value as f64),
         JsonValue::Number(value) => parse_epoch_ms_number(field, *value),
         JsonValue::String(value) => {
             let numeric = value.trim().parse::<f64>().map_err(|_| {
