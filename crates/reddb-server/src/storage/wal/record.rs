@@ -1,6 +1,7 @@
 use reddb_file::{
     decode_main_wal_record_frame_with_authority, encode_main_wal_record_frame_into,
-    encode_main_wal_record_frame_with_authority_into, MainWalRecordFrame, WAL_FILE_VERSION,
+    encode_main_wal_record_frame_with_authority_into, MainWalRecordFrame, MainWalRecordFrameRef,
+    WAL_FILE_VERSION,
 };
 use std::io::{self, Read};
 
@@ -93,13 +94,17 @@ impl WalRecord {
     /// The checksum is computed over only the bytes this call appends (the slice
     /// starting at the buffer's prior length), so appending after existing
     /// records leaves them untouched and keeps each record's CRC self-contained.
+    ///
+    /// The payload is written straight from this record's own buffers — the
+    /// append path never clones a page image or a commit batch into an owned
+    /// file frame first.
     pub fn encode_with_term_into(&self, out: &mut Vec<u8>, term: u64) {
-        encode_main_wal_record_frame_into(&self.to_file_frame(), term, out)
+        encode_main_wal_record_frame_into(self.to_file_frame_ref(), term, out)
             .expect("main WAL record cannot be encoded");
     }
 
     pub fn encode_with_authority_into(&self, out: &mut Vec<u8>, authority: WalRecordAuthority) {
-        encode_main_wal_record_frame_with_authority_into(&self.to_file_frame(), authority, out)
+        encode_main_wal_record_frame_with_authority_into(self.to_file_frame_ref(), authority, out)
             .expect("main WAL record cannot be encoded");
     }
 
@@ -151,6 +156,65 @@ impl WalRecord {
 }
 
 impl WalRecord {
+    /// Borrow this record as a file frame. Every payload is passed through by
+    /// reference, so encoding a `PageWrite`, `FullPageImage` or `TxCommitBatch`
+    /// costs no copy of the payload.
+    fn to_file_frame_ref(&self) -> MainWalRecordFrameRef<'_> {
+        match self {
+            WalRecord::Begin { tx_id } => MainWalRecordFrameRef::Begin { tx_id: *tx_id },
+            WalRecord::Commit { tx_id } => MainWalRecordFrameRef::Commit { tx_id: *tx_id },
+            WalRecord::Rollback { tx_id } => MainWalRecordFrameRef::Rollback { tx_id: *tx_id },
+            WalRecord::PageWrite {
+                tx_id,
+                page_id,
+                data,
+            } => MainWalRecordFrameRef::PageWrite {
+                tx_id: *tx_id,
+                page_id: *page_id,
+                data,
+            },
+            WalRecord::TxCommitBatch { tx_id, actions } => MainWalRecordFrameRef::TxCommitBatch {
+                tx_id: *tx_id,
+                actions,
+            },
+            WalRecord::FullPageImage {
+                tx_id,
+                page_id,
+                ckpt_epoch,
+                data,
+            } => MainWalRecordFrameRef::FullPageImage {
+                tx_id: *tx_id,
+                page_id: *page_id,
+                ckpt_epoch: *ckpt_epoch,
+                data,
+            },
+            WalRecord::VectorInsert {
+                collection,
+                entity_id,
+                vector,
+            } => MainWalRecordFrameRef::VectorInsert {
+                collection,
+                entity_id: *entity_id,
+                vector,
+            },
+            WalRecord::ProbabilisticDelta {
+                kind,
+                operation,
+                name,
+                operands,
+            } => MainWalRecordFrameRef::ProbabilisticDelta {
+                kind: *kind,
+                operation: *operation,
+                name,
+                operands,
+            },
+            WalRecord::Checkpoint { lsn } => MainWalRecordFrameRef::Checkpoint { lsn: *lsn },
+        }
+    }
+
+    /// The pre-#2013 owning conversion, kept as the baseline the borrowed
+    /// encode path is proven byte-identical against.
+    #[cfg(test)]
     fn to_file_frame(&self) -> MainWalRecordFrame {
         match self {
             WalRecord::Begin { tx_id } => MainWalRecordFrame::Begin { tx_id: *tx_id },
@@ -687,6 +751,117 @@ mod tests {
             assert_eq!(&decoded, expected);
         }
         assert!(WalRecord::read(&mut cursor).unwrap().is_none());
+    }
+
+    /// Every record variant, including empty/large/compressible payloads and
+    /// the edge cases each variant can carry.
+    fn every_record_variant() -> Vec<WalRecord> {
+        vec![
+            WalRecord::Begin { tx_id: 12345 },
+            WalRecord::Commit { tx_id: 99999 },
+            WalRecord::Rollback { tx_id: 54321 },
+            WalRecord::Checkpoint { lsn: 1_000_000 },
+            // Below the compression threshold → literal PageWrite frame.
+            WalRecord::PageWrite {
+                tx_id: 100,
+                page_id: 42,
+                data: vec![1, 2, 3, 4, 5],
+            },
+            WalRecord::PageWrite {
+                tx_id: 1,
+                page_id: 0,
+                data: Vec::new(),
+            },
+            // Compressible and above the threshold → PageWriteCompressed frame.
+            WalRecord::PageWrite {
+                tx_id: 7,
+                page_id: 3,
+                data: vec![0xABu8; 1024],
+            },
+            // Above the threshold but incompressible → stays a literal PageWrite.
+            WalRecord::PageWrite {
+                tx_id: 8,
+                page_id: 4,
+                data: (0..300u32)
+                    .map(|i| i.wrapping_mul(2_654_435_761) as u8)
+                    .collect(),
+            },
+            WalRecord::TxCommitBatch {
+                tx_id: 7,
+                actions: vec![b"insert".to_vec(), Vec::new(), b"update".to_vec()],
+            },
+            WalRecord::TxCommitBatch {
+                tx_id: 8,
+                actions: Vec::new(),
+            },
+            WalRecord::FullPageImage {
+                tx_id: 11,
+                page_id: 9,
+                ckpt_epoch: 42,
+                data: (0..4096).map(|i| (i % 251) as u8).collect(),
+            },
+            WalRecord::VectorInsert {
+                collection: "turbo".to_string(),
+                entity_id: 42,
+                vector: vec![1.0, -0.5, 0.25],
+            },
+            WalRecord::ProbabilisticDelta {
+                kind: 1,
+                operation: 2,
+                name: "visitors".to_string(),
+                operands: vec![b"alice".to_vec(), b"bob".to_vec()],
+            },
+        ]
+    }
+
+    /// The borrowed encode path (#2013) must persist *exactly* the bytes the
+    /// pre-#2013 owning path persisted, for every record variant and for both
+    /// the term-only and the full-authority envelope. The on-disk format is
+    /// frozen; only the in-memory representation changed.
+    #[test]
+    fn borrowed_encode_is_byte_identical_to_the_owning_frame_path() {
+        for record in every_record_variant() {
+            // Old path: clone the payload into an owned frame, then encode.
+            let mut owned_bytes = Vec::new();
+            encode_main_wal_record_frame_into(&record.to_file_frame(), 17, &mut owned_bytes)
+                .expect("owning encode");
+
+            // New path: encode straight from the borrowed record.
+            let mut borrowed_bytes = Vec::new();
+            record.encode_with_term_into(&mut borrowed_bytes, 17);
+
+            assert_eq!(
+                borrowed_bytes, owned_bytes,
+                "borrowed encode diverged from the owning baseline for {record:?}"
+            );
+
+            // Same again through the authority envelope (with an ownership epoch).
+            let authority = WalRecordAuthority {
+                term: 17,
+                ownership_epoch: Some(5),
+            };
+            let mut owned_auth = Vec::new();
+            encode_main_wal_record_frame_with_authority_into(
+                &record.to_file_frame(),
+                authority,
+                &mut owned_auth,
+            )
+            .expect("owning authority encode");
+
+            let mut borrowed_auth = Vec::new();
+            record.encode_with_authority_into(&mut borrowed_auth, authority);
+
+            assert_eq!(
+                borrowed_auth, owned_auth,
+                "borrowed authority encode diverged from the owning baseline for {record:?}"
+            );
+
+            // And the persisted bytes still decode back to the original record.
+            let mut cursor = Cursor::new(borrowed_bytes);
+            let (term, decoded) = WalRecord::read_with_term(&mut cursor).unwrap().unwrap();
+            assert_eq!(term, 17);
+            assert_eq!(decoded, record);
+        }
     }
 
     /// `encode_with_term_into` honours the term and matches the allocating
