@@ -452,6 +452,7 @@ impl ModelVersion {
             _ => None,
         };
         let parent_version = match obj.get("parent_version") {
+            Some(JsonValue::Integer(n)) if *n >= 0 => Some(*n as u32),
             Some(JsonValue::Number(n)) => Some(*n as u32),
             _ => None,
         };
@@ -495,6 +496,7 @@ fn decode_model_active(raw: &str) -> Option<u32> {
     let parsed = crate::json::parse_json(raw).ok()?;
     let value = JsonValue::from(parsed);
     match value.as_object()?.get("active") {
+        Some(JsonValue::Integer(n)) if *n >= 0 => Some(*n as u32),
         Some(JsonValue::Number(n)) => Some(*n as u32),
         _ => None,
     }
