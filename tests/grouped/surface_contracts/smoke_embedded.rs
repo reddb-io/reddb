@@ -8,12 +8,22 @@ use reddb::application::{
 };
 use reddb::json::Value as JsonValue;
 use reddb::storage::schema::Value;
-use reddb::{ArtifactState, EntityUseCases, NativeUseCases, QueryUseCases};
+use reddb::{
+    shm_path_for, ArtifactState, EntityUseCases, NativeUseCases, QueryUseCases, RedDBOptions,
+    RedDBRuntime, StorageDeployPreset,
+};
+use std::fs;
 
 use super::support::PersistentRuntime;
 
 fn rt() -> PersistentRuntime {
     super::support::persistent_test_runtime("surface-smoke-embedded")
+}
+
+fn embedded_options(path: &std::path::Path) -> RedDBOptions {
+    RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::Embedded.selection())
+        .expect("embedded profile should validate")
 }
 
 // ---------------------------------------------------------------------------
@@ -37,6 +47,59 @@ fn smoke_catalog_snapshot() {
     let rt = rt();
     let native = NativeUseCases::new(rt.runtime());
     let _report = native.health();
+}
+
+#[test]
+fn embedded_phase3_census_has_no_dwb_sidecars_and_no_shm() {
+    let db = super::support::temp_db_file("embedded-phase3-census");
+    let path = db.path();
+
+    {
+        let rt = RedDBRuntime::with_options(embedded_options(path)).expect("runtime opens");
+        rt.execute_query("CREATE TABLE phase3_rows (id INT, label TEXT)")
+            .expect("ddl");
+        for i in 0..96 {
+            rt.execute_query(&format!(
+                "INSERT INTO phase3_rows (id, label) VALUES ({i}, 'row-{i}')"
+            ))
+            .expect("page-heavy insert");
+        }
+        rt.checkpoint().expect("checkpoint");
+    }
+    {
+        let rt = RedDBRuntime::with_options(embedded_options(path)).expect("runtime reopens");
+        let rows = rt
+            .execute_query("SELECT id FROM phase3_rows")
+            .expect("select after reopen");
+        assert_eq!(rows.result.records.len(), 96);
+        rt.checkpoint().expect("second checkpoint");
+    }
+
+    let parent = path.parent().expect("db has parent");
+    let names: Vec<_> = fs::read_dir(parent)
+        .expect("read temp dir")
+        .map(|entry| {
+            entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.ends_with("-dwb") && !name.ends_with(".rdb-dwb")),
+        "fresh embedded lifecycle must not create retired DWB sidecars: {names:?}"
+    );
+    assert!(
+        !shm_path_for(path).exists(),
+        "ADR 0038 phase 3 verdict: embedded keeps shm retired/absent"
+    );
+    assert!(
+        names.iter().any(|name| name == "data.rdb"),
+        "data file should be present: {names:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
