@@ -1207,6 +1207,7 @@ pub(crate) fn value_to_sql_literal(v: &Value) -> String {
     match v {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => b.to_string(),
+        Value::Integer(n) => n.to_string(),
         Value::Number(n) => {
             if n.fract() == 0.0 {
                 format!("{}", *n as i64)
@@ -1578,6 +1579,7 @@ pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
 
 fn json_i64(value: &Value) -> Option<i64> {
     match value {
+        Value::Integer(n) => Some(*n),
         Value::Number(n) => {
             if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
                 Some(*n as i64)
