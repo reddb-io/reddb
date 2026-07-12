@@ -609,6 +609,9 @@ pub(super) fn stats_snapshot(
             CollectionModel::Table => {
                 append_table_stats(&mut rows, &schema, store.as_ref(), &collection.name);
             }
+            CollectionModel::Document => {
+                append_document_stats(&mut rows, &schema, store.as_ref(), &collection.name);
+            }
             CollectionModel::Kv => {
                 append_kv_stats(&mut rows, &schema, store.as_ref(), &collection.name);
             }
@@ -953,6 +956,111 @@ fn append_table_stats(
             "most_common_values",
             Value::Array(most_common_values(column.mcv.as_ref())),
         ));
+    }
+}
+
+fn append_document_stats(
+    rows: &mut Vec<UnifiedRecord>,
+    schema: &Arc<Vec<Arc<str>>>,
+    store: &UnifiedStore,
+    collection: &str,
+) {
+    let mut entities = Vec::new();
+    let mut key_counts = BTreeMap::<String, u64>::new();
+    let mut type_counts = BTreeMap::<String, BTreeMap<&'static str, u64>>::new();
+
+    for (name, entity) in store.query_all(|_| true) {
+        if name != collection {
+            continue;
+        }
+        let EntityData::Row(row) = entity.data else {
+            continue;
+        };
+
+        let mut fields: Vec<(String, Value)> = row
+            .iter_fields()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
+        let body_fields = row
+            .get_field("body")
+            .and_then(document_body_top_level_fields)
+            .unwrap_or_default();
+
+        for (name, value) in &body_fields {
+            *key_counts.entry(name.clone()).or_default() += 1;
+            *type_counts
+                .entry(name.clone())
+                .or_default()
+                .entry(document_value_type_name(value))
+                .or_default() += 1;
+        }
+        for (name, value) in body_fields {
+            if fields.iter().all(|(existing, _)| existing != &name) {
+                fields.push((name, value));
+            }
+        }
+
+        entities.push((entity.id, fields));
+    }
+
+    let analyzed =
+        crate::storage::query::planner::stats_catalog::analyze_entity_fields(collection, &entities);
+
+    rows.push(stats_row(
+        schema,
+        collection,
+        Value::Null,
+        "row_count",
+        Value::UnsignedInteger(analyzed.row_count),
+    ));
+    for column in &analyzed.columns {
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(column.name.clone()),
+            "null_count",
+            Value::UnsignedInteger(column.null_count),
+        ));
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(column.name.clone()),
+            "distinct_count",
+            Value::UnsignedInteger(column.distinct_count),
+        ));
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(column.name.clone()),
+            "most_common_values",
+            Value::Array(most_common_values(column.mcv.as_ref())),
+        ));
+    }
+
+    for (name, count) in key_counts {
+        let coverage = if analyzed.row_count == 0 {
+            0.0
+        } else {
+            count as f64 / analyzed.row_count as f64
+        };
+        rows.push(stats_row(
+            schema,
+            collection,
+            Value::text(name.clone()),
+            "coverage",
+            Value::Float(coverage),
+        ));
+        if let Some(counts) = type_counts.remove(&name) {
+            for (value_type, count) in counts {
+                rows.push(stats_row(
+                    schema,
+                    collection,
+                    Value::text(name.clone()),
+                    &format!("type_count:{value_type}"),
+                    Value::UnsignedInteger(count),
+                ));
+            }
+        }
     }
 }
 
@@ -1328,6 +1436,41 @@ fn value_type_name(value: &Value) -> &'static str {
         Value::Array(_) => "array",
         _ => "other",
     }
+}
+
+fn document_value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Json(bytes) => match crate::json::from_slice::<crate::json::Value>(bytes) {
+            Ok(crate::json::Value::Array(_)) => "array",
+            Ok(crate::json::Value::Object(_)) => "object",
+            _ => "json",
+        },
+        Value::Array(_) => "array",
+        other => value_type_name(other),
+    }
+}
+
+fn document_body_top_level_fields(value: &Value) -> Option<Vec<(String, Value)>> {
+    let bytes = match value {
+        Value::Json(bytes) => bytes.as_slice(),
+        Value::Text(text) => text.as_bytes(),
+        _ => return None,
+    };
+    if let Some(fields) = crate::document_body::body_fields(bytes) {
+        return Some(fields);
+    }
+    let crate::json::Value::Object(map) = crate::json::from_slice(bytes).ok()? else {
+        return None;
+    };
+    Some(
+        map.iter()
+            .filter_map(|(key, value)| {
+                crate::application::entity::json_to_storage_value(value)
+                    .ok()
+                    .map(|value| (key.clone(), value))
+            })
+            .collect(),
+    )
 }
 
 fn value_estimated_bytes(value: &Value) -> u64 {
