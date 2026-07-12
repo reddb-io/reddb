@@ -152,7 +152,7 @@ mod tests {
         let body: JsonValue = serde_json::from_slice(&frame.payload).unwrap();
         assert_eq!(body["outcome"], JsonValue::String("timeout".into()));
         assert_eq!(body["queue"], JsonValue::String("jobs".into()));
-        assert_eq!(body["wait_ms"], JsonValue::Number(5000.0));
+        assert_eq!(body["wait_ms"].as_i64(), Some(5000));
     }
 
     #[test]
