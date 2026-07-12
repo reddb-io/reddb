@@ -1941,6 +1941,7 @@ pub(crate) fn render_sql_literal(value: &crate::json::Value) -> String {
         Value::Null => "NULL".to_string(),
         Value::Bool(true) => "TRUE".to_string(),
         Value::Bool(false) => "FALSE".to_string(),
+        Value::Integer(n) => n.to_string(),
         Value::Number(n) => {
             if n.is_finite() {
                 if n.fract() == 0.0 && n.abs() < 1e18 {
