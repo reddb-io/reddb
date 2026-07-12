@@ -74,6 +74,13 @@ the extension (clean break — no dual-read window beyond one minor release).
 | 3 | Double-write/recovery state in-file | `rdb-dwb` (+ shadow), `shm` review |
 | 4 | Server-profile disk-resident entity/segment zones (dataset > RAM) | — (new capability, not a retirement) |
 
+Phase 3 amendment: embedded keeps `shm` retired/absent. The `shm` file is
+coordination state, not durable state, and the embedded single-file contract
+does not need a sibling file to recover bytes. Profiles that require
+multi-process coordination may still provision `shm` through their explicit
+tier policy, but that is outside the embedded packaging contract and is asserted
+separately from the DWB sidecar census.
+
 Ordering within phases 1–3 may be re-sequenced by an ADR amendment with one
 line of rationale; silently skipping a phase is not allowed. Phase 4 is gated
 on ADR 0073 landing first (the cache hierarchy it pages through is
