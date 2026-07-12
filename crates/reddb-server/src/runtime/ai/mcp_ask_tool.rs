@@ -526,6 +526,7 @@ fn expect_u64(v: &Value, path: &str) -> Result<u64, ParseError> {
 
 fn expect_integer(v: &Value, path: &str) -> Result<i128, ParseError> {
     match v {
+        Value::Integer(n) => Ok(*n as i128),
         Value::Number(n) => {
             if !n.is_finite() || n.fract() != 0.0 {
                 return Err(ParseError::WrongType {
@@ -544,6 +545,7 @@ fn expect_integer(v: &Value, path: &str) -> Result<i128, ParseError> {
 
 fn expect_f64(v: &Value, path: &str) -> Result<f64, ParseError> {
     match v {
+        Value::Integer(n) => Ok(*n as f64),
         Value::Number(n) if n.is_finite() => Ok(*n),
         Value::Number(_) => Err(ParseError::WrongType {
             path: path.into(),
