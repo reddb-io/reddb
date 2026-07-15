@@ -845,6 +845,7 @@ fn json_id_for_hash(value: &JsonValue) -> String {
         JsonValue::String(value) => value.clone(),
         JsonValue::Integer(value) => value.to_string(),
         JsonValue::Number(value) => value.to_string(),
+        JsonValue::Decimal(value) => value.clone(),
         JsonValue::Bool(value) => value.to_string(),
         JsonValue::Null => "null".to_string(),
         JsonValue::Array(_) | JsonValue::Object(_) => {
@@ -1358,6 +1359,7 @@ fn compare_json_to_store_value(
                 Value::Float(n)
             }
         }
+        Some(JsonValue::Decimal(s)) => Value::DecimalText(s.clone()),
         Some(JsonValue::String(s)) => Value::text(s.clone()),
         Some(JsonValue::Array(_) | JsonValue::Object(_)) => return false,
     };
