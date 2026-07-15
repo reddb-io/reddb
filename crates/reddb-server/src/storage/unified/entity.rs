@@ -412,6 +412,8 @@ pub struct TimeSeriesData {
     pub value: f64,
     /// Legacy/read-through dimensional tags (e.g., {"host": "srv1"}).
     pub tags: std::collections::HashMap<String, String>,
+    /// Per-point fields that are not part of the immutable series identity.
+    pub fields: std::collections::HashMap<String, Value>,
 }
 
 /// Queue message data
