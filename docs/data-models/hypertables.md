@@ -150,8 +150,9 @@ retention policy for lifecycle management.
 
 ## Performance notes
 
-* Chunk lookup is O(log n) through the temporal index — lookup cost
-  is independent of the number of chunks.
+* Chunk enumeration scans the hypertable chunk registry, then SELECT
+  planning prunes non-overlapping chunks from the persisted `ChunkMeta`
+  time bounds before reading chunk data.
 * Each chunk compresses independently. The auto-selector picks
   `DeltaOfDelta` for monotonic timestamps, `T64` for narrow-range
   integers, `Raw + zstd` otherwise.

@@ -28,8 +28,6 @@ pub enum IndexKind {
     ProductQuantization,
     /// Adjacency index for graph edges.
     GraphAdjacency,
-    /// Temporal BTree for timeseries.
-    Temporal,
     /// Cuckoo filter.
     Cuckoo,
     /// Zone map / min-max summary.
@@ -43,10 +41,7 @@ pub enum IndexKind {
 impl IndexKind {
     /// Does this kind support range queries out of the box?
     pub fn supports_range(self) -> bool {
-        matches!(
-            self,
-            IndexKind::BTree | IndexKind::Temporal | IndexKind::ZoneMap
-        )
+        matches!(self, IndexKind::BTree | IndexKind::ZoneMap)
     }
 
     /// Does this kind support approximate / similarity queries?
@@ -196,18 +191,5 @@ mod tests {
             seq_cost < random_cost,
             "correlated (seq) should be cheaper than uncorrelated (random): {seq_cost} vs {random_cost}"
         );
-    }
-
-    #[test]
-    fn timeseries_gets_full_correlation() {
-        // Timeseries index is set to correlation = 1.0 in temporal_index.rs
-        let s = IndexStats {
-            index_correlation: 1.0,
-            kind: IndexKind::Temporal,
-            ..IndexStats::default()
-        };
-        // With correlation = 1.0, cost = seq_cost × pages_fetched
-        // 0 result_rows → 0 cost
-        assert_eq!(s.correlated_io_cost(0.0, 1000.0), 0.0);
     }
 }

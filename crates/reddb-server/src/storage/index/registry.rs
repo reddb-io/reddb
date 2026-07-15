@@ -16,7 +16,7 @@
 //!
 //! - `Table { name, column }` — secondary indexes on table columns
 //! - `Graph { collection }`   — adjacency / property indexes on graph nodes
-//! - `Timeseries { series }`  — temporal indexes for a named series
+//! - `Timeseries { series }`  — indexes for a named timeseries
 //!
 //! # Thread safety
 //!
@@ -262,15 +262,10 @@ mod tests {
             IndexScope::graph("social"),
             shared("social.adj", IndexKind::GraphAdjacency, 5_000),
         );
-        reg.register(
-            IndexScope::timeseries("cpu.idle"),
-            shared("cpu.temporal", IndexKind::Temporal, 2_000),
-        );
 
-        assert_eq!(reg.len(), 3);
+        assert_eq!(reg.len(), 2);
         assert!(reg.table_index_stats("users", "id").is_some());
         assert!(reg.graph_index_stats("social").is_some());
-        assert!(reg.timeseries_index_stats("cpu.idle").is_some());
     }
 
     #[test]

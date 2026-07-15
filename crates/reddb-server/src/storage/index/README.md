@@ -2,19 +2,18 @@
 
 This module is the trait layer + reusable primitives that let the planner,
 diagnostics, and segment pruning treat every concrete index — btree, hash,
-bloom, zone map, HNSW, inverted, graph adjacency, temporal, heavy hitters
+bloom, zone map, HNSW, inverted, graph adjacency, heavy hitters
 — uniformly.
 
 It does **not** replace concrete index implementations. Tables, graphs,
 vectors, timeseries, documents, and queues each maintain their own
-structures (`src/storage/engine/btree`, `src/storage/engine/hnsw`,
-`src/storage/timeseries/temporal_index`, etc.). This module just defines
-the common surface those implementations *opt into*.
+structures (`src/storage/engine/btree`, `src/storage/engine/hnsw`, etc.).
+This module just defines the common surface those implementations *opt into*.
 
 ## Module layout
 
 - `mod.rs` — `IndexBase`, `PointIndex`, `RangeIndex` traits + `IndexError`
-- `stats.rs` — `IndexKind` enum (15 families), `IndexStats` cardinality summary
+- `stats.rs` — `IndexKind` enum (14 families), `IndexStats` cardinality summary
 - `bloom_segment.rs` — `BloomSegment` reusable bloom header + `HasBloom` trait
 - `zone_map.rs` — `ZoneMap` (min/max/null_count + HLL distinct estimate +
   bloom) with `block_skip(predicate)` helper
@@ -112,5 +111,4 @@ top-k), document the drift in the impl's doc comment.
 
 - Planner cost integration: `src/storage/query/planner/cost.rs::filter_selectivity`
 - Stats provider trait: `src/storage/query/planner/stats_provider.rs`
-- Concrete examples: `src/storage/engine/graph_store/secondary_index.rs`,
-  `src/storage/timeseries/temporal_index.rs`
+- Concrete examples: `src/storage/engine/graph_store/secondary_index.rs`
