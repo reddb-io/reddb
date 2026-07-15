@@ -234,6 +234,7 @@ fn json_type_name(v: &JsonValue) -> &'static str {
         JsonValue::Bool(_) => "bool",
         JsonValue::Integer(_) => "number",
         JsonValue::Number(_) => "number",
+        JsonValue::Decimal(_) => "number",
         JsonValue::String(_) => "string",
         JsonValue::Array(_) => "array",
         JsonValue::Object(_) => "object",
@@ -255,6 +256,7 @@ fn json_to_value(v: &JsonValue) -> Value {
                 Value::Float(*n)
             }
         }
+        JsonValue::Decimal(n) => Value::DecimalText(n.clone()),
         JsonValue::String(s) => Value::text(s.clone()),
         JsonValue::Array(arr) => Value::Array(arr.iter().map(json_to_value).collect()),
         JsonValue::Object(_) => Value::text(v.to_string_compact()),
