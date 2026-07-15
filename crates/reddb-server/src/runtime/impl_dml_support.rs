@@ -456,7 +456,7 @@ pub(super) fn extract_remaining_properties(
 pub(super) fn validate_timeseries_insert_columns(columns: &[String]) -> RedDBResult<()> {
     let mut invalid = Vec::new();
     for column in columns {
-        if !is_timeseries_insert_column(column) && resolve_sql_ttl_metadata_key(column).is_none() {
+        if column.trim().is_empty() && resolve_sql_ttl_metadata_key(column).is_none() {
             invalid.push(column.clone());
         }
     }
@@ -465,7 +465,7 @@ pub(super) fn validate_timeseries_insert_columns(columns: &[String]) -> RedDBRes
         Ok(())
     } else {
         Err(RedDBError::Query(format!(
-            "timeseries INSERT only accepts metric, value, tags, timestamp, timestamp_ns, or time columns; got {}",
+            "timeseries INSERT column names must be non-empty; got {}",
             invalid.join(", ")
         )))
     }
