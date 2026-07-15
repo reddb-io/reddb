@@ -1292,6 +1292,12 @@ impl UnifiedStore {
                     scale,
                 }
             }
+            52 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let s = String::from_utf8(buf[*pos..*pos + len].to_vec())?;
+                *pos += len;
+                Value::DecimalText(s)
+            }
             // C3 TOAST: compressed Text (0x85) and Blob (0x86).
             0x85 => {
                 let orig_len = Self::read_varu32_safe(buf, pos)?;
@@ -1603,6 +1609,11 @@ impl UnifiedStore {
                 buf.push(49);
                 write_varu32(buf, hash.len() as u32);
                 buf.extend_from_slice(hash.as_bytes());
+            }
+            Value::DecimalText(s) => {
+                buf.push(52);
+                write_varu32(buf, s.len() as u32);
+                buf.extend_from_slice(s.as_bytes());
             }
         }
     }
