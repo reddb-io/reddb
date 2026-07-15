@@ -994,6 +994,7 @@ pub(crate) fn summarize_value(value: &Value) -> String {
         Value::PageRef(page_id) => format!("page_ref({})", page_id),
         Value::Secret(bytes) => format!("secret({} bytes)", bytes.len()),
         Value::Password(_) => "password(***)".to_string(),
+        Value::DecimalText(s) => format!("decimal_text({})", s),
     }
 }
 
