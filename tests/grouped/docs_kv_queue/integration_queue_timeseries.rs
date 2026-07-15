@@ -1341,6 +1341,98 @@ fn test_timeseries_series_dictionary_interns_canonical_tags() {
 }
 
 #[test]
+fn test_timeseries_tag_index_filters_series_for_equality_and_in_after_reopen() {
+    let path = PersistentDbPath::new("timeseries_tag_index");
+    let rt = path.open_runtime();
+
+    exec(&rt, "CREATE TIMESERIES cpu_metrics RETENTION 7 d");
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 94.8, {host: 'srv1', region: 'us-east'}, 1)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 95.2, {host: 'srv2', region: 'us-west'}, 2)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 96.0, {host: 'srv3', region: 'us-east'}, 3)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 97.0, {host: 'srv1', region: 'us-east'}, 4)",
+    );
+
+    {
+        let store = rt.db().store();
+        let tag_index = store
+            .get_collection("red_timeseries_tag_index")
+            .expect("tag index collection should be maintained at series creation");
+        let host_rows = tag_index.query_all(|entity| {
+            entity.data.as_row().is_some_and(|row| {
+                matches!(row.get_field("collection"), Some(Value::Text(name)) if &**name == "cpu_metrics")
+                    && matches!(row.get_field("tag_key"), Some(Value::Text(key)) if &**key == "host")
+            })
+        });
+        assert_eq!(
+            host_rows.len(),
+            3,
+            "one posting list row should exist per distinct host tag value"
+        );
+    }
+
+    let equal = exec(
+        &rt,
+        "SELECT timestamp FROM cpu_metrics WHERE tags.host = 'srv1' ORDER BY timestamp ASC",
+    );
+    assert_eq!(
+        equal
+            .result
+            .records
+            .iter()
+            .map(|row| uint(row, "timestamp"))
+            .collect::<Vec<_>>(),
+        vec![1, 4]
+    );
+
+    reddb::runtime::reset_timeseries_tag_index_observability();
+    let in_filter = exec(
+        &rt,
+        "SELECT timestamp FROM cpu_metrics WHERE tags.host IN ('srv1', 'srv3') ORDER BY timestamp ASC",
+    );
+    assert_eq!(
+        in_filter
+            .result
+            .records
+            .iter()
+            .map(|row| uint(row, "timestamp"))
+            .collect::<Vec<_>>(),
+        vec![1, 3, 4]
+    );
+    assert_eq!(
+        reddb::runtime::timeseries_tag_index_observed_points(),
+        3,
+        "indexed tag scan should only hydrate points from matching series"
+    );
+
+    let rt = checkpoint_and_reopen(&path, rt);
+    let reopened = exec(
+        &rt,
+        "SELECT timestamp FROM cpu_metrics WHERE tags.region = 'us-east' ORDER BY timestamp ASC",
+    );
+    assert_eq!(
+        reopened
+            .result
+            .records
+            .iter()
+            .map(|row| uint(row, "timestamp"))
+            .collect::<Vec<_>>(),
+        vec![1, 3, 4],
+        "tag index should survive restart with the series dictionary"
+    );
+}
+
+#[test]
 fn test_timeseries_time_bucket_aggregate_query() {
     let rt = rt();
 
