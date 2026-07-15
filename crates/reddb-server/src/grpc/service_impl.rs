@@ -1848,6 +1848,7 @@ impl RedDb for GrpcRuntime {
                                 Value::Float(n)
                             }
                         }
+                        JsonValue::Decimal(s) => Value::DecimalText(s),
                         JsonValue::String(s) => Value::text(s),
                         other => Value::text(json_to_string(&other).unwrap_or_default()),
                     })
