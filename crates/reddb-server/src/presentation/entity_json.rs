@@ -125,6 +125,7 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         Value::Date(days) => JsonValue::Number(*days as f64),
         Value::Time(ms) => JsonValue::Number(*ms as f64),
         Value::Decimal(v) => JsonValue::Number(*v as f64 / 10_000.0),
+        Value::DecimalText(text) => JsonValue::Decimal(text.clone()),
         Value::EnumValue(i) => JsonValue::Number(*i as f64),
         Value::Array(elems) => JsonValue::Array(elems.iter().map(storage_value_to_json).collect()),
         Value::TimestampMs(ms) => JsonValue::Number(*ms as f64),
