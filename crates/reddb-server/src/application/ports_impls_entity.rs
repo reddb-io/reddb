@@ -1132,6 +1132,7 @@ fn data_type_name(data_type: DataType) -> &'static str {
         DataType::PageRef => "pageref",
         DataType::Secret => "secret",
         DataType::Password => "password",
+        DataType::DecimalText => "decimal_text",
         DataType::TextZstd => "text",
         DataType::BlobZstd => "blob",
     }
