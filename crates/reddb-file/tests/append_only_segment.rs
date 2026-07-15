@@ -1,9 +1,9 @@
 use std::fs;
 
 use reddb_file::{
-    decode_append_only_segment, encode_append_only_segment, AppendOnlySegmentCodec,
-    AppendOnlySegmentRow, AppendOnlySegmentState, OperationalManifest,
-    APPEND_ONLY_SEGMENT_CHUNK_BYTES,
+    append_only_segment_primary_bloom_might_contain, decode_append_only_segment,
+    encode_append_only_segment, AppendOnlySegmentCodec, AppendOnlySegmentRow,
+    AppendOnlySegmentState, OperationalManifest, APPEND_ONLY_SEGMENT_CHUNK_BYTES,
 };
 
 #[test]
@@ -28,6 +28,16 @@ fn append_only_segment_frame_round_trips_metadata_and_checksums() {
     assert_eq!(decoded.rows, rows);
     assert_eq!(decoded.primary_min.as_deref(), Some(&b"0001"[..]));
     assert_eq!(decoded.primary_max.as_deref(), Some(&b"0002"[..]));
+    let bloom = decoded.primary_bloom.as_ref().expect("primary bloom");
+    assert!(append_only_segment_primary_bloom_might_contain(
+        bloom, b"0001"
+    ));
+    assert!(append_only_segment_primary_bloom_might_contain(
+        bloom, b"0002"
+    ));
+    assert!(!append_only_segment_primary_bloom_might_contain(
+        bloom, b"9999"
+    ));
     assert!(!decoded.chunk_checksums.is_empty());
     assert!(decoded
         .chunk_checksums
@@ -56,6 +66,9 @@ fn operational_manifest_publishes_closed_append_only_segment_once() {
     assert_eq!(segment.codec, AppendOnlySegmentCodec::None);
     assert_eq!(segment.chunk_size, APPEND_ONLY_SEGMENT_CHUNK_BYTES);
     assert_eq!(segment.row_count, 1);
+    assert!(segment.primary_min.is_some());
+    assert!(segment.primary_max.is_some());
+    assert!(segment.primary_bloom.is_some());
     assert!(!segment.chunk_checksums.is_empty());
     assert!(segment.path.ends_with(".raos"));
     assert!(manifest
