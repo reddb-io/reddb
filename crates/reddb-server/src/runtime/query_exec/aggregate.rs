@@ -2294,6 +2294,7 @@ mod agg_spill_codec {
             CanonicalKeyFamily::TableRef => 44,
             CanonicalKeyFamily::PageRef => 45,
             CanonicalKeyFamily::Password => 46,
+            CanonicalKeyFamily::DecimalText => 47,
         }
     }
 
@@ -2346,6 +2347,7 @@ mod agg_spill_codec {
             44 => Ok(CanonicalKeyFamily::TableRef),
             45 => Ok(CanonicalKeyFamily::PageRef),
             46 => Ok(CanonicalKeyFamily::Password),
+            47 => Ok(CanonicalKeyFamily::DecimalText),
             other => Err(SpillError::Codec(format!(
                 "unknown canonical key family tag {other}"
             ))),
