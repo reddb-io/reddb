@@ -14,7 +14,6 @@ pub mod continuous_aggregate;
 pub mod hypertable;
 pub mod log_pipeline;
 pub mod retention;
-pub mod temporal_index;
 
 pub use aggregation::{time_bucket, AggregationType, WindowAggregator};
 pub use chunk::{TimeSeriesChunk, TimeSeriesPoint};
@@ -33,4 +32,3 @@ pub use log_pipeline::{LogIngestStats, LogLine, LogPipeline, LogSeverity};
 pub use retention::{
     RetentionBackend, RetentionDaemonHandle, RetentionPolicy, RetentionRegistry, RetentionStats,
 };
-pub use temporal_index::{ChunkHandle, TemporalIndex};
