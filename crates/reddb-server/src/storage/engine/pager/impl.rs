@@ -227,18 +227,23 @@ impl Pager {
             }
         };
 
-        // Open double-write buffer file.
-        //
-        // gh-478: when `fold_dwb_into_wal` is enabled the DWB sidecar is
-        // suppressed — torn pages are healed by replaying FullPageImage WAL
-        // records during recovery. Any pre-existing `-dwb` is removed so a
-        // flipped flag cannot leave a stale sidecar on disk.
+        // ADR 0038 phase 3: the DWB sidecar is retired. When DWB is active,
+        // the recovery frame is written to a reserved zone inside the data
+        // file and fsynced before in-place page writes. A pre-existing sidecar
+        // marks a legacy store that must go through the offline migration tool.
         //
         // gh-895: an explicit `double_write = false` request is honored only
         // when the already-open data file is proven to live on a filesystem
         // with atomic CoW page writes. Unknown and non-CoW filesystems fail
-        // closed by keeping the DWB sidecar.
+        // closed by keeping the in-file DWB zone enabled.
         let fold_dwb = crate::physical::fold_dwb_into_wal_enabled();
+        if exists {
+            if let Some(sidecar) =
+                reddb_file::layout::retired::first_present_phase3_dwb_sidecar(&path)
+            {
+                return Err(PagerError::LegacySidecarStore { sidecar });
+            }
+        }
         if !config.double_write && !config.read_only && !fold_dwb {
             let skip_dwb_on_cow =
                 Self::cow_filesystem_has_atomic_page_writes(&path, &file).is_some();
@@ -246,27 +251,18 @@ impl Pager {
                 tracing::warn!(
                     path = %path.display(),
                     "double_write=false requested, but the data file is not proven to be on \
-                     ZFS or btrfs datacow; keeping the double-write buffer enabled"
+                     ZFS or btrfs datacow; keeping the in-file double-write buffer enabled"
                 );
                 config.double_write = true;
             }
         }
-
-        let dwb_file = if config.double_write && !config.read_only && !fold_dwb {
-            let f = Self::open_dwb_file(&path)?;
-            Some(Mutex::new(f))
-        } else {
-            if fold_dwb && !config.read_only {
-                let _ = std::fs::remove_file(Self::dwb_path(&path));
-            }
-            None
-        };
+        let dwb_enabled = config.double_write && !config.read_only && !fold_dwb;
 
         let mut pager = Self {
             path,
             file: Mutex::new(file),
             _lock_file: lock_file,
-            dwb_file,
+            dwb_enabled,
             cache: PageCache::new(config.cache_size),
             freelist: RwLock::new(FreeList::new()),
             header: RwLock::new(DatabaseHeader::default()),
@@ -277,11 +273,9 @@ impl Pager {
         };
 
         if exists {
-            // Recover from double-write buffer if needed
+            // Recover from the in-file double-write zone before loading the
+            // header or allowing WAL replay to read pages.
             pager.recover_from_dwb()?;
-            if !pager.config.double_write && !pager.config.read_only {
-                let _ = std::fs::remove_file(Self::dwb_path(&pager.path));
-            }
             // Load existing database (with header shadow fallback)
             pager.load_header()?;
             pager.bind_encryption_for_existing()?;
@@ -421,10 +415,10 @@ impl Pager {
             return Err(PagerError::ReadOnly);
         }
 
-        // Create header page. Page ids 1 and 2 are reserved so fixed
-        // metadata/vault pages cannot be handed out to normal B-tree
-        // allocation before those subsystems are initialized.
-        let initial_page_count = 3;
+        // Create header page. Page ids 1 and 2 are reserved for fixed
+        // metadata/vault pages. ADR 0038 phase 3 reserves the following DWB
+        // zone in-file so normal B-tree allocation starts after it.
+        let initial_page_count = FIRST_ALLOCATABLE_PAGE;
         let header_page = Page::new_header_page(initial_page_count);
         self.header_write()?.page_count = initial_page_count;
 
@@ -439,6 +433,7 @@ impl Pager {
         let mut vault_page = Page::new(PageType::Vault, 2);
         vault_page.update_checksum();
         self.write_page_raw(2, &vault_page)?;
+        self.clear_dwb_zone()?;
 
         // Publish both superblock copies so the ping-pong invariant — one
         // valid copy always survives a crash — holds from the very first
@@ -1113,25 +1108,55 @@ impl Pager {
         reddb_file::layout::pager_dwb_shadow_path(db_path)
     }
 
-    /// Open the double-write buffer file without truncating existing content.
-    ///
-    /// The file is intentionally preserved across restarts so recovery can
-    /// consume any crash-leftover pages before the next write cycle clears it.
-    fn open_dwb_file(db_path: &Path) -> Result<File, PagerError> {
-        Ok(OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(Self::dwb_path(db_path))?)
+    fn dwb_zone_offset() -> u64 {
+        DWB_ZONE_START_PAGE as u64 * PAGE_SIZE as u64
     }
 
-    /// Clear the DWB in place while preserving the file path and handle.
-    fn clear_dwb_file(file: &mut File) -> Result<(), PagerError> {
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
+    fn write_dwb_zone_frame(&self, buf: &[u8]) -> Result<(), PagerError> {
+        if buf.len() > DWB_ZONE_BYTES {
+            return Err(PagerError::InvalidDatabase(
+                "DWB frame exceeds the reserved in-file zone".to_string(),
+            ));
+        }
+        let mut file = self.file_lock()?;
+        file.seek(SeekFrom::Start(Self::dwb_zone_offset()))?;
+        file.write_all(buf)?;
         file.sync_all()?;
         Ok(())
+    }
+
+    /// Clear the in-file DWB zone with valid reserved pages.
+    fn clear_dwb_zone(&self) -> Result<(), PagerError> {
+        let mut file = self.file_lock()?;
+        for page_id in DWB_ZONE_START_PAGE..FIRST_ALLOCATABLE_PAGE {
+            let mut page = Page::new(PageType::Header, page_id);
+            page.update_checksum();
+            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
+            file.write_all(page.as_bytes())?;
+        }
+        file.sync_all()?;
+        Ok(())
+    }
+
+    fn dwb_zone_is_clear(buf: &[u8]) -> bool {
+        if buf.len() != DWB_ZONE_BYTES {
+            return false;
+        }
+        for (idx, chunk) in buf.chunks_exact(PAGE_SIZE).enumerate() {
+            let Ok(page) = Page::from_slice(chunk) else {
+                return false;
+            };
+            if page.verify_checksum().is_err() {
+                return false;
+            }
+            if page.page_id() != DWB_ZONE_START_PAGE + idx as u32 {
+                return false;
+            }
+            if page.page_type().ok() != Some(PageType::Header) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Read the internal manifest page (page 1), the zone the superblock roots.
@@ -1145,33 +1170,34 @@ impl Pager {
 
     /// Write pages through the double-write buffer for torn page protection.
     ///
-    /// 1. Write all pages to the DWB file with a header (magic + count + checksum)
-    /// 2. fsync the DWB
+    /// 1. Write pages to the in-file DWB zone with a header (magic + count + checksum)
+    /// 2. fsync the DWB zone
     /// 3. Write all pages to their final locations in the .rdb file
-    /// 4. Truncate the DWB (marks as consumed)
+    /// 4. Clear the DWB zone (marks as consumed)
     fn write_pages_through_dwb(&self, pages: &[(u32, Page)]) -> Result<(), PagerError> {
-        if let Some(dwb_mutex) = &self.dwb_file {
-            let mut dwb = dwb_mutex.lock().map_err(|_| PagerError::LockPoisoned)?;
+        if self.dwb_enabled {
+            for chunk in pages.chunks(DWB_MAX_PAGES_PER_FRAME.max(1)) {
+                let buf = reddb_file::encode_paged_dwb_frame(
+                    chunk
+                        .iter()
+                        .map(|(page_id, page)| (*page_id, page.as_bytes())),
+                );
 
-            let buf = reddb_file::encode_paged_dwb_frame(
-                pages
-                    .iter()
-                    .map(|(page_id, page)| (*page_id, page.as_bytes())),
-            );
+                // Write DWB zone and fsync
+                self.write_dwb_zone_frame(&buf)?;
 
-            // Write DWB and fsync
-            dwb.seek(SeekFrom::Start(0))?;
-            dwb.write_all(&buf)?;
-            dwb.set_len(buf.len() as u64)?;
-            dwb.sync_all()?;
+                // Now write pages to their final locations
+                for (page_id, page) in chunk {
+                    self.write_page_raw(*page_id, page)?;
+                }
+                {
+                    let file = self.file_lock()?;
+                    file.sync_all()?;
+                }
 
-            // Now write pages to their final locations
-            for (page_id, page) in pages {
-                self.write_page_raw(*page_id, page)?;
+                // Reset the zone to its inactive page images.
+                self.clear_dwb_zone()?;
             }
-
-            // Truncate DWB to mark as consumed
-            Self::clear_dwb_file(&mut dwb)?;
 
             Ok(())
         } else {
@@ -1185,32 +1211,34 @@ impl Pager {
 
     /// Recover from double-write buffer after a crash.
     ///
-    /// If the DWB file contains valid pages, they were written before the crash
-    /// interrupted writing to the main file. Re-apply them.
+    /// If the DWB zone contains valid pages, they were written before the crash
+    /// interrupted writing to their home locations. Re-apply them.
     fn recover_from_dwb(&self) -> Result<(), PagerError> {
-        let dwb_path = Self::dwb_path(&self.path);
-        if !dwb_path.exists() {
+        let len = {
+            let file = self.file_lock()?;
+            file.metadata()?.len()
+        };
+        let zone_end = Self::dwb_zone_offset() + DWB_ZONE_BYTES as u64;
+        if len < zone_end {
             return Ok(());
         }
 
-        if let Some(dwb_mutex) = &self.dwb_file {
-            let mut file = dwb_mutex.lock().map_err(|_| PagerError::LockPoisoned)?;
-            return self.recover_from_dwb_file(&mut file);
+        let mut buf = vec![0u8; DWB_ZONE_BYTES];
+        {
+            let mut file = self.file_lock()?;
+            file.seek(SeekFrom::Start(Self::dwb_zone_offset()))?;
+            file.read_exact(&mut buf)?;
         }
-
-        let mut file = OpenOptions::new().read(true).write(true).open(&dwb_path)?;
-        self.recover_from_dwb_file(&mut file)
-    }
-
-    fn recover_from_dwb_file(&self, file: &mut File) -> Result<(), PagerError> {
-        file.seek(SeekFrom::Start(0))?;
-        let len = file.metadata()?.len();
-        let mut buf = vec![0u8; len as usize];
-        file.read_exact(&mut buf)?;
+        if buf.get(0..4) != Some(reddb_file::DWB_MAGIC.as_slice()) {
+            if Self::dwb_zone_is_clear(&buf) {
+                return Ok(());
+            }
+            return Err(PagerError::DwbZoneCorrupt(self.path.clone()));
+        }
 
         let entries = match reddb_file::decode_paged_dwb_frame(&buf) {
             Ok(entries) => entries,
-            Err(_) => return Self::clear_dwb_file(file),
+            Err(_) => return Err(PagerError::DwbZoneCorrupt(self.path.clone())),
         };
 
         // DWB is valid — re-apply pages to main file
@@ -1225,7 +1253,7 @@ impl Pager {
             file.sync_all()?;
         }
 
-        Self::clear_dwb_file(file)
+        self.clear_dwb_zone()
     }
 
     /// Write header and sync to disk (public for checkpointer).
