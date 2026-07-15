@@ -570,6 +570,7 @@ impl RedDBRuntime {
                         // Rollup outputs keep tags inline; they do not intern
                         // through the series dictionary.
                         series_id: None,
+                        fields: std::collections::HashMap::new(),
                     }),
                 );
                 store
