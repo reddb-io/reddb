@@ -11,6 +11,8 @@ pub enum Value {
     Bool(bool),
     Integer(i64),
     Number(f64),
+    /// Beyond-native-range decimal stored as exact text (emitted as raw JSON number, never quoted)
+    Decimal(String),
     String(String),
     Array(Vec<Value>),
     Object(Map<String, Value>),
@@ -34,6 +36,7 @@ impl Value {
         match self {
             Value::Number(n) => Some(*n),
             Value::Integer(n) => Some(*n as f64),
+            Value::Decimal(s) => s.parse::<f64>().ok(),
             _ => None,
         }
     }
@@ -42,6 +45,7 @@ impl Value {
         match self {
             Value::Integer(n) => Some(*n),
             Value::Number(n) => Some(*n as i64),
+            Value::Decimal(s) => s.parse::<i64>().ok(),
             _ => None,
         }
     }
@@ -50,6 +54,8 @@ impl Value {
         match self {
             Value::Integer(n) if *n >= 0 => Some(*n as u64),
             Value::Number(n) if *n >= 0.0 => Some(*n as u64),
+            Value::Decimal(s) if !s.starts_with('-') => s.parse::<u64>().ok(),
+            Value::Decimal(_) => None,
             _ => None,
         }
     }
@@ -107,6 +113,7 @@ impl Value {
                     out.push_str(&format!("{}", n));
                 }
             }
+            Value::Decimal(s) => out.push_str(s),
             Value::String(s) => {
                 out.push('"');
                 out.push_str(&escape_string(s));
@@ -145,6 +152,7 @@ impl Value {
             | Value::Bool(_)
             | Value::Integer(_)
             | Value::Number(_)
+            | Value::Decimal(_)
             | Value::String(_) => {
                 out.push_str(&self.to_string_compact());
             }
@@ -426,6 +434,21 @@ mod tests {
     }
 
     #[test]
+    fn decimal_text_round_trips_through_json_parse_and_emit() {
+        // Beyond i64 range: 2^64 + 1
+        let big_int = "18446744073709551617";
+        let parsed: crate::serde_json::Value = super::from_str(big_int).unwrap();
+        assert!(matches!(parsed, crate::serde_json::Value::Decimal(_)));
+        assert_eq!(parsed.to_string_compact(), big_int);
+
+        // High-precision decimal (more than 17 significant digits)
+        let pi = "3.14159265358979323846264338327950288";
+        let parsed: crate::serde_json::Value = super::from_str(pi).unwrap();
+        assert!(matches!(parsed, crate::serde_json::Value::Decimal(_)));
+        assert_eq!(parsed.to_string_compact(), pi);
+    }
+
+    #[test]
     fn string_and_byte_entry_points_round_trip_and_reject_bad_inputs() {
         let bytes = to_vec(&vec![1u8, 2, 3]).unwrap();
         assert_eq!(from_slice::<Vec<u8>>(&bytes).unwrap(), vec![1, 2, 3]);
@@ -446,6 +469,7 @@ impl From<JsonValue> for Value {
             JsonValue::Bool(b) => Value::Bool(b),
             JsonValue::Integer(n) => Value::Integer(n),
             JsonValue::Number(n) => Value::Number(n),
+            JsonValue::Decimal(s) => Value::Decimal(s),
             JsonValue::String(s) => Value::String(s),
             JsonValue::Array(values) => Value::Array(values.into_iter().map(Value::from).collect()),
             JsonValue::Object(entries) => {
