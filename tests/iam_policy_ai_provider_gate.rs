@@ -166,10 +166,15 @@ fn ask_gate_records_planner_audit_event_on_deny() {
         body.contains("\"outcome\":\"denied\""),
         "expected deny outcome in audit; audit:\n{body}"
     );
-    // The credential resolver must NOT have been reached — no
-    // `ai.credential.resolve` audit event should be present.
+    // The credential resolver must NOT have been reached for the denied
+    // principal/provider. Other tests in this grouped binary can run in
+    // parallel and emit unrelated credential-resolution audit rows.
     assert!(
-        !body.contains("ai.credential.resolve"),
+        !body.lines().any(|line| {
+            line.contains("\"action\":\"ai.credential.resolve\"")
+                && line.contains("\"principal\":\"alice\"")
+                && line.contains("\"resource\":\"ai.credential:openai/default\"")
+        }),
         "credential resolver must not run when the gate denied; audit:\n{body}"
     );
 }
