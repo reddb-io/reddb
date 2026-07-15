@@ -375,6 +375,12 @@ pub fn encode(value: &Value, out: &mut Vec<u8>) {
             write_varint(out, bytes.len() as u64);
             out.extend_from_slice(bytes);
         }
+        Value::DecimalText(s) => {
+            out.push(DataType::DecimalText.to_byte());
+            let bytes = s.as_bytes();
+            write_varint(out, bytes.len() as u64);
+            out.extend_from_slice(bytes);
+        }
     }
 }
 
@@ -903,6 +909,17 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
             offset += len as usize;
             Value::Password(hash)
         }
+        DataType::DecimalText => {
+            let (len, varint_size) = read_varint(&data[offset..])?;
+            offset += varint_size;
+            if data.len() < offset + len as usize {
+                return Err(ValueError::TruncatedData);
+            }
+            let s = String::from_utf8(data[offset..offset + len as usize].to_vec())
+                .map_err(|_| ValueError::InvalidUtf8)?;
+            offset += len as usize;
+            Value::DecimalText(s)
+        }
         DataType::Nullable => {
             // Nullable without inner type means null
             Value::Null
@@ -1137,6 +1154,7 @@ mod tests {
             Value::PageRef(99),
             Value::Secret(vec![9, 8, 7]),
             Value::Password("$argon2id$v=19$hash".to_string()),
+            Value::DecimalText("123456789012345678901234567890.123456789".to_string()),
         ];
 
         for original in values {
@@ -1223,6 +1241,7 @@ mod tests {
             DataType::Password,
             DataType::TextZstd,
             DataType::BlobZstd,
+            DataType::DecimalText,
         ];
 
         for data_type in truncated_tags {
@@ -1334,6 +1353,28 @@ mod tests {
         match (left, right) {
             (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
             _ => left == right,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn prop_decimal_text_round_trips_through_codec(
+            integer_part in "[0-9]{1,40}",
+            frac_part in "[0-9]{0,20}",
+        ) {
+            let decimal_str = if frac_part.is_empty() {
+                integer_part.clone()
+            } else {
+                format!("{}.{}", integer_part, frac_part)
+            };
+            let original = Value::DecimalText(decimal_str);
+            let mut bytes = Vec::new();
+            encode(&original, &mut bytes);
+            let (decoded, consumed) = decode(&bytes).expect("decode");
+            prop_assert_eq!(consumed, bytes.len());
+            prop_assert_eq!(decoded, original);
         }
     }
 }
