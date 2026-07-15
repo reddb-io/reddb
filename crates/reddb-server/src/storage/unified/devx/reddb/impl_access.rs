@@ -532,6 +532,7 @@ impl RedDB {
             JsonValue::Bool(value) => Some(value.to_string()),
             JsonValue::Integer(value) => Some(value.to_string()),
             JsonValue::Number(value) => Some(value.to_string()),
+            JsonValue::Decimal(value) => Some(value.clone()),
             JsonValue::String(value) => Some(value.clone()),
             JsonValue::Array(_) | JsonValue::Object(_) => None,
         }
@@ -664,6 +665,7 @@ impl RedDB {
             Value::DocRef(col, id) => Some(format!("{}#{}", col, id)),
             Value::TableRef(name) => Some(name.clone()),
             Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
+            Value::DecimalText(s) => Some(s.clone()),
             Value::Secret(_) | Value::Password(_) => None,
         }
     }
