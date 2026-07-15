@@ -1250,6 +1250,7 @@ mod tests {
                 timestamp_ns: 42,
                 value: 10.5,
                 tags: std::collections::HashMap::new(),
+                fields: std::collections::HashMap::new(),
             }),
         );
 
