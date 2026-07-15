@@ -533,6 +533,9 @@ impl QueryStats {
             nodes_scanned: a.nodes_scanned + b.nodes_scanned,
             edges_scanned: a.edges_scanned + b.edges_scanned,
             rows_scanned: a.rows_scanned + b.rows_scanned,
+            segments_total: a.segments_total + b.segments_total,
+            segments_scanned: a.segments_scanned + b.segments_scanned,
+            segments_pruned: a.segments_pruned + b.segments_pruned,
             exec_time_us: a.exec_time_us + b.exec_time_us,
         }
     }

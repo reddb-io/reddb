@@ -22,6 +22,9 @@ fn append_only_flush_publishes_closed_segment_and_reopen_reads_rows() {
         assert_eq!(segments[0].collection, "events");
         assert_eq!(segments[0].codec, reddb_file::AppendOnlySegmentCodec::Zstd);
         assert_eq!(segments[0].row_count, 2);
+        assert!(segments[0].primary_min.is_some());
+        assert!(segments[0].primary_max.is_some());
+        assert!(segments[0].primary_bloom.is_some());
         assert!(!segments[0].chunk_checksums.is_empty());
         manifest.append_only_segment_path_for_test(&segments[0].path)
     };

@@ -38,6 +38,14 @@ pub struct AppendOnlySegmentChunkChecksum {
     pub checksum: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppendOnlySegmentBloom {
+    pub num_hashes: u8,
+    pub bit_size: u32,
+    pub inserted: u32,
+    pub bits_hex: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendOnlySegment {
     pub version: u32,
@@ -46,6 +54,7 @@ pub struct AppendOnlySegment {
     pub rows: Vec<AppendOnlySegmentRow>,
     pub primary_min: Option<Vec<u8>>,
     pub primary_max: Option<Vec<u8>>,
+    pub primary_bloom: Option<AppendOnlySegmentBloom>,
     pub chunk_checksums: Vec<AppendOnlySegmentChunkChecksum>,
 }
 
@@ -58,6 +67,7 @@ struct SegmentHeader {
     uncompressed_len: u64,
     primary_min_hex: Option<String>,
     primary_max_hex: Option<String>,
+    primary_bloom: Option<AppendOnlySegmentBloom>,
     chunk_checksums: Vec<AppendOnlySegmentChunkChecksum>,
 }
 
@@ -102,6 +112,7 @@ pub fn encode_append_only_segment(
             .map(|row| row.primary_key.as_slice())
             .max()
             .map(hex::encode),
+        primary_bloom: build_primary_bloom(rows),
         chunk_checksums,
     };
     let header_bytes = serde_json::to_vec(&header).map_err(invalid_operation)?;
@@ -217,12 +228,82 @@ pub fn decode_append_only_segment(bytes: &[u8]) -> RdbFileResult<AppendOnlySegme
         rows,
         primary_min,
         primary_max,
+        primary_bloom: header.primary_bloom,
         chunk_checksums: header.chunk_checksums,
     })
 }
 
 pub fn append_only_segment_chunk_checksums(bytes: &[u8]) -> Vec<AppendOnlySegmentChunkChecksum> {
     chunk_checksums(bytes)
+}
+
+pub fn append_only_segment_primary_bloom_might_contain(
+    bloom: &AppendOnlySegmentBloom,
+    key: &[u8],
+) -> bool {
+    if bloom.bit_size == 0 || bloom.num_hashes == 0 {
+        return true;
+    }
+    let Ok(bits) = hex::decode(&bloom.bits_hex) else {
+        return true;
+    };
+    for idx in primary_bloom_indexes(key, bloom.bit_size, bloom.num_hashes) {
+        let byte = (idx / 8) as usize;
+        let mask = 1u8 << (idx % 8);
+        if bits
+            .get(byte)
+            .map(|value| value & mask == 0)
+            .unwrap_or(true)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn build_primary_bloom(rows: &[AppendOnlySegmentRow]) -> Option<AppendOnlySegmentBloom> {
+    if rows.is_empty() {
+        return None;
+    }
+    let inserted = u32::try_from(rows.len()).ok()?;
+    let bit_size = inserted.saturating_mul(10).max(64);
+    let num_hashes = 3;
+    let mut bits = vec![0u8; (bit_size as usize).div_ceil(8)];
+    for row in rows {
+        for idx in primary_bloom_indexes(&row.primary_key, bit_size, num_hashes) {
+            bits[(idx / 8) as usize] |= 1u8 << (idx % 8);
+        }
+    }
+    Some(AppendOnlySegmentBloom {
+        num_hashes,
+        bit_size,
+        inserted,
+        bits_hex: hex::encode(bits),
+    })
+}
+
+fn primary_bloom_indexes(key: &[u8], bit_size: u32, num_hashes: u8) -> impl Iterator<Item = u32> {
+    let h1 = fnv1a64(key);
+    let h2 = djb2_64(key).max(1);
+    (0..num_hashes)
+        .map(move |idx| h1.wrapping_add(u64::from(idx).wrapping_mul(h2)) as u32 % bit_size)
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+fn djb2_64(bytes: &[u8]) -> u64 {
+    let mut hash = 5381u64;
+    for byte in bytes {
+        hash = hash.wrapping_mul(33).wrapping_add(u64::from(*byte));
+    }
+    hash
 }
 
 fn chunk_checksums(bytes: &[u8]) -> Vec<AppendOnlySegmentChunkChecksum> {
