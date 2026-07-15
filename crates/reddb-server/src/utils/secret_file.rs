@@ -108,6 +108,22 @@ pub fn expand_all_reddb_secrets() -> Vec<(String, std::io::Error)> {
     let mut errors = Vec::new();
     for var in VARS {
         if let Err(err) = expand_file_env(var) {
+            // First-boot self-bootstrap (issue #1589, reddb-io/rio-lair#255):
+            // a cloud init points `REDDB_CERTIFICATE_FILE` at the same path
+            // as `--bootstrap-cert-out` on every boot, so on the very first
+            // boot the file does not exist yet — the bootstrap that mints it
+            // hasn't run. Degrade that one case to "no cert yet" instead of
+            // aborting: the `_FILE` var stays in the env untouched, and the
+            // vault's `env_with_file_fallback` re-reads it once the
+            // bootstrap has written the file. Every other error (conflict,
+            // permissions, other vars) remains fatal to the caller.
+            if *var == "REDDB_CERTIFICATE" && err.kind() == std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "warning: {var}_FILE points at a file that does not exist yet; \
+                     proceeding without {var} (first-boot self-bootstrap will mint it)"
+                );
+                continue;
+            }
             errors.push((var.to_string(), err));
         }
     }
@@ -284,5 +300,69 @@ mod tests {
 
         cleanup("RED_ADMIN_TOKEN");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // reddb-io/rio-lair#255 — a static cloud-init config points
+    // REDDB_CERTIFICATE_FILE at the --bootstrap-cert-out path on every
+    // boot, so on the very first boot the file does not exist yet. That
+    // must degrade to "no cert yet" (env left intact for the vault's
+    // file fallback), not abort the boot.
+    #[test]
+    fn expand_all_tolerates_missing_certificate_file() {
+        let _g = env_lock().lock();
+        for var in [
+            "REDDB_CERTIFICATE",
+            "REDDB_USERNAME",
+            "REDDB_PASSWORD",
+            "REDDB_ROOT_TOKEN",
+            "RED_ADMIN_TOKEN",
+        ] {
+            cleanup(var);
+        }
+        let dir = tmpdir("cert-catch22");
+        let missing = dir.join("bootstrap-cert-not-written-yet");
+        unsafe {
+            std::env::set_var("REDDB_CERTIFICATE_FILE", &missing);
+        }
+
+        let errors = expand_all_reddb_secrets();
+        assert!(
+            errors.is_empty(),
+            "a missing REDDB_CERTIFICATE_FILE target must not be fatal: {errors:?}"
+        );
+        // The _FILE var survives so `env_with_file_fallback` can consume
+        // the file once the first-boot self-bootstrap has written it.
+        assert_eq!(
+            std::env::var("REDDB_CERTIFICATE_FILE").ok().as_deref(),
+            missing.to_str()
+        );
+        assert!(std::env::var("REDDB_CERTIFICATE").is_err());
+
+        cleanup("REDDB_CERTIFICATE");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expand_all_still_fails_on_missing_password_file() {
+        let _g = env_lock().lock();
+        for var in [
+            "REDDB_CERTIFICATE",
+            "REDDB_USERNAME",
+            "REDDB_PASSWORD",
+            "REDDB_ROOT_TOKEN",
+            "RED_ADMIN_TOKEN",
+        ] {
+            cleanup(var);
+        }
+        unsafe {
+            std::env::set_var("REDDB_PASSWORD_FILE", "/nonexistent/reddb-test-password");
+        }
+
+        let errors = expand_all_reddb_secrets();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].0, "REDDB_PASSWORD");
+        assert_eq!(errors[0].1.kind(), std::io::ErrorKind::NotFound);
+
+        cleanup("REDDB_PASSWORD");
     }
 }

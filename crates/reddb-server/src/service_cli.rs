@@ -1779,23 +1779,27 @@ async fn spawn_wire_listeners(
         }
     }
 
-    // RedWire over TLS. A `--wire-tls-bind` is always an explicit request,
-    // so it fails closed: a TLS config/resolve error (including the gated
-    // auto-gen refusal) or a bind failure is fatal to boot — never a silent
-    // degrade to serving the other transports. Mirrors the TLS-only path
-    // (`run_wire_tls_only_server`) and the plaintext branch's explicit
-    // handling above.
+    // RedWire over TLS. A `--wire-tls-bind` is always an explicit request
+    // (there is no implicit/default TLS bind), so per the #545 contract it
+    // fails closed: a TLS config/resolve error (including the gated auto-gen
+    // refusal) or a bind failure is fatal to boot — never a silent degrade to
+    // "healthy HTTP, dead TLS". That silent mode shipped provision loops that
+    // only a downstream TLS probe caught (reddb-io/rio-lair#255). Mirrors the
+    // TLS-only path (`run_wire_tls_only_server`) and the plaintext branch's
+    // explicit handling above.
     if let Some(wire_tls_addr) = config.wire_tls_bind_addr.clone() {
         let tls_cfg = match resolve_wire_tls_config(config) {
             Ok(cfg) => cfg,
             Err(e) => {
+                let reason = format!("redwire TLS config error: {e}");
+                readiness.failed("wire-tls", &wire_tls_addr, true, reason.clone());
                 tracing::error!(
                     transport = "wire-tls",
                     bind = %wire_tls_addr,
                     error = %e,
                     "fatal explicit redwire TLS config error"
                 );
-                return Err(format!("explicit redwire TLS config error: {e}"));
+                return Err(format!("explicit {reason}"));
             }
         };
         // Bind up front so a contested/unbindable port fails the explicit

@@ -497,3 +497,215 @@ fn server_help_documents_first_boot_flags_and_idempotency() {
         "red server --help must connect cert capture to REDDB_CERTIFICATE_FILE.\nhelp:\n{help}"
     );
 }
+
+/// Spawn `red server` like [`spawn_server`], but with extra env vars laid
+/// over the hermetic baseline. Used to reproduce the release Docker
+/// image's baked-in env defaults (e.g. `REDDB_WIRE_BIND_ADDR`).
+fn spawn_server_with_envs(
+    args: &[&str],
+    stderr_path: &Path,
+    envs: &[(&str, &str)],
+) -> ServerChild {
+    let stderr_file = File::create(stderr_path).expect("create stderr file");
+    let mut cmd = Command::new(red_binary());
+    cmd.args(args)
+        .env_remove("REDDB_CERTIFICATE")
+        .env_remove("REDDB_USERNAME")
+        .env_remove("REDDB_PASSWORD")
+        .env_remove("REDDB_USERNAME_FILE")
+        .env_remove("REDDB_PASSWORD_FILE")
+        .env_remove("REDDB_CERTIFICATE_FILE")
+        .env_remove("REDDB_BOOTSTRAP_PRESET")
+        .env_remove("REDDB_PRESET")
+        .env_remove("REDDB_BOOTSTRAP_MANIFEST")
+        .env_remove("REDDB_BOOTSTRAP_CERT_OUT")
+        .env_remove("REDDB_VAULT")
+        .env_remove("REDDB_AUTH")
+        .env_remove("REDDB_REQUIRE_AUTH")
+        .env_remove("REDDB_WIRE_BIND_ADDR");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn red server");
+    ServerChild {
+        child,
+        stderr_path: stderr_path.to_path_buf(),
+    }
+}
+
+/// reddb-io/rio-lair#255 catch-22 regression — a static cloud-init config
+/// points `REDDB_CERTIFICATE_FILE` at the SAME path as
+/// `--bootstrap-cert-out` on EVERY boot. On the very first boot the file
+/// does not exist yet (the bootstrap that mints it hasn't run), so the
+/// `*_FILE` expansion at the top of `main()` must degrade to "no cert
+/// yet" instead of `exit(2)`; the boot then self-bootstraps and writes
+/// the file. On the next boot the file exists and unseals the vault —
+/// one immutable config serves both boots.
+#[test]
+fn first_boot_tolerates_cert_file_env_pointing_at_absent_bootstrap_cert_out() {
+    let dir = support::temp_data_dir("first-boot-cert-catch22");
+    let db_path = dir.join("data.rdb");
+    let db_path_str = db_path.display().to_string();
+    let head_pw = dir.join("head.pw");
+    let customer_pw = dir.join("customer.pw");
+    std::fs::write(&head_pw, "head-secret\n").unwrap();
+    std::fs::write(&customer_pw, "customer-secret\n").unwrap();
+    let head_pw_s = head_pw.to_str().unwrap();
+    let customer_pw_s = customer_pw.to_str().unwrap();
+    let cert_out = dir.join("bootstrap-cert");
+    let cert_out_s = cert_out.to_str().unwrap();
+    let port = free_port();
+    let http_addr = format!("127.0.0.1:{port}");
+
+    assert!(!db_path.exists(), "fresh volume precondition");
+    assert!(
+        !cert_out.exists(),
+        "cert file must not exist on first boot (that IS the catch-22)"
+    );
+
+    let mut args = cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s);
+    args.push("--bootstrap-cert-out");
+    args.push(cert_out_s);
+
+    // ---- First boot: env points at the not-yet-existing file. ----
+    let stderr_path = dir.join("server.stderr");
+    let mut server = spawn_server_with_cert_file(&args, &stderr_path, &cert_out);
+    let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
+    let stderr = server.stderr();
+    assert!(
+        serving,
+        "first boot must serve despite REDDB_CERTIFICATE_FILE pointing at a \
+         not-yet-written --bootstrap-cert-out path.\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("failed to expand REDDB_CERTIFICATE_FILE"),
+        "the *_FILE expansion must not abort on the missing cert file.\nstderr:\n{stderr}"
+    );
+    assert!(
+        wait_for_file(&mut server, &cert_out, Duration::from_secs(10)),
+        "self-bootstrap must write the cert to --bootstrap-cert-out.\nstderr:\n{stderr}"
+    );
+    drop(server); // kill + reap
+
+    // ---- Second boot: SAME config, file now exists → unseal. ----
+    let stderr_path2 = dir.join("server2.stderr");
+    let mut server2 = spawn_server_with_cert_file(&args, &stderr_path2, &cert_out);
+    let serving2 = wait_until_serving(&mut server2, &http_addr, Duration::from_secs(30));
+    let stderr2 = server2.stderr();
+    assert!(
+        serving2,
+        "second boot with the identical static config must unseal and serve.\nstderr:\n{stderr2}"
+    );
+    assert!(
+        !stderr2.contains("no vault certificate"),
+        "second boot must consume the written cert file.\nstderr:\n{stderr2}"
+    );
+}
+
+/// reddb-io/rio-lair#255 port-collision regression — the release Docker
+/// image bakes `REDDB_WIRE_BIND_ADDR=0.0.0.0:5050`, so a container run
+/// with `--wire-tls-bind` on the same port (and no `--wire-bind`) used to
+/// boot an env-derived PLAINTEXT listener that won the port and
+/// non-fatally killed the TLS listener. The explicit TLS flag must own
+/// the port: the plaintext default is suppressed and the TLS listener
+/// comes up.
+#[test]
+fn wire_tls_flag_owns_port_over_env_plaintext_default() {
+    let dir = support::temp_data_dir("wire-tls-owns-port");
+    let db_path = dir.join("data.rdb");
+    let db_path_str = db_path.display().to_string();
+    let head_pw = dir.join("head.pw");
+    let customer_pw = dir.join("customer.pw");
+    std::fs::write(&head_pw, "head-secret\n").unwrap();
+    std::fs::write(&customer_pw, "customer-secret\n").unwrap();
+    let head_pw_s = head_pw.to_str().unwrap();
+    let customer_pw_s = customer_pw.to_str().unwrap();
+    let http_port = free_port();
+    let http_addr = format!("127.0.0.1:{http_port}");
+    let wire_port = free_port();
+    let wire_tls_addr = format!("127.0.0.1:{wire_port}");
+    let env_wire_addr = format!("0.0.0.0:{wire_port}");
+
+    let mut args = cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s);
+    // No --wire-tls-cert/key: the listener auto-generates a self-signed
+    // cert — the collision under test is independent of the material.
+    args.extend_from_slice(&["--wire-tls-bind", &wire_tls_addr]);
+
+    let stderr_path = dir.join("server.stderr");
+    let mut server = spawn_server_with_envs(
+        &args,
+        &stderr_path,
+        &[("REDDB_WIRE_BIND_ADDR", env_wire_addr.as_str())],
+    );
+    let tls_online =
+        wait_for_stderr_contains(&mut server, "redwire+tls", Duration::from_secs(30));
+    let stderr = server.stderr();
+    assert!(
+        tls_online,
+        "the TLS wire listener must come up on the contested port.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("suppressing the plaintext wire listener"),
+        "the env-derived plaintext default must be suppressed with a warning.\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Address already in use"),
+        "no listener may lose the port to a plaintext/TLS collision.\nstderr:\n{stderr}"
+    );
+}
+
+/// reddb-io/rio-lair#255 silent-degradation regression — `--wire-tls-bind`
+/// is always operator-explicit, so per the #545 readiness contract a
+/// failed bind must be FATAL. Before this fix the failure was a
+/// `tracing::error!` inside a spawned task: the server kept serving HTTP
+/// (looking healthy) while the customer-facing TLS port was dead.
+#[test]
+fn explicit_wire_tls_bind_failure_is_fatal() {
+    let dir = support::temp_data_dir("wire-tls-bind-fatal");
+    let db_path = dir.join("data.rdb");
+    let db_path_str = db_path.display().to_string();
+    let head_pw = dir.join("head.pw");
+    let customer_pw = dir.join("customer.pw");
+    std::fs::write(&head_pw, "head-secret\n").unwrap();
+    std::fs::write(&customer_pw, "customer-secret\n").unwrap();
+    let head_pw_s = head_pw.to_str().unwrap();
+    let customer_pw_s = customer_pw.to_str().unwrap();
+    let http_port = free_port();
+    let http_addr = format!("127.0.0.1:{http_port}");
+
+    // Hold the port so the child's TLS bind loses.
+    let blocker = TcpListener::bind("127.0.0.1:0").expect("bind blocker");
+    let wire_tls_addr = blocker.local_addr().expect("blocker addr").to_string();
+    // Add a gRPC bind so dispatch lands in the multi-transport path that
+    // spawns the wire listeners alongside HTTP/gRPC (the production shape).
+    let grpc_port = free_port();
+    let grpc_addr = format!("127.0.0.1:{grpc_port}");
+
+    let mut args = cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s);
+    args.extend_from_slice(&[
+        "--grpc",
+        "--grpc-bind",
+        &grpc_addr,
+        "--wire-tls-bind",
+        &wire_tls_addr,
+    ]);
+
+    let stderr_path = dir.join("server.stderr");
+    let mut server = spawn_server(&args, &stderr_path);
+    let exit = wait_for_exit(&mut server, Duration::from_secs(30));
+    let stderr = server.stderr();
+    assert!(
+        matches!(exit, Some(code) if code != 0),
+        "a lost explicit --wire-tls-bind must exit the boot non-zero, got {exit:?}.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("wire-tls listener bind"),
+        "the fatal error must name the failed wire-tls bind.\nstderr:\n{stderr}"
+    );
+    drop(blocker);
+}
