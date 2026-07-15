@@ -541,6 +541,10 @@ where
                 49u8.hash(hasher);
                 hash.hash(hasher);
             }
+            Value::DecimalText(s) => {
+                55u8.hash(hasher);
+                s.hash(hasher);
+            }
         }
     }
 }
