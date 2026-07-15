@@ -395,6 +395,7 @@ pub fn infer_literal_type(value: &JsonValue) -> DataType {
                 DataType::Float
             }
         }
+        JsonValue::Decimal(_) => DataType::DecimalText,
         JsonValue::String(_) => DataType::Text,
         JsonValue::Array(_) => DataType::Array,
         JsonValue::Object(_) => DataType::Json,
