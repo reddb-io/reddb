@@ -17,7 +17,7 @@ Reusable vocabulary for code, docs, and architecture decisions, sharded by topic
 - **[Data model](context/data-model.md)** — how data is shaped and accessed: query & streams, catalog & discovery, keyed collection models (KV/Config/Vault), events & subscriptions, queue modes, analytics.
 - **[Governance](context/governance.md)** — auth & security, telemetry channels, and compliance/evidence.
 
-> **Shared replication terms** (Topology, TopologyAdvertiser/Consumer, HealthAwareRouter, any-node routing, routing hints, misrouted handling, topology refresh, commit policy, logical replication stream/applier) are **intentionally duplicated** in both [Primary-replica](context/primary-replica.md) and [Clustering](context/clustering.md). When one changes, update both.
+> **Shared replication terms** (Topology, TopologyAdvertiser/Consumer, HealthAwareRouter, signal plane, any-node routing, routing hints, misrouted handling, topology refresh, cooperative lease handoff, failover profile, spread rule, commit policy, logical replication stream/applier) are **intentionally duplicated** in both [Primary-replica](context/primary-replica.md) and [Clustering](context/clustering.md). When one changes, update both.
 
 ## Storage/deploy profile
 
