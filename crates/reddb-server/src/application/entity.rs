@@ -347,6 +347,7 @@ pub(crate) fn json_to_storage_value(value: &JsonValue) -> RedDBResult<Value> {
                 Ok(Value::Float(*value))
             }
         }
+        JsonValue::Decimal(text) => Ok(Value::DecimalText(text.clone())),
         JsonValue::String(value) => Ok(Value::text(value.clone())),
         JsonValue::Array(_) | JsonValue::Object(_) => json_to_vec(value)
             .map(Value::Json)
@@ -366,6 +367,7 @@ pub(crate) fn json_to_metadata_value(value: &JsonValue) -> RedDBResult<MetadataV
                 Ok(MetadataValue::Float(*value))
             }
         }
+        JsonValue::Decimal(value) => Ok(MetadataValue::String(value.clone())),
         JsonValue::String(value) => Ok(MetadataValue::String(value.clone())),
         JsonValue::Array(values) => {
             let mut items = Vec::with_capacity(values.len());
@@ -695,6 +697,7 @@ fn metadata_value_from_json(value: &JsonValue) -> RedDBResult<MetadataValue> {
                 Ok(MetadataValue::Float(*value))
             }
         }
+        JsonValue::Decimal(value) => Ok(MetadataValue::String(value.clone())),
         JsonValue::String(value) => Ok(MetadataValue::String(value.clone())),
         JsonValue::Array(values) => {
             let mut out = Vec::with_capacity(values.len());
