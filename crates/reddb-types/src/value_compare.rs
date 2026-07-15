@@ -16,6 +16,61 @@ fn value_type_tag(v: &Value) -> u8 {
     registry_type_tag(v)
 }
 
+/// Compare two decimal numbers held as exact text, honouring numeric order
+/// without parsing into a lossy `f64`. Handles a leading sign, an optional
+/// fractional part, and differing digit counts by right-padding the shorter
+/// fractional part with zeros.
+fn compare_decimal_str(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_neg = a.starts_with('-');
+    let b_neg = b.starts_with('-');
+    let a_abs = if a_neg { &a[1..] } else { a };
+    let b_abs = if b_neg { &b[1..] } else { b };
+
+    if a_neg != b_neg {
+        return if a_neg {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        };
+    }
+
+    // Split at decimal point
+    let (a_int, a_frac) = a_abs.split_once('.').unwrap_or((a_abs, ""));
+    let (b_int, b_frac) = b_abs.split_once('.').unwrap_or((b_abs, ""));
+
+    // Strip leading zeros from integer parts for length comparison
+    let a_int_trim = a_int.trim_start_matches('0');
+    let b_int_trim = b_int.trim_start_matches('0');
+
+    let int_order = match a_int_trim.len().cmp(&b_int_trim.len()) {
+        std::cmp::Ordering::Equal => a_int_trim.cmp(b_int_trim),
+        other => other,
+    };
+
+    let abs_order = if int_order != std::cmp::Ordering::Equal {
+        int_order
+    } else {
+        // Compare fractional parts character by character (zero-padded on right)
+        let max_len = a_frac.len().max(b_frac.len());
+        let mut ord = std::cmp::Ordering::Equal;
+        for i in 0..max_len {
+            let ac = a_frac.as_bytes().get(i).copied().unwrap_or(b'0');
+            let bc = b_frac.as_bytes().get(i).copied().unwrap_or(b'0');
+            ord = ac.cmp(&bc);
+            if ord != std::cmp::Ordering::Equal {
+                break;
+            }
+        }
+        ord
+    };
+
+    if a_neg {
+        abs_order.reverse()
+    } else {
+        abs_order
+    }
+}
+
 pub fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
         (Value::Null, Value::Null) => Some(Ordering::Equal),
@@ -34,6 +89,9 @@ pub fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Float(a), Value::UnsignedInteger(b)) => a.partial_cmp(&(*b as f64)),
         (Value::Integer(a), Value::UnsignedInteger(b)) => Some((*a as i128).cmp(&(*b as i128))),
         (Value::UnsignedInteger(a), Value::Integer(b)) => Some((*a as i128).cmp(&(*b as i128))),
+        (Value::DecimalText(a), Value::DecimalText(b)) => Some(compare_decimal_str(a, b)),
+        (Value::DecimalText(a), Value::Integer(b)) => Some(compare_decimal_str(a, &b.to_string())),
+        (Value::Integer(a), Value::DecimalText(b)) => Some(compare_decimal_str(&a.to_string(), b)),
         _ => None,
     }
 }
@@ -141,6 +199,39 @@ mod tests {
         for (left, right, expected) in pairs {
             assert_eq!(partial_compare_values(&left, &right), Some(expected));
         }
+    }
+
+    #[test]
+    fn decimal_text_comparison_honors_numeric_order() {
+        let cases = [
+            ("1", "2", Ordering::Less),
+            ("10", "9", Ordering::Greater),
+            ("-5", "3", Ordering::Less),
+            ("3.14", "3.15", Ordering::Less),
+            ("3.14159265358979323846", "3.14159265358979323847", Ordering::Less),
+            ("18446744073709551616", "18446744073709551617", Ordering::Less),
+            ("-100", "-99", Ordering::Less),
+            ("0", "0", Ordering::Equal),
+        ];
+        for (a, b, expected) in cases {
+            let result = partial_compare_values(
+                &Value::DecimalText(a.to_string()),
+                &Value::DecimalText(b.to_string()),
+            );
+            assert_eq!(result, Some(expected), "comparing {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn decimal_text_vs_integer_cross_type_comparison() {
+        assert_eq!(
+            partial_compare_values(&Value::DecimalText("100".to_string()), &Value::Integer(99)),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            partial_compare_values(&Value::Integer(50), &Value::DecimalText("100".to_string())),
+            Some(Ordering::Less)
+        );
     }
 
     #[test]
