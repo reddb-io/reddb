@@ -223,17 +223,18 @@ fn vault_single_user_fits_in_header_page() {
     let (_dir, db_path) = scratch_path("single");
     let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
     let vault = Vault::with_certificate(&pager, TEST_CERTIFICATE).unwrap();
+    let pages_before = pager.page_count().unwrap();
 
     let state = synth_state(1);
     vault.save(&pager, &state).unwrap();
 
     let pages_after = pager.page_count().unwrap();
-    // We had to bump page_count up to 3 to reserve the header slot;
-    // we don't allocate any data pages for a one-user payload, so
-    // page_count should sit at exactly 3.
+    // The pager may reserve fixed in-file zones before user pages.
+    // The vault invariant is that this payload fits in its header page
+    // and therefore does not allocate any additional chain pages.
     assert_eq!(
-        pages_after, 3,
-        "one-user vault should not allocate any data pages; got page_count={pages_after}"
+        pages_after, pages_before,
+        "one-user vault should not allocate any data pages; before={pages_before}, after={pages_after}"
     );
 
     let loaded = vault.load(&pager).unwrap().unwrap();
