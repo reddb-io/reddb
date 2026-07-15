@@ -46,6 +46,33 @@ fn mark_table_scan_as_geo_h3_index_seek(
     false
 }
 
+fn wrap_plan_as_hypertable_chunk_prune(
+    node: &mut crate::storage::query::planner::CanonicalLogicalNode,
+    table: &str,
+    total_chunks: usize,
+    kept_chunks: usize,
+) {
+    let child = std::mem::take(node);
+    let mut details = std::collections::BTreeMap::new();
+    details.insert("table".to_string(), table.to_string());
+    details.insert("chunks_total".to_string(), total_chunks.to_string());
+    details.insert("chunks_kept".to_string(), kept_chunks.to_string());
+    details.insert(
+        "reason".to_string(),
+        "hypertable time predicate prunes chunk scan bounds".to_string(),
+    );
+    *node = crate::storage::query::planner::CanonicalLogicalNode {
+        operator: "hypertable_chunk_prune".to_string(),
+        source: Some(table.to_string()),
+        details,
+        estimated_rows: child.estimated_rows,
+        estimated_selectivity: child.estimated_selectivity,
+        estimated_confidence: child.estimated_confidence,
+        operator_cost: child.operator_cost,
+        children: vec![child],
+    };
+}
+
 fn explain_literal_f64(expr: &Expr) -> Option<f64> {
     match expr {
         Expr::Literal {
@@ -164,20 +191,39 @@ impl RedDBRuntime {
         if table.filter.is_none() && table.where_expr.is_none() {
             return;
         }
+        let chunk_prune = self.table_filter_has_hypertable_chunk_prune(table);
         if self.table_filter_has_geo_h3_route(table) {
             mark_table_scan_as_geo_h3_index_seek(node);
-            return;
-        }
-        let Some(index) = self
+        } else if let Some(index) = self
             .inner
             .index_store
             .list_indices(&table.table)
             .into_iter()
             .next()
-        else {
-            return;
-        };
-        mark_table_scan_as_index_seek(node, &index.name);
+        {
+            mark_table_scan_as_index_seek(node, &index.name);
+        }
+        if let Some((total_chunks, kept_chunks)) = chunk_prune {
+            wrap_plan_as_hypertable_chunk_prune(node, &table.table, total_chunks, kept_chunks);
+        }
+    }
+
+    fn table_filter_has_hypertable_chunk_prune(
+        &self,
+        table: &TableQuery,
+    ) -> Option<(usize, usize)> {
+        let spec = self.inner.db.hypertables().get(&table.table)?;
+        let chunks = self.inner.db.hypertables().show_chunks(&table.table);
+        if chunks.is_empty() {
+            return None;
+        }
+        let filter = crate::storage::query::sql_lowering::effective_table_filter(table);
+        let kept = crate::storage::query::planner::hypertable_pruning::prune_hypertable_chunks(
+            &spec,
+            &chunks,
+            filter.as_ref(),
+        );
+        (kept.len() < chunks.len()).then_some((chunks.len(), kept.len()))
     }
 
     fn table_filter_has_geo_h3_route(&self, table: &TableQuery) -> bool {
