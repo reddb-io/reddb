@@ -57,6 +57,7 @@ pub enum CanonicalKeyFamily {
     TableRef,
     PageRef,
     Password,
+    DecimalText,
 }
 
 /// Canonical multi-type key used by ordered in-memory indexes.
@@ -134,6 +135,7 @@ impl CanonicalKey {
             Self::Text(CanonicalKeyFamily::Url, v) => Value::Url(v.to_string()),
             Self::Text(CanonicalKeyFamily::TableRef, v) => Value::TableRef(v.to_string()),
             Self::Text(CanonicalKeyFamily::Password, v) => Value::Password(v.to_string()),
+            Self::Text(CanonicalKeyFamily::DecimalText, v) => Value::DecimalText(v.to_string()),
             Self::Bytes(CanonicalKeyFamily::Blob, v) => Value::Blob(v),
             Self::Bytes(CanonicalKeyFamily::MacAddr, v) => {
                 let mut out = [0u8; 6];
@@ -399,6 +401,10 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
         Value::Secret(_) => None,
         Value::Password(v) => Some(CanonicalKey::Text(
             CanonicalKeyFamily::Password,
+            Arc::from(v.as_str()),
+        )),
+        Value::DecimalText(v) => Some(CanonicalKey::Text(
+            CanonicalKeyFamily::DecimalText,
             Arc::from(v.as_str()),
         )),
     }
