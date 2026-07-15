@@ -65,8 +65,8 @@ shapes:
 Decision rules:
 
 - **Does the row have a dominant time axis and you need downsampling /
-  retention / `time_bucket`?** → Time-series. Chunks, codecs (Delta +
-  XOR), temporal index are all tuned for it.
+  retention / `time_bucket`?** → Time-series. Chunks and codecs
+  (Delta + XOR) are tuned for it.
 - **Are the records arbitrary-shape text / JSON with no schema and
   you need sub-millisecond append rate?** → Log Collections. The HTTP
   surface `/logs/{name}/append` skips validation entirely.
