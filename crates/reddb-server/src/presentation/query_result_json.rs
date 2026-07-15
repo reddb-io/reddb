@@ -322,6 +322,7 @@ fn coarse_type_for(value: &StorageValue) -> &'static str {
         | StorageValue::UnsignedInteger(_)
         | StorageValue::Float(_)
         | StorageValue::Decimal(_)
+        | StorageValue::DecimalText(_)
         | StorageValue::BigInt(_)
         | StorageValue::Port(_)
         | StorageValue::Latitude(_)
