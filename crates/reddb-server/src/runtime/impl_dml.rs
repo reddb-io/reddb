@@ -1222,6 +1222,21 @@ impl RedDBRuntime {
             tags.entry("payload".to_string())
                 .or_insert_with(|| payload.clone());
         }
+        let fields = extract_remaining_properties(
+            &columns,
+            &values,
+            &[
+                "metric",
+                "value",
+                "tags",
+                "timestamp",
+                "timestamp_ns",
+                "time",
+                "event_name",
+                "payload",
+            ],
+        );
+        let index_fields = fields.clone();
         let series_id = super::impl_timeseries::intern_timeseries_series(
             self.inner.db.store().as_ref(),
             collection,
@@ -1241,6 +1256,7 @@ impl RedDBRuntime {
                 timestamp_ns,
                 value,
                 tags: HashMap::new(),
+                fields: fields.into_iter().collect(),
             }),
         );
         // MVCC #30: stamp xmin with the active tx xid (inside a tx)
@@ -1261,6 +1277,10 @@ impl RedDBRuntime {
         let id = store
             .insert_auto(collection, entity)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner
+            .index_store
+            .index_entity_insert(collection, id, &index_fields)
+            .map_err(RedDBError::Internal)?;
 
         if !metadata.is_empty() {
             let _ = store.set_metadata(
