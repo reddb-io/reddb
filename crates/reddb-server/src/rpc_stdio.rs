@@ -1526,6 +1526,7 @@ pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
                 SchemaValue::Float(*n)
             }
         }
+        Value::Decimal(s) => SchemaValue::DecimalText(s.clone()),
         Value::String(s) => SchemaValue::text(s.clone()),
         Value::Array(items) => {
             // A JSON array of numbers (or empty) is taken as `Vector`
