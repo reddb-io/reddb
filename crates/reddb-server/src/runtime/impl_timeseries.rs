@@ -1,12 +1,13 @@
 //! Time-series DDL execution
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::*;
 
 const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
 const TIMESERIES_SERIES_COLLECTION: &str = "red_timeseries_series";
+const TIMESERIES_TAG_INDEX_COLLECTION: &str = "red_timeseries_tag_index";
 const DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS: u64 = 86_400_000_000_000;
 const TIMESERIES_MAX_SERIES_GLOBAL_CONFIG: &str = "storage.time_series.max_series_per_collection";
 const DEFAULT_TIMESERIES_MAX_SERIES_PER_COLLECTION: usize = 1_000_000;
@@ -201,6 +202,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         remove_timeseries_metadata(store.as_ref(), &query.name);
         remove_timeseries_series_dictionary(store.as_ref(), &query.name);
+        remove_timeseries_tag_index(store.as_ref(), &query.name);
         self.invalidate_result_cache();
         self.inner
             .db
@@ -603,7 +605,258 @@ pub(crate) fn intern_timeseries_series(
         )
         .map_err(|err| RedDBError::Internal(err.to_string()))?;
 
+    maintain_timeseries_tag_index(store, collection, series_id, tags)?;
+
     Ok(series_id)
+}
+
+pub(crate) fn timeseries_tag_index_series_candidates(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+    filter: &Filter,
+) -> Option<HashSet<u64>> {
+    match filter {
+        Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
+            let tag_key = timeseries_tag_field(field)?;
+            let tag_values = value_to_tag_index_texts(value)?;
+            lookup_timeseries_tag_index(store, collection, tag_key, &tag_values)
+        }
+        Filter::In { field, values } => {
+            let tag_key = timeseries_tag_field(field)?;
+            let tag_values = values
+                .iter()
+                .map(value_to_tag_index_texts)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            lookup_timeseries_tag_index(store, collection, tag_key, &tag_values)
+        }
+        Filter::And(left, right) => {
+            match (
+                timeseries_tag_index_series_candidates(store, collection, left),
+                timeseries_tag_index_series_candidates(store, collection, right),
+            ) {
+                (Some(left), Some(right)) => {
+                    Some(left.intersection(&right).copied().collect::<HashSet<_>>())
+                }
+                (Some(candidates), None) | (None, Some(candidates)) => Some(candidates),
+                (None, None) => None,
+            }
+        }
+        Filter::Or(left, right) => {
+            let mut left = timeseries_tag_index_series_candidates(store, collection, left)?;
+            let right = timeseries_tag_index_series_candidates(store, collection, right)?;
+            left.extend(right);
+            Some(left)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn strip_indexed_timeseries_tag_filter(filter: &Filter) -> Option<Filter> {
+    match filter {
+        Filter::Compare { field, op, value }
+            if *op == CompareOp::Eq
+                && timeseries_tag_field(field).is_some()
+                && value_to_tag_index_texts(value).is_some() =>
+        {
+            None
+        }
+        Filter::In { field, values }
+            if timeseries_tag_field(field).is_some()
+                && values
+                    .iter()
+                    .all(|value| value_to_tag_index_texts(value).is_some()) =>
+        {
+            None
+        }
+        Filter::And(left, right) => match (
+            strip_indexed_timeseries_tag_filter(left),
+            strip_indexed_timeseries_tag_filter(right),
+        ) {
+            (Some(left), Some(right)) => Some(Filter::And(Box::new(left), Box::new(right))),
+            (Some(filter), None) | (None, Some(filter)) => Some(filter),
+            (None, None) => None,
+        },
+        _ => Some(filter.clone()),
+    }
+}
+
+fn maintain_timeseries_tag_index(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+    series_id: u64,
+    tags: &HashMap<String, String>,
+) -> RedDBResult<()> {
+    let _ = store.get_or_create_collection(TIMESERIES_TAG_INDEX_COLLECTION);
+    let manager = store
+        .get_collection(TIMESERIES_TAG_INDEX_COLLECTION)
+        .ok_or_else(|| RedDBError::Internal("timeseries tag index missing".to_string()))?;
+
+    for (tag_key, tag_value) in tags {
+        let existing = manager
+            .query_all(|entity| tag_index_row_matches(entity, collection, tag_key, tag_value))
+            .into_iter()
+            .next();
+
+        if let Some(mut entity) = existing {
+            let EntityData::Row(row) = &mut entity.data else {
+                continue;
+            };
+            let mut ids = row
+                .get_field("series_ids")
+                .map(series_ids_from_value)
+                .unwrap_or_default();
+            if !ids.contains(&series_id) {
+                ids.push(series_id);
+                ids.sort_unstable();
+                set_row_field(row, "series_ids", series_ids_value(&ids));
+                manager
+                    .update(entity)
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            }
+            continue;
+        }
+
+        let mut fields = HashMap::new();
+        fields.insert(
+            "collection".to_string(),
+            Value::text(collection.to_string()),
+        );
+        fields.insert("tag_key".to_string(), Value::text(tag_key.clone()));
+        fields.insert("tag_value".to_string(), Value::text(tag_value.clone()));
+        fields.insert("series_ids".to_string(), series_ids_value(&[series_id]));
+
+        store
+            .insert_auto(
+                TIMESERIES_TAG_INDEX_COLLECTION,
+                UnifiedEntity::new(
+                    EntityId::new(0),
+                    EntityKind::TableRow {
+                        table: Arc::from(TIMESERIES_TAG_INDEX_COLLECTION),
+                        row_id: 0,
+                    },
+                    EntityData::Row(crate::storage::RowData {
+                        columns: Vec::new(),
+                        named: Some(fields),
+                        schema: None,
+                    }),
+                ),
+            )
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    }
+
+    Ok(())
+}
+
+fn lookup_timeseries_tag_index(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+    tag_key: &str,
+    tag_values: &[String],
+) -> Option<HashSet<u64>> {
+    let Some(manager) = store.get_collection(TIMESERIES_TAG_INDEX_COLLECTION) else {
+        return None;
+    };
+    let wanted = tag_values
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let rows = manager.query_all(|entity| {
+        entity.data.as_row().is_some_and(|row| {
+            row_text(row, "collection").is_some_and(|value| value == collection)
+                && row_text(row, "tag_key").is_some_and(|value| value == tag_key)
+                && row_text(row, "tag_value").is_some_and(|value| wanted.contains(value))
+        })
+    });
+
+    Some(
+        rows.iter()
+            .filter_map(|entity| entity.data.as_row())
+            .flat_map(|row| {
+                row.get_field("series_ids")
+                    .map(series_ids_from_value)
+                    .unwrap_or_default()
+            })
+            .collect(),
+    )
+}
+
+fn timeseries_tag_field(field: &FieldRef) -> Option<&str> {
+    match field {
+        FieldRef::TableColumn { table, column } if table == "tags" && !column.is_empty() => {
+            Some(column.as_str())
+        }
+        FieldRef::TableColumn { column, .. } => {
+            column.strip_prefix("tags.").filter(|key| !key.is_empty())
+        }
+        _ => None,
+    }
+}
+
+fn value_to_tag_index_texts(value: &Value) -> Option<Vec<String>> {
+    match value {
+        Value::Text(value) => {
+            let raw = value.to_string();
+            let encoded = encoded_json_tag_probe(&raw);
+            if encoded == raw {
+                Some(vec![raw])
+            } else {
+                Some(vec![raw, encoded])
+            }
+        }
+        _ => None,
+    }
+}
+
+fn encoded_json_tag_probe(value: &str) -> String {
+    let mut encoded = String::new();
+    encoded.push(crate::runtime::query_exec::TIMESERIES_TAG_JSON_PREFIX);
+    encoded.push_str(&crate::json::Value::String(value.to_string()).to_string_compact());
+    encoded
+}
+
+fn tag_index_row_matches(
+    entity: &UnifiedEntity,
+    collection: &str,
+    tag_key: &str,
+    tag_value: &str,
+) -> bool {
+    entity.data.as_row().is_some_and(|row| {
+        row_text(row, "collection").is_some_and(|value| value == collection)
+            && row_text(row, "tag_key").is_some_and(|value| value == tag_key)
+            && row_text(row, "tag_value").is_some_and(|value| value == tag_value)
+    })
+}
+
+fn series_ids_value(ids: &[u64]) -> Value {
+    Value::Array(
+        ids.iter()
+            .copied()
+            .map(Value::UnsignedInteger)
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn series_ids_from_value(value: &Value) -> Vec<u64> {
+    let Value::Array(values) = value else {
+        return Vec::new();
+    };
+    values
+        .iter()
+        .filter_map(|value| match value {
+            Value::UnsignedInteger(value) => Some(*value),
+            Value::Integer(value) if *value >= 0 => Some(*value as u64),
+            _ => None,
+        })
+        .collect()
+}
+
+fn set_row_field(row: &mut crate::storage::RowData, name: &str, value: Value) {
+    if let Some(named) = &mut row.named {
+        named.insert(name.to_string(), value);
+    }
 }
 
 pub(crate) fn hydrate_timeseries_entity(
@@ -883,6 +1136,22 @@ fn remove_timeseries_series_dictionary(
     });
     for row in rows {
         let _ = store.delete(TIMESERIES_SERIES_COLLECTION, row.id);
+    }
+}
+
+fn remove_timeseries_tag_index(store: &crate::storage::unified::UnifiedStore, collection: &str) {
+    let Some(manager) = store.get_collection(TIMESERIES_TAG_INDEX_COLLECTION) else {
+        return;
+    };
+    let rows = manager.query_all(|entity| {
+        entity.data.as_row().is_some_and(|row| {
+            row.get_field("collection").is_some_and(
+                |value| matches!(value, Value::Text(candidate) if &**candidate == collection),
+            )
+        })
+    });
+    for row in rows {
+        let _ = store.delete(TIMESERIES_TAG_INDEX_COLLECTION, row.id);
     }
 }
 
