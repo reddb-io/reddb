@@ -681,6 +681,7 @@ fn value_kind(value: &Value) -> &'static str {
         Value::PageRef(_) => "PageRef",
         Value::Secret(_) => "Secret",
         Value::Password(_) => "Password",
+        Value::DecimalText(_) => "DecimalText",
     }
 }
 
