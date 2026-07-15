@@ -438,12 +438,27 @@ impl UnifiedStore {
                 } else {
                     None
                 };
+                let fields = if format_version >= STORE_VERSION_V12 {
+                    let field_count = Self::read_varu32_safe(buf, pos)?;
+                    let mut fields = HashMap::with_capacity(field_count);
+                    for _ in 0..field_count {
+                        let key_len = Self::read_varu32_safe(buf, pos)?;
+                        let key = String::from_utf8(buf[*pos..*pos + key_len].to_vec())?;
+                        *pos += key_len;
+                        let value = Self::read_value_binary(buf, pos)?;
+                        fields.insert(key, value);
+                    }
+                    fields
+                } else {
+                    HashMap::new()
+                };
                 EntityData::TimeSeries(crate::storage::unified::entity::TimeSeriesData {
                     metric,
                     series_id,
                     timestamp_ns,
                     value: f64::from_le_bytes(value_bytes),
                     tags,
+                    fields,
                 })
             }
             5 => {
@@ -762,6 +777,16 @@ impl UnifiedStore {
                         buf.extend_from_slice(key.as_bytes());
                         write_varu32(buf, value.len() as u32);
                         buf.extend_from_slice(value.as_bytes());
+                    }
+                }
+                if format_version >= STORE_VERSION_V12 {
+                    write_varu32(buf, ts.fields.len() as u32);
+                    let mut field_entries: Vec<_> = ts.fields.iter().collect();
+                    field_entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                    for (key, value) in field_entries {
+                        write_varu32(buf, key.len() as u32);
+                        buf.extend_from_slice(key.as_bytes());
+                        Self::write_value_binary(buf, value);
                     }
                 }
             }
@@ -1658,6 +1683,7 @@ mod aux_metadata_dump_tests {
                         timestamp_ns,
                         value: 94.8,
                         tags: tags.clone(),
+                        fields: HashMap::new(),
                     }),
                 );
                 UnifiedStore::serialize_entity_record(&entity, None, reddb_file::STORE_VERSION_V10)
@@ -1711,6 +1737,7 @@ mod aux_metadata_dump_tests {
                             timestamp_ns,
                             value: 94.8,
                             tags: HashMap::new(),
+                            fields: HashMap::new(),
                         }),
                     );
                     UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11).len()
