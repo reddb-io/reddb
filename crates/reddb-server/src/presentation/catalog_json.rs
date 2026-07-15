@@ -1625,6 +1625,7 @@ fn schema_data_type_str(data_type: crate::storage::schema::DataType) -> &'static
         crate::storage::schema::DataType::PageRef => "pageref",
         crate::storage::schema::DataType::Secret => "secret",
         crate::storage::schema::DataType::Password => "password",
+        crate::storage::schema::DataType::DecimalText => "decimal_text",
         crate::storage::schema::DataType::TextZstd => "text",
         crate::storage::schema::DataType::BlobZstd => "blob",
     }
