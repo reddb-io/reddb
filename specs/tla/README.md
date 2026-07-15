@@ -18,6 +18,7 @@ Jepsen-style cluster harness.
 | [`ReplicationSafetyEnvelope.tla`](ReplicationSafetyEnvelope.tla) | Single-writer fencing, election safety, partition behavior, and crash/recovery durability in one bounded model. | ADR 0030 / ADR 0032; writer fencing, quorum commit, crash/restart recovery. |
 | [`SafeReconfig.tla`](SafeReconfig.tla) | Every membership change preserves quorum overlap (old and new quorums intersect). | ADR 0030 membership rules; Raft single-server change. |
 | [`CommitProtocol.tla`](CommitProtocol.tla) | Optimistic MVCC commit safety: no lost update under FCW, stable snapshot reads, and SSI-admitted histories are serializable. | ADR 0065 TM v2; `SnapshotManager::begin` / `snapshot` / `commit`; `visibility::is_visible`; SQL table-row commit conflict checks; `TxnContext` savepoint sub-xids. |
+| [`OwnershipTransition.tla`](OwnershipTransition.tla) | Range ownership transitions preserve one accepting owner per range epoch and never lose writes acknowledged at/below the commit watermark. | ADR 0037 shard/range ownership catalog; ADR 0064 Placement Authority and Range Owner; ownership admission gate (#1836); ownership-transition safety (#1838). |
 
 ## How the models mirror the implementation
 
@@ -54,6 +55,16 @@ Jepsen-style cluster harness.
   `AbortSSI` rejects a commit that would create a dangerous structure. The
   serializability invariant compares every all-SSI admitted history against a
   serial-execution oracle on the same bounded rows.
+* **Ownership transition** — the shard/range ownership catalog is the authority
+  for `(range, owner, epoch)`, while the local lease/admission gate must match
+  that catalog epoch before a durable write is accepted. Normal promotion creates
+  the first owner, cooperative handoff and crash failover promote only candidates
+  that cover the commit watermark, and forced transitions use the same epoch bump
+  and watermark coverage rule while recording audit evidence. Recovery may
+  truncate divergent suffixes but cannot discard an acknowledged entry already
+  present on that node. The checked invariants assert that only one node ever
+  accepts durable writes for a range epoch and that the current owner always
+  retains every write acknowledged at or below the range commit watermark.
 
 ## Commit protocol non-vacuity
 
@@ -85,7 +96,8 @@ Needs a JDK (17+) and `tla2tools.jar` (pinned to `v1.8.0` in CI):
 curl -fsSL -o tla2tools.jar \
   https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
 
-# Check one module (repeat for Durability, SafeReconfig, CommitProtocol):
+# Check one module (repeat for Durability, SafeReconfig, CommitProtocol,
+# OwnershipTransition):
 java -XX:+UseParallelGC -cp tla2tools.jar tlc2.TLC \
   -deadlock -config ElectionSafety.cfg ElectionSafety.tla
 ```
