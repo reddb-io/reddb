@@ -402,6 +402,7 @@ fn keyed_value_literal(value: &JsonValue) -> Result<String, HttpResponse> {
         JsonValue::String(value) => Ok(format!("'{}'", value.replace('\'', "''"))),
         JsonValue::Integer(value) => Ok(value.to_string()),
         JsonValue::Number(value) => Ok(value.to_string()),
+        JsonValue::Decimal(value) => Ok(value.clone()),
         JsonValue::Bool(value) => Ok(value.to_string()),
         JsonValue::Null => Ok("NULL".to_string()),
         JsonValue::Array(_) | JsonValue::Object(_) => crate::json::to_string(value)
