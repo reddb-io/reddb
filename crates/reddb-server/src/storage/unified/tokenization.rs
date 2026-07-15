@@ -93,6 +93,10 @@ pub fn push_json_tokens(tokens: &mut BTreeSet<String>, bytes: &[u8]) {
                 push_text_tokens(tokens, &v.to_string(), false);
                 *budget = budget.saturating_sub(1);
             }
+            crate::serde_json::Value::Decimal(v) => {
+                push_text_tokens(tokens, v, false);
+                *budget = budget.saturating_sub(1);
+            }
             crate::serde_json::Value::String(v) => {
                 push_text_tokens(tokens, v, true);
                 *budget = budget.saturating_sub(1);
