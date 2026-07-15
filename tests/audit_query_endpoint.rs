@@ -9,17 +9,28 @@ mod support;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
 use reddb::runtime::audit_log::{AuditAuthSource, AuditEvent, Outcome};
 use reddb::server::RedDBServer;
-use reddb::{RedDBOptions, RedDBRuntime};
+use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+
+static AUDIT_ENDPOINT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn audit_endpoint_test_lock() -> MutexGuard<'static, ()> {
+    AUDIT_ENDPOINT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Unique per-test data path so the audit logger doesn't share
 /// `<tmp>/.audit.log` across parallel tests.
 fn isolated_runtime(dir: &support::TempDataDir) -> RedDBRuntime {
-    let opts = RedDBOptions::in_memory().with_data_path(dir.join("data.rdb"));
+    let opts = RedDBOptions::persistent(dir.join("data.rdb"))
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+        .expect("primary-replica-dev profile should validate");
     RedDBRuntime::with_options(opts).expect("runtime")
 }
 
@@ -97,6 +108,7 @@ fn seed_events(rt: &RedDBRuntime) {
 
 #[test]
 fn query_by_principal_returns_only_alice_events() {
+    let _guard = audit_endpoint_test_lock();
     let dir = support::temp_data_dir("audit-endpoint-principal");
     let rt = isolated_runtime(&dir);
     seed_events(&rt);
@@ -111,6 +123,7 @@ fn query_by_principal_returns_only_alice_events() {
 
 #[test]
 fn query_by_action_prefix_filters_correctly() {
+    let _guard = audit_endpoint_test_lock();
     let dir = support::temp_data_dir("audit-endpoint-action");
     let rt = isolated_runtime(&dir);
     seed_events(&rt);
@@ -126,6 +139,7 @@ fn query_by_action_prefix_filters_correctly() {
 
 #[test]
 fn query_by_outcome_denied_returns_eve_only() {
+    let _guard = audit_endpoint_test_lock();
     let dir = support::temp_data_dir("audit-endpoint-outcome");
     let rt = isolated_runtime(&dir);
     seed_events(&rt);
@@ -139,6 +153,7 @@ fn query_by_outcome_denied_returns_eve_only() {
 
 #[test]
 fn query_jsonl_format_returns_ndjson() {
+    let _guard = audit_endpoint_test_lock();
     let dir = support::temp_data_dir("audit-endpoint-jsonl");
     let rt = isolated_runtime(&dir);
     seed_events(&rt);
@@ -157,6 +172,7 @@ fn query_jsonl_format_returns_ndjson() {
 
 #[test]
 fn invalid_outcome_returns_400() {
+    let _guard = audit_endpoint_test_lock();
     let dir = support::temp_data_dir("audit-endpoint-400");
     let rt = isolated_runtime(&dir);
     seed_events(&rt);
