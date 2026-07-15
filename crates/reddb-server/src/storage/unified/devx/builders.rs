@@ -800,6 +800,7 @@ fn json_value_to_storage_value(value: &JsonValue) -> Value {
                 Value::Float(*n)
             }
         }
+        JsonValue::Decimal(n) => Value::DecimalText(n.clone()),
         JsonValue::String(s) => Value::text(s.clone()),
         JsonValue::Array(_) | JsonValue::Object(_) => match json_to_vec(value) {
             Ok(bytes) => Value::Json(bytes),
