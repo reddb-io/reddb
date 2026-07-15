@@ -73,8 +73,9 @@ pub use ai_model_cache::{
     AI_MODEL_CACHE_STAGING_DIR_NAME,
 };
 pub use append_only_segment::{
-    append_only_segment_chunk_checksums, decode_append_only_segment, encode_append_only_segment,
-    AppendOnlySegment, AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec,
+    append_only_segment_chunk_checksums, append_only_segment_primary_bloom_might_contain,
+    decode_append_only_segment, encode_append_only_segment, AppendOnlySegment,
+    AppendOnlySegmentBloom, AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec,
     AppendOnlySegmentRow, APPEND_ONLY_SEGMENT_CHUNK_BYTES, APPEND_ONLY_SEGMENT_VERSION,
 };
 pub use audit_log::{rotate_audit_log, AuditLogRotation};
