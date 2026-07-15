@@ -670,5 +670,6 @@ fn approximate_value_size(value: &Value) -> usize {
         Value::BigInt(_) => 8,
         Value::KeyRef(collection, key) => collection.len() + key.len(),
         Value::IpAddr(_) => 16,
+        Value::DecimalText(s) => s.len(),
     }
 }
