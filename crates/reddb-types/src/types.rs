@@ -313,6 +313,8 @@ pub enum DataType {
     AssetCode = 53,
     /// Monetary amount represented as minor units + scale + asset code
     Money = 54,
+    /// Beyond-native-range numeric stored as exact decimal text
+    DecimalText = 55,
 }
 
 /// Type categories used by the Fase 3 coercion resolver. Mirrors
@@ -385,7 +387,8 @@ impl DataType {
             | DataType::BigInt
             | DataType::Port
             | DataType::Latitude
-            | DataType::Longitude => TypeCategory::Numeric,
+            | DataType::Longitude
+            | DataType::DecimalText => TypeCategory::Numeric,
             DataType::Text | DataType::Blob => TypeCategory::String,
             DataType::Boolean => TypeCategory::Boolean,
             DataType::Timestamp | DataType::TimestampMs | DataType::Date | DataType::Time => {
@@ -524,6 +527,7 @@ impl DataType {
             52 => Some(DataType::BlobZstd),
             53 => Some(DataType::AssetCode),
             54 => Some(DataType::Money),
+            55 => Some(DataType::DecimalText),
             _ => None,
         }
     }
@@ -650,6 +654,7 @@ impl DataType {
             DataType::BigInt => Some(8),      // i64
             DataType::AssetCode => None,      // variable-length normalized code
             DataType::Money => None,          // variable-length asset + scale + i64
+            DataType::DecimalText => None,    // variable-length exact decimal text
             DataType::KeyRef => None,         // variable-length (collection + key)
             DataType::DocRef => None,         // variable-length (collection + u64)
             DataType::TableRef => None,       // variable-length (table name)
@@ -702,6 +707,7 @@ impl DataType {
                 | DataType::DocRef
                 | DataType::TableRef
                 | DataType::PageRef
+                | DataType::DecimalText
         )
     }
 
@@ -725,6 +731,7 @@ impl DataType {
                 | DataType::Longitude
                 | DataType::BigInt
                 | DataType::AssetCode
+                | DataType::DecimalText
         )
     }
 }
@@ -777,6 +784,7 @@ impl fmt::Display for DataType {
             DataType::Currency => write!(f, "CURRENCY"),
             DataType::AssetCode => write!(f, "ASSET_CODE"),
             DataType::Money => write!(f, "MONEY"),
+            DataType::DecimalText => write!(f, "DECIMAL_TEXT"),
             DataType::ColorAlpha => write!(f, "COLOR_ALPHA"),
             DataType::BigInt => write!(f, "BIGINT"),
             DataType::KeyRef => write!(f, "KEY_REF"),
@@ -902,6 +910,8 @@ pub enum Value {
     Secret(Vec<u8>),
     /// Argon2id password hash string
     Password(String),
+    /// Beyond-native-range numeric (high-precision decimal or oversized integer) stored as exact decimal text
+    DecimalText(String),
 }
 
 /// Manual `Eq` impl: consistent with the manual `Hash` impl below.
@@ -1010,6 +1020,7 @@ impl std::hash::Hash for Value {
             Value::PageRef(v) => v.hash(state),
             Value::Secret(v) => v.hash(state),
             Value::Password(v) => v.hash(state),
+            Value::DecimalText(v) => v.hash(state),
         }
     }
 }
@@ -1079,6 +1090,7 @@ impl Value {
             Value::PageRef(..) => DataType::PageRef,
             Value::Secret(..) => DataType::Secret,
             Value::Password(..) => DataType::Password,
+            Value::DecimalText(_) => DataType::DecimalText,
         }
     }
 
@@ -1277,6 +1289,7 @@ impl Value {
             Value::DocRef(c, id) => format!("{}#{}", c, id),
             Value::TableRef(t) => t.clone(),
             Value::PageRef(p) => format!("page:{}", p),
+            Value::DecimalText(s) => s.clone(),
             other => format!("{}", other),
         }
     }
@@ -1479,6 +1492,7 @@ impl fmt::Display for Value {
             Value::PageRef(p) => write!(f, "page_ref:{}", p),
             Value::Secret(b) => write!(f, "<secret {} bytes>", b.len()),
             Value::Password(_) => write!(f, "***"),
+            Value::DecimalText(s) => write!(f, "{}", s),
         }
     }
 }
@@ -1833,6 +1847,7 @@ mod tests {
             any::<u32>().prop_map(Value::PageRef),
             proptest::collection::vec(any::<u8>(), 0..8).prop_map(Value::Secret),
             short_text().prop_map(Value::Password),
+            short_text().prop_map(Value::DecimalText),
         ];
 
         leaf.prop_recursive(2, 16, 4, |inner| {
