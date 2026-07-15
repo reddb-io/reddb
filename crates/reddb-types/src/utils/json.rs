@@ -10,6 +10,8 @@ pub enum JsonValue {
     Bool(bool),
     Integer(i64),
     Number(f64),
+    /// Beyond-native-range decimal stored as exact text (emitted as raw JSON number, never quoted)
+    Decimal(String),
     String(String),
     Array(Vec<JsonValue>),
     Object(Vec<(String, JsonValue)>),
@@ -29,6 +31,7 @@ impl JsonValue {
         match self {
             JsonValue::Number(n) => Some(*n),
             JsonValue::Integer(n) => Some(*n as f64),
+            JsonValue::Decimal(s) => s.parse::<f64>().ok(),
             _ => None,
         }
     }
@@ -147,6 +150,10 @@ impl JsonValue {
                     out.push_str(&format!("{}", n));
                 }
             }
+            JsonValue::Decimal(s) => {
+                // Emit as raw JSON number (no quotes) — exact decimal text
+                out.push_str(s);
+            }
             JsonValue::String(s) => {
                 out.push('"');
                 for ch in s.chars() {
@@ -238,6 +245,29 @@ impl fmt::Display for JsonValue {
         let s = self.to_json_string();
         write!(f, "{s}")
     }
+}
+
+/// Count the significant digits in a decimal number's textual form.
+///
+/// Ignores the sign, the decimal point, any exponent suffix, and leading
+/// zeros. Used to decide whether a float literal exceeds f64's exact
+/// precision (17 significant decimal digits) and must be preserved as
+/// exact decimal text instead of a lossy `f64`.
+fn count_significant_digits(s: &str) -> usize {
+    let s = s.trim_start_matches('-');
+    // Split off any exponent — its digits do not count toward the mantissa's
+    // significant digits (e.g. `1.5e10` has 2 significant digits, not 12).
+    let s = match s.split_once(|c| c == 'e' || c == 'E') {
+        Some((mantissa, _)) => mantissa,
+        None => s,
+    };
+    // Remove the decimal point, then strip leading zeros.
+    let s = s.replace('.', "");
+    let s = s.trim_start_matches('0');
+    if s.is_empty() {
+        return 1;
+    }
+    s.len()
 }
 
 /// Parser for JSON strings into [`JsonValue`].
@@ -345,10 +375,18 @@ impl<'a> JsonParser<'a> {
             if let Ok(value) = s.parse::<i64>() {
                 return Ok(JsonValue::Integer(value));
             }
+            // Beyond i64 range: preserve as exact decimal text.
+            return Ok(JsonValue::Decimal(s.to_string()));
         }
+        // Floats with more than 17 significant digits exceed f64's exact
+        // precision — keep them as exact decimal text rather than losing digits.
+        let sig_digits = count_significant_digits(s);
         let value = s
             .parse::<f64>()
             .map_err(|_| "failed to parse number".to_string())?;
+        if sig_digits > 17 {
+            return Ok(JsonValue::Decimal(s.to_string()));
+        }
         Ok(JsonValue::Number(value))
     }
 
@@ -689,6 +727,29 @@ mod tests {
         assert!(text.contains('\t'));
         assert!(text.chars().any(|ch| ch as u32 == 0x00E9));
         assert_eq!(text.chars().last(), char::from_u32(0x1F4A9));
+    }
+
+    #[test]
+    fn beyond_range_integers_and_high_precision_floats_parse_as_decimal() {
+        // Beyond i64::MAX
+        let v = parse_json("18446744073709551615").unwrap();
+        assert!(matches!(v, JsonValue::Decimal(_)));
+
+        // Negative beyond i64::MIN
+        let v = parse_json("-9999999999999999999").unwrap();
+        assert!(matches!(v, JsonValue::Decimal(_)));
+
+        // High-precision decimal (>17 significant digits)
+        let v = parse_json("3.14159265358979323846").unwrap();
+        assert!(matches!(v, JsonValue::Decimal(_)));
+
+        // Normal integer within i64 range → Integer
+        let v = parse_json("42").unwrap();
+        assert!(matches!(v, JsonValue::Integer(42)));
+
+        // Normal float with few sig digits → Number
+        let v = parse_json("3.14").unwrap();
+        assert!(matches!(v, JsonValue::Number(_)));
     }
 
     #[test]
