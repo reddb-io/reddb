@@ -41,7 +41,6 @@ Tracked in the [12-week TS/CH parity plan](../../../.claude/plans/eu-recebi-esta
 |----------------------------|--------|
 | Delta-of-Delta + XOR TS codecs | Shipped (`src/storage/timeseries/compression.rs`) |
 | T64 bit-packing + zstd fallback | Shipped (A4) |
-| Temporal index (BRIN-style)   | Shipped |
 | Chunks (open/sealed, bloom, zone maps) | Shipped |
 | Hypertables (chunking + router) | Registry shipped (A1); SQL DDL next sprint |
 | Retention daemon              | Shipped (A3) |
