@@ -694,6 +694,7 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
             .any(|value| json_value_contains(value, needle)),
         crate::serde_json::Value::String(value) => value == needle,
         crate::serde_json::Value::Integer(value) => value.to_string() == needle,
+        crate::serde_json::Value::Decimal(value) => value == needle,
         crate::serde_json::Value::Number(value) => value.to_string() == needle,
         crate::serde_json::Value::Bool(value) => value.to_string() == needle,
         crate::serde_json::Value::Null | crate::serde_json::Value::Object(_) => false,
