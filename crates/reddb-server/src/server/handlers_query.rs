@@ -2699,12 +2699,12 @@ mod tests {
         assert_eq!(row["question"], crate::json!("why did login fail?"));
         assert_eq!(row["provider"], crate::json!("openai"));
         assert_eq!(row["model"], crate::json!("gpt-4.1-mini"));
-        assert_eq!(row["prompt_tokens"], crate::json!(12));
-        assert_eq!(row["completion_tokens"], crate::json!(3));
+        assert_eq!(row["prompt_tokens"], crate::json::Value::Integer(12));
+        assert_eq!(row["completion_tokens"], crate::json::Value::Integer(3));
         assert_eq!(row["cache_hit"], crate::json!(false));
         assert_eq!(row["mode"], crate::json!("strict"));
         assert_eq!(row["validation_ok"], crate::json!(true));
-        assert_eq!(row["retry_count"], crate::json!(0));
+        assert_eq!(row["retry_count"], crate::json::Value::Integer(0));
     }
 
     #[test]
@@ -3017,7 +3017,7 @@ mod tests {
         assert_eq!(rows[0]["provider"], crate::json!("openai"));
         let audit_temperature = rows[0]["temperature"].as_f64().expect("audit temperature");
         assert!((audit_temperature - 0.7).abs() < 0.000_001);
-        assert_eq!(rows[0]["seed"], crate::json!(42));
+        assert_eq!(rows[0]["seed"], crate::json::Value::Integer(42));
     }
 
     #[test]
