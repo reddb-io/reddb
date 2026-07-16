@@ -595,6 +595,7 @@ impl OwnershipAdmissionGate {
             .chain(std::iter::once(mirror));
         self.catalog
             .apply_update(current.update_replicas(replicas))
+            .map(|_| ())
             .map_err(|err| RedDBError::Catalog(err.to_string()))
     }
 
