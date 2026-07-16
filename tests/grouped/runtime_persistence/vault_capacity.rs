@@ -228,11 +228,12 @@ fn vault_single_user_fits_in_header_page() {
     vault.save(&pager, &state).unwrap();
 
     let pages_after = pager.page_count().unwrap();
-    // We had to bump page_count up to 3 to reserve the header slot;
-    // we don't allocate any data pages for a one-user payload, so
-    // page_count should sit at exactly 3.
+    // A fresh store reserves the metadata/vault pages plus the ADR 0038
+    // phase-3 in-file double-write zone (DWB_ZONE_START_PAGE=3 + 64 zone
+    // pages => FIRST_ALLOCATABLE_PAGE=67). A one-user payload allocates no
+    // data pages, so page_count sits at exactly that reserved boundary.
     assert_eq!(
-        pages_after, 3,
+        pages_after, 67,
         "one-user vault should not allocate any data pages; got page_count={pages_after}"
     );
 
