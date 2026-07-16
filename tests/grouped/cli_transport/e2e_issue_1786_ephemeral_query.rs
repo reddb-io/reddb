@@ -326,6 +326,96 @@ fn red_query_multiple_files_join_by_alias_and_stem() {
 }
 
 #[test]
+fn red_query_funnel_demo_load_stats_join_format_save_reopen() {
+    let dir = temp_dir("funnel-demo");
+    let users = dir.path().join("users.csv");
+    let orders = dir.path().join("orders.json");
+    let saved = dir.path().join("funnel.rdb");
+    fs::write(&users, "id,name\n1,Ada\n2,Linus\n").expect("write users");
+    fs::write(
+        &orders,
+        r#"[
+  {"id":100,"user_id":1,"total":42},
+  {"id":101,"user_id":2,"total":7}
+]"#,
+    )
+    .expect("write orders");
+    let users_str = users.display().to_string();
+    let orders_str = orders.display().to_string();
+    let saved_str = saved.display().to_string();
+
+    let (code, stdout, stderr) =
+        run_query_files(&[&users_str, &orders_str], "SHOW STATS users", &["--json"]);
+    assert_eq!(code, 0, "users stats failed; stderr: {stderr}");
+    assert!(stdout.contains("\"ok\":true"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("\"collection\":\"users\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"entity\":null") && stdout.contains("\"metric\":\"row_count\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"entity\":\"name\"") && stdout.contains("\"metric\":\"distinct_count\""),
+        "stdout: {stdout}"
+    );
+
+    let (code, stdout, stderr) =
+        run_query_files(&[&users_str, &orders_str], "SHOW STATS orders", &["--json"]);
+    assert_eq!(code, 0, "orders stats failed; stderr: {stderr}");
+    assert!(
+        stdout.contains("\"collection\":\"orders\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"entity\":null") && stdout.contains("\"metric\":\"row_count\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"entity\":\"user_id\"") && stdout.contains("\"metric\":\"coverage\""),
+        "stdout: {stdout}"
+    );
+
+    let join_sql = "SELECT users.name AS name, orders.total AS total \
+        FROM users JOIN orders ON users.id = orders.user_id \
+        WHERE orders.total > 20";
+    let (code, stdout, stderr) =
+        run_query_files(&[&users_str, &orders_str], join_sql, &["--format", "csv"]);
+    assert_eq!(code, 0, "join/csv failed; stderr: {stderr}");
+    assert_eq!(stdout, "name,total\nAda,42\n");
+
+    let (code, _stdout, stderr) = run_query_files(
+        &[&users_str, &orders_str],
+        join_sql,
+        &["--save", &saved_str, "--format", "json"],
+    );
+    assert_eq!(code, 0, "save failed; stderr: {stderr}");
+    assert!(saved.exists(), "--save should create the embedded store");
+
+    let (code, stdout, stderr) = run_red(&[
+        "query",
+        "--path",
+        &saved_str,
+        "SELECT users.name AS name, orders.total AS total \
+         FROM users JOIN orders ON users.id = orders.user_id \
+         WHERE orders.total > 20",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "reopen join failed; stderr: {stderr}");
+    assert_eq!(stdout, "[{\"name\":\"Ada\",\"total\":42}]\n");
+
+    let (code, stdout, stderr) =
+        run_red(&["query", "--path", &saved_str, "SHOW STATS orders", "--json"]);
+    assert_eq!(code, 0, "reopen stats failed; stderr: {stderr}");
+    assert!(
+        stdout.contains("\"collection\":\"orders\"") && stdout.contains("\"metric\":\"row_count\""),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn red_query_multiple_files_collision_uses_deterministic_stems_and_aliases() {
     let dir = temp_dir("collision");
     let plain = dir.path().join("items.csv");
