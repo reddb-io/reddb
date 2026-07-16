@@ -1107,6 +1107,7 @@ fn data_type_name(data_type: DataType) -> &'static str {
         DataType::Date => "date",
         DataType::Time => "time",
         DataType::Decimal => "decimal",
+        DataType::DecimalText => "decimal_text",
         DataType::Enum => "enum",
         DataType::Array => "array",
         DataType::TimestampMs => "timestamp_ms",
