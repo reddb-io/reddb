@@ -401,6 +401,7 @@ fn keyed_value_literal(value: &JsonValue) -> Result<String, HttpResponse> {
     match value {
         JsonValue::String(value) => Ok(format!("'{}'", value.replace('\'', "''"))),
         JsonValue::Integer(value) => Ok(value.to_string()),
+        JsonValue::Decimal(value) => Ok(value.clone()),
         JsonValue::Number(value) => Ok(value.to_string()),
         JsonValue::Bool(value) => Ok(value.to_string()),
         JsonValue::Null => Ok("NULL".to_string()),
