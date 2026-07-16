@@ -3,9 +3,9 @@
 use crate::api::{RedDBError, RedDBResult};
 use crate::storage::memory_pools::{MemoryPool, MEMORY_POOLS};
 use crate::storage::schema::Value;
+use crate::storage::unified::entity::UnifiedEntity;
 
 const MAX_PRESSURE_TICKS: usize = 64;
-const ROW_BASE_BYTES: u64 = 384;
 const FIELD_BASE_BYTES: u64 = 64;
 const INDEX_ENTRY_BYTES: u64 = 96;
 
@@ -95,15 +95,27 @@ impl crate::RedDBRuntime {
 }
 
 pub(crate) fn estimate_row_growth(fields: &[(String, Value)]) -> u64 {
-    ROW_BASE_BYTES
-        .saturating_add(fields.len() as u64 * FIELD_BASE_BYTES)
+    entity_base_bytes().saturating_add(estimate_value_fields_bytes(fields))
+}
+
+pub(crate) fn estimate_timeseries_point_growth(
+    metric: &str,
+    tags: &std::collections::HashMap<String, String>,
+    fields: &[(String, Value)],
+) -> u64 {
+    entity_base_bytes()
+        .saturating_add(64)
+        .saturating_add(metric.len() as u64)
         .saturating_add(
-            fields
-                .iter()
-                .map(|(name, _)| name.len() as u64)
-                .reduce(u64::saturating_add)
-                .unwrap_or(0),
+            tags.iter()
+                .map(|(name, value)| {
+                    FIELD_BASE_BYTES
+                        .saturating_add(name.len() as u64)
+                        .saturating_add(value.len() as u64)
+                })
+                .fold(0, u64::saturating_add),
         )
+        .saturating_add(estimate_value_fields_bytes(fields))
 }
 
 pub(crate) fn estimate_index_growth(rows: &[Vec<(String, Value)>], columns: &[String]) -> u64 {
@@ -137,6 +149,21 @@ fn estimate_value_bytes(value: &Value) -> u64 {
         | Value::VectorRef(value, _) => value.len() as u64,
         _ => 16,
     }
+}
+
+fn entity_base_bytes() -> u64 {
+    std::mem::size_of::<UnifiedEntity>() as u64
+}
+
+fn estimate_value_fields_bytes(fields: &[(String, Value)]) -> u64 {
+    fields
+        .iter()
+        .map(|(name, value)| {
+            FIELD_BASE_BYTES
+                .saturating_add(name.len() as u64)
+                .saturating_add(estimate_value_bytes(value))
+        })
+        .fold(0, u64::saturating_add)
 }
 
 fn didactic_pool_name(pool: MemoryPool) -> &'static str {
