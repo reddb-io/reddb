@@ -198,7 +198,7 @@ path landed inside the 24h window:
 - **AND-of-sorted intersection** — multi-predicate filters that
   hit two sorted indices intersect at the index layer instead of
   scanning then filtering.
-- **`SplitBlockBloomFilter` for large IN-lists** — `WHERE col IN
+- **Split-block bloom for large IN-lists** — `WHERE col IN
   (...big list...)` switches to a split-block bloom filter for
   membership tests; cuts the per-row probe cost dramatically on
   thousand-element IN clauses.

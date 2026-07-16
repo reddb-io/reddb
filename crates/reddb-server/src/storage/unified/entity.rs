@@ -609,7 +609,7 @@ impl UnifiedEntity {
 
 /// Compute one bit of a field-name bloom filter.
 ///
-/// Uses the mid-character trick from MongoDB's `FieldNameBloomFilter.h`:
+/// Uses the mid-character trick from MongoDB's field-name bloom:
 /// the bit position is the mid-byte value clamped to 0..63. Zero-allocation,
 /// ~1.5% false-positive rate for ≤5 distinct field names.
 #[inline]
