@@ -516,13 +516,15 @@ mod tests {
         {
             let db = Database::open(&path).unwrap();
             assert!(!db.is_read_only());
-            assert_eq!(db.page_count(), 3); // Header + reserved pages
+            // Header + reserved metadata/vault pages + ADR 0038 phase-3
+            // in-file double-write zone (FIRST_ALLOCATABLE_PAGE = 67).
+            assert_eq!(db.page_count(), 67);
         }
 
         // Should be able to reopen
         {
             let db = Database::open(&path).unwrap();
-            assert_eq!(db.page_count(), 3);
+            assert_eq!(db.page_count(), 67);
         }
 
         cleanup(&path);
