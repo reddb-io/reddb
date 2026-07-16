@@ -316,6 +316,7 @@ fn schema_value_to_value_out(value: &reddb::storage::schema::Value) -> ValueOut 
             .map(ValueOut::Integer)
             .unwrap_or_else(|_| ValueOut::String(value.to_string())),
         Value::Float(value) => ValueOut::Float(*value),
+        Value::DecimalText(value) => ValueOut::String(value.clone()),
         Value::BigInt(value) => ValueOut::Integer(*value),
         Value::TimestampMs(value)
         | Value::Timestamp(value)
@@ -1039,6 +1040,7 @@ fn auto_type_param(s: &str) -> reddb::storage::schema::Value {
                     Value::Float(n)
                 }
             }
+            J::Decimal(n) => Value::DecimalText(n),
             J::String(t) => Value::text(t),
             J::Array(items) => {
                 if items
@@ -1072,6 +1074,7 @@ fn value_to_json_fragment(value: &reddb::storage::schema::Value) -> String {
         Value::Integer(n) => n.to_string(),
         Value::UnsignedInteger(n) => n.to_string(),
         Value::Float(n) => n.to_string(),
+        Value::DecimalText(n) => n.clone(),
         Value::BigInt(n) => n.to_string(),
         Value::TimestampMs(n) | Value::Timestamp(n) | Value::Duration(n) | Value::Decimal(n) => {
             n.to_string()
@@ -5764,6 +5767,7 @@ fn admin_json_value_display(value: &reddb::json::Value) -> String {
         reddb::json::Value::Integer(n) => n.to_string(),
         reddb::json::Value::Number(n) if n.fract() == 0.0 => (*n as i64).to_string(),
         reddb::json::Value::Number(n) => n.to_string(),
+        reddb::json::Value::Decimal(n) => n.clone(),
         reddb::json::Value::Array(_) | reddb::json::Value::Object(_) => value.to_string_compact(),
     }
 }
