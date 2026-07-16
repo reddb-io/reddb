@@ -7,6 +7,7 @@ pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
 /// The superblock zone occupies the head of page 0 (ADR 0038 §2 phase 1).
 pub(super) const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
 pub(super) const SUPERBLOCK_ZONE_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE;
+pub(super) const PHASE3_DWB_ZONE_FILE_VERSION: u32 = reddb_file::PAGE_FILE_VERSION;
 
 /// The newest valid superblock copy together with its slot image.
 type NewestSuperblock = (
@@ -275,6 +276,7 @@ impl Pager {
         if exists {
             // Recover from the in-file double-write zone before loading the
             // header or allowing WAL replay to read pages.
+            pager.ensure_phase3_dwb_zone_layout()?;
             pager.recover_from_dwb()?;
             // Load existing database (with header shadow fallback)
             pager.load_header()?;
@@ -504,6 +506,18 @@ impl Pager {
         let mut image = [0u8; SUPERBLOCK_SLOT_SIZE];
         image.copy_from_slice(&zone[start..start + SUPERBLOCK_SLOT_SIZE]);
         Ok((selection, image))
+    }
+
+    fn ensure_phase3_dwb_zone_layout(&self) -> Result<(), PagerError> {
+        let (_, image) = self.newest_superblock()?;
+        let header = reddb_file::decode_database_header(&image)
+            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        if header.version < PHASE3_DWB_ZONE_FILE_VERSION {
+            return Err(PagerError::LegacyPagedStore {
+                path: self.path.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Seal `slot` for `copy_index`/`generation` and write exactly that slot,
@@ -1233,12 +1247,16 @@ impl Pager {
             if Self::dwb_zone_is_clear(&buf) {
                 return Ok(());
             }
-            return Err(PagerError::DwbZoneCorrupt(self.path.clone()));
+            self.clear_dwb_zone()?;
+            return Ok(());
         }
 
         let entries = match reddb_file::decode_paged_dwb_frame(&buf) {
             Ok(entries) => entries,
-            Err(_) => return Err(PagerError::DwbZoneCorrupt(self.path.clone())),
+            Err(_) => {
+                self.clear_dwb_zone()?;
+                return Ok(());
+            }
         };
 
         // DWB is valid — re-apply pages to main file
@@ -1328,6 +1346,23 @@ mod tests {
         .expect("operation should succeed");
         file.write_all(bytes).expect("write_all() should succeed");
         file.sync_all().expect("sync_all() should succeed");
+    }
+
+    fn stamp_pre_phase3_layout(path: &Path, page_count: u32) {
+        let zone = read_zone(path);
+        for copy_index in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+            let start = copy_index * SUPERBLOCK_SLOT_SIZE;
+            let mut slot = zone[start..start + SUPERBLOCK_SLOT_SIZE].to_vec();
+            let generation = reddb_file::paged_superblock_slot_generation(&slot, copy_index)
+                .expect("fresh store should publish both slots");
+            reddb_file::set_database_header_version(&mut slot, PHASE3_DWB_ZONE_FILE_VERSION - 1)
+                .expect("set_database_header_version() should succeed");
+            reddb_file::set_database_header_page_count(&mut slot, page_count)
+                .expect("set_database_header_page_count() should succeed");
+            reddb_file::seal_paged_superblock_slot(&mut slot, copy_index, generation)
+                .expect("seal_paged_superblock_slot() should succeed");
+            poke_slot(path, copy_index, &slot);
+        }
     }
 
     #[test]
@@ -1502,6 +1537,48 @@ mod tests {
         assert!(rendered.contains("migration tool"), "{rendered}");
 
         let _ = std::fs::remove_file(&sidecar);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn pre_phase3_large_store_without_sidecar_routes_to_migration() {
+        let path = temp_db_path("pre-phase3-large");
+        {
+            let _ = Pager::open_default(&path).expect("open_default() should succeed");
+        }
+        stamp_pre_phase3_layout(&path, FIRST_ALLOCATABLE_PAGE);
+
+        let err = match Pager::open_default(&path) {
+            Ok(_) => panic!("pre-phase-3 stores need migration first"),
+            Err(err) => err,
+        };
+        let rendered = err.to_string();
+        assert!(matches!(err, PagerError::LegacyPagedStore { .. }));
+        assert!(rendered.contains("migration tool"), "{rendered}");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn pre_phase3_small_store_without_sidecar_routes_to_migration() {
+        let path = temp_db_path("pre-phase3-small");
+        {
+            let _ = Pager::open_default(&path).expect("open_default() should succeed");
+        }
+        stamp_pre_phase3_layout(&path, 3);
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open() should succeed")
+            .set_len(3 * PAGE_SIZE as u64)
+            .expect("set_len() should succeed");
+
+        let err = match Pager::open_default(&path) {
+            Ok(_) => panic!("pre-phase-3 stores need migration first"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, PagerError::LegacyPagedStore { .. }));
+
         cleanup(&path);
     }
 
