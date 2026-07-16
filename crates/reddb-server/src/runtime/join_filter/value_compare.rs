@@ -191,6 +191,7 @@ pub(in crate::runtime) fn runtime_value_text(value: &Value) -> Option<String> {
             ))
         }
         Value::Decimal(v) => Some(Value::Decimal(*v).display_string()),
+        Value::DecimalText(v) => Some(v.clone()),
         Value::EnumValue(i) => Some(format!("enum({})", i)),
         Value::Array(_) => None,
         Value::TimestampMs(ms) => Some(ms.to_string()),
