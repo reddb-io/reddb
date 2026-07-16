@@ -189,9 +189,11 @@ impl Default for IntraClusterSignalBus {
 
 impl IntraClusterSignalBus {
     pub fn new(limits: SignalPlaneLimits) -> Self {
-        let mut metrics = SignalPlaneMetrics::default();
-        metrics.fanout_cap = limits.fanout;
-        metrics.payload_cap = limits.max_payload_messages;
+        let metrics = SignalPlaneMetrics {
+            fanout_cap: limits.fanout,
+            payload_cap: limits.max_payload_messages,
+            ..Default::default()
+        };
         Self {
             admitted: BTreeSet::new(),
             endpoints: BTreeMap::new(),
@@ -348,9 +350,11 @@ impl TransportSignalPlane {
     ) -> Self {
         transport.set_limits(limits);
         transport.register_endpoint(local_member.clone());
-        let mut metrics = SignalPlaneMetrics::default();
-        metrics.fanout_cap = limits.fanout;
-        metrics.payload_cap = limits.max_payload_messages;
+        let metrics = SignalPlaneMetrics {
+            fanout_cap: limits.fanout,
+            payload_cap: limits.max_payload_messages,
+            ..Default::default()
+        };
         Self {
             local_member,
             transport,
