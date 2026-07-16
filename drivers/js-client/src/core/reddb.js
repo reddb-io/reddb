@@ -19,7 +19,7 @@
  */
 
 import { RedDBError } from './errors.js'
-import { normalizeQueryParams } from './serialization.js'
+import { normalizeExactNumbers, normalizeQueryParams, serializeJsonValue } from './serialization.js'
 import { requireInsertId, requireInsertIds } from './insert-ids.js'
 import { CacheClient } from '../cache.js'
 import { KvClient } from '../kv.js'
@@ -124,9 +124,9 @@ export class RedDB {
   query(sql, ...params) {
     const wireParams = normalizeQueryParams(params)
     if (wireParams == null) {
-      return this.client.call('query', { sql })
+      return this.client.call('query', { sql }).then(normalizeExactNumbers)
     }
-    return this.client.call('query', { sql, params: wireParams })
+    return this.client.call('query', { sql, params: wireParams }).then(normalizeExactNumbers)
   }
 
   /** Execute a SQL statement. Alias for `query`, including parameter binding. */
@@ -136,7 +136,8 @@ export class RedDB {
 
   /** Insert one row. Returns `{ affected, rid, id }`; `id` is a legacy alias for `rid`. */
   async insert(collection, payload) {
-    let result = await this.client.call('insert', { collection, payload })
+    let result = await this.client.call('insert', { collection, payload: serializeJsonValue(payload) })
+    result = normalizeExactNumbers(result)
     if (
       result &&
       typeof result === 'object' &&
@@ -150,7 +151,10 @@ export class RedDB {
 
   /** Insert many rows in one call. Returns `{ affected, rids, ids }`; `ids` is a legacy alias. */
   async bulkInsert(collection, payloads) {
-    const result = await this.client.call('bulk_insert', { collection, payloads })
+    const result = await this.client.call('bulk_insert', {
+      collection,
+      payloads: serializeJsonValue(payloads),
+    }).then(normalizeExactNumbers)
     return requireInsertIds(result, payloads.length)
   }
 
@@ -244,7 +248,7 @@ export class RedDB {
 
   /** Get an entity by id. Returns `{ entity }` (entity is `null` if not found). */
   get(collection, id) {
-    return this.client.call('get', { collection, id: String(id) })
+    return this.client.call('get', { collection, id: String(id) }).then(normalizeExactNumbers)
   }
 
   /** Delete an entity by id. Returns `{ affected }`. */
