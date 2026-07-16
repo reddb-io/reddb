@@ -52,6 +52,9 @@ export const HELPER_SPEC_VERSION = '1.0'
 
 const MIN_INSERT_ID_ENGINE_VERSION = '1.0.9'
 const NESTED_TX_NOT_SUPPORTED = 'NESTED_TX_NOT_SUPPORTED'
+const MIN_I64 = -(1n << 63n)
+const MAX_I64 = (1n << 63n) - 1n
+const MAX_U64 = (1n << 64n) - 1n
 
 /**
  * Connect to a RedDB instance.
@@ -94,6 +97,9 @@ export async function connect(uri, options = {}) {
 // stdio/HTTP query parameter envelopes.
 function serializeParam(value) {
   assertSupportedParam(value)
+  if (typeof value === 'bigint') {
+    return exactIntegerEnvelope(value)
+  }
   if (value instanceof Float32Array || value instanceof Float64Array) {
     return Array.from(value)
   }
@@ -113,10 +119,39 @@ function serializeParam(value) {
   return value
 }
 
+function serializeJsonValue(value) {
+  if (typeof value === 'bigint') {
+    return exactIntegerEnvelope(value)
+  }
+  if (Array.isArray(value)) {
+    return value.map(serializeJsonValue)
+  }
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    if ('$number' in value || '$decimalText' in value) {
+      throw new RedDBError('UNSUPPORTED_EXACT_NUMBER', 'superseded exact-number envelope')
+    }
+    const out = {}
+    for (const [key, item] of Object.entries(value)) out[key] = serializeJsonValue(item)
+    return out
+  }
+  return value
+}
+
+function exactIntegerEnvelope(value) {
+  if (value >= MIN_I64 && value <= MAX_I64) {
+    return { $int: value.toString() }
+  }
+  if (value >= 0n && value <= MAX_U64) {
+    return { $uint: value.toString() }
+  }
+  throw new RedDBError('UNSUPPORTED_PARAM', 'integer value is outside i64/u64 range')
+}
+
 function assertSupportedParam(value) {
   if (value == null) return
   if (
     typeof value === 'boolean'
+    || typeof value === 'bigint'
     || typeof value === 'number'
     || typeof value === 'string'
   ) {
@@ -198,6 +233,13 @@ function normalizeResult(value) {
         if (value.$float === 'NaN') return Number.NaN
         if (value.$float === 'Infinity' || value.$float === '+Infinity') return Infinity
         if (value.$float === '-Infinity') return -Infinity
+      }
+      if (typeof value.$int === 'string' || typeof value.$uint === 'string') {
+        return BigInt(value.$int ?? value.$uint)
+      }
+      if (typeof value.$decimal === 'string') return value.$decimal
+      if ('$number' in value || '$decimalText' in value) {
+        throw new RedDBError('UNSUPPORTED_EXACT_NUMBER', 'superseded exact-number envelope')
       }
       if (typeof value.$ts === 'string' || typeof value.$ts === 'number') {
         const raw = typeof value.$ts === 'string'
@@ -459,7 +501,10 @@ export class RedDB {
 
   /** Insert one row. Returns `{ affected, rid, id }`; `id` is a legacy alias. */
   async insert(collection, payload) {
-    const result = await this.client.call('insert', { collection, payload })
+    const result = await this.client.call('insert', {
+      collection,
+      payload: serializeJsonValue(payload),
+    }).then(normalizeResult)
     return requireInsertId(result, 'insert')
   }
 
@@ -469,7 +514,10 @@ export class RedDB {
     if (Array.isArray(payloads) && payloads.length === 0) {
       return { affected: 0, rids: [], ids: [] }
     }
-    const result = await this.client.call('bulk_insert', { collection, payloads })
+    const result = await this.client.call('bulk_insert', {
+      collection,
+      payloads: serializeJsonValue(payloads),
+    }).then(normalizeResult)
     return requireInsertIds(result, payloads.length)
   }
 
@@ -529,7 +577,7 @@ export class RedDB {
 
   /** Get an entity by id. Returns `{ entity }` (entity is `null` if not found). */
   get(collection, id) {
-    return this.client.call('get', { collection, id: String(id) })
+    return this.client.call('get', { collection, id: String(id) }).then(normalizeResult)
   }
 
   /** Delete an entity by id. Returns `{ affected }`. */
