@@ -1820,6 +1820,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                 crate::serde_json::Value::Null => "null",
                 crate::serde_json::Value::Bool(_) => "boolean",
                 crate::serde_json::Value::Integer(_) => "number",
+                crate::serde_json::Value::Decimal(_) => "number",
                 crate::serde_json::Value::Number(_) => "number",
                 crate::serde_json::Value::String(_) => "string",
                 crate::serde_json::Value::Array(_) => "array",
@@ -1922,6 +1923,7 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
         }
         crate::serde_json::Value::String(value) => value == needle,
         crate::serde_json::Value::Integer(value) => value.to_string() == needle,
+        crate::serde_json::Value::Decimal(value) => value == needle,
         crate::serde_json::Value::Number(value) => value.to_string() == needle,
         crate::serde_json::Value::Bool(value) => value.to_string() == needle,
         crate::serde_json::Value::Null => false,
