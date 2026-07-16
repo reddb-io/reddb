@@ -103,6 +103,7 @@ fn json_to_value(v: &JsonValue) -> Value {
         JsonValue::Null => Value::Null,
         JsonValue::Bool(b) => Value::Boolean(*b),
         JsonValue::Integer(n) => Value::Integer(*n),
+        JsonValue::Decimal(n) => Value::DecimalText(n.clone()),
         JsonValue::Number(n) => Value::Float(*n),
         JsonValue::String(s) => Value::text(s.clone()),
         JsonValue::Array(arr) => Value::Array(arr.iter().map(json_to_value).collect()),
