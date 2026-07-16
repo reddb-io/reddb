@@ -317,6 +317,7 @@ fn schema_value_to_value_out(value: &reddb::storage::schema::Value) -> ValueOut 
             .unwrap_or_else(|_| ValueOut::String(value.to_string())),
         Value::Float(value) => ValueOut::Float(*value),
         Value::BigInt(value) => ValueOut::Integer(*value),
+        Value::DecimalText(value) => ValueOut::String(value.clone()),
         Value::TimestampMs(value)
         | Value::Timestamp(value)
         | Value::Duration(value)
@@ -1032,6 +1033,7 @@ fn auto_type_param(s: &str) -> reddb::storage::schema::Value {
             J::Null => Value::Null,
             J::Bool(b) => Value::Boolean(b),
             J::Integer(n) => Value::Integer(n),
+            J::Decimal(n) => Value::DecimalText(n),
             J::Number(n) => {
                 if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
                     Value::Integer(n as i64)
@@ -1073,6 +1075,7 @@ fn value_to_json_fragment(value: &reddb::storage::schema::Value) -> String {
         Value::UnsignedInteger(n) => n.to_string(),
         Value::Float(n) => n.to_string(),
         Value::BigInt(n) => n.to_string(),
+        Value::DecimalText(n) => n.to_string(),
         Value::TimestampMs(n) | Value::Timestamp(n) | Value::Duration(n) | Value::Decimal(n) => {
             n.to_string()
         }
@@ -1636,6 +1639,7 @@ fn main() {
                 cols.push(k.clone());
                 vals.push(match v {
                     reddb::json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                    reddb::json::Value::Decimal(n) => n.to_string(),
                     reddb::json::Value::Number(n) => n.to_string(),
                     reddb::json::Value::Bool(b) => b.to_string(),
                     reddb::json::Value::Null => "NULL".to_string(),
@@ -2409,6 +2413,7 @@ fn main() {
                     cols.push(k.clone());
                     vals.push(match v {
                         reddb::json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                        reddb::json::Value::Decimal(n) => n.to_string(),
                         reddb::json::Value::Number(n) => n.to_string(),
                         reddb::json::Value::Bool(b) => b.to_string(),
                         reddb::json::Value::Null => "NULL".to_string(),
@@ -5762,6 +5767,7 @@ fn admin_json_value_display(value: &reddb::json::Value) -> String {
         reddb::json::Value::String(s) => s.clone(),
         reddb::json::Value::Bool(b) => b.to_string(),
         reddb::json::Value::Integer(n) => n.to_string(),
+        reddb::json::Value::Decimal(n) => n.to_string(),
         reddb::json::Value::Number(n) if n.fract() == 0.0 => (*n as i64).to_string(),
         reddb::json::Value::Number(n) => n.to_string(),
         reddb::json::Value::Array(_) | reddb::json::Value::Object(_) => value.to_string_compact(),
