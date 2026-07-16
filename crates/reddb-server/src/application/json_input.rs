@@ -27,6 +27,7 @@ pub(crate) fn json_metadata_value_to_string(value: &JsonValue) -> String {
         JsonValue::Null => "null".to_string(),
         JsonValue::Bool(value) => value.to_string(),
         JsonValue::Integer(value) => value.to_string(),
+        JsonValue::Decimal(value) => value.clone(),
         JsonValue::Number(value) => value.to_string(),
         JsonValue::String(value) => value.clone(),
         JsonValue::Array(_) | JsonValue::Object(_) => {
