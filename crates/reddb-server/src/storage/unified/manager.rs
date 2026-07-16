@@ -1531,14 +1531,14 @@ impl SegmentManager {
         results
     }
 
-    /// Probe segment blooms for a key without materializing matching entities.
+    /// Probe exact segment membership for a key without materializing matching entities.
     ///
-    /// Returns `false` only when every consulted segment bloom proves absence.
+    /// Returns `false` only when every consulted segment proves absence.
     /// Missing segment state is conservative and returns `true`.
     pub fn bloom_may_contain_key(&self, key: &[u8]) -> bool {
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
-            if growing.bloom_might_contain_key(key) {
+            if growing.may_contain_exact_key(key) {
                 return true;
             }
         } else {
@@ -1548,7 +1548,7 @@ impl SegmentManager {
         let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
             let segment = segment_arc.read();
-            if segment.bloom_might_contain_key(key) {
+            if segment.may_contain_exact_key(key) {
                 return true;
             }
         }
@@ -1707,24 +1707,8 @@ impl SegmentManager {
             return false;
         }
 
-        let live_estimate: usize = {
-            let sealed = self.sealed.read();
-            sealed
-                .iter()
-                .filter_map(|segment_arc| {
-                    let segment = segment_arc.read();
-                    if sources.contains(&segment.id()) {
-                        Some(segment.live_entity_count())
-                    } else {
-                        None
-                    }
-                })
-                .sum()
-        };
-
         let merged_id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
-        let merged =
-            GrowingSegment::with_bloom_capacity(merged_id, &self.collection, live_estimate);
+        let merged = GrowingSegment::new(merged_id, &self.collection);
 
         *self.consolidation.write() = Some(Consolidation {
             sources: sources
@@ -2151,7 +2135,11 @@ mod tests {
         let id = manager.insert(entity).unwrap();
 
         assert!(manager.bloom_may_contain_key(&id.raw().to_le_bytes()));
+        assert!(manager.bloom_may_contain_key(id.raw().to_string().as_bytes()));
         assert!(!manager.bloom_may_contain_key(&u64::MAX.to_le_bytes()));
+
+        assert_eq!(manager.delete(id).unwrap(), Some(id));
+        assert!(!manager.bloom_may_contain_key(&id.raw().to_le_bytes()));
     }
 
     #[test]
