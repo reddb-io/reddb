@@ -852,7 +852,11 @@ pub(super) fn runtime_table_record_from_entity_projected(
                     "tags" if !ts.tags.is_empty() => {
                         record.set("tags", timeseries_tags_value(&ts.tags));
                     }
-                    _ => {}
+                    _ => {
+                        if let Some(value) = ts.fields.get(col) {
+                            record.set(col, value.clone());
+                        }
+                    }
                 }
             }
 
@@ -1229,6 +1233,9 @@ fn append_timeseries_record_fields(
     record.set("value", Value::Float(ts.value));
     if !ts.tags.is_empty() {
         record.set("tags", timeseries_tags_value(&ts.tags));
+    }
+    for (key, value) in &ts.fields {
+        record.set(key, value.clone());
     }
 }
 

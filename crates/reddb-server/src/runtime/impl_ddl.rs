@@ -1587,6 +1587,11 @@ impl RedDBRuntime {
                             .iter()
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect(),
+                        crate::storage::EntityData::TimeSeries(ts) => ts
+                            .fields
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
                         _ => Vec::new(),
                     };
                     (e.id, fields)

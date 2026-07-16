@@ -1387,6 +1387,11 @@ fn index_fields_from_entity(entity: &UnifiedEntity) -> Vec<(String, Value)> {
             .iter()
             .map(|(field, value)| (field.clone(), value.clone()))
             .collect(),
+        EntityData::TimeSeries(ts) => ts
+            .fields
+            .iter()
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect(),
         _ => Vec::new(),
     }
 }

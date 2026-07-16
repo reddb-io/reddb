@@ -2087,6 +2087,7 @@ fn decode_metric_batch(
                     timestamp_ns,
                     value: sample.value,
                     tags: tags.clone(),
+                    fields: HashMap::new(),
                 }),
             );
             entities.push(entity);
@@ -2245,6 +2246,7 @@ fn materialize_metrics_rollups(
                     timestamp_ns: key.bucket_ns,
                     value: accumulator.value(&policy.aggregation),
                     tags,
+                    fields: HashMap::new(),
                 }),
             ));
         }

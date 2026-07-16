@@ -1928,6 +1928,7 @@ fn stable_spatial_key(entity: &UnifiedEntity) -> String {
             if let Some(named) = &row.named {
                 return named
                     .get("id")
+                    .or_else(|| named.get("name"))
                     .map(stable_value_key)
                     .unwrap_or_else(|| format!("row:{}", entity.id.raw()));
             }
@@ -1943,6 +1944,11 @@ fn stable_spatial_key(entity: &UnifiedEntity) -> String {
             .get("name")
             .map(stable_value_key)
             .unwrap_or_else(|| format!("node:{}", entity.id.raw())),
+        EntityData::TimeSeries(ts) => ts
+            .fields
+            .get("name")
+            .map(stable_value_key)
+            .unwrap_or_else(|| format!("timeseries:{}", entity.id.raw())),
         _ => format!("entity:{}", entity.id.raw()),
     }
 }
@@ -2041,6 +2047,7 @@ fn graph_node_h3_index_is_maintained_after_public_insert_update_delete() {
 enum SpatialEntityKind {
     Row,
     Node,
+    TimeSeries,
 }
 
 #[derive(Clone, Copy)]
@@ -2055,6 +2062,9 @@ fn setup_spatial_collection(rt: &RedDBRuntime, kind: SpatialEntityKind) {
             .execute_query("CREATE TABLE spatial_items (id INT, name TEXT, loc GEOPOINT)")
             .unwrap(),
         SpatialEntityKind::Node => rt.execute_query("CREATE GRAPH spatial_items").unwrap(),
+        SpatialEntityKind::TimeSeries => rt
+            .execute_query("CREATE HYPERTABLE spatial_items TIME_COLUMN ts CHUNK_INTERVAL '1h'")
+            .unwrap(),
     };
 }
 
@@ -2077,22 +2087,32 @@ fn insert_spatial_item(rt: &RedDBRuntime, kind: SpatialEntityKind, id: i64, name
                 geo_json_expr(loc)
             ))
             .unwrap(),
+        SpatialEntityKind::TimeSeries => rt
+            .execute_query(&format!(
+                "INSERT INTO spatial_items (metric, value, tags, ts, name, loc) \
+                 VALUES ('position', 1.0, '{{\"asset\":\"{name}\"}}', {id}, '{name}', {})",
+                geo_json_expr(loc)
+            ))
+            .unwrap(),
     };
 }
 
 fn update_spatial_item(rt: &RedDBRuntime, kind: SpatialEntityKind, name: &str, loc: &str) {
     match kind {
-        SpatialEntityKind::Row => rt
-            .execute_query(&format!(
+        SpatialEntityKind::Row => {
+            rt.execute_query(&format!(
                 "UPDATE spatial_items SET loc = '{loc}' WHERE name = '{name}'"
             ))
-            .unwrap(),
-        SpatialEntityKind::Node => rt
-            .execute_query(&format!(
+            .unwrap();
+        }
+        SpatialEntityKind::Node => {
+            rt.execute_query(&format!(
                 "UPDATE spatial_items NODES SET loc = {} WHERE name = '{name}'",
                 geo_json_expr(loc)
             ))
-            .unwrap(),
+            .unwrap();
+        }
+        SpatialEntityKind::TimeSeries => {}
     };
 }
 
@@ -2103,9 +2123,14 @@ fn geo_json_expr(loc: &str) -> String {
     format!("{{lat: {lat}, lon: {lon}}}")
 }
 
-fn delete_spatial_item(rt: &RedDBRuntime, name: &str) {
-    rt.execute_query(&format!("DELETE FROM spatial_items WHERE name = '{name}'"))
-        .unwrap();
+fn delete_spatial_item(rt: &RedDBRuntime, kind: SpatialEntityKind, name: &str) {
+    match kind {
+        SpatialEntityKind::Row | SpatialEntityKind::Node => {
+            rt.execute_query(&format!("DELETE FROM spatial_items WHERE name = '{name}'"))
+                .unwrap();
+        }
+        SpatialEntityKind::TimeSeries => {}
+    }
 }
 
 fn apply_spatial_seed(rt: &RedDBRuntime, kind: SpatialEntityKind) {
@@ -2116,7 +2141,7 @@ fn apply_spatial_seed(rt: &RedDBRuntime, kind: SpatialEntityKind) {
 
 fn apply_spatial_tail_mutations(rt: &RedDBRuntime, kind: SpatialEntityKind) {
     update_spatial_item(rt, kind, "rome", "35.6895,139.6917");
-    delete_spatial_item(rt, "louvre");
+    delete_spatial_item(rt, kind, "louvre");
     insert_spatial_item(rt, kind, 4, "eiffel", "48.8584,2.2945");
     insert_spatial_item(rt, kind, 5, "singapore", "1.3521,103.8198");
 }
@@ -2143,7 +2168,11 @@ fn h3_index_route_superset_invariant_generated_mutation_sequences() {
         "SEARCH SPATIAL NEAREST 48.8566 2.3522 K 3 COLLECTION spatial_items COLUMN loc",
     ];
 
-    for kind in [SpatialEntityKind::Row, SpatialEntityKind::Node] {
+    for kind in [
+        SpatialEntityKind::Row,
+        SpatialEntityKind::Node,
+        SpatialEntityKind::TimeSeries,
+    ] {
         for timing in [IndexTiming::BeforeData, IndexTiming::AfterSeedData] {
             let full_scan = build_spatial_case(kind, timing, false);
             let indexed = build_spatial_case(kind, timing, true);

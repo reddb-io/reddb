@@ -1222,6 +1222,45 @@ impl RedDBRuntime {
             tags.entry("payload".to_string())
                 .or_insert_with(|| payload.clone());
         }
+        let fields = extract_remaining_properties(
+            &columns,
+            &values,
+            &[
+                "metric",
+                "value",
+                "tags",
+                "timestamp",
+                "timestamp_ns",
+                "time",
+                "event_name",
+                "payload",
+            ],
+        );
+        let index_fields = fields.clone();
+        self.admit_non_evictable_growth(
+            crate::storage::memory_pools::MemoryPool::SegmentArena,
+            &format!("insert into {collection}"),
+            crate::runtime::memory_admission::estimate_timeseries_point_growth(
+                &metric, &tags, &fields,
+            ),
+        )?;
+        let indexed_columns = self
+            .inner
+            .index_store
+            .list_indices(collection)
+            .into_iter()
+            .flat_map(|index| index.columns)
+            .collect::<Vec<_>>();
+        if !indexed_columns.is_empty() {
+            self.admit_non_evictable_growth(
+                crate::storage::memory_pools::MemoryPool::IndexMemory,
+                &format!("index insert into {collection}"),
+                crate::runtime::memory_admission::estimate_index_growth(
+                    std::slice::from_ref(&index_fields),
+                    &indexed_columns,
+                ),
+            )?;
+        }
         let series_id = super::impl_timeseries::intern_timeseries_series(
             self.inner.db.store().as_ref(),
             collection,
@@ -1241,6 +1280,7 @@ impl RedDBRuntime {
                 timestamp_ns,
                 value,
                 tags: HashMap::new(),
+                fields: fields.into_iter().collect(),
             }),
         );
         // MVCC #30: stamp xmin with the active tx xid (inside a tx)
@@ -1261,6 +1301,10 @@ impl RedDBRuntime {
         let id = store
             .insert_auto(collection, entity)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner
+            .index_store
+            .index_entity_insert(collection, id, &index_fields)
+            .map_err(RedDBError::Internal)?;
 
         if !metadata.is_empty() {
             let _ = store.set_metadata(

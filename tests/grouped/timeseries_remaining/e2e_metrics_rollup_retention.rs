@@ -56,6 +56,7 @@ fn insert_raw_metric(rt: &RedDBRuntime, collection: &str, timestamp_ms: i64, val
             value,
             tags,
             series_id: None,
+            fields: HashMap::new(),
         }),
     );
     rt.db()

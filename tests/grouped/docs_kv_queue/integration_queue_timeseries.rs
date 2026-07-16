@@ -1455,6 +1455,7 @@ fn test_timeseries_time_bucket_aggregate_query() {
                 timestamp_ns,
                 value,
                 tags: HashMap::new(),
+                fields: HashMap::new(),
             }),
         );
         store
