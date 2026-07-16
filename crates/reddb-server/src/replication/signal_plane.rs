@@ -7,7 +7,8 @@
 //! ownership transition, vote, or bootstrap-state variant, so those authority
 //! facts cannot be represented by this seam.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use super::MemberId;
 
@@ -112,6 +113,381 @@ pub trait SignalPlane {
 
     /// Drain signals delivered to `member`.
     fn drain_received(&mut self, member: &MemberId) -> Vec<ReceivedSignal>;
+}
+
+/// Per-round bounds for signal-plane gossip traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalPlaneLimits {
+    /// Maximum peers sampled by one member in a round.
+    pub fanout: usize,
+    /// Maximum closed-vocabulary messages carried in one frame.
+    pub max_payload_messages: usize,
+}
+
+impl Default for SignalPlaneLimits {
+    fn default() -> Self {
+        Self {
+            fanout: 3,
+            max_payload_messages: 16,
+        }
+    }
+}
+
+/// Signal-plane traffic counters exported by the transport and engines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignalPlaneMetrics {
+    pub sent_frames_total: u64,
+    pub sent_messages_total: u64,
+    pub received_frames_total: u64,
+    pub received_messages_total: u64,
+    pub rejected_frames_total: u64,
+    pub dropped_frames_total: u64,
+    pub payload_cap_hits_total: u64,
+    pub fanout_cap: usize,
+    pub payload_cap: usize,
+}
+
+/// One authenticated intra-cluster signal frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalFrame {
+    pub authenticated_peer: MemberId,
+    pub from: MemberId,
+    pub to: MemberId,
+    pub messages: Vec<SignalPlaneMessage>,
+}
+
+/// Rejection from the secured intra-cluster signal transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignalTransportError {
+    AuthenticatedPeerMismatch {
+        authenticated_peer: MemberId,
+        declared_sender: MemberId,
+    },
+    SenderNotAdmitted(MemberId),
+    RecipientNotAdmitted(MemberId),
+    PayloadTooLarge {
+        actual: usize,
+        max: usize,
+    },
+    EndpointUnavailable(MemberId),
+}
+
+/// Secured member-to-member signal transport for admitted cluster members.
+#[derive(Debug)]
+pub struct IntraClusterSignalBus {
+    admitted: BTreeSet<MemberId>,
+    endpoints: BTreeMap<MemberId, VecDeque<SignalFrame>>,
+    limits: SignalPlaneLimits,
+    metrics: SignalPlaneMetrics,
+}
+
+impl Default for IntraClusterSignalBus {
+    fn default() -> Self {
+        Self::new(SignalPlaneLimits::default())
+    }
+}
+
+impl IntraClusterSignalBus {
+    pub fn new(limits: SignalPlaneLimits) -> Self {
+        let mut metrics = SignalPlaneMetrics::default();
+        metrics.fanout_cap = limits.fanout;
+        metrics.payload_cap = limits.max_payload_messages;
+        Self {
+            admitted: BTreeSet::new(),
+            endpoints: BTreeMap::new(),
+            limits,
+            metrics,
+        }
+    }
+
+    pub fn set_limits(&mut self, limits: SignalPlaneLimits) {
+        self.limits = limits;
+        self.metrics.fanout_cap = limits.fanout;
+        self.metrics.payload_cap = limits.max_payload_messages;
+    }
+
+    pub fn set_admitted_members(&mut self, members: Vec<MemberId>) {
+        self.admitted = members.into_iter().collect();
+        self.endpoints
+            .retain(|member, _| self.admitted.contains(member));
+    }
+
+    pub fn register_endpoint(&mut self, member: MemberId) {
+        if self.admitted.is_empty() || self.admitted.contains(&member) {
+            self.endpoints.entry(member).or_default();
+        }
+    }
+
+    pub fn unregister_endpoint(&mut self, member: &MemberId) {
+        self.endpoints.remove(member);
+    }
+
+    pub fn send(&mut self, frame: SignalFrame) -> Result<(), SignalTransportError> {
+        if frame.authenticated_peer != frame.from {
+            self.metrics.rejected_frames_total += 1;
+            return Err(SignalTransportError::AuthenticatedPeerMismatch {
+                authenticated_peer: frame.authenticated_peer,
+                declared_sender: frame.from,
+            });
+        }
+        if !self.admitted.contains(&frame.from) {
+            self.metrics.rejected_frames_total += 1;
+            return Err(SignalTransportError::SenderNotAdmitted(frame.from));
+        }
+        if !self.admitted.contains(&frame.to) {
+            self.metrics.rejected_frames_total += 1;
+            return Err(SignalTransportError::RecipientNotAdmitted(frame.to));
+        }
+        if frame.messages.len() > self.limits.max_payload_messages {
+            self.metrics.rejected_frames_total += 1;
+            self.metrics.payload_cap_hits_total += 1;
+            return Err(SignalTransportError::PayloadTooLarge {
+                actual: frame.messages.len(),
+                max: self.limits.max_payload_messages,
+            });
+        }
+
+        let message_count = frame.messages.len() as u64;
+        let Some(endpoint) = self.endpoints.get_mut(&frame.to) else {
+            self.metrics.dropped_frames_total += 1;
+            return Err(SignalTransportError::EndpointUnavailable(frame.to));
+        };
+        endpoint.push_back(frame);
+        self.metrics.sent_frames_total += 1;
+        self.metrics.sent_messages_total += message_count;
+        Ok(())
+    }
+
+    pub fn drain(&mut self, member: MemberId) -> Vec<SignalFrame> {
+        let Some(endpoint) = self.endpoints.get_mut(&member) else {
+            return Vec::new();
+        };
+        endpoint.drain(..).collect()
+    }
+
+    pub fn metrics(&self) -> SignalPlaneMetrics {
+        self.metrics.clone()
+    }
+}
+
+/// Cloneable handle for the secured intra-cluster signal transport.
+#[derive(Debug, Clone, Default)]
+pub struct SharedSignalTransport {
+    bus: Arc<Mutex<IntraClusterSignalBus>>,
+}
+
+impl SharedSignalTransport {
+    pub fn set_limits(&self, limits: SignalPlaneLimits) {
+        self.bus
+            .lock()
+            .expect("signal transport mutex poisoned")
+            .set_limits(limits);
+    }
+
+    pub fn set_admitted_members(&self, members: Vec<MemberId>) {
+        self.bus
+            .lock()
+            .expect("signal transport mutex poisoned")
+            .set_admitted_members(members);
+    }
+
+    pub fn register_endpoint(&self, member: MemberId) {
+        self.bus
+            .lock()
+            .expect("signal transport mutex poisoned")
+            .register_endpoint(member);
+    }
+
+    pub fn unregister_endpoint(&self, member: &MemberId) {
+        self.bus
+            .lock()
+            .expect("signal transport mutex poisoned")
+            .unregister_endpoint(member);
+    }
+
+    pub fn send(&self, frame: SignalFrame) -> Result<(), SignalTransportError> {
+        self.bus
+            .lock()
+            .expect("signal transport mutex poisoned")
+            .send(frame)
+    }
+
+    pub fn drain(&self, member: MemberId) -> Vec<SignalFrame> {
+        self.bus
+            .lock()
+            .expect("signal transport mutex poisoned")
+            .drain(member)
+    }
+
+    pub fn metrics(&self) -> SignalPlaneMetrics {
+        self.bus
+            .lock()
+            .expect("signal transport mutex poisoned")
+            .metrics()
+    }
+}
+
+/// SWIM-style signal-plane engine over the secured intra-cluster transport.
+#[derive(Debug)]
+pub struct TransportSignalPlane {
+    local_member: MemberId,
+    transport: SharedSignalTransport,
+    limits: SignalPlaneLimits,
+    members: BTreeSet<MemberId>,
+    known: BTreeSet<SignalPlaneMessage>,
+    inbox: Vec<ReceivedSignal>,
+    round: u64,
+    metrics: SignalPlaneMetrics,
+}
+
+impl TransportSignalPlane {
+    pub fn new(
+        local_member: MemberId,
+        transport: SharedSignalTransport,
+        limits: SignalPlaneLimits,
+    ) -> Self {
+        transport.set_limits(limits);
+        transport.register_endpoint(local_member.clone());
+        let mut metrics = SignalPlaneMetrics::default();
+        metrics.fanout_cap = limits.fanout;
+        metrics.payload_cap = limits.max_payload_messages;
+        Self {
+            local_member,
+            transport,
+            limits,
+            members: BTreeSet::new(),
+            known: BTreeSet::new(),
+            inbox: Vec::new(),
+            round: 0,
+            metrics,
+        }
+    }
+
+    pub fn advance_round(&mut self) {
+        self.receive_frames();
+        self.send_round();
+        self.round += 1;
+    }
+
+    pub fn knows(&self, message: &SignalPlaneMessage) -> bool {
+        self.known.contains(message)
+    }
+
+    pub fn metrics(&self) -> SignalPlaneMetrics {
+        self.metrics.clone()
+    }
+
+    fn receive_frames(&mut self) {
+        let frames = self.transport.drain(self.local_member.clone());
+        for frame in frames {
+            if !self.members.contains(&frame.from) || !self.members.contains(&frame.to) {
+                self.metrics.rejected_frames_total += 1;
+                continue;
+            }
+            self.metrics.received_frames_total += 1;
+            self.metrics.received_messages_total += frame.messages.len() as u64;
+            for message in frame.messages {
+                self.known.insert(message.clone());
+                self.inbox.push(ReceivedSignal {
+                    from: frame.from.clone(),
+                    to: self.local_member.clone(),
+                    message,
+                });
+            }
+        }
+    }
+
+    fn send_round(&mut self) {
+        if self.known.is_empty() {
+            return;
+        }
+
+        let payload = self
+            .known
+            .iter()
+            .take(self.limits.max_payload_messages)
+            .cloned()
+            .collect::<Vec<_>>();
+        if self.known.len() > payload.len() {
+            self.metrics.payload_cap_hits_total += 1;
+        }
+
+        for peer in self.sample_peers() {
+            let message_count = payload.len() as u64;
+            let frame = SignalFrame {
+                authenticated_peer: self.local_member.clone(),
+                from: self.local_member.clone(),
+                to: peer,
+                messages: payload.clone(),
+            };
+            match self.transport.send(frame) {
+                Ok(()) => {
+                    self.metrics.sent_frames_total += 1;
+                    self.metrics.sent_messages_total += message_count;
+                }
+                Err(SignalTransportError::EndpointUnavailable(_)) => {
+                    self.metrics.dropped_frames_total += 1;
+                }
+                Err(_) => {
+                    self.metrics.rejected_frames_total += 1;
+                }
+            }
+        }
+    }
+
+    fn sample_peers(&self) -> Vec<MemberId> {
+        if self.limits.fanout == 0 {
+            return Vec::new();
+        }
+
+        let peers = self
+            .members
+            .iter()
+            .filter(|member| *member != &self.local_member)
+            .cloned()
+            .collect::<Vec<_>>();
+        if peers.len() <= self.limits.fanout {
+            return peers;
+        }
+
+        let start = (self.round + stable_member_hash(&self.local_member)) as usize % peers.len();
+        (0..self.limits.fanout)
+            .map(|offset| peers[(start + offset) % peers.len()].clone())
+            .collect()
+    }
+}
+
+impl SignalPlane for TransportSignalPlane {
+    fn set_members(&mut self, members: Vec<MemberId>) {
+        self.members = members.iter().cloned().collect();
+        self.transport.set_admitted_members(members);
+        if self.members.contains(&self.local_member) {
+            self.transport.register_endpoint(self.local_member.clone());
+        }
+    }
+
+    fn publish(&mut self, from: MemberId, message: SignalPlaneMessage) {
+        if from == self.local_member && self.members.contains(&from) {
+            self.known.insert(message);
+        } else {
+            self.metrics.rejected_frames_total += 1;
+        }
+    }
+
+    fn drain_received(&mut self, member: &MemberId) -> Vec<ReceivedSignal> {
+        if member == &self.local_member {
+            self.receive_frames();
+            std::mem::take(&mut self.inbox)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+fn stable_member_hash(member: &MemberId) -> u64 {
+    member.bytes().fold(0_u64, |hash, byte| {
+        hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+    })
 }
 
 /// Deterministic fault schedule for the in-process simulated-peer engine.
@@ -499,5 +875,76 @@ mod tests {
             plane.members_with_signal(&observation),
             vec![member("a"), member("b"), member("c")]
         );
+    }
+
+    #[test]
+    fn secured_transport_rejects_signal_from_unadmitted_peer_before_delivery() {
+        let mut bus = IntraClusterSignalBus::new(SignalPlaneLimits::default());
+        bus.set_admitted_members(vec![member("a"), member("b")]);
+        bus.register_endpoint(member("a"));
+        bus.register_endpoint(member("b"));
+
+        let err = bus
+            .send(SignalFrame {
+                authenticated_peer: member("stranger"),
+                from: member("stranger"),
+                to: member("a"),
+                messages: vec![liveness("stranger", "a")],
+            })
+            .expect_err("unadmitted sender must be rejected");
+
+        assert_eq!(
+            err,
+            SignalTransportError::SenderNotAdmitted(member("stranger"))
+        );
+        assert_eq!(bus.drain(member("a")).len(), 0);
+        assert_eq!(bus.metrics().rejected_frames_total, 1);
+    }
+
+    #[test]
+    fn three_node_gossip_converges_over_secured_transport_with_one_member_down() {
+        let transport = SharedSignalTransport::default();
+        let limits = SignalPlaneLimits {
+            fanout: 1,
+            max_payload_messages: 2,
+        };
+        let members = vec![member("a"), member("b"), member("c")];
+
+        let mut node_a = TransportSignalPlane::new(member("a"), transport.clone(), limits);
+        let mut node_b = TransportSignalPlane::new(member("b"), transport.clone(), limits);
+        let mut node_c = TransportSignalPlane::new(member("c"), transport.clone(), limits);
+
+        node_a.set_members(members.clone());
+        node_b.set_members(members.clone());
+        node_c.set_members(members);
+        transport.unregister_endpoint(&member("c"));
+
+        let observation = SignalPlaneMessage::LivenessObservation(LivenessObservation {
+            observer: member("a"),
+            observed: member("c"),
+            incarnation: 2,
+            status: LivenessStatus::Unreachable,
+        });
+        node_a.publish(member("a"), observation.clone());
+
+        let bound = 6;
+        for _ in 0..bound {
+            node_a.advance_round();
+            node_b.advance_round();
+            node_c.advance_round();
+            if node_a.knows(&observation) && node_b.knows(&observation) {
+                break;
+            }
+        }
+
+        assert!(node_a.knows(&observation));
+        assert!(node_b.knows(&observation));
+        assert!(!node_c.knows(&observation));
+
+        let metrics = node_a.metrics();
+        assert!(metrics.sent_frames_total > 0);
+        assert!(metrics.sent_messages_total > 0);
+        assert!(metrics.fanout_cap >= 1);
+        assert!(metrics.payload_cap >= 2);
     }
 }
