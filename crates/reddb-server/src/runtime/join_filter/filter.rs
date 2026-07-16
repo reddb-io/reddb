@@ -165,6 +165,7 @@ fn json_value_contains(value: &JsonValue, needle: &str) -> bool {
             .any(|value| json_value_contains(value, needle)),
         JsonValue::String(value) => value == needle,
         JsonValue::Integer(value) => value.to_string() == needle,
+        JsonValue::Decimal(value) => value == needle,
         JsonValue::Number(value) => value.to_string() == needle,
         JsonValue::Bool(value) => value.to_string() == needle,
         JsonValue::Null | JsonValue::Object(_) => false,
