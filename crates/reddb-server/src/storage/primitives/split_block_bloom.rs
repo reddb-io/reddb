@@ -1,6 +1,6 @@
-//! SplitBlockBloomFilter — cache-line-aligned, SIMD-friendly bloom filter.
+//! SplitBlockBloom — cache-line-aligned, SIMD-friendly bloom filter.
 //!
-//! Direct port of MongoDB's `SplitBlockBloomFilter` from
+//! Direct port of MongoDB's split-block bloom from
 //! `src/mongo/db/exec/sbe/util/bloom_filter.h`.
 //!
 //! # Design
