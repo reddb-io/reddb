@@ -11,6 +11,7 @@ pub enum Value {
     Bool(bool),
     Integer(i64),
     Number(f64),
+    Decimal(String),
     String(String),
     Array(Vec<Value>),
     Object(Map<String, Value>),
@@ -34,6 +35,7 @@ impl Value {
         match self {
             Value::Number(n) => Some(*n),
             Value::Integer(n) => Some(*n as f64),
+            Value::Decimal(n) => n.parse::<f64>().ok(),
             _ => None,
         }
     }
@@ -42,6 +44,7 @@ impl Value {
         match self {
             Value::Integer(n) => Some(*n),
             Value::Number(n) => Some(*n as i64),
+            Value::Decimal(n) => n.parse::<i64>().ok(),
             _ => None,
         }
     }
@@ -50,6 +53,7 @@ impl Value {
         match self {
             Value::Integer(n) if *n >= 0 => Some(*n as u64),
             Value::Number(n) if *n >= 0.0 => Some(*n as u64),
+            Value::Decimal(n) => n.parse::<u64>().ok(),
             _ => None,
         }
     }
@@ -107,6 +111,7 @@ impl Value {
                     out.push_str(&format!("{}", n));
                 }
             }
+            Value::Decimal(n) => out.push_str(n),
             Value::String(s) => {
                 out.push('"');
                 out.push_str(&escape_string(s));
@@ -145,6 +150,7 @@ impl Value {
             | Value::Bool(_)
             | Value::Integer(_)
             | Value::Number(_)
+            | Value::Decimal(_)
             | Value::String(_) => {
                 out.push_str(&self.to_string_compact());
             }
@@ -300,6 +306,10 @@ mod tests {
         object.insert("null".to_string(), Value::Null);
         object.insert("bool".to_string(), Value::Bool(true));
         object.insert("number".to_string(), Value::Number(42.5));
+        object.insert(
+            "decimal".to_string(),
+            Value::Decimal("3.14159265358979323846".to_string()),
+        );
         object.insert("string".to_string(), Value::String("reddb".to_string()));
         object.insert(
             "array".to_string(),
@@ -316,7 +326,11 @@ mod tests {
             value.get("array").and_then(Value::as_array).map(<[_]>::len),
             Some(2)
         );
-        assert_eq!(value.as_object().map(Map::len), Some(5));
+        assert_eq!(value.as_object().map(Map::len), Some(6));
+        assert_eq!(
+            value.get("decimal").and_then(Value::as_f64),
+            Some(3.141592653589793)
+        );
         assert!(Value::Number(-1.0).as_u64().is_none());
         assert!(Value::Null.as_str().is_none());
 
@@ -327,6 +341,10 @@ mod tests {
         assert!(pretty.contains("\"array\": ["));
         assert_eq!(Value::Array(Vec::new()).to_string_pretty(), "[]");
         assert_eq!(Value::Object(Map::new()).to_string_pretty(), "{}");
+        assert_eq!(
+            value.get("decimal").unwrap().to_string_compact(),
+            "3.14159265358979323846"
+        );
 
         let mut created_from_index = Value::Null;
         created_from_index["created"] = Value::Bool(true);
@@ -446,6 +464,7 @@ impl From<JsonValue> for Value {
             JsonValue::Bool(b) => Value::Bool(b),
             JsonValue::Integer(n) => Value::Integer(n),
             JsonValue::Number(n) => Value::Number(n),
+            JsonValue::Decimal(n) => Value::Decimal(n),
             JsonValue::String(s) => Value::String(s),
             JsonValue::Array(values) => Value::Array(values.into_iter().map(Value::from).collect()),
             JsonValue::Object(entries) => {
