@@ -297,6 +297,7 @@ fn tree_json_value_to_storage_value(value: &JsonValue) -> Result<Value, ParseErr
                 Value::Float(*value)
             }
         }
+        JsonValue::Decimal(value) => Value::DecimalText(value.clone()),
         JsonValue::String(value) => Value::text(value.clone()),
         JsonValue::Array(_) | JsonValue::Object(_) => {
             Value::Json(reddb_types::json::to_vec(value).map_err(|err| {
