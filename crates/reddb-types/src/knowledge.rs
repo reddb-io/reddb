@@ -388,6 +388,7 @@ pub fn infer_literal_type(value: &JsonValue) -> DataType {
         JsonValue::Null => DataType::Nullable,
         JsonValue::Bool(_) => DataType::Boolean,
         JsonValue::Integer(_) => DataType::Integer,
+        JsonValue::Decimal(_) => DataType::DecimalText,
         JsonValue::Number(n) => {
             if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
                 DataType::Integer
