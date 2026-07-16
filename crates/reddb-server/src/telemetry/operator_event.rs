@@ -201,6 +201,18 @@ pub enum OperatorEvent {
         ownership_epoch: u64,
         range_identity: String,
     },
+    /// A healthy owner cooperatively handed write authority to a caught-up
+    /// hot mirror before lease expiry/election. This is planned maintenance
+    /// evidence, distinct from failover.
+    CooperativeLeaseHandoff {
+        range_identity: String,
+        previous_owner: String,
+        new_owner: String,
+        previous_epoch: u64,
+        new_epoch: u64,
+        commit_watermark: u64,
+        target_lsn: u64,
+    },
     /// Replica apply rejected a stamped record because its range authority
     /// term/ownership epoch conflicts with the current ownership state.
     ReplicaAuthorityDivergence {
@@ -237,6 +249,7 @@ impl OperatorEvent {
             "QueueDlqPromoted",
             "DeposedPrimaryRollback",
             "OwnershipFenced",
+            "CooperativeLeaseHandoff",
             "ReplicaAuthorityDivergence",
         ]
     }
@@ -264,6 +277,7 @@ impl OperatorEvent {
             Self::QueueDlqPromoted { .. } => "QueueDlqPromoted",
             Self::DeposedPrimaryRollback { .. } => "DeposedPrimaryRollback",
             Self::OwnershipFenced { .. } => "OwnershipFenced",
+            Self::CooperativeLeaseHandoff { .. } => "CooperativeLeaseHandoff",
             Self::ReplicaAuthorityDivergence { .. } => "ReplicaAuthorityDivergence",
         }
     }
@@ -579,6 +593,31 @@ impl OperatorEvent {
                     AuditFieldEscaper::field("range_identity", range_identity),
                 ];
                 ("operator/ownership_fenced", fields, summary)
+            }
+            Self::CooperativeLeaseHandoff {
+                range_identity,
+                previous_owner,
+                new_owner,
+                previous_epoch,
+                new_epoch,
+                commit_watermark,
+                target_lsn,
+            } => {
+                let summary = format!(
+                    "cooperative lease handoff: range={range_identity} previous_owner={previous_owner} \
+                     new_owner={new_owner} epoch={previous_epoch}->{new_epoch} \
+                     commit_watermark={commit_watermark} target_lsn={target_lsn}"
+                );
+                let fields = vec![
+                    AuditFieldEscaper::field("range_identity", range_identity),
+                    AuditFieldEscaper::field("previous_owner", previous_owner),
+                    AuditFieldEscaper::field("new_owner", new_owner),
+                    AuditFieldEscaper::field("previous_epoch", previous_epoch),
+                    AuditFieldEscaper::field("new_epoch", new_epoch),
+                    AuditFieldEscaper::field("commit_watermark", commit_watermark),
+                    AuditFieldEscaper::field("target_lsn", target_lsn),
+                ];
+                ("operator/cooperative_lease_handoff", fields, summary)
             }
             Self::ReplicaAuthorityDivergence {
                 range_identity,
@@ -1009,6 +1048,50 @@ mod tests {
             detail.get("range_identity").and_then(|x| x.as_str()),
             Some("system.global/0")
         );
+    }
+
+    #[test]
+    fn cooperative_lease_handoff_emits_epoch_watermark_and_owners() {
+        let (logger, path) = make_logger();
+        OperatorEvent::CooperativeLeaseHandoff {
+            range_identity: "system.global/0".into(),
+            previous_owner: "CN=node-a,O=reddb".into(),
+            new_owner: "CN=node-b,O=reddb".into(),
+            previous_epoch: 1,
+            new_epoch: 2,
+            commit_watermark: 12,
+            target_lsn: 12,
+        }
+        .emit(&logger);
+        drain(&logger);
+        let v = read_last_line(&path);
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/cooperative_lease_handoff")
+        );
+        let detail = v.get("detail").expect("event detail");
+        assert_eq!(
+            detail.get("range_identity").and_then(|x| x.as_str()),
+            Some("system.global/0")
+        );
+        assert_eq!(
+            detail.get("previous_owner").and_then(|x| x.as_str()),
+            Some("CN=node-a,O=reddb")
+        );
+        assert_eq!(
+            detail.get("new_owner").and_then(|x| x.as_str()),
+            Some("CN=node-b,O=reddb")
+        );
+        assert_eq!(
+            detail.get("previous_epoch").and_then(|x| x.as_i64()),
+            Some(1)
+        );
+        assert_eq!(detail.get("new_epoch").and_then(|x| x.as_i64()), Some(2));
+        assert_eq!(
+            detail.get("commit_watermark").and_then(|x| x.as_i64()),
+            Some(12)
+        );
+        assert_eq!(detail.get("target_lsn").and_then(|x| x.as_i64()), Some(12));
     }
 
     #[test]

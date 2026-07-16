@@ -819,6 +819,23 @@ mod tests {
                     fields_changed: fields_changed.clone(),
                 }
             }
+            OperatorEvent::CooperativeLeaseHandoff {
+                range_identity,
+                previous_owner,
+                new_owner,
+                previous_epoch,
+                new_epoch,
+                commit_watermark,
+                target_lsn,
+            } => OperatorEvent::CooperativeLeaseHandoff {
+                range_identity: range_identity.clone(),
+                previous_owner: previous_owner.clone(),
+                new_owner: new_owner.clone(),
+                previous_epoch: *previous_epoch,
+                new_epoch: *new_epoch,
+                commit_watermark: *commit_watermark,
+                target_lsn: *target_lsn,
+            },
             OperatorEvent::DanglingAdminIntent { .. } => {
                 // Not cloneable without crypto type impls; skip.
                 OperatorEvent::ShutdownForced {
