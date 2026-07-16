@@ -1107,6 +1107,7 @@ fn data_type_name(data_type: DataType) -> &'static str {
         DataType::Date => "date",
         DataType::Time => "time",
         DataType::Decimal => "decimal",
+        DataType::DecimalText => "decimal_text",
         DataType::Enum => "enum",
         DataType::Array => "array",
         DataType::TimestampMs => "timestamp_ms",
@@ -1167,6 +1168,7 @@ fn value_matches_declared_type(value: &Value, target: DataType) -> bool {
             | (Value::Date(_), DataType::Date)
             | (Value::Time(_), DataType::Time)
             | (Value::Decimal(_), DataType::Decimal)
+            | (Value::DecimalText(_), DataType::DecimalText)
             | (Value::EnumValue(_), DataType::Enum)
             | (Value::Array(_), DataType::Array)
             | (Value::TimestampMs(_), DataType::TimestampMs)
@@ -1222,6 +1224,7 @@ fn value_to_coercion_input(value: &Value) -> Option<String> {
         Value::Date(value) => Some(value.to_string()),
         Value::Time(value) => Some(value.to_string()),
         Value::Decimal(value) => Some(value.to_string()),
+        Value::DecimalText(value) => Some(value.clone()),
         Value::TimestampMs(value) => Some(value.to_string()),
         Value::Ipv4(value) => Some(format!(
             "{}.{}.{}.{}",
