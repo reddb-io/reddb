@@ -313,6 +313,8 @@ pub enum DataType {
     AssetCode = 53,
     /// Monetary amount represented as minor units + scale + asset code
     Money = 54,
+    /// Exact JSON numeric literal stored as decimal text
+    DecimalText = 55,
 }
 
 /// Type categories used by the Fase 3 coercion resolver. Mirrors
@@ -382,6 +384,7 @@ impl DataType {
             | DataType::UnsignedInteger
             | DataType::Float
             | DataType::Decimal
+            | DataType::DecimalText
             | DataType::BigInt
             | DataType::Port
             | DataType::Latitude
@@ -524,6 +527,7 @@ impl DataType {
             52 => Some(DataType::BlobZstd),
             53 => Some(DataType::AssetCode),
             54 => Some(DataType::Money),
+            55 => Some(DataType::DecimalText),
             _ => None,
         }
     }
@@ -650,6 +654,7 @@ impl DataType {
             DataType::BigInt => Some(8),      // i64
             DataType::AssetCode => None,      // variable-length normalized code
             DataType::Money => None,          // variable-length asset + scale + i64
+            DataType::DecimalText => None,    // variable-length decimal literal
             DataType::KeyRef => None,         // variable-length (collection + key)
             DataType::DocRef => None,         // variable-length (collection + u64)
             DataType::TableRef => None,       // variable-length (table name)
@@ -718,6 +723,7 @@ impl DataType {
                 | DataType::Date
                 | DataType::Time
                 | DataType::Decimal
+                | DataType::DecimalText
                 | DataType::Semver
                 | DataType::TimestampMs
                 | DataType::Port
@@ -760,6 +766,7 @@ impl fmt::Display for DataType {
             DataType::Date => write!(f, "DATE"),
             DataType::Time => write!(f, "TIME"),
             DataType::Decimal => write!(f, "DECIMAL"),
+            DataType::DecimalText => write!(f, "DECIMAL_TEXT"),
             DataType::Enum => write!(f, "ENUM"),
             DataType::Array => write!(f, "ARRAY"),
             DataType::TimestampMs => write!(f, "TIMESTAMP_MS"),
@@ -848,6 +855,8 @@ pub enum Value {
     Time(u32),
     /// Fixed-point decimal (value * 10^precision)
     Decimal(i64),
+    /// Exact JSON numeric literal stored as normalized decimal text
+    DecimalText(String),
     /// Enum variant index
     EnumValue(u8),
     /// Homogeneous array
@@ -960,6 +969,7 @@ impl std::hash::Hash for Value {
             Value::Date(v) => v.hash(state),
             Value::Time(v) => v.hash(state),
             Value::Decimal(v) => v.hash(state),
+            Value::DecimalText(v) => v.hash(state),
             Value::EnumValue(v) => v.hash(state),
             Value::Array(v) => {
                 v.len().hash(state);
@@ -1054,6 +1064,7 @@ impl Value {
             Value::Date(_) => DataType::Date,
             Value::Time(_) => DataType::Time,
             Value::Decimal(_) => DataType::Decimal,
+            Value::DecimalText(_) => DataType::DecimalText,
             Value::EnumValue(_) => DataType::Enum,
             Value::Array(_) => DataType::Array,
             Value::TimestampMs(_) => DataType::TimestampMs,
@@ -1128,6 +1139,7 @@ impl Value {
             Value::Float(v) => Some(*v),
             Value::Integer(v) => Some(*v as f64),
             Value::UnsignedInteger(v) => Some(*v as f64),
+            Value::DecimalText(v) => v.parse().ok(),
             _ => None,
         }
     }
@@ -1196,6 +1208,7 @@ impl Value {
                 )
             }
             Value::Decimal(v) => format_scaled_i64(*v, 4),
+            Value::DecimalText(v) => v.clone(),
             Value::EnumValue(i) => format!("enum({})", i),
             Value::Array(elems) => {
                 let items: Vec<String> = elems.iter().map(|e| e.display_string()).collect();
@@ -1378,6 +1391,7 @@ impl fmt::Display for Value {
                 )
             }
             Value::Decimal(v) => write!(f, "{}", format_scaled_i64(*v, 4)),
+            Value::DecimalText(v) => write!(f, "{}", v),
             Value::EnumValue(i) => write!(f, "enum({})", i),
             Value::Array(elems) => {
                 write!(f, "[")?;
