@@ -25,9 +25,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::api::{RedDBError, RedDBOptions, RedDBResult};
 use crate::cluster::{
-    admit_durable_write, CollectionId, DurableWriteReject, LeasedOwner, NodeIdentity,
-    OwnershipEpoch, OwnershipLease, PlacementMetadata, RangeBounds, RangeId, RangeOwnership,
-    ShardKeyMode, ShardOwnershipCatalog, SupervisorTerm,
+    admit_durable_write, CollectionId, DurableWriteReject, HotMirrorCandidate,
+    HotMirrorPromotionRefusal, LeasedOwner, NodeIdentity, OwnershipEpoch, OwnershipLease,
+    PlacementMetadata, RangeBounds, RangeId, RangeOwnership, ShardKeyMode, ShardOwnershipCatalog,
+    SupervisorTerm,
 };
 use crate::replication::cdc::RangeAuthority;
 use crate::replication::flow_control::{Admission, FlowController};
@@ -60,6 +61,17 @@ pub enum WriteKind {
     /// Serverless lifecycle endpoints that mutate state (attach / warmup
     /// / reclaim).
     Serverless,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CooperativeHandoffOutcome {
+    pub range_identity: String,
+    pub previous_owner: String,
+    pub new_owner: String,
+    pub previous_epoch: u64,
+    pub new_epoch: u64,
+    pub commit_watermark: u64,
+    pub target_lsn: u64,
 }
 
 impl WriteKind {
@@ -419,6 +431,50 @@ impl WriteGate {
         gate.promote_to(new_owner, new_term)
     }
 
+    pub fn register_primary_replica_hot_mirror(&self, mirror_subject: &str) -> RedDBResult<()> {
+        let mirror = node_identity(mirror_subject)?;
+        let mut guard = self.ownership.write();
+        let Some(gate) = guard.as_mut() else {
+            return Ok(());
+        };
+        gate.register_hot_mirror(mirror)
+    }
+
+    pub fn cooperative_handoff_primary_replica_owner(
+        &self,
+        new_owner_subject: &str,
+        new_term: u64,
+        target_lsn: u64,
+        commit_watermark: u64,
+    ) -> RedDBResult<CooperativeHandoffOutcome> {
+        let new_owner = node_identity(new_owner_subject)?;
+        let mut guard = self.ownership.write();
+        let Some(gate) = guard.as_mut() else {
+            return Ok(CooperativeHandoffOutcome {
+                range_identity: RESERVED_GLOBAL_SYSTEM_COLLECTION.to_string(),
+                previous_owner: String::new(),
+                new_owner: new_owner.to_string(),
+                previous_epoch: 0,
+                new_epoch: 0,
+                commit_watermark,
+                target_lsn,
+            });
+        };
+        let outcome =
+            gate.cooperative_handoff_to(new_owner, new_term, target_lsn, commit_watermark)?;
+        OperatorEvent::CooperativeLeaseHandoff {
+            range_identity: outcome.range_identity.clone(),
+            previous_owner: outcome.previous_owner.clone(),
+            new_owner: outcome.new_owner.clone(),
+            previous_epoch: outcome.previous_epoch,
+            new_epoch: outcome.new_epoch,
+            commit_watermark: outcome.commit_watermark,
+            target_lsn: outcome.target_lsn,
+        }
+        .emit_global();
+        Ok(outcome)
+    }
+
     pub fn primary_replica_range_authority(&self) -> Option<RangeAuthority> {
         self.ownership
             .read()
@@ -521,6 +577,75 @@ impl OwnershipAdmissionGate {
             .map_err(|err| RedDBError::Catalog(err.to_string()))?;
         self.current_term = SupervisorTerm::new(new_term);
         Ok(())
+    }
+
+    fn register_hot_mirror(&mut self, mirror: NodeIdentity) -> RedDBResult<()> {
+        let current = self
+            .catalog
+            .range(&self.collection, self.range_id)
+            .ok_or_else(|| RedDBError::Internal("reserved global system range missing".into()))?
+            .clone();
+        if current.replicas().contains(&mirror) {
+            return Ok(());
+        }
+        let replicas = current
+            .replicas()
+            .iter()
+            .cloned()
+            .chain(std::iter::once(mirror));
+        self.catalog
+            .apply_update(current.update_replicas(replicas))
+            .map_err(|err| RedDBError::Catalog(err.to_string()))
+    }
+
+    fn cooperative_handoff_to(
+        &mut self,
+        new_owner: NodeIdentity,
+        new_term: u64,
+        target_lsn: u64,
+        commit_watermark: u64,
+    ) -> RedDBResult<CooperativeHandoffOutcome> {
+        let current = self
+            .catalog
+            .range(&self.collection, self.range_id)
+            .ok_or_else(|| RedDBError::Internal("reserved global system range missing".into()))?
+            .clone();
+        let promotion = current
+            .promote_hot_mirror(
+                &HotMirrorCandidate::new(new_owner.clone(), target_lsn),
+                commit_watermark,
+            )
+            .map_err(|err| RedDBError::InvalidOperation(hot_mirror_refusal_message(&err)))?;
+        let outcome = CooperativeHandoffOutcome {
+            range_identity: format!("{}/{}", current.collection(), current.range_id()),
+            previous_owner: current.owner().to_string(),
+            new_owner: new_owner.to_string(),
+            previous_epoch: current.epoch().value(),
+            new_epoch: promotion.promoted().epoch().value(),
+            commit_watermark,
+            target_lsn,
+        };
+        self.catalog
+            .apply_update(promotion.promoted().clone())
+            .map_err(|err| RedDBError::Catalog(err.to_string()))?;
+        self.current_term = SupervisorTerm::new(new_term);
+        Ok(outcome)
+    }
+}
+
+fn hot_mirror_refusal_message(err: &HotMirrorPromotionRefusal) -> String {
+    match err {
+        HotMirrorPromotionRefusal::NotReplica { candidate, role } => {
+            format!("cooperative_handoff_refused reason=not_hot_mirror candidate={candidate} role={role:?}")
+        }
+        HotMirrorPromotionRefusal::WatermarkNotCovered {
+            candidate_lsn,
+            watermark,
+        } => {
+            format!(
+                "cooperative_handoff_refused reason=watermark_not_covered candidate_lsn={candidate_lsn} watermark={watermark}"
+            )
+        }
     }
 }
 
