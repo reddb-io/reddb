@@ -428,6 +428,10 @@ where
                 26u8.hash(hasher);
                 v.hash(hasher);
             }
+            Value::DecimalText(v) => {
+                52u8.hash(hasher);
+                v.hash(hasher);
+            }
             Value::EnumValue(i) => {
                 27u8.hash(hasher);
                 i.hash(hasher);
