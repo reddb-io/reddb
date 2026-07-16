@@ -82,8 +82,9 @@ pub use ownership_force::{
     ForcedTransitionAudit, ForcedTransitionDisposition, ForcedTransitionRequest, OperatorReason,
 };
 pub use ownership_lease::{
-    admit_durable_write, DurableWriteReject, FenceReason, LeaseFenceRejection, LeasedOwner,
-    OwnerWriteMode, OwnershipLease, RangeRequest, SupervisorTerm,
+    admit_durable_write, DurableWriteReject, FenceReason, LeaseClockConfigError, LeaseClockSample,
+    LeaseFenceRejection, LeasedOwner, OwnerWriteMode, OwnershipLease, OwnershipLeaseClockConfig,
+    RangeRequest, SupervisorTerm,
 };
 pub use ownership_transition::{
     prepare, run_transition, validate_archive_recovery_source, ArchiveRecoveryEvidence,
