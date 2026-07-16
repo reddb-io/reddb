@@ -464,6 +464,22 @@ fn server_source_does_not_embed_owned_file_suffixes() {
 }
 
 #[test]
+fn database_open_restores_dwb_zone_before_wal_replay() {
+    let root = repo_root();
+    let database = read(root.join("crates/reddb-server/src/storage/engine/database.rs"));
+    let pager_open = database
+        .find("Pager::open(&path, pager_config)")
+        .expect("database open should construct the pager");
+    let wal_replay = database
+        .find("Checkpointer::recover(&pager, &wal_path)")
+        .expect("database open should run WAL recovery");
+    assert!(
+        pager_open < wal_replay,
+        "Pager::open restores the in-file DWB zone and must happen before WAL replay reads pages"
+    );
+}
+
+#[test]
 fn tiered_layout_matrix_lives_in_reddb_file_tests() {
     let root = repo_root();
     let file_test = read(root.join("crates/reddb-file/tests/storage_layout.rs"));

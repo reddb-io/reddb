@@ -48,6 +48,12 @@ pub use reddb_file::{DatabaseHeader, PhysicalFileHeader};
 
 /// Default cache size (pages)
 const DEFAULT_CACHE_SIZE: usize = 10_000;
+const DWB_ZONE_START_PAGE: u32 = 3;
+const DWB_ZONE_PAGES: u32 = 64;
+const DWB_ZONE_BYTES: usize = DWB_ZONE_PAGES as usize * PAGE_SIZE;
+const DWB_MAX_PAGES_PER_FRAME: usize =
+    (DWB_ZONE_BYTES - reddb_file::PAGED_DWB_HEADER_SIZE) / reddb_file::PAGED_DWB_ENTRY_SIZE;
+const FIRST_ALLOCATABLE_PAGE: u32 = DWB_ZONE_START_PAGE + DWB_ZONE_PAGES;
 
 #[cfg(test)]
 static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
@@ -79,8 +85,12 @@ pub enum PagerError {
     SuperblockZoneUnrecoverable(PathBuf),
     /// The internal manifest zone failed its checksum (ADR 0074 §2).
     ManifestZoneCorrupt(PathBuf),
+    /// The in-file double-write zone failed validation (ADR 0074 §2).
+    DwbZoneCorrupt(PathBuf),
     /// The store still carries a retired phase-1 pager sidecar (ADR 0038 §4).
     LegacySidecarStore { sidecar: PathBuf },
+    /// The store predates the phase-3 in-file DWB layout marker (ADR 0038 §4).
+    LegacyPagedStore { path: PathBuf },
 }
 
 /// A contiguous run of database pages reserved for vector-turbo payloads.
@@ -126,14 +136,31 @@ impl std::fmt::Display for PagerError {
                  and red salvage to extract what survives (ADR 0074 §2/§4).",
                 path.display()
             ),
+            Self::DwbZoneCorrupt(path) => write!(
+                f,
+                "double-write zone of {} failed validation: page recovery cannot prove \
+                 whether the protected in-place write completed. The store will not be opened \
+                 silently; run scrub to classify the fault and red salvage to extract trusted \
+                 rows (ADR 0074 §2/§4).",
+                path.display()
+            ),
             Self::LegacySidecarStore { sidecar } => write!(
                 f,
                 "refusing to open a legacy sidecar-backed store: found {}. The superblock \
-                 pair and the internal manifest now live inside the .rdb file (ADR 0038 §2), \
+                 pair, internal manifest, and double-write recovery state now live inside the \
+                 .rdb file (ADR 0038 §2/§4), \
                  and the engine never reads the retired sidecars silently. Convert the store \
                  first with the offline migration tool \
                  (`reddb_server::pager_zone_migration::migrate_to_zoned`); it is reversible.",
                 sidecar.display()
+            ),
+            Self::LegacyPagedStore { path } => write!(
+                f,
+                "refusing to open a pre-phase-3 paged store: {} does not carry the layout marker \
+                 for the in-file double-write zone. Convert the store first with the offline \
+                 migration tool (`reddb_server::pager_zone_migration::migrate_to_zoned`); it is \
+                 reversible.",
+                path.display()
             ),
         }
     }
@@ -205,8 +232,8 @@ pub struct Pager {
     file: Mutex<File>,
     /// Exclusive file lock (held for lifetime, released on drop)
     _lock_file: Option<File>,
-    /// Double-write buffer file.
-    dwb_file: Option<Mutex<File>>,
+    /// Whether mutable pages are protected by the in-file DWB zone.
+    dwb_enabled: bool,
     /// Page cache
     cache: PageCache,
     /// Free page list
@@ -288,6 +315,10 @@ mod tests {
         reddb_file::layout::pager_dwb_shadow_path(path)
     }
 
+    fn dwb_zone_offset_for_test() -> u64 {
+        3 * PAGE_SIZE as u64
+    }
+
     static COW_ATOMIC_WRITE_OVERRIDE_GUARD: Mutex<()> = Mutex::new(());
 
     struct CowAtomicWriteOverrideGuard {
@@ -323,8 +354,13 @@ mod tests {
                 .map(|(page_id, page)| (*page_id, page.as_bytes())),
         );
 
-        let dwb_path = dwb_path_for(path);
-        let mut file = fs::File::create(&dwb_path).expect("create() should succeed");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("open() should succeed");
+        file.seek(SeekFrom::Start(dwb_zone_offset_for_test()))
+            .expect("seek() should succeed");
         file.write_all(&buf).expect("write_all() should succeed");
         file.sync_all().expect("sync_all() should succeed");
     }
@@ -362,8 +398,11 @@ mod tests {
 
         {
             let pager = Pager::open_default(&path).expect("open_default() should succeed");
-            assert_eq!(pager.page_count().expect("page_count() should succeed"), 3);
-            // Header + reserved pages
+            assert_eq!(
+                pager.page_count().expect("page_count() should succeed"),
+                FIRST_ALLOCATABLE_PAGE
+            );
+            // Header + reserved metadata pages + DWB zone
         }
 
         cleanup(&path);
@@ -382,7 +421,7 @@ mod tests {
             let page = pager
                 .allocate_page(PageType::BTreeLeaf)
                 .expect("allocate_page() should succeed");
-            assert_eq!(page.page_id(), 3);
+            assert_eq!(page.page_id(), FIRST_ALLOCATABLE_PAGE);
 
             pager.sync().expect("sync() should succeed");
         }
@@ -390,8 +429,11 @@ mod tests {
         // Reopen and verify
         {
             let pager = Pager::open_default(&path).expect("open_default() should succeed");
-            assert_eq!(pager.page_count().expect("page_count() should succeed"), 4);
-            // Header + reserved pages + 1 data page
+            assert_eq!(
+                pager.page_count().expect("page_count() should succeed"),
+                FIRST_ALLOCATABLE_PAGE + 1
+            );
+            // Header + reserved metadata pages + DWB zone + 1 data page
         }
 
         cleanup(&path);
@@ -579,14 +621,7 @@ mod tests {
             .expect("insert_cell() should succeed");
         write_dwb_fixture(&path, &[(page_id, recovered_page.clone())]);
 
-        let dwb_path = dwb_path_for(&path);
-        assert!(dwb_path.exists());
-        assert!(
-            fs::metadata(&dwb_path)
-                .expect("metadata() should succeed")
-                .len()
-                > 0
-        );
+        assert!(!dwb_path_for(&path).exists());
 
         {
             let pager = Pager::open(&path, config).expect("open() should succeed");
@@ -598,13 +633,7 @@ mod tests {
             assert_eq!(key, b"key");
             assert_eq!(value, b"value");
 
-            assert!(dwb_path.exists());
-            assert_eq!(
-                fs::metadata(&dwb_path)
-                    .expect("metadata() should succeed")
-                    .len(),
-                0
-            );
+            assert!(!dwb_path_for(&path).exists());
 
             let mut updated_page = recovered_page.clone();
             updated_page
@@ -615,14 +644,70 @@ mod tests {
                 .expect("write_page() should succeed");
             pager.flush().expect("flush() should succeed");
 
-            assert!(dwb_path.exists());
-            assert_eq!(
-                fs::metadata(&dwb_path)
-                    .expect("metadata() should succeed")
-                    .len(),
-                0
-            );
+            assert!(!dwb_path_for(&path).exists());
         }
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn retired_dwb_sidecar_routes_through_offline_migration() {
+        let path = temp_db_path();
+        cleanup(&path);
+
+        {
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            pager.sync().expect("sync() should succeed");
+        }
+
+        let dwb = dwb_path_for(&path);
+        fs::write(&dwb, b"legacy dwb sidecar").expect("write legacy sidecar");
+
+        let err = match Pager::open_default(&path) {
+            Ok(_) => panic!("retired DWB sidecar must refuse open"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, PagerError::LegacySidecarStore { .. }));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn interrupted_dwb_staging_write_is_discarded_on_open() {
+        let path = temp_db_path();
+        cleanup(&path);
+
+        {
+            let pager = Pager::open_default(&path).expect("open_default() should succeed");
+            pager.sync().expect("sync() should succeed");
+        }
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open() should succeed");
+        file.seek(SeekFrom::Start(dwb_zone_offset_for_test()))
+            .expect("seek() should succeed");
+        file.write_all(b"RDDW")
+            .expect("write corrupt DWB magic should succeed");
+        file.sync_all().expect("sync_all() should succeed");
+
+        {
+            let pager = Pager::open_default(&path).expect("torn staging frame should be discarded");
+            pager.sync().expect("sync() should succeed");
+        }
+
+        let mut cleared = [0u8; 4];
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("open() should succeed");
+        file.seek(SeekFrom::Start(dwb_zone_offset_for_test()))
+            .expect("seek() should succeed");
+        file.read_exact(&mut cleared)
+            .expect("read_exact() should succeed");
+        assert_ne!(cleared, reddb_file::DWB_MAGIC);
 
         cleanup(&path);
     }
@@ -704,8 +789,8 @@ mod tests {
         }
 
         assert!(
-            dwb_path_for(&path).exists(),
-            "DWB must stay enabled when double_write=false is not proven safe"
+            !dwb_path_for(&path).exists(),
+            "DWB must stay enabled in-file when double_write=false is not proven safe"
         );
 
         cleanup(&path);
@@ -741,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn double_write_false_on_cow_replays_then_removes_existing_dwb() {
+    fn double_write_false_on_cow_recovers_from_in_file_dwb_zone() {
         let _override = cow_atomic_write_override(true);
         let path = temp_db_path();
         cleanup(&path);
@@ -776,10 +861,7 @@ mod tests {
             assert_eq!(value, b"value");
         }
 
-        assert!(
-            !dwb_path_for(&path).exists(),
-            "CoW DWB-skip must replay any existing DWB before removing the sidecar"
-        );
+        assert!(!dwb_path_for(&path).exists());
 
         cleanup(&path);
     }
@@ -911,12 +993,7 @@ mod tests {
             assert_eq!(value, b"after");
         }
 
-        assert_eq!(
-            fs::metadata(dwb_path_for(&path))
-                .expect("metadata() should succeed")
-                .len(),
-            0
-        );
+        assert!(!dwb_path_for(&path).exists());
         cleanup(&path);
     }
 

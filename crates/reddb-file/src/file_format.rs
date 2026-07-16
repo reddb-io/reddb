@@ -8,8 +8,11 @@ use std::fmt;
 /// Magic bytes for database file identification: `RDDB`.
 pub const PAGE_FILE_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x42];
 
-/// Database file version 1.0.0.
-pub const PAGE_FILE_VERSION: u32 = 0x0001_0000;
+/// Database file version 1.0.1.
+///
+/// 1.0.1 is the positive layout marker for ADR 0038 phase 3 stores whose
+/// double-write buffer lives in the reserved in-file zone.
+pub const PAGE_FILE_VERSION: u32 = 0x0001_0001;
 
 /// Paged database page size.
 pub const PAGED_PAGE_SIZE: usize = 16_384;
