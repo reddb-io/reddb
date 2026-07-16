@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 )
 
@@ -26,8 +27,14 @@ func paramToJSON(v any) (any, error) {
 		return nil, nil
 	case bool, string,
 		int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32, uint64,
 		float32, float64:
+		return x, nil
+	case uint, uint8, uint16, uint32:
+		return x, nil
+	case uint64:
+		if x > uint64(1<<63-1) {
+			return map[string]any{"$uint": strconv.FormatUint(x, 10)}, nil
+		}
 		return x, nil
 	case []byte:
 		return map[string]any{"$bytes": base64.StdEncoding.EncodeToString(x)}, nil
