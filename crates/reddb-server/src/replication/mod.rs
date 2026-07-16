@@ -77,9 +77,10 @@ pub use rollback::{
     RollbackPlan, RollbackRequest, RollbackTransport, TailRecord,
 };
 pub use signal_plane::{
-    CatalogVersionHint, LivenessObservation, LivenessStatus, LoadBucket, LoadMetricSample,
-    MemberHealthInput, ReceivedSignal, SignalPlane, SignalPlaneMessage, SignalPlaneSchedule,
-    SimulatedSignalPlane, TopologyHint,
+    CatalogVersionHint, IntraClusterSignalBus, LivenessObservation, LivenessStatus, LoadBucket,
+    LoadMetricSample, MemberHealthInput, ReceivedSignal, SharedSignalTransport, SignalFrame,
+    SignalPlane, SignalPlaneLimits, SignalPlaneMessage, SignalPlaneMetrics, SignalPlaneSchedule,
+    SignalTransportError, SimulatedSignalPlane, TopologyHint, TransportSignalPlane,
 };
 pub use swap_db::{RebootstrapInProgress, SwapDb};
 pub use topology_advertiser::{
