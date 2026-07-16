@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import decimal
+
 import httpx
 import pytest
 
-from reddb_asyncio import HttpClient, Reddb
+from reddb_asyncio import HttpClient, RedDBError, Reddb
 from reddb_asyncio.client import _RedwireAdapter
 from reddb_asyncio.redwire import Kind, ValueTag, encode_query_with_params
 
@@ -21,6 +23,11 @@ def test_redwire_query_with_params_codec_encodes_common_values() -> None:
     assert payload[pos + 1:pos + 3] == bytes([ValueTag.Bool, 1])
     assert payload[pos + 3] == ValueTag.Int
     assert payload[pos + 12] == ValueTag.Text
+
+
+def test_redwire_query_with_params_rejects_decimal_envelope() -> None:
+    with pytest.raises(RedDBError, match="exact-number params require an HTTP JSON transport"):
+        encode_query_with_params("SELECT $1", [{"$decimal": "1.25"}])
 
 
 def test_redwire_query_with_params_kind_is_pinned() -> None:
@@ -104,6 +111,96 @@ async def test_http_query_serializes_bytes_and_datetime_params() -> None:
             datetime.datetime(2024, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc),
         ],
     )
+    await client.close()
+
+
+async def test_http_query_serializes_decimal_param() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/query"
+        assert request.read() == (
+            b'{"query":"SELECT $1",'
+            b'"params":[{"$decimal":"3.14159265358979323846"}]}'
+        )
+        return httpx.Response(200, json={"rows": []})
+
+    client = HttpClient(
+        base_url="http://red.local",
+        client=httpx.AsyncClient(
+            base_url="http://red.local",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    await client.query("SELECT $1", [decimal.Decimal("3.14159265358979323846")])
+    await client.close()
+
+
+async def test_http_query_serializes_large_unsigned_integer_param() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/query"
+        assert request.read() == (
+            b'{"query":"SELECT $1",'
+            b'"params":[{"$uint":"9223372036854775808"}]}'
+        )
+        return httpx.Response(200, json={"rows": []})
+
+    client = HttpClient(
+        base_url="http://red.local",
+        client=httpx.AsyncClient(
+            base_url="http://red.local",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    await client.query("SELECT $1", [9223372036854775808])
+    await client.close()
+
+
+async def test_http_query_decodes_exact_number_envelopes() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "rows": [
+                    {
+                        "n": {"$int": "9007199254740993"},
+                        "u": {"$uint": "9223372036854775808"},
+                        "d": {"$decimal": "3.14159265358979323846"},
+                    }
+                ]
+            },
+        )
+
+    client = HttpClient(
+        base_url="http://red.local",
+        client=httpx.AsyncClient(
+            base_url="http://red.local",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    result = await client.query("SELECT exact")
+    row = result["rows"][0]
+    assert row["n"] == 9007199254740993
+    assert row["u"] == 9223372036854775808
+    assert row["d"] == decimal.Decimal("3.14159265358979323846")
+    await client.close()
+
+
+async def test_http_query_rejects_superseded_exact_number_envelope() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"rows": [{"n": {"$number": "1"}}]})
+
+    client = HttpClient(
+        base_url="http://red.local",
+        client=httpx.AsyncClient(
+            base_url="http://red.local",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="superseded exact-number envelope"):
+        await client.query("SELECT old")
     await client.close()
 
 
