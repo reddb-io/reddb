@@ -756,9 +756,7 @@ fn lookup_timeseries_tag_index(
     tag_key: &str,
     tag_values: &[String],
 ) -> Option<HashSet<u64>> {
-    let Some(manager) = store.get_collection(TIMESERIES_TAG_INDEX_COLLECTION) else {
-        return None;
-    };
+    let manager = store.get_collection(TIMESERIES_TAG_INDEX_COLLECTION)?;
     let wanted = tag_values
         .iter()
         .map(String::as_str)
