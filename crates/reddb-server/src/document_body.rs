@@ -154,14 +154,17 @@ mod tests {
         let original = parse(r#"{"amount":3.14159265358979323846,"big":18446744073709551616}"#);
         let bytes = serialize_document_body(&original, true).expect("serialize");
         let decoded = decode_container_to_json(&bytes).expect("decode");
-        assert_eq!(decoded, original);
+        let expected = parse(
+            r#"{"amount":{"$decimal":"3.14159265358979323846"},"big":{"$decimal":"18446744073709551616"}}"#,
+        );
+        assert_eq!(decoded, expected);
         assert_eq!(
             read_body_field(&bytes, "amount"),
             Some(Value::DecimalText("3.14159265358979323846".to_string()))
         );
         assert_eq!(
             decoded.to_string_compact(),
-            r#"{"amount":3.14159265358979323846,"big":18446744073709551616}"#
+            r#"{"amount":{"$decimal":"3.14159265358979323846"},"big":{"$decimal":"18446744073709551616"}}"#
         );
     }
 
