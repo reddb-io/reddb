@@ -531,6 +531,7 @@ impl RedDB {
             JsonValue::Null => None,
             JsonValue::Bool(value) => Some(value.to_string()),
             JsonValue::Integer(value) => Some(value.to_string()),
+            JsonValue::Decimal(value) => Some(value.clone()),
             JsonValue::Number(value) => Some(value.to_string()),
             JsonValue::String(value) => Some(value.clone()),
             JsonValue::Array(_) | JsonValue::Object(_) => None,
@@ -619,6 +620,7 @@ impl RedDB {
                 ))
             }
             Value::Decimal(v) => Some(Value::Decimal(*v).display_string()),
+            Value::DecimalText(v) => Some(v.clone()),
             Value::EnumValue(i) => Some(format!("enum({})", i)),
             Value::Array(_) => None,
             Value::TimestampMs(ms) => Some(ms.to_string()),
