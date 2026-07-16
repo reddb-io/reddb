@@ -8,11 +8,13 @@ use crate::runtime::ScanPage;
 use crate::storage::schema::Value;
 use crate::storage::{CrossRef, EntityData, EntityKind, UnifiedEntity};
 
+const MAX_JSON_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
 pub(crate) fn created_entity_output_json(output: &CreateEntityOutput) -> JsonValue {
     let mut object = Map::new();
     object.insert("ok".to_string(), JsonValue::Bool(true));
-    object.insert("rid".to_string(), JsonValue::Number(output.id.raw() as f64));
-    object.insert("id".to_string(), JsonValue::Number(output.id.raw() as f64));
+    object.insert("rid".to_string(), exact_u64_to_json(output.id.raw()));
+    object.insert("id".to_string(), exact_u64_to_json(output.id.raw()));
     object.insert(
         "entity".to_string(),
         output
@@ -69,14 +71,14 @@ pub(crate) fn compact_entity_json_string(entity: &UnifiedEntity) -> String {
 pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
     match value {
         Value::Null => JsonValue::Null,
-        Value::Integer(value) => JsonValue::Number(*value as f64),
-        Value::UnsignedInteger(value) => JsonValue::Number(*value as f64),
+        Value::Integer(value) => exact_i64_to_json(*value),
+        Value::UnsignedInteger(value) => exact_u64_to_json(*value),
         Value::Float(value) => JsonValue::Number(*value),
         Value::Text(value) => JsonValue::String(value.to_string()),
         Value::Blob(value) => JsonValue::String(hex::encode(value)),
         Value::Boolean(value) => JsonValue::Bool(*value),
-        Value::Timestamp(value) => JsonValue::Number(*value as f64),
-        Value::Duration(value) => JsonValue::Number(*value as f64),
+        Value::Timestamp(value) => exact_i64_to_json(*value),
+        Value::Duration(value) => exact_i64_to_json(*value),
         Value::IpAddr(value) => JsonValue::String(value.to_string()),
         Value::MacAddr(value) => JsonValue::String(format_mac(value)),
         Value::Vector(value) => JsonValue::Array(
@@ -95,19 +97,19 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
                 "collection".to_string(),
                 JsonValue::String(collection.clone()),
             );
-            object.insert("id".to_string(), JsonValue::Number(*id as f64));
+            object.insert("id".to_string(), exact_u64_to_json(*id));
             JsonValue::Object(object)
         }
         Value::RowRef(table, row_id) => {
             let mut object = Map::new();
             object.insert("table".to_string(), JsonValue::String(table.to_string()));
-            object.insert("row_id".to_string(), JsonValue::Number(*row_id as f64));
+            object.insert("row_id".to_string(), exact_u64_to_json(*row_id));
             JsonValue::Object(object)
         }
         Value::Color([r, g, b]) => JsonValue::String(format!("#{:02X}{:02X}{:02X}", r, g, b)),
         Value::Email(s) => JsonValue::String(s.clone()),
         Value::Url(s) => JsonValue::String(s.clone()),
-        Value::Phone(n) => JsonValue::Number(*n as f64),
+        Value::Phone(n) => exact_u64_to_json(*n),
         Value::Semver(packed) => JsonValue::String(format!(
             "{}.{}.{}",
             packed / 1_000_000,
@@ -122,13 +124,15 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
             ip & 0xFF,
             prefix
         )),
-        Value::Date(days) => JsonValue::Number(*days as f64),
-        Value::Time(ms) => JsonValue::Number(*ms as f64),
-        Value::Decimal(v) => JsonValue::Number(*v as f64 / 10_000.0),
-        Value::DecimalText(v) => JsonValue::Decimal(v.clone()),
-        Value::EnumValue(i) => JsonValue::Number(*i as f64),
+        Value::Date(days) => JsonValue::Integer(i64::from(*days)),
+        Value::Time(ms) => JsonValue::Integer(i64::from(*ms)),
+        Value::Decimal(v) => {
+            exact_decimal_to_json(crate::storage::schema::Value::Decimal(*v).display_string())
+        }
+        Value::DecimalText(v) => exact_decimal_to_json(v.clone()),
+        Value::EnumValue(i) => JsonValue::Integer(i64::from(*i)),
         Value::Array(elems) => JsonValue::Array(elems.iter().map(storage_value_to_json).collect()),
-        Value::TimestampMs(ms) => JsonValue::Number(*ms as f64),
+        Value::TimestampMs(ms) => exact_i64_to_json(*ms),
         Value::Ipv4(ip) => JsonValue::String(format!(
             "{}.{}.{}.{}",
             (ip >> 24) & 0xFF,
@@ -148,7 +152,7 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
                 prefix
             ))
         }
-        Value::Port(p) => JsonValue::Number(*p as f64),
+        Value::Port(p) => JsonValue::Integer(i64::from(*p)),
         Value::Latitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
         Value::Longitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
         Value::GeoPoint(lat, lon) => JsonValue::String(format!(
@@ -172,17 +176,14 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
                 "asset_code".to_string(),
                 JsonValue::String(asset_code.clone()),
             );
-            object.insert(
-                "minor_units".to_string(),
-                JsonValue::Number(*minor_units as f64),
-            );
-            object.insert("scale".to_string(), JsonValue::Number(*scale as f64));
+            object.insert("minor_units".to_string(), exact_i64_to_json(*minor_units));
+            object.insert("scale".to_string(), exact_i64_to_json(i64::from(*scale)));
             JsonValue::Object(object)
         }
         Value::ColorAlpha([r, g, b, a]) => {
             JsonValue::String(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
         }
-        Value::BigInt(v) => JsonValue::Number(*v as f64),
+        Value::BigInt(v) => exact_i64_to_json(*v),
         Value::KeyRef(col, key) => {
             let mut object = Map::new();
             object.insert("collection".to_string(), JsonValue::String(col.clone()));
@@ -192,11 +193,11 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         Value::DocRef(col, id) => {
             let mut object = Map::new();
             object.insert("collection".to_string(), JsonValue::String(col.clone()));
-            object.insert("id".to_string(), JsonValue::Number(*id as f64));
+            object.insert("id".to_string(), exact_u64_to_json(*id));
             JsonValue::Object(object)
         }
         Value::TableRef(name) => JsonValue::String(name.clone()),
-        Value::PageRef(page_id) => JsonValue::Number(*page_id as f64),
+        Value::PageRef(page_id) => exact_u64_to_json(u64::from(*page_id)),
         // Secrets and passwords are always masked in JSON output.
         // SELECT decryption (if the vault is unsealed) happens earlier
         // in the query pipeline and replaces Value::Secret with
@@ -204,6 +205,30 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         Value::Secret(_) => JsonValue::String("***".to_string()),
         Value::Password(_) => JsonValue::String("***".to_string()),
     }
+}
+
+fn exact_i64_to_json(value: i64) -> JsonValue {
+    if (-MAX_JSON_SAFE_INTEGER..=MAX_JSON_SAFE_INTEGER).contains(&value) {
+        JsonValue::Integer(value)
+    } else {
+        single_key_object("$int", JsonValue::String(value.to_string()))
+    }
+}
+
+fn exact_u64_to_json(value: u64) -> JsonValue {
+    if value <= MAX_JSON_SAFE_INTEGER as u64 {
+        JsonValue::Integer(value as i64)
+    } else {
+        single_key_object("$uint", JsonValue::String(value.to_string()))
+    }
+}
+
+fn exact_decimal_to_json(value: String) -> JsonValue {
+    single_key_object("$decimal", JsonValue::String(value))
+}
+
+fn single_key_object(key: &str, value: JsonValue) -> JsonValue {
+    JsonValue::Object([(key.to_string(), value)].into_iter().collect())
 }
 
 pub(crate) fn storage_json_bytes_to_json(bytes: &[u8]) -> JsonValue {
@@ -620,4 +645,37 @@ fn format_mac(bytes: &[u8; 6]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_value_to_json_preserves_exact_numbers() {
+        assert_eq!(
+            storage_value_to_json(&Value::Integer(9_007_199_254_740_993)),
+            single_key_object("$int", JsonValue::String("9007199254740993".to_string()))
+        );
+        assert_eq!(
+            storage_value_to_json(&Value::UnsignedInteger(i64::MAX as u64 + 1)),
+            single_key_object(
+                "$uint",
+                JsonValue::String("9223372036854775808".to_string())
+            )
+        );
+        assert_eq!(
+            storage_value_to_json(&Value::Decimal(1_234_567)),
+            single_key_object("$decimal", JsonValue::String("123.4567".to_string()))
+        );
+        assert_eq!(
+            storage_value_to_json(&Value::DecimalText(
+                "3.141592653589793238462643383279".to_string()
+            )),
+            single_key_object(
+                "$decimal",
+                JsonValue::String("3.141592653589793238462643383279".to_string())
+            )
+        );
+    }
 }
