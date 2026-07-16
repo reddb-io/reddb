@@ -543,6 +543,7 @@ fn json_kind(v: &JsonValue) -> &'static str {
         JsonValue::Bool(_) => "bool",
         JsonValue::Integer(_) => "number",
         JsonValue::Number(_) => "number",
+        JsonValue::Decimal(_) => "number",
         JsonValue::String(_) => "string",
         JsonValue::Array(_) => "array",
         JsonValue::Object(_) => "object",

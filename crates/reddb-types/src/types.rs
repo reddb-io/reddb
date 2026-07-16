@@ -313,6 +313,8 @@ pub enum DataType {
     AssetCode = 53,
     /// Monetary amount represented as minor units + scale + asset code
     Money = 54,
+    /// Exact JSON numeric literal stored as canonical decimal text
+    DecimalText = 55,
 }
 
 /// Type categories used by the Fase 3 coercion resolver. Mirrors
@@ -382,6 +384,7 @@ impl DataType {
             | DataType::UnsignedInteger
             | DataType::Float
             | DataType::Decimal
+            | DataType::DecimalText
             | DataType::BigInt
             | DataType::Port
             | DataType::Latitude
@@ -524,6 +527,7 @@ impl DataType {
             52 => Some(DataType::BlobZstd),
             53 => Some(DataType::AssetCode),
             54 => Some(DataType::Money),
+            55 => Some(DataType::DecimalText),
             _ => None,
         }
     }
@@ -585,6 +589,7 @@ impl DataType {
             "CURRENCY" => DataType::Currency,
             "ASSETCODE" | "ASSET_CODE" | "ASSET" => DataType::AssetCode,
             "MONEY" => DataType::Money,
+            "DECIMAL_TEXT" | "DECIMALTEXT" => DataType::DecimalText,
             "ENUM" => DataType::Enum,
             "ARRAY" => DataType::Array,
             "KEYREF" => DataType::KeyRef,
@@ -631,6 +636,7 @@ impl DataType {
             DataType::Date => Some(4),        // i32
             DataType::Time => Some(4),        // u32
             DataType::Decimal => Some(8),     // i64
+            DataType::DecimalText => None,    // variable-length exact decimal text
             DataType::Enum => Some(1),        // u8
             DataType::Array => None,          // variable-length
             DataType::TimestampMs => Some(8), // i64
@@ -683,6 +689,7 @@ impl DataType {
                 | DataType::Date
                 | DataType::Time
                 | DataType::Decimal
+                | DataType::DecimalText
                 | DataType::Enum
                 | DataType::TimestampMs
                 | DataType::Ipv4
@@ -718,6 +725,7 @@ impl DataType {
                 | DataType::Date
                 | DataType::Time
                 | DataType::Decimal
+                | DataType::DecimalText
                 | DataType::Semver
                 | DataType::TimestampMs
                 | DataType::Port
@@ -777,6 +785,7 @@ impl fmt::Display for DataType {
             DataType::Currency => write!(f, "CURRENCY"),
             DataType::AssetCode => write!(f, "ASSET_CODE"),
             DataType::Money => write!(f, "MONEY"),
+            DataType::DecimalText => write!(f, "DECIMAL_TEXT"),
             DataType::ColorAlpha => write!(f, "COLOR_ALPHA"),
             DataType::BigInt => write!(f, "BIGINT"),
             DataType::KeyRef => write!(f, "KEY_REF"),
@@ -848,6 +857,8 @@ pub enum Value {
     Time(u32),
     /// Fixed-point decimal (value * 10^precision)
     Decimal(i64),
+    /// Exact JSON numeric literal stored as decimal text
+    DecimalText(String),
     /// Enum variant index
     EnumValue(u8),
     /// Homogeneous array
@@ -960,6 +971,7 @@ impl std::hash::Hash for Value {
             Value::Date(v) => v.hash(state),
             Value::Time(v) => v.hash(state),
             Value::Decimal(v) => v.hash(state),
+            Value::DecimalText(v) => v.hash(state),
             Value::EnumValue(v) => v.hash(state),
             Value::Array(v) => {
                 v.len().hash(state);
@@ -1054,6 +1066,7 @@ impl Value {
             Value::Date(_) => DataType::Date,
             Value::Time(_) => DataType::Time,
             Value::Decimal(_) => DataType::Decimal,
+            Value::DecimalText(_) => DataType::DecimalText,
             Value::EnumValue(_) => DataType::Enum,
             Value::Array(_) => DataType::Array,
             Value::TimestampMs(_) => DataType::TimestampMs,
@@ -1196,6 +1209,7 @@ impl Value {
                 )
             }
             Value::Decimal(v) => format_scaled_i64(*v, 4),
+            Value::DecimalText(v) => v.clone(),
             Value::EnumValue(i) => format!("enum({})", i),
             Value::Array(elems) => {
                 let items: Vec<String> = elems.iter().map(|e| e.display_string()).collect();
@@ -1378,6 +1392,7 @@ impl fmt::Display for Value {
                 )
             }
             Value::Decimal(v) => write!(f, "{}", format_scaled_i64(*v, 4)),
+            Value::DecimalText(v) => write!(f, "{v}"),
             Value::EnumValue(i) => write!(f, "enum({})", i),
             Value::Array(elems) => {
                 write!(f, "[")?;
@@ -2867,6 +2882,14 @@ mod tests {
                 false,
                 false,
             ),
+            (
+                DataType::DecimalText,
+                TypeCategory::Numeric,
+                "DECIMAL_TEXT",
+                None,
+                true,
+                true,
+            ),
         ];
 
         for (data_type, category, display, fixed, indexable, orderable) in cases {
@@ -2908,6 +2931,7 @@ mod tests {
             ("COLOR_ALPHA", DataType::ColorAlpha),
             ("GEO_POINT", DataType::GeoPoint),
             ("ASSET_CODE", DataType::AssetCode),
+            ("DECIMAL_TEXT", DataType::DecimalText),
             ("KEYREF", DataType::KeyRef),
             ("DOCREF", DataType::DocRef),
             ("TABLEREF", DataType::TableRef),
@@ -2921,7 +2945,7 @@ mod tests {
         }
         assert_eq!(DataType::from_sql_name("definitely_not_a_type"), None);
         assert_eq!(DataType::from_byte(0), None);
-        assert_eq!(DataType::from_byte(55), None);
+        assert_eq!(DataType::from_byte(56), None);
     }
 
     #[test]
@@ -2955,6 +2979,7 @@ mod tests {
             Value::Date(20_000),
             Value::Time(43_200_000),
             Value::Decimal(123_456),
+            Value::DecimalText("3.14159265358979323846".to_string()),
             Value::EnumValue(3),
             Value::Array(vec![Value::Integer(1), Value::text("two")]),
             Value::TimestampMs(123_456),

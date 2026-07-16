@@ -400,6 +400,7 @@ fn literal_type(v: &Value) -> DataType {
         Value::Float(_) => DataType::Float,
         Value::BigInt(_) => DataType::BigInt,
         Value::Decimal(_) => DataType::Decimal,
+        Value::DecimalText(_) => DataType::DecimalText,
         Value::Text(_) => DataType::Text,
         Value::Blob(_) => DataType::Blob,
         Value::Timestamp(_) => DataType::Timestamp,

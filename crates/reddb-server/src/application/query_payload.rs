@@ -685,6 +685,7 @@ fn json_filter_value(value: &JsonValue) -> RedDBResult<RuntimeFilterValue> {
                 RuntimeFilterValue::Float(*value)
             }
         }
+        JsonValue::Decimal(value) => RuntimeFilterValue::String(value.clone()),
         JsonValue::String(value) => RuntimeFilterValue::String(value.clone()),
         JsonValue::Array(values) => RuntimeFilterValue::List(
             values

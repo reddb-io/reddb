@@ -949,6 +949,7 @@ pub(crate) fn summarize_value(value: &Value) -> String {
         Value::Date(days) => format!("date({})", days),
         Value::Time(ms) => format!("time({})", ms),
         Value::Decimal(v) => Value::Decimal(*v).display_string(),
+        Value::DecimalText(v) => v.clone(),
         Value::EnumValue(i) => format!("enum({})", i),
         Value::Array(elems) => format!("array({})", elems.len()),
         Value::TimestampMs(ms) => format!("timestamp_ms({})", ms),

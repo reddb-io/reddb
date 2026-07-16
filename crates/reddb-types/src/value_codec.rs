@@ -247,6 +247,12 @@ pub fn encode(value: &Value, out: &mut Vec<u8>) {
             out.push(DataType::Decimal.to_byte());
             out.extend_from_slice(&v.to_le_bytes());
         }
+        Value::DecimalText(s) => {
+            out.push(DataType::DecimalText.to_byte());
+            let bytes = s.as_bytes();
+            write_varint(out, bytes.len() as u64);
+            out.extend_from_slice(bytes);
+        }
         Value::EnumValue(idx) => {
             out.push(DataType::Enum.to_byte());
             out.push(*idx);
@@ -656,6 +662,17 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
             let v = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
             offset += 8;
             Value::Decimal(v)
+        }
+        DataType::DecimalText => {
+            let (len, varint_size) = read_varint(&data[offset..])?;
+            offset += varint_size;
+            if data.len() < offset + len as usize {
+                return Err(ValueError::TruncatedData);
+            }
+            let value = String::from_utf8(data[offset..offset + len as usize].to_vec())
+                .map_err(|_| ValueError::InvalidUtf8)?;
+            offset += len as usize;
+            Value::DecimalText(value)
         }
         DataType::Enum => {
             if data.len() < offset + 1 {
@@ -1108,6 +1125,7 @@ mod tests {
             Value::Date(20_000),
             Value::Time(43_200_000),
             Value::Decimal(123_456),
+            Value::DecimalText("18446744073709551616.00000000000000000001".to_string()),
             Value::EnumValue(3),
             Value::Array(vec![Value::Integer(1), Value::text("two")]),
             Value::TimestampMs(123_456),
@@ -1196,6 +1214,7 @@ mod tests {
             DataType::Date,
             DataType::Time,
             DataType::Decimal,
+            DataType::DecimalText,
             DataType::Enum,
             DataType::Array,
             DataType::TimestampMs,
@@ -1302,6 +1321,7 @@ mod tests {
                 Just(f64::from_bits(1)),
             ]
             .prop_map(Value::Float),
+            "[1-9][0-9]{18,36}\\.[0-9]{1,24}".prop_map(Value::DecimalText),
             proptest::collection::vec(any::<u8>(), 0..4096).prop_map(Value::Blob),
             prop_oneof![
                 Just(br#"{"a":null,"b":[1,true]}"#.to_vec()),

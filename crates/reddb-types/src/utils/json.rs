@@ -10,6 +10,7 @@ pub enum JsonValue {
     Bool(bool),
     Integer(i64),
     Number(f64),
+    Decimal(String),
     String(String),
     Array(Vec<JsonValue>),
     Object(Vec<(String, JsonValue)>),
@@ -29,6 +30,7 @@ impl JsonValue {
         match self {
             JsonValue::Number(n) => Some(*n),
             JsonValue::Integer(n) => Some(*n as f64),
+            JsonValue::Decimal(n) => n.parse::<f64>().ok(),
             _ => None,
         }
     }
@@ -147,6 +149,7 @@ impl JsonValue {
                     out.push_str(&format!("{}", n));
                 }
             }
+            JsonValue::Decimal(n) => out.push_str(n),
             JsonValue::String(s) => {
                 out.push('"');
                 for ch in s.chars() {
@@ -345,10 +348,17 @@ impl<'a> JsonParser<'a> {
             if let Ok(value) = s.parse::<i64>() {
                 return Ok(JsonValue::Integer(value));
             }
+            return Ok(JsonValue::Decimal(s.to_string()));
+        }
+        if should_preserve_decimal_text(s) {
+            return Ok(JsonValue::Decimal(s.to_string()));
         }
         let value = s
             .parse::<f64>()
             .map_err(|_| "failed to parse number".to_string())?;
+        if !value.is_finite() {
+            return Ok(JsonValue::Decimal(s.to_string()));
+        }
         Ok(JsonValue::Number(value))
     }
 
@@ -575,6 +585,11 @@ impl<'a> JsonParser<'a> {
     }
 }
 
+fn should_preserve_decimal_text(input: &str) -> bool {
+    let significant_digits = input.bytes().filter(u8::is_ascii_digit).count();
+    significant_digits > 15
+}
+
 /// Parses the provided JSON string into a [`JsonValue`].
 pub fn parse_json(input: &str) -> Result<JsonValue, String> {
     let mut parser = JsonParser::new(input);
@@ -590,6 +605,7 @@ pub fn parse_json(input: &str) -> Result<JsonValue, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn parse_simple_object() {
@@ -674,6 +690,14 @@ mod tests {
         assert_eq!(parse_json("true").unwrap(), JsonValue::Bool(true));
         assert_eq!(parse_json("false").unwrap(), JsonValue::Bool(false));
         assert_eq!(parse_json("-12.5e+2").unwrap(), JsonValue::Number(-1250.0));
+        assert_eq!(
+            parse_json("3.14159265358979323846").unwrap(),
+            JsonValue::Decimal("3.14159265358979323846".to_string())
+        );
+        assert_eq!(
+            parse_json("18446744073709551616").unwrap(),
+            JsonValue::Decimal("18446744073709551616".to_string())
+        );
         assert_eq!(parse_json("[]").unwrap(), JsonValue::Array(Vec::new()));
         assert_eq!(parse_json("{}").unwrap(), JsonValue::Object(Vec::new()));
 
@@ -718,6 +742,21 @@ mod tests {
 
         for case in cases {
             assert!(parse_json(case).is_err(), "{case:?}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn beyond_native_decimal_text_round_trips(
+            prefix in "[1-9][0-9]{18,36}",
+            suffix in "[0-9]{1,24}"
+        ) {
+            let input = format!("{prefix}.{suffix}");
+            let parsed = parse_json(&input).expect("generated decimal parses");
+            prop_assert_eq!(&parsed, &JsonValue::Decimal(input.clone()));
+            #[allow(deprecated)]
+            let output = parsed.to_json_string();
+            prop_assert_eq!(output, input);
         }
     }
 }

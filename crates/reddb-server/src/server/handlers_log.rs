@@ -104,6 +104,7 @@ fn json_to_value(v: &JsonValue) -> Value {
         JsonValue::Bool(b) => Value::Boolean(*b),
         JsonValue::Integer(n) => Value::Integer(*n),
         JsonValue::Number(n) => Value::Float(*n),
+        JsonValue::Decimal(n) => Value::DecimalText(n.clone()),
         JsonValue::String(s) => Value::text(s.clone()),
         JsonValue::Array(arr) => Value::Array(arr.iter().map(json_to_value).collect()),
         JsonValue::Object(_) => Value::text(format!("{:?}", v)),

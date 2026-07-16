@@ -226,6 +226,7 @@ pub(crate) fn write_value_bytes(buf: &mut Vec<u8>, value: &Value) {
                 buf.extend_from_slice(b"null");
             }
         }
+        Value::DecimalText(value) => buf.extend_from_slice(value.as_bytes()),
         Value::Text(s) => write_json_bytes(buf, s.as_bytes()),
         Value::Array(values) => {
             buf.push(b'[');

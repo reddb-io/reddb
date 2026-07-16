@@ -16,6 +16,7 @@ pub(crate) fn parse_json_bind_value(s: &str) -> Result<Value, String> {
                 Value::Float(n)
             }
         }
+        JsonValue::Decimal(n) => Value::DecimalText(n),
         JsonValue::String(s) => Value::text(s),
         JsonValue::Array(_) | JsonValue::Object(_) => {
             Value::text(json_to_string(&json_val).unwrap_or_default())

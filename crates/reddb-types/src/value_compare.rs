@@ -22,6 +22,8 @@ pub fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Integer(a), Value::Integer(b)) => Some(a.cmp(b)),
         (Value::UnsignedInteger(a), Value::UnsignedInteger(b)) => Some(a.cmp(b)),
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+        (Value::Decimal(a), Value::Decimal(b)) => Some(a.cmp(b)),
+        (Value::DecimalText(a), Value::DecimalText(b)) => compare_decimal_text(a, b),
         (Value::Text(a), Value::Text(b)) => Some(a.cmp(b)),
         (Value::Boolean(a), Value::Boolean(b)) => Some(a.cmp(b)),
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
@@ -34,12 +36,168 @@ pub fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Float(a), Value::UnsignedInteger(b)) => a.partial_cmp(&(*b as f64)),
         (Value::Integer(a), Value::UnsignedInteger(b)) => Some((*a as i128).cmp(&(*b as i128))),
         (Value::UnsignedInteger(a), Value::Integer(b)) => Some((*a as i128).cmp(&(*b as i128))),
+        (Value::Decimal(a), other) => {
+            compare_decimal_text(&format_scaled_i64(*a, 4), &numeric_value_text(other)?)
+        }
+        (other, Value::Decimal(b)) => {
+            compare_decimal_text(&numeric_value_text(other)?, &format_scaled_i64(*b, 4))
+        }
+        (Value::DecimalText(a), other) => compare_decimal_text(a, &numeric_value_text(other)?),
+        (other, Value::DecimalText(b)) => compare_decimal_text(&numeric_value_text(other)?, b),
         _ => None,
     }
 }
 
 pub fn total_compare_values(a: &Value, b: &Value) -> Ordering {
     partial_compare_values(a, b).unwrap_or_else(|| value_type_tag(a).cmp(&value_type_tag(b)))
+}
+
+fn numeric_value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Integer(n) => Some(n.to_string()),
+        Value::UnsignedInteger(n) => Some(n.to_string()),
+        Value::Float(n) if n.is_finite() => Some(n.to_string()),
+        Value::Decimal(n) => Some(format_scaled_i64(*n, 4)),
+        Value::DecimalText(n) => Some(n.clone()),
+        _ => None,
+    }
+}
+
+fn format_scaled_i64(value: i64, scale: usize) -> String {
+    let sign = if value < 0 { "-" } else { "" };
+    let abs = value.unsigned_abs();
+    let factor = 10u64.pow(scale as u32);
+    let whole = abs / factor;
+    let frac = abs % factor;
+    format!("{sign}{whole}.{frac:0scale$}")
+}
+
+fn compare_decimal_text(left: &str, right: &str) -> Option<Ordering> {
+    let left = ParsedDecimal::parse(left)?;
+    let right = ParsedDecimal::parse(right)?;
+    Some(left.cmp(&right))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ParsedDecimal {
+    negative: bool,
+    digits: String,
+    scale: i32,
+}
+
+impl ParsedDecimal {
+    fn parse(input: &str) -> Option<Self> {
+        let mut s = input.trim();
+        let mut negative = false;
+        if let Some(rest) = s.strip_prefix('-') {
+            negative = true;
+            s = rest;
+        } else if let Some(rest) = s.strip_prefix('+') {
+            s = rest;
+        }
+
+        let (base, exponent) = split_exponent(s)?;
+        let (int_part, frac_part) = split_decimal_base(base)?;
+        if int_part.is_empty() && frac_part.is_empty() {
+            return None;
+        }
+        if !int_part.bytes().all(|b| b.is_ascii_digit())
+            || !frac_part.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+
+        let mut digits = String::with_capacity(int_part.len() + frac_part.len());
+        digits.push_str(int_part);
+        digits.push_str(frac_part);
+        let mut scale = frac_part.len() as i32 - exponent;
+        trim_decimal(&mut digits, &mut scale);
+        if digits == "0" {
+            negative = false;
+        }
+        Some(Self {
+            negative,
+            digits,
+            scale,
+        })
+    }
+
+    fn cmp_abs(&self, other: &Self) -> Ordering {
+        let left_int = self.digits.len() as i32 - self.scale;
+        let right_int = other.digits.len() as i32 - other.scale;
+        match left_int.cmp(&right_int) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+
+        let scale = self.scale.max(other.scale).max(0) as usize;
+        let mut left = self.digits.clone();
+        let mut right = other.digits.clone();
+        left.extend(std::iter::repeat_n(
+            '0',
+            scale.saturating_sub(self.scale.max(0) as usize),
+        ));
+        right.extend(std::iter::repeat_n(
+            '0',
+            scale.saturating_sub(other.scale.max(0) as usize),
+        ));
+        left.cmp(&right)
+    }
+}
+
+impl Ord for ParsedDecimal {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.negative, other.negative) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (true, true) => other.cmp_abs(self),
+            (false, false) => self.cmp_abs(other),
+        }
+    }
+}
+
+impl PartialOrd for ParsedDecimal {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn split_exponent(input: &str) -> Option<(&str, i32)> {
+    let Some(index) = input.find(['e', 'E']) else {
+        return Some((input, 0));
+    };
+    let exponent = input[index + 1..].parse::<i32>().ok()?;
+    Some((&input[..index], exponent))
+}
+
+fn split_decimal_base(input: &str) -> Option<(&str, &str)> {
+    if let Some(index) = input.find('.') {
+        if input[index + 1..].contains('.') {
+            return None;
+        }
+        Some((&input[..index], &input[index + 1..]))
+    } else {
+        Some((input, ""))
+    }
+}
+
+fn trim_decimal(digits: &mut String, scale: &mut i32) {
+    while digits.len() > 1 && digits.starts_with('0') {
+        digits.remove(0);
+    }
+    while *scale > 0 && digits.len() > 1 && digits.ends_with('0') {
+        digits.pop();
+        *scale -= 1;
+    }
+    if digits.is_empty() || digits.bytes().all(|b| b == b'0') {
+        digits.clear();
+        digits.push('0');
+        *scale = 0;
+    }
+    if *scale < 0 {
+        digits.extend(std::iter::repeat_n('0', (-*scale) as usize));
+        *scale = 0;
+    }
 }
 
 #[cfg(test)]
@@ -60,6 +218,8 @@ mod tests {
             Value::Integer(0),
             Value::UnsignedInteger(0),
             Value::Float(0.0),
+            Value::Decimal(0),
+            Value::DecimalText("0".to_string()),
             Value::text(""),
             Value::Blob(Vec::new()),
             Value::Timestamp(0),
@@ -97,6 +257,12 @@ mod tests {
                 Ordering::Greater,
             ),
             (Value::Float(1.0), Value::Float(1.0), Ordering::Equal),
+            (Value::Decimal(10000), Value::Decimal(20000), Ordering::Less),
+            (
+                Value::DecimalText("3.14".to_string()),
+                Value::DecimalText("3.1400".to_string()),
+                Ordering::Equal,
+            ),
             (Value::text("a"), Value::text("b"), Ordering::Less),
             (Value::Boolean(false), Value::Boolean(true), Ordering::Less),
             (Value::Timestamp(10), Value::Timestamp(9), Ordering::Greater),
@@ -134,6 +300,26 @@ mod tests {
             (
                 Value::UnsignedInteger(9),
                 Value::Integer(8),
+                Ordering::Greater,
+            ),
+            (
+                Value::DecimalText("18446744073709551616".to_string()),
+                Value::UnsignedInteger(u64::MAX),
+                Ordering::Greater,
+            ),
+            (
+                Value::DecimalText("3.14159265358979323846".to_string()),
+                Value::DecimalText("3.14159265358979323847".to_string()),
+                Ordering::Less,
+            ),
+            (
+                Value::DecimalText("-0.00000000000000000001".to_string()),
+                Value::Integer(0),
+                Ordering::Less,
+            ),
+            (
+                Value::DecimalText("1e30".to_string()),
+                Value::DecimalText("999999999999999999999999999999".to_string()),
                 Ordering::Greater,
             ),
         ];

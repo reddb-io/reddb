@@ -656,6 +656,7 @@ fn value_kind(value: &Value) -> &'static str {
         Value::Date(_) => "Date",
         Value::Time(_) => "Time",
         Value::Decimal(_) => "Decimal",
+        Value::DecimalText(_) => "DecimalText",
         Value::EnumValue(_) => "Enum",
         Value::Array(_) => "Array",
         Value::TimestampMs(_) => "TimestampMs",

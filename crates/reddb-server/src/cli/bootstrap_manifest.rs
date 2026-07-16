@@ -1014,6 +1014,7 @@ fn json_to_storage_value(value: &JsonValue) -> Result<Value, String> {
                 Value::Float(*value)
             }
         }
+        JsonValue::Decimal(value) => Value::DecimalText(value.clone()),
         JsonValue::String(value) => Value::text(value.clone()),
         JsonValue::Array(_) | JsonValue::Object(_) => Value::Json(
             crate::serde_json::to_vec(value)
