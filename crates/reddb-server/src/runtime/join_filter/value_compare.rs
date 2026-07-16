@@ -21,6 +21,14 @@ pub(in crate::runtime) fn compare_runtime_values(
 }
 
 pub(in crate::runtime) fn runtime_values_equal(left: &Value, right: &Value) -> bool {
+    if matches!(
+        (left, right),
+        (Value::DecimalText(_), _) | (_, Value::DecimalText(_))
+    ) {
+        return crate::storage::query::value_compare::partial_compare_values(left, right)
+            == Some(Ordering::Equal);
+    }
+
     if let Some(ordering) = runtime_exact_integer_cmp(left, right) {
         return ordering == Ordering::Equal;
     }
@@ -45,6 +53,13 @@ pub(in crate::runtime) fn runtime_values_equal(left: &Value, right: &Value) -> b
 }
 
 pub(in crate::runtime) fn runtime_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
+    if matches!(
+        (left, right),
+        (Value::DecimalText(_), _) | (_, Value::DecimalText(_))
+    ) {
+        return crate::storage::query::value_compare::partial_compare_values(left, right);
+    }
+
     if let Some(ordering) = runtime_exact_integer_cmp(left, right) {
         return Some(ordering);
     }
@@ -156,6 +171,7 @@ pub(in crate::runtime) fn runtime_value_text(value: &Value) -> Option<String> {
         Value::Boolean(value) => Some(value.to_string()),
         Value::Integer(value) => Some(value.to_string()),
         Value::UnsignedInteger(value) => Some(value.to_string()),
+        Value::DecimalText(value) => Some(value.clone()),
         Value::Float(value) => Some(value.to_string()),
         Value::Timestamp(value) => Some(value.to_string()),
         Value::Duration(value) => Some(value.to_string()),
