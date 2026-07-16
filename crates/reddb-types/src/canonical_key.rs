@@ -324,6 +324,7 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
         )),
         Value::Time(v) => Some(CanonicalKey::Unsigned(CanonicalKeyFamily::Time, *v as u64)),
         Value::Decimal(v) => Some(CanonicalKey::Signed(CanonicalKeyFamily::Decimal, *v)),
+        Value::DecimalText(_) => None,
         Value::EnumValue(v) => Some(CanonicalKey::Unsigned(
             CanonicalKeyFamily::EnumValue,
             *v as u64,
