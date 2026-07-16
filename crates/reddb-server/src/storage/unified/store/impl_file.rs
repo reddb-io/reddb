@@ -1089,6 +1089,12 @@ impl UnifiedStore {
                 *pos += 8;
                 Value::Decimal(val)
             }
+            52 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let s = String::from_utf8(buf[*pos..*pos + len].to_vec())?;
+                *pos += len;
+                Value::DecimalText(s)
+            }
             27 => {
                 let val = buf[*pos];
                 *pos += 1;
@@ -1482,6 +1488,11 @@ impl UnifiedStore {
             Value::Decimal(v) => {
                 buf.push(26);
                 buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::DecimalText(v) => {
+                buf.push(52);
+                write_varu32(buf, v.len() as u32);
+                buf.extend_from_slice(v.as_bytes());
             }
             Value::EnumValue(i) => {
                 buf.push(27);
