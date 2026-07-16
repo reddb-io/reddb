@@ -150,6 +150,22 @@ mod tests {
     }
 
     #[test]
+    fn high_precision_decimal_body_field_round_trips_exactly() {
+        let original = parse(r#"{"amount":3.14159265358979323846,"big":18446744073709551616}"#);
+        let bytes = serialize_document_body(&original, true).expect("serialize");
+        let decoded = decode_container_to_json(&bytes).expect("decode");
+        assert_eq!(decoded, original);
+        assert_eq!(
+            read_body_field(&bytes, "amount"),
+            Some(Value::DecimalText("3.14159265358979323846".to_string()))
+        );
+        assert_eq!(
+            decoded.to_string_compact(),
+            r#"{"amount":3.14159265358979323846,"big":18446744073709551616}"#
+        );
+    }
+
+    #[test]
     fn non_object_body_falls_back_to_json_even_with_binary_on() {
         let scalar = JsonValue::String("just-a-string".to_string());
         let bytes = serialize_document_body(&scalar, true).expect("serialize");
