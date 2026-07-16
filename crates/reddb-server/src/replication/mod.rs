@@ -39,6 +39,7 @@ pub mod reconnect;
 pub mod replica;
 pub mod rollback;
 pub mod scheduler;
+pub mod signal_plane;
 pub mod swap_db;
 pub mod topology_advertiser;
 pub mod witness;
@@ -74,6 +75,11 @@ pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
 pub use rollback::{
     DivergentTail, RollbackCoordinator, RollbackError, RollbackEvent, RollbackOutcome,
     RollbackPlan, RollbackRequest, RollbackTransport, TailRecord,
+};
+pub use signal_plane::{
+    CatalogVersionHint, LivenessObservation, LivenessStatus, LoadBucket, LoadMetricSample,
+    MemberHealthInput, ReceivedSignal, SignalPlane, SignalPlaneMessage, SignalPlaneSchedule,
+    SimulatedSignalPlane, TopologyHint,
 };
 pub use swap_db::{RebootstrapInProgress, SwapDb};
 pub use topology_advertiser::{
