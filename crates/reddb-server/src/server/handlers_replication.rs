@@ -14,6 +14,36 @@ impl RedDBServer {
             "current_term".to_string(),
             JsonValue::Number(db.options().replication.term as f64),
         );
+        let profile = db.options().replication.failover_profile;
+        let mut profile_json = Map::new();
+        profile_json.insert(
+            "name".to_string(),
+            JsonValue::String(profile.name_str().to_string()),
+        );
+        profile_json.insert(
+            "lease_window_ms".to_string(),
+            JsonValue::Number(profile.lease_window_ms as f64),
+        );
+        profile_json.insert(
+            "member_health_score_threshold".to_string(),
+            JsonValue::Number(profile.member_health_score_threshold as f64),
+        );
+        profile_json.insert(
+            "promotion_grace_ms".to_string(),
+            JsonValue::Number(profile.promotion_grace_ms as f64),
+        );
+        profile_json.insert(
+            "max_clock_drift_ms".to_string(),
+            JsonValue::Number(profile.max_clock_drift_ms as f64),
+        );
+        profile_json.insert(
+            "lease_safety_margin_ms".to_string(),
+            JsonValue::Number(profile.lease_safety_margin_ms() as f64),
+        );
+        object.insert(
+            "failover_profile".to_string(),
+            JsonValue::Object(profile_json),
+        );
         match &db.options().replication.role {
             crate::replication::ReplicationRole::Standalone => {
                 object.insert(
@@ -468,6 +498,33 @@ mod tests {
         assert!(body.contains(r#""commit_watermark":"#), "{body}");
         assert!(body.contains(r#""full_resync_count":0"#), "{body}");
         assert!(body.contains(r#""partial_resync_count":0"#), "{body}");
+    }
+
+    #[test]
+    fn replication_status_surfaces_active_failover_profile() {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory().with_replication(
+                ReplicationConfig::primary()
+                    .with_failover_profile(crate::replication::FailoverProfile::CONSERVATIVE),
+            ),
+        )
+        .expect("runtime");
+
+        let server = RedDBServer::new(runtime);
+        let response = server.handle_replication_status();
+        let body = String::from_utf8(response.body).expect("status body is utf8");
+
+        assert_eq!(response.status, 200);
+        assert!(body.contains(r#""failover_profile":{"#), "{body}");
+        assert!(body.contains(r#""name":"conservative""#), "{body}");
+        assert!(body.contains(r#""lease_window_ms":60000"#), "{body}");
+        assert!(
+            body.contains(r#""member_health_score_threshold":90"#),
+            "{body}"
+        );
+        assert!(body.contains(r#""promotion_grace_ms":30000"#), "{body}");
+        assert!(body.contains(r#""max_clock_drift_ms":5000"#), "{body}");
+        assert!(body.contains(r#""lease_safety_margin_ms":30000"#), "{body}");
     }
 
     #[test]

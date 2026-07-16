@@ -85,6 +85,181 @@ pub use witness::{RuntimeProfile, WitnessSupervisor};
 pub const DEFAULT_REPLICATION_TERM: u64 = reddb_wire::replication::DEFAULT_REPLICATION_TERM;
 pub const DEFAULT_SLOT_RETENTION_MAX_LAG_LSN: u64 = 100_000;
 pub const DEFAULT_SLOT_IDLE_TIMEOUT_MS: u64 = 86_400_000;
+pub const SHIPPED_FAILOVER_PROFILES: [FailoverProfile; 3] = [
+    FailoverProfile::CONSERVATIVE,
+    FailoverProfile::BALANCED,
+    FailoverProfile::AGGRESSIVE,
+];
+
+/// Named failover timing posture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FailoverProfileName {
+    Conservative,
+    Balanced,
+    Aggressive,
+    Custom,
+}
+
+impl FailoverProfileName {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+            Self::Balanced => "balanced",
+            Self::Aggressive => "aggressive",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+/// Tuned failover constants over the existing lease, health, and grace
+/// mechanisms.
+///
+/// Shipped profiles document the intended trade-off:
+/// - `conservative`: long lease and high health threshold; favors avoiding
+///   false promotion over fast recovery.
+/// - `balanced`: default posture; keeps a moderate lease and health threshold
+///   for ordinary multi-node deployments.
+/// - `aggressive`: short lease and lower health threshold; favors fast recovery
+///   when the operator accepts a narrower timing margin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailoverProfile {
+    pub name: FailoverProfileName,
+    pub lease_window_ms: u64,
+    pub member_health_score_threshold: u8,
+    pub promotion_grace_ms: u64,
+    pub max_clock_drift_ms: u64,
+}
+
+impl FailoverProfile {
+    pub const CONSERVATIVE: Self = Self {
+        name: FailoverProfileName::Conservative,
+        lease_window_ms: 60_000,
+        member_health_score_threshold: 90,
+        promotion_grace_ms: 30_000,
+        max_clock_drift_ms: 5_000,
+    };
+
+    pub const BALANCED: Self = Self {
+        name: FailoverProfileName::Balanced,
+        lease_window_ms: 30_000,
+        member_health_score_threshold: 75,
+        promotion_grace_ms: 10_000,
+        max_clock_drift_ms: 5_000,
+    };
+
+    pub const AGGRESSIVE: Self = Self {
+        name: FailoverProfileName::Aggressive,
+        lease_window_ms: 15_000,
+        member_health_score_threshold: 60,
+        promotion_grace_ms: 5_000,
+        max_clock_drift_ms: 2_000,
+    };
+
+    pub const fn shipped() -> &'static [Self] {
+        &SHIPPED_FAILOVER_PROFILES
+    }
+
+    pub const fn name_str(self) -> &'static str {
+        self.name.as_str()
+    }
+
+    pub fn validate(self) -> Result<Self, String> {
+        if self.lease_window_ms == 0 {
+            return Err("failover profile lease_window_ms must be positive".to_string());
+        }
+        if self.member_health_score_threshold > 100 {
+            return Err(
+                "failover profile member_health_score_threshold must be <= 100".to_string(),
+            );
+        }
+        if self.promotion_grace_ms >= self.lease_window_ms {
+            return Err(
+                "failover profile promotion_grace_ms must be smaller than lease_window_ms"
+                    .to_string(),
+            );
+        }
+        let safety_margin_ms = self.lease_window_ms - self.promotion_grace_ms;
+        if safety_margin_ms < self.max_clock_drift_ms {
+            return Err(format!(
+                "failover profile lease safety margin {safety_margin_ms}ms is below configured max clock drift {}ms",
+                self.max_clock_drift_ms
+            ));
+        }
+        Ok(self)
+    }
+
+    pub const fn lease_safety_margin_ms(self) -> u64 {
+        self.lease_window_ms - self.promotion_grace_ms
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shipped_failover_profiles_satisfy_lease_safety_validation() {
+        for profile in FailoverProfile::shipped() {
+            profile.validate().expect(profile.name_str());
+            assert!(
+                profile.lease_safety_margin_ms() >= profile.max_clock_drift_ms,
+                "{} profile violates lease clock-discipline margin",
+                profile.name_str()
+            );
+        }
+    }
+
+    #[test]
+    fn failover_profile_rejects_margin_below_configured_clock_drift() {
+        let invalid = FailoverProfile {
+            name: FailoverProfileName::Custom,
+            lease_window_ms: 1_000,
+            member_health_score_threshold: 80,
+            promotion_grace_ms: 900,
+            max_clock_drift_ms: 200,
+        };
+
+        let err = invalid.validate().expect_err("profile must be rejected");
+
+        assert!(err.contains("lease safety margin"), "{err}");
+        assert!(err.contains("max clock drift"), "{err}");
+    }
+
+    #[test]
+    fn runtime_open_rejects_invalid_failover_profile() {
+        let invalid = FailoverProfile {
+            name: FailoverProfileName::Custom,
+            lease_window_ms: 1_000,
+            member_health_score_threshold: 80,
+            promotion_grace_ms: 900,
+            max_clock_drift_ms: 200,
+        };
+        let options = crate::RedDBOptions::in_memory()
+            .with_replication(ReplicationConfig::primary().with_failover_profile(invalid));
+
+        let err = match crate::RedDBRuntime::with_options(options) {
+            Ok(_) => panic!("boot must reject config"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("invalid config"), "{err}");
+        assert!(err.to_string().contains("lease safety margin"), "{err}");
+    }
+
+    #[test]
+    fn changing_failover_profile_updates_active_profile() {
+        let mut config = ReplicationConfig::primary();
+
+        config
+            .change_failover_profile(FailoverProfile::AGGRESSIVE, "test")
+            .expect("valid profile applies");
+
+        assert_eq!(
+            config.failover_profile.name,
+            FailoverProfileName::Aggressive
+        );
+    }
+}
 
 /// Role of this RedDB instance in a replication cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -135,6 +310,9 @@ pub struct ReplicationConfig {
     /// only for an async read-replica; a voting member refuses it and streams
     /// directly from the primary. See [`ReplicationConfig::resolved_upstream`].
     pub cascade_from: Option<CascadeUpstream>,
+    /// Active named failover profile. The profile is a bundle of tuned
+    /// lease/health/grace constants; it does not add new failover machinery.
+    pub failover_profile: FailoverProfile,
 }
 
 impl ReplicationConfig {
@@ -150,6 +328,7 @@ impl ReplicationConfig {
             slot_idle_timeout_ms: DEFAULT_SLOT_IDLE_TIMEOUT_MS,
             replica_class: ReplicaClass::Voting,
             cascade_from: None,
+            failover_profile: FailoverProfile::BALANCED,
         }
     }
 
@@ -165,6 +344,7 @@ impl ReplicationConfig {
             slot_idle_timeout_ms: DEFAULT_SLOT_IDLE_TIMEOUT_MS,
             replica_class: ReplicaClass::Voting,
             cascade_from: None,
+            failover_profile: FailoverProfile::BALANCED,
         }
     }
 
@@ -182,6 +362,7 @@ impl ReplicationConfig {
             slot_idle_timeout_ms: DEFAULT_SLOT_IDLE_TIMEOUT_MS,
             replica_class: ReplicaClass::Voting,
             cascade_from: None,
+            failover_profile: FailoverProfile::BALANCED,
         }
     }
 
@@ -211,6 +392,32 @@ impl ReplicationConfig {
     pub fn with_slot_idle_timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.slot_idle_timeout_ms = timeout_ms;
         self
+    }
+
+    pub fn with_failover_profile(mut self, profile: FailoverProfile) -> Self {
+        self.failover_profile = profile;
+        self
+    }
+
+    pub fn validate_failover_profile(&self) -> Result<(), String> {
+        self.failover_profile.validate().map(|_| ())
+    }
+
+    pub fn change_failover_profile(
+        &mut self,
+        profile: FailoverProfile,
+        changed_by: impl Into<String>,
+    ) -> Result<(), String> {
+        let profile = profile.validate()?;
+        let old_profile = self.failover_profile.name_str().to_string();
+        self.failover_profile = profile;
+        crate::telemetry::operator_event::OperatorEvent::FailoverProfileChanged {
+            old_profile,
+            new_profile: profile.name_str().to_string(),
+            changed_by: changed_by.into(),
+        }
+        .emit_global();
+        Ok(())
     }
 
     /// Set the streaming class explicitly (issue #838).

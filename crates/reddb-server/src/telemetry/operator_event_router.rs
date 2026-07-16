@@ -666,6 +666,11 @@ mod tests {
                 new_value: "n".into(),
                 changed_by: "b".into(),
             },
+            OperatorEvent::FailoverProfileChanged {
+                old_profile: "balanced".into(),
+                new_profile: "aggressive".into(),
+                changed_by: "b".into(),
+            },
             OperatorEvent::StartupFailed {
                 phase: "p".into(),
                 error: "e".into(),
@@ -781,6 +786,15 @@ mod tests {
                 key: key.clone(),
                 old_value: old_value.clone(),
                 new_value: new_value.clone(),
+                changed_by: changed_by.clone(),
+            },
+            OperatorEvent::FailoverProfileChanged {
+                old_profile,
+                new_profile,
+                changed_by,
+            } => OperatorEvent::FailoverProfileChanged {
+                old_profile: old_profile.clone(),
+                new_profile: new_profile.clone(),
                 changed_by: changed_by.clone(),
             },
             OperatorEvent::StartupFailed { phase, error } => OperatorEvent::StartupFailed {
