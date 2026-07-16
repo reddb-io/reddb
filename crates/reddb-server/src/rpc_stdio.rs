@@ -1519,6 +1519,7 @@ pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
         Value::Null => SchemaValue::Null,
         Value::Bool(b) => SchemaValue::Boolean(*b),
         Value::Integer(n) => SchemaValue::Integer(*n),
+        Value::Decimal(n) => SchemaValue::DecimalText(n.clone()),
         Value::Number(n) => {
             if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
                 SchemaValue::Integer(*n as i64)
