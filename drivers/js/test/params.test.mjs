@@ -37,6 +37,42 @@ test('query(sql, paramsArray) remains supported', async () => {
   assert.deepEqual(calls[0].params.params, [{ $bytes: '3q0=' }])
 })
 
+test('query serializes bigint params as exact integer envelope', async () => {
+  const { db, calls } = fakeDb()
+  await db.query('SELECT $1', 9007199254740993n)
+  assert.deepEqual(calls[0].params.params, [{ $int: '9007199254740993' }])
+
+  const next = fakeDb()
+  await next.db.query('SELECT $1', 9223372036854775808n)
+  assert.deepEqual(next.calls[0].params.params, [{ $uint: '9223372036854775808' }])
+})
+
+test('insert serializes bigint body values as exact integer envelope', async () => {
+  const { db, calls } = fakeDb(() => ({ affected: 1, rid: '1' }))
+  await db.insert('docs', { id: 9007199254740993n })
+  assert.deepEqual(calls[0].params.payload, { id: { $int: '9007199254740993' } })
+})
+
+test('query result decodes exact-number envelopes and rejects superseded forms', async () => {
+  const { db } = fakeDb(() => ({
+    ok: true,
+    statement: 'SELECT',
+    affected: 0,
+    columns: ['n', 'u', 'd'],
+    rows: [{ n: { $int: '9007199254740993' }, u: { $uint: '9223372036854775808' }, d: { $decimal: '3.14159265358979323846' } }],
+  }))
+  const result = await db.query('SELECT exact')
+  assert.equal(result.rows[0].n, 9007199254740993n)
+  assert.equal(result.rows[0].u, 9223372036854775808n)
+  assert.equal(result.rows[0].d, '3.14159265358979323846')
+
+  const bad = fakeDb(() => ({ rows: [{ n: { $number: '9007199254740993' } }] })).db
+  await assert.rejects(
+    () => bad.query('SELECT old'),
+    (err) => err instanceof RedDBError && err.code === 'UNSUPPORTED_EXACT_NUMBER',
+  )
+})
+
 test('execute aliases parameterized query', async () => {
   const { db, calls } = fakeDb(() => ({ ok: true, statement: 'INSERT', affected: 1, columns: [], rows: [] }))
   const result = await db.execute('INSERT INTO t (id) VALUES ($1)', 7)
