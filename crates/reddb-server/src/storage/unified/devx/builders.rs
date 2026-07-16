@@ -793,6 +793,7 @@ fn json_value_to_storage_value(value: &JsonValue) -> Value {
         JsonValue::Null => Value::Null,
         JsonValue::Bool(b) => Value::Boolean(*b),
         JsonValue::Integer(n) => Value::Integer(*n),
+        JsonValue::Decimal(n) => Value::DecimalText(n.clone()),
         JsonValue::Number(n) => {
             if n.fract().abs() < f64::EPSILON {
                 Value::Integer(*n as i64)
