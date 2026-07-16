@@ -480,6 +480,7 @@ fn json_type_name(v: &JsonValue) -> &'static str {
         JsonValue::Null => "null",
         JsonValue::Bool(_) => "boolean",
         JsonValue::Integer(_) => "number",
+        JsonValue::Decimal(_) => "number",
         JsonValue::Number(_) => "number",
         JsonValue::String(_) => "string",
         JsonValue::Array(_) => "array",
