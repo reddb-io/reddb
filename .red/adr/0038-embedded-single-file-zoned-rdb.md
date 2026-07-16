@@ -81,6 +81,10 @@ multi-process coordination may still provision `shm` through their explicit
 tier policy, but that is outside the embedded packaging contract and is asserted
 separately from the DWB sidecar census.
 
+Phase 3 amendment: in-file DWB zone interpretation is gated by the paged-file
+version marker introduced with phase 3. Older stores route through the offline
+migration tool rather than treating pages 3-66 as a DWB zone.
+
 Ordering within phases 1–3 may be re-sequenced by an ADR amendment with one
 line of rationale; silently skipping a phase is not allowed. Phase 4 is gated
 on ADR 0073 landing first (the cache hierarchy it pages through is
