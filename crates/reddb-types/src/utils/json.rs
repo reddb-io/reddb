@@ -10,6 +10,7 @@ pub enum JsonValue {
     Bool(bool),
     Integer(i64),
     Number(f64),
+    Decimal(String),
     String(String),
     Array(Vec<JsonValue>),
     Object(Vec<(String, JsonValue)>),
@@ -29,6 +30,7 @@ impl JsonValue {
         match self {
             JsonValue::Number(n) => Some(*n),
             JsonValue::Integer(n) => Some(*n as f64),
+            JsonValue::Decimal(n) => n.parse().ok(),
             _ => None,
         }
     }
@@ -37,6 +39,7 @@ impl JsonValue {
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             JsonValue::Integer(n) => Some(*n),
+            JsonValue::Decimal(n) => n.parse().ok(),
             _ => None,
         }
     }
@@ -140,6 +143,7 @@ impl JsonValue {
             JsonValue::Null => out.push_str("null"),
             JsonValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             JsonValue::Integer(n) => out.push_str(&format!("{n}")),
+            JsonValue::Decimal(n) => out.push_str(n),
             JsonValue::Number(n) => {
                 if n.fract() == 0.0 {
                     out.push_str(&format!("{}", *n as i64));
@@ -345,10 +349,14 @@ impl<'a> JsonParser<'a> {
             if let Ok(value) = s.parse::<i64>() {
                 return Ok(JsonValue::Integer(value));
             }
+            return Ok(JsonValue::Decimal(s.to_string()));
         }
         let value = s
             .parse::<f64>()
             .map_err(|_| "failed to parse number".to_string())?;
+        if !value.is_finite() || should_preserve_decimal_text(s) {
+            return Ok(JsonValue::Decimal(s.to_string()));
+        }
         Ok(JsonValue::Number(value))
     }
 
@@ -575,6 +583,15 @@ impl<'a> JsonParser<'a> {
     }
 }
 
+fn should_preserve_decimal_text(s: &str) -> bool {
+    let significant_digits = s
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .skip_while(|digit| *digit == b'0')
+        .count();
+    significant_digits > 15
+}
+
 /// Parses the provided JSON string into a [`JsonValue`].
 pub fn parse_json(input: &str) -> Result<JsonValue, String> {
     let mut parser = JsonParser::new(input);
@@ -674,6 +691,14 @@ mod tests {
         assert_eq!(parse_json("true").unwrap(), JsonValue::Bool(true));
         assert_eq!(parse_json("false").unwrap(), JsonValue::Bool(false));
         assert_eq!(parse_json("-12.5e+2").unwrap(), JsonValue::Number(-1250.0));
+        assert_eq!(
+            parse_json("3.141592653589793238462643383279").unwrap(),
+            JsonValue::Decimal("3.141592653589793238462643383279".to_string())
+        );
+        assert_eq!(
+            parse_json("9223372036854775808").unwrap(),
+            JsonValue::Decimal("9223372036854775808".to_string())
+        );
         assert_eq!(parse_json("[]").unwrap(), JsonValue::Array(Vec::new()));
         assert_eq!(parse_json("{}").unwrap(), JsonValue::Object(Vec::new()));
 
