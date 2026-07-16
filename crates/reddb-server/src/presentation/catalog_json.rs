@@ -1600,6 +1600,7 @@ fn schema_data_type_str(data_type: crate::storage::schema::DataType) -> &'static
         crate::storage::schema::DataType::Date => "date",
         crate::storage::schema::DataType::Time => "time",
         crate::storage::schema::DataType::Decimal => "decimal",
+        crate::storage::schema::DataType::DecimalText => "decimal_text",
         crate::storage::schema::DataType::Enum => "enum",
         crate::storage::schema::DataType::Array => "array",
         crate::storage::schema::DataType::TimestampMs => "timestamp_ms",
