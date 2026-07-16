@@ -105,6 +105,12 @@ pub enum OperatorEvent {
         new_value: String,
         changed_by: String,
     },
+    /// The operator selected a different named failover profile.
+    FailoverProfileChanged {
+        old_profile: String,
+        new_profile: String,
+        changed_by: String,
+    },
     /// The server process failed to start cleanly.
     StartupFailed { phase: String, error: String },
     /// The server process was forced to shut down (e.g. OOM killer,
@@ -219,6 +225,7 @@ impl OperatorEvent {
             "AdminCapabilityGranted",
             "SecretRotationFailed",
             "ConfigChanged",
+            "FailoverProfileChanged",
             "StartupFailed",
             "ShutdownForced",
             "SchemaCorruption",
@@ -245,6 +252,7 @@ impl OperatorEvent {
             Self::AdminCapabilityGranted { .. } => "AdminCapabilityGranted",
             Self::SecretRotationFailed { .. } => "SecretRotationFailed",
             Self::ConfigChanged { .. } => "ConfigChanged",
+            Self::FailoverProfileChanged { .. } => "FailoverProfileChanged",
             Self::StartupFailed { .. } => "StartupFailed",
             Self::ShutdownForced { .. } => "ShutdownForced",
             Self::SchemaCorruption { .. } => "SchemaCorruption",
@@ -414,6 +422,21 @@ impl OperatorEvent {
                     AuditFieldEscaper::field("changed_by", changed_by),
                 ];
                 ("operator/config_changed", fields, summary)
+            }
+            Self::FailoverProfileChanged {
+                old_profile,
+                new_profile,
+                changed_by,
+            } => {
+                let summary = format!(
+                    "failover profile changed: old={old_profile} new={new_profile} by={changed_by}"
+                );
+                let fields = vec![
+                    AuditFieldEscaper::field("old_profile", old_profile),
+                    AuditFieldEscaper::field("new_profile", new_profile),
+                    AuditFieldEscaper::field("changed_by", changed_by),
+                ];
+                ("operator/failover_profile_changed", fields, summary)
             }
             Self::StartupFailed { phase, error } => {
                 let summary = format!("startup failed: phase={phase} error={error}");
@@ -820,6 +843,28 @@ mod tests {
             .and_then(|d| d.get("new_value"))
             .and_then(|x| x.as_str());
         assert_eq!(nv, Some("200"));
+    }
+
+    #[test]
+    fn failover_profile_changed_emits() {
+        let (logger, path) = make_logger();
+        OperatorEvent::FailoverProfileChanged {
+            old_profile: "balanced".into(),
+            new_profile: "aggressive".into(),
+            changed_by: "operator".into(),
+        }
+        .emit(&logger);
+        drain(&logger);
+        let v = read_last_line(&path);
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/failover_profile_changed")
+        );
+        let new_profile = v
+            .get("detail")
+            .and_then(|d| d.get("new_profile"))
+            .and_then(|x| x.as_str());
+        assert_eq!(new_profile, Some("aggressive"));
     }
 
     #[test]
