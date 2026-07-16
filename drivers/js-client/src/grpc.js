@@ -10,6 +10,7 @@ import { connect as connectHttp2 } from 'node:http2'
 import { Buffer } from 'node:buffer'
 
 import { RedDBError } from './protocol.js'
+import { normalizeExactNumbers, serializeJsonValue } from './core/serialization.js'
 
 const SERVICE = '/reddb.v1.RedDb'
 
@@ -154,7 +155,7 @@ function normalizeQueryReply(reply) {
       throw new RedDBError('QUERY_ERROR', `bad gRPC query JSON: ${err.message}`)
     }
   }
-  const rows = parsed.rows ?? parsed.records ?? []
+  const rows = normalizeExactNumbers(parsed.rows ?? parsed.records ?? [])
   return {
     ok: reply.ok,
     statement: parsed.statement ?? reply.statement ?? '',
@@ -171,7 +172,7 @@ function normalizeEntityReply(reply) {
     affected: reply.ok ? 1 : 0,
     rid,
     id: rid,
-    entity: parseJsonOrNull(reply.entity_json),
+    entity: normalizeExactNumbers(parseJsonOrNull(reply.entity_json)),
   }
 }
 
@@ -231,6 +232,13 @@ function encodeQueryValue(value) {
     return bytesField(7, encodeQueryVector(value))
   }
   if (typeof value === 'object') {
+    if (typeof value.$int === 'string') return int64Field(3, BigInt(value.$int))
+    if ('$uint' in value || '$decimal' in value) {
+      throw new RedDBError(
+        'UNSUPPORTED_PARAM',
+        'exact uint and decimal params require a JSON body transport',
+      )
+    }
     if (typeof value.$bytes === 'string') return bytesField(6, Buffer.from(value.$bytes, 'base64'))
     if (typeof value.$float === 'string') return doubleField(4, Number(value.$float))
     if (value.$ts != null) return int64Field(9, BigInt(value.$ts))
@@ -250,14 +258,14 @@ function encodeQueryVector(values) {
 function encodeJsonCreateRequest(collection, payload) {
   return concat([
     stringField(1, collection ?? ''),
-    stringField(2, JSON.stringify(payload ?? {})),
+    stringField(2, JSON.stringify(serializeJsonValue(payload ?? {}))),
   ])
 }
 
 function encodeJsonBulkCreateRequest(collection, payloads) {
   const fields = [stringField(1, collection ?? '')]
   for (const payload of payloads ?? []) {
-    fields.push(stringField(2, JSON.stringify(payload ?? {})))
+    fields.push(stringField(2, JSON.stringify(serializeJsonValue(payload ?? {}))))
   }
   return concat(fields)
 }
@@ -371,7 +379,11 @@ function uint64Field(no, value) {
 }
 
 function int64Field(no, value) {
-  return concat([varint((BigInt(no) << 3n) | 0n), varint(BigInt.asUintN(64, BigInt(value)))])
+  const raw = BigInt(value)
+  if (raw < -(1n << 63n) || raw > (1n << 63n) - 1n) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'integer param is outside i64 range')
+  }
+  return concat([varint((BigInt(no) << 3n) | 0n), varint(BigInt.asUintN(64, raw))])
 }
 
 function doubleField(no, value) {
