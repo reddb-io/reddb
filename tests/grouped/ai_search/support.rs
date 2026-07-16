@@ -3,7 +3,7 @@ use std::sync::{Mutex, OnceLock};
 #[path = "../../support/mod.rs"]
 mod root_support;
 
-pub(crate) use root_support::{persistent_test_runtime, PersistentRuntime};
+pub(crate) use root_support::{persistent_test_runtime, temp_db_file, PersistentRuntime};
 
 pub(crate) fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
