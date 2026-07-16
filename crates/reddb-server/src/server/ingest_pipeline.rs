@@ -233,6 +233,7 @@ fn json_type_name(v: &JsonValue) -> &'static str {
         JsonValue::Null => "null",
         JsonValue::Bool(_) => "bool",
         JsonValue::Integer(_) => "number",
+        JsonValue::Decimal(_) => "number",
         JsonValue::Number(_) => "number",
         JsonValue::String(_) => "string",
         JsonValue::Array(_) => "array",
@@ -245,6 +246,7 @@ fn json_to_value(v: &JsonValue) -> Value {
         JsonValue::Null => Value::Null,
         JsonValue::Bool(b) => Value::Boolean(*b),
         JsonValue::Integer(n) => Value::Integer(*n),
+        JsonValue::Decimal(n) => Value::DecimalText(n.clone()),
         JsonValue::Number(n) => {
             // Preserve integer-ness when the number has no fraction —
             // downstream codecs pick T64 / Delta on i64 columns and
