@@ -247,6 +247,12 @@ pub fn encode(value: &Value, out: &mut Vec<u8>) {
             out.push(DataType::Decimal.to_byte());
             out.extend_from_slice(&v.to_le_bytes());
         }
+        Value::DecimalText(v) => {
+            out.push(DataType::DecimalText.to_byte());
+            let bytes = v.as_bytes();
+            write_varint(out, bytes.len() as u64);
+            out.extend_from_slice(bytes);
+        }
         Value::EnumValue(idx) => {
             out.push(DataType::Enum.to_byte());
             out.push(*idx);
@@ -656,6 +662,17 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
             let v = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
             offset += 8;
             Value::Decimal(v)
+        }
+        DataType::DecimalText => {
+            let (len, len_bytes) = read_varint(&data[offset..])?;
+            offset += len_bytes;
+            if data.len() < offset + len as usize {
+                return Err(ValueError::TruncatedData);
+            }
+            let literal = String::from_utf8(data[offset..offset + len as usize].to_vec())
+                .map_err(|_| ValueError::InvalidUtf8)?;
+            offset += len as usize;
+            Value::DecimalText(literal)
         }
         DataType::Enum => {
             if data.len() < offset + 1 {
