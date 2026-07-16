@@ -176,6 +176,51 @@ handles. The aliases and stem names are real collections in the
 ephemeral store, so they work in queries and catalog commands such as
 `SHOW STATS t1`.
 
+#### Canonical funnel demo
+
+This is the canonical copy-pasteable file-to-store funnel. The same
+sequence is pinned by
+`tests/grouped/cli_transport/e2e_issue_1786_ephemeral_query.rs`.
+
+```bash
+cat > users.csv <<'CSV'
+id,name
+1,Ada
+2,Linus
+CSV
+
+cat > orders.json <<'JSON'
+[
+  {"id":100,"user_id":1,"total":42},
+  {"id":101,"user_id":2,"total":7}
+]
+JSON
+
+red query users.csv orders.json "SHOW STATS users" --json
+red query users.csv orders.json "SHOW STATS orders" --json
+
+red query users.csv orders.json \
+  "SELECT users.name AS name, orders.total AS total \
+   FROM users JOIN orders ON users.id = orders.user_id \
+   WHERE orders.total > 20" \
+  --format csv
+
+red query users.csv orders.json \
+  "SELECT users.name AS name, orders.total AS total \
+   FROM users JOIN orders ON users.id = orders.user_id \
+   WHERE orders.total > 20" \
+  --format json \
+  --save funnel.rdb
+
+red query --path funnel.rdb \
+  "SELECT users.name AS name, orders.total AS total \
+   FROM users JOIN orders ON users.id = orders.user_id \
+   WHERE orders.total > 20" \
+  --format json
+
+red query --path funnel.rdb "SHOW STATS orders" --json
+```
+
 ### Parameterized queries
 
 `--param <value>` (or `-p <value>`) binds positionally — the first
