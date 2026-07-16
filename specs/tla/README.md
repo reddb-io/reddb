@@ -18,6 +18,7 @@ Jepsen-style cluster harness.
 | [`ReplicationSafetyEnvelope.tla`](ReplicationSafetyEnvelope.tla) | Single-writer fencing, election safety, partition behavior, and crash/recovery durability in one bounded model. | ADR 0030 / ADR 0032; writer fencing, quorum commit, crash/restart recovery. |
 | [`SafeReconfig.tla`](SafeReconfig.tla) | Every membership change preserves quorum overlap (old and new quorums intersect). | ADR 0030 membership rules; Raft single-server change. |
 | [`CommitProtocol.tla`](CommitProtocol.tla) | Optimistic MVCC commit safety: no lost update under FCW, stable snapshot reads, and SSI-admitted histories are serializable. | ADR 0065 TM v2; `SnapshotManager::begin` / `snapshot` / `commit`; `visibility::is_visible`; SQL table-row commit conflict checks; `TxnContext` savepoint sub-xids. |
+| [`OwnershipTransition.tla`](OwnershipTransition.tla) | Range ownership transitions keep one durable-write owner per ownership epoch and preserve all acknowledged writes at/below the commit watermark. | ADR 0037 ownership catalog; ADR 0058 reserved range owner fencing; current `LeaseStore` / `WriteGate` / failover promotion guard; tracked per-range follow-ups #1836, #1837, and #1843. |
 
 ## How the models mirror the implementation
 
@@ -76,6 +77,25 @@ two-row model. For local reachability checks, temporarily add
 `NoOptimisticAdmitsMoreThan2PL` as an invariant; TLC must reject the model with
 a counterexample reaching the corresponding witness state. These negated
 witness invariants are not in CI because their success condition is failure.
+
+## Ownership transition model
+
+`OwnershipTransition.tla` models ADR 0037's cataloged range ownership contract.
+The catalog owner and ownership epoch are authoritative, and `AcceptDurableWrite`
+requires the local admission gate to be open with a lease at the same epoch as
+the catalog. Cooperative handoff closes the old owner's gate before installing a
+caught-up new owner. Crash failover requires the old owner to be down. Forced
+transition skips old-owner cooperation, but still bumps the epoch and requires
+the new owner to cover every acknowledged entry at or below the range commit
+watermark. The model intentionally records transition kinds for inspection only;
+the CI invariants are the safety contract: `SingleOwnerPerEpoch` and
+`NoAcknowledgedWriteLoss`.
+
+The bounded spec is ahead of the live per-range implementation in three tracked
+places: #1836 wires the ownership admission gate into durable writes, #1837
+carries term/ownership epoch through WAL and logical spool framing, and #1843
+rejects divergent term/epoch history on replica apply. No additional divergence
+issue was opened for this model because those slices already capture the gap.
 
 ## Running locally
 
