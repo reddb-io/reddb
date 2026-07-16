@@ -1,0 +1,83 @@
+# RedDB-only conformance — cross-model numeric equivalence (issue #1782).
+#
+# Truth is hand-authored from the RedDB numeric contract: the same numeric
+# value written through row, KV, and document surfaces compares equal and orders
+# identically through SQL, including when indexes exist on the compared fields.
+
+statement ok
+CREATE TABLE issue1782_rows (name TEXT, n INT)
+
+statement ok
+CREATE INDEX idx_issue1782_rows_n ON issue1782_rows (n)
+
+statement ok
+INSERT INTO issue1782_rows (name, n) VALUES ('low', 9), ('same', 10), ('high', 11)
+
+statement ok
+CREATE KV issue1782_kv
+
+statement ok
+CREATE INDEX idx_issue1782_kv_value ON issue1782_kv (value)
+
+statement ok
+INSERT INTO issue1782_kv KV (key, value) VALUES ('low', 9)
+
+statement ok
+INSERT INTO issue1782_kv KV (key, value) VALUES ('same', 10)
+
+statement ok
+INSERT INTO issue1782_kv KV (key, value) VALUES ('high', 11)
+
+statement ok
+CREATE DOCUMENT issue1782_docs
+
+statement ok
+CREATE INDEX idx_issue1782_docs_n ON issue1782_docs (body.n)
+
+statement ok
+INSERT INTO issue1782_docs DOCUMENT VALUES ({"name":"low","n":9})
+
+statement ok
+INSERT INTO issue1782_docs DOCUMENT VALUES ({"name":"same","n":10})
+
+statement ok
+INSERT INTO issue1782_docs DOCUMENT VALUES ({"name":"high","n":11})
+
+query T nosort
+SELECT name FROM issue1782_rows WHERE n = 10.0
+----
+same
+
+query T nosort
+SELECT key FROM issue1782_kv WHERE value = 10.0
+----
+same
+
+query T nosort
+SELECT name FROM issue1782_docs WHERE body.n = 10.0
+----
+same
+
+query T nosort
+SELECT name FROM issue1782_rows WHERE n BETWEEN 9.5 AND 11 ORDER BY n
+----
+same
+high
+
+query T nosort
+SELECT key FROM issue1782_kv WHERE value BETWEEN 9.5 AND 11 ORDER BY value
+----
+same
+high
+
+query T nosort
+SELECT key FROM issue1782_kv WHERE value BETWEEN 10 AND 11 ORDER BY value DESC
+----
+high
+same
+
+query T nosort
+SELECT name FROM issue1782_docs WHERE body.n BETWEEN 9.5 AND 11 ORDER BY body.n
+----
+same
+high

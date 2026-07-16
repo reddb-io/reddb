@@ -49,6 +49,7 @@ use sqllogictest::{DBOutput, DefaultColumnType, Runner, DB};
 /// accepted-but-unprojected and pinned with `statement ok` (characterization).
 const KEEP: &[&str] = &[
     "op",
+    "key",
     "label",
     "name",
     "content",
