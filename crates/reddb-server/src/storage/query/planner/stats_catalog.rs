@@ -644,6 +644,7 @@ fn approximate_value_size(value: &Value) -> usize {
         | Value::PageRef(_) => 8,
         Value::Boolean(_) | Value::EnumValue(_) => 1,
         Value::Text(v) => v.len(),
+        Value::DecimalText(v) => v.len(),
         Value::Email(v)
         | Value::Url(v)
         | Value::NodeRef(v)
