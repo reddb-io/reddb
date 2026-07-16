@@ -461,6 +461,26 @@ mod tests {
     }
 
     #[test]
+    fn partition_clock_skew_lease_expiry_preserves_ownership_and_sync_acks() {
+        let report = run_partition_clock_skew_lease_expiry_scenario(0x1846);
+
+        assert_eq!(report.promoted_owner, "replica-a");
+        assert_eq!(report.self_fenced_owner, "old-primary");
+        assert!(
+            report.old_owner_late_write_refused,
+            "the deposed owner must be refused by the admission gate"
+        );
+        assert!(
+            report.local_policy_losses > 0,
+            "the schedule should exercise documented local-policy loss"
+        );
+        assert_eq!(
+            report.sync_ack_loss_count, 0,
+            "synchronous acknowledgements must survive recovery"
+        );
+    }
+
+    #[test]
     #[ignore = "heavy seed sweep runs nightly in CI"]
     fn dst_seed_sweep_election_safety_no_split_brain_no_lost_committed_writes() {
         for seed in 1..=256 {
@@ -489,6 +509,380 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[ignore = "heavy seed sweep runs nightly in CI"]
+    fn dst_seed_sweep_partition_clock_skew_lease_expiry_oracles() {
+        for seed in 1..=128 {
+            let report = run_partition_clock_skew_lease_expiry_scenario(seed);
+            assert_eq!(
+                report.sync_ack_loss_count, 0,
+                "seed {seed}: synchronous acked writes were lost"
+            );
+            assert!(
+                report.old_owner_late_write_refused,
+                "seed {seed}: stale owner was not refused"
+            );
+        }
+    }
+
+    fn run_partition_clock_skew_lease_expiry_scenario(seed: u64) -> DstLeaseExpiryReport {
+        let mut scenario = LeaseExpiryScenario::new(seed);
+        scenario.bootstrap_sync_write();
+        scenario.partition_old_owner();
+        scenario.accept_old_owner_local_write_before_expiry();
+        scenario.advance_until_old_owner_self_fences();
+        scenario.promote_covered_replica();
+        scenario.accept_promoted_owner_sync_write();
+        scenario.refuse_old_owner_late_write();
+        scenario.assert_no_double_owner_window();
+        scenario.assert_acked_write_loss_oracle()
+    }
+
+    struct LeaseExpiryScenario {
+        network: InProcessReplicationNetwork<ReplicationControlMessage>,
+        old_owner: SimOwner,
+        current_epoch: u64,
+        committed_watermark: u64,
+        next_write_id: u64,
+        replica_logs: BTreeMap<String, BTreeSet<u64>>,
+        accepted: Vec<SimAcceptedWrite>,
+        self_fenced_at_ms: Option<u64>,
+        promoted_at_ms: Option<u64>,
+        promoted_owner: Option<String>,
+        old_owner_late_write_refused: bool,
+    }
+
+    impl LeaseExpiryScenario {
+        fn new(seed: u64) -> Self {
+            let mut replica_logs = BTreeMap::new();
+            for member in [
+                "old-primary",
+                "replica-a",
+                "replica-b",
+                "replica-c",
+                "replica-d",
+            ] {
+                replica_logs.insert(member.to_string(), BTreeSet::new());
+            }
+
+            Self {
+                network: InProcessReplicationNetwork::new(
+                    seed,
+                    NetworkFaults {
+                        loss_per_million: 0,
+                        max_delay_ms: 25,
+                        reorder: true,
+                    },
+                ),
+                old_owner: SimOwner {
+                    id: "old-primary".to_string(),
+                    term: 7,
+                    epoch: 1,
+                    lease_expires_local_ms: 100,
+                    clock_skew_ms: -25,
+                    self_fenced: false,
+                },
+                current_epoch: 1,
+                committed_watermark: 0,
+                next_write_id: 1,
+                replica_logs,
+                accepted: Vec::new(),
+                self_fenced_at_ms: None,
+                promoted_at_ms: None,
+                promoted_owner: None,
+                old_owner_late_write_refused: false,
+            }
+        }
+
+        fn bootstrap_sync_write(&mut self) {
+            let write_id = self.next_write_id();
+            self.record_owner_durable_write(
+                self.old_owner.id.clone(),
+                self.old_owner.term,
+                self.old_owner.epoch,
+                write_id,
+                AckPolicy::Synchronous,
+            );
+            let old_owner_id = self.old_owner.id.clone();
+            let replicated = self.replicate_commit(
+                &old_owner_id,
+                self.old_owner.term,
+                write_id,
+                &["replica-a", "replica-b"],
+            );
+            assert_eq!(
+                replicated.len(),
+                2,
+                "bootstrap synchronous write must reach a covered quorum"
+            );
+            self.committed_watermark = write_id;
+        }
+
+        fn partition_old_owner(&mut self) {
+            for peer in ["replica-a", "replica-b", "replica-c", "replica-d"] {
+                self.network.partition(&self.old_owner.id, peer);
+            }
+            self.network.advance(Duration::from_millis(40));
+        }
+
+        fn accept_old_owner_local_write_before_expiry(&mut self) {
+            assert!(
+                self.old_owner.local_now_ms(self.network.clock().now_ms())
+                    < self.old_owner.lease_expires_local_ms,
+                "old owner should still believe its lease is alive under skew"
+            );
+            let write_id = self.next_write_id();
+            self.record_owner_durable_write(
+                self.old_owner.id.clone(),
+                self.old_owner.term,
+                self.old_owner.epoch,
+                write_id,
+                AckPolicy::Local,
+            );
+        }
+
+        fn advance_until_old_owner_self_fences(&mut self) {
+            while self.old_owner.local_now_ms(self.network.clock().now_ms())
+                < self.old_owner.lease_expires_local_ms
+            {
+                self.network.advance(Duration::from_millis(10));
+            }
+            self.old_owner.self_fenced = true;
+            self.self_fenced_at_ms = Some(self.network.clock().now_ms());
+        }
+
+        fn promote_covered_replica(&mut self) {
+            self.network.advance(Duration::from_millis(10));
+            let members = replica_members_with_old_owner();
+            let stores = shared_vote_stores(&members);
+            let request = candidate_request(
+                "replica-a",
+                self.old_owner.term,
+                self.committed_watermark,
+                self.committed_watermark,
+            );
+            let mut tx = NetworkElectionTransport::new(
+                &mut self.network,
+                members,
+                stores,
+                "replica-a".to_string(),
+                self.committed_watermark,
+            );
+            let outcome = ElectionCoordinator::run(&request, &mut tx, Duration::from_secs(60));
+            let ElectionOutcome::Elected { term, .. } = outcome else {
+                panic!("covered replica must be promoted, got {outcome:?}");
+            };
+
+            self.current_epoch += 1;
+            self.promoted_at_ms = Some(self.network.clock().now_ms());
+            self.promoted_owner = Some("replica-a".to_string());
+            assert_eq!(
+                term,
+                self.old_owner.term + 1,
+                "supervisor promotion should advance the term"
+            );
+        }
+
+        fn accept_promoted_owner_sync_write(&mut self) {
+            let write_id = self.next_write_id();
+            let term = self.old_owner.term + 1;
+            self.record_owner_durable_write(
+                "replica-a".to_string(),
+                term,
+                self.current_epoch,
+                write_id,
+                AckPolicy::Synchronous,
+            );
+            let replicated =
+                self.replicate_commit("replica-a", term, write_id, &["replica-b", "replica-c"]);
+            assert!(
+                replicated.len() >= 2,
+                "promoted owner must synchronously replicate write {write_id}"
+            );
+        }
+
+        fn refuse_old_owner_late_write(&mut self) {
+            let stale_lease = WriterLease {
+                database_key: "main".to_string(),
+                holder_id: self.old_owner.id.clone(),
+                term: self.old_owner.term,
+                generation: 1,
+                acquired_at_ms: 0,
+                expires_at_ms: u64::MAX,
+            };
+            self.old_owner_late_write_refused =
+                self.old_owner.self_fenced || stale_lease.fenced_by_term(self.old_owner.term + 1);
+            assert!(
+                self.old_owner_late_write_refused,
+                "old owner must not admit writes after promotion"
+            );
+        }
+
+        fn assert_no_double_owner_window(&self) {
+            let self_fenced_at_ms = self.self_fenced_at_ms.expect("self fence happened");
+            let promoted_at_ms = self.promoted_at_ms.expect("promotion happened");
+            assert!(
+                self_fenced_at_ms <= promoted_at_ms,
+                "promotion at {promoted_at_ms} overlapped old owner until {self_fenced_at_ms}"
+            );
+
+            let mut writers_by_instant_and_epoch = BTreeMap::new();
+            for write in &self.accepted {
+                assert!(write.term > 0, "accepted writes must be term-stamped");
+                let previous = writers_by_instant_and_epoch
+                    .insert((write.accepted_at_ms, write.epoch), write.owner_id.clone());
+                assert!(
+                    previous
+                        .as_ref()
+                        .is_none_or(|owner| owner == &write.owner_id),
+                    "two owners accepted durable writes at t={} epoch={}: {:?} and {}",
+                    write.accepted_at_ms,
+                    write.epoch,
+                    previous,
+                    write.owner_id
+                );
+            }
+        }
+
+        fn assert_acked_write_loss_oracle(&self) -> DstLeaseExpiryReport {
+            let surviving: BTreeSet<u64> = self
+                .replica_logs
+                .get(self.promoted_owner.as_deref().expect("promoted owner"))
+                .expect("promoted owner log")
+                .clone();
+            let mut sync_ack_loss_count = 0;
+            let mut local_policy_losses = 0;
+
+            for write in &self.accepted {
+                let survived = surviving.contains(&write.write_id);
+                match write.policy {
+                    AckPolicy::Synchronous => {
+                        if !survived {
+                            sync_ack_loss_count += 1;
+                        }
+                    }
+                    AckPolicy::Local => {
+                        if !survived {
+                            local_policy_losses += 1;
+                        }
+                    }
+                }
+            }
+
+            DstLeaseExpiryReport {
+                promoted_owner: self.promoted_owner.clone().expect("promoted owner"),
+                self_fenced_owner: self.old_owner.id.clone(),
+                old_owner_late_write_refused: self.old_owner_late_write_refused,
+                sync_ack_loss_count,
+                local_policy_losses,
+            }
+        }
+
+        fn replicate_commit(
+            &mut self,
+            owner_id: &str,
+            term: u64,
+            write_id: u64,
+            peers: &[&str],
+        ) -> BTreeSet<String> {
+            for peer in peers {
+                let _ = self.network.send(
+                    owner_id.to_string(),
+                    (*peer).to_string(),
+                    ReplicationControlMessage::LogicalCommit {
+                        term,
+                        lsn: write_id,
+                        payload_hash: format!("write-{write_id}"),
+                    },
+                );
+            }
+            self.network.advance(Duration::from_millis(25));
+
+            let mut replicated = BTreeSet::new();
+            for peer in peers {
+                for delivery in self.network.drain_ready_for(peer) {
+                    if let ReplicationControlMessage::LogicalCommit { lsn, .. } = delivery.message {
+                        self.replica_logs
+                            .get_mut(*peer)
+                            .expect("known peer")
+                            .insert(lsn);
+                        replicated.insert((*peer).to_string());
+                    }
+                }
+            }
+            replicated
+        }
+
+        fn record_owner_durable_write(
+            &mut self,
+            owner_id: String,
+            term: u64,
+            epoch: u64,
+            write_id: u64,
+            policy: AckPolicy,
+        ) {
+            self.replica_logs
+                .get_mut(&owner_id)
+                .expect("known owner")
+                .insert(write_id);
+            self.accepted.push(SimAcceptedWrite {
+                owner_id,
+                term,
+                epoch,
+                write_id,
+                policy,
+                accepted_at_ms: self.network.clock().now_ms(),
+            });
+        }
+
+        fn next_write_id(&mut self) -> u64 {
+            let write_id = self.next_write_id;
+            self.next_write_id += 1;
+            write_id
+        }
+    }
+
+    #[derive(Debug)]
+    struct DstLeaseExpiryReport {
+        promoted_owner: String,
+        self_fenced_owner: String,
+        old_owner_late_write_refused: bool,
+        sync_ack_loss_count: usize,
+        local_policy_losses: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum AckPolicy {
+        Synchronous,
+        Local,
+    }
+
+    #[derive(Debug)]
+    struct SimOwner {
+        id: String,
+        term: u64,
+        epoch: u64,
+        lease_expires_local_ms: i64,
+        clock_skew_ms: i64,
+        self_fenced: bool,
+    }
+
+    impl SimOwner {
+        fn local_now_ms(&self, simulated_now_ms: u64) -> i64 {
+            simulated_now_ms as i64 + self.clock_skew_ms
+        }
+    }
+
+    #[derive(Debug)]
+    struct SimAcceptedWrite {
+        owner_id: String,
+        term: u64,
+        epoch: u64,
+        write_id: u64,
+        policy: AckPolicy,
+        accepted_at_ms: u64,
     }
 
     struct NetworkElectionTransport<'a> {
@@ -615,6 +1009,16 @@ mod tests {
             Member::data_voting("c"),
             Member::data_voting("d"),
             Member::data_voting("e"),
+        ]
+    }
+
+    fn replica_members_with_old_owner() -> Vec<Member> {
+        vec![
+            Member::data_voting("old-primary"),
+            Member::data_voting("replica-a"),
+            Member::data_voting("replica-b"),
+            Member::data_voting("replica-c"),
+            Member::data_voting("replica-d"),
         ]
     }
 
