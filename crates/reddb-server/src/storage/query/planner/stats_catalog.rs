@@ -649,6 +649,7 @@ fn approximate_value_size(value: &Value) -> usize {
         | Value::NodeRef(v)
         | Value::EdgeRef(v)
         | Value::TableRef(v)
+        | Value::DecimalText(v)
         | Value::Password(v) => v.len(),
         Value::Blob(v) | Value::Json(v) | Value::Secret(v) => v.len(),
         Value::MacAddr(_) => 6,
