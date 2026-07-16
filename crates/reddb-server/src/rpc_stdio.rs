@@ -699,7 +699,12 @@ fn dispatch_method(
                             error_code::INVALID_PARAMS,
                             "'params' must be an array".to_string(),
                         ))
-                        .map(|arr| arr.iter().map(json_value_to_schema_value).collect())
+                        .and_then(|arr| {
+                            arr.iter()
+                                .map(try_json_value_to_schema_value)
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|message| (error_code::INVALID_PARAMS, message))
+                        })
                 })
                 .transpose()?;
 
@@ -803,7 +808,11 @@ fn dispatch_method(
             }
 
             // Convert JSON bind values to SchemaValue.
-            let binds: Vec<SV> = binds_json.iter().map(json_value_to_schema_value).collect();
+            let binds: Vec<SV> = binds_json
+                .iter()
+                .map(try_json_value_to_schema_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|message| (error_code::INVALID_PARAMS, message))?;
 
             // Bind literals into the parameterized shape.
             let expr = if stmt.parameter_count == 0 {
@@ -1472,8 +1481,8 @@ fn schema_value_to_json(v: &SchemaValue) -> Value {
     match v {
         SchemaValue::Null => Value::Null,
         SchemaValue::Boolean(b) => Value::Bool(*b),
-        SchemaValue::Integer(n) => Value::Number(*n as f64),
-        SchemaValue::UnsignedInteger(n) => Value::Number(*n as f64),
+        SchemaValue::Integer(n) => exact_i64_to_json(*n),
+        SchemaValue::UnsignedInteger(n) => exact_u64_to_json(*n),
         SchemaValue::Float(n) if n.is_finite() => Value::Number(*n),
         SchemaValue::Float(n) => {
             let token = if n.is_nan() {
@@ -1485,10 +1494,10 @@ fn schema_value_to_json(v: &SchemaValue) -> Value {
             };
             single_key_object("$float", Value::String(token.to_string()))
         }
-        SchemaValue::BigInt(n) => Value::Number(*n as f64),
-        SchemaValue::TimestampMs(n) | SchemaValue::Duration(n) | SchemaValue::Decimal(n) => {
-            Value::Number(*n as f64)
-        }
+        SchemaValue::BigInt(n) => exact_i64_to_json(*n),
+        SchemaValue::TimestampMs(n) | SchemaValue::Duration(n) => exact_i64_to_json(*n),
+        SchemaValue::Decimal(n) => exact_decimal_to_json(SchemaValue::Decimal(*n).display_string()),
+        SchemaValue::DecimalText(n) => exact_decimal_to_json(n.clone()),
         SchemaValue::Timestamp(n) => single_key_object("$ts", Value::String(n.to_string())),
         SchemaValue::Password(_) | SchemaValue::Secret(_) => Value::String("***".to_string()),
         SchemaValue::Text(s) => Value::String(s.to_string()),
@@ -1511,23 +1520,50 @@ fn single_key_object(key: &str, value: Value) -> Value {
     Value::Object([(key.to_string(), value)].into_iter().collect())
 }
 
+const MAX_JSON_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+fn exact_i64_to_json(value: i64) -> Value {
+    if (-MAX_JSON_SAFE_INTEGER..=MAX_JSON_SAFE_INTEGER).contains(&value) {
+        Value::Integer(value)
+    } else {
+        single_key_object("$int", Value::String(value.to_string()))
+    }
+}
+
+fn exact_u64_to_json(value: u64) -> Value {
+    if value <= MAX_JSON_SAFE_INTEGER as u64 {
+        Value::Integer(value as i64)
+    } else {
+        single_key_object("$uint", Value::String(value.to_string()))
+    }
+}
+
+fn exact_decimal_to_json(value: String) -> Value {
+    single_key_object("$decimal", Value::String(value))
+}
+
 /// Convert a JSON `Value` to a `SchemaValue` for use as a bind parameter
 /// in a prepared statement. JSON-RPC envelopes preserve values that
 /// ordinary JSON cannot represent losslessly.
 pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
+    try_json_value_to_schema_value(v)
+        .unwrap_or_else(|_| SchemaValue::Json(crate::json::to_vec(v).unwrap_or_default()))
+}
+
+fn try_json_value_to_schema_value(v: &Value) -> Result<SchemaValue, String> {
     match v {
-        Value::Null => SchemaValue::Null,
-        Value::Bool(b) => SchemaValue::Boolean(*b),
-        Value::Integer(n) => SchemaValue::Integer(*n),
+        Value::Null => Ok(SchemaValue::Null),
+        Value::Bool(b) => Ok(SchemaValue::Boolean(*b)),
+        Value::Integer(n) => Ok(SchemaValue::Integer(*n)),
         Value::Number(n) => {
             if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
-                SchemaValue::Integer(*n as i64)
+                Ok(SchemaValue::Integer(*n as i64))
             } else {
-                SchemaValue::Float(*n)
+                Ok(SchemaValue::Float(*n))
             }
         }
-        Value::Decimal(n) => SchemaValue::DecimalText(n.clone()),
-        Value::String(s) => SchemaValue::text(s.clone()),
+        Value::Decimal(n) => Ok(SchemaValue::DecimalText(n.clone())),
+        Value::String(s) => Ok(SchemaValue::text(s.clone())),
         Value::Array(items) => {
             // A JSON array of numbers (or empty) is taken as `Vector`
             // for the #355 query-param contract. Other arrays are
@@ -1540,40 +1576,64 @@ pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
                     .iter()
                     .map(|v| v.as_f64().unwrap_or(0.0) as f32)
                     .collect();
-                SchemaValue::Vector(floats)
+                Ok(SchemaValue::Vector(floats))
             } else {
-                SchemaValue::Json(crate::json::to_vec(v).unwrap_or_default())
+                Ok(SchemaValue::Json(
+                    crate::json::to_vec(v).unwrap_or_default(),
+                ))
             }
         }
         Value::Object(map) => {
             if map.len() == 1 {
                 if let Some(Value::String(encoded)) = map.get("$bytes") {
                     if let Ok(bytes) = base64_decode(encoded) {
-                        return SchemaValue::Blob(bytes);
+                        return Ok(SchemaValue::Blob(bytes));
                     }
                 }
                 if let Some(value) = map.get("$ts") {
                     if let Some(ts) = json_i64(value) {
-                        return SchemaValue::Timestamp(ts);
+                        return Ok(SchemaValue::Timestamp(ts));
                     }
                 }
                 if let Some(Value::String(value)) = map.get("$uuid") {
                     if let Ok(uuid) = crate::crypto::Uuid::parse_str(value) {
-                        return SchemaValue::Uuid(*uuid.as_bytes());
+                        return Ok(SchemaValue::Uuid(*uuid.as_bytes()));
                     }
                 }
                 if let Some(Value::String(value)) = map.get("$float") {
-                    return match value.as_str() {
+                    return Ok(match value.as_str() {
                         "NaN" => SchemaValue::Float(f64::NAN),
                         "Infinity" | "+Infinity" | "inf" | "+inf" => {
                             SchemaValue::Float(f64::INFINITY)
                         }
                         "-Infinity" | "-inf" => SchemaValue::Float(f64::NEG_INFINITY),
                         _ => SchemaValue::Json(crate::json::to_vec(v).unwrap_or_default()),
-                    };
+                    });
+                }
+                if map.contains_key("$number") || map.contains_key("$decimalText") {
+                    return Err("superseded exact-number envelope".to_string());
+                }
+                if let Some(value) = map.get("$int") {
+                    return json_i64(value)
+                        .map(SchemaValue::Integer)
+                        .ok_or_else(|| "invalid $int exact-number envelope".to_string());
+                }
+                if let Some(value) = map.get("$uint") {
+                    if let Value::String(value) = value {
+                        return value
+                            .parse::<u64>()
+                            .map(SchemaValue::UnsignedInteger)
+                            .map_err(|_| "invalid $uint exact-number envelope".to_string());
+                    }
+                    return Err("invalid $uint exact-number envelope".to_string());
+                }
+                if let Some(Value::String(value)) = map.get("$decimal") {
+                    return Ok(SchemaValue::DecimalText(value.clone()));
                 }
             }
-            SchemaValue::Json(crate::json::to_vec(v).unwrap_or_default())
+            Ok(SchemaValue::Json(
+                crate::json::to_vec(v).unwrap_or_default(),
+            ))
         }
     }
 }
@@ -2111,6 +2171,20 @@ mod tests {
     }
 
     #[test]
+    fn query_params_reject_superseded_exact_number_envelope() {
+        let rt = make_runtime();
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"SELECT $1","params":[{"$number":"1"}]}}"#,
+        );
+        assert!(resp.contains("\"code\":\"INVALID_PARAMS\""), "got: {resp}");
+        assert!(
+            resp.contains("superseded exact-number envelope"),
+            "got: {resp}"
+        );
+    }
+
+    #[test]
     fn close_method_marks_response_for_shutdown() {
         let rt = make_runtime();
         let resp = handle(
@@ -2418,6 +2492,77 @@ mod tests {
             panic!("expected float");
         };
         assert!(value.is_infinite() && value.is_sign_negative());
+
+        assert_eq!(
+            json_value_to_schema_value(&json!({ "$int": "9007199254740993" })),
+            SchemaValue::Integer(9_007_199_254_740_993)
+        );
+        assert_eq!(
+            json_value_to_schema_value(&json!({ "$uint": "9223372036854775808" })),
+            SchemaValue::UnsignedInteger(i64::MAX as u64 + 1)
+        );
+        assert_eq!(
+            json_value_to_schema_value(&json!({ "$decimal": "3.14159265358979323846" })),
+            SchemaValue::DecimalText("3.14159265358979323846".to_string())
+        );
+    }
+
+    #[test]
+    fn query_result_json_preserves_exact_numbers() {
+        use crate::storage::query::unified::UnifiedResult;
+
+        let mut result =
+            UnifiedResult::with_columns(vec!["big".into(), "unsigned".into(), "decimal".into()]);
+        let mut record = UnifiedRecord::new();
+        record.set("big", SchemaValue::Integer(9_007_199_254_740_993));
+        record.set(
+            "unsigned",
+            SchemaValue::UnsignedInteger(i64::MAX as u64 + 1),
+        );
+        record.set(
+            "decimal",
+            SchemaValue::DecimalText("3.14159265358979323846".to_string()),
+        );
+        result.push(record);
+
+        let json = query_result_to_json(&RuntimeQueryResult {
+            query: "SELECT exact".to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "select",
+            engine: "runtime-table",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+            notice: None,
+        });
+
+        let row = json
+            .get("rows")
+            .and_then(Value::as_array)
+            .and_then(|rows| rows.first())
+            .expect("row");
+        assert_eq!(
+            row.get("big"),
+            Some(&single_key_object(
+                "$int",
+                Value::String("9007199254740993".to_string())
+            ))
+        );
+        assert_eq!(
+            row.get("unsigned"),
+            Some(&single_key_object(
+                "$uint",
+                Value::String("9223372036854775808".to_string())
+            ))
+        );
+        assert_eq!(
+            row.get("decimal"),
+            Some(&single_key_object(
+                "$decimal",
+                Value::String("3.14159265358979323846".to_string())
+            ))
+        );
     }
 
     #[test]
