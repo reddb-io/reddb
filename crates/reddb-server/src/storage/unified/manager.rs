@@ -2138,7 +2138,7 @@ mod tests {
         assert!(manager.bloom_may_contain_key(id.raw().to_string().as_bytes()));
         assert!(!manager.bloom_may_contain_key(&u64::MAX.to_le_bytes()));
 
-        assert_eq!(manager.delete(id).unwrap(), Some(id));
+        assert!(manager.delete(id).unwrap());
         assert!(!manager.bloom_may_contain_key(&id.raw().to_le_bytes()));
     }
 
