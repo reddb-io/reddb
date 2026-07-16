@@ -181,6 +181,10 @@ impl RedDBRuntime {
         options: RedDBOptions,
         pool_config: ConnectionPoolConfig,
     ) -> RedDBResult<Self> {
+        options
+            .replication
+            .validate_failover_profile()
+            .map_err(RedDBError::InvalidConfig)?;
         // PLAN.md Phase 9.1 — capture wall-clock before storage
         // open so the cold-start phase markers can be backfilled
         // once Lifecycle is constructed below. Storage open
