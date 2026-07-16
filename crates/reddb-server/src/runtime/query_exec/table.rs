@@ -55,6 +55,94 @@ pub(crate) struct RuntimeTableExecutionContext<'a> {
     pub(crate) table_alias: &'a str,
 }
 
+fn append_order_by_columns(cols: &mut Vec<String>, query: &TableQuery) -> bool {
+    if cols.is_empty() {
+        return false;
+    }
+    let mut appended = false;
+    for clause in &query.order_by {
+        if clause.expr.is_some() {
+            continue;
+        }
+        let FieldRef::TableColumn { column, .. } = &clause.field else {
+            continue;
+        };
+        if !cols.iter().any(|existing| existing == column) {
+            cols.push(column.clone());
+            appended = true;
+        }
+    }
+    appended
+}
+
+fn project_added_order_by_columns(
+    db: &RedDB,
+    records: Vec<UnifiedRecord>,
+    effective_projections: &[Projection],
+    table_name: &str,
+    table_alias: &str,
+    has_added_order_by_columns: bool,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    if !has_added_order_by_columns {
+        return Ok(records);
+    }
+    records
+        .iter()
+        .map(|record| {
+            project_runtime_record_with_db(
+                Some(db),
+                record,
+                effective_projections,
+                Some(table_name),
+                Some(table_alias),
+                false,
+                false,
+            )
+        })
+        .collect()
+}
+
+fn finish_ordered_index_records(
+    db: &RedDB,
+    query: &TableQuery,
+    effective_projections: &[Projection],
+    mut records: Vec<UnifiedRecord>,
+    table_name: &str,
+    table_alias: &str,
+    has_added_order_by_columns: bool,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    if !query.order_by.is_empty() {
+        crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
+        super::super::join_filter::sort_records_by_order_by_with_db(
+            Some(db),
+            &mut records,
+            &query.order_by,
+            Some(table_name),
+            Some(table_alias),
+        );
+    }
+
+    if let Some(offset) = query.offset {
+        let offset = offset as usize;
+        if offset < records.len() {
+            records = records.into_iter().skip(offset).collect();
+        } else {
+            records.clear();
+        }
+    }
+    if let Some(limit) = query.limit {
+        records.truncate(limit as usize);
+    }
+    project_added_order_by_columns(
+        db,
+        records,
+        effective_projections,
+        table_name,
+        table_alias,
+        has_added_order_by_columns,
+    )
+}
+
 fn resolve_table_row_by_logical_id(
     db: &RedDB,
     table: &str,
@@ -591,12 +679,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         uses_document_projection,
     ) {
         let trace = std::env::var("REDDB_INDEX_TRACE").ok().as_deref() == Some("1");
-        let sorted_res = try_sorted_index_lookup(
-            filter,
-            &query.table,
-            idx_store,
-            query.limit.map(|l| l as usize),
-        );
+        let sorted_lookup_limit = if query.order_by.is_empty() && query.offset.is_none() {
+            query.limit.map(|l| l as usize)
+        } else {
+            None
+        };
+        let sorted_res =
+            try_sorted_index_lookup(filter, &query.table, idx_store, sorted_lookup_limit);
         if trace {
             eprintln!(
                 "sorted_index_lookup table={} filter={:?} result={:?}",
@@ -608,7 +697,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if let Some(entity_ids) = sorted_res {
             // Even covered projections must fetch the candidate row so MVCC
             // can reject stale or tombstoned index IDs before materialization.
-            let explicit_cols = extract_select_column_names(&effective_projections);
+            let mut explicit_cols = extract_select_column_names(&effective_projections);
+            let has_added_order_by_columns = append_order_by_columns(&mut explicit_cols, query);
 
             // Re-apply the full filter — when the filter is a compound AND, the
             // sorted lookup used only the range predicate to narrow candidates.
@@ -657,7 +747,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // path below so user-specified system fields (e.g. SELECT rid,
             // age FROM t) are not silently dropped.
             let lean = explicit_cols.is_empty(); // SELECT * → lean path
-            let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+            let limit = if query.order_by.is_empty() && query.offset.is_none() {
+                query.limit.map(|l| l as usize).unwrap_or(usize::MAX)
+            } else {
+                usize::MAX
+            };
 
             // Lean/SELECT-* path uses the borrow-based
             // `SegmentManager::for_each_id` → `runtime_table_record_lean_ref`
@@ -700,7 +794,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         records.push(record);
                     }
                 });
-                return Ok(records);
+                return finish_ordered_index_records(
+                    db,
+                    query,
+                    &effective_projections,
+                    records,
+                    table_name,
+                    table_alias,
+                    has_added_order_by_columns,
+                );
             }
 
             // Projection path (explicit columns): keep owned-entity flow.
@@ -731,7 +833,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     records.push(record);
                 }
             }
-            return Ok(records);
+            return finish_ordered_index_records(
+                db,
+                query,
+                &effective_projections,
+                records,
+                table_name,
+                table_alias,
+                has_added_order_by_columns,
+            );
         }
     }
 
@@ -1310,7 +1420,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             .collect();
 
         // Extract explicit column names for projection pushdown
-        let select_cols = extract_select_column_names(&effective_projections);
+        let mut select_cols = extract_select_column_names(&effective_projections);
+        let has_added_order_by_columns = append_order_by_columns(&mut select_cols, query);
 
         // Compile the filter ONCE before iterating. When the collection
         // schema is available, use compile_with_schema to pre-resolve
@@ -1590,7 +1701,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             records.truncate(limit as usize);
         }
 
-        return Ok(records);
+        return project_added_order_by_columns(
+            db,
+            records,
+            &effective_projections,
+            table_name,
+            table_alias,
+            has_added_order_by_columns,
+        );
     }
 
     // ── FAST PATH: Unfiltered scan — bypass planner for simple SELECT * ──
