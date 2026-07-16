@@ -385,8 +385,8 @@ func execResultFromJSON(body []byte) (Result, error) {
 	if len(body) == 0 {
 		return result, nil
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	obj, err := decodeBody(body)
+	if err != nil {
 		return Result{}, err
 	}
 	result.Affected = affectedFromMap(obj)
@@ -425,7 +425,8 @@ func parseBulkInsertResult(v any) (*BulkInsertResult, error) {
 		if len(bs) == 0 {
 			return &BulkInsertResult{}, nil
 		}
-		if err := json.Unmarshal(bs, &obj); err != nil {
+		obj, err = decodeBody(bs)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -436,6 +437,10 @@ func parseBulkInsertResult(v any) (*BulkInsertResult, error) {
 	case json.Number:
 		n, _ := affected.Int64()
 		result.Affected = uint64(n)
+	case int64:
+		result.Affected = uint64(affected)
+	case uint64:
+		result.Affected = affected
 	}
 	if rawIDs, ok := obj["ids"].([]any); ok {
 		result.IDs = make([]string, 0, len(rawIDs))
@@ -447,6 +452,10 @@ func parseBulkInsertResult(v any) (*BulkInsertResult, error) {
 				result.IDs = append(result.IDs, strconv.FormatUint(uint64(id), 10))
 			case json.Number:
 				result.IDs = append(result.IDs, id.String())
+			case int64:
+				result.IDs = append(result.IDs, strconv.FormatInt(id, 10))
+			case uint64:
+				result.IDs = append(result.IDs, strconv.FormatUint(id, 10))
 			}
 		}
 	}
