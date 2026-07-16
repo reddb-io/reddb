@@ -1694,6 +1694,9 @@ fn flatten_config_json(
                 out.push((prefix.to_string(), Value::Float(*n)));
             }
         }
+        crate::serde_json::Value::Decimal(n) => {
+            out.push((prefix.to_string(), Value::DecimalText(n.clone())));
+        }
         crate::serde_json::Value::Bool(b) => {
             out.push((prefix.to_string(), Value::Boolean(*b)));
         }
