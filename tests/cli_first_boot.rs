@@ -501,11 +501,7 @@ fn server_help_documents_first_boot_flags_and_idempotency() {
 /// Spawn `red server` like [`spawn_server`], but with extra env vars laid
 /// over the hermetic baseline. Used to reproduce the release Docker
 /// image's baked-in env defaults (e.g. `REDDB_WIRE_BIND_ADDR`).
-fn spawn_server_with_envs(
-    args: &[&str],
-    stderr_path: &Path,
-    envs: &[(&str, &str)],
-) -> ServerChild {
+fn spawn_server_with_envs(args: &[&str], stderr_path: &Path, envs: &[(&str, &str)]) -> ServerChild {
     let stderr_file = File::create(stderr_path).expect("create stderr file");
     let mut cmd = Command::new(red_binary());
     cmd.args(args)
@@ -642,8 +638,7 @@ fn wire_tls_flag_owns_port_over_env_plaintext_default() {
         &stderr_path,
         &[("REDDB_WIRE_BIND_ADDR", env_wire_addr.as_str())],
     );
-    let tls_online =
-        wait_for_stderr_contains(&mut server, "redwire+tls", Duration::from_secs(30));
+    let tls_online = wait_for_stderr_contains(&mut server, "redwire+tls", Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
         tls_online,
