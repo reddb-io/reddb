@@ -41,6 +41,7 @@ pub(crate) fn decode_container_to_json(bytes: &[u8]) -> Option<JsonValue> {
     for (key, value) in fields {
         let json = match &value {
             Value::Integer(n) => JsonValue::Integer(*n),
+            Value::DecimalText(n) => JsonValue::Decimal(n.clone()),
             other => storage_value_to_json(other),
         };
         map.insert(key, json);
