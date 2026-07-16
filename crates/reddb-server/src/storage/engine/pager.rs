@@ -89,6 +89,8 @@ pub enum PagerError {
     DwbZoneCorrupt(PathBuf),
     /// The store still carries a retired phase-1 pager sidecar (ADR 0038 §4).
     LegacySidecarStore { sidecar: PathBuf },
+    /// The store predates the phase-3 in-file DWB layout marker (ADR 0038 §4).
+    LegacyPagedStore { path: PathBuf },
 }
 
 /// A contiguous run of database pages reserved for vector-turbo payloads.
@@ -151,6 +153,14 @@ impl std::fmt::Display for PagerError {
                  first with the offline migration tool \
                  (`reddb_server::pager_zone_migration::migrate_to_zoned`); it is reversible.",
                 sidecar.display()
+            ),
+            Self::LegacyPagedStore { path } => write!(
+                f,
+                "refusing to open a pre-phase-3 paged store: {} does not carry the layout marker \
+                 for the in-file double-write zone. Convert the store first with the offline \
+                 migration tool (`reddb_server::pager_zone_migration::migrate_to_zoned`); it is \
+                 reversible.",
+                path.display()
             ),
         }
     }
@@ -663,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_in_file_dwb_zone_fails_didactically() {
+    fn interrupted_dwb_staging_write_is_discarded_on_open() {
         let path = temp_db_path();
         cleanup(&path);
 
@@ -683,11 +693,21 @@ mod tests {
             .expect("write corrupt DWB magic should succeed");
         file.sync_all().expect("sync_all() should succeed");
 
-        let err = match Pager::open_default(&path) {
-            Ok(_) => panic!("corrupt DWB zone must refuse open"),
-            Err(err) => err,
-        };
-        assert!(matches!(err, PagerError::DwbZoneCorrupt(_)));
+        {
+            let pager = Pager::open_default(&path).expect("torn staging frame should be discarded");
+            pager.sync().expect("sync() should succeed");
+        }
+
+        let mut cleared = [0u8; 4];
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("open() should succeed");
+        file.seek(SeekFrom::Start(dwb_zone_offset_for_test()))
+            .expect("seek() should succeed");
+        file.read_exact(&mut cleared)
+            .expect("read_exact() should succeed");
+        assert_ne!(cleared, reddb_file::DWB_MAGIC);
 
         cleanup(&path);
     }
