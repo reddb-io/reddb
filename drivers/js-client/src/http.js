@@ -38,6 +38,7 @@
 
 import { RedDBError } from './protocol.js'
 import { classifyNdjsonFrame, splitLines } from './core/ndjson.js'
+import { normalizeExactNumbers, serializeJsonValue } from './core/serialization.js'
 
 export class HttpRpcClient {
   /**
@@ -165,7 +166,7 @@ export class HttpRpcClient {
 
     let opened = false
     let cols = Array.isArray(columns) && columns.length > 0 ? columns.slice() : null
-    const encodeLine = (obj) => writer.write(`${JSON.stringify(obj)}\n`)
+    const encodeLine = (obj) => writer.write(`${JSON.stringify(serializeJsonValue(obj))}\n`)
     const ensureOpen = async (row) => {
       if (opened) return
       if (!cols) {
@@ -177,7 +178,7 @@ export class HttpRpcClient {
           'inputStream() needs a non-empty column set — pass { columns } or write at least one object row',
         )
       }
-      await writer.write(`${JSON.stringify({ open: { target, columns: cols } })}\n`)
+        await writer.write(`${JSON.stringify({ open: { target, columns: cols } })}\n`)
       opened = true
     }
 
@@ -302,9 +303,9 @@ async function parseResponse(response) {
       const code = body.error_code || 'RPC_ERROR'
       throw new RedDBError(code, body.error || 'unknown error', body)
     }
-    return body.result ?? body
+    return normalizeExactNumbers(body.result ?? body)
   }
-  return body
+  return normalizeExactNumbers(body)
 }
 
 // ---------------------------------------------------------------------------
@@ -318,18 +319,18 @@ const ROUTES = {
     url: `${base}/query`,
     init: {
       method: 'POST',
-      body: JSON.stringify(
-        Array.isArray(params) ? { query: sql, params } : { query: sql },
-      ),
+          body: JSON.stringify(
+            Array.isArray(params) ? { query: sql, params } : { query: sql },
+          ),
     },
   }),
   insert: (base, { collection, payload }) => ({
     url: `${base}/collections/${encodeURIComponent(collection)}/rows`,
-    init: { method: 'POST', body: JSON.stringify(payload) },
+    init: { method: 'POST', body: JSON.stringify(serializeJsonValue(payload)) },
   }),
   bulk_insert: (base, { collection, payloads }) => ({
     url: `${base}/collections/${encodeURIComponent(collection)}/bulk/rows`,
-    init: { method: 'POST', body: JSON.stringify({ rows: payloads }) },
+    init: { method: 'POST', body: JSON.stringify(serializeJsonValue({ rows: payloads })) },
   }),
   get: (base, { collection, id }) => ({
     url: `${base}/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
@@ -371,7 +372,7 @@ const ROUTES = {
   }),
   'cache.put': (base, { namespace, key, value, ttl_ms, tags, policy }) => ({
     url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`,
-    init: { method: 'PUT', body: JSON.stringify({ value, ttl_ms, tags, policy }) },
+    init: { method: 'PUT', body: JSON.stringify(serializeJsonValue({ value, ttl_ms, tags, policy })) },
   }),
   'cache.exists': (base, { namespace, key }) => ({
     url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}/exists`,

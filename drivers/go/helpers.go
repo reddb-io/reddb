@@ -1,6 +1,7 @@
 package reddb
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,7 +35,7 @@ func NewHelpers(q Querier) *Helpers { return &Helpers{q: q} }
 func (h *Helpers) Documents() *DocumentClient { return &DocumentClient{q: h.q} }
 
 // KV returns the KV namespace client bound to the default collection
-// (``kv_default``).
+// (“kv_default“).
 func (h *Helpers) KV() *KVClient { return &KVClient{q: h.q, Collection: "kv_default"} }
 
 // Queue returns the queue namespace client.
@@ -107,7 +108,10 @@ func (d *DocumentClient) Insert(ctx context.Context, collection string, document
 	if err != nil {
 		return nil, err
 	}
-	row, affected := firstRow(body)
+	row, affected, err := firstRow(body)
+	if err != nil {
+		return nil, err
+	}
 	if row == nil || row["rid"] == nil {
 		return nil, NewError(CodeInvalidResponse, "documents.insert expected one returned item with rid")
 	}
@@ -125,7 +129,10 @@ func (d *DocumentClient) Get(ctx context.Context, collection, rid string) (map[s
 	if err != nil {
 		return nil, err
 	}
-	row, _ := firstRow(body)
+	row, _, err := firstRow(body)
+	if err != nil {
+		return nil, err
+	}
 	if row == nil {
 		return nil, NewError(CodeNotFound, fmt.Sprintf("document %q was not found", rid))
 	}
@@ -159,7 +166,10 @@ func (d *DocumentClient) List(ctx context.Context, collection string, opts ListO
 	if err != nil {
 		return nil, err
 	}
-	rows := allRows(body)
+	rows, err := allRows(body)
+	if err != nil {
+		return nil, err
+	}
 	return &ListResult{Items: rows}, nil
 }
 
@@ -189,7 +199,10 @@ func (d *DocumentClient) Patch(ctx context.Context, collection, rid string, patc
 	if err != nil {
 		return nil, err
 	}
-	row, _ := firstRow(body)
+	row, _, err := firstRow(body)
+	if err != nil {
+		return nil, err
+	}
 	if row == nil {
 		return nil, NewError(CodeNotFound, fmt.Sprintf("document %q was not found", rid))
 	}
@@ -207,7 +220,10 @@ func (d *DocumentClient) Delete(ctx context.Context, collection, rid string) (*D
 	if err != nil {
 		return nil, err
 	}
-	n := affectedFromBody(body)
+	n, err := affectedFromBody(body)
+	if err != nil {
+		return nil, err
+	}
 	return &DeleteResult{Affected: n, Deleted: n > 0}, nil
 }
 
@@ -292,7 +308,10 @@ func (k *KVClient) Get(ctx context.Context, key string, collection ...string) (a
 	if err != nil {
 		return nil, err
 	}
-	row, _ := firstRow(body)
+	row, _, err := firstRow(body)
+	if err != nil {
+		return nil, err
+	}
 	if row == nil {
 		return nil, nil
 	}
@@ -322,7 +341,10 @@ func (k *KVClient) Delete(ctx context.Context, key string, collection ...string)
 	if err != nil {
 		return nil, err
 	}
-	n := affectedFromBody(body)
+	n, err := affectedFromBody(body)
+	if err != nil {
+		return nil, err
+	}
 	return &DeleteResult{Affected: n, Deleted: n > 0}, nil
 }
 
@@ -350,7 +372,10 @@ func (k *KVClient) List(ctx context.Context, opts KVListOptions) (*ListResult, e
 	if err != nil {
 		return nil, err
 	}
-	rows := allRows(body)
+	rows, err := allRows(body)
+	if err != nil {
+		return nil, err
+	}
 	if opts.Prefix != "" {
 		filtered := rows[:0]
 		for _, r := range rows {
@@ -396,11 +421,17 @@ func (qc *QueueClient) Push(ctx context.Context, queue string, value any, opts .
 	if err != nil {
 		return nil, err
 	}
-	res := &QueuePushResult{Affected: affectedFromBody(body)}
+	affected, err := affectedFromBody(body)
+	if err != nil {
+		return nil, err
+	}
+	res := &QueuePushResult{Affected: affected}
 	if res.Affected == 0 {
 		res.Affected = 1
 	}
-	if row, _ := firstRow(body); row != nil {
+	if row, _, err := firstRow(body); err != nil {
+		return nil, err
+	} else if row != nil {
 		if rid, ok := ridString(row["rid"]); ok {
 			res.RID = rid
 		}
@@ -434,7 +465,10 @@ func (qc *QueueClient) fetch(ctx context.Context, verb, queue string, count []in
 	if err != nil {
 		return nil, err
 	}
-	rows := allRows(body)
+	rows, err := allRows(body)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]any, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, row["payload"])
@@ -451,7 +485,10 @@ func (qc *QueueClient) Len(ctx context.Context, queue string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	row, _ := firstRow(body)
+	row, _, err := firstRow(body)
+	if err != nil {
+		return 0, err
+	}
 	if row == nil {
 		return 0, nil
 	}
@@ -461,6 +498,10 @@ func (qc *QueueClient) Len(ctx context.Context, queue string) (uint64, error) {
 	case json.Number:
 		n, _ := v.Int64()
 		return uint64(n), nil
+	case int64:
+		return uint64(v), nil
+	case uint64:
+		return v, nil
 	}
 	return 0, nil
 }
@@ -474,7 +515,10 @@ func (qc *QueueClient) Purge(ctx context.Context, queue string) (*DeleteResult, 
 	if err != nil {
 		return nil, err
 	}
-	n := affectedFromBody(body)
+	n, err := affectedFromBody(body)
+	if err != nil {
+		return nil, err
+	}
 	return &DeleteResult{Affected: n, Deleted: n > 0}, nil
 }
 
@@ -536,7 +580,10 @@ func (qc *QueueClient) ReadWait(
 	if err != nil {
 		return nil, err
 	}
-	rows := allRows(body)
+	rows, err := allRows(body)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]any, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, row["payload"])
@@ -620,7 +667,7 @@ func (t *TxClient) Run(ctx context.Context, fn func(*TxClient) error) error {
 
 // --- pure SQL helpers (unit-testable) --------------------------------
 
-// KVPath builds a fully qualified ``collection.key`` reference, quoting the
+// KVPath builds a fully qualified “collection.key“ reference, quoting the
 // key segment when it contains anything but `[A-Za-z0-9_]`.
 func KVPath(collection, key string) (string, error) {
 	ident, err := kvIdentifier(collection)
@@ -771,21 +818,79 @@ func allIdentChars(s string) bool {
 
 // --- response parsing -------------------------------------------------
 
-func decodeBody(body []byte) map[string]any {
+func decodeBody(body []byte) (map[string]any, error) {
 	if len(body) == 0 {
-		return nil
+		return nil, nil
 	}
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return nil
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&obj); err != nil {
+		return nil, err
 	}
-	return obj
+	normalized, err := normalizeExactJSONValue(obj)
+	if err != nil {
+		return nil, err
+	}
+	obj, _ = normalized.(map[string]any)
+	return obj, nil
 }
 
-func firstRow(body []byte) (map[string]any, uint64) {
-	obj := decodeBody(body)
-	if obj == nil {
-		return nil, 0
+func normalizeExactJSONValue(value any) (any, error) {
+	switch v := value.(type) {
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			normalized, err := normalizeExactJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = normalized
+		}
+		return out, nil
+	case map[string]any:
+		if len(v) == 1 {
+			if raw, ok := v["$int"].(string); ok {
+				n, err := strconv.ParseInt(raw, 10, 64)
+				if err != nil {
+					return nil, err
+				}
+				return n, nil
+			}
+			if raw, ok := v["$uint"].(string); ok {
+				n, err := strconv.ParseUint(raw, 10, 64)
+				if err != nil {
+					return nil, err
+				}
+				return n, nil
+			}
+			if raw, ok := v["$decimal"].(string); ok {
+				return raw, nil
+			}
+			if _, ok := v["$number"]; ok {
+				return nil, NewError(CodeInvalidResponse, "superseded exact-number envelope")
+			}
+			if _, ok := v["$decimalText"]; ok {
+				return nil, NewError(CodeInvalidResponse, "superseded exact-number envelope")
+			}
+		}
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			normalized, err := normalizeExactJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = normalized
+		}
+		return out, nil
+	}
+	return value, nil
+}
+
+func firstRow(body []byte) (map[string]any, uint64, error) {
+	obj, err := decodeBody(body)
+	if err != nil || obj == nil {
+		return nil, 0, err
 	}
 	affected := affectedFromMap(obj)
 	rows, _ := obj["rows"].([]any)
@@ -798,16 +903,16 @@ func firstRow(body []byte) (map[string]any, uint64) {
 		}
 	}
 	if len(rows) == 0 {
-		return nil, affected
+		return nil, affected, nil
 	}
 	row, _ := rows[0].(map[string]any)
-	return row, affected
+	return row, affected, nil
 }
 
-func allRows(body []byte) []map[string]any {
-	obj := decodeBody(body)
-	if obj == nil {
-		return nil
+func allRows(body []byte) ([]map[string]any, error) {
+	obj, err := decodeBody(body)
+	if err != nil || obj == nil {
+		return nil, err
 	}
 	raw, ok := obj["rows"].([]any)
 	if !ok {
@@ -821,21 +926,21 @@ func allRows(body []byte) []map[string]any {
 			out = append(out, m)
 		}
 	}
-	return out
+	return out, nil
 }
 
-func affectedFromBody(body []byte) uint64 {
-	obj := decodeBody(body)
-	if obj == nil {
-		return 0
+func affectedFromBody(body []byte) (uint64, error) {
+	obj, err := decodeBody(body)
+	if err != nil || obj == nil {
+		return 0, err
 	}
 	if n := affectedFromMap(obj); n > 0 {
-		return n
+		return n, nil
 	}
 	if nested, ok := obj["result"].(map[string]any); ok {
-		return affectedFromMap(nested)
+		return affectedFromMap(nested), nil
 	}
-	return 0
+	return 0, nil
 }
 
 func ridString(value any) (string, bool) {

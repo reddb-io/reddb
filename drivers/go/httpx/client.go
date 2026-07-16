@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -264,8 +265,15 @@ func parseEnvelope(resp *http.Response) (any, error) {
 	}
 	var body any
 	if len(bs) > 0 {
-		if err := json.Unmarshal(bs, &body); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(bs))
+		dec.UseNumber()
+		if err := dec.Decode(&body); err != nil {
 			body = string(bs)
+		} else {
+			body, err = normalizeExactJSONValue(body)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	if resp.StatusCode >= 400 {
@@ -297,6 +305,57 @@ func parseEnvelope(resp *http.Response) (any, error) {
 		}
 	}
 	return body, nil
+}
+
+func normalizeExactJSONValue(value any) (any, error) {
+	switch v := value.(type) {
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			normalized, err := normalizeExactJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = normalized
+		}
+		return out, nil
+	case map[string]any:
+		if len(v) == 1 {
+			if raw, ok := v["$int"].(string); ok {
+				n, err := strconv.ParseInt(raw, 10, 64)
+				if err != nil {
+					return nil, err
+				}
+				return n, nil
+			}
+			if raw, ok := v["$uint"].(string); ok {
+				n, err := strconv.ParseUint(raw, 10, 64)
+				if err != nil {
+					return nil, err
+				}
+				return n, nil
+			}
+			if raw, ok := v["$decimal"].(string); ok {
+				return raw, nil
+			}
+			if _, ok := v["$number"]; ok {
+				return nil, fmt.Errorf("httpx: superseded exact-number envelope")
+			}
+			if _, ok := v["$decimalText"]; ok {
+				return nil, fmt.Errorf("httpx: superseded exact-number envelope")
+			}
+		}
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			normalized, err := normalizeExactJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = normalized
+		}
+		return out, nil
+	}
+	return value, nil
 }
 
 func trimTrailingSlash(s string) string {

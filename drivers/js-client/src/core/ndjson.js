@@ -12,6 +12,7 @@
  */
 
 import { RedDBError } from './errors.js'
+import { normalizeExactNumbers } from './serialization.js'
 
 /**
  * Parse an NDJSON line into a typed read-session frame, or `null` for a
@@ -29,10 +30,10 @@ export function classifyNdjsonFrame(line) {
     throw new RedDBError('STREAM_PROTOCOL', `stream frame is not JSON: ${err.message}`)
   }
   if (parsed && typeof parsed === 'object') {
-    if ('descriptor' in parsed) return { type: 'descriptor', value: parsed.descriptor }
-    if ('cursor' in parsed) return { type: 'cursor', value: parsed.cursor }
-    if ('row' in parsed) return { type: 'row', value: parsed.row }
-    if ('end' in parsed) return { type: 'end', value: parsed.end }
+    if ('descriptor' in parsed) return { type: 'descriptor', value: normalizeExactNumbers(parsed.descriptor) }
+    if ('cursor' in parsed) return { type: 'cursor', value: normalizeExactNumbers(parsed.cursor) }
+    if ('row' in parsed) return { type: 'row', value: normalizeExactNumbers(parsed.row) }
+    if ('end' in parsed) return { type: 'end', value: normalizeExactNumbers(parsed.end) }
     if ('error' in parsed) {
       const e = parsed.error ?? {}
       throw new RedDBError(e.code || 'STREAM_ERROR', e.message || 'stream error', e)

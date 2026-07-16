@@ -65,6 +65,9 @@ export const ValueTag = Object.freeze({
   Bytes: 0x05, Vector: 0x06, Json: 0x07, Timestamp: 0x08, Uuid: 0x09,
 })
 
+const MIN_I64 = -(1n << 63n)
+const MAX_I64 = (1n << 63n) - 1n
+
 /**
  * Typed value tags for the binary fast path. Identical to the
  * engine-side `wire::protocol::VAL_*` table.
@@ -1015,10 +1018,7 @@ export function encodeValue(v) {
   if (v === null || v === undefined) return Uint8Array.of(ValueTag.Null)
   if (typeof v === 'boolean') return Uint8Array.of(ValueTag.Bool, v ? 1 : 0)
   if (typeof v === 'bigint') {
-    const out = new Uint8Array(1 + 8)
-    out[0] = ValueTag.Int
-    new DataView(out.buffer).setBigInt64(1, v, true)
-    return out
+    return encodeInt(v)
   }
   if (typeof v === 'number') {
     if (Number.isInteger(v) && v >= -(2 ** 53) && v <= 2 ** 53) {
@@ -1046,6 +1046,12 @@ export function encodeValue(v) {
     const keys = Object.keys(v)
     if (keys.length === 1) {
       const k = keys[0]
+      if (k === '$int' && typeof v.$int === 'string') {
+        return encodeInt(BigInt(v.$int))
+      }
+      if (k === '$uint' || k === '$decimal') {
+        throw new RedDBError('UNSUPPORTED_PARAM', `${k} params require a JSON body transport`)
+      }
       if (k === '$bytes' && typeof v.$bytes === 'string') {
         return encodeLenPrefixed(ValueTag.Bytes, base64ToBytes(v.$bytes))
       }
@@ -1070,6 +1076,16 @@ export function encodeValue(v) {
     return encodeLenPrefixed(ValueTag.Json, new TextEncoder().encode(canonicalJson(v)))
   }
   throw new RedDBError('UNSUPPORTED_PARAM', `cannot encode param of type ${typeof v}`)
+}
+
+function encodeInt(value) {
+  if (value < MIN_I64 || value > MAX_I64) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'integer param is outside i64 range')
+  }
+  const out = new Uint8Array(1 + 8)
+  out[0] = ValueTag.Int
+  new DataView(out.buffer).setBigInt64(1, value, true)
+  return out
 }
 
 function encodeLenPrefixed(tag, bytes) {

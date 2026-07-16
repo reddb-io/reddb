@@ -10,6 +10,8 @@ import assert from 'node:assert/strict'
 
 import {
   serializeParam,
+  serializeJsonValue,
+  normalizeExactNumbers,
   assertSupportedParam,
   normalizeQueryParams,
   bytesToBase64,
@@ -33,6 +35,37 @@ test('serializeParam: primitives pass through untouched', () => {
   assert.equal(serializeParam(true), true)
   assert.equal(serializeParam(null), null)
   assert.equal(serializeParam(undefined), undefined)
+})
+
+test('serializeParam: bigint -> exact $int envelope', () => {
+  assert.deepEqual(serializeParam(9007199254740993n), { $int: '9007199254740993' })
+  assert.deepEqual(serializeParam(9223372036854775808n), { $uint: '9223372036854775808' })
+})
+
+test('serializeJsonValue: bigint body values use exact $int envelopes', () => {
+  assert.deepEqual(
+    serializeJsonValue({ id: 9007199254740993n, nested: [1n] }),
+    { id: { $int: '9007199254740993' }, nested: [{ $int: '1' }] },
+  )
+})
+
+test('normalizeExactNumbers: decodes exact envelopes and rejects superseded forms', () => {
+  assert.deepEqual(
+    normalizeExactNumbers({
+      n: { $int: '9007199254740993' },
+      u: { $uint: '9223372036854775808' },
+      d: { $decimal: '3.14159265358979323846' },
+    }),
+    {
+      n: 9007199254740993n,
+      u: 9223372036854775808n,
+      d: '3.14159265358979323846',
+    },
+  )
+  assert.throws(
+    () => normalizeExactNumbers({ n: { $number: '1' } }),
+    (err) => err instanceof RedDBError && err.code === 'UNSUPPORTED_EXACT_NUMBER',
+  )
 })
 
 test('serializeParam: Date → nanosecond $ts envelope', () => {

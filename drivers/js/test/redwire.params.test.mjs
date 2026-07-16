@@ -106,6 +106,20 @@ test('encodeValue: bigint always Int', () => {
   assert.equal(view.getBigInt64(0, true), 1n << 53n)
 })
 
+test('encodeValue: $int exact envelope unwraps to Int', () => {
+  const enc = encodeValue({ $int: '9007199254740993' })
+  assert.equal(enc[0], ValueTag.Int)
+  const view = new DataView(enc.buffer, enc.byteOffset + 1, 8)
+  assert.equal(view.getBigInt64(0, true), 9007199254740993n)
+})
+
+test('encodeValue: exact decimal envelope rejects on binary RedWire', () => {
+  assert.throws(
+    () => encodeValue({ $decimal: '1.25' }),
+    (e) => e.code === 'UNSUPPORTED_PARAM',
+  )
+})
+
 test('encodeValue: non-integer number → Float (f64 LE)', () => {
   const enc = encodeValue(3.14)
   assert.equal(enc[0], ValueTag.Float)

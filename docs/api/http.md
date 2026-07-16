@@ -337,6 +337,33 @@ curl -X POST http://127.0.0.1:5000/query \
   }'
 ```
 
+### Exact numeric body representation
+
+RedDB has three numeric body classes on JSON transports:
+
+- JSON integers in the signed safe range `[-9007199254740991, 9007199254740991]`
+  are exact integers and may appear as normal JSON numbers.
+- Finite JSON numbers with a fractional part or exponent that fit native `f64`
+  are floating-point numbers and may appear as normal JSON numbers.
+- Exact integers outside the signed safe range, unsigned integers outside the
+  signed safe range, and decimal text values use typed envelopes.
+
+Drivers must use the typed envelopes below in `params`, row/document bodies,
+query results, and any JSON-RPC payloads whenever a normal JSON number would
+not round-trip safely through every official driver:
+
+```json
+{"$int":"9007199254740993"}
+{"$uint":"9223372036854775808"}
+{"$decimal":"3.141592653589793238462643383279"}
+```
+
+The envelope values are base-10 strings with no grouping separators. `$int`
+must fit `i64`; `$uint` must fit `u64`; `$decimal` must be a valid JSON number
+token and is stored as canonical decimal text. The superseded exact-number
+envelopes `$number` and `$decimalText` are invalid for this release: official
+drivers must reject them instead of converting them to float or string.
+
 ### Streaming reads with resumable cursors (`POST /query/stream`)
 
 `POST /query/stream` streams a read-only `SELECT` as newline-delimited JSON

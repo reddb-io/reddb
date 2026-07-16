@@ -120,6 +120,59 @@ func TestClient_QuerySendsAuthHeader(t *testing.T) {
 	}
 }
 
+func TestClient_QuerySerializesLargeUintParamEnvelope(t *testing.T) {
+	srv, rec := fakeServer(t)
+	c, _ := NewClient(Options{BaseURL: srv.URL})
+	if _, err := c.Query(context.Background(), "SELECT $1", uint64(9223372036854775808)); err != nil {
+		t.Fatal(err)
+	}
+	params := rec.lastBody["params"].([]any)
+	got := params[0].(map[string]any)["$uint"]
+	if got != "9223372036854775808" {
+		t.Fatalf("$uint = %#v", got)
+	}
+}
+
+func TestClient_QueryDecodesExactNumberEnvelopes(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/query", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"rows":[{"n":{"$int":"9007199254740993"},"u":{"$uint":"9223372036854775808"},"d":{"$decimal":"3.14159265358979323846"}}]}}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, _ := NewClient(Options{BaseURL: srv.URL})
+	out, err := c.Query(context.Background(), "SELECT exact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := out.(map[string]any)["rows"].([]any)[0].(map[string]any)
+	if row["n"] != int64(9007199254740993) {
+		t.Fatalf("n = %#v", row["n"])
+	}
+	if row["u"] != uint64(9223372036854775808) {
+		t.Fatalf("u = %#v", row["u"])
+	}
+	if row["d"] != "3.14159265358979323846" {
+		t.Fatalf("d = %#v", row["d"])
+	}
+}
+
+func TestClient_QueryRejectsSupersededExactNumberEnvelope(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/query", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"rows":[{"n":{"$number":"1"}}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, _ := NewClient(Options{BaseURL: srv.URL})
+	_, err := c.Query(context.Background(), "SELECT old")
+	if err == nil || !strings.Contains(err.Error(), "superseded exact-number envelope") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestClient_Health(t *testing.T) {
 	srv, _ := fakeServer(t)
 	c, _ := NewClient(Options{BaseURL: srv.URL})

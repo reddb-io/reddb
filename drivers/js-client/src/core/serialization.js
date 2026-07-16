@@ -10,8 +10,15 @@
 
 import { RedDBError } from './errors.js'
 
+const MIN_I64 = -(1n << 63n)
+const MAX_I64 = (1n << 63n) - 1n
+const MAX_U64 = (1n << 64n) - 1n
+
 export function serializeParam(value) {
   assertSupportedParam(value)
+  if (typeof value === 'bigint') {
+    return exactIntegerEnvelope(value)
+  }
   if (value instanceof Float32Array || value instanceof Float64Array) {
     return Array.from(value)
   }
@@ -31,10 +38,59 @@ export function serializeParam(value) {
   return value
 }
 
+export function serializeJsonValue(value) {
+  if (typeof value === 'bigint') {
+    return exactIntegerEnvelope(value)
+  }
+  if (Array.isArray(value)) {
+    return value.map(serializeJsonValue)
+  }
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    if ('$number' in value || '$decimalText' in value) {
+      throw new RedDBError('UNSUPPORTED_EXACT_NUMBER', 'superseded exact-number envelope')
+    }
+    const out = {}
+    for (const [key, item] of Object.entries(value)) out[key] = serializeJsonValue(item)
+    return out
+  }
+  return value
+}
+
+export function normalizeExactNumbers(value) {
+  if (Array.isArray(value)) return value.map(normalizeExactNumbers)
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value)
+    if (keys.length === 1) {
+      if (typeof value.$int === 'string' || typeof value.$uint === 'string') {
+        return BigInt(value.$int ?? value.$uint)
+      }
+      if (typeof value.$decimal === 'string') return value.$decimal
+      if ('$number' in value || '$decimalText' in value) {
+        throw new RedDBError('UNSUPPORTED_EXACT_NUMBER', 'superseded exact-number envelope')
+      }
+    }
+    const out = {}
+    for (const [key, item] of Object.entries(value)) out[key] = normalizeExactNumbers(item)
+    return out
+  }
+  return value
+}
+
+function exactIntegerEnvelope(value) {
+  if (value >= MIN_I64 && value <= MAX_I64) {
+    return { $int: value.toString() }
+  }
+  if (value >= 0n && value <= MAX_U64) {
+    return { $uint: value.toString() }
+  }
+  throw new RedDBError('UNSUPPORTED_PARAM', 'integer value is outside i64/u64 range')
+}
+
 export function assertSupportedParam(value) {
   if (value == null) return
   if (
     typeof value === 'boolean'
+    || typeof value === 'bigint'
     || typeof value === 'number'
     || typeof value === 'string'
   ) {

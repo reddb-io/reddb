@@ -42,6 +42,32 @@ func reply(t *testing.T, v any) []byte {
 	return bs
 }
 
+func TestHelperRowsDecodeExactNumberEnvelopes(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{[]byte(`{"rows":[{"n":{"$int":"9007199254740993"},"u":{"$uint":"9223372036854775808"},"d":{"$decimal":"3.14159265358979323846"}}]}`)}}
+	rows, err := NewHelpers(fq).Documents().List(context.Background(), "docs", ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := rows.Items[0]
+	if row["n"] != int64(9007199254740993) {
+		t.Fatalf("n = %#v", row["n"])
+	}
+	if row["u"] != uint64(9223372036854775808) {
+		t.Fatalf("u = %#v", row["u"])
+	}
+	if row["d"] != "3.14159265358979323846" {
+		t.Fatalf("d = %#v", row["d"])
+	}
+}
+
+func TestHelperRowsRejectSupersededExactNumberEnvelope(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{[]byte(`{"rows":[{"n":{"$number":"1"}}]}`)}}
+	_, err := NewHelpers(fq).Documents().List(context.Background(), "docs", ListOptions{})
+	if err == nil || !strings.Contains(err.Error(), "superseded exact-number envelope") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 // ----------------------------------------------------------------- KV path
 
 func TestKVPath_QuotesNamespacedKeys(t *testing.T) {
@@ -424,7 +450,11 @@ func TestHelperSpecVersion(t *testing.T) {
 
 func TestAffectedFromBody_HandlesNestedResult(t *testing.T) {
 	body := reply(t, map[string]any{"result": map[string]any{"affected": 7}})
-	if affectedFromBody(body) != 7 {
+	got, err := affectedFromBody(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 7 {
 		t.Fatalf("nested affected")
 	}
 }

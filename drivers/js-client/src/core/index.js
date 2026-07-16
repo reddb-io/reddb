@@ -17,6 +17,8 @@ export { RedDBError } from './errors.js'
 export { RedDB, Collection } from './reddb.js'
 export {
   serializeParam,
+  serializeJsonValue,
+  normalizeExactNumbers,
   assertSupportedParam,
   normalizeQueryParams,
   bytesToBase64,

@@ -34,7 +34,7 @@ from .errors import (
     UnknownFlags,
 )
 from . import scram as scram_lib
-from .params import normalize_params
+from .params import normalize_json_value, normalize_params
 
 # ---------------------------------------------------------------------------
 # Protocol constants — keep in sync with src/wire/redwire/{frame,mod}.rs.
@@ -664,6 +664,11 @@ def _encode_value(value: Any) -> bytes:
             out.extend(struct.pack("<f", float(item)))
         return bytes(out)
     if isinstance(value, dict):
+        if set(value) & {"$int", "$uint", "$decimal"}:
+            raise RedDBError(
+                "exact-number params require an HTTP JSON transport",
+                code="UNSUPPORTED_PARAM",
+            )
         if set(value) == {"$bytes"} and isinstance(value["$bytes"], str):
             import base64
 
@@ -714,7 +719,8 @@ def _reason(payload: bytes, fallback: str) -> str:
 
 def _expect_json(frame: Frame, *, ok_kinds: tuple[int, ...]) -> dict[str, Any]:
     if frame.kind in ok_kinds:
-        return _json_loads(frame.payload)
+        value = normalize_json_value(_json_loads(frame.payload))
+        return value if isinstance(value, dict) else {}
     if frame.kind == Kind.Error:
         raise EngineError(frame.payload.decode("utf-8", errors="replace"))
     raise ProtocolError(

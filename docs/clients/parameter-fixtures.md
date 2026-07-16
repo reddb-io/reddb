@@ -13,6 +13,13 @@ The manifest pins:
 - full `QueryWithParams` and gRPC `QueryRequest` payload fixtures, including
   the SQL header/request field and back-to-back/repeated parameter values
 
+Exact numerics on JSON body transports are specified in
+[`POST /query`](../api/http.md#exact-numeric-body-representation). RedWire
+`QueryWithParams` keeps the binary `Int(i64)` and `Float(f64)` tags; exact
+integers or decimals that cannot fit those tags must ride JSON body surfaces
+with the `$int`, `$uint`, or `$decimal` envelopes rather than being coerced to
+`Float`.
+
 When adding or changing a wire `Value` variant:
 
 1. Add a new manifest entry with a stable `name`, `kind`, and lowercase
