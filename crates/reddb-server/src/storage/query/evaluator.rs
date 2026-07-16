@@ -511,6 +511,7 @@ fn as_f64(v: &Value) -> f64 {
         Value::BigInt(x) => *x as f64,
         Value::UnsignedInteger(x) => *x as f64,
         Value::Decimal(x) => *x as f64,
+        Value::DecimalText(x) => x.parse().unwrap_or(0.0),
         _ => 0.0,
     }
 }
@@ -533,6 +534,12 @@ where
 /// [`EvalError::OperatorMismatch`].
 fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
+    if matches!(
+        (a, b),
+        (Value::DecimalText(_), _) | (_, Value::DecimalText(_))
+    ) {
+        return crate::storage::query::value_compare::partial_compare_values(a, b);
+    }
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => Some(x.cmp(y)),
         (Value::BigInt(x), Value::BigInt(y)) => Some(x.cmp(y)),
@@ -980,6 +987,7 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
         }
         crate::serde_json::Value::String(value) => value == needle,
         crate::serde_json::Value::Integer(value) => value.to_string() == needle,
+        crate::serde_json::Value::Decimal(value) => value == needle,
         crate::serde_json::Value::Number(value) => value.to_string() == needle,
         crate::serde_json::Value::Bool(value) => value.to_string() == needle,
         crate::serde_json::Value::Null => false,
