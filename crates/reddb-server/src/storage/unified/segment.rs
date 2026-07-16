@@ -9,19 +9,19 @@
 //! 2. Growing-segment entity storage in RAM (HashMap mode or flat-vector mode
 //!    with epoch-published lock-free reads)
 //! 3. `seal()` freezes the growing segment into a Sealed segment and builds
-//!    bloom filter and zone maps over the immutable data
+//!    pruning summaries over the immutable data
 //!
 //! # Read Path
 //!
 //! 1. Growing segment entity storage (most recent writes)
-//! 2. Sealed segments (older, immutable, bloom/zone-map guarded)
+//! 2. Sealed segments (older, immutable, zone-map guarded)
 //!
 //! # Lifecycle
 //!
 //! ```text
 //! Growing (in-memory, accepts writes)
 //!    ↓ seal() when full or manually triggered
-//! Sealed (immutable, bloom filter + zone maps built)
+//! Sealed (immutable, zone maps built)
 //!    ↓ flush() for persistence
 //! Flushed (on disk, can be mmap'd)
 //!    ↓ archive() for cold storage
@@ -34,7 +34,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::metadata::{Metadata, MetadataStorage};
-use crate::storage::primitives::bloom::BloomFilter;
 use crate::storage::query::value_compare::partial_compare_values;
 use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
 
@@ -161,6 +160,17 @@ fn current_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn entity_id_from_probe_key(key: &[u8]) -> Option<EntityId> {
+    if let Ok(text) = std::str::from_utf8(key) {
+        if let Ok(raw) = text.parse::<u64>() {
+            return Some(EntityId::new(raw));
+        }
+    }
+
+    let bytes: [u8; 8] = key.try_into().ok()?;
+    Some(EntityId::new(u64::from_le_bytes(bytes)))
 }
 
 const SEALED_MULTI_ZONE_MAX_INTERVALS: usize = 4;
@@ -451,9 +461,6 @@ pub struct GrowingSegment {
     /// Reverse cross-reference index: target → Vec<(source, ref_type)>
     cross_ref_reverse: HashMap<EntityId, Vec<(EntityId, RefType)>>,
 
-    /// Bloom filter for fast negative key lookups
-    bloom: BloomFilter,
-
     /// Per-column zone maps: col_name → (min, max) for segment pruning
     col_zones: HashMap<String, ColZone>,
     /// Sealed-only minmax-multi summaries built from canonical ordering.
@@ -546,18 +553,6 @@ impl GrowingSegment {
 
     /// Create a new growing segment
     pub fn new(id: SegmentId, collection: impl Into<String>) -> Self {
-        Self::with_bloom_capacity(id, collection, 100_000)
-    }
-
-    /// Create a growing segment whose bloom filter is sized for a known
-    /// entity count. Consolidation uses this: the merged segment's live
-    /// count is known up front, so its bloom need not be sized for the
-    /// 100k default when it holds a handful of rows.
-    pub(crate) fn with_bloom_capacity(
-        id: SegmentId,
-        collection: impl Into<String>,
-        expected_entities: usize,
-    ) -> Self {
         let now = current_unix_secs();
 
         Self {
@@ -576,7 +571,6 @@ impl GrowingSegment {
             kind_index: HashMap::new(),
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
-            bloom: BloomFilter::with_capacity(expected_entities.max(1), 0.01),
             col_zones: HashMap::new(),
             sealed_col_zones: HashMap::new(),
             sequence: AtomicU64::new(0),
@@ -856,8 +850,8 @@ impl GrowingSegment {
     /// Unlike `insert`, this keeps `sequence_id` — the merged segment is the
     /// same rows, not new ones, and callers (`physical_collection_roots`, MVCC
     /// ordering) read that field. All derived structures are rebuilt: kind
-    /// index, primary-key index, cross-reference forward/reverse indexes, bloom
-    /// filter, and per-column zone maps.
+    /// index, primary-key index, cross-reference forward/reverse indexes, and
+    /// per-column zone maps.
     pub(crate) fn adopt_entity(&mut self, entity: UnifiedEntity, metadata: Option<Metadata>) {
         let id = entity.id;
 
@@ -1067,16 +1061,10 @@ impl GrowingSegment {
             .or_default()
             .insert(entity.id);
 
-        // Bloom filter: insert entity ID bytes for fast negative lookups
-        let id_bytes = entity.id.raw().to_le_bytes();
-        self.bloom.insert(&id_bytes);
-
         // Primary key index (if applicable)
         if let EntityData::Row(row) = &entity.data {
             if let Some(first_col) = row.columns.first() {
                 let pk_str = format!("{:?}", first_col);
-                // Also add PK to bloom filter
-                self.bloom.insert(pk_str.as_bytes());
                 self.pk_index
                     .insert((entity.kind.collection().to_string(), pk_str), entity.id);
             }
@@ -1096,14 +1084,19 @@ impl GrowingSegment {
         }
     }
 
-    /// Check if a primary key value might exist in this segment via bloom filter.
-    pub fn bloom_might_contain_key(&self, key: &[u8]) -> bool {
-        self.bloom.contains(key)
-    }
+    /// Check whether an early-exit probe key exists in this segment.
+    pub fn may_contain_exact_key(&self, key: &[u8]) -> bool {
+        if let Some(id) = entity_id_from_probe_key(key) {
+            return self.has_live_entity(id);
+        }
 
-    /// Get bloom filter statistics
-    pub fn bloom_stats(&self) -> (f64, u32) {
-        (self.bloom.fill_ratio(), self.bloom.count_set_bits())
+        let Ok(pk_str) = std::str::from_utf8(key) else {
+            return false;
+        };
+        let pk_key = (self.collection.clone(), pk_str.to_string());
+        self.pk_index
+            .get(&pk_key)
+            .is_some_and(|id| self.has_live_entity(*id))
     }
 
     /// Remove entity from indices
@@ -1136,8 +1129,6 @@ impl GrowingSegment {
     /// - `pk_index`: only updated when the primary-key column (first column of
     ///   a Row entity) actually changed. When `modified_columns` is provided,
     ///   we check membership; otherwise we compare old vs new pk value.
-    /// - `bloom`: add-only by design, so we only insert the new pk when it
-    ///   genuinely changes (old entry is a benign false positive).
     /// - `cross_ref`: only rebuilt when the refs actually differ.
     fn reindex_for_update(
         &mut self,
@@ -1147,8 +1138,6 @@ impl GrowingSegment {
     ) {
         // kind_index: kind is immutable — the existing entry is already correct.
         // No remove + reinsert needed.
-
-        // bloom: entity ID never changes; already present from insert.
 
         // pk_index: only update when pk column is touched
         let pk_changed = match &new.data {
@@ -1184,7 +1173,6 @@ impl GrowingSegment {
             if let EntityData::Row(row) = &new.data {
                 if let Some(first_col) = row.columns.first() {
                     let pk_str = format!("{:?}", first_col);
-                    self.bloom.insert(pk_str.as_bytes());
                     self.pk_index
                         .insert((new.kind.collection().to_string(), pk_str), new.id);
                 }
@@ -1241,7 +1229,7 @@ impl GrowingSegment {
     /// Turbo bulk insert — minimal allocations per entity.
     ///
     /// Optimizations vs normal insert:
-    /// - Skips bloom filter, cross-refs, memory tracking
+    /// - Skips cross-refs
     /// - Computes kind_key ONCE (not per entity)
     /// - Pre-allocates kind_index HashSet
     /// - Skips contains_key check (caller guarantees unique IDs)
@@ -1652,7 +1640,6 @@ impl UnifiedSegment for GrowingSegment {
         self.state = SegmentState::Sealing;
 
         // Build indices on the sealed data:
-        // - Bloom filter is already populated from insert()
         // - HNSW/IVF for vectors (future)
         // - B-tree for sorted access (future)
         // - Inverted index for text search (future)
