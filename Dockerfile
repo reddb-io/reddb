@@ -7,7 +7,7 @@
 # Stage 2: distroless glibc runtime with non-root user
 # ============================================================================
 
-FROM rust:1.96-slim-bookworm AS builder
+FROM rust:1.97-slim-bookworm AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG REDDB_CARGO_FEATURES=""
