@@ -31,7 +31,7 @@ from urllib.parse import quote
 import httpx
 
 from .errors import EngineError, HttpError
-from .params import normalize_params
+from .params import normalize_json_value, normalize_params
 
 DEFAULT_TIMEOUT_SECS: float = 30.0
 
@@ -147,7 +147,7 @@ class HttpClient:
         for block in text.split("\n\n"):
             for line in block.splitlines():
                 if line.startswith("data: "):
-                    yield json.loads(line[6:])
+                    yield normalize_json_value(json.loads(line[6:]))
 
     async def kv_watch_prefix(
         self,
@@ -254,8 +254,8 @@ def _parse_response(response: httpx.Response) -> Any:
                 code=parsed.get("error_code", "RPC_ERROR"),
                 payload=parsed,
             )
-        return parsed.get("result", parsed)
-    return parsed
+        return normalize_json_value(parsed.get("result", parsed))
+    return normalize_json_value(parsed)
 
 
 __all__ = ["HttpClient", "DEFAULT_TIMEOUT_SECS"]
