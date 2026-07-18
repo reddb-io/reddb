@@ -58,13 +58,23 @@ impl Drop for ServerChild {
 }
 
 fn spawn_server(args: &[&str], stderr_path: &Path) -> ServerChild {
+    spawn_server_with_dev_flag(args, stderr_path, true)
+}
+
+/// Spawn `red server`, choosing whether to opt into self-signed wire-TLS
+/// auto-generation (`RED_WIRE_TLS_DEV`, mirroring `RED_HTTP_TLS_DEV`). With
+/// `dev_flag = false` the flag is explicitly cleared so a `--wire-tls-bind`
+/// without cert/key exercises the prod-refusal (fail-closed) path.
+fn spawn_server_with_dev_flag(args: &[&str], stderr_path: &Path, dev_flag: bool) -> ServerChild {
     let stderr_file = File::create(stderr_path).expect("create stderr file");
-    let child = Command::new(red_binary())
-        .args(args)
-        // Opt into self-signed wire-TLS auto-generation (gated by
-        // RED_WIRE_TLS_DEV, mirroring RED_HTTP_TLS_DEV). Inert unless
-        // `--wire-tls-bind` is used without an explicit cert/key.
-        .env("RED_WIRE_TLS_DEV", "1")
+    let mut cmd = Command::new(red_binary());
+    cmd.args(args);
+    if dev_flag {
+        cmd.env("RED_WIRE_TLS_DEV", "1");
+    } else {
+        cmd.env_remove("RED_WIRE_TLS_DEV");
+    }
+    let child = cmd
         .env_remove("REDDB_USERNAME")
         .env_remove("REDDB_PASSWORD")
         .env_remove("REDDB_VAULT")
@@ -141,6 +151,104 @@ fn wire_tls_only_serves_without_router_collision() {
     assert!(
         !stderr.contains("at least one server bind address must be configured"),
         "wire-tls-bind alone must be a valid server configuration.\nstderr:\n{stderr}"
+    );
+}
+
+/// Wait until the spawned server process exits. Returns `true` if it
+/// exited within the timeout, `false` if it was still running.
+fn wait_for_exit(server: &mut ServerChild, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(Some(_status)) = server.child.try_wait() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    false
+}
+
+/// In the combined multi-listener path (here: `--grpc-bind` +
+/// `--wire-tls-bind`), an explicit `--wire-tls-bind` with the dev opt-in
+/// brings the RedWire-over-TLS listener online alongside the other
+/// transport — the TLS listener is tracked, not fire-and-forget.
+#[test]
+fn wire_tls_bind_serves_alongside_grpc_with_dev_flag() {
+    let dir = support::temp_data_dir("issue-1588-wire-tls-grpc-up");
+    let db_path = dir.join("data.rdb");
+    let db_path_str = db_path.display().to_string();
+    let grpc_addr = format!("127.0.0.1:{}", free_port());
+    let tls_addr = format!("127.0.0.1:{}", free_port());
+    let stderr_path = dir.join("server.stderr");
+
+    let mut server = spawn_server(
+        &[
+            "server",
+            "--path",
+            &db_path_str,
+            "--grpc-bind",
+            &grpc_addr,
+            "--wire-tls-bind",
+            &tls_addr,
+            "--no-auth",
+        ],
+        &stderr_path,
+    );
+
+    let serving = wait_until_serving(&mut server, &tls_addr, Duration::from_secs(30));
+    let stderr = server.stderr();
+    assert!(
+        serving,
+        "wire-tls listener never came up on {tls_addr} in the combined path.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("redwire+tls"),
+        "wire-tls listener must log itself online (redwire+tls).\nstderr:\n{stderr}"
+    );
+}
+
+/// The fail-closed guarantee: in the combined multi-listener path an
+/// explicit `--wire-tls-bind` with no cert/key and NO dev opt-in must be
+/// fatal to boot — never a silent degrade to serving the other transport
+/// only. Before the fix the TLS branch swallowed the config error and the
+/// server kept serving gRPC.
+#[test]
+fn wire_tls_bind_fails_closed_alongside_grpc_without_dev_flag() {
+    let dir = support::temp_data_dir("issue-1588-wire-tls-grpc-failclosed");
+    let db_path = dir.join("data.rdb");
+    let db_path_str = db_path.display().to_string();
+    let grpc_addr = format!("127.0.0.1:{}", free_port());
+    let tls_addr = format!("127.0.0.1:{}", free_port());
+    let stderr_path = dir.join("server.stderr");
+
+    let mut server = spawn_server_with_dev_flag(
+        &[
+            "server",
+            "--path",
+            &db_path_str,
+            "--grpc-bind",
+            &grpc_addr,
+            "--wire-tls-bind",
+            &tls_addr,
+            "--no-auth",
+        ],
+        &stderr_path,
+        false,
+    );
+
+    let exited = wait_for_exit(&mut server, Duration::from_secs(30));
+    let stderr = server.stderr();
+    assert!(
+        exited,
+        "server must fail closed (exit) when an explicit --wire-tls-bind cannot \
+         resolve TLS material; it kept running.\nstderr:\n{stderr}"
+    );
+    assert!(
+        TcpStream::connect(&grpc_addr).is_err(),
+        "server must not serve gRPC after the explicit wire-TLS bind failed closed.\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("RED_WIRE_TLS_DEV") || stderr.contains("redwire TLS config"),
+        "fatal error must name the wire-TLS config failure.\nstderr:\n{stderr}"
     );
 }
 
