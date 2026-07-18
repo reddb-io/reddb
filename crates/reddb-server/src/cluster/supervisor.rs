@@ -64,7 +64,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::replication::{
+    LivenessObservation, LivenessStatus, MemberHealthInput, ReceivedSignal, SignalPlaneMessage,
+};
+
 use super::identity::NodeIdentity;
+use super::identity::NodeIdentityError;
 use super::membership::MembershipCatalog;
 use super::ownership::{CollectionId, RangeId, ShardOwnershipCatalog};
 use super::ownership_transition::{
@@ -101,6 +106,145 @@ impl MemberSignals {
             replication_lag_lsn: 0,
             recent_errors: 0,
             unhealthy_for: Duration::ZERO,
+        }
+    }
+}
+
+/// Gossip-derived member health inputs keyed by the same [`NodeIdentity`] the
+/// supervisor already scores.
+///
+/// The tracker is deliberately just a transport adapter: it folds
+/// signal-plane liveness and health-input messages into [`MemberSignals`], then
+/// the existing [`HealthPolicy`] keeps doing all scoring and grace gating.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GossipMemberSignals {
+    members: BTreeMap<NodeIdentity, GossipMemberState>,
+}
+
+impl GossipMemberSignals {
+    pub fn record_received(
+        &mut self,
+        observed_at: Duration,
+        signal: &ReceivedSignal,
+    ) -> Result<(), NodeIdentityError> {
+        self.record_message(observed_at, &signal.message)
+    }
+
+    pub fn record_message(
+        &mut self,
+        observed_at: Duration,
+        message: &SignalPlaneMessage,
+    ) -> Result<(), NodeIdentityError> {
+        match message {
+            SignalPlaneMessage::LivenessObservation(observation) => {
+                let member = NodeIdentity::from_certificate_subject(&observation.observed)?;
+                self.members
+                    .entry(member)
+                    .or_default()
+                    .record_liveness(observed_at, observation.status);
+            }
+            SignalPlaneMessage::MemberHealthInput(input) => {
+                let member = NodeIdentity::from_certificate_subject(&input.member)?;
+                self.members.entry(member).or_default().record_health(input);
+            }
+            SignalPlaneMessage::LoadMetricSample(_)
+            | SignalPlaneMessage::CatalogVersionHint(_)
+            | SignalPlaneMessage::TopologyHint(_) => {}
+        }
+        Ok(())
+    }
+
+    pub fn member_signals_at(
+        &self,
+        member: &NodeIdentity,
+        now: Duration,
+        policy: &HealthPolicy,
+    ) -> MemberSignals {
+        self.members
+            .get(member)
+            .map(|state| state.to_member_signals(now, policy))
+            .unwrap_or_else(MemberSignals::healthy)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GossipMemberState {
+    liveness: LivenessStatus,
+    liveness_since: Duration,
+    replication_lag_lsn: u64,
+    recent_errors: u32,
+}
+
+impl Default for GossipMemberState {
+    fn default() -> Self {
+        Self {
+            liveness: LivenessStatus::Alive,
+            liveness_since: Duration::ZERO,
+            replication_lag_lsn: 0,
+            recent_errors: 0,
+        }
+    }
+}
+
+impl GossipMemberState {
+    fn record_liveness(&mut self, observed_at: Duration, liveness: LivenessStatus) {
+        if self.liveness != liveness {
+            self.liveness = liveness;
+            self.liveness_since = observed_at;
+        }
+    }
+
+    fn record_health(&mut self, input: &MemberHealthInput) {
+        self.replication_lag_lsn = input.replication_lag_records;
+        self.recent_errors = if input.self_fenced {
+            u32::MAX
+        } else {
+            input.error_count.saturating_add(u32::from(input.read_only))
+        };
+    }
+
+    fn to_member_signals(&self, now: Duration, policy: &HealthPolicy) -> MemberSignals {
+        let unhealthy_for = now.saturating_sub(self.liveness_since);
+        let (since_last_heartbeat, unhealthy_for) = match self.liveness {
+            LivenessStatus::Alive => (Duration::ZERO, Duration::ZERO),
+            LivenessStatus::Suspect => (half_duration(policy.heartbeat_timeout), Duration::ZERO),
+            LivenessStatus::Unreachable => (policy.heartbeat_timeout, unhealthy_for),
+        };
+
+        MemberSignals {
+            since_last_heartbeat,
+            replication_lag_lsn: self.replication_lag_lsn,
+            recent_errors: self.recent_errors,
+            unhealthy_for,
+        }
+    }
+}
+
+fn half_duration(duration: Duration) -> Duration {
+    Duration::from_secs_f64(duration.as_secs_f64() / 2.0)
+}
+
+/// [`ClusterSignals`] view that gets member health from gossip observations and
+/// delegates watermarks/catch-up evidence to the existing control-plane source.
+pub struct GossipDerivedSignals<'a, S: ClusterSignals + ?Sized> {
+    gossip: &'a GossipMemberSignals,
+    delegate: &'a S,
+    now: Duration,
+    policy: HealthPolicy,
+}
+
+impl<'a, S: ClusterSignals + ?Sized> GossipDerivedSignals<'a, S> {
+    pub fn new(
+        gossip: &'a GossipMemberSignals,
+        delegate: &'a S,
+        now: Duration,
+        policy: HealthPolicy,
+    ) -> Self {
+        Self {
+            gossip,
+            delegate,
+            now,
+            policy,
         }
     }
 }
@@ -271,6 +415,26 @@ pub trait ClusterSignals {
         range_id: RangeId,
         candidate: &NodeIdentity,
     ) -> Option<CatchUpEvidence>;
+}
+
+impl<S: ClusterSignals + ?Sized> ClusterSignals for GossipDerivedSignals<'_, S> {
+    fn member_signals(&self, member: &NodeIdentity) -> MemberSignals {
+        self.gossip
+            .member_signals_at(member, self.now, &self.policy)
+    }
+
+    fn commit_watermark(&self, collection: &CollectionId, range_id: RangeId) -> CommitWatermark {
+        self.delegate.commit_watermark(collection, range_id)
+    }
+
+    fn catch_up(
+        &self,
+        collection: &CollectionId,
+        range_id: RangeId,
+        candidate: &NodeIdentity,
+    ) -> Option<CatchUpEvidence> {
+        self.delegate.catch_up(collection, range_id, candidate)
+    }
 }
 
 /// A safe, validated promotion the supervisor proposes for one range: the failed
@@ -976,5 +1140,87 @@ mod tests {
         assert_eq!(scores.len(), 2);
         assert_eq!(scores[&ident("CN=node-a")].class, HealthClass::Failed);
         assert_eq!(scores[&ident("CN=node-b")].class, HealthClass::Healthy);
+    }
+
+    #[test]
+    fn gossip_alive_observation_scores_member_healthy_without_direct_heartbeat() {
+        let policy = HealthPolicy::default();
+        let member = ident("CN=node-a");
+        let mut gossip = GossipMemberSignals::default();
+        gossip
+            .record_message(
+                Duration::ZERO,
+                &SignalPlaneMessage::LivenessObservation(LivenessObservation {
+                    observer: "CN=node-c".to_string(),
+                    observed: "CN=node-a".to_string(),
+                    incarnation: 1,
+                    status: LivenessStatus::Alive,
+                }),
+            )
+            .unwrap();
+        gossip
+            .record_message(
+                Duration::ZERO,
+                &SignalPlaneMessage::MemberHealthInput(MemberHealthInput {
+                    member: "CN=node-a".to_string(),
+                    error_count: 0,
+                    replication_lag_records: 0,
+                    read_only: false,
+                    self_fenced: false,
+                }),
+            )
+            .unwrap();
+
+        let signals = gossip.member_signals_at(&member, Duration::from_secs(60), &policy);
+        let score = policy.evaluate(&signals);
+
+        assert_eq!(signals, MemberSignals::healthy());
+        assert_eq!(score.class, HealthClass::Healthy);
+    }
+
+    #[test]
+    fn gossip_unreachable_observation_crosses_grace_and_triggers_failover() {
+        let policy = HealthPolicy {
+            grace_period: Duration::from_secs(5),
+            ..HealthPolicy::default()
+        };
+        let supervisor = ClusterSupervisor::new(policy);
+        let members = membership(&["CN=node-a", "CN=node-b"]);
+        let (mut catalog, _orders) = catalog_with("CN=node-a", &["CN=node-b"]);
+        let base_signals =
+            FakeSignals::new(CommitWatermark::new(1, 10)).with_catch_up("CN=node-b", 1, 10);
+        let mut gossip = GossipMemberSignals::default();
+        gossip
+            .record_message(
+                Duration::ZERO,
+                &SignalPlaneMessage::LivenessObservation(LivenessObservation {
+                    observer: "CN=node-b".to_string(),
+                    observed: "CN=node-a".to_string(),
+                    incarnation: 2,
+                    status: LivenessStatus::Unreachable,
+                }),
+            )
+            .unwrap();
+        gossip
+            .record_message(
+                Duration::ZERO,
+                &SignalPlaneMessage::MemberHealthInput(MemberHealthInput {
+                    member: "CN=node-a".to_string(),
+                    error_count: 100,
+                    replication_lag_records: 50_000,
+                    read_only: false,
+                    self_fenced: false,
+                }),
+            )
+            .unwrap();
+        let signals =
+            GossipDerivedSignals::new(&gossip, &base_signals, policy.grace_period, policy);
+
+        let (outcomes, plan) = supervisor.run_failovers(&members, &mut catalog, &signals);
+
+        assert_eq!(plan.promotions.len(), 1);
+        assert_eq!(plan.promotions[0].failed_owner, ident("CN=node-a"));
+        assert_eq!(plan.promotions[0].candidate, ident("CN=node-b"));
+        assert!(outcomes[0].as_ref().unwrap().fenced_old_owner());
     }
 }
