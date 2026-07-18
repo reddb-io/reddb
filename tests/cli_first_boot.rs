@@ -629,14 +629,18 @@ fn wire_tls_flag_owns_port_over_env_plaintext_default() {
 
     let mut args = cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s);
     // No --wire-tls-cert/key: the listener auto-generates a self-signed
-    // cert — the collision under test is independent of the material.
+    // cert (opted into via `RED_WIRE_TLS_DEV`) — the collision under test
+    // is independent of the material.
     args.extend_from_slice(&["--wire-tls-bind", &wire_tls_addr]);
 
     let stderr_path = dir.join("server.stderr");
     let mut server = spawn_server_with_envs(
         &args,
         &stderr_path,
-        &[("REDDB_WIRE_BIND_ADDR", env_wire_addr.as_str())],
+        &[
+            ("REDDB_WIRE_BIND_ADDR", env_wire_addr.as_str()),
+            ("RED_WIRE_TLS_DEV", "1"),
+        ],
     );
     let tls_online = wait_for_stderr_contains(&mut server, "redwire+tls", Duration::from_secs(30));
     let stderr = server.stderr();
@@ -691,7 +695,9 @@ fn explicit_wire_tls_bind_failure_is_fatal() {
     ]);
 
     let stderr_path = dir.join("server.stderr");
-    let mut server = spawn_server(&args, &stderr_path);
+    // Opt into self-signed dev certs so TLS config resolves and the boot
+    // reaches the bind — the stage this test targets.
+    let mut server = spawn_server_with_envs(&args, &stderr_path, &[("RED_WIRE_TLS_DEV", "1")]);
     let exit = wait_for_exit(&mut server, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
