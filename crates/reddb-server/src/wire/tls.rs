@@ -85,7 +85,21 @@ pub(crate) fn generate_self_signed_dev_cert(
 
 /// Generate self-signed cert and write to files in the given directory.
 /// Returns the WireTlsConfig pointing to the written files.
+///
+/// Gated by `RED_WIRE_TLS_DEV=1`; refuses to auto-generate in any other
+/// context (refuses prod by default). This mirrors the HTTP edge's
+/// `RED_HTTP_TLS_DEV` opt-in ([`crate::server::tls::auto_generate_dev_cert`])
+/// — the two edges are independent, so enabling dev certs on one does not
+/// enable them on the other.
 pub fn auto_generate_cert(dir: &Path) -> Result<WireTlsConfig, Box<dyn std::error::Error>> {
+    let dev_flag = std::env::var("RED_WIRE_TLS_DEV").unwrap_or_default();
+    if !matches!(dev_flag.as_str(), "1" | "true" | "yes" | "on") {
+        return Err(
+            "refusing to auto-generate wire TLS cert: set RED_WIRE_TLS_DEV=1 to opt into self-signed dev certs"
+                .into(),
+        );
+    }
+
     let cert_path = dir.join("wire-tls-cert.pem");
     let key_path = dir.join("wire-tls-key.pem");
 
@@ -191,5 +205,55 @@ mod tests {
         let (cns, orgs) = subject_cn_and_orgs(&cert_pem);
         assert_eq!(cns, vec!["RedDB HTTP localhost".to_string()]);
         assert!(orgs.is_empty(), "HTTP cert must not carry an Organization");
+    }
+
+    /// Tests that mutate the process-global `RED_WIRE_TLS_DEV` env var must
+    /// serialize to avoid trampling each other under cargo's default
+    /// parallel test runner (mirrors the HTTP twin's `env_lock`).
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn auto_generate_refuses_without_dev_flag() {
+        let _g = env_lock().lock();
+        let dir = std::env::temp_dir().join(format!(
+            "reddb-wire-tls-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Make sure flag is unset.
+        unsafe {
+            std::env::remove_var("RED_WIRE_TLS_DEV");
+        }
+        let err = auto_generate_cert(&dir).unwrap_err();
+        assert!(err.to_string().contains("RED_WIRE_TLS_DEV"));
+    }
+
+    #[test]
+    fn auto_generate_with_dev_flag_writes_cert() {
+        let _g = env_lock().lock();
+        let dir = std::env::temp_dir().join(format!(
+            "reddb-wire-tls-dev-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("RED_WIRE_TLS_DEV", "1");
+        }
+        let cfg = auto_generate_cert(&dir).expect("should generate");
+        assert!(cfg.cert_path.exists());
+        assert!(cfg.key_path.exists());
+        unsafe {
+            std::env::remove_var("RED_WIRE_TLS_DEV");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

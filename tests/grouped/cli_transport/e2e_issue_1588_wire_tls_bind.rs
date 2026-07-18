@@ -61,6 +61,10 @@ fn spawn_server(args: &[&str], stderr_path: &Path) -> ServerChild {
     let stderr_file = File::create(stderr_path).expect("create stderr file");
     let child = Command::new(red_binary())
         .args(args)
+        // Opt into self-signed wire-TLS auto-generation (gated by
+        // RED_WIRE_TLS_DEV, mirroring RED_HTTP_TLS_DEV). Inert unless
+        // `--wire-tls-bind` is used without an explicit cert/key.
+        .env("RED_WIRE_TLS_DEV", "1")
         .env_remove("REDDB_USERNAME")
         .env_remove("REDDB_PASSWORD")
         .env_remove("REDDB_VAULT")
@@ -100,7 +104,9 @@ fn wait_until_serving(server: &mut ServerChild, addr: &str, timeout: Duration) -
 /// `--wire-tls-bind` with no explicit `--wire-bind` brings the
 /// RedWire-over-TLS listener online — no router collision, no
 /// "at least one server bind address must be configured" abort.
-/// The TLS cert/key are auto-generated next to the data dir.
+/// The TLS cert/key are auto-generated next to the data dir (the
+/// listener opts into self-signed dev certs via `RED_WIRE_TLS_DEV=1`,
+/// set by `spawn_server`).
 #[test]
 fn wire_tls_only_serves_without_router_collision() {
     let dir = support::temp_data_dir("issue-1588-wire-tls-only");
