@@ -109,8 +109,9 @@ pub use slot::{
     PRODUCTION_HASH_SLOT_COUNT,
 };
 pub use supervisor::{
-    BlockedFailover, BlockedReason, ClusterSignals, ClusterSupervisor, FailoverPlan, HealthClass,
-    HealthPolicy, HealthScore, MemberSignals, PlannedPromotion,
+    BlockedFailover, BlockedReason, ClusterSignals, ClusterSupervisor, FailoverPlan,
+    GossipDerivedSignals, GossipMemberSignals, HealthClass, HealthPolicy, HealthScore,
+    MemberSignals, PlannedPromotion,
 };
 pub use topology::{
     ClientTopology, HintOutcome, RefreshOutcome, TopologyAuthority, TopologyRange,
