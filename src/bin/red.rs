@@ -4272,6 +4272,13 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
     ]
 }
 
+/// Extract the TCP port from a bind-address string (`0.0.0.0:5050`,
+/// `[::]:5050`, `host:5050`). `None` for portless forms (unix sockets,
+/// bare paths) — those can never collide on a TCP port.
+fn bind_addr_port(addr: &str) -> Option<u16> {
+    addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok())
+}
+
 fn build_server_config(
     flags: &HashMap<String, FlagValue>,
     forced_role: Option<&str>,
@@ -4308,10 +4315,38 @@ fn build_server_config(
     let explicit_wire_bind_from_flag =
         flag_string(flags, "wire-bind").filter(|value| !value.is_empty());
     let explicit_wire_bind_from_env = env_string("REDDB_WIRE_BIND_ADDR");
-    let wire_bind_addr = explicit_wire_bind_from_flag
+    let mut wire_bind_addr = explicit_wire_bind_from_flag
         .clone()
         .or(explicit_wire_bind_from_env.clone());
     let wire_tls_bind_addr = flag_string(flags, "wire-tls-bind").filter(|v| !v.is_empty());
+    // Plaintext/TLS wire-port collision (follow-up to #1588, found via
+    // reddb-io/rio-lair#255): the release Docker image bakes
+    // `REDDB_WIRE_BIND_ADDR=0.0.0.0:5050` as a default, so a container
+    // started with `--wire-tls-bind [::]:5050` (and no `--wire-bind`)
+    // would spin up an env-derived plaintext listener that wins the port
+    // and non-fatally kills the TLS listener — TLS clients get a reset
+    // while the server reports healthy. The explicit CLI TLS flag owns
+    // the port: suppress the env-derived plaintext default when both
+    // target the same port. Two explicit *flags* on one port stay a hard
+    // error — that is an operator contradiction, not an image default.
+    if let (Some(tls_addr), Some(wire_addr)) = (&wire_tls_bind_addr, &wire_bind_addr) {
+        let same_port = match (bind_addr_port(tls_addr), bind_addr_port(wire_addr)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        };
+        if same_port {
+            if explicit_wire_bind_from_flag.is_some() {
+                return Err(format!(
+                    "--wire-bind {wire_addr} and --wire-tls-bind {tls_addr} target the same port; pick distinct ports"
+                ));
+            }
+            eprintln!(
+                "warning: REDDB_WIRE_BIND_ADDR={wire_addr} targets the same port as --wire-tls-bind {tls_addr}; \
+                 suppressing the plaintext wire listener (the TLS listener owns the port)"
+            );
+            wire_bind_addr = None;
+        }
+    }
     let pg_bind_addr = flag_string(flags, "pg-bind").filter(|v| !v.is_empty());
     let router_bind_addr = if explicit_grpc_bind.is_none()
         && explicit_http_bind.is_none()
@@ -7116,6 +7151,63 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:55055"));
         assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:5000"));
         assert!(config.vault);
+    }
+
+    // reddb-io/rio-lair#255 — the Docker image's REDDB_WIRE_BIND_ADDR
+    // default must lose the port to an explicit --wire-tls-bind instead
+    // of booting a plaintext listener that kills the TLS one.
+    #[test]
+    fn build_server_config_suppresses_env_wire_bind_when_wire_tls_flag_owns_the_port() {
+        let _lock = env_lock().lock().unwrap();
+        let _cleared = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
+        let _guard = EnvGuard::set(&[("REDDB_WIRE_BIND_ADDR", "0.0.0.0:5050")]);
+        let flags = HashMap::from([
+            ("http-bind".to_string(), str_flag("[::]:5055")),
+            ("grpc-bind".to_string(), str_flag("[::]:5555")),
+            ("wire-tls-bind".to_string(), str_flag("[::]:5050")),
+        ]);
+        let config = build_server_config(&flags, None).unwrap();
+        assert_eq!(config.wire_bind_addr, None);
+        assert_eq!(config.wire_tls_bind_addr.as_deref(), Some("[::]:5050"));
+    }
+
+    #[test]
+    fn build_server_config_keeps_env_wire_bind_when_ports_differ_from_wire_tls() {
+        let _lock = env_lock().lock().unwrap();
+        let _cleared = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
+        let _guard = EnvGuard::set(&[("REDDB_WIRE_BIND_ADDR", "0.0.0.0:5050")]);
+        let flags = HashMap::from([("wire-tls-bind".to_string(), str_flag("[::]:5051"))]);
+        let config = build_server_config(&flags, None).unwrap();
+        assert_eq!(config.wire_bind_addr.as_deref(), Some("0.0.0.0:5050"));
+        assert_eq!(config.wire_tls_bind_addr.as_deref(), Some("[::]:5051"));
+    }
+
+    #[test]
+    fn build_server_config_rejects_explicit_wire_and_wire_tls_flags_on_same_port() {
+        let _lock = env_lock().lock().unwrap();
+        let _cleared = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+            "REDDB_WIRE_BIND_ADDR",
+        ]);
+        let flags = HashMap::from([
+            ("wire-bind".to_string(), str_flag("0.0.0.0:5050")),
+            ("wire-tls-bind".to_string(), str_flag("[::]:5050")),
+        ]);
+        let err = build_server_config(&flags, None).unwrap_err();
+        assert!(
+            err.contains("same port"),
+            "expected a same-port error, got: {err}"
+        );
     }
 
     #[test]
