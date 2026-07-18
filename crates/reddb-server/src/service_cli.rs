@@ -1779,23 +1779,54 @@ async fn spawn_wire_listeners(
         }
     }
 
-    // RedWire over TLS
+    // RedWire over TLS. A `--wire-tls-bind` is always an explicit request,
+    // so it fails closed: a TLS config/resolve error (including the gated
+    // auto-gen refusal) or a bind failure is fatal to boot — never a silent
+    // degrade to serving the other transports. Mirrors the TLS-only path
+    // (`run_wire_tls_only_server`) and the plaintext branch's explicit
+    // handling above.
     if let Some(wire_tls_addr) = config.wire_tls_bind_addr.clone() {
-        let tls_config = resolve_wire_tls_config(config);
-        match tls_config {
-            Ok(tls_cfg) => {
-                let wire_rt = Arc::new(runtime.clone());
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::wire::start_redwire_tls_listener(&wire_tls_addr, wire_rt, &tls_cfg)
-                            .await
-                    {
-                        tracing::error!(err = %e, "redwire+tls listener error");
-                    }
-                });
+        let tls_cfg = match resolve_wire_tls_config(config) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::error!(
+                    transport = "wire-tls",
+                    bind = %wire_tls_addr,
+                    error = %e,
+                    "fatal explicit redwire TLS config error"
+                );
+                return Err(format!("explicit redwire TLS config error: {e}"));
             }
-            Err(e) => tracing::error!(err = %e, "redwire TLS config error"),
-        }
+        };
+        // Bind up front so a contested/unbindable port fails the explicit
+        // request here instead of dying inside a fire-and-forget task.
+        let listener = match tokio::net::TcpListener::bind(&wire_tls_addr).await {
+            Ok(listener) => listener,
+            Err(err) => {
+                let reason = format!("wire-tls listener bind {wire_tls_addr}: {err}");
+                readiness.failed("wire-tls", &wire_tls_addr, true, reason.clone());
+                tracing::error!(
+                    transport = "wire-tls",
+                    bind = %wire_tls_addr,
+                    error = %err,
+                    "fatal explicit bind failure"
+                );
+                return Err(format!("explicit {reason}"));
+            }
+        };
+        readiness.active("wire-tls", &wire_tls_addr, true);
+        // The bind-first `_on` variant does not log online itself, so emit
+        // the transport-online line here (parity with the plaintext wire
+        // branch and the internally-binding `start_redwire_tls_listener`).
+        tracing::info!(transport = "redwire+tls", bind = %wire_tls_addr, "listener online");
+        let wire_rt = Arc::new(runtime.clone());
+        tokio::spawn(async move {
+            if let Err(e) =
+                crate::wire::start_redwire_tls_listener_on(listener, wire_rt, &tls_cfg).await
+            {
+                tracing::error!(err = %e, "redwire+tls listener error");
+            }
+        });
     }
     Ok(())
 }
