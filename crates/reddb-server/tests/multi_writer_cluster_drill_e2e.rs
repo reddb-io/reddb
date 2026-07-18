@@ -38,14 +38,19 @@ use reddb_server::cluster::{
     ArchiveRecoveryError, ArchiveRecoveryMode, ArchiveRecoveryRequest, ArchivedRangeReplica,
     CatchUpEvidence, ClusterId, ClusterMember, ClusterSignals, ClusterSupervisor, CollectionId,
     CommitWatermark, DurableWriteReject, FenceReason, ForceTransitionCapability,
-    ForcedTransitionDisposition, ForcedTransitionRequest, HealthPolicy, HintOutcome,
-    HotMirrorFailoverError, HotMirrorInputs, JoinRequest, KeyTarget, LeasedOwner, MemberCapacity,
-    MemberKind, MemberSignals, MembershipCatalog, NodeIdentity, OperatorReason, OwnerWriteMode,
-    OwnershipEpoch, OwnershipLease, PlacementMetadata, PlacementPolicy, PlacementSignals,
-    RangeBound, RangeBounds, RangeId, RangeLoad, RangeOwnership, RangeRequest, RangeRole,
-    RangeWriteReject, RedirectReason, RequestOperation, RouteDecision, RoutedRequest,
-    RoutingPolicy, SeedAuthority, ShardKeyMode, ShardOwnershipCatalog, SupervisorTerm,
-    TransitionKind, WatermarkOutcome, WeightedPlacementPlanner, WriteTransactionReject,
+    ForcedTransitionDisposition, ForcedTransitionRequest, GossipDerivedSignals,
+    GossipMemberSignals, HealthPolicy, HintOutcome, HotMirrorFailoverError, HotMirrorInputs,
+    JoinRequest, KeyTarget, LeasedOwner, MemberCapacity, MemberKind, MemberSignals,
+    MembershipCatalog, NodeIdentity, OperatorReason, OwnerWriteMode, OwnershipEpoch,
+    OwnershipLease, PlacementMetadata, PlacementPolicy, PlacementSignals, RangeBound, RangeBounds,
+    RangeId, RangeLoad, RangeOwnership, RangeRequest, RangeRole, RangeWriteReject, RedirectReason,
+    RequestOperation, RouteDecision, RoutedRequest, RoutingPolicy, SeedAuthority, ShardKeyMode,
+    ShardOwnershipCatalog, SupervisorTerm, TransitionKind, WatermarkOutcome,
+    WeightedPlacementPlanner, WriteTransactionReject,
+};
+use reddb_server::replication::{
+    FailoverProfile, LivenessObservation, LivenessStatus, MemberHealthInput, SharedSignalTransport,
+    SignalPlane, SignalPlaneLimits, SignalPlaneMessage, TransportSignalPlane,
 };
 
 // --- shared cluster vocabulary ------------------------------------------------
@@ -693,6 +698,142 @@ fn failover_promotes_a_covered_replica_and_blocks_an_uncovered_one() {
             catalog.range(&orders, RangeId::new(1)).unwrap().owner(),
             &ident(NODE_A)
         );
+    }
+}
+
+#[test]
+fn issue_1851_gossip_derived_member_signals_drive_supervisor_failover() {
+    let membership = join_three_member_cluster();
+    let (mut catalog, orders) = ownership_two_ranges();
+    let profile = FailoverProfile::AGGRESSIVE;
+    let policy = HealthPolicy {
+        grace_period: Duration::from_millis(profile.promotion_grace_ms),
+        ..HealthPolicy::default()
+    };
+    let supervisor = ClusterSupervisor::new(policy);
+    let mut base_signals = DrillSignals::new();
+    base_signals.set_watermark(&orders, RangeId::new(1), CommitWatermark::new(7, 1_200));
+    base_signals.set_catch_up(&orders, RangeId::new(1), NODE_B, 7, 1_200);
+    base_signals.set_catch_up(&orders, RangeId::new(1), NODE_C, 7, 1_200);
+
+    let transport = SharedSignalTransport::default();
+    let limits = SignalPlaneLimits {
+        fanout: 2,
+        max_payload_messages: 8,
+    };
+    let mut supervisor_leader =
+        TransportSignalPlane::new(NODE_B.to_string(), transport.clone(), limits);
+    let mut peer = TransportSignalPlane::new(NODE_C.to_string(), transport, limits);
+    let members = vec![NODE_A.to_string(), NODE_B.to_string(), NODE_C.to_string()];
+    supervisor_leader.set_members(members.clone());
+    peer.set_members(members);
+
+    let mut gossip = GossipMemberSignals::default();
+    peer.publish(
+        NODE_C.to_string(),
+        SignalPlaneMessage::LivenessObservation(LivenessObservation {
+            observer: NODE_C.to_string(),
+            observed: NODE_A.to_string(),
+            incarnation: 1,
+            status: LivenessStatus::Alive,
+        }),
+    );
+    peer.publish(
+        NODE_C.to_string(),
+        SignalPlaneMessage::MemberHealthInput(MemberHealthInput {
+            member: NODE_A.to_string(),
+            error_count: 0,
+            replication_lag_records: 0,
+            read_only: false,
+            self_fenced: false,
+        }),
+    );
+    drain_peer_gossip(
+        &mut peer,
+        &mut supervisor_leader,
+        &mut gossip,
+        Duration::ZERO,
+    );
+
+    let leader_view = GossipDerivedSignals::new(&gossip, &base_signals, Duration::ZERO, policy);
+    let owner_score = supervisor
+        .assess_members(&membership, &leader_view)
+        .remove(&ident(NODE_A))
+        .expect("owner scored through gossip");
+    assert!(
+        owner_score.is_healthy(),
+        "peer-visible owner remains healthy without a direct heartbeat to the supervisor leader"
+    );
+    assert!(
+        supervisor
+            .plan_failovers(&membership, &catalog, &leader_view)
+            .is_empty(),
+        "healthy gossip-derived signals do not move ownership"
+    );
+
+    peer.publish(
+        NODE_C.to_string(),
+        SignalPlaneMessage::LivenessObservation(LivenessObservation {
+            observer: NODE_C.to_string(),
+            observed: NODE_A.to_string(),
+            incarnation: 2,
+            status: LivenessStatus::Unreachable,
+        }),
+    );
+    peer.publish(
+        NODE_C.to_string(),
+        SignalPlaneMessage::MemberHealthInput(MemberHealthInput {
+            member: NODE_A.to_string(),
+            error_count: 100,
+            replication_lag_records: 50_000,
+            read_only: false,
+            self_fenced: false,
+        }),
+    );
+    drain_peer_gossip(
+        &mut peer,
+        &mut supervisor_leader,
+        &mut gossip,
+        Duration::ZERO,
+    );
+
+    let failover_view =
+        GossipDerivedSignals::new(&gossip, &base_signals, policy.grace_period, policy);
+    let (outcomes, plan) = supervisor.run_failovers(&membership, &mut catalog, &failover_view);
+
+    assert_eq!(
+        plan.promotions.len(),
+        1,
+        "gossip-derived failure promotes once"
+    );
+    assert!(plan.blocked.is_empty());
+    assert_eq!(plan.promotions[0].failed_owner, ident(NODE_A));
+    assert_eq!(
+        plan.promotions[0].candidate,
+        ident(NODE_B),
+        "covered replica visible to the supervisor leader is promoted"
+    );
+    let outcome = outcomes[0].as_ref().expect("promotion activates");
+    assert_eq!(outcome.kind, TransitionKind::Promote);
+    assert_eq!(outcome.new_owner, ident(NODE_B));
+    assert!(outcome.fenced_old_owner());
+}
+
+fn drain_peer_gossip(
+    peer: &mut TransportSignalPlane,
+    supervisor_leader: &mut TransportSignalPlane,
+    gossip: &mut GossipMemberSignals,
+    observed_at: Duration,
+) {
+    for _ in 0..6 {
+        peer.advance_round();
+        supervisor_leader.advance_round();
+    }
+
+    for signal in supervisor_leader.drain_received(&NODE_B.to_string()) {
+        gossip
+            .record_received(observed_at, &signal)
+            .expect("gossip member id is a node identity");
     }
 }
 
