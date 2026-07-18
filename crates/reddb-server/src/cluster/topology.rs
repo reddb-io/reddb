@@ -44,6 +44,7 @@ use super::ownership::{
 };
 use super::routing::RoutingHint;
 use super::slot::hash_shard_key_to_range_key;
+use crate::replication::{ReceivedSignal, SignalPlaneMessage};
 
 /// What authority a topology/serving-graph projection carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +498,29 @@ impl ClientTopology {
                 HintOutcome::UnknownRange
             }
         }
+    }
+
+    /// Consume signal-plane messages and refresh through the normal authoritative
+    /// topology path when a peer reports a newer ownership-catalog version.
+    ///
+    /// The signal is only a trigger: it does not mutate cached ownership itself.
+    /// Stale, duplicate, missing, or non-catalog signals are ignored, and the
+    /// snapshot returned by `refresh` is still applied through the same monotonic
+    /// [`apply_refresh`](Self::apply_refresh) guard as an ordinary poll.
+    pub fn refresh_on_newer_catalog_signal(
+        &mut self,
+        signals: impl IntoIterator<Item = ReceivedSignal>,
+        mut refresh: impl FnMut() -> TopologySnapshot,
+    ) -> Option<RefreshOutcome> {
+        for signal in signals {
+            let SignalPlaneMessage::CatalogVersionHint(hint) = signal.message else {
+                continue;
+            };
+            if hint.ownership_catalog_version > self.version.value() {
+                return Some(self.apply_refresh(refresh()));
+            }
+        }
+        None
     }
 }
 
