@@ -162,7 +162,9 @@ impl CompoundNumber {
             Value::Integer(value) | Value::BigInt(value) => Some(Self::Integer(*value as i128)),
             Value::UnsignedInteger(value) => Some(Self::Integer(*value as i128)),
             Value::Float(value) => value.is_finite().then_some(Self::Float(*value)),
-            Value::Decimal(value) => Some(Self::Float(*value as f64 / 10_000.0)),
+            Value::Decimal(value) => {
+                Some(Self::Float(crate::storage::schema::decimal_to_f64(*value)))
+            }
             _ => None,
         }
     }

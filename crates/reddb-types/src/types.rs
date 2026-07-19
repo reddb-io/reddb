@@ -1310,6 +1310,26 @@ impl Value {
     }
 }
 
+/// The fixed scale of [`Value::Decimal`].
+///
+/// `Value::Decimal(i64)` stores `value * 10^DECIMAL_SCALE` and carries no scale
+/// of its own. Four is not a free choice — it is already the scale the write
+/// side parses at (`coerce::parse_decimal`), the render side formats at
+/// (`display_string`, `Display`), and, load-bearingly, the scale that
+/// comparison and ordering assume (`value_compare`). Reads must agree with all
+/// of them.
+pub const DECIMAL_SCALE: u8 = 4;
+
+/// Convert a [`Value::Decimal`] payload to its true numeric value.
+///
+/// The single authority for that conversion. It used to be open-coded at nine
+/// call sites, four dividing by `10^4` and five casting raw, which made
+/// `SUM`/`AVG` over a `DECIMAL` column differ by four orders of magnitude
+/// depending on which aggregate route the planner picked (#2058).
+pub fn decimal_to_f64(value: i64) -> f64 {
+    value as f64 / 10_i64.pow(DECIMAL_SCALE as u32) as f64
+}
+
 fn format_scaled_i64(value: i64, scale: u8) -> String {
     let negative = value < 0;
     let abs = (value as i128).abs();

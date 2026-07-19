@@ -555,7 +555,7 @@ fn value_as_number(v: &Value) -> Option<(f64, bool)> {
         Value::Integer(n) | Value::BigInt(n) => Some((*n as f64, false)),
         Value::UnsignedInteger(n) => Some((*n as f64, false)),
         Value::Float(f) => Some((*f, true)),
-        Value::Decimal(d) => Some((*d as f64 / 10_000.0, true)),
+        Value::Decimal(d) => Some((crate::storage::schema::decimal_to_f64(*d), true)),
         Value::Text(s) => s
             .parse::<i64>()
             .map(|n| (n as f64, false))

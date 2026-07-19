@@ -179,12 +179,19 @@ fn sum_f64_to_value(f: f64) -> Value {
 /// performs in `aggregate.rs::value_to_f64`, but kept private to
 /// this module so the planner has no dependency on the legacy
 /// internals.
+///
+/// That claim used to be false for `Decimal`: this cast was raw while the
+/// legacy path divided by the fixed scale, so `SUM`/`AVG` over a `DECIMAL`
+/// column returned results differing by 10^4 depending on which route the
+/// planner picked (#2058). Both now go through `schema::decimal_to_f64`, and
+/// `decimal_sum_agrees_with_the_legacy_aggregate_path` pins them together —
+/// duplicating the match arms is what let them drift silently.
 fn numeric_value(v: &Value) -> Option<f64> {
     match v {
         Value::Integer(i) => Some(*i as f64),
         Value::UnsignedInteger(u) => Some(*u as f64),
         Value::Float(f) if f.is_finite() => Some(*f),
-        Value::Decimal(d) => Some(*d as f64),
+        Value::Decimal(d) => Some(crate::storage::schema::decimal_to_f64(*d)),
         Value::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
         _ => None,
     }
@@ -224,5 +231,77 @@ fn update_extreme(current: &mut Option<Value>, candidate: &Value, target: std::c
                 *current = Some(candidate.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::numeric_value;
+    use crate::runtime::query_exec::aggregate::value_to_f64;
+    use crate::storage::schema::Value;
+
+    /// The planner's `SUM`/`AVG` cast and the legacy path's must agree on
+    /// every value they both accept.
+    ///
+    /// They did not: the planner cast `Decimal` raw while the legacy path
+    /// divided by the fixed scale, so the same `SUM` over a `DECIMAL` column
+    /// returned values 10^4 apart depending on the route chosen (#2058). Both
+    /// now delegate to `schema::decimal_to_f64`; this pins them so a future
+    /// edit to one match arm cannot silently reintroduce the split.
+    #[test]
+    fn decimal_sum_agrees_with_the_legacy_aggregate_path() {
+        let cases = [
+            Value::Decimal(387_600),   // 38.76
+            Value::Decimal(-771_500),  // -77.15
+            Value::Decimal(1_234_567), // 123.4567 — the rendering test's value
+            Value::Decimal(0),
+            Value::Decimal(i64::MAX),
+            Value::Decimal(i64::MIN),
+            Value::Integer(42),
+            Value::UnsignedInteger(7),
+            Value::Float(1.5),
+            Value::Null,
+        ];
+        for value in cases {
+            assert_eq!(
+                numeric_value(&value),
+                value_to_f64(&value),
+                "planner and legacy aggregate casts disagree on {value:?}"
+            );
+        }
+    }
+
+    /// Types the two routes still disagree on, tracked in #2060.
+    ///
+    /// This documents current behaviour; it does not endorse it. `SUM` over a
+    /// `BIGINT` column returning a number on one route and `NULL` on the other
+    /// is a defect, but closing it means deciding whether `SUM(boolean)` is
+    /// supported at all and how non-finite floats aggregate — semantics calls
+    /// rather than mechanical edits, so #2058 fixed only the `Decimal` arm and
+    /// left these visible instead of silently narrowing the pin above.
+    ///
+    /// When #2060 is fixed this test will fail. That is the point: update it
+    /// then, and fold the surviving cases into the agreement test.
+    #[test]
+    fn planner_and_legacy_diverge_on_bigint_boolean_and_nonfinite_float() {
+        // The planner has no BigInt arm; the legacy path does.
+        assert_eq!(numeric_value(&Value::BigInt(9)), None);
+        assert_eq!(value_to_f64(&Value::BigInt(9)), Some(9.0));
+
+        // The planner counts booleans; the legacy path rejects them.
+        assert_eq!(numeric_value(&Value::Boolean(true)), Some(1.0));
+        assert_eq!(value_to_f64(&Value::Boolean(true)), None);
+
+        // The planner guards on `is_finite`; the legacy path does not.
+        assert_eq!(numeric_value(&Value::Float(f64::NAN)), None);
+        assert!(value_to_f64(&Value::Float(f64::NAN)).is_some_and(f64::is_nan));
+    }
+
+    /// A `DECIMAL` read for aggregation must equal what the engine renders and
+    /// compares it as — scale 4, the value the write side parses at.
+    #[test]
+    fn decimal_aggregation_matches_the_rendered_value() {
+        // `Decimal(1_234_567)` renders as "123.4567" (pinned in entity_json).
+        assert_eq!(numeric_value(&Value::Decimal(1_234_567)), Some(123.4567));
     }
 }
