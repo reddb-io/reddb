@@ -81,7 +81,14 @@ plugins:
         # 3. Clippy at warn-as-error (mirrors CI's Quality gate).
         #    Pulled in here so a red local clippy fails the merge
         #    before the CI round-trip.
-        - cargo clippy --workspace --locked --all-targets -- -D warnings
+        #    Must stay byte-identical in scope to `.github/workflows/ci.yml`
+        #    (`cargo clippy --locked --all -- -D warnings`). It carried
+        #    `--all-targets` until 2026-07-19, which CI does not: that pulled in
+        #    ~79 pre-existing test-target lints and failed the gate on every
+        #    branch, parking innocent workers at `blocked:validation`. A gate
+        #    stricter than CI blocks work CI would accept, which defeats the
+        #    stated purpose above. Widen only by widening CI first.
+        - cargo clippy --locked --all -- -D warnings
 
       # ----------------------------------------------------------------
       # Hooks — intercept the AFK loop at named lifecycle points.
@@ -94,6 +101,15 @@ plugins:
       #     (use this for notifiers — broken notifiers MUST NOT
       #     starve the AFK, per ADR 0059 lesson).
       # Unknown hook names are a HARD ERROR at boot — typo protection.
+      #
+      # Every hook below MUST be a scalar (a single string, `|` block for
+      # multiple commands) — NOT a YAML list. As of bundle 2.74.4/2.74.6 the
+      # loader flattens a list into indexed keys and then validates the
+      # flattened key against the hook allowlist, so `pre_pick: [x]` is
+      # rejected at boot as `unknown hook name 'pre_pick.0'` even though
+      # `pre_pick` is allowlisted. These were lists until 2026-07-19 and
+      # crashed every `/afk` and `/go` boot. Do not convert them back
+      # without re-testing `red-skills-dev run --boot-only`.
       # ----------------------------------------------------------------
       hooks:
 
@@ -106,16 +122,14 @@ plugins:
         # Reorder by `priority:*` ascending (P0 first). Defensive:
         # a broken pre_pick must NOT starve the AFK, so the script
         # returns the original queue on parse/gh failure.
-        pre_pick:
-          - scripts/afk-pre-pick.sh
+        pre_pick: scripts/afk-pre-pick.sh
 
         # --- pre_attempt: inject house-style + boundary reminder -------
         # Cheaper than `--request -r` on every /afk invocation. Runs
         # before EACH attempt (so the reminder survives iteration).
         # `--request -r "..."` is still appended after this, so users
         # retain per-run overrides.
-        pre_attempt:
-          - scripts/afk-pre-attempt.sh
+        pre_attempt: scripts/afk-pre-attempt.sh
 
         # --- pre_merge: drift-guard (HARD GATE) ------------------------
         # Reject the merge BEFORE CI burns a round on it. Checks:
@@ -128,8 +142,7 @@ plugins:
         #   5. New Cargo dep without `# track: issue-XXXX` comment.
         # Thresholds are conservative on purpose — see ADR 0062 for
         # the rationale and the tuning policy.
-        pre_merge:
-          - scripts/afk-pre-merge.sh
+        pre_merge: scripts/afk-pre-merge.sh
 
         # --- post_merge: notifier --------------------------------------
         # Optional Slack-style hook. Disabled by default (no URL set);
@@ -142,15 +155,14 @@ plugins:
         # Prune worktrees that no longer have a branch attached, and
         # delete orphan afk/* branches. Defaults (cargo/gradle) handle
         # build-dir cleanup; this is git-state cleanup.
-        on_idle:
-          - git worktree prune
-          - |
-            git branch --list 'afk/*' | while read -r br; do
-              [ -z "$br" ] && continue
-              git worktree list --porcelain \
-                | grep -qF "  $br" \
-                || git branch -D "$br"
-            done
+        on_idle: |
+          git worktree prune
+          git branch --list 'afk/*' | while read -r br; do
+            [ -z "$br" ] && continue
+            git worktree list --porcelain \
+              | grep -qF "  $br" \
+              || git branch -D "$br"
+          done
 
         # --- defaults ---------------------------------------------------
         # Built-in defaults the harness ships with. Each can be turned
