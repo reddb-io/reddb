@@ -509,6 +509,40 @@ fn spatial_full_scan_reads_document_body_column() {
     );
 }
 
+/// The literal session from issue #1866, byte for byte — trailing zeros and
+/// all. The rest of the suite abbreviates these to `38.76`.
+///
+/// This is a characterization test, not a regression guard: the document body
+/// parses `38.76000000` to a float, so it passes with or without the exact
+/// decimal arm in `geo::numeric_value_to_f64` (which the unit tests there
+/// cover). What it pins is narrower and still worth pinning — that the exact
+/// bytes a real user typed keep resolving to a point, so a future change to
+/// the JSON number path cannot quietly break the reported repro.
+#[test]
+fn spatial_reads_document_body_with_the_reported_literals() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE DOCUMENT events").unwrap();
+    rt.execute_query(
+        r#"INSERT INTO events DOCUMENT VALUES ({"gpsLocation":{"lat":38.76000000,"lon":-77.15000000}})"#,
+    )
+    .unwrap();
+
+    let radius = spatial_rows(
+        &rt,
+        "SEARCH SPATIAL RADIUS 38.76000000 -77.15000000 10.0 COLLECTION events COLUMN gpsLocation",
+    );
+    assert_eq!(
+        radius.len(),
+        1,
+        "the exact literals from #1866 must resolve to a point"
+    );
+    assert_eq!(
+        radius[0].1,
+        0.0_f64.to_bits(),
+        "exact centre hit must report zero distance"
+    );
+}
+
 #[test]
 fn h3_cell_projects_and_groups_row_geopoints() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();

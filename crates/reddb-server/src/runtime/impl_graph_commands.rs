@@ -1437,15 +1437,12 @@ fn h3_cover_cells(lat: f64, lon: f64, radius_km: f64, resolution: u8) -> Vec<u64
     if cell == 0 {
         return Vec::new();
     }
-    let edge_km = crate::geo::h3::edge_length_km(resolution).max(f64::MIN_POSITIVE);
-    // Cap the cover so a large radius over a fine resolution cannot blow up
-    // into hundreds of millions of cells; beyond it the full scan is cheaper.
-    const MAX_COVER_RING: u32 = 128;
-    let k_f = (radius_km / edge_km).ceil() + 1.0;
-    if !k_f.is_finite() || k_f > f64::from(MAX_COVER_RING) {
+    // The cover is capped so a large radius over a fine resolution cannot blow
+    // up into hundreds of millions of cells; beyond it the full scan is cheaper.
+    let Some(k) = crate::geo::h3::radius_cover_ring(radius_km, resolution) else {
         return Vec::new();
-    }
-    crate::geo::h3::grid_disk(cell, k_f as u32)
+    };
+    crate::geo::h3::grid_disk(cell, k)
 }
 
 impl RedDBRuntime {
@@ -1670,9 +1667,13 @@ impl RedDBRuntime {
             dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let d_k = dists[k - 1];
             // A point in any unscanned cell (grid distance > r) lies at least
-            // `r * edge_km` from the centre — a conservative lower bound. Once
-            // that already meets or exceeds the current K-th distance, the
-            // cover is a proven superset of the true nearest-K.
+            // `edge_km * (√3·r − 1)` from the centre, since one grid step spans
+            // the hexagon short diagonal `√3 · edge`. `r * edge_km` is well
+            // below that, so it is a conservative lower bound — and the ~1.73×
+            // slack is also what covers `edge_km` being the resolution's
+            // *average* edge rather than its smallest. Once the bound meets or
+            // exceeds the current K-th distance, the cover is a proven superset
+            // of the true nearest-K.
             if f64::from(r) * edge_km >= d_k {
                 return candidates;
             }
