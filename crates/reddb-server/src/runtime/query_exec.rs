@@ -16,7 +16,7 @@ mod indexed_scan;
 mod join;
 mod json_writers;
 mod row_stream;
-mod table;
+pub(crate) mod table;
 mod vector;
 
 // Re-export public helpers so call sites outside this module

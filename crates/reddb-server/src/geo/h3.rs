@@ -26,6 +26,22 @@ pub const MAX_RESOLUTION: i64 = 15;
 /// surfaces prune identically and stay result-identical.
 pub const MAX_POLYGON_COVER_CELLS: usize = 50_000;
 
+/// Cap on the kRing cover of a radius query. Past it the ring costs more to
+/// enumerate than a full scan, so every caller falls back to the exact scan.
+pub const MAX_COVER_RING: u32 = 128;
+
+/// The kRing radius that covers `radius_km` around a point at `res`.
+///
+/// `None` when the cover would exceed [`MAX_COVER_RING`] — the caller then
+/// takes the exact full scan. Shared by the executor and by `EXPLAIN` so the
+/// plan that `EXPLAIN` reports is the plan the executor runs; the two drifting
+/// apart would make `EXPLAIN` announce an index route that never happens.
+pub fn radius_cover_ring(radius_km: f64, res: u8) -> Option<u32> {
+    let edge_km = edge_length_km(res).max(f64::MIN_POSITIVE);
+    let k = (radius_km / edge_km).ceil() + 1.0;
+    (k.is_finite() && k <= f64::from(MAX_COVER_RING)).then_some(k as u32)
+}
+
 pub fn valid_resolution(res: i64) -> Option<u8> {
     if (MIN_RESOLUTION..=MAX_RESOLUTION).contains(&res) {
         Some(res as u8)
@@ -84,11 +100,19 @@ pub fn grid_disk(cell: u64, k: u32) -> Vec<u64> {
 
 /// Average hexagon edge length, in kilometres, for an H3 resolution.
 ///
-/// Sourced from h3o's per-resolution average-edge table. Used by the
-/// spatial query path to size the covering kRing for a radius search
-/// (`k ≈ radius_km / edge_km`): one grid step spans at least one edge
-/// length, so dividing the radius by the edge length over-estimates the
-/// ring count, which keeps the cover a safe superset (PRD #1574 slice 3).
+/// Sourced from h3o's per-resolution *average*-edge table, and used by
+/// [`radius_cover_ring`] to size the covering kRing for a radius search
+/// (`k ≈ radius_km / edge_km`).
+///
+/// Why an average is safe here: one grid step moves between hexagon centres
+/// by the short diagonal, `√3 · edge ≈ 1.73 · edge`, so a cell at grid
+/// distance `k` sits at least `k · √3 · edge` away and its nearest point at
+/// least `edge · (√3·k − 1)`. Dividing the radius by a plain `edge` therefore
+/// over-estimates `k` by roughly 1.73×, and that margin is what absorbs the
+/// gap between this average and the smallest real cell at the resolution —
+/// H3 cell size varies within a resolution, so the average alone would not
+/// justify the bound. The margin is what keeps the cover a safe superset
+/// (PRD #1574 slice 3).
 pub fn edge_length_km(res: u8) -> f64 {
     clamp_resolution(res).edge_length_km()
 }
@@ -211,6 +235,42 @@ mod tests {
         assert!(coarse > fine, "edge length must shrink as resolution grows");
         // Out-of-range bytes clamp to res 15 rather than panicking.
         assert!(edge_length_km(200) > 0.0);
+    }
+
+    #[test]
+    fn radius_cover_ring_grows_with_radius_and_caps() {
+        // A radius under one edge still needs a ring, and the ring grows with
+        // the radius at a fixed resolution.
+        let small = radius_cover_ring(0.1, 9).expect("small radius must cover");
+        let large = radius_cover_ring(5.0, 9).expect("larger radius must cover");
+        assert!(small >= 1, "the cover always includes the neighbour ring");
+        assert!(large > small, "a wider radius needs a wider ring");
+        // Past the cap the caller must fall back to the exact full scan.
+        assert_eq!(
+            radius_cover_ring(20_000.0, 15),
+            None,
+            "a cover beyond MAX_COVER_RING must decline, not truncate"
+        );
+        assert_eq!(radius_cover_ring(f64::NAN, 9), None);
+    }
+
+    #[test]
+    fn radius_cover_ring_stays_a_superset_of_the_radius() {
+        // The ring must reach at least as far as the radius it covers: `k`
+        // grid steps span at least `k * edge` km (the √3 short-diagonal
+        // margin is on top of that), so `k * edge >= radius` must hold.
+        for res in [5u8, 7, 9, 12] {
+            let edge = edge_length_km(res);
+            for radius_km in [0.05, 0.5, 2.0, 10.0] {
+                let Some(k) = radius_cover_ring(radius_km, res) else {
+                    continue;
+                };
+                assert!(
+                    f64::from(k) * edge >= radius_km,
+                    "ring {k} at res {res} must reach {radius_km} km (edge {edge})"
+                );
+            }
+        }
     }
 
     #[test]

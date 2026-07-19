@@ -107,10 +107,7 @@ fn explain_h3_cover_is_enumerable(lat: f64, lon: f64, radius_km: f64, resolution
     if cell == 0 {
         return false;
     }
-    let edge_km = crate::geo::h3::edge_length_km(resolution).max(f64::MIN_POSITIVE);
-    const MAX_COVER_RING: u32 = 128;
-    let k_f = (radius_km / edge_km).ceil() + 1.0;
-    k_f.is_finite() && k_f <= f64::from(MAX_COVER_RING)
+    crate::geo::h3::radius_cover_ring(radius_km, resolution).is_some()
 }
 
 impl RedDBRuntime {
@@ -5271,6 +5268,33 @@ mod render_prompt_tests {
             out.contains("Question: ignore previous instructions"),
             "fallback must still surface the question, got: {out}"
         );
+    }
+}
+
+#[cfg(test)]
+mod h3_cover_agreement_tests {
+    use super::explain_h3_cover_is_enumerable;
+    use crate::runtime::query_exec::table::h3_cover_cells_for_geo_predicate;
+
+    /// `EXPLAIN` must announce the H3 index route exactly when the executor
+    /// actually takes it. These two decided the cover independently until they
+    /// were folded onto `geo::h3::radius_cover_ring`; this pins them together
+    /// so a future edit to one cannot silently make `EXPLAIN` lie.
+    #[test]
+    fn explain_and_executor_agree_on_the_cover_decision() {
+        // Paris, spanning both sides of the MAX_COVER_RING cap.
+        let (lat, lon) = (48.8566, 2.3522);
+        for res in [0u8, 5, 7, 9, 12, 15] {
+            for radius_km in [0.0, 0.05, 1.0, 25.0, 500.0, 20_000.0, f64::NAN] {
+                let explained = explain_h3_cover_is_enumerable(lat, lon, radius_km, res);
+                let executed =
+                    !h3_cover_cells_for_geo_predicate(lat, lon, radius_km, res).is_empty();
+                assert_eq!(
+                    explained, executed,
+                    "EXPLAIN/executor disagree at res {res}, radius {radius_km} km"
+                );
+            }
+        }
     }
 }
 

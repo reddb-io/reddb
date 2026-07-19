@@ -52,16 +52,25 @@ pub fn recognize_geo_value(value: &Value) -> Option<(f64, f64)> {
     }
 }
 
+/// Field names accepted as latitude, in priority order.
+const LAT_ALIASES: [&str; 2] = ["lat", "latitude"];
+/// Field names accepted as longitude, in priority order.
+const LON_ALIASES: [&str; 3] = ["lon", "lng", "longitude"];
+
+/// Resolve a `{lat, lon}` object from any keyed source.
+///
+/// `lookup` maps an alias to an already-coerced degree value, so the storage
+/// and JSON sides share one alias list and differ only in how their own value
+/// representation becomes an `f64`.
+fn recognize_geo_aliases(lookup: impl Fn(&str) -> Option<f64>) -> Option<(f64, f64)> {
+    let lat = LAT_ALIASES.iter().find_map(|alias| lookup(alias))?;
+    let lon = LON_ALIASES.iter().find_map(|alias| lookup(alias))?;
+    recognize_geo_degrees(lat, lon)
+}
+
 /// Recognize an object-shaped value from row/node fields as `(lat, lon)` degrees.
 pub fn recognize_geo_fields<'a>(field: impl Fn(&str) -> Option<&'a Value>) -> Option<(f64, f64)> {
-    let lat = field("lat")
-        .or_else(|| field("latitude"))
-        .and_then(numeric_value_to_f64)?;
-    let lon = field("lon")
-        .or_else(|| field("lng"))
-        .or_else(|| field("longitude"))
-        .and_then(numeric_value_to_f64)?;
-    recognize_geo_degrees(lat, lon)
+    recognize_geo_aliases(|alias| field(alias).and_then(numeric_value_to_f64))
 }
 
 fn recognize_geo_degrees(lat: f64, lon: f64) -> Option<(f64, f64)> {
@@ -76,11 +85,22 @@ fn recognize_geo_degrees(lat: f64, lon: f64) -> Option<(f64, f64)> {
     }
 }
 
+/// Coerce a storage value to degrees.
+///
+/// Must stay coverage-equivalent with [`json_number_to_f64`]: a coordinate that
+/// one side recognizes and the other drops is a silent zero-result.
+///
+/// `Value::Decimal(i64)` is deliberately absent. It carries no scale of its own
+/// — `decimal_precision` is per-column metadata — so converting one here would
+/// have to assume a precision. The engine does not currently agree on that
+/// assumption, so a decimal coordinate must be stored as `DecimalText` (exact,
+/// self-describing) or a float.
 fn numeric_value_to_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Float(value) => Some(*value),
         Value::Integer(value) => Some(*value as f64),
         Value::UnsignedInteger(value) => Some(*value as f64),
+        Value::DecimalText(text) => text.parse::<f64>().ok(),
         _ => None,
     }
 }
@@ -97,18 +117,12 @@ fn recognize_geo_json(bytes: &[u8]) -> Option<(f64, f64)> {
         let lat = &coordinates[1];
         return recognize_geo_degrees(json_number_to_f64(lat)?, json_number_to_f64(lon)?);
     }
-    let lat = object
-        .get("lat")
-        .or_else(|| object.get("latitude"))
-        .and_then(json_number_to_f64)?;
-    let lon = object
-        .get("lon")
-        .or_else(|| object.get("lng"))
-        .or_else(|| object.get("longitude"))
-        .and_then(json_number_to_f64)?;
-    recognize_geo_degrees(lat, lon)
+    recognize_geo_aliases(|alias| object.get(alias).and_then(json_number_to_f64))
 }
 
+/// Coerce a JSON value to degrees. Coverage-equivalent with
+/// [`numeric_value_to_f64`]; `as_f64` already spans integer, float, and exact
+/// decimal text.
 fn json_number_to_f64(value: &crate::json::Value) -> Option<f64> {
     value.as_f64()
 }
@@ -375,6 +389,40 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn exact_decimal_text_coordinates_are_recognized() {
+        // An exact decimal coordinate used to fall through to `None`, so a
+        // DECIMAL-typed lat/lon read as "no geo here" — a silent zero-result.
+        let decimal = fields(&[
+            ("lat", Value::DecimalText("38.76000000".to_string())),
+            ("lon", Value::DecimalText("-77.15000000".to_string())),
+        ]);
+        assert_eq!(
+            recognize_geo_fields(|key| decimal.get(key)),
+            Some((38.76, -77.15))
+        );
+    }
+
+    #[test]
+    fn both_halves_of_the_seam_cover_the_same_numeric_shapes() {
+        // The storage and JSON sides carry separate coercions by necessity —
+        // they read different representations — but a coordinate one accepts
+        // and the other drops is a silent zero-result. Exact decimals are
+        // where they last diverged.
+        for (text, expected) in [("38.76000000", 38.76), ("-77.15000000", -77.15)] {
+            assert_eq!(
+                numeric_value_to_f64(&Value::DecimalText(text.to_string())),
+                Some(expected),
+                "storage side must read exact decimal {text}"
+            );
+            assert_eq!(
+                json_number_to_f64(&crate::json::Value::Decimal(text.to_string())),
+                Some(expected),
+                "json side must read exact decimal {text}"
+            );
+        }
     }
 
     #[test]

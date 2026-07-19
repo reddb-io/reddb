@@ -446,7 +446,7 @@ fn h3_cell_candidate_ids(
     Some(ids.into_iter().map(|id| id.raw()).collect())
 }
 
-fn h3_cover_cells_for_geo_predicate(
+pub(crate) fn h3_cover_cells_for_geo_predicate(
     lat: f64,
     lon: f64,
     radius_km: f64,
@@ -456,13 +456,10 @@ fn h3_cover_cells_for_geo_predicate(
     if cell == 0 {
         return Vec::new();
     }
-    let edge_km = crate::geo::h3::edge_length_km(resolution).max(f64::MIN_POSITIVE);
-    const MAX_COVER_RING: u32 = 128;
-    let k_f = (radius_km / edge_km).ceil() + 1.0;
-    if !k_f.is_finite() || k_f > f64::from(MAX_COVER_RING) {
+    let Some(k) = crate::geo::h3::radius_cover_ring(radius_km, resolution) else {
         return Vec::new();
-    }
-    crate::geo::h3::grid_disk(cell, k_f as u32)
+    };
+    crate::geo::h3::grid_disk(cell, k)
 }
 
 pub(crate) fn execute_runtime_canonical_table_query_indexed(
