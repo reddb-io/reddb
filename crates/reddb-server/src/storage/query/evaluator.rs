@@ -510,7 +510,7 @@ fn as_f64(v: &Value) -> f64 {
         Value::Integer(x) => *x as f64,
         Value::BigInt(x) => *x as f64,
         Value::UnsignedInteger(x) => *x as f64,
-        Value::Decimal(x) => *x as f64,
+        Value::Decimal(x) => crate::storage::schema::decimal_to_f64(*x),
         _ => 0.0,
     }
 }

@@ -2082,13 +2082,13 @@ pub(super) fn update_extreme_value_slot(
     }
 }
 
-fn value_to_f64(val: &Value) -> Option<f64> {
+pub(crate) fn value_to_f64(val: &Value) -> Option<f64> {
     match val {
         Value::Integer(n) => Some(*n as f64),
         Value::UnsignedInteger(n) => Some(*n as f64),
         Value::BigInt(n) => Some(*n as f64),
         Value::Float(f) => Some(*f),
-        Value::Decimal(d) => Some(*d as f64 / 10_000.0),
+        Value::Decimal(d) => Some(crate::storage::schema::decimal_to_f64(*d)),
         _ => None,
     }
 }

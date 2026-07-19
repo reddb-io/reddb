@@ -25,4 +25,6 @@ pub mod value_codec;
 pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};
 pub use coerce::coerce;
 pub use table::{ColumnDef, Constraint, ConstraintType, IndexDef, IndexType, TableDef};
-pub use types::{DataType, Row, SqlTypeName, TypeModifier, Value, ValueError};
+pub use types::{
+    decimal_to_f64, DataType, Row, SqlTypeName, TypeModifier, Value, ValueError, DECIMAL_SCALE,
+};
