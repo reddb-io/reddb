@@ -31,6 +31,7 @@ RUN cargo fetch --locked
 COPY src/ src/
 
 RUN cargo build --release --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} \
+    && strip /app/target/release/red \
     && mkdir -p /image/data /image/etc/reddb \
     && touch /image/data/.keep /image/etc/reddb/.keep
 
