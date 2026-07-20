@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-grpc-proto"
-version = "1.23.1"
+version = "1.23.2"
 edition.workspace = true
 authors.workspace = true
 description = "Generated gRPC protobuf types and tonic client/server stubs for RedDB. Shared across reddb-server, reddb-client, and language drivers."

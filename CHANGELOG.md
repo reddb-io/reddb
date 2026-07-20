@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.2
+
+### Patch Changes
+
+- [#2069](https://github.com/reddb-io/reddb/pull/2069) [`03bb1bc`](https://github.com/reddb-io/reddb/commit/03bb1bcd6476e4d555fa9434f5d47bd337ae88da) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Expose the reversible legacy sidecar-to-zoned store conversion as `red migrate-pager-zone --path <FILE>` so applications can safely upgrade pre-1.23 databases before opening them.
+
 ## 1.23.1
 
 ### Patch Changes
