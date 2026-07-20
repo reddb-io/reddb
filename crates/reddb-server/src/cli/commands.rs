@@ -123,6 +123,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: migrate_from_redis_flags(),
     },
     CommandDef {
+      name: "migrate-pager-zone",
+      summary: "Convert a closed legacy sidecar-backed store to the zoned .rdb format",
+      usage: "red migrate-pager-zone --path ./data/reddb.rdb [--json]",
+      flags: migrate_pager_zone_flags(),
+    },
+    CommandDef {
       name: "salvage",
       summary: "Extract verified data from a damaged embedded store into a fresh .rdb",
       usage: "red salvage --source damaged.rdb --destination recovered.rdb [--json]",
@@ -735,6 +741,12 @@ fn migrate_from_redis_flags() -> Vec<FlagSchema> {
     ]
 }
 
+fn migrate_pager_zone_flags() -> Vec<FlagSchema> {
+    vec![FlagSchema::new("path")
+        .with_short('d')
+        .with_description("Closed legacy sidecar-backed .rdb file to convert")]
+}
+
 fn salvage_flags() -> Vec<FlagSchema> {
     vec![
         FlagSchema::new("source").with_description("Damaged source .rdb file to read"),
@@ -949,6 +961,14 @@ mod tests {
         assert!(help.contains("--dry-run"));
         assert!(help.contains("--redis-url"));
         assert!(help.contains("application-owned helper"));
+    }
+
+    #[test]
+    fn test_migrate_pager_zone_command_help() {
+        let help = command_help_text("migrate-pager-zone").unwrap();
+        assert!(help.contains("red migrate-pager-zone"));
+        assert!(help.contains("--path"));
+        assert!(help.contains("legacy sidecar-backed"));
     }
 
     #[test]
