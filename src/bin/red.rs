@@ -1829,6 +1829,10 @@ fn main() {
             std::process::exit(run_migrate_from_redis_command(&result.flags));
         }
 
+        "migrate-pager-zone" => {
+            std::process::exit(run_migrate_pager_zone_command(&result.flags));
+        }
+
         "salvage" => {
             std::process::exit(run_salvage_command(&result.flags));
         }
@@ -3176,6 +3180,51 @@ fn run_salvage_command(flags: &HashMap<String, FlagValue>) -> i32 {
     }
 }
 
+fn run_migrate_pager_zone_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let Some(path) = flag_string(flags, "path").filter(|value| !value.is_empty()) else {
+        let msg = "--path is required for migrate-pager-zone";
+        if json_mode {
+            json_error("migrate-pager-zone", msg);
+        }
+        eprintln!("migrate-pager-zone: {msg}");
+        return 2;
+    };
+
+    match reddb::pager_zone_migration::migrate_to_zoned(std::path::Path::new(&path)) {
+        Ok(report) => {
+            if json_mode {
+                let data_path = json_escape(&report.data_path.to_string_lossy());
+                let backup_path = json_escape(&report.backup_path.to_string_lossy());
+                json_ok(
+                    "migrate-pager-zone",
+                    &format!(
+                        "{{\"data_path\":\"{data_path}\",\"backup_path\":\"{backup_path}\",\"removed_sidecars\":{},\"header_recovered_from_shadow\":{},\"manifest_recovered_from_shadow\":{}}}",
+                        report.removed_sidecars.len(),
+                        report.header_recovered_from_shadow,
+                        report.manifest_recovered_from_shadow,
+                    ),
+                );
+            } else {
+                println!(
+                    "migrated {} to the zoned .rdb format; rollback copy retained at {}",
+                    report.data_path.display(),
+                    report.backup_path.display()
+                );
+            }
+            0
+        }
+        Err(err) => {
+            let msg = err.to_string();
+            if json_mode {
+                json_error("migrate-pager-zone", &msg);
+            }
+            eprintln!("migrate-pager-zone: {msg}");
+            1
+        }
+    }
+}
+
 fn validate_redis_tcp_connectivity(redis_url: &str) -> Result<(), String> {
     let addr = redis_socket_addr(redis_url)?;
     let mut addrs = addr
@@ -4142,6 +4191,13 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_default("redis-migration"),
             ]);
         }
+        Some("migrate-pager-zone") => {
+            flags.push(
+                cli::types::FlagSchema::new("path")
+                    .with_short('d')
+                    .with_description("Closed legacy sidecar-backed .rdb file to convert"),
+            );
+        }
         Some("salvage") => {
             flags.extend(vec![
                 cli::types::FlagSchema::new("source")
@@ -4244,6 +4300,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("delete".to_string(), vec![]),
         ("tick".to_string(), vec![]),
         ("migrate-from-redis".to_string(), vec![]),
+        ("migrate-pager-zone".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
@@ -6693,6 +6750,35 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
 
     fn str_flag(value: &str) -> FlagValue {
         FlagValue::Str(value.to_string())
+    }
+
+    #[test]
+    fn migrate_pager_zone_converts_a_closed_legacy_store() {
+        let dir = std::env::temp_dir().join(format!(
+            "reddb-migrate-pager-zone-cli-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.rdb");
+
+        let pager = reddb::storage::engine::pager::Pager::open_default(&path).unwrap();
+        pager.sync().unwrap();
+        drop(pager);
+        reddb::pager_zone_migration::revert_to_sidecars(&path).unwrap();
+
+        let flags = HashMap::from([(
+            "path".to_string(),
+            str_flag(path.to_string_lossy().as_ref()),
+        )]);
+        assert_eq!(run_migrate_pager_zone_command(&flags), 0);
+        assert!(path.with_extension("rdb.pre-migration").exists());
+        assert!(!PathBuf::from(format!("{}-hdr", path.display())).exists());
+        assert!(!PathBuf::from(format!("{}-meta", path.display())).exists());
+
+        let reopened = reddb::storage::engine::pager::Pager::open_default(&path).unwrap();
+        drop(reopened);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn env_lock() -> &'static Mutex<()> {
