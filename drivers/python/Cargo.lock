@@ -2166,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "reddb-io-client",
  "reddb-io-file",
@@ -2178,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "reddb-io-client-connector",
  "reddb-io-grpc-proto",
@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "reddb-io-grpc-proto",
  "reddb-io-wire",
@@ -2201,14 +2201,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "aes-gcm",
 ]
 
 [[package]]
 name = "reddb-io-file"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2223,7 +2223,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "prost",
  "reddb-io-wire",
@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-python"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "prost",
  "pyo3",
@@ -2253,14 +2253,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-server"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2320,14 +2320,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.23.1"
+version = "1.23.2"
 dependencies = [
  "reddb-io-types",
  "serde_json",
