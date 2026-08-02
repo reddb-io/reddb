@@ -3251,21 +3251,64 @@ fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
         ));
     };
     let db_options = config.to_db_options()?;
+    let rt_config = detect_runtime_config();
+    let worker_threads = config.workers.unwrap_or(rt_config.suggested_workers);
+
+    // Issue #2055 — the RedWire (and PG) accept loops are `tokio::spawn`ed
+    // and die with the runtime that hosted them, so — like `run_grpc_server`
+    // and `run_dual_server` — the HTTP-only path owns a multi-thread tokio
+    // runtime kept alive for the process lifetime. The synchronous axum HTTP
+    // server runs on its own OS thread (`serve_in_background_on`, which builds
+    // its own edge runtime), and this runtime's `block_on` stays parked on
+    // that thread's completion so the wire listeners spawned underneath keep
+    // running. Before this, binding HTTP without gRPC spawned no wire listener
+    // at all: `--wire-bind` / `--wire-tls-bind` and the env-derived plaintext
+    // default (`REDDB_WIRE_BIND_ADDR`) all silently vanished.
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(worker_threads)
+        .thread_stack_size(rt_config.stack_size)
+        .build()
+        .map_err(|err| format!("tokio runtime: {err}"))?;
+
+    // Guard lives on the outer stack so it outlives the tokio runtime.
     let (runtime, auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(&config, db_options.clone())?;
     let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
     spawn_admin_metrics_listeners(&runtime, &auth_store);
     spawn_http_tls_listener(&config, &runtime, &auth_store)?;
-    let server = build_http_server_with_transport_readiness(
-        runtime.clone(),
-        auth_store,
-        bind_addr.clone(),
-        transport_readiness,
-    );
-    let server = apply_http_limits(server, &config, &runtime);
-    let server = apply_ui_bundle(server, &config)?;
-    tracing::info!(transport = "http", bind = %bind_addr, "listener online");
-    server.serve_on(listener).map_err(|err| err.to_string())
+
+    let signal_runtime = runtime.clone();
+    tokio_runtime.block_on(async move {
+        spawn_lifecycle_signal_handler(signal_runtime).await;
+        // Bring up the RedWire listeners (plaintext + TLS) and the PG wire
+        // listener before the HTTP surface is built, so the readiness the
+        // HTTP `/health` snapshot captures enumerates every wire transport —
+        // parity with what `run_dual_server` records.
+        spawn_wire_listeners(&config, &runtime, &mut transport_readiness).await?;
+        spawn_pg_listener(&config, &runtime);
+
+        let server = build_http_server_with_transport_readiness(
+            runtime.clone(),
+            auth_store,
+            bind_addr.clone(),
+            transport_readiness,
+        );
+        let server = apply_http_limits(server, &config, &runtime);
+        let server = apply_ui_bundle(server, &config)?;
+        tracing::info!(transport = "http", bind = %bind_addr, "listener online");
+        let http_handle = server.serve_in_background_on(listener);
+
+        // Park on the HTTP thread. Keeping `block_on` here alive holds the
+        // runtime — and the wire accept loops spawned above — open for as
+        // long as the HTTP server runs; a return means the process is done.
+        match tokio::task::spawn_blocking(move || http_handle.join()).await {
+            Ok(Ok(Ok(()))) => Err("HTTP server exited unexpectedly".to_string()),
+            Ok(Ok(Err(err))) => Err(err.to_string()),
+            Ok(Err(_)) => Err("HTTP server thread panicked".to_string()),
+            Err(join_err) => Err(format!("HTTP server monitor task failed: {join_err}")),
+        }
+    })
 }
 
 /// PLAN.md HTTP TLS — when `http_tls_bind_addr` is set, spawn a
