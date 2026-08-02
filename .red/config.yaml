@@ -174,3 +174,24 @@ plugins:
           heartbeat: true         # post_attempt heartbeat
           envelope: true          # post_attempt envelope shaping
           validation: true       # post_merge validation report
+      labels:
+        hitl_types:
+          - wayfinder:grilling
+          - wayfinder:prototype
+
+# ------------------------------------------------------------------
+# Required host binaries (/red-setup Section E2). `tq` is the jq-for-TOON
+# CLI from github:reddb-io/toon; after ADR 0097 there is no jq fallback
+# for RedSkills-owned TOON/TOONL logs. /red-doctor enforces this pin and
+# red-flags absence or drift.
+#
+# Recorded as the version actually installed on this host (0.13.0), not
+# the v0.3.0 the red-setup 3.3.9 bundle still names: 0.13.0 is newer, so
+# pinning the older string would make the doctor demand a downgrade.
+# Reinstall with:
+#   TQ_VERSION=v0.13.0 curl -fsSL \
+#     https://raw.githubusercontent.com/reddb-io/toon/v0.13.0/install.sh | sh
+# ------------------------------------------------------------------
+host_binaries:
+  tq:
+    version: 0.13.0
