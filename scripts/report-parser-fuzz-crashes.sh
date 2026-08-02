@@ -15,11 +15,15 @@ gh label create "release-blocker" \
   --color "B60205" \
   --description "Blocks release until resolved" >/dev/null 2>&1 || true
 
-body="$(mktemp)"
+header="$(mktemp)"
 tmin_log="$(mktemp)"
 b64_file="$(mktemp)"
+create_body="$(mktemp)"
+comment_body="$(mktemp)"
+sections_dir="$(mktemp -d)"
 title_suffix="crash"
-trap 'rm -f "${body}" "${tmin_log}" "${b64_file}"' EXIT
+trap 'rm -rf "${header}" "${tmin_log}" "${b64_file}" "${create_body}" "${comment_body}" "${sections_dir}"' EXIT
+
 {
   echo "Nightly parser fuzz found a failure in \`${target}\`."
   echo
@@ -34,13 +38,20 @@ trap 'rm -f "${body}" "${tmin_log}" "${b64_file}"' EXIT
   echo
   echo "## Minimized input"
   echo
-} > "${body}"
+} > "${header}"
 
+# Build one Markdown section per artifact, keyed by the libFuzzer artifact
+# basename. The basename is a content hash, so it is a stable dedup key: an
+# identical reproducer found on a later night has the same basename and adds
+# nothing, while a genuinely new input carries a new basename.
+declare -a basenames=()
+idx=0
 while IFS= read -r artifact; do
-  minimized="${RUNNER_TEMP:-/tmp}/${target}-$(basename "${artifact}").min"
+  base="$(basename "${artifact}")"
+  minimized="${RUNNER_TEMP:-/tmp}/${target}-${base}.min"
   cp "${artifact}" "${minimized}"
   artifact_kind="crash"
-  if [[ "$(basename "${artifact}")" == oom-* ]]; then
+  if [[ "${base}" == oom-* ]]; then
     artifact_kind="out-of-memory"
     title_suffix="out-of-memory"
   fi
@@ -66,10 +77,64 @@ while IFS= read -r artifact; do
     echo
     echo '```'
     echo
-  } >> "${body}"
+  } > "${sections_dir}/${idx}"
+  basenames+=("${base}")
+  idx=$((idx + 1))
 done < <(find "${artifact_dir}" -type f | sort)
 
-gh issue create \
-  --title "release-blocker: parser fuzz ${title_suffix} in ${target}" \
-  --label "release-blocker" \
-  --body-file "${body}"
+title="release-blocker: parser fuzz ${title_suffix} in ${target}"
+
+# One open issue per (target, failure-kind): the title is fully determined by
+# ${title_suffix} and ${target}, so it doubles as the dedup key. Only OPEN
+# issues are dedup targets — a closed-but-recurring failure means the fix that
+# closed it regressed, and that occurrence deserves its own fresh history.
+issue_number="$(gh issue list --state open --label release-blocker \
+  --search "in:title \"parser fuzz ${title_suffix} in ${target}\"" \
+  --json number,title \
+  --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+
+if [ -z "${issue_number}" ]; then
+  # No open match: file a fresh issue carrying every reproducer from this run.
+  cat "${header}" > "${create_body}"
+  for i in "${!basenames[@]}"; do
+    cat "${sections_dir}/${i}" >> "${create_body}"
+  done
+  gh issue create \
+    --title "${title}" \
+    --label "release-blocker" \
+    --body-file "${create_body}"
+  exit 0
+fi
+
+# Open match exists: comment only with reproducers whose basename is not already
+# recorded in the issue body or any of its comments. Re-found identical inputs
+# add nothing.
+existing_content="$(gh issue view "${issue_number}" --json body,comments \
+  --jq '.body, (.comments[]?.body)')"
+
+declare -a new_indices=()
+for i in "${!basenames[@]}"; do
+  if ! grep -qF -- "${basenames[$i]}" <<<"${existing_content}"; then
+    new_indices+=("${i}")
+  fi
+done
+
+if [ "${#new_indices[@]}" -eq 0 ]; then
+  # Known failure recurred with no new inputs: stay silent, just log.
+  echo "Known failure \"${title}\" recurred in ${GITHUB_RUN_URL:-unknown} with no new inputs (#${issue_number}); nothing to report."
+  exit 0
+fi
+
+{
+  echo "Nightly parser fuzz reproduced this failure again."
+  echo
+  echo "- Workflow run: ${GITHUB_RUN_URL:-unknown}"
+  echo
+  echo "## New reproducers"
+  echo
+} > "${comment_body}"
+for i in "${new_indices[@]}"; do
+  cat "${sections_dir}/${i}" >> "${comment_body}"
+done
+
+gh issue comment "${issue_number}" --body-file "${comment_body}"
