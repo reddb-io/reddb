@@ -58,7 +58,16 @@ fi
 # labels array we extract for the filter predicates. Labels are
 # lowercased for the contains/startswith checks; reddb labels are
 # lowercase by convention but this protects against accidental drift.
-printf '%s' "$ctx" | jq -c --argjson c "$candidates" '
+#
+# Priority ordering is by the WORD vocabulary this repo actually
+# provisions (`priority:urgent|high|low`, per
+# `.red/agents/triage-labels.md`), not by a number. The sort used
+# `tonumber` until 2026-08-02, which threw `Invalid numeric literal` on
+# every real `priority:high` label and — since this jq is the last
+# command — leaked a non-zero exit that ABORTED the pick. That is the
+# starvation this script's own header forbids. Unknown or absent
+# priority falls back to 9 (last), same as before.
+if ! filtered=$(printf '%s' "$ctx" | jq -c --argjson c "$candidates" '
     ($c
      | map(
          . as $cand
@@ -74,11 +83,21 @@ printf '%s' "$ctx" | jq -c --argjson c "$candidates" '
        )
      | sort_by(
          (.labels // [])
-         | map(select(. | startswith("priority:")))[0]
-         // "priority:9"
+         | map(select(. | ascii_downcase | startswith("priority:")))[0]
+         // "priority:none"
+         | ascii_downcase
          | sub("^priority:"; "")
-         | tonumber
+         | {"urgent": 0, "high": 1, "low": 8}[.] // 9
        )
     ) as $filtered
     | .candidates = $filtered
-'
+'); then
+    # Never starve the harness on a jq failure: log and pass the queue
+    # through untouched (ADR 0059 lesson, restated in this file's header).
+    printf 'afk-pre-pick: jq pass failed; passing queue through untouched\n' >&2
+    printf '%s' "$ctx"
+    exit 0
+fi
+
+printf '%s' "$filtered"
+exit 0
