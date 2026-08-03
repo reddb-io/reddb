@@ -42,7 +42,7 @@ jobs:
           components: llvm-tools-preview
 
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       - uses: Swatinem/rust-cache@v2
         with:
