@@ -14,6 +14,17 @@ plugins:
 
     afk:
       # ----------------------------------------------------------------
+      # Trust gate (fail-closed on public repos). The nightly parser-fuzz
+      # workflow files release-blockers as app/github-actions and the
+      # maintainer promotes them to ready-for-agent during triage, so both
+      # actors must be allowlisted or every bot-authored issue is held for
+      # summon forever. MUST be a single string (the loader `.split()`s it),
+      # not a YAML list.
+      # ----------------------------------------------------------------
+      trust-gate:
+        allowlist: "app/github-actions filipeforattini"
+
+      # ----------------------------------------------------------------
       # Worker model tiers. Pin every Claude tier to opus-4-8/high so a
       # worker never falls through to the cheaper per-tier defaults
       # (validate defaults to low). Flattening every tier onto one slug
