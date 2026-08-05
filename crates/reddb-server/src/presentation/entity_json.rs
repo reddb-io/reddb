@@ -649,6 +649,8 @@ fn format_mac(bytes: &[u8; 6]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
     use super::*;
 
     #[test]
@@ -677,5 +679,67 @@ mod tests {
                 JsonValue::String("3.141592653589793238462643383279".to_string())
             )
         );
+    }
+
+    #[test]
+    fn keystone_json_is_byte_identical_to_presentation_json() {
+        let document_fields = [
+            Value::Integer(7),
+            Value::DecimalText("18446744073709551616.0001".to_string()),
+        ];
+        let mut document_body = Vec::new();
+        reddb_types::document_body_codec::encode(
+            &[
+                ("integer", &document_fields[0]),
+                ("decimal", &document_fields[1]),
+            ],
+            &mut document_body,
+        )
+        .expect("representative document body should encode");
+
+        let corpus = [
+            Value::Null,
+            Value::Integer(9_007_199_254_740_992),
+            Value::UnsignedInteger(u64::MAX),
+            Value::Float(1.25),
+            Value::text("hello"),
+            Value::Blob(vec![0x00, 0xff]),
+            Value::Boolean(true),
+            Value::Timestamp(1_700_000_000),
+            Value::TimestampMs(1_700_000_000_123),
+            Value::Duration(-500),
+            Value::IpAddr(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            Value::MacAddr([0, 1, 2, 3, 4, 5]),
+            Value::Vector(vec![1.5, -2.0]),
+            Value::Json(br#"{"nested":[1,2.5]}"#.to_vec()),
+            Value::Json(vec![0xff]),
+            Value::Json(document_body),
+            Value::Uuid([0; 16]),
+            Value::VectorRef("embeddings".to_string(), 7),
+            Value::RowRef("users".to_string(), 8),
+            Value::Cidr(0xc0a8_0100, 24),
+            Value::Decimal(1_234_567),
+            Value::DecimalText("3.141592653589793238462643383279".to_string()),
+            Value::Array(vec![
+                Value::Boolean(false),
+                Value::Array(vec![Value::Integer(2)]),
+            ]),
+            Value::GeoPoint(12_345_678, -87_654_321),
+            Value::Money {
+                asset_code: "BRL".to_string(),
+                minor_units: 12_345,
+                scale: 2,
+            },
+            Value::KeyRef("settings".to_string(), "theme".to_string()),
+            Value::DocRef("profiles".to_string(), 9),
+            Value::Secret(vec![1, 2, 3]),
+            Value::Password("hash".to_string()),
+        ];
+
+        for value in corpus {
+            let legacy = storage_value_to_json(&value).to_string_compact();
+            let keystone = value.to_json().to_string_compact();
+            assert_eq!(keystone.as_bytes(), legacy.as_bytes(), "{value:?}");
+        }
     }
 }
