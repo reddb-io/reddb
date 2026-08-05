@@ -322,9 +322,8 @@ pub(crate) fn execute_aggregate_query(
     >::new(spill_dir.path(), WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
 
-    let snapshot = crate::runtime::impl_core::capture_current_snapshot()
-        .expect("aggregate scan executes inside a statement snapshot");
-    manager.scan_for_each(&snapshot, |entity| {
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    manager.scan_for_each(snapshot.as_ref(), |entity| {
         // ── Lazy record materialisation ──────────────────────────────────
         // We defer `runtime_table_record_from_entity` until we actually
         // need it (complex filters, GROUP BY exprs or aggregate args that
@@ -3136,10 +3135,9 @@ fn try_execute_parallel_single_col_numeric_aggs(
         return Ok(None);
     };
 
-    let snapshot = crate::runtime::impl_core::capture_current_snapshot()
-        .expect("parallel aggregate scan executes inside a statement snapshot");
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let acc = manager.scan_fold_parallel(
-        &snapshot,
+        snapshot.as_ref(),
         || FastNumericGroupAccumulator {
             groups: std::collections::HashMap::new(),
             unsupported_value: false,

@@ -190,11 +190,10 @@ fn execute_geo_candidate_scan(
         &crate::runtime::scalar_evaluator::PermissiveScope,
     );
 
-    let snapshot = crate::runtime::impl_core::capture_current_snapshot()
-        .expect("geo table scan executes inside a statement snapshot");
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let hydrate_store = db.store();
     let mut records = Vec::new();
-    manager.scan_for_each(&snapshot, |entity| {
+    manager.scan_for_each(snapshot.as_ref(), |entity| {
         if !candidate_ids.contains(&entity.id.raw()) {
             return true;
         }
@@ -1481,11 +1480,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
         let mut records: Vec<UnifiedRecord> = Vec::new();
         let hydrate_store = store;
-        let snapshot = crate::runtime::impl_core::capture_current_snapshot()
-            .expect("table scan executes inside a statement snapshot");
+        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         if use_parallel {
             let (matching, scan_stats) =
-                manager.scan_zoned_with_stats(&snapshot, &zone_preds, |entity| {
+                manager.scan_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
                     if let Some(candidates) = tag_series_candidates.as_ref() {
                         let EntityData::TimeSeries(point) = &entity.data else {
                             return false;
@@ -1571,7 +1569,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             }
         } else {
             let scan_stats =
-                manager.scan_for_each_zoned_with_stats(&snapshot, &zone_preds, |entity| {
+                manager.scan_for_each_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
                 if records.len() >= limit {
                     return false; // stop iteration
                 }
@@ -1941,9 +1939,8 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 };
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
-                let snapshot = crate::runtime::impl_core::capture_current_snapshot()
-                    .expect("filtered table scan executes inside a statement snapshot");
-                manager.scan_for_each(&snapshot, |entity| {
+                let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+                manager.scan_for_each(snapshot.as_ref(), |entity| {
                     if records.len() >= limit {
                         return false;
                     }
