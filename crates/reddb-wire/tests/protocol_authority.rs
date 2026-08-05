@@ -736,6 +736,73 @@ fn client_connector_redwire_is_compatibility_adapter_only() {
 }
 
 #[test]
+fn legacy_engine_and_client_connector_point_to_canonical_replacements() {
+    let root = repo_root();
+    let engine = read(root.join("crates/reddb-server/src/engine.rs"));
+    let connector = read(root.join("crates/reddb-client-connector/src/lib.rs"));
+    let grpc_lib = read(root.join("crates/reddb-grpc-proto/src/lib.rs"));
+    let grpc_client = read(root.join("crates/reddb-grpc-proto/src/client.rs"));
+    let client_manifest = read(root.join("crates/reddb-client/Cargo.toml"));
+    let server_manifest = read(root.join("crates/reddb-server/Cargo.toml"));
+    let client_connector = read(root.join("crates/reddb-client/src/connector/mod.rs"));
+    let server_stdio = read(root.join("crates/reddb-server/src/rpc_stdio.rs"));
+
+    assert!(
+        engine.contains("#[deprecated(")
+            && engine.contains("RedDBRuntime")
+            && engine.contains("RedDBServer"),
+        "RedDBEngine should warn users and name both real execution entry points"
+    );
+
+    assert!(
+        connector.contains("#![deprecated(")
+            && connector.contains("reddb_grpc_proto")
+            && connector.contains("RedDBClient"),
+        "the published connector should be a deprecated re-export of reddb-grpc-proto"
+    );
+    for mirrored in [
+        "pub struct HealthStatus",
+        "pub struct QueryResponse",
+        "pub struct CreatedEntity",
+        "pub struct BulkCreateStatus",
+        "pub struct OperationStatus",
+    ] {
+        assert!(
+            !connector.contains(mirrored) && !grpc_client.contains(mirrored),
+            "generated gRPC replies should replace mirror type {mirrored}"
+        );
+    }
+
+    assert!(
+        grpc_lib.contains("pub use client::RedDBClient"),
+        "reddb-grpc-proto should publish the canonical RedDBClient"
+    );
+    assert!(
+        grpc_client.contains("Result<HealthReply")
+            && grpc_client.contains("Result<QueryReply")
+            && grpc_client.contains("Result<EntityReply")
+            && grpc_client.contains("Result<BulkEntityReply")
+            && grpc_client.contains("Result<OperationReply"),
+        "the canonical client should return generated reply types directly"
+    );
+
+    for (manifest_name, manifest) in [
+        ("reddb-client", client_manifest),
+        ("reddb-server", server_manifest),
+    ] {
+        assert!(
+            !manifest.contains("reddb-client-connector ="),
+            "{manifest_name} should depend on the canonical gRPC crate"
+        );
+    }
+    assert!(
+        client_connector.contains("pub use reddb_grpc_proto")
+            && server_stdio.contains("use reddb_grpc_proto::RedDBClient;"),
+        "workspace consumers should import the canonical client home"
+    );
+}
+
+#[test]
 fn client_redwire_client_type_has_single_definition() {
     let root = repo_root();
     let mut definitions = Vec::new();
