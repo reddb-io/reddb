@@ -7,10 +7,9 @@
 //! reusable term-comparison primitive both fencing boundaries share:
 //!
 //! * **Apply boundary** — a replica rejects a WAL/logical record whose term
-//!   is behind its current term. The live replica apply path enforces this
-//!   directly in [`super::logical::LogicalChangeApplier::apply`] (it already
-//!   tracks the last-applied term); [`TermFence::admit_record`] is the same
-//!   rule expressed over a durable term so it survives a restart.
+//!   is behind its current term. The live replica apply path routes through
+//!   [`TermFence::admit_record`] in
+//!   [`super::logical::LogicalChangeApplier::apply`].
 //! * **Handshake boundary** — when a node opens a replication stream it
 //!   declares the term it is streaming under. [`TermFence::admit_handshake`]
 //!   refuses a handshake whose declared term is behind the current term, so a
