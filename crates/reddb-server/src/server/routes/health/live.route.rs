@@ -25,5 +25,6 @@ pub(crate) fn register(registry: &mut RouteRegistry) {
             RouteMiddleware::ListenerSurfaceGate,
             RouteMiddleware::QuotaBypass,
         ],
+        handler: None,
     });
 }
