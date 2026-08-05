@@ -66,6 +66,27 @@ mod tests {
             .all(|command| command.output_shape.is_declared()));
     }
 
+    /// The only commands served outside buffered dispatch: `try_route_streaming`
+    /// writes their responses directly and returns before
+    /// `route_discovered_buffered` runs, so they carry no buffered handler.
+    const STREAMING_SERVED_COMMANDS: &[&str] = &["streams.input", "streams.query.output"];
+
+    #[test]
+    fn every_discovered_http_command_has_a_handler_binding() {
+        let catalog = build_discovered_route_catalog().unwrap();
+
+        let unbound: Vec<&str> = catalog
+            .commands()
+            .filter(|command| command.handler.is_none())
+            .map(|command| command.id)
+            .collect();
+
+        assert_eq!(
+            unbound, STREAMING_SERVED_COMMANDS,
+            "every non-streaming command must bind a buffered handler"
+        );
+    }
+
     #[test]
     fn discovered_routes_are_matchable() {
         let catalog = build_discovered_route_catalog().unwrap();

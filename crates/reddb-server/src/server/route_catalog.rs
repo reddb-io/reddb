@@ -5,6 +5,26 @@ use std::sync::Arc;
 use crate::application::OperationContext;
 use crate::auth::policies::{self, EvalContext, Policy, ResourceRef};
 
+use super::{HttpResponse, RedDBServer};
+
+/// The buffered HTTP request handed to a route's handler, alongside the
+/// catalog match that selected it (so handlers read their path params from
+/// `matched.params` instead of re-parsing the path).
+pub(crate) struct RouteRequest<'a> {
+    pub(crate) matched: &'a RouteMatch<'a>,
+    pub(crate) method: &'a str,
+    pub(crate) path: &'a str,
+    pub(crate) query: &'a BTreeMap<String, String>,
+    pub(crate) headers: &'a BTreeMap<String, String>,
+    pub(crate) body: &'a [u8],
+}
+
+/// A route's buffered handler. Every non-streaming [`RouteEntry`] binds one
+/// at declaration time, so a declared route cannot reach dispatch without a
+/// handler behind it.
+pub(crate) type RouteHandler =
+    for<'a, 'b> fn(&'a RedDBServer, &'b RouteRequest<'b>) -> Option<HttpResponse>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) enum RouteMethod {
     Get,
@@ -176,7 +196,7 @@ impl RouteAlias {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct CommandSpec {
     pub(crate) id: &'static str,
     pub(crate) input_shape: CommandShape,
@@ -190,6 +210,10 @@ pub(crate) struct CommandSpec {
     pub(crate) stability: CommandStability,
     pub(crate) aliases: &'static [RouteAlias],
     pub(crate) middlewares: &'static [RouteMiddleware],
+    /// `None` only for the streaming-served commands, whose responses are
+    /// written by [`RedDBServer::try_route_streaming`] before buffered
+    /// dispatch runs.
+    pub(crate) handler: Option<RouteHandler>,
 }
 
 pub(crate) type RouteSpec = CommandSpec;
@@ -204,7 +228,7 @@ pub(crate) struct RouteGroupDefaults {
     pub(crate) middlewares: &'static [RouteMiddleware],
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct RouteEntry {
     pub(crate) id: &'static str,
     pub(crate) input_shape: CommandShape,
@@ -212,10 +236,16 @@ pub(crate) struct RouteEntry {
     pub(crate) method: RouteMethod,
     pub(crate) pattern: &'static str,
     pub(crate) aliases: &'static [RouteAlias],
+    pub(crate) handler: Option<RouteHandler>,
 }
 
 impl RouteEntry {
-    pub(crate) const fn new(id: &'static str, method: RouteMethod, pattern: &'static str) -> Self {
+    pub(crate) const fn new(
+        id: &'static str,
+        method: RouteMethod,
+        pattern: &'static str,
+        handler: RouteHandler,
+    ) -> Self {
         Self {
             id,
             input_shape: CommandShape::Structured,
@@ -223,10 +253,33 @@ impl RouteEntry {
             method,
             pattern,
             aliases: &[],
+            handler: Some(handler),
         }
     }
 
     pub(crate) const fn with_aliases(
+        id: &'static str,
+        method: RouteMethod,
+        pattern: &'static str,
+        aliases: &'static [RouteAlias],
+        handler: RouteHandler,
+    ) -> Self {
+        Self {
+            id,
+            input_shape: CommandShape::Structured,
+            output_shape: CommandShape::Structured,
+            method,
+            pattern,
+            aliases,
+            handler: Some(handler),
+        }
+    }
+
+    /// A route whose response is written by the streaming entry
+    /// ([`RedDBServer::try_route_streaming`]), which runs before buffered
+    /// dispatch and never falls through to it. Declaring the absence of a
+    /// buffered handler is the only way to get one.
+    pub(crate) const fn streaming(
         id: &'static str,
         method: RouteMethod,
         pattern: &'static str,
@@ -239,6 +292,7 @@ impl RouteEntry {
             method,
             pattern,
             aliases,
+            handler: None,
         }
     }
 }
@@ -268,6 +322,7 @@ impl RouteRegistry {
                 stability: defaults.stability,
                 aliases: entry.aliases,
                 middlewares: defaults.middlewares,
+                handler: entry.handler,
             });
         }
     }
@@ -908,6 +963,7 @@ mod tests {
             stability: RouteStability::Stable,
             aliases: &[],
             middlewares: NO_MIDDLEWARE,
+            handler: None,
         }
     }
 
