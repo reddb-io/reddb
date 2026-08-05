@@ -9,6 +9,7 @@ use crate::replication::cdc::{
     change_record_from_entity, wire_json_to_server_json, ChangeOperation, ChangeRecord,
     RangeAdmitError, RangeAuthority,
 };
+use crate::replication::fence::{FenceVerdict, MemoryTermStore, TermFence};
 use crate::storage::{EntityId, EntityKind, RedDB, UnifiedStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,6 +294,7 @@ impl std::error::Error for BookmarkWaitError {}
 /// detected explicitly.
 pub struct LogicalChangeApplier {
     last_applied_term: AtomicU64,
+    term_fence: TermFence<MemoryTermStore>,
     last_applied_lsn: AtomicU64,
     received_frontier_lsn: AtomicU64,
     last_payload_hash: Mutex<Option<[u8; 32]>>,
@@ -323,6 +325,7 @@ impl LogicalChangeApplier {
     pub fn with_metrics(starting_lsn: u64, metrics: std::sync::Arc<ReplicaApplyMetrics>) -> Self {
         Self {
             last_applied_term: AtomicU64::new(crate::replication::DEFAULT_REPLICATION_TERM),
+            term_fence: TermFence::new(MemoryTermStore::new()),
             last_applied_lsn: AtomicU64::new(starting_lsn),
             received_frontier_lsn: AtomicU64::new(starting_lsn),
             last_payload_hash: Mutex::new(None),
@@ -443,19 +446,19 @@ impl LogicalChangeApplier {
             }
         }
 
-        // Stale-term fence (issue #835, ADR 0030). A record from a term
-        // *behind* the highest term this replica has adopted is a returning
-        // ex-primary on a superseded timeline. Reject it before the LSN
-        // state machine runs — fail closed regardless of LSN, so a stale
-        // ex-primary can neither apply nor advance the chain/watermark. A
-        // record on the *same* term is admitted; a *higher* term is the new
-        // primary's timeline and is adopted on apply below. This mirrors the
-        // election-side `RefusalReason::StaleTerm` on the data path.
-        if record.term < last_term {
+        // Stale-term fence (issue #835, ADR 0030). Run the shared primitive
+        // before the LSN state machine so a stale ex-primary can neither
+        // apply nor advance the chain/watermark. TermFence also adopts a
+        // higher term before admitting its record.
+        if let FenceVerdict::Fenced(rejection) = self
+            .term_fence
+            .admit_record(record.term)
+            .expect("in-memory term store")
+        {
             self.metrics.record(ApplyErrorKind::Fenced);
             return Err(LogicalApplyError::StaleTermFenced {
-                record_term: record.term,
-                current_term: last_term,
+                record_term: rejection.incoming_term,
+                current_term: rejection.current_term,
                 lsn: record.lsn,
             });
         }
