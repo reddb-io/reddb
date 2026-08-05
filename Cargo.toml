@@ -161,7 +161,7 @@ path = "tests/grouped/timeseries_retention.rs"
 [dependencies]
 reddb-wire = { workspace = true }
 reddb-grpc-proto = { workspace = true }
-reddb-client = { workspace = true }
+reddb-client = { workspace = true, features = ["http"] }
 reddb-server = { workspace = true }
 reddb-file = { workspace = true }
 # `red` bin spins up its own multi-thread tokio runtime (server
