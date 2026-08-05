@@ -31,7 +31,15 @@ impl std::fmt::Debug for EmbeddedClient {
 impl EmbeddedClient {
     /// Open a persistent database at `path`.
     pub fn open(path: PathBuf) -> Result<Self> {
-        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(path))
+        Self::open_with_options(RedDBOptions::persistent(path))
+    }
+
+    /// Open with explicit engine options (storage profile, packaging,
+    /// durability). Callers that resolve deployment profiles — like the
+    /// `red` CLI — build the options themselves; `open` keeps the
+    /// plain-default path.
+    pub fn open_with_options(options: RedDBOptions) -> Result<Self> {
+        let runtime = RedDBRuntime::with_options(options)
             .map_err(|e| ClientError::new(ErrorCode::IoError, e.to_string()))?;
         Ok(Self {
             runtime: Arc::new(runtime),
@@ -326,19 +334,56 @@ fn schema_value_to_value_out(v: &SchemaValue) -> ValueOut {
         SchemaValue::Null => ValueOut::Null,
         SchemaValue::Boolean(b) => ValueOut::Bool(*b),
         SchemaValue::Integer(n) => ValueOut::Integer(*n),
-        SchemaValue::UnsignedInteger(n) => ValueOut::Integer(*n as i64),
+        SchemaValue::UnsignedInteger(n) => i64::try_from(*n)
+            .map(ValueOut::Integer)
+            .unwrap_or_else(|_| ValueOut::String(n.to_string())),
         SchemaValue::Float(n) => ValueOut::Float(*n),
+        SchemaValue::DecimalText(s) => ValueOut::String(s.clone()),
         SchemaValue::BigInt(n) => ValueOut::Integer(*n),
         SchemaValue::TimestampMs(n)
         | SchemaValue::Timestamp(n)
         | SchemaValue::Duration(n)
         | SchemaValue::Decimal(n) => ValueOut::Integer(*n),
         SchemaValue::Password(_) | SchemaValue::Secret(_) => ValueOut::String("***".to_string()),
+        SchemaValue::Json(bytes) => {
+            reddb_server::json::from_slice::<reddb_server::json::Value>(bytes)
+                .ok()
+                .and_then(|json| reddb_server::json::to_string(&json).ok())
+                .map(ValueOut::String)
+                .unwrap_or(ValueOut::Null)
+        }
         SchemaValue::Text(s) => ValueOut::String(s.to_string()),
         SchemaValue::Email(s)
         | SchemaValue::Url(s)
         | SchemaValue::NodeRef(s)
         | SchemaValue::EdgeRef(s) => ValueOut::String(s.clone()),
         other => ValueOut::String(format!("{other}")),
+    }
+}
+
+#[cfg(test)]
+mod value_out_tests {
+    use super::*;
+
+    #[test]
+    fn conversion_preserves_the_arms_the_cli_relied_on() {
+        // The divergent CLI duplicate was retired in favor of this
+        // conversion (issue #2124); these arms are the ones that diverged.
+        assert_eq!(
+            schema_value_to_value_out(&SchemaValue::DecimalText("1.250".to_string())),
+            ValueOut::String("1.250".to_string()),
+        );
+        assert_eq!(
+            schema_value_to_value_out(&SchemaValue::Json(b"{\"b\": 2, \"a\": 1}".to_vec())),
+            ValueOut::String("{\"a\":1,\"b\":2}".to_string()),
+        );
+        assert_eq!(
+            schema_value_to_value_out(&SchemaValue::UnsignedInteger(7)),
+            ValueOut::Integer(7),
+        );
+        assert_eq!(
+            schema_value_to_value_out(&SchemaValue::UnsignedInteger(u64::MAX)),
+            ValueOut::String(u64::MAX.to_string()),
+        );
     }
 }

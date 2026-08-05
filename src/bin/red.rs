@@ -1209,15 +1209,32 @@ fn run_data_command(
             std::process::exit(1);
         });
     let uri = data_connection_uri(flags, args);
-    let client = runtime
-        .block_on(reddb_client::Reddb::connect(&uri))
-        .unwrap_or_else(|err| {
-            if json_mode {
-                json_error(command, &err.to_string());
-            }
-            eprintln!("{command}: {err}");
-            std::process::exit(1);
-        });
+    // `--path` resolves the storage profile/packaging flags + env exactly like
+    // the pre-driver `open_local_runtime` did; other targets go through the
+    // driver's URI connect.
+    let client_result = match flag_string(flags, "path").filter(|path| !path.is_empty()) {
+        Some(path) => resolve_storage_profile(flags, "local")
+            .and_then(|profile| {
+                reddb::api::RedDBOptions::persistent(&path)
+                    .with_storage_profile(profile)
+                    .map_err(|e| format!("storage profile: {e}"))
+            })
+            .and_then(|options| {
+                reddb_client::embedded::EmbeddedClient::open_with_options(options)
+                    .map(reddb_client::Reddb::Embedded)
+                    .map_err(|err| err.to_string())
+            }),
+        None => runtime
+            .block_on(reddb_client::Reddb::connect(&uri))
+            .map_err(|err| err.to_string()),
+    };
+    let client = client_result.unwrap_or_else(|err| {
+        if json_mode {
+            json_error(command, &err);
+        }
+        eprintln!("{command}: {err}");
+        std::process::exit(1);
+    });
 
     let (result, dry_run): (Result<QueryResult, String>, Option<(&str, String)>) = match command {
         "query" => {
@@ -1252,9 +1269,10 @@ fn run_data_command(
         }
         "insert" => {
             if remaining.len() < 2 {
-                data_usage_error(
+                data_usage_error_with_example(
                     "insert",
                     "Usage: red insert [--path file] <collection> <json>",
+                    "Example: red insert users '{\"name\": \"Alice\"}'",
                     json_mode,
                 );
             }
@@ -1308,9 +1326,10 @@ fn run_data_command(
         }
         "get" => {
             if remaining.len() < 2 {
-                data_usage_error(
+                data_usage_error_with_example(
                     "get",
                     "Usage: red get [--path file] <collection> <id>",
+                    "Example: red get users 42",
                     json_mode,
                 );
             }
@@ -1327,9 +1346,10 @@ fn run_data_command(
         }
         "delete" => {
             if remaining.len() < 2 {
-                data_usage_error(
+                data_usage_error_with_example(
                     "delete",
                     "Usage: red delete [--path file] <collection> <id>",
+                    "Example: red delete users 42",
                     json_mode,
                 );
             }
@@ -1390,6 +1410,15 @@ fn cli_flag_supplied(args: &[String], long: &str, short: char) -> bool {
     })
 }
 
+fn data_usage_error_with_example(command: &str, usage: &str, example: &str, json_mode: bool) -> ! {
+    if json_mode {
+        json_error(command, usage);
+    }
+    eprintln!("{usage}");
+    eprintln!("{example}");
+    std::process::exit(1);
+}
+
 fn data_usage_error(command: &str, usage: &str, json_mode: bool) -> ! {
     if json_mode {
         json_error(command, usage);
@@ -1408,34 +1437,45 @@ fn emit_data_result(
     if json_mode {
         let rows = String::from_utf8(format_query_result(result, RowFormat::Json))
             .expect("driver JSON RowFormat is UTF-8");
-        let statement = if dry_run.is_some() {
-            "explain"
-        } else {
-            &result.statement
-        };
-        let mut data = format!(
+        let mut body = format!(
             "{{\"statement\":\"{}\",\"affected\":{},\"rows\":{}",
-            json_escape(statement),
+            json_escape(&result.statement),
             result.affected,
             rows.trim_end()
         );
-        if let Some((statement, preview)) = dry_run {
-            data.push_str(&format!(
-                ",\"dry_run\":true,\"would_run\":\"{}\",\"preview_statement\":\"{}\"",
-                json_escape(statement),
-                json_escape(&preview)
-            ));
-        }
         if let Some(notice) = result.notice.as_deref() {
-            data.push_str(&format!(",\"notice\":\"{}\"", json_escape(notice)));
+            body.push_str(&format!(",\"notice\":\"{}\"", json_escape(notice)));
         }
-        data.push('}');
+        body.push('}');
+        // Dry-run keeps the documented envelope: the result nests under
+        // `preview`, never flattened to the top level.
+        let data = if let Some((statement, preview)) = dry_run {
+            format!(
+                "{{\"statement\":\"explain\",\"dry_run\":true,\"would_run\":\"{}\",\"preview_statement\":\"{}\",\"preview\":{}}}",
+                json_escape(statement),
+                json_escape(&preview),
+                body
+            )
+        } else {
+            body
+        };
         json_ok(command, &data);
         return;
     }
     if let Some((statement, preview)) = dry_run {
         println!("dry-run: {statement}");
         println!("preview: {preview}");
+    }
+    // Writes keep their affected-row feedback: a successful DML must never
+    // render as "(no rows)".
+    if result.statement != "select" && result.rows.is_empty() {
+        println!(
+            "{} ok ({} row{} affected)",
+            result.statement,
+            result.affected,
+            if result.affected == 1 { "" } else { "s" },
+        );
+        return;
     }
     std::io::stdout()
         .write_all(&format_query_result(result, format))
@@ -1739,7 +1779,7 @@ fn main() {
                 command.as_deref().unwrap_or_default(),
                 &result.flags,
                 &args,
-                &remaining,
+                remaining,
             );
         }
 
@@ -6783,8 +6823,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "-p=alice".to_string(),
         ];
         let params = collect_query_params(&args).unwrap();
-        assert_eq!(params[0], reddb::storage::schema::Value::Integer(42));
-        assert_eq!(params[1], reddb::storage::schema::Value::text("alice"));
+        assert_eq!(params[0], reddb_client::Value::Int(42));
+        assert_eq!(params[1], reddb_client::Value::Text("alice".to_string()));
     }
 
     #[test]
