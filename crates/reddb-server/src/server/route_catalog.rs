@@ -495,10 +495,8 @@ impl<'a> IamCommandPolicyEngine<'a> {
 
 impl CommandPolicyEngine for IamCommandPolicyEngine<'_> {
     fn allows(&self, ctx: &OperationContext, command: &CommandSpec) -> bool {
-        let Some(action) = command_policy_action(command) else {
-            return true;
-        };
-        if ctx.audit_principal == "anonymous" {
+        let policy = command_policy(command);
+        if !policy.default_allow && ctx.audit_principal == "anonymous" {
             return false;
         }
 
@@ -511,32 +509,64 @@ impl CommandPolicyEngine for IamCommandPolicyEngine<'_> {
             principal_tenant: ctx.tenant.clone(),
             current_tenant: ctx.tenant.clone(),
             now_ms: crate::auth::now_ms(),
-            principal_is_platform_scoped: ctx.tenant.is_none(),
+            // OperationContext carries the request's tenant override, not the
+            // principal's scope; an absent override must never satisfy
+            // `platform_scoped` policy conditions meant for platform operators.
+            principal_is_platform_scoped: false,
             ..EvalContext::default()
         };
         let policies: Vec<&Policy> = self.policies.iter().map(Arc::as_ref).collect();
 
-        matches!(
-            policies::evaluate(&policies, action, &resource, &eval_context),
-            policies::Decision::Allow { .. } | policies::Decision::AdminBypass
-        )
+        match policies::evaluate(&policies, policy.action, &resource, &eval_context) {
+            policies::Decision::Deny { .. } => false,
+            policies::Decision::Allow { .. } => true,
+            // AdminBypass is documented dead ("treat admin as an ordinary
+            // principal") and must never become an automatic allow.
+            policies::Decision::DefaultDeny | policies::Decision::AdminBypass => {
+                policy.default_allow
+            }
+        }
     }
 }
 
-fn command_policy_action(command: &CommandSpec) -> Option<&'static str> {
+struct CommandPolicy {
+    action: &'static str,
+    /// Commands whose auth requirement is `Public`/`OptionalUser` need no
+    /// matching Allow policy — but explicit Deny guardrails still apply,
+    /// so the evaluator is always consulted.
+    default_allow: bool,
+}
+
+fn command_policy(command: &CommandSpec) -> CommandPolicy {
+    let method_action = match command.method {
+        RouteMethod::Get | RouteMethod::Options | RouteMethod::Head => "select",
+        RouteMethod::Post
+        | RouteMethod::Put
+        | RouteMethod::Patch
+        | RouteMethod::Delete
+        | RouteMethod::Any => "write",
+    };
     match command.auth {
-        RouteAuth::Public | RouteAuth::OptionalUser => None,
-        RouteAuth::UserRequired => match command.method {
-            RouteMethod::Get | RouteMethod::Options | RouteMethod::Head => Some("select"),
-            RouteMethod::Post
-            | RouteMethod::Put
-            | RouteMethod::Patch
-            | RouteMethod::Delete
-            | RouteMethod::Any => Some("write"),
+        RouteAuth::Public | RouteAuth::OptionalUser => CommandPolicy {
+            action: method_action,
+            default_allow: true,
         },
-        RouteAuth::AdminToken => Some("admin:*"),
-        RouteAuth::OpsCapability(action) => Some(action),
-        RouteAuth::StreamLease => Some("stream"),
+        RouteAuth::UserRequired => CommandPolicy {
+            action: method_action,
+            default_allow: false,
+        },
+        RouteAuth::AdminToken => CommandPolicy {
+            action: "admin:*",
+            default_allow: false,
+        },
+        RouteAuth::OpsCapability(action) => CommandPolicy {
+            action,
+            default_allow: false,
+        },
+        RouteAuth::StreamLease => CommandPolicy {
+            action: "stream",
+            default_allow: false,
+        },
     }
 }
 
@@ -1185,6 +1215,78 @@ mod tests {
         let deny_engine = IamCommandPolicyEngine::new(&deny_policies);
         assert!(matches!(
             CommandAuthorizer::new(&catalog, &deny_engine).authorize(&ctx, "test.command"),
+            Err(CommandAuthorizationError::Denied { .. })
+        ));
+    }
+
+    #[test]
+    fn iam_policy_engine_deny_guardrail_blocks_public_command() {
+        let deny = Arc::new(
+            Policy::from_json_str(
+                r#"{"id":"guardrail","version":1,"statements":[
+                    {"effect":"deny","actions":["select"],
+                     "resources":["command:client:health.get"]}
+                ]}"#,
+            )
+            .expect("deny policy"),
+        );
+        let catalog = CommandCatalog::build(vec![RouteSpec {
+            auth: RouteAuth::Public,
+            audience: RouteAudience::Client,
+            ..spec("health.get", RouteMethod::Get, "/health")
+        }])
+        .expect("command catalog");
+
+        // Without the guardrail a Public command is allowed by default,
+        // even anonymously.
+        let no_policies: Vec<Arc<Policy>> = vec![];
+        let open_engine = IamCommandPolicyEngine::new(&no_policies);
+        let anon = OperationContext::read_only("request-1");
+        assert!(CommandAuthorizer::new(&catalog, &open_engine)
+            .authorize(&anon, "health.get")
+            .is_ok());
+
+        // An explicit Deny wins for anonymous and authenticated callers alike.
+        let deny_policies = vec![deny];
+        let deny_engine = IamCommandPolicyEngine::new(&deny_policies);
+        assert!(matches!(
+            CommandAuthorizer::new(&catalog, &deny_engine).authorize(&anon, "health.get"),
+            Err(CommandAuthorizationError::Denied { .. })
+        ));
+        let user = OperationContext::read_only("request-2").with_principal("operator");
+        assert!(matches!(
+            CommandAuthorizer::new(&catalog, &deny_engine).authorize(&user, "health.get"),
+            Err(CommandAuthorizationError::Denied { .. })
+        ));
+    }
+
+    #[test]
+    fn iam_policy_engine_never_grants_platform_scoped_conditions() {
+        // The allow policy is restricted to platform-scoped principals.
+        // OperationContext carries no principal scope, so a request without
+        // a tenant override must NOT satisfy the condition.
+        let allow = Arc::new(
+            Policy::from_json_str(
+                r#"{"id":"platform-only","version":1,"statements":[
+                    {"effect":"allow","actions":["write"],
+                     "resources":["command:operator:test.command"],
+                     "condition":{"platform_scoped":true}}
+                ]}"#,
+            )
+            .expect("allow policy"),
+        );
+        let catalog = CommandCatalog::build(vec![RouteSpec {
+            audience: RouteAudience::Operator,
+            ..spec("test.command", RouteMethod::Post, "/test")
+        }])
+        .expect("command catalog");
+        let ctx = OperationContext::read_only("request-1").with_principal("tenant-user");
+        assert_eq!(ctx.tenant, None);
+
+        let policies = vec![allow];
+        let engine = IamCommandPolicyEngine::new(&policies);
+        assert!(matches!(
+            CommandAuthorizer::new(&catalog, &engine).authorize(&ctx, "test.command"),
             Err(CommandAuthorizationError::Denied { .. })
         ));
     }
