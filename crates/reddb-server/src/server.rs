@@ -54,7 +54,7 @@ mod tests {
     use super::*;
     use crate::api::RedDBOptions;
     use crate::health::HealthReport;
-    use crate::service_cli::{
+    use crate::transport::{
         TransportListenerFailure, TransportListenerState, TransportReadiness,
     };
 
@@ -226,7 +226,7 @@ pub struct ServerOptions {
     /// `Public`. Set to `AdminOnly` / `MetricsOnly` for dedicated
     /// admin / scrape ports (PLAN.md Phase 6.2).
     pub surface: ServerSurface,
-    pub transport_readiness: crate::service_cli::TransportReadiness,
+    pub transport_readiness: crate::transport::TransportReadiness,
     /// Allowed `Origin` values for the RedWire-over-WSS browser endpoint
     /// (issue #935, ADR 0036). WebSocket is not covered by CORS, so the
     /// upgrade is gated on an explicit allowlist to block Cross-Site
@@ -257,7 +257,7 @@ impl Default for ServerOptions {
             write_timeout_ms: 5_000,
             max_scan_limit: 1_000,
             surface: ServerSurface::Public,
-            transport_readiness: crate::service_cli::TransportReadiness::default(),
+            transport_readiness: crate::transport::TransportReadiness::default(),
             websocket_allowed_origins: Vec::new(),
             ui_dir: None,
         }
