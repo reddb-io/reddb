@@ -2302,6 +2302,7 @@ dependencies = [
  "reddb-io-file",
  "reddb-io-grpc-proto",
  "reddb-io-server",
+ "reddb-io-types",
  "reddb-io-wire",
  "tokio",
 ]
@@ -2313,6 +2314,7 @@ dependencies = [
  "reddb-io-client-connector",
  "reddb-io-grpc-proto",
  "reddb-io-server",
+ "reddb-io-types",
  "reddb-io-wire",
  "reqwest",
  "serde_json",
@@ -2371,6 +2373,7 @@ dependencies = [
  "prost",
  "pyo3",
  "reddb-io",
+ "reddb-io-types",
  "rustls",
  "rustls-pemfile",
  "serde_json",
