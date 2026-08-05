@@ -26,6 +26,18 @@ fn extract_bearer(headers: &BTreeMap<String, String>) -> Option<&str> {
 const CATALOG_DEPRECATION_DATE: &str = "2026-08-08";
 const CATALOG_DEPRECATION_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
+struct HttpCommandPolicyDecision(bool);
+
+impl route_catalog::CommandPolicyEngine for HttpCommandPolicyDecision {
+    fn allows(
+        &self,
+        _ctx: &crate::application::OperationContext,
+        _command: &route_catalog::CommandSpec,
+    ) -> bool {
+        self.0
+    }
+}
+
 fn deprecated_catalog_response(endpoint: &'static str, mut response: HttpResponse) -> HttpResponse {
     warn_deprecated_catalog_endpoint(endpoint);
 
@@ -436,15 +448,15 @@ impl RedDBServer {
             .map_err(|err| json_error(400, err.to_string()))
     }
 
-    fn route_discovered_buffered(
+    pub(crate) fn dispatch_auth_routes(
         &self,
+        matched: &route_catalog::RouteMatch<'_>,
         method: &str,
         path: &str,
         query: &BTreeMap<String, String>,
         headers: &BTreeMap<String, String>,
         body: &[u8],
     ) -> Option<HttpResponse> {
-        let matched = Self::discovered_route(method, path)?;
         match matched.spec.id {
             "auth.bootstrap" => Some(self.handle_auth_bootstrap(body.to_vec())),
             "auth.login" => Some(self.handle_auth_login(body.to_vec())),
@@ -488,9 +500,65 @@ impl RedDBServer {
             "auth.admin.users.create" | "auth.admin.system_users.create" => {
                 Some(self.handle_admin_create_user(body.to_vec()))
             }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_health_live_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "health.live" => Some(self.handle_health_live()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_health_ready_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "health.ready" => Some(self.handle_health_ready()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_health_startup_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "health.startup" => Some(self.handle_health_startup()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_query_streams_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "query.contract" => Some(self.handle_query_contract()),
             "query.execute" => Some(self.handle_query(body.to_vec())),
             "query.explain" => Some(self.handle_query_explain(body.to_vec())),
@@ -504,6 +572,20 @@ impl RedDBServer {
                 let tenant = self.stream_tenant_for(headers);
                 Some(self.handle_query_stream_cancel(body, &principal, &tenant))
             }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_admin_ops_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "admin.shutdown" => Some(self.handle_admin_shutdown()),
             "admin.drain" => Some(self.handle_admin_drain()),
             "admin.restore" => Some(self.handle_admin_restore(body.to_vec())),
@@ -737,6 +819,20 @@ impl RedDBServer {
                 ))
             }
             "ops.capabilities" => Some(self.handle_capabilities()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_catalog_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "catalog.readiness" => {
                 let native = self.native_use_cases();
                 let readiness = native.readiness();
@@ -923,6 +1019,20 @@ impl RedDBServer {
                     ),
                 ),
             )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_physical_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "physical.metadata" => Some(match self.native_use_cases().physical_metadata() {
                 Ok(metadata) => json_response(200, metadata.to_json_value()),
                 Err(err) => json_error(404, err.to_string()),
@@ -1207,6 +1317,20 @@ impl RedDBServer {
                 let collection = matched.params.get("collection")?;
                 Some(self.handle_rebuild_indexes(body.to_vec(), Some(collection)))
             }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_collections_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "collections.list" => {
                 let values = self
                     .catalog_use_cases()
@@ -1429,11 +1553,39 @@ impl RedDBServer {
                 let collection = matched.params.get("collection")?;
                 Some(self.handle_ivf_search(collection, body.to_vec()))
             }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_geo_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "geo.distance" => Some(handlers_geo::handle_geo_distance(body.to_vec())),
             "geo.bearing" => Some(handlers_geo::handle_geo_bearing(body.to_vec())),
             "geo.midpoint" => Some(handlers_geo::handle_geo_midpoint(body.to_vec())),
             "geo.destination" => Some(handlers_geo::handle_geo_destination(body.to_vec())),
             "geo.bounding_box" => Some(handlers_geo::handle_geo_bounding_box(body.to_vec())),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_graph_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "graph.neighborhood" => Some(self.handle_graph_neighborhood(body.to_vec())),
             "graph.traverse" => Some(self.handle_graph_traverse(body.to_vec())),
             "graph.shortest_path" => Some(self.handle_graph_shortest_path(body.to_vec())),
@@ -1503,6 +1655,20 @@ impl RedDBServer {
             "graph.jobs.complete" => Some(self.handle_analytics_job_complete(body.to_vec())),
             "graph.jobs.stale" => Some(self.handle_analytics_job_stale(body.to_vec())),
             "graph.jobs.fail" => Some(self.handle_analytics_job_fail(body.to_vec())),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_ai_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "ai.ask" => Some(self.handle_ai_ask(body.to_vec())),
             "ai.embeddings" => Some(self.handle_ai_embeddings(body.to_vec())),
             "ai.prompt" => Some(self.handle_ai_prompt(body.to_vec())),
@@ -1529,6 +1695,20 @@ impl RedDBServer {
                 let name = matched.params.get("name")?;
                 Some(self.handle_ai_model_cache_drop(name))
             }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_metrics_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "metrics.scrape" => Some(self.handle_metrics()),
             "prometheus.query.get" => Some(self.handle_prometheus_query(headers, query, None)),
             "prometheus.query.post" => {
@@ -1544,6 +1724,20 @@ impl RedDBServer {
                 Some(self.handle_prometheus_remote_write(query, headers, body.to_vec()))
             }
             // Routing 3/3 (#1643) leftovers migrated from the legacy matcher.
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dispatch_leftovers_routes(
+        &self,
+        matched: &route_catalog::RouteMatch<'_>,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        match matched.spec.id {
             "root.index" => Some(match self.ui_dir() {
                 Some(ui_dir) => crate::server::ui_static::serve_bundle_asset(ui_dir, "/")
                     .unwrap_or_else(|| self.handle_root_discovery()),
@@ -1622,6 +1816,18 @@ impl RedDBServer {
             }
             _ => None,
         }
+    }
+
+    fn route_discovered_buffered(
+        &self,
+        method: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+    ) -> Option<HttpResponse> {
+        let matched = Self::discovered_route(method, path)?;
+        (matched.spec.handler?)(self, &matched, method, path, query, headers, body)
     }
 
     /// Routing 3/3 (#1643) — `/config/{key.path}` GET/PUT/DELETE. Re-runs the
@@ -1832,6 +2038,28 @@ impl RedDBServer {
     }
 
     fn is_authorized(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> bool {
+        let credential_decision = self.is_authorized_by_http_credentials(method, path, headers);
+        let Some(matched) = Self::discovered_route(method, path) else {
+            return credential_decision;
+        };
+        let principal = principal_for(headers);
+        let ctx = self.build_read_context(
+            headers.get("x-request-id").map(String::as_str),
+            Some(&principal),
+        );
+        let policy = HttpCommandPolicyDecision(credential_decision);
+
+        route_catalog::CommandAuthorizer::new(routes::discovered_route_catalog(), &policy)
+            .authorize(&ctx, matched.spec.id)
+            .is_ok()
+    }
+
+    fn is_authorized_by_http_credentials(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> bool {
         if let Some(matched) = Self::discovered_route(method, path) {
             if matches!(
                 matched.spec.auth,
