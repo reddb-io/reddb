@@ -9,7 +9,7 @@
 //!
 //! ## Why
 //!
-//! reddb's range scan in `btree/cursor.rs` walks leaves
+//! reddb's range scan in `engine/btree.rs` walks leaves
 //! sequentially. The buffer-pool fetch for leaf N+1 happens only
 //! after the cursor finishes leaf N, so the disk read serializes
 //! with the CPU's tuple processing. Prefetch breaks that
@@ -19,10 +19,9 @@
 //!
 //! ## Wiring
 //!
-//! Phase 5 wiring adds a single call site in
-//! `btree/cursor.rs::advance_leaf` that checks "are we past 50%
-//! of the current leaf?" and if so calls `prefetch_page(next_leaf_id)`.
-//! The cursor already knows `next_leaf_id` from the leaf header.
+//! `BTreeCursor` checks "are we past 50% of the current leaf?" and asks
+//! `Pager::prefetch_hint` to call `prefetch_page(next_leaf_id)`. The cursor
+//! already knows `next_leaf_id` from the leaf header.
 //!
 //! The actual `posix_fadvise` syscall is OS-specific and behind
 //! a stub on platforms that don't support it (Windows). reddb

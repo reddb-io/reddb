@@ -188,10 +188,6 @@ name = "row_id_intersection_bench"
 harness = false
 
 [[bench]]
-name = "cache_ring_contention_bench"
-harness = false
-
-[[bench]]
 name = "cache_topology_spike_bench"
 harness = false
 
