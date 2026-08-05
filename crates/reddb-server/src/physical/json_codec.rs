@@ -229,7 +229,7 @@ fn collection_contract_to_persisted(
         table_def_hex: contract
             .table_def
             .as_ref()
-            .map(|table_def| hex::encode(table_def.to_bytes())),
+            .map(|table_def| hex::encode(reddb_file::encode_table_def(table_def))),
         timestamps_enabled: contract.timestamps_enabled,
         context_index_enabled: contract.context_index_enabled,
         metrics_raw_retention_ms: contract.metrics_raw_retention_ms,
@@ -266,13 +266,11 @@ fn collection_contract_from_persisted(
             let bytes = hex::decode(encoded).map_err(|err| {
                 invalid_data(format!("invalid collection contract table_def hex: {err}"))
             })?;
-            Some(
-                crate::storage::schema::TableDef::from_bytes(&bytes).map_err(|err| {
-                    invalid_data(format!(
-                        "invalid collection contract table_def payload: {err}"
-                    ))
-                })?,
-            )
+            Some(reddb_file::decode_table_def(&bytes).map_err(|err| {
+                invalid_data(format!(
+                    "invalid collection contract table_def payload: {err}"
+                ))
+            })?)
         }
         None => None,
     };

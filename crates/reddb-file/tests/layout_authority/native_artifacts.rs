@@ -70,17 +70,20 @@ fn reddb_file_owns_native_artifact_codecs() {
     let table = read(root.join("crates/reddb-file/src/table_def.rs"));
     for required in [
         "pub const TABLE_DEF_MAGIC",
-        "pub struct TableDefFrame",
-        "pub struct ColumnDefFrame",
-        "pub struct IndexDefFrame",
-        "pub struct ConstraintFrame",
-        "pub fn encode_table_def_frame",
-        "pub fn decode_table_def_frame",
+        "pub fn encode_table_def",
+        "pub fn decode_table_def",
         "b\"RTBL\"",
     ] {
         assert!(
             table.contains(required),
             "reddb-file should own the RTBL table-def codec: {required}"
+        );
+    }
+    for logical_name in ["TableDef", "ColumnDef", "IndexDef", "Constraint"] {
+        let forbidden = format!("pub struct {logical_name}{}", "Frame");
+        assert!(
+            !table.contains(&forbidden),
+            "reddb-file must codec the keystone {logical_name} directly"
         );
     }
 }
@@ -97,6 +100,7 @@ fn server_does_not_redeclare_native_artifact_payload_formats() {
     let impl_access =
         read(root.join("crates/reddb-server/src/storage/unified/devx/reddb/impl_access.rs"));
     let table = read(root.join("crates/reddb-server/src/storage/schema/table.rs"));
+    let physical = read(root.join("crates/reddb-server/src/physical/json_codec.rs"));
 
     let hnsw_src = non_test_source(&hnsw);
     let ivf_src = non_test_source(&ivf);
@@ -156,8 +160,12 @@ fn server_does_not_redeclare_native_artifact_payload_formats() {
         "impl_access.rs must call the reddb-file native artifact codecs"
     );
     assert!(
-        table_src.contains("reddb_file::encode_table_def_frame")
-            && table_src.contains("reddb_file::decode_table_def_frame"),
-        "table.rs must call the reddb-file RTBL codec"
+        table_src.contains("pub use reddb_types::table::*"),
+        "table.rs must re-export the keystone table vocabulary"
+    );
+    assert!(
+        physical.contains("reddb_file::encode_table_def")
+            && physical.contains("reddb_file::decode_table_def"),
+        "physical JSON persistence must call the reddb-file RTBL codec"
     );
 }
