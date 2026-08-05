@@ -171,6 +171,13 @@ pub(crate) trait ReadFrame {
 /// re-parsing the query. Matches the keywords that the legacy
 /// inline checks in `RedDBRuntime::check_query_privilege` and
 /// `intent_lock_modes_for` already key on.
+/// Whether [`statement_kind`] reads `query` as a mutating statement.
+/// The Request seam uses it to keep its pre-write commit-policy check off
+/// read paths.
+pub(crate) fn statement_is_write(query: &str) -> bool {
+    statement_kind(query) == "write"
+}
+
 fn statement_kind(query: &str) -> &'static str {
     let trimmed = query.trim_start();
     // Skip a leading line / block comment so the classifier doesn't
@@ -1459,33 +1466,48 @@ mod tests {
     /// Transport adapters may decode their wire-specific parameter value
     /// shapes, but SQL parsing/binding must stay behind the runtime's
     /// statement entrypoint. This pins the deeper seam introduced for
-    /// parameterized query execution: HTTP, JSON-RPC, RedWire, PG wire,
-    /// and gRPC all call `RedDBRuntime::execute_query_with_params`, which
-    /// installs a real `StatementExecutionFrame` before dispatch.
+    /// parameterized query execution: HTTP, JSON-RPC, PG wire, and gRPC all
+    /// call `RedDBRuntime::execute_query_with_params`, which installs a real
+    /// `StatementExecutionFrame` before dispatch.
+    ///
+    /// RedWire (issue #2139) reaches the same entrypoint one layer deeper:
+    /// it hands a `QueryRequest` to the Request module, and
+    /// `QueryRequestExecutor` calls `execute_query_with_params` on its
+    /// behalf. Its delegation target is the seam, so that is what is pinned
+    /// here — the "no binding in the adapter" half is unchanged for all.
     #[test]
     fn parameterized_transport_adapters_delegate_binding_to_runtime() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let adapters = [
-            "src/server/handlers_query.rs",
-            "src/rpc_stdio.rs",
-            "src/wire/redwire/session.rs",
-            "src/wire/postgres/server.rs",
-            "src/grpc.rs",
+            ("src/server/handlers_query.rs", "execute_query_with_params"),
+            ("src/rpc_stdio.rs", "execute_query_with_params"),
+            ("src/wire/redwire/session.rs", "QueryRequestExecutor"),
+            ("src/wire/postgres/server.rs", "execute_query_with_params"),
+            ("src/grpc.rs", "execute_query_with_params"),
         ];
 
-        for relative in adapters {
+        for (relative, delegation) in adapters {
             let path = manifest_dir.join(relative);
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
             assert!(
-                text.contains("execute_query_with_params"),
-                "{relative} should delegate parameterized query execution to the runtime"
+                text.contains(delegation),
+                "{relative} should delegate parameterized query execution through {delegation}"
             );
             assert!(
                 !text.contains("user_params::bind"),
                 "{relative} must not bind SQL params in the transport adapter"
             );
         }
+
+        // The Request module is the only place RedWire's delegation may
+        // bottom out: it must still reach the runtime entrypoint itself.
+        let seam = std::fs::read_to_string(manifest_dir.join("src/runtime/query_request.rs"))
+            .expect("read src/runtime/query_request.rs");
+        assert!(
+            seam.contains("execute_query_with_params"),
+            "the Request module must execute text SQL through the runtime entrypoint"
+        );
     }
 
     /// Deletion-test for `ReadFrame::lock_intent`: a transaction

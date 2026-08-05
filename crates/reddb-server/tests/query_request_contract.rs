@@ -51,6 +51,12 @@ fn request_decodes_every_adr_0015_parameter_variant() {
         (ParamValue::Null, Value::Null),
         (ParamValue::Bool(true), Value::Boolean(true)),
         (ParamValue::Int64(-42), Value::Integer(-42)),
+        // The wire taxonomy's unsigned type, over the full u64 range: it
+        // must stay unsigned and must not narrow through i64.
+        (
+            ParamValue::UInt64(u64::MAX),
+            Value::UnsignedInteger(u64::MAX),
+        ),
         (ParamValue::Float64(1.5), Value::Float(1.5)),
         (ParamValue::Text("hello".to_string()), Value::text("hello")),
         (

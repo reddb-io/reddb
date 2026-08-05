@@ -45,6 +45,21 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         Err(_) => return make_error(b"invalid UTF-8 in query"),
     };
 
+    // Zero-copy fast path for simple indexed SELECT. Gated behind
+    // `REDDB_DISABLE_DIRECT_SCAN=1` so correctness bisects don't have
+    // to rebuild the binary. Returns None unchanged when the shape
+    // / filter / index don't qualify, so we fall through to the
+    // standard executor without semantic drift.
+    if !direct_scan_disabled() {
+        if let Some(resp) = super::query_direct::try_handle_query_binary_direct(runtime, sql) {
+            return resp;
+        }
+    }
+
+    // PLAN.md Phase 11.4 — wire DML adoption. The Request seam blocks on
+    // the resolved commit policy after a successful mutation (no-op when
+    // the policy is `local`, the default), so a missed ack window surfaces
+    // as an error frame instead of a silently non-durable write.
     let prepared = PreparedRegistry::new();
     match QueryRequestExecutor::new(runtime, &prepared).execute(QueryRequest::sql(sql, Vec::new()))
     {
@@ -56,8 +71,18 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
             }
             encode_result(&result)
         }
-        Err(err) => make_error(query_request_error_message(err).as_bytes()),
+        Err(err) => make_error(err.to_string().as_bytes()),
     }
+}
+
+/// `REDDB_DISABLE_DIRECT_SCAN=1` sends every query through the standard
+/// executor so a correctness bisect can rule the zero-copy scan out without
+/// rebuilding the binary.
+fn direct_scan_disabled() -> bool {
+    std::env::var("REDDB_DISABLE_DIRECT_SCAN")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "on"))
+        .unwrap_or(false)
 }
 
 /// Handle a MSG_QUERY_BINARY request.
@@ -567,17 +592,21 @@ fn make_error(msg: &[u8]) -> Vec<u8> {
 
 // ── Prepared statements ───────────────────────────────────────────
 //
+// Prepared shapes live in the connection's `PreparedRegistry` (the Request
+// module). The wire keeps its own client-chosen `stmt_id` → registry-id map
+// plus the parameter count it advertised in PREPARED_OK, because the wire
+// owns those two facts and the registry does not.
+#[derive(Default)]
 pub(crate) struct PreparedStatements {
     registry: PreparedRegistry,
     wire_ids: std::collections::HashMap<u32, (PreparedId, usize)>,
 }
 
-impl Default for PreparedStatements {
-    fn default() -> Self {
-        Self {
-            registry: PreparedRegistry::new(),
-            wire_ids: std::collections::HashMap::new(),
-        }
+impl PreparedStatements {
+    /// The connection's prepared registry, also used to execute this
+    /// connection's plain and parameterized queries.
+    pub(crate) fn registry(&self) -> &PreparedRegistry {
+        &self.registry
     }
 }
 
@@ -586,12 +615,24 @@ pub(crate) fn handle_prepare(
     payload: &[u8],
     stmts: &mut PreparedStatements,
 ) -> Vec<u8> {
+    if !stmts.registry.is_enabled() {
+        return make_error(b"prepared statements disabled");
+    }
     let request = match decode_prepare_payload(payload) {
         Ok(request) => request,
         Err(err) => return make_error(err.to_string().as_bytes()),
     };
 
-    let prepared = match stmts.registry.prepare(runtime, &request.sql) {
+    // The binary protocol auto-parameterizes literals: `WHERE id = 5`
+    // advertises one parameter and clients bind against that count.
+    //
+    // RLS / tenant / auth identity are captured per-EXECUTE by the usual
+    // runtime guards — a prepared statement is a compiled shape, not a
+    // pinned security context. This mirrors PG's prepare model.
+    let prepared = match stmts
+        .registry
+        .prepare_auto_parameterized(runtime, &request.sql)
+    {
         Ok(prepared) => prepared,
         Err(err) => return make_error(err.to_string().as_bytes()),
     };
@@ -611,6 +652,9 @@ pub(crate) fn handle_execute_prepared(
     payload: &[u8],
     stmts: &PreparedStatements,
 ) -> Vec<u8> {
+    if !stmts.registry.is_enabled() {
+        return make_error(b"prepared statements disabled");
+    }
     let request = match decode_execute_prepared_payload(payload) {
         Ok(request) => request,
         Err(err) => return make_error(err.to_string().as_bytes()),
@@ -620,53 +664,78 @@ pub(crate) fn handle_execute_prepared(
         Some(prepared) => prepared,
         None => return make_error(b"unknown prepared stmt_id"),
     };
+    // DDL ran between PREPARE and EXECUTE — the cached shape may bind columns
+    // that no longer exist. Force a re-PREPARE rather than executing a stale
+    // plan. Checked ahead of arity so a stale client learns to replan first.
+    match stmts.registry.ddl_epoch(prepared_id) {
+        Some(epoch) if epoch != runtime.ddl_epoch() => {
+            return make_error(b"prepared_needs_replan");
+        }
+        Some(_) => {}
+        None => return make_error(b"unknown prepared stmt_id"),
+    }
     if request.params.len() != parameter_count {
         return make_error(b"prepared param count mismatch");
     }
 
     let mut params = Vec::with_capacity(request.params.len());
     for param in request.params {
-        match prepared_param_value(param) {
+        match wire_param_value(param) {
             Ok(value) => params.push(value),
             Err(err) => return make_error(err.as_bytes()),
         }
     }
 
-    match QueryRequestExecutor::new(runtime, &stmts.registry)
-        .execute(QueryRequest::prepared(prepared_id, params))
-    {
+    let executor = QueryRequestExecutor::new(runtime, &stmts.registry);
+    let bound = match executor.bind(QueryRequest::prepared(prepared_id, params)) {
+        Ok(bound) => bound,
+        Err(err) => return make_error(err.to_string().as_bytes()),
+    };
+
+    // Zero-copy direct-scan path. The bound expression is already a
+    // QueryExpr, so the byte-level shape parser in `query_direct` is
+    // skipped; we go straight to the eligibility gate + scan loop and
+    // emit the wire frame without ever materialising `UnifiedRecord`.
+    // Same kill switch as MSG_QUERY_BINARY (`REDDB_DISABLE_DIRECT_SCAN`).
+    if !direct_scan_disabled() {
+        if let Some(crate::storage::query::ast::QueryExpr::Table(tq)) = bound.prepared_expr() {
+            if super::query_direct::is_shape_direct_eligible(tq) {
+                if let Some(resp) = super::query_direct::execute_direct_scan(runtime, tq) {
+                    return resp;
+                }
+            }
+        }
+    }
+
+    match executor.execute_bound(bound) {
         Ok(result) => {
             if let Some(ref json) = result.result.pre_serialized_json {
                 return build_legacy_result_frame(json.as_bytes());
             }
             encode_result(&result)
         }
-        Err(err) => make_error(query_request_error_message(err).as_bytes()),
+        Err(err) => make_error(err.to_string().as_bytes()),
     }
 }
 
-fn query_request_error_message(error: crate::RedDBError) -> String {
-    match error {
-        crate::RedDBError::Query(message) => message,
-        other => other.to_string(),
-    }
-}
-
-fn prepared_param_value(value: reddb_wire::legacy::WireValue) -> Result<ParamValue, String> {
+/// Decode one wire parameter into the Request module's transport-neutral
+/// vocabulary. Mirrors `impl TryFrom<WireValue> for Value` byte for byte,
+/// including the unsigned range and the timestamp error text.
+pub(crate) fn wire_param_value(
+    value: reddb_wire::legacy::WireValue,
+) -> Result<ParamValue, &'static str> {
     use reddb_wire::legacy::WireValue;
     match value {
         WireValue::Null => Ok(ParamValue::Null),
         WireValue::I64(value) => Ok(ParamValue::Int64(value)),
-        WireValue::U64(value) => i64::try_from(value)
-            .map(ParamValue::Int64)
-            .map_err(|_| "prepared unsigned integer exceeds i64".to_string()),
+        WireValue::U64(value) => Ok(ParamValue::UInt64(value)),
         WireValue::F64(value) => Ok(ParamValue::Float64(value)),
         WireValue::Text(value) => Ok(ParamValue::Text(value)),
         WireValue::Bool(value) => Ok(ParamValue::Bool(value)),
         WireValue::Bytes(value) => Ok(ParamValue::Bytes(value)),
         WireValue::Timestamp(value) => i64::try_from(value)
             .map(ParamValue::Timestamp)
-            .map_err(|_| "prepared timestamp exceeds i64".to_string()),
+            .map_err(|_| "timestamp exceeds i64 range"),
     }
 }
 
@@ -679,11 +748,16 @@ fn enforce_wire_commit_policy_after_write(runtime: &RedDBRuntime) -> Result<(), 
 }
 
 pub(crate) fn handle_deallocate(payload: &[u8], stmts: &mut PreparedStatements) -> Vec<u8> {
+    if !stmts.registry.is_enabled() {
+        return make_error(b"prepared statements disabled");
+    }
     let request = match decode_deallocate_payload(payload) {
         Ok(request) => request,
         Err(err) => return make_error(err.to_string().as_bytes()),
     };
-    stmts.wire_ids.remove(&request.stmt_id);
+    if let Some((prepared_id, _)) = stmts.wire_ids.remove(&request.stmt_id) {
+        stmts.registry.release(prepared_id);
+    }
     Vec::new() // empty response — like STREAM_ROWS success path
 }
 
@@ -1000,14 +1074,14 @@ mod tests {
         seed_users_table(&runtime);
         let mut stmts = PreparedStatements::default();
 
-        let payload = prepare_payload(42, "SELECT * FROM users WHERE id = $1");
+        let payload = prepare_payload(42, "SELECT * FROM users WHERE id = 5");
         let resp = handle_prepare(&runtime, &payload, &mut stmts);
         assert_eq!(resp.get(4), Some(&MSG_PREPARED_OK));
         let body = &resp[5..];
         let sid = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
         let npc = u16::from_le_bytes([body[4], body[5]]);
         assert_eq!(sid, 42);
-        assert_eq!(npc, 1, "WHERE id = $1 should expose one parameter");
+        assert_eq!(npc, 1, "WHERE id = 5 should parameterize one literal");
         assert!(stmts.wire_ids.contains_key(&42));
         assert_eq!(stmts.wire_ids[&42].1, 1);
     }
@@ -1035,7 +1109,7 @@ mod tests {
         // Prepare: SELECT ... WHERE id = ?
         let _ = handle_prepare(
             &runtime,
-            &prepare_payload(1, "SELECT * FROM users WHERE id = $1"),
+            &prepare_payload(1, "SELECT * FROM users WHERE id = 5"),
             &mut stmts,
         );
 
@@ -1099,7 +1173,7 @@ mod tests {
 
         let _ = handle_prepare(
             &runtime,
-            &prepare_payload(101, "SELECT * FROM users WHERE id = $1"),
+            &prepare_payload(101, "SELECT * FROM users WHERE id = 1"),
             &mut stmts,
         );
         // Sanity: same-epoch EXECUTE works.
@@ -1139,13 +1213,30 @@ mod tests {
         let mut stmts = PreparedStatements::default();
         let _ = handle_prepare(
             &runtime,
-            &prepare_payload(50, "SELECT * FROM users WHERE id = $1"),
+            &prepare_payload(50, "SELECT * FROM users WHERE id = 5"),
             &mut stmts,
         );
         let prepared =
             handle_execute_prepared(&runtime, &execute_payload(50, &[Value::Integer(5)]), &stmts);
         let inline = handle_query(&runtime, b"SELECT * FROM users WHERE id = 5");
         assert_eq!(prepared, inline, "prepared+direct-scan must match inline");
+    }
+
+    /// The wire's unsigned parameter type keeps its full range and its
+    /// engine type across the Request seam — narrowing it through `i64`
+    /// would reject every value above `i64::MAX`.
+    #[test]
+    fn wire_unsigned_param_keeps_full_range_and_type() {
+        assert_eq!(
+            wire_param_value(reddb_wire::legacy::WireValue::U64(u64::MAX))
+                .map(Value::from)
+                .expect("u64::MAX is a valid bind"),
+            Value::UnsignedInteger(u64::MAX)
+        );
+        assert_eq!(
+            wire_param_value(reddb_wire::legacy::WireValue::Timestamp(u64::MAX)),
+            Err("timestamp exceeds i64 range")
+        );
     }
 
     #[test]
@@ -1163,7 +1254,7 @@ mod tests {
         let mut stmts = PreparedStatements::default();
         let _ = handle_prepare(
             &runtime,
-            &prepare_payload(1, "SELECT * FROM users WHERE id = $1"),
+            &prepare_payload(1, "SELECT * FROM users WHERE id = 5"),
             &mut stmts,
         );
 
@@ -1183,18 +1274,61 @@ mod tests {
             &mut stmts,
         );
         assert!(stmts.wire_ids.contains_key(&3));
+        let prepared_id = stmts.wire_ids[&3].0;
 
         let payload = reddb_wire::redwire::encode_deallocate_payload(3);
         let resp = handle_deallocate(&payload, &mut stmts);
         assert!(resp.is_empty(), "deallocate success sends no response");
         assert!(!stmts.wire_ids.contains_key(&3));
+        assert!(
+            stmts.registry.ddl_epoch(prepared_id).is_none(),
+            "deallocate must free the prepared shape, not just the wire id"
+        );
+    }
+
+    /// Issue #2139 AC2 — the binary listener's write path resolves its
+    /// commit policy through the Request module (`enforce_commit_policy_
+    /// for_request`) instead of the old global-only call, so the policy the
+    /// request resolves to is the one enforced. With no per-request override
+    /// on the frame, that resolution is the server floor.
+    #[test]
+    fn binary_listener_write_enforces_resolved_request_commit_policy() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _env = EnvGuard::set(&[
+            ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
+            ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ]);
+        let data_path = temp_data_path("wire_query_request_commit_policy");
+        cleanup(&data_path);
+        let runtime = create_primary_runtime(&data_path);
+
+        let response = handle_query(
+            &runtime,
+            b"INSERT INTO wire_request_policy (id, name) VALUES (1, 'alpha')",
+        );
+        let message = decode_error_message(&response);
+        assert!(
+            message.contains("commit policy timed out")
+                && message.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+            "listener write should report the resolved commit policy, got {message}"
+        );
+
+        // A read resolves no commit policy at all — it must not inherit the
+        // write path's enforcement.
+        let read = handle_query(&runtime, b"SELECT id FROM wire_request_policy");
+        assert_eq!(read.get(4), Some(&MSG_RESULT));
+
+        cleanup(&data_path);
     }
 
     #[test]
     fn prepare_disabled_flag_errors_out() {
-        // Environment mutation belongs in a subprocess-style test. Verify the
-        // default enabled path here; the shared registry contract covers its
-        // one-way kill switch independently.
+        // A subprocess-style test would be cleaner, but the registry
+        // caches `REDDB_DISABLE_PREPARED` per process. Skip the flag
+        // toggle and just verify a happy-path parse runs under the
+        // default (enabled) state — the disabled path's error message
+        // is pinned by the connection-scope test below.
         let runtime = create_runtime();
         seed_users_table(&runtime);
         let mut stmts = PreparedStatements::default();
