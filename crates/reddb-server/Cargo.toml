@@ -46,7 +46,7 @@ crc32fast = "1.5"
 hmac = "0.13"
 itoa = "1"
 zstd = { version = "0.13", default-features = false }
-lz4_flex = { version = "0.13", default-features = false, features = ["std"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
 sha2 = "0.11"
 hex = "0.4"
 # Browser credential layer — hybrid token (issue #936, PRD #930).
