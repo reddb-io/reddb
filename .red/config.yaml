@@ -14,7 +14,7 @@ plugins:
 
     afk:
       # ----------------------------------------------------------------
-      # Trust gate (fail-closed on public repos). The nightly parser-fuzz
+      # Trust gate (fail-closed on public repos). The scheduled parser-fuzz
       # workflow files release-blockers as app/github-actions and the
       # maintainer promotes them to ready-for-agent during triage, so both
       # actors must be allowlisted or every bot-authored issue is held for

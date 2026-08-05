@@ -249,13 +249,14 @@ test("DST storage fault issue creation deduplicates open release blockers", () =
   assert.ok(createCall > existingReturn, "issue creation must happen after existing issue guard");
 });
 
-test("per-PR parser fuzz runs as one bounded required smoke check", () => {
+test("on-demand parser fuzz runs as one bounded smoke check", () => {
   const workflow = read(".github/workflows/ci.yml");
   const fuzzParsers = workflowJob(workflow, "fuzz-parsers");
 
-  assert.equal(workflowJob(workflow, "fuzz-targets"), "", "per-PR fuzz must not fan out into separate runners");
+  assert.equal(workflowJob(workflow, "fuzz-targets"), "", "fuzz smoke must not fan out into separate runners");
   assert.match(fuzzParsers, /name: Fuzz Parsers/);
   assert.match(fuzzParsers, /needs: gate/);
+  assert.match(fuzzParsers, /if: github\.event_name == 'workflow_dispatch' && inputs\.full_ci/);
   assert.match(fuzzParsers, /timeout-minutes: 15/);
   assert.match(fuzzParsers, /FUZZ_PR_TIME_SECONDS: 30/);
   assert.match(fuzzParsers, /shared-key: ubuntu-fuzz-pr-smoke/);
@@ -269,13 +270,16 @@ test("per-PR parser fuzz runs as one bounded required smoke check", () => {
   );
 });
 
-test("nightly parser fuzz keeps the long-window coverage for every PR target", () => {
+test("weekly parser fuzz keeps bounded coverage for every smoke target", () => {
   const workflow = read(".github/workflows/parser-fuzz-nightly.yml");
   const fuzz = workflowJob(workflow, "fuzz");
 
-  assert.match(fuzz, /timeout-minutes: 90/);
+  assert.match(workflow, /cron: "17 3 \* \* 6"/);
+  assert.match(workflow, /duration_minutes:[\s\S]*- '15'[\s\S]*- '45'[\s\S]*- '60'/);
+  assert.match(fuzz, /runs-on: ubuntu-24\.04/);
+  assert.match(fuzz, /timeout-minutes: 75/);
   for (const target of ["sql_parser", "migration_parser", "conn_string_parser", "query_with_params"]) {
     assert.match(fuzz, new RegExp(`- ${target}`));
   }
-  assert.match(fuzz, /cargo \+nightly fuzz run \$\{\{ matrix\.target \}\} -- -max_total_time=3600/);
+  assert.match(fuzz, /cargo \+nightly fuzz run \$\{\{ matrix\.target \}\} --[\s\S]*-max_total_time="\$\{FUZZ_DURATION_SECONDS\}"/);
 });

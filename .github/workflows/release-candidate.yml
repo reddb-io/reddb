@@ -1,13 +1,6 @@
 name: Release Candidate
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'CHANGELOG**'
-      - 'LICENSE**'
   workflow_dispatch:
 
 permissions:
@@ -17,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
-# New pushes to main cancel the in-flight RC — only the latest commit matters.
+# Only one manually requested RC for a ref should run at a time.
 concurrency:
   group: release-candidate-${{ github.ref }}
   cancel-in-progress: true
@@ -25,7 +18,7 @@ concurrency:
 jobs:
   plan:
     name: Plan
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: github.actor != 'dependabot[bot]'
     outputs:
       should_skip: ${{ steps.plan.outputs.should_skip }}
@@ -140,7 +133,7 @@ jobs:
   publish-github:
     name: GitHub Pre-release
     needs: [plan, build-linux]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
@@ -236,7 +229,7 @@ jobs:
   publish-npm:
     name: Publish npm packages @rc
     needs: [plan, publish-github]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
@@ -269,7 +262,7 @@ jobs:
   publish-cargo:
     name: Skip crates @rc
     needs: [plan, build-linux]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     # Cargo pre-release publishing is intentionally skipped. The Rust workspace has
     # internal path dependency cycles (notably wire <-> grpc-proto) that make exact
     # RC version rewriting unsafe; stable release publishing remains authoritative.

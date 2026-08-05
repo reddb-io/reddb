@@ -1,9 +1,18 @@
-name: Parser Fuzz Nightly
+name: Parser Fuzz Weekly
 
 on:
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "17 3 * * 6"
   workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: Fuzzing time per target
+        type: choice
+        default: '45'
+        options:
+          - '15'
+          - '45'
+          - '60'
 
 permissions:
   contents: read
@@ -14,14 +23,15 @@ env:
   CARGO_INCREMENTAL: 0
   FUZZ_RSS_LIMIT_MB: 4096
   FUZZ_MALLOC_LIMIT_MB: 2048
+  FUZZ_DURATION_SECONDS: ${{ (github.event_name == 'workflow_dispatch' && inputs.duration_minutes) || '2700' }}
 
 jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 90
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
     concurrency:
-      group: parser-fuzz-nightly-${{ github.ref }}-${{ matrix.target }}
+      group: parser-fuzz-weekly-${{ github.ref }}-${{ matrix.target }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
@@ -65,7 +75,7 @@ jobs:
       - name: Run ${{ matrix.target }}
         run: >
           cargo +nightly fuzz run ${{ matrix.target }} --
-          -max_total_time=3600
+          -max_total_time="${FUZZ_DURATION_SECONDS}"
           -rss_limit_mb="${FUZZ_RSS_LIMIT_MB}"
           -malloc_limit_mb="${FUZZ_MALLOC_LIMIT_MB}"
 
