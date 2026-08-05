@@ -17,6 +17,9 @@ use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 use crate::auth::store::AuthStore;
 use crate::auth::Role;
+use crate::runtime::query_request::{
+    ParamValue, PreparedRegistry, QueryRequest, QueryRequestExecutor,
+};
 use crate::runtime::RedDBRuntime;
 use crate::serde_json::{self, Value as JsonValue};
 use reddb_wire::query_with_params::{
@@ -74,10 +77,11 @@ where
     let session = session.unwrap();
 
     // Per-connection state for prepared statements + streaming
-    // bulk inserts. Owned by the session; dropped on disconnect.
+    // bulk inserts. Owned by the session; dropped on disconnect. The
+    // prepared registry inside `prepared_stmts` is also the Request
+    // module's execution scope for this connection's queries.
     let mut stream_session: Option<crate::wire::listener::BulkStreamSession> = None;
-    let mut prepared_stmts: std::collections::HashMap<u32, crate::wire::listener::PreparedStmt> =
-        std::collections::HashMap::new();
+    let mut prepared_stmts = crate::wire::listener::PreparedStatements::default();
 
     // After handshake, split the socket so reads and writes are
     // independent: this is what makes RedWire multiplex (PRD #759
@@ -175,11 +179,11 @@ where
                 queue_send(&out_tx, pong)?;
             }
             MessageKind::Query => {
-                let response = run_query(&runtime, &frame);
+                let response = run_query(&runtime, prepared_stmts.registry(), &frame);
                 queue_send(&out_tx, encode_frame(&response))?;
             }
             MessageKind::QueryWithParams => {
-                let response = run_query_with_params(&runtime, &frame);
+                let response = run_query_with_params(&runtime, prepared_stmts.registry(), &frame);
                 queue_send(&out_tx, encode_frame(&response))?;
             }
             // BulkInsert handles both single-row and bulk shapes off
@@ -1131,7 +1135,11 @@ fn redwire_io_err(err: reddb_wire::redwire::RedWireIoError) -> io::Error {
     }
 }
 
-fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
+/// `Query` (0x01) answers with the pinned summary payload — statement type
+/// plus affected rows — not the full result envelope. `QueryWithParams`
+/// (0x28) is the frame that carries records back; clients pick the frame by
+/// the reply shape they want.
+fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame) -> Frame {
     let sql = match std::str::from_utf8(&frame.payload) {
         Ok(s) => s,
         Err(_) => {
@@ -1141,7 +1149,7 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             );
         }
     };
-    match runtime.execute_query(sql) {
+    match QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new())) {
         Ok(result) => {
             let payload =
                 encode_query_result_summary_payload(result.statement_type, result.affected_rows);
@@ -1151,7 +1159,11 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     }
 }
 
-fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
+fn run_query_with_params(
+    runtime: &RedDBRuntime,
+    prepared: &PreparedRegistry,
+    frame: &Frame,
+) -> Frame {
     let request = match decode_query_with_params_request(&frame.payload) {
         Ok(decoded) => decoded,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
@@ -1164,18 +1176,14 @@ fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let params = request
         .params
         .into_iter()
-        .map(param_to_schema_value)
+        .map(param_to_request_value)
         .collect::<Vec<_>>();
-    match runtime.execute_query_with_params(&request.sql, &params) {
+    let mut query = QueryRequest::sql(request.sql, params);
+    if let Some(policy) = commit_policy {
+        query = query.with_commit_policy(policy);
+    }
+    match QueryRequestExecutor::new(runtime, prepared).execute(query) {
         Ok(result) => {
-            let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
-            if is_mutation {
-                let post_lsn = runtime.cdc_current_lsn();
-                if let Err(err) = runtime.enforce_commit_policy_for_request(post_lsn, commit_policy)
-                {
-                    return build_error_frame_lossy(frame.correlation_id, &err.to_string());
-                }
-            }
             let payload =
                 crate::presentation::query_result_json::runtime_query_json(&result, &None, &None)
                     .to_string_compact()
@@ -1197,19 +1205,18 @@ fn parse_redwire_commit_policy(
         .ok_or_else(|| format!("invalid commit_policy value '{value}'"))
 }
 
-fn param_to_schema_value(value: RedWireParamValue) -> crate::storage::schema::Value {
-    use crate::storage::schema::Value;
+fn param_to_request_value(value: RedWireParamValue) -> ParamValue {
     match value {
-        RedWireParamValue::Null => Value::Null,
-        RedWireParamValue::Bool(value) => Value::Boolean(value),
-        RedWireParamValue::Int(value) => Value::Integer(value),
-        RedWireParamValue::Float(value) => Value::Float(value),
-        RedWireParamValue::Text(value) => Value::Text(Arc::from(value.as_str())),
-        RedWireParamValue::Bytes(value) => Value::Blob(value),
-        RedWireParamValue::Vector(value) => Value::Vector(value),
-        RedWireParamValue::Json(value) => Value::Json(value),
-        RedWireParamValue::Timestamp(value) => Value::Timestamp(value),
-        RedWireParamValue::Uuid(value) => Value::Uuid(value),
+        RedWireParamValue::Null => ParamValue::Null,
+        RedWireParamValue::Bool(value) => ParamValue::Bool(value),
+        RedWireParamValue::Int(value) => ParamValue::Int64(value),
+        RedWireParamValue::Float(value) => ParamValue::Float64(value),
+        RedWireParamValue::Text(value) => ParamValue::Text(value),
+        RedWireParamValue::Bytes(value) => ParamValue::Bytes(value),
+        RedWireParamValue::Vector(value) => ParamValue::Vector(value),
+        RedWireParamValue::Json(value) => ParamValue::Json(value),
+        RedWireParamValue::Timestamp(value) => ParamValue::Timestamp(value),
+        RedWireParamValue::Uuid(value) => ParamValue::Uuid(value),
     }
 }
 
@@ -1595,6 +1602,7 @@ mod tests {
     #[test]
     fn redwire_query_with_params_preserves_json_columns() {
         let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let prepared = PreparedRegistry::new();
         runtime
             .execute_query("KV PUT proj.a.b.c.d = 12")
             .expect("put nested number");
@@ -1607,7 +1615,7 @@ mod tests {
                 .expect("encode query with params");
         let frame = reddb_wire::redwire::build_query_with_params_frame(99, payload)
             .expect("query-with-params frame");
-        let reply = run_query_with_params(&runtime, &frame);
+        let reply = run_query_with_params(&runtime, &prepared, &frame);
 
         assert_eq!(
             reply.kind,
@@ -1644,6 +1652,152 @@ mod tests {
         );
     }
 
+    /// The two query frames answer with deliberately different shapes:
+    /// `Query` (0x01) replies with the summary payload the protocol pins,
+    /// `QueryWithParams` (0x28) with the full result envelope. Clients pick
+    /// the frame by the reply they want, so neither may drift into the other.
+    #[test]
+    fn redwire_query_replies_summary_and_query_with_params_replies_full_envelope() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let prepared = PreparedRegistry::new();
+
+        let query =
+            reddb_wire::redwire::build_query_frame(98, "SELECT 7 AS value").expect("query frame");
+        let query_reply = run_query(&runtime, &prepared, &query);
+        assert_eq!(query_reply.kind, MessageKind::Result);
+        let summary =
+            reddb_wire::redwire::operations::decode_query_result_payload(&query_reply.payload)
+                .expect("Query replies with the summary payload");
+        assert_eq!(
+            summary.get("statement").and_then(|value| value.as_str()),
+            Some("select")
+        );
+        assert!(
+            summary.get("result").is_none(),
+            "Query must not carry the full result envelope, got {summary}"
+        );
+
+        let payload = reddb_wire::query_with_params::encode_query_with_params(
+            "SELECT $1 AS value",
+            &[reddb_wire::query_with_params::ParamValue::Int(7)],
+        )
+        .expect("encode query with params");
+        let query_with_params = reddb_wire::redwire::build_query_with_params_frame(99, payload)
+            .expect("query-with-params frame");
+        let params_reply = run_query_with_params(&runtime, &prepared, &query_with_params);
+        assert_eq!(params_reply.kind, MessageKind::Result);
+        let body: JsonValue =
+            serde_json::from_slice(&params_reply.payload).expect("full result envelope");
+        assert_eq!(
+            body.get("result")
+                .and_then(|result| result.get("records"))
+                .and_then(JsonValue::as_array)
+                .and_then(|records| records.first())
+                .and_then(|record| record.get("values"))
+                .and_then(|values| values.get("value"))
+                .and_then(JsonValue::as_f64),
+            Some(7.0)
+        );
+    }
+
+    /// Issue #2139 AC1 — the prepared frames run on the connection's shared
+    /// registry, so a prepared id is scoped to the connection that minted it,
+    /// DDL invalidates the shape, and the kill switch closes both frames.
+    /// Driven through the same handler + rewrap the session loop uses, so the
+    /// legacy reply encodings are exercised too.
+    #[test]
+    fn redwire_prepared_requests_use_connection_registry_guards() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE redwire_prepared (id INTEGER)")
+            .expect("create table");
+        runtime
+            .execute_query("INSERT INTO redwire_prepared (id) VALUES (7)")
+            .expect("seed row");
+        let mut first_connection = crate::wire::listener::PreparedStatements::default();
+        let second_connection = crate::wire::listener::PreparedStatements::default();
+
+        let prepare_payload = reddb_wire::redwire::encode_prepare_payload(
+            41,
+            "SELECT * FROM redwire_prepared WHERE id = 7",
+        )
+        .expect("encode prepare");
+        let prepared = rewrap_length_prefixed_handler_response(
+            &crate::wire::listener::handle_prepare(
+                &runtime,
+                &prepare_payload,
+                &mut first_connection,
+            ),
+            100,
+        );
+        assert_eq!(prepared.kind, MessageKind::PreparedOk);
+        let parameter_count = u16::from_le_bytes([prepared.payload[4], prepared.payload[5]]);
+        assert_eq!(
+            parameter_count, 1,
+            "the literal `7` is auto-parameterized into one bind"
+        );
+
+        let execute_payload = reddb_wire::redwire::encode_execute_prepared_payload(
+            41,
+            &[reddb_wire::legacy::WireValue::I64(7)],
+        )
+        .expect("encode execute prepared");
+        let executed = rewrap_length_prefixed_handler_response(
+            &crate::wire::listener::handle_execute_prepared(
+                &runtime,
+                &execute_payload,
+                &first_connection,
+            ),
+            101,
+        );
+        assert_eq!(executed.kind, MessageKind::Result);
+
+        let wrong_connection = rewrap_length_prefixed_handler_response(
+            &crate::wire::listener::handle_execute_prepared(
+                &runtime,
+                &execute_payload,
+                &second_connection,
+            ),
+            102,
+        );
+        assert_eq!(wrong_connection.kind, MessageKind::Error);
+        assert!(
+            String::from_utf8_lossy(&wrong_connection.payload).contains("unknown prepared stmt_id")
+        );
+
+        runtime
+            .execute_query("CREATE TABLE redwire_prepared_epoch (id INTEGER)")
+            .expect("advance DDL epoch");
+        let stale = rewrap_length_prefixed_handler_response(
+            &crate::wire::listener::handle_execute_prepared(
+                &runtime,
+                &execute_payload,
+                &first_connection,
+            ),
+            103,
+        );
+        assert_eq!(stale.kind, MessageKind::Error);
+        assert_eq!(
+            String::from_utf8_lossy(&stale.payload),
+            "prepared_needs_replan"
+        );
+
+        first_connection.registry().disable();
+        let disabled = rewrap_length_prefixed_handler_response(
+            &crate::wire::listener::handle_execute_prepared(
+                &runtime,
+                &execute_payload,
+                &first_connection,
+            ),
+            104,
+        );
+        assert_eq!(disabled.kind, MessageKind::Error);
+        assert_eq!(
+            String::from_utf8_lossy(&disabled.payload),
+            "prepared statements disabled"
+        );
+    }
+
     #[test]
     fn redwire_query_with_params_request_policy_strengthens_to_ack_n() {
         let _env_lock = env_lock().lock().expect("env lock");
@@ -1658,6 +1812,7 @@ mod tests {
                 .with_replication(crate::replication::ReplicationConfig::primary()),
         )
         .expect("runtime");
+        let prepared = PreparedRegistry::new();
 
         let payload = reddb_wire::query_with_params::encode_query_with_params_request(
             "INSERT INTO redwire_request_ack (id, name) VALUES (1, 'alpha')",
@@ -1669,7 +1824,7 @@ mod tests {
         .expect("encode query with request policy");
         let frame = reddb_wire::redwire::build_query_with_params_frame(100, payload)
             .expect("query-with-params frame");
-        let reply = run_query_with_params(&runtime, &frame);
+        let reply = run_query_with_params(&runtime, &prepared, &frame);
 
         assert_eq!(reply.kind, MessageKind::Error);
         let body = String::from_utf8_lossy(&reply.payload);
@@ -1685,6 +1840,10 @@ mod tests {
         let _env_lock = env_lock().lock().expect("env lock");
         let _env = EnvGuard::set(&[("RED_PRIMARY_COMMIT_POLICY", "quorum")]);
         let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let prepared = PreparedRegistry::new();
+        runtime
+            .execute_query("CREATE TABLE redwire_request_floor (id INTEGER, name TEXT)")
+            .expect("create table");
 
         let payload = reddb_wire::query_with_params::encode_query_with_params_request(
             "INSERT INTO redwire_request_floor (id, name) VALUES (1, 'alpha')",
@@ -1696,13 +1855,60 @@ mod tests {
         .expect("encode query with request policy");
         let frame = reddb_wire::redwire::build_query_with_params_frame(101, payload)
             .expect("query-with-params frame");
-        let reply = run_query_with_params(&runtime, &frame);
+        let reply = run_query_with_params(&runtime, &prepared, &frame);
 
         assert_eq!(reply.kind, MessageKind::Error);
         let body = String::from_utf8_lossy(&reply.payload);
         assert!(
             body.contains("COMMIT_POLICY_BELOW_FLOOR"),
             "typed floor violation should be surfaced, got {body}"
+        );
+
+        // Ordering is observable, so pin it: the Request seam rejects a
+        // below-floor policy *before* the write lands. RedWire used to run
+        // the INSERT and then fail the policy check, leaving the row behind.
+        let rows = runtime
+            .execute_query("SELECT id FROM redwire_request_floor")
+            .expect("read back the rejected write");
+        assert!(
+            rows.result.records.is_empty(),
+            "a policy-rejected write must not be visible"
+        );
+    }
+
+    /// The pre-write policy check is for mutations only. A read carrying a
+    /// below-floor policy still returns rows, exactly as it did before the
+    /// Request seam existed.
+    #[test]
+    fn redwire_query_with_params_read_ignores_request_policy_below_floor() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _env = EnvGuard::set(&[("RED_PRIMARY_COMMIT_POLICY", "quorum")]);
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let prepared = PreparedRegistry::new();
+        runtime
+            .execute_query("CREATE TABLE redwire_request_read (id INTEGER)")
+            .expect("create table");
+        runtime
+            .execute_query("INSERT INTO redwire_request_read (id) VALUES (1)")
+            .expect("seed row");
+
+        let payload = reddb_wire::query_with_params::encode_query_with_params_request(
+            "SELECT id FROM redwire_request_read",
+            &[],
+            &reddb_wire::query_with_params::QueryWithParamsOptions {
+                commit_policy: Some("local".to_string()),
+            },
+        )
+        .expect("encode query with request policy");
+        let frame = reddb_wire::redwire::build_query_with_params_frame(102, payload)
+            .expect("query-with-params frame");
+        let reply = run_query_with_params(&runtime, &prepared, &frame);
+
+        assert_eq!(
+            reply.kind,
+            MessageKind::Result,
+            "body={}",
+            String::from_utf8_lossy(&reply.payload)
         );
     }
 

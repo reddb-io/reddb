@@ -1,6 +1,7 @@
 use super::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::ast::QueryExpr;
 use crate::storage::query::modes::parse_multi;
+use crate::storage::query::planner::shape::{bind_parameterized_query, parameterize_query_expr};
 use crate::storage::query::user_params;
 use crate::storage::schema::Value;
 use crate::{RedDBError, RedDBResult};
@@ -11,11 +12,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const DEFAULT_PREPARED_CAPACITY: usize = 1_024;
 
 /// Transport-neutral parameter value vocabulary from ADR 0015.
+///
+/// `UInt64` extends the ADR's ten-variant enumeration with the wire
+/// taxonomy's unsigned type (`WireValue::U64`, tag `VAL_U64`). The legacy
+/// binary protocol binds unsigned parameters over the full u64 range and
+/// as a distinct engine type; folding them into `Int64` would reject every
+/// value above `i64::MAX` and change the bound value's type, so the seam
+/// has to be able to say what the wire already says.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParamValue {
     Null,
     Bool(bool),
     Int64(i64),
+    UInt64(u64),
     Float64(f64),
     Text(String),
     Bytes(Vec<u8>),
@@ -31,6 +40,7 @@ impl From<ParamValue> for Value {
             ParamValue::Null => Self::Null,
             ParamValue::Bool(value) => Self::Boolean(value),
             ParamValue::Int64(value) => Self::Integer(value),
+            ParamValue::UInt64(value) => Self::UnsignedInteger(value),
             ParamValue::Float64(value) => Self::Float(value),
             ParamValue::Text(value) => Self::text(value),
             ParamValue::Bytes(value) => Self::Blob(value),
@@ -97,10 +107,24 @@ pub struct PreparedQuery {
     pub parameter_count: usize,
 }
 
+/// How a prepared shape names its parameter slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParamBinding {
+    /// The parser emitted one `Expr::Parameter` per client `$N` placeholder.
+    UserPlaceholders,
+    /// The planner's shape cache turned every literal into a parameter slot.
+    /// This is what the legacy binary protocol has always prepared: `WHERE
+    /// id = 5` reports one parameter in PREPARED_OK and clients bind against
+    /// that count.
+    AutoParameterizedLiterals,
+}
+
 #[derive(Debug, Clone)]
 struct PreparedStatement {
     sql: String,
     shape: QueryExpr,
+    parameter_count: usize,
+    binding: ParamBinding,
     ddl_epoch: u64,
 }
 
@@ -142,6 +166,8 @@ impl PreparedRegistry {
         }
     }
 
+    /// Prepare a statement whose parameters are the client's `$N`
+    /// placeholders (ADR 0015).
     pub fn prepare(&self, runtime: &RedDBRuntime, sql: &str) -> RedDBResult<PreparedQuery> {
         self.ensure_enabled()?;
         let shape = parse_multi(sql).map_err(|error| RedDBError::Query(error.to_string()))?;
@@ -149,6 +175,53 @@ impl PreparedRegistry {
         let parameter_count = indices.iter().copied().max().map_or(0, |index| index + 1);
         user_params::validate(&indices, parameter_count)
             .map_err(|error| RedDBError::Query(error.to_string()))?;
+        Ok(self.insert(
+            runtime,
+            sql,
+            shape,
+            parameter_count,
+            ParamBinding::UserPlaceholders,
+        ))
+    }
+
+    /// Prepare a statement whose parameters are the planner's
+    /// auto-parameterized literals instead of `$N` placeholders.
+    ///
+    /// The legacy binary protocol reports `WHERE id = 5` as one parameter in
+    /// PREPARED_OK and its clients bind positionally against that count, so
+    /// the wire prepares through here. `prepare` stays the entry point for
+    /// transports that speak ADR 0015 placeholders.
+    pub fn prepare_auto_parameterized(
+        &self,
+        runtime: &RedDBRuntime,
+        sql: &str,
+    ) -> RedDBResult<PreparedQuery> {
+        self.ensure_enabled()?;
+        let parsed = parse_multi(sql).map_err(|error| RedDBError::Query(error.to_string()))?;
+        // Runtime-side view rewrite runs at execute time, not prepare — view
+        // bodies may change between the two on another thread, and rewriting
+        // here would pin stale bodies into the shape.
+        let (shape, parameter_count) = match parameterize_query_expr(&parsed) {
+            Some(parameterized) => (parameterized.shape, parameterized.parameter_count),
+            None => (parsed, 0),
+        };
+        Ok(self.insert(
+            runtime,
+            sql,
+            shape,
+            parameter_count,
+            ParamBinding::AutoParameterizedLiterals,
+        ))
+    }
+
+    fn insert(
+        &self,
+        runtime: &RedDBRuntime,
+        sql: &str,
+        shape: QueryExpr,
+        parameter_count: usize,
+        binding: ParamBinding,
+    ) -> PreparedQuery {
         let mut statements = self.statements.write();
         let id = PreparedId(self.next_id.fetch_add(1, Ordering::Relaxed));
         if statements.len() == self.capacity.get() {
@@ -159,19 +232,44 @@ impl PreparedRegistry {
             PreparedStatement {
                 sql: sql.to_string(),
                 shape,
+                parameter_count,
+                binding,
                 ddl_epoch: runtime.ddl_epoch(),
             },
         );
-        Ok(PreparedQuery {
+        PreparedQuery {
             id,
             parameter_count,
-        })
+        }
     }
 
     /// One-way emergency kill switch. Existing entries stay allocated but
     /// cannot be prepared or executed after this call.
     pub fn disable(&self) {
         self.enabled.store(false, Ordering::Release);
+    }
+
+    /// Whether prepared statements are still served on this connection.
+    /// Transports gate their handlers on this so the kill switch keeps its
+    /// own wire error text instead of inheriting an execution error's.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    /// DDL epoch captured when `id` was prepared, or `None` when the entry is
+    /// gone. Transports check it themselves to keep the wire's
+    /// `prepared_needs_replan` precedence ahead of their arity check.
+    pub fn ddl_epoch(&self, id: PreparedId) -> Option<u64> {
+        self.statements
+            .read()
+            .get(&id)
+            .map(|statement| statement.ddl_epoch)
+    }
+
+    /// Drop a prepared entry — DEALLOCATE frees the shape, not just the
+    /// transport's wire-id mapping.
+    pub fn release(&self, id: PreparedId) {
+        self.statements.write().remove(&id);
     }
 
     fn get(&self, id: PreparedId) -> RedDBResult<PreparedStatement> {
@@ -194,20 +292,56 @@ impl PreparedRegistry {
     }
 }
 
+/// `REDDB_DISABLE_PREPARED=1` forces clients onto the plain query path by
+/// making every registry operation fail. Read once per process: registries are
+/// per-connection and the binary listener builds one per text query, so this
+/// must not cost an environment lookup on the hot path.
 fn prepared_disabled_from_env() -> bool {
-    std::env::var("REDDB_DISABLE_PREPARED")
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "on" | "yes"
-            )
-        })
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("REDDB_DISABLE_PREPARED")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+    })
 }
 
 impl Default for PreparedRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+enum BoundStatement {
+    Sql { sql: String, params: Vec<Value> },
+    // Boxed: a bound `QueryExpr` dwarfs the text variant.
+    Prepared { sql: String, expr: Box<QueryExpr> },
+}
+
+/// A request resolved to the statement that will run, before it runs.
+///
+/// Transports with a zero-copy fast path — the binary listener's direct scan —
+/// need the bound `QueryExpr` to test scan eligibility. Handing it out here
+/// keeps a single binder instead of forking one back into the transport.
+#[derive(Debug, Clone)]
+pub struct BoundRequest {
+    statement: BoundStatement,
+    commit_policy: Option<crate::replication::CommitPolicy>,
+}
+
+impl BoundRequest {
+    /// The bound expression of a prepared request, or `None` for text SQL,
+    /// which the runtime parses inside its own statement frame.
+    pub fn prepared_expr(&self) -> Option<&QueryExpr> {
+        match &self.statement {
+            BoundStatement::Prepared { expr, .. } => Some(expr.as_ref()),
+            BoundStatement::Sql { .. } => None,
+        }
     }
 }
 
@@ -221,26 +355,63 @@ impl<'a> QueryRequestExecutor<'a> {
         Self { runtime, prepared }
     }
 
-    pub fn execute(&self, request: QueryRequest) -> RedDBResult<RuntimeQueryResult> {
+    /// Resolve a request to its bound statement without executing it.
+    pub fn bind(&self, request: QueryRequest) -> RedDBResult<BoundRequest> {
         let commit_policy = request.commit_policy;
-        self.runtime
-            .resolve_request_commit_policy(commit_policy)
-            .map_err(super::impl_replication_commit::commit_policy_violation_error)?;
         let params = request
             .params
             .into_iter()
             .map(Value::from)
             .collect::<Vec<_>>();
-        let result = match request.source {
-            QuerySource::Sql(sql) => self.runtime.execute_query_with_params(&sql, &params),
+        let statement = match request.source {
+            QuerySource::Sql(sql) => {
+                self.reject_weaker_commit_policy(&sql, commit_policy)?;
+                BoundStatement::Sql { sql, params }
+            }
             QuerySource::Prepared(id) => {
                 let prepared = self.prepared.get(id)?;
                 if prepared.ddl_epoch != self.runtime.ddl_epoch() {
                     return Err(RedDBError::Query("prepared_needs_replan".to_string()));
                 }
-                let bound = user_params::bind(&prepared.shape, &params)
-                    .map_err(|error| RedDBError::Query(error.to_string()))?;
-                self.runtime.execute_prepared_query(&prepared.sql, bound)
+                self.reject_weaker_commit_policy(&prepared.sql, commit_policy)?;
+                let expr = match prepared.binding {
+                    ParamBinding::UserPlaceholders => {
+                        user_params::bind(&prepared.shape, &params)
+                            .map_err(|error| RedDBError::Query(error.to_string()))?
+                    }
+                    // A shape with no slots is already executable. Statement
+                    // kinds the planner does not auto-parameterize (DML, DDL,
+                    // commands) land here, and the binder rejects those
+                    // outright rather than returning them unchanged.
+                    ParamBinding::AutoParameterizedLiterals if prepared.parameter_count == 0 => {
+                        prepared.shape.clone()
+                    }
+                    ParamBinding::AutoParameterizedLiterals => {
+                        bind_parameterized_query(&prepared.shape, &params, prepared.parameter_count)
+                            .ok_or_else(|| RedDBError::Query("prepared bind failed".to_string()))?
+                    }
+                };
+                BoundStatement::Prepared {
+                    sql: prepared.sql,
+                    expr: Box::new(expr),
+                }
+            }
+        };
+        Ok(BoundRequest {
+            statement,
+            commit_policy,
+        })
+    }
+
+    /// Execute an already-bound request and enforce its commit policy.
+    pub fn execute_bound(&self, bound: BoundRequest) -> RedDBResult<RuntimeQueryResult> {
+        let commit_policy = bound.commit_policy;
+        let result = match bound.statement {
+            BoundStatement::Sql { sql, params } => {
+                self.runtime.execute_query_with_params(&sql, &params)
+            }
+            BoundStatement::Prepared { sql, expr } => {
+                self.runtime.execute_prepared_query(&sql, *expr)
             }
         }?;
         if matches!(result.statement_type, "insert" | "update" | "delete") {
@@ -248,5 +419,31 @@ impl<'a> QueryRequestExecutor<'a> {
                 .enforce_commit_policy_for_request(self.runtime.cdc_current_lsn(), commit_policy)?;
         }
         Ok(result)
+    }
+
+    pub fn execute(&self, request: QueryRequest) -> RedDBResult<RuntimeQueryResult> {
+        self.execute_bound(self.bind(request)?)
+    }
+
+    /// Refuse a per-request policy weaker than the resolved floor before the
+    /// write lands.
+    ///
+    /// Gated on mutating statements: a read never consulted the commit path
+    /// before this seam existed, and must not start failing because a client
+    /// attached a weak policy to a SELECT. Requests that carry no override
+    /// resolve to the floor by definition, so they skip the classifier
+    /// entirely and the hot text-query path stays free.
+    fn reject_weaker_commit_policy(
+        &self,
+        sql: &str,
+        commit_policy: Option<crate::replication::CommitPolicy>,
+    ) -> RedDBResult<()> {
+        if commit_policy.is_none() || !super::statement_frame::statement_is_write(sql) {
+            return Ok(());
+        }
+        self.runtime
+            .resolve_request_commit_policy(commit_policy)
+            .map(|_| ())
+            .map_err(super::impl_replication_commit::commit_policy_violation_error)
     }
 }
