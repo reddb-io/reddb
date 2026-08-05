@@ -1148,22 +1148,9 @@ struct RuntimeInner {
     /// In-memory only; resets across restart.
     pub(crate) retention_sweeper:
         parking_lot::RwLock<crate::runtime::retention_sweeper::RetentionSweeperState>,
-    /// MVCC snapshot manager (Phase 2.3 PG parity).
-    ///
-    /// Allocates monotonic `xid`s on BEGIN and tracks the active/aborted
-    /// sets used by `Snapshot::sees` to filter tuples by visibility. Each
-    /// query evaluates `entity.is_visible(snapshot.xid)` — pre-MVCC rows
-    /// (`xmin == 0`) stay visible to every snapshot, preserving backward
-    /// compatibility with data written before the xid fields existed.
-    snapshot_manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
-    /// Connection → active transaction context map (Phase 2.3 PG parity).
-    ///
-    /// Keyed by connection id from `RuntimeConnection`. Populated on BEGIN,
-    /// cleared on COMMIT/ROLLBACK. When a statement executes outside a
-    /// transaction (autocommit path) no entry exists and writes stamp
-    /// `xid=0` — identical to pre-MVCC behaviour.
-    tx_contexts:
-        parking_lot::RwLock<HashMap<u64, crate::storage::transaction::snapshot::TxnContext>>,
+    /// Per-connection transaction contexts, local tenant overrides, and the
+    /// shared MVCC snapshot manager behind the Transaction State interface.
+    transaction_state: crate::runtime::transaction_state::TransactionState,
     /// Intent-lock hierarchy (IS/IX/S/X) used to break the implicit
     /// global-write serialisation in write paths. Populated at boot
     /// with `concurrency.locking.deadlock_timeout_ms` from the matrix
@@ -1177,14 +1164,6 @@ struct RuntimeInner {
     /// can hot-fix a bad config by restarting with a different env
     /// var set. Keys are restricted to those declared in the matrix.
     env_config_overrides: HashMap<String, String>,
-    /// Transaction-local tenant override (`SET LOCAL TENANT '<id>'`).
-    /// Keyed by connection id, mirroring `tx_contexts`. Lives only while
-    /// a transaction is open — `COMMIT` / `ROLLBACK` evict the entry,
-    /// returning the connection to whichever session-level tenant
-    /// (`SET TENANT 'x'`) was active before the transaction began.
-    /// Wins over the session value but loses to a per-statement
-    /// `WITHIN TENANT '<id>' …` override on the same call.
-    tx_local_tenants: parking_lot::RwLock<HashMap<u64, Option<String>>>,
     /// Row-level security policies (Phase 2.5 PG parity).
     ///
     /// Keyed by `(table_name, policy_name)`; the set of tables with RLS
@@ -1598,6 +1577,7 @@ pub(crate) mod slo_descriptor_catalog;
 pub mod snapshot_reuse;
 mod statement_frame;
 mod table_row_mvcc_resolver;
+pub(crate) mod transaction_state;
 pub mod turbo_crash_inject;
 mod vcs_command;
 mod vector_index;

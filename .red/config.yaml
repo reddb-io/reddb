@@ -14,26 +14,52 @@ plugins:
 
     afk:
       # ----------------------------------------------------------------
-      # Worker model tiers. Pin every Claude tier to opus-4-8/high so a
-      # worker never falls through to the cheaper per-tier defaults
-      # (validate defaults to low). Flattening every tier onto one slug
-      # is the ADR 0049 posture; this is the durable form of the
-      # RED_AFK_MODEL/RED_AFK_EFFORT env override, so no launch needs it.
+      # Trust gate (fail-closed on public repos). The scheduled parser-fuzz
+      # workflow files release-blockers as app/github-actions and the
+      # maintainer promotes them to ready-for-agent during triage, so both
+      # actors must be allowlisted or every bot-authored issue is held for
+      # summon forever. MUST be a single string (the loader `.split()`s it),
+      # not a YAML list.
+      # ----------------------------------------------------------------
+      trust-gate:
+        allowlist: "app/github-actions filipeforattini"
+
+      # ----------------------------------------------------------------
+      # Worker model tiers. Pin every Codex tier to gpt-5.6-sol/high (the
+      # flagship of the sol/terra/luna family, mirroring red-skills' coding
+      # tiers) and every Claude tier to opus-5/high, so a worker never
+      # falls through to the cheaper per-tier defaults (validate defaults
+      # to low). Flattening every tier onto one slug is the ADR 0049
+      # posture; this is the durable form of the RED_AFK_MODEL/
+      # RED_AFK_EFFORT env override, so no launch needs it.
       # Precedence: --model flag > RED_AFK_MODEL env > this block > defaults.
       # ----------------------------------------------------------------
       models:
-        claude:
+        codex:
           validate:
-            model: claude-opus-4-8
+            model: gpt-5.6-sol
             effort: high
           simple:
-            model: claude-opus-4-8
+            model: gpt-5.6-sol
             effort: high
           complex:
-            model: claude-opus-4-8
+            model: gpt-5.6-sol
             effort: high
           think:
-            model: claude-opus-4-8
+            model: gpt-5.6-sol
+            effort: high
+        claude:
+          validate:
+            model: claude-opus-5
+            effort: high
+          simple:
+            model: claude-opus-5
+            effort: high
+          complex:
+            model: claude-opus-5
+            effort: high
+          think:
+            model: claude-opus-5
             effort: high
 
       # ----------------------------------------------------------------
@@ -174,3 +200,24 @@ plugins:
           heartbeat: true         # post_attempt heartbeat
           envelope: true          # post_attempt envelope shaping
           validation: true       # post_merge validation report
+      labels:
+        hitl_types:
+          - wayfinder:grilling
+          - wayfinder:prototype
+
+# ------------------------------------------------------------------
+# Required host binaries (/red-setup Section E2). `tq` is the jq-for-TOON
+# CLI from github:reddb-io/toon; after ADR 0097 there is no jq fallback
+# for RedSkills-owned TOON/TOONL logs. /red-doctor enforces this pin and
+# red-flags absence or drift.
+#
+# Recorded as the version actually installed on this host (0.13.0), not
+# the v0.3.0 the red-setup 3.3.9 bundle still names: 0.13.0 is newer, so
+# pinning the older string would make the doctor demand a downgrade.
+# Reinstall with:
+#   TQ_VERSION=v0.13.0 curl -fsSL \
+#     https://raw.githubusercontent.com/reddb-io/toon/v0.13.0/install.sh | sh
+# ------------------------------------------------------------------
+host_binaries:
+  tq:
+    version: 0.13.0

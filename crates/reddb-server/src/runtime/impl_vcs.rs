@@ -669,8 +669,9 @@ impl RedDBRuntime {
         // Each commit therefore has a unique, monotonic root_xid — a
         // prerequisite for `AS OF BRANCH` to map to distinct
         // snapshots across divergent branches.
-        let root_xid = self.inner.snapshot_manager.begin();
-        self.inner.snapshot_manager.commit(root_xid);
+        let snapshot_manager = self.inner.transaction_state.snapshot_manager();
+        let root_xid = snapshot_manager.begin();
+        snapshot_manager.commit(root_xid);
         let timestamp_ms = now_ms();
         let committer = input.committer.unwrap_or_else(|| input.author.clone());
 
@@ -705,7 +706,7 @@ impl RedDBRuntime {
         // Pin the root xid so VACUUM cannot reclaim history while the
         // commit is reachable.
         if root_xid != XID_NONE {
-            self.inner.snapshot_manager.pin(root_xid);
+            snapshot_manager.pin(root_xid);
         }
 
         // Advance (or create) the branch ref.
@@ -850,7 +851,10 @@ impl RedDBRuntime {
             input.connection_id,
             &branch_ref,
             Some(&target_hash),
-            self.inner.snapshot_manager.peek_next_xid(),
+            self.inner
+                .transaction_state
+                .snapshot_manager()
+                .peek_next_xid(),
         )?;
 
         // Update per-connection HEAD pointer for status/introspection.
@@ -982,8 +986,9 @@ impl RedDBRuntime {
             .max()
             .unwrap_or(0);
         let height = parent_height + 1;
-        let root_xid = self.inner.snapshot_manager.begin();
-        self.inner.snapshot_manager.commit(root_xid);
+        let snapshot_manager = self.inner.transaction_state.snapshot_manager();
+        let root_xid = snapshot_manager.begin();
+        snapshot_manager.commit(root_xid);
 
         let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
 
@@ -1005,7 +1010,7 @@ impl RedDBRuntime {
         // merge_state_id so status() surfaces the in-progress state.
         save_commit(store, &merge_commit)?;
         if root_xid != XID_NONE {
-            self.inner.snapshot_manager.pin(root_xid);
+            snapshot_manager.pin(root_xid);
         }
         if !head_branch.is_empty() {
             save_ref(
@@ -1127,8 +1132,9 @@ impl RedDBRuntime {
             .map(|c| c.height)
             .unwrap_or(0);
         let height = parent_height + 1;
-        let root_xid = self.inner.snapshot_manager.begin();
-        self.inner.snapshot_manager.commit(root_xid);
+        let snapshot_manager = self.inner.transaction_state.snapshot_manager();
+        let root_xid = snapshot_manager.begin();
+        snapshot_manager.commit(root_xid);
         let timestamp_ms = now_ms();
 
         let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
@@ -1145,7 +1151,7 @@ impl RedDBRuntime {
         };
         save_commit(store, &pick_commit)?;
         if root_xid != XID_NONE {
-            self.inner.snapshot_manager.pin(root_xid);
+            snapshot_manager.pin(root_xid);
         }
         if !head_branch.is_empty() {
             save_ref(
@@ -1242,8 +1248,9 @@ impl RedDBRuntime {
             .map(|c| c.height)
             .unwrap_or(0);
         let height = parent_height + 1;
-        let root_xid = self.inner.snapshot_manager.begin();
-        self.inner.snapshot_manager.commit(root_xid);
+        let snapshot_manager = self.inner.transaction_state.snapshot_manager();
+        let root_xid = snapshot_manager.begin();
+        snapshot_manager.commit(root_xid);
         let timestamp_ms = now_ms();
 
         let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
@@ -1260,7 +1267,7 @@ impl RedDBRuntime {
         };
         save_commit(store, &rv_commit)?;
         if root_xid != XID_NONE {
-            self.inner.snapshot_manager.pin(root_xid);
+            snapshot_manager.pin(root_xid);
         }
         if !head_branch.is_empty() {
             save_ref(
@@ -1363,7 +1370,7 @@ impl RedDBRuntime {
         let from_xid = RedDBRuntime::vcs_resolve_as_of(self, AsOfSpec::Commit(from_hash.clone()))?;
         let to_xid = RedDBRuntime::vcs_resolve_as_of(self, AsOfSpec::Commit(to_hash.clone()))?;
 
-        let sm = &self.inner.snapshot_manager;
+        let sm = self.inner.transaction_state.snapshot_manager();
         let from_snap = sm.snapshot(from_xid);
         let to_snap = sm.snapshot(to_xid);
 
@@ -1708,7 +1715,7 @@ fn materialize_merge_conflicts(
     let ours_xid = rt.vcs_resolve_as_of(AsOfSpec::Commit(ours_hash.to_string()))?;
     let theirs_xid = rt.vcs_resolve_as_of(AsOfSpec::Commit(theirs_hash.to_string()))?;
 
-    let sm = &rt.inner.snapshot_manager;
+    let sm = rt.inner.transaction_state.snapshot_manager();
     let base_snap = sm.snapshot(base_xid);
     let ours_snap = sm.snapshot(ours_xid);
     let theirs_snap = sm.snapshot(theirs_xid);

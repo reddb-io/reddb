@@ -610,15 +610,12 @@ fn first_boot_tolerates_cert_file_env_pointing_at_absent_bootstrap_cert_out() {
 /// non-fatally killed the TLS listener. The explicit TLS flag must own
 /// the port: the plaintext default is suppressed and the TLS listener
 /// comes up.
-// Currently unreachable: with `--http-bind` and no gRPC the dispatch in
-// `run_server` picks `run_http_server`, which never calls
-// `spawn_wire_listeners` — that call exists only in `run_grpc_server` and
-// `run_dual_server`. So no wire listener (TLS *or* plaintext) comes up in
-// the HTTP-only path, and `red.rs` still suppresses the env-derived
-// plaintext default, leaving the port orphaned. Wiring it up means
-// restructuring the HTTP-only path's tokio-runtime ownership, which is a
-// design decision beyond this fix.
-#[ignore = "wire listeners are not spawned in the HTTP-only dispatch path"]
+// Issue #2055: with `--http-bind` and no gRPC the dispatch in `run_server`
+// picks `run_http_server`, which now owns a tokio runtime and spawns the
+// wire listeners (plaintext + TLS) like `run_grpc_server` /
+// `run_dual_server`. Before the fix neither wire listener came up in the
+// HTTP-only path while `red.rs` still suppressed the env-derived plaintext
+// default, orphaning the port.
 #[test]
 fn wire_tls_flag_owns_port_over_env_plaintext_default() {
     let dir = support::temp_data_dir("wire-tls-owns-port");
@@ -718,4 +715,116 @@ fn explicit_wire_tls_bind_failure_is_fatal() {
         "the fatal error must name the failed wire-tls bind.\nstderr:\n{stderr}"
     );
     drop(blocker);
+}
+
+/// Issue #2055 — the DaaS provisioning shape: the release container image
+/// bakes `REDDB_WIRE_BIND_ADDR=0.0.0.0:5050`, and a run with `--http-bind`
+/// and no gRPC used to route to `run_http_server`, which never spawned any
+/// wire listener. The env-derived plaintext RedWire listener must come up in
+/// the HTTP-only path and accept a connection on its port.
+#[test]
+fn http_only_env_plaintext_wire_listener_accepts_connections() {
+    let dir = support::temp_data_dir("http-only-env-wire");
+    let db_path = dir.join("data.rdb");
+    let db_path_str = db_path.display().to_string();
+    let head_pw = dir.join("head.pw");
+    let customer_pw = dir.join("customer.pw");
+    std::fs::write(&head_pw, "head-secret\n").unwrap();
+    std::fs::write(&customer_pw, "customer-secret\n").unwrap();
+    let head_pw_s = head_pw.to_str().unwrap();
+    let customer_pw_s = customer_pw.to_str().unwrap();
+    let http_port = free_port();
+    let http_addr = format!("127.0.0.1:{http_port}");
+    let wire_port = free_port();
+    let wire_addr = format!("127.0.0.1:{wire_port}");
+
+    // HTTP-only dispatch (no gRPC bind), plaintext wire taken from the
+    // baked-in container env var — exactly the shape that used to vanish.
+    let args = cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s);
+    let stderr_path = dir.join("server.stderr");
+    let mut server = spawn_server_with_envs(
+        &args,
+        &stderr_path,
+        &[("REDDB_WIRE_BIND_ADDR", wire_addr.as_str())],
+    );
+
+    let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
+    let stderr = server.stderr();
+    assert!(
+        serving,
+        "HTTP-only boot with an env plaintext wire default must serve.\nstderr:\n{stderr}"
+    );
+    // The plaintext RedWire listener must accept a connection on its port.
+    let wire_up = wait_until_serving(&mut server, &wire_addr, Duration::from_secs(30));
+    let stderr = server.stderr();
+    assert!(
+        wire_up,
+        "the env-derived plaintext RedWire listener must accept a connection \
+         on {wire_addr} in the HTTP-only path.\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Address already in use"),
+        "no listener may lose the wire port to a collision.\nstderr:\n{stderr}"
+    );
+}
+
+/// Issue #2055 (acceptance) — the HTTP-only path must record the wire
+/// transport in `TransportReadiness`, the same `active("wire", …)` state
+/// `run_dual_server` records, so the HTTP `/health` snapshot enumerates it
+/// as ready rather than silently omitting a live listener.
+#[test]
+fn http_only_reports_wire_transport_ready_on_health() {
+    let dir = support::temp_data_dir("http-only-wire-ready");
+    let db_path = dir.join("data.rdb");
+    let db_path_str = db_path.display().to_string();
+    let head_pw = dir.join("head.pw");
+    let customer_pw = dir.join("customer.pw");
+    std::fs::write(&head_pw, "head-secret\n").unwrap();
+    std::fs::write(&customer_pw, "customer-secret\n").unwrap();
+    let head_pw_s = head_pw.to_str().unwrap();
+    let customer_pw_s = customer_pw.to_str().unwrap();
+    let http_port = free_port();
+    let http_addr = format!("127.0.0.1:{http_port}");
+    let wire_port = free_port();
+    let wire_addr = format!("127.0.0.1:{wire_port}");
+
+    // Explicit `--wire-bind` alongside `--http-bind`, no gRPC.
+    let mut args = cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s);
+    args.extend_from_slice(&["--wire-bind", &wire_addr]);
+    let stderr_path = dir.join("server.stderr");
+    let mut server = spawn_server_with_envs(&args, &stderr_path, &[]);
+
+    let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
+    let stderr = server.stderr();
+    assert!(
+        serving,
+        "HTTP-only boot with --wire-bind must serve.\nstderr:\n{stderr}"
+    );
+
+    // `/health` is public; its `transport_listeners.active` must list the
+    // wire transport as an explicit, ready listener.
+    let body = ureq::get(&format!("http://{http_addr}/health"))
+        .call()
+        .expect("GET /health")
+        .body_mut()
+        .read_to_string()
+        .expect("read /health body");
+    let health: serde_json::Value = serde_json::from_str(&body).expect("parse /health json");
+    let active = health["transport_listeners"]["active"]
+        .as_array()
+        .expect("transport_listeners.active array");
+    let wire = active
+        .iter()
+        .find(|entry| entry["transport"] == "wire")
+        .unwrap_or_else(|| {
+            panic!("HTTP-only /health must report the wire transport ready; got {body}")
+        });
+    assert_eq!(
+        wire["bind_addr"], wire_addr,
+        "the ready wire listener must report its bind address.\n/health: {body}"
+    );
+    assert_eq!(
+        wire["explicit"], true,
+        "an explicit --wire-bind must be recorded as explicit.\n/health: {body}"
+    );
 }

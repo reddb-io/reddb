@@ -12,7 +12,7 @@ concurrency:
 jobs:
   changesets:
     name: Version Packages
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     # Skip on the version-bump commit itself to avoid an infinite loop. The
     # commit landing the version bump is authored by github-actions[bot] —
     # that push doesn't need to re-trigger this workflow.

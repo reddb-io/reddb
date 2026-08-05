@@ -76,7 +76,7 @@ impl Snapshot {
 }
 
 /// Per-transaction state tracked on the runtime while BEGIN/COMMIT/ROLLBACK
-/// is active. Attached to a connection via `RuntimeInner::tx_contexts`.
+/// is active. Attached to a connection by the runtime Transaction State module.
 #[derive(Debug, Clone)]
 pub struct TxnContext {
     pub xid: Xid,

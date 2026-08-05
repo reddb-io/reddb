@@ -38,7 +38,7 @@ concurrency:
 jobs:
   plan:
     name: Plan release
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       should_skip: ${{ steps.plan.outputs.should_skip }}
       release_channel: ${{ steps.plan.outputs.release_channel }}
@@ -360,7 +360,7 @@ jobs:
   publish-github:
     name: GitHub Release
     needs: [plan, build, artifact-sizes]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
@@ -612,7 +612,7 @@ jobs:
     # before any npm tarball ships.
     name: Verify release assets
     needs: [plan, publish-github]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -627,7 +627,7 @@ jobs:
   publish-npm:
     name: Publish CLI npm package
     needs: [plan, publish-github, verify-release-assets]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -726,7 +726,7 @@ jobs:
   publish-js-driver:
     name: Publish @reddb-io/sdk (npm)
     needs: [plan, publish-github, verify-release-assets]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -762,7 +762,7 @@ jobs:
   publish-js-client:
     name: Publish @reddb-io/client (npm)
     needs: [plan, publish-github, verify-release-assets]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -798,7 +798,7 @@ jobs:
   publish-bun-client:
     name: Publish @reddb-io/client-bun (npm)
     needs: [plan, publish-github, verify-release-assets]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -834,7 +834,7 @@ jobs:
   publish-mcp:
     name: Publish @reddb-io/mcp (npm)
     needs: [plan, publish-github, verify-release-assets]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -1111,7 +1111,7 @@ jobs:
     name: Upload wheels to PyPI
     needs: [plan, publish-python-wheels]
     if: false  # TODO: enable after creating PYPI_API_TOKEN secret
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
         with:

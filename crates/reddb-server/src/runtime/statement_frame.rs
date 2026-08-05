@@ -312,8 +312,8 @@ pub(super) struct PreparedStatement {
 impl StatementExecutionFrame {
     pub(super) fn build(runtime: &RedDBRuntime, query: &str) -> RedDBResult<Self> {
         let conn_id = current_connection_id();
-        let tx_local_tenant = runtime.inner.tx_local_tenants.read().get(&conn_id).cloned();
-        let tx_context = runtime.inner.tx_contexts.read().get(&conn_id).cloned();
+        let tx_local_tenant = runtime.inner.transaction_state.local_tenant(conn_id);
+        let tx_context = runtime.inner.transaction_state.context(conn_id);
         let own_xids = own_transaction_xids(tx_context.as_ref());
         let serializable_reader = tx_context
             .as_ref()
@@ -396,7 +396,7 @@ impl StatementExecutionFrame {
             _kv_store_guard: KvStoreGuard::install(runtime.inner.auth_store.read().clone()),
             _snapshot_guard: CurrentSnapshotGuard::install(SnapshotContext {
                 snapshot: self.snapshot.clone(),
-                manager: Arc::clone(&runtime.inner.snapshot_manager),
+                manager: runtime.inner.transaction_state.snapshot_manager(),
                 own_xids: self.own_xids.clone(),
                 requires_index_fallback: self.requires_index_fallback,
                 serializable_reader: self.serializable_reader,
@@ -978,8 +978,13 @@ impl RedDBRuntime {
     }
 
     fn result_cache_safe(&self, conn_id: u64) -> bool {
-        let has_active_xids = self.inner.snapshot_manager.oldest_active_xid().is_some();
-        let in_own_tx = self.inner.tx_contexts.read().contains_key(&conn_id);
+        let has_active_xids = self
+            .inner
+            .transaction_state
+            .snapshot_manager()
+            .oldest_active_xid()
+            .is_some();
+        let in_own_tx = self.inner.transaction_state.in_transaction(conn_id);
         !has_active_xids && !in_own_tx
     }
 }

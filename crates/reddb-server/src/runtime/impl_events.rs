@@ -62,10 +62,9 @@ impl RedDBRuntime {
         let manager = store
             .get_collection(&query.collection)
             .ok_or_else(|| RedDBError::NotFound(query.collection.clone()))?;
-        let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-        let mut entities = manager.query_all(|entity| {
-            crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
-        });
+        let snap_ctx = crate::runtime::impl_core::capture_current_snapshot()
+            .expect("event backfill executes inside a statement snapshot");
+        let mut entities = manager.scan(&snap_ctx, |_| true);
         entities.sort_by_key(|entity| entity.id.raw());
 
         let effective_queue = crate::runtime::mutation::effective_queue_name(&subscription);
