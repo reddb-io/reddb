@@ -1553,6 +1553,7 @@ mod probabilistic_store;
 pub mod query_audit;
 pub(crate) mod query_exec;
 pub(crate) mod query_latency_telemetry;
+pub mod query_request;
 pub(crate) mod queue_lifecycle;
 pub(crate) mod queue_telemetry;
 pub(crate) mod queue_wait_registry;
