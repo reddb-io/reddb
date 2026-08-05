@@ -9,6 +9,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
 use pyo3::{IntoPyObject, Py};
+use reddb_types::encoding::json_escape;
 
 #[cfg(feature = "embedded")]
 use crate::embedded::{EmbeddedRuntime, ParamValue, QueryRows, ScalarOut};
@@ -1800,22 +1801,6 @@ fn pydict_to_json_str(payload: &Bound<'_, PyDict>) -> PyResult<String> {
     }
     out.push('}');
     Ok(out)
-}
-
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 /// Parse the server's `result_json` (from `QueryReply`) into the same
