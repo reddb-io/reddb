@@ -281,16 +281,23 @@ fn json_value_to_schema_value(v: &JsonValue) -> SchemaValue {
 }
 
 fn map_query_result(qr: &reddb_server::runtime::RuntimeQueryResult) -> QueryResult {
-    let columns: Vec<String> = qr
-        .result
-        .records
-        .first()
-        .map(|r| {
-            let mut keys: Vec<String> = r.column_names().iter().map(|k| k.to_string()).collect();
-            keys.sort();
-            keys
-        })
-        .unwrap_or_default();
+    let columns = if qr.result.columns.is_empty() {
+        qr.result
+            .records
+            .first()
+            .map(|record| {
+                let mut keys: Vec<String> = record
+                    .column_names()
+                    .iter()
+                    .map(|key| key.to_string())
+                    .collect();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default()
+    } else {
+        qr.result.columns.clone()
+    };
 
     let rows: Vec<Vec<(String, ValueOut)>> =
         qr.result.records.iter().map(record_to_pairs).collect();
