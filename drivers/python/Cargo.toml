@@ -23,7 +23,7 @@ crate-type = ["cdylib"]
 # and `connect("memory://")` work without spawning anything. The wheel is
 # bigger but the experience matches the Rust client.
 default = ["embedded"]
-embedded = ["dep:reddb"]
+embedded = ["dep:reddb", "dep:reddb-types"]
 
 [dependencies]
 pyo3 = { version = "0.29", features = ["extension-module"] }
@@ -43,6 +43,7 @@ webpki-roots = "1.0"
 # Backend::Grpc is tracked separately; until then `--no-default-features`
 # builds the slim `Connection` / `WireConnection` API only.
 reddb = { package = "reddb-io", version = "1.0", path = "../..", optional = true }
+reddb-types = { package = "reddb-io-types", version = "1.0", path = "../../crates/reddb-types", optional = true }
 
 [build-dependencies]
 tonic-build = "0.14"
