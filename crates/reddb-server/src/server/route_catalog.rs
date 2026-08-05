@@ -5,6 +5,18 @@ use std::sync::Arc;
 use crate::application::OperationContext;
 use crate::auth::policies::{self, EvalContext, Policy, ResourceRef};
 
+use super::{HttpResponse, RedDBServer};
+
+pub(crate) type BufferedRouteHandler = for<'a> fn(
+    &RedDBServer,
+    &RouteMatch<'a>,
+    &str,
+    &str,
+    &BTreeMap<String, String>,
+    &BTreeMap<String, String>,
+    &[u8],
+) -> Option<HttpResponse>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) enum RouteMethod {
     Get,
@@ -176,7 +188,7 @@ impl RouteAlias {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct CommandSpec {
     pub(crate) id: &'static str,
     pub(crate) input_shape: CommandShape,
@@ -190,6 +202,13 @@ pub(crate) struct CommandSpec {
     pub(crate) stability: CommandStability,
     pub(crate) aliases: &'static [RouteAlias],
     pub(crate) middlewares: &'static [RouteMiddleware],
+    pub(crate) handler: Option<BufferedRouteHandler>,
+}
+
+impl CommandSpec {
+    pub(crate) fn has_handler(&self) -> bool {
+        self.handler.is_some()
+    }
 }
 
 pub(crate) type RouteSpec = CommandSpec;
@@ -243,13 +262,37 @@ impl RouteEntry {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct RouteRegistry {
     specs: Vec<RouteSpec>,
+    handler: Option<BufferedRouteHandler>,
+}
+
+impl Default for RouteRegistry {
+    fn default() -> Self {
+        Self {
+            specs: Vec::new(),
+            handler: None,
+        }
+    }
 }
 
 impl RouteRegistry {
-    pub(crate) fn route(&mut self, spec: RouteSpec) {
+    pub(crate) fn with_handler(
+        &mut self,
+        handler: BufferedRouteHandler,
+        register: fn(&mut RouteRegistry),
+    ) {
+        assert!(
+            self.handler.is_none(),
+            "route handler registration must not be nested"
+        );
+        self.handler = Some(handler);
+        register(self);
+        self.handler = None;
+    }
+
+    pub(crate) fn route(&mut self, mut spec: RouteSpec) {
+        spec.handler = self.handler;
         self.specs.push(spec);
     }
 
@@ -268,6 +311,7 @@ impl RouteRegistry {
                 stability: defaults.stability,
                 aliases: entry.aliases,
                 middlewares: defaults.middlewares,
+                handler: self.handler,
             });
         }
     }
@@ -908,6 +952,7 @@ mod tests {
             stability: RouteStability::Stable,
             aliases: &[],
             middlewares: NO_MIDDLEWARE,
+            handler: None,
         }
     }
 
