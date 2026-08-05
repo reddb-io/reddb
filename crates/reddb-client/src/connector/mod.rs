@@ -19,7 +19,6 @@ pub mod repl;
 // existing `reddb_client::{RedDBClient, repl, …}` import paths
 // keep resolving.
 pub use reddb_grpc_proto::{
-    BulkEntityReply as BulkCreateStatus, EntityReply as CreatedEntity,
-    HealthReply as HealthStatus, OperationReply as OperationStatus, QueryReply as QueryResponse,
-    RedDBClient,
+    BulkEntityReply as BulkCreateStatus, EntityReply as CreatedEntity, HealthReply as HealthStatus,
+    OperationReply as OperationStatus, QueryReply as QueryResponse, RedDBClient,
 };
