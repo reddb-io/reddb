@@ -32,6 +32,7 @@
 //! ```
 
 use super::{BackendError, RemoteBackend};
+use reddb_types::encoding::base64_encode;
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,34 +40,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ---------------------------------------------------------------------------
 // Base64 encode / decode
 // ---------------------------------------------------------------------------
-
-const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn base64_encode(data: &[u8]) -> String {
-    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-
-        result.push(BASE64_CHARS[((n >> 18) & 63) as usize] as char);
-        result.push(BASE64_CHARS[((n >> 12) & 63) as usize] as char);
-
-        if chunk.len() > 1 {
-            result.push(BASE64_CHARS[((n >> 6) & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-
-        if chunk.len() > 2 {
-            result.push(BASE64_CHARS[(n & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
-}
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, BackendError> {
     let input = input.trim_end_matches('=');
