@@ -104,10 +104,18 @@ fn migration_oom_reproducers_parse_with_bounded_work() {
     for (name, encoded) in REPRODUCERS {
         let bytes = decode_base64(encoded).unwrap_or_else(|err| panic!("{name}: {err}"));
         let input = std::str::from_utf8(&bytes).unwrap_or_else(|err| panic!("{name}: {err}"));
+        let (prefix_byte, tail) = input
+            .as_bytes()
+            .split_first()
+            .unwrap_or_else(|| panic!("{name}: empty reproducer"));
+        let tail = std::str::from_utf8(tail).unwrap_or_else(|err| panic!("{name}: {err}"));
+        let selected_prefix = PREFIXES[*prefix_byte as usize % PREFIXES.len()];
 
         let _ = parser::parse(input);
+        let selected = format!("{selected_prefix}{tail}");
+        let _ = parser::parse(&selected);
         for prefix in PREFIXES {
-            let prefixed = format!("{prefix}{input}");
+            let prefixed = format!("{prefix}{tail}");
             let _ = parser::parse(&prefixed);
         }
     }
