@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 
 use crate::crypto::{os_random, sha256};
 use crate::json::{Map, Value as JsonValue};
+use reddb_types::encoding::base64_encode;
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -562,44 +563,6 @@ impl AuditFieldEscaper {
             value: value.into(),
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Base64 (audit-only, no external dep)
-// ---------------------------------------------------------------------------
-
-/// Standard base64 (RFC 4648 §4) encoder. Audit-only; we don't
-/// import the base64 crate from this slice.
-fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i + 3 <= input.len() {
-        let b0 = input[i] as u32;
-        let b1 = input[i + 1] as u32;
-        let b2 = input[i + 2] as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
-        out.push(ALPHABET[(n & 0x3f) as usize] as char);
-        i += 3;
-    }
-    let rem = input.len() - i;
-    if rem == 1 {
-        let n = (input[i] as u32) << 16;
-        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-        out.push('=');
-        out.push('=');
-    } else if rem == 2 {
-        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
-        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
-        out.push('=');
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
