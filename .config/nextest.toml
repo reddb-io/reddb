@@ -34,5 +34,14 @@ final-status-level = "slow"
 slow-timeout = { period = "60s", terminate-after = 2 }
 retries = 1
 
+# Building a 200-table persistent catalog is intentionally CPU- and I/O-heavy.
+# Give this one overflow-chain regression exclusive access to the public runner
+# and a larger hard timeout; every other test keeps the 120-second ceiling.
+[[profile.ci.overrides]]
+filter = 'test(massive_catalog_forces_meta_overflow_chain)'
+threads-required = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 5 }
+retries = 0
+
 [profile.ci.junit]
 path = "junit.xml"
