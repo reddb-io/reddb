@@ -187,6 +187,10 @@ fn run_ephemeral_query(
     } else {
         use reddb::storage::query::modes::parse_multi;
         use reddb::storage::query::user_params;
+        let params: Vec<_> = params
+            .into_iter()
+            .map(reddb_client::Value::into_schema_value)
+            .collect();
         match parse_multi(sql_to_run) {
             Ok(expr) => match user_params::bind(&expr, &params) {
                 Ok(bound) => rt.execute_query_expr(bound),
@@ -923,7 +927,7 @@ fn attach_cli_vault(
 /// Without an explicit type, plain values are auto-typed by trying
 /// to parse them as JSON first (so `42` → integer, `[1,2,3]` →
 /// vector, `true` → boolean, `null` → Null) and falling back to text.
-fn collect_query_params(args: &[String]) -> Result<Vec<reddb::storage::schema::Value>, String> {
+fn collect_query_params(args: &[String]) -> Result<Vec<reddb_client::Value>, String> {
     let mut pairs: Vec<(String, Option<String>)> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -965,10 +969,10 @@ fn collect_query_params(args: &[String]) -> Result<Vec<reddb::storage::schema::V
 }
 
 /// Map a CLI `--param` token (and optional `--param-type`) into a
-/// schema `Value`. `@path` is unwrapped before type coercion so a
+/// driver `Value`. `@path` is unwrapped before type coercion so a
 /// file holding a JSON vector or large text works with every type.
-fn parse_cli_param(raw: &str, ty: Option<&str>) -> Result<reddb::storage::schema::Value, String> {
-    use reddb::storage::schema::Value;
+fn parse_cli_param(raw: &str, ty: Option<&str>) -> Result<reddb_client::Value, String> {
+    use reddb_client::Value;
     let body: String = if let Some(path) = raw.strip_prefix('@') {
         std::fs::read_to_string(path).map_err(|e| format!("--param @{path}: {e}"))?
     } else {
@@ -976,10 +980,10 @@ fn parse_cli_param(raw: &str, ty: Option<&str>) -> Result<reddb::storage::schema
     };
     let trimmed = body.trim();
     match ty {
-        Some("text") | Some("string") => Ok(Value::text(body.clone())),
+        Some("text") | Some("string") => Ok(Value::Text(body.clone())),
         Some("int") | Some("integer") => trimmed
             .parse::<i64>()
-            .map(Value::Integer)
+            .map(Value::Int)
             .map_err(|e| format!("--param-type int: {e}")),
         Some("float") => trimmed
             .parse::<f64>()
@@ -987,25 +991,21 @@ fn parse_cli_param(raw: &str, ty: Option<&str>) -> Result<reddb::storage::schema
             .map_err(|e| format!("--param-type float: {e}")),
         Some("bool") | Some("boolean") => trimmed
             .parse::<bool>()
-            .map(Value::Boolean)
+            .map(Value::Bool)
             .map_err(|e| format!("--param-type bool: {e}")),
         Some("null") => Ok(Value::Null),
         Some("vec") | Some("vector") => json_str_to_vector(trimmed),
         Some("json") => {
-            // Canonicalise via the project JSON parser so embedded code
-            // sees the same canonical form HTTP callers do.
             let parsed: reddb::json::Value =
                 reddb::json::from_str(trimmed).map_err(|e| format!("--param-type json: {e}"))?;
-            Ok(Value::text(
-                reddb::json::to_string(&parsed).unwrap_or_default(),
-            ))
+            Ok(Value::Json(json_value_to_client(parsed)))
         }
         Some(other) => Err(format!("unknown --param-type: {other}")),
         None => Ok(auto_type_param(&body)),
     }
 }
 
-fn json_str_to_vector(s: &str) -> Result<reddb::storage::schema::Value, String> {
+fn json_str_to_vector(s: &str) -> Result<reddb_client::Value, String> {
     use reddb::json::Value as J;
     let parsed: J = reddb::json::from_str(s).map_err(|e| format!("--param-type vec: {e}"))?;
     let J::Array(items) = parsed else {
@@ -1018,30 +1018,30 @@ fn json_str_to_vector(s: &str) -> Result<reddb::storage::schema::Value, String> 
             _ => return Err("--param-type vec: array must contain only numbers".into()),
         }
     }
-    Ok(reddb::storage::schema::Value::Vector(out))
+    Ok(reddb_client::Value::Vector(out))
 }
 
 /// Auto-type a CLI string: try JSON first (covers ints, floats, bools,
 /// null, arrays, objects) and fall back to text. Mirrors the
 /// `json_value_to_schema_value` mapping used by HTTP `params`.
-fn auto_type_param(s: &str) -> reddb::storage::schema::Value {
+fn auto_type_param(s: &str) -> reddb_client::Value {
     use reddb::json::Value as J;
-    use reddb::storage::schema::Value;
+    use reddb_client::Value;
     let trimmed = s.trim();
     if let Ok(parsed) = reddb::json::from_str::<J>(trimmed) {
         return match parsed {
             J::Null => Value::Null,
-            J::Bool(b) => Value::Boolean(b),
-            J::Integer(n) => Value::Integer(n),
+            J::Bool(b) => Value::Bool(b),
+            J::Integer(n) => Value::Int(n),
             J::Number(n) => {
                 if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
-                    Value::Integer(n as i64)
+                    Value::Int(n as i64)
                 } else {
                     Value::Float(n)
                 }
             }
-            J::Decimal(n) => Value::DecimalText(n),
-            J::String(t) => Value::text(t),
+            J::Decimal(n) => Value::Text(n),
+            J::String(t) => Value::Text(t),
             J::Array(items) => {
                 if items
                     .iter()
@@ -1053,13 +1053,34 @@ fn auto_type_param(s: &str) -> reddb::storage::schema::Value {
                         .collect();
                     Value::Vector(floats)
                 } else {
-                    Value::text(reddb::json::to_string(&J::Array(items)).unwrap_or_default())
+                    Value::Text(reddb::json::to_string(&J::Array(items)).unwrap_or_default())
                 }
             }
-            J::Object(_) => Value::text(reddb::json::to_string(&parsed).unwrap_or_default()),
+            J::Object(_) => Value::Text(reddb::json::to_string(&parsed).unwrap_or_default()),
         };
     }
-    Value::text(s.to_string())
+    Value::Text(s.to_string())
+}
+
+fn json_value_to_client(value: reddb::json::Value) -> reddb_client::JsonValue {
+    use reddb::json::Value;
+    match value {
+        Value::Null => reddb_client::JsonValue::Null,
+        Value::Bool(value) => reddb_client::JsonValue::Bool(value),
+        Value::Integer(value) => reddb_client::JsonValue::Number(value as f64),
+        Value::Number(value) => reddb_client::JsonValue::Number(value),
+        Value::Decimal(value) => reddb_client::JsonValue::String(value),
+        Value::String(value) => reddb_client::JsonValue::String(value),
+        Value::Array(values) => {
+            reddb_client::JsonValue::Array(values.into_iter().map(json_value_to_client).collect())
+        }
+        Value::Object(values) => reddb_client::JsonValue::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, json_value_to_client(value)))
+                .collect(),
+        ),
+    }
 }
 
 /// Convert a RedDB `Value` to a minimal JSON fragment. Numbers and
@@ -1090,56 +1111,6 @@ fn value_to_json_fragment(value: &reddb::storage::schema::Value) -> String {
         }
         other => format!("\"{}\"", json_escape(&format!("{other}"))),
     }
-}
-
-/// Render a `RuntimeQueryResult` as a compact human-readable string.
-/// Format: one row per line, `key=value` pairs joined with spaces,
-/// plus a trailing stats line. Value::Password / Value::Secret rely
-/// on the `Display` impl which already masks them as `***`.
-fn format_result_pretty(result: &reddb::runtime::RuntimeQueryResult) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    if result.statement_type != "select" {
-        let _ = writeln!(
-            out,
-            "{} ok ({} row{} affected)",
-            result.statement_type,
-            result.affected_rows,
-            if result.affected_rows == 1 { "" } else { "s" },
-        );
-        return out;
-    }
-    if result.result.records.is_empty() {
-        out.push_str("(no rows)\n");
-        if let Some(notice) = result.notice.as_deref() {
-            out.push_str("Note: ");
-            out.push_str(notice);
-            out.push('\n');
-        }
-        return out;
-    }
-    for (i, record) in result.result.records.iter().enumerate() {
-        let mut entries: Vec<(&str, &reddb::storage::schema::Value)> =
-            record.iter_fields().map(|(k, v)| (k.as_ref(), v)).collect();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
-        let mut line = format!("{}.", i + 1);
-        for (key, value) in entries {
-            let _ = write!(line, " {key}={value}");
-        }
-        out.push_str(&line);
-        out.push('\n');
-    }
-    let _ = writeln!(
-        out,
-        "({} row{})",
-        result.result.records.len(),
-        if result.result.records.len() == 1 {
-            ""
-        } else {
-            "s"
-        }
-    );
-    out
 }
 
 /// Render a `RuntimeQueryResult` as a JSON object with a `rows`
@@ -1196,6 +1167,322 @@ fn format_dry_run_result_json(
         format_result_json(result),
     )
 }
+
+// DATA COMMANDS BEGIN (issue #2124)
+
+fn run_data_command(
+    command: &str,
+    flags: &HashMap<String, FlagValue>,
+    args: &[String],
+    remaining: &[String],
+) {
+    let json_mode = wants_json(flags);
+    let row_format = parse_row_format(flags).unwrap_or_else(|err| {
+        if json_mode {
+            json_error(command, &err);
+        }
+        eprintln!("{command}: {err}");
+        std::process::exit(1);
+    });
+
+    if command == "query" && remaining.len() >= 2 && is_ephemeral_data_file(&remaining[0]) {
+        let file_count = remaining
+            .iter()
+            .take_while(|arg| is_ephemeral_data_file(arg))
+            .count();
+        run_ephemeral_query(
+            args,
+            &remaining[..file_count],
+            remaining.get(file_count).map(String::as_str).unwrap_or(""),
+            json_mode,
+            row_format,
+            flag_string(flags, "save"),
+            flag_bool(flags, "dry-run"),
+        );
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|err| {
+            eprintln!("{command}: failed to build async runtime: {err}");
+            std::process::exit(1);
+        });
+    let uri = data_connection_uri(flags, args);
+    // `--path` resolves the storage profile/packaging flags + env exactly like
+    // the pre-driver `open_local_runtime` did; other targets go through the
+    // driver's URI connect.
+    let client_result = match flag_string(flags, "path").filter(|path| !path.is_empty()) {
+        Some(path) => resolve_storage_profile(flags, "local")
+            .and_then(|profile| {
+                reddb::api::RedDBOptions::persistent(&path)
+                    .with_storage_profile(profile)
+                    .map_err(|e| format!("storage profile: {e}"))
+            })
+            .and_then(|options| {
+                reddb_client::embedded::EmbeddedClient::open_with_options(options)
+                    .map(reddb_client::Reddb::Embedded)
+                    .map_err(|err| err.to_string())
+            }),
+        None => runtime
+            .block_on(reddb_client::Reddb::connect(&uri))
+            .map_err(|err| err.to_string()),
+    };
+    let client = client_result.unwrap_or_else(|err| {
+        if json_mode {
+            json_error(command, &err);
+        }
+        eprintln!("{command}: {err}");
+        std::process::exit(1);
+    });
+
+    let (result, dry_run): (Result<QueryResult, String>, Option<(&str, String)>) = match command {
+        "query" => {
+            let sql = remaining.first().map(String::as_str).unwrap_or("");
+            if sql.is_empty() {
+                if json_mode {
+                    json_error("query", "Usage: red query [--path file] <sql>");
+                }
+                eprintln!("Usage: red query [--path file] <sql>");
+                eprintln!("Example: red query \"SELECT * FROM users\"");
+                std::process::exit(1);
+            }
+            let params = collect_query_params(args).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("query", &err);
+                }
+                eprintln!("query: {err}");
+                std::process::exit(1);
+            });
+            let dry_run = flag_bool(flags, "dry-run");
+            let preview = dry_run.then(|| format!("EXPLAIN {sql}"));
+            let sql_to_run = preview.as_deref().unwrap_or(sql);
+            let result = if params.is_empty() {
+                runtime.block_on(client.query(sql_to_run))
+            } else {
+                runtime.block_on(client.query_with(sql_to_run, params))
+            };
+            (
+                result.map_err(|err| err.to_string()),
+                preview.map(|preview| (sql, preview)),
+            )
+        }
+        "insert" => {
+            if remaining.len() < 2 {
+                data_usage_error_with_example(
+                    "insert",
+                    "Usage: red insert [--path file] <collection> <json>",
+                    "Example: red insert users '{\"name\": \"Alice\"}'",
+                    json_mode,
+                );
+            }
+            let collection = &remaining[0];
+            let parsed: reddb::json::Value =
+                reddb::json::from_str(&remaining[1]).unwrap_or_else(|err| {
+                    if json_mode {
+                        json_error("insert", &format!("invalid JSON: {err}"));
+                    }
+                    eprintln!("invalid JSON: {err}");
+                    std::process::exit(1);
+                });
+            let object = match parsed {
+                reddb::json::Value::Object(map) => map,
+                _ => data_usage_error("insert", "expected a JSON object", json_mode),
+            };
+            let mut columns = Vec::with_capacity(object.len());
+            let mut values = Vec::with_capacity(object.len());
+            for (key, value) in object {
+                columns.push(key);
+                values.push(match value {
+                    reddb::json::Value::String(value) => {
+                        format!("'{}'", value.replace('\'', "''"))
+                    }
+                    reddb::json::Value::Integer(value) => value.to_string(),
+                    reddb::json::Value::Number(value) => value.to_string(),
+                    reddb::json::Value::Decimal(value) => {
+                        format!("'{}'", value.replace('\'', "''"))
+                    }
+                    reddb::json::Value::Bool(value) => value.to_string(),
+                    reddb::json::Value::Null => "NULL".to_string(),
+                    other => format!(
+                        "'{}'",
+                        reddb::json::to_string(&other)
+                            .unwrap_or_default()
+                            .replace('\'', "''")
+                    ),
+                });
+            }
+            let sql = format!(
+                "INSERT INTO {collection} ({}) VALUES ({})",
+                columns.join(", "),
+                values.join(", ")
+            );
+            (
+                runtime
+                    .block_on(client.query(&sql))
+                    .map_err(|err| err.to_string()),
+                None,
+            )
+        }
+        "get" => {
+            if remaining.len() < 2 {
+                data_usage_error_with_example(
+                    "get",
+                    "Usage: red get [--path file] <collection> <id>",
+                    "Example: red get users 42",
+                    json_mode,
+                );
+            }
+            let sql = format!(
+                "SELECT * FROM {} WHERE _entity_id = {}",
+                remaining[0], remaining[1]
+            );
+            (
+                runtime
+                    .block_on(client.query(&sql))
+                    .map_err(|err| err.to_string()),
+                None,
+            )
+        }
+        "delete" => {
+            if remaining.len() < 2 {
+                data_usage_error_with_example(
+                    "delete",
+                    "Usage: red delete [--path file] <collection> <id>",
+                    "Example: red delete users 42",
+                    json_mode,
+                );
+            }
+            let sql = format!(
+                "DELETE FROM {} WHERE _entity_id = {}",
+                remaining[0], remaining[1]
+            );
+            (
+                runtime
+                    .block_on(client.query(&sql))
+                    .map_err(|err| err.to_string()),
+                None,
+            )
+        }
+        other => (Err(format!("unsupported data command: {other}")), None),
+    };
+
+    let close_result = runtime
+        .block_on(client.close())
+        .map_err(|err| err.to_string());
+    let result = result.and_then(|result| close_result.map(|()| result));
+    match result {
+        Ok(result) => emit_data_result(command, &result, row_format, json_mode, dry_run),
+        Err(err) => {
+            if json_mode {
+                json_error(command, &err);
+            }
+            eprintln!("{command} error: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn data_connection_uri(flags: &HashMap<String, FlagValue>, args: &[String]) -> String {
+    if let Some(path) = flag_string(flags, "path").filter(|path| !path.is_empty()) {
+        return format!("file://{path}");
+    }
+    if cli_flag_supplied(args, "bind", 'b') {
+        let bind = flag_string(flags, "bind").unwrap_or_else(|| "127.0.0.1:5000".to_string());
+        if bind.contains("://") {
+            return bind;
+        }
+        return format!("http://{bind}");
+    }
+    "memory://".to_string()
+}
+
+fn cli_flag_supplied(args: &[String], long: &str, short: char) -> bool {
+    let long = format!("--{long}");
+    let long_prefix = format!("{long}=");
+    let short = format!("-{short}");
+    let short_prefix = format!("{short}=");
+    args.iter().any(|arg| {
+        arg == &long
+            || arg.starts_with(&long_prefix)
+            || arg == &short
+            || arg.starts_with(&short_prefix)
+    })
+}
+
+fn data_usage_error_with_example(command: &str, usage: &str, example: &str, json_mode: bool) -> ! {
+    if json_mode {
+        json_error(command, usage);
+    }
+    eprintln!("{usage}");
+    eprintln!("{example}");
+    std::process::exit(1);
+}
+
+fn data_usage_error(command: &str, usage: &str, json_mode: bool) -> ! {
+    if json_mode {
+        json_error(command, usage);
+    }
+    eprintln!("{usage}");
+    std::process::exit(1);
+}
+
+fn emit_data_result(
+    command: &str,
+    result: &QueryResult,
+    format: RowFormat,
+    json_mode: bool,
+    dry_run: Option<(&str, String)>,
+) {
+    if json_mode {
+        let rows = String::from_utf8(format_query_result(result, RowFormat::Json))
+            .expect("driver JSON RowFormat is UTF-8");
+        let mut body = format!(
+            "{{\"statement\":\"{}\",\"affected\":{},\"rows\":{}",
+            json_escape(&result.statement),
+            result.affected,
+            rows.trim_end()
+        );
+        if let Some(notice) = result.notice.as_deref() {
+            body.push_str(&format!(",\"notice\":\"{}\"", json_escape(notice)));
+        }
+        body.push('}');
+        // Dry-run keeps the documented envelope: the result nests under
+        // `preview`, never flattened to the top level.
+        let data = if let Some((statement, preview)) = dry_run {
+            format!(
+                "{{\"statement\":\"explain\",\"dry_run\":true,\"would_run\":\"{}\",\"preview_statement\":\"{}\",\"preview\":{}}}",
+                json_escape(statement),
+                json_escape(&preview),
+                body
+            )
+        } else {
+            body
+        };
+        json_ok(command, &data);
+        return;
+    }
+    if let Some((statement, preview)) = dry_run {
+        println!("dry-run: {statement}");
+        println!("preview: {preview}");
+    }
+    // Writes keep their affected-row feedback: a successful DML must never
+    // render as "(no rows)".
+    if result.statement != "select" && result.rows.is_empty() {
+        println!(
+            "{} ok ({} row{} affected)",
+            result.statement,
+            result.affected,
+            if result.affected == 1 { "" } else { "s" },
+        );
+        return;
+    }
+    std::io::stdout()
+        .write_all(&format_query_result(result, format))
+        .expect("write stdout");
+}
+
+// DATA COMMANDS END (issue #2124)
 
 /// Print an error JSON envelope to **stderr** and exit with code 1.
 fn json_error(command: &str, error: &str) -> ! {
@@ -1487,273 +1774,13 @@ fn main() {
             std::process::exit(code);
         }
 
-        "query" => {
-            let json_mode = wants_json(&result.flags);
-            let row_format = parse_row_format(&result.flags).unwrap_or_else(|err| {
-                if json_mode {
-                    json_error("query", &err);
-                }
-                eprintln!("query: {err}");
-                std::process::exit(1);
-            });
-            // Ephemeral-store tracer (PRD #1785, issues #1786/#1792):
-            // `red query <file.csv|file.tsv|file.json|file.ndjson> [more files ...] <sql>`
-            // materializes all leading data-file positionals into a throwaway
-            // in-memory store and queries them. The SQL is the first non-file
-            // positional.
-            if remaining.len() >= 2 && is_ephemeral_data_file(remaining[0].as_str()) {
-                let file_count = remaining
-                    .iter()
-                    .take_while(|arg| is_ephemeral_data_file(arg.as_str()))
-                    .count();
-                run_ephemeral_query(
-                    &args,
-                    &remaining[..file_count],
-                    remaining
-                        .get(file_count)
-                        .map(|sql| sql.as_str())
-                        .unwrap_or(""),
-                    json_mode,
-                    row_format,
-                    flag_string(&result.flags, "save"),
-                    flag_bool(&result.flags, "dry-run"),
-                );
-            }
-            let sql = remaining.first().map(|s| s.as_str()).unwrap_or("");
-            if sql.is_empty() {
-                if json_mode {
-                    json_error("query", "Usage: red query [--path file] <sql>");
-                }
-                eprintln!("Usage: red query [--path file] <sql>");
-                eprintln!("Example: red query \"SELECT * FROM users\"");
-                std::process::exit(1);
-            }
-            let params = collect_query_params(&args).unwrap_or_else(|err| {
-                if json_mode {
-                    json_error("query", &err);
-                }
-                eprintln!("query: {err}");
-                std::process::exit(1);
-            });
-            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
-                if json_mode {
-                    json_error("query", &err);
-                }
-                eprintln!("error: {err}");
-                std::process::exit(1);
-            });
-            let dry_run = flag_bool(&result.flags, "dry-run");
-            let preview_sql = dry_run.then(|| format!("EXPLAIN {sql}"));
-            let sql_to_run = preview_sql.as_deref().unwrap_or(sql);
-            let exec_result = if params.is_empty() {
-                rt.execute_query(sql_to_run)
-            } else {
-                use reddb::storage::query::modes::parse_multi;
-                use reddb::storage::query::user_params;
-                match parse_multi(sql_to_run) {
-                    Ok(expr) => match user_params::bind(&expr, &params) {
-                        Ok(bound) => rt.execute_query_expr(bound),
-                        Err(err) => {
-                            if json_mode {
-                                json_error("query", &err.to_string());
-                            }
-                            eprintln!("query error: {err}");
-                            std::process::exit(1);
-                        }
-                    },
-                    Err(err) => {
-                        if json_mode {
-                            json_error("query", &err.to_string());
-                        }
-                        eprintln!("query error: {err}");
-                        std::process::exit(1);
-                    }
-                }
-            };
-            match exec_result {
-                Ok(qr) => {
-                    if !dry_run {
-                        checkpoint_local_runtime(&rt);
-                    }
-                    if json_mode {
-                        if let Some(preview_sql) = preview_sql.as_deref() {
-                            json_ok("query", &format_dry_run_result_json(sql, preview_sql, &qr));
-                        } else {
-                            json_ok("query", &format_result_json(&qr));
-                        }
-                    } else {
-                        if let Some(preview_sql) = preview_sql.as_deref() {
-                            println!("dry-run: {sql}");
-                            println!("preview: {preview_sql}");
-                        }
-                        print_row_result(&qr, row_format);
-                    }
-                }
-                Err(err) => {
-                    if json_mode {
-                        json_error("query", &err.to_string());
-                    }
-                    eprintln!("query error: {err}");
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        "insert" => {
-            let json_mode = wants_json(&result.flags);
-            if remaining.len() < 2 {
-                if json_mode {
-                    json_error(
-                        "insert",
-                        "Usage: red insert [--path file] <collection> <json>",
-                    );
-                }
-                eprintln!("Usage: red insert [--path file] <collection> <json>");
-                eprintln!("Example: red insert users '{{\"name\": \"Alice\"}}'");
-                std::process::exit(1);
-            }
-            let collection = &remaining[0];
-            let json_data = &remaining[1];
-            let parsed: reddb::json::Value =
-                reddb::json::from_str(json_data).unwrap_or_else(|err| {
-                    if json_mode {
-                        json_error("insert", &format!("invalid JSON: {err}"));
-                    }
-                    eprintln!("invalid JSON: {err}");
-                    std::process::exit(1);
-                });
-            let object = match parsed {
-                reddb::json::Value::Object(map) => map,
-                _ => {
-                    if json_mode {
-                        json_error("insert", "expected a JSON object");
-                    }
-                    eprintln!("expected a JSON object");
-                    std::process::exit(1);
-                }
-            };
-            // Build INSERT INTO <collection> (cols) VALUES (vals)
-            let mut cols = Vec::new();
-            let mut vals = Vec::new();
-            for (k, v) in object.iter() {
-                cols.push(k.clone());
-                vals.push(match v {
-                    reddb::json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                    reddb::json::Value::Number(n) => n.to_string(),
-                    reddb::json::Value::Bool(b) => b.to_string(),
-                    reddb::json::Value::Null => "NULL".to_string(),
-                    other => format!("'{}'", other.to_string().replace('\'', "''")),
-                });
-            }
-            let sql = format!(
-                "INSERT INTO {collection} ({}) VALUES ({})",
-                cols.join(", "),
-                vals.join(", "),
+        "query" | "insert" | "get" | "delete" => {
+            run_data_command(
+                command.as_deref().unwrap_or_default(),
+                &result.flags,
+                &args,
+                remaining,
             );
-            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
-                if json_mode {
-                    json_error("insert", &err);
-                }
-                eprintln!("error: {err}");
-                std::process::exit(1);
-            });
-            match rt.execute_query(&sql) {
-                Ok(qr) => {
-                    checkpoint_local_runtime(&rt);
-                    if json_mode {
-                        json_ok("insert", &format_result_json(&qr));
-                    } else {
-                        print!("{}", format_result_pretty(&qr));
-                    }
-                }
-                Err(err) => {
-                    if json_mode {
-                        json_error("insert", &err.to_string());
-                    }
-                    eprintln!("insert error: {err}");
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        "get" => {
-            let json_mode = wants_json(&result.flags);
-            if remaining.len() < 2 {
-                if json_mode {
-                    json_error("get", "Usage: red get [--path file] <collection> <id>");
-                }
-                eprintln!("Usage: red get [--path file] <collection> <id>");
-                eprintln!("Example: red get users 42");
-                std::process::exit(1);
-            }
-            let collection = &remaining[0];
-            let id = &remaining[1];
-            let sql = format!("SELECT * FROM {collection} WHERE _entity_id = {id}");
-            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
-                if json_mode {
-                    json_error("get", &err);
-                }
-                eprintln!("error: {err}");
-                std::process::exit(1);
-            });
-            match rt.execute_query(&sql) {
-                Ok(qr) => {
-                    if json_mode {
-                        json_ok("get", &format_result_json(&qr));
-                    } else {
-                        print!("{}", format_result_pretty(&qr));
-                    }
-                }
-                Err(err) => {
-                    if json_mode {
-                        json_error("get", &err.to_string());
-                    }
-                    eprintln!("get error: {err}");
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        "delete" => {
-            let json_mode = wants_json(&result.flags);
-            if remaining.len() < 2 {
-                if json_mode {
-                    json_error(
-                        "delete",
-                        "Usage: red delete [--path file] <collection> <id>",
-                    );
-                }
-                eprintln!("Usage: red delete [--path file] <collection> <id>");
-                eprintln!("Example: red delete users 42");
-                std::process::exit(1);
-            }
-            let collection = &remaining[0];
-            let id = &remaining[1];
-            let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
-            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
-                if json_mode {
-                    json_error("delete", &err);
-                }
-                eprintln!("error: {err}");
-                std::process::exit(1);
-            });
-            match rt.execute_query(&sql) {
-                Ok(qr) => {
-                    checkpoint_local_runtime(&rt);
-                    if json_mode {
-                        json_ok("delete", &format_result_json(&qr));
-                    } else {
-                        print!("{}", format_result_pretty(&qr));
-                    }
-                }
-                Err(err) => {
-                    if json_mode {
-                        json_error("delete", &err.to_string());
-                    }
-                    eprintln!("delete error: {err}");
-                    std::process::exit(1);
-                }
-            }
         }
 
         "health" => {
@@ -6796,8 +6823,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "-p=alice".to_string(),
         ];
         let params = collect_query_params(&args).unwrap();
-        assert_eq!(params[0], reddb::storage::schema::Value::Integer(42));
-        assert_eq!(params[1], reddb::storage::schema::Value::text("alice"));
+        assert_eq!(params[0], reddb_client::Value::Int(42));
+        assert_eq!(params[1], reddb_client::Value::Text("alice".to_string()));
     }
 
     #[test]

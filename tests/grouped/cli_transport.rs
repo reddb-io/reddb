@@ -21,6 +21,9 @@ mod cli_migrate_from_redis;
 #[path = "cli_transport/cli_query_param.rs"]
 mod cli_query_param;
 
+#[path = "cli_transport/cli_driver_data_commands.rs"]
+mod cli_driver_data_commands;
+
 #[path = "cli_transport/cli_salvage.rs"]
 mod cli_salvage;
 
