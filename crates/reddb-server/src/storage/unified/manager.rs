@@ -23,6 +23,7 @@ use super::segment::{
     GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats,
     UnifiedSegment, ZoneColPred, ZoneColPredKind,
 };
+use crate::runtime::mvcc::{entity_visible_with_context, SnapshotContext};
 use crate::storage::btree::visibility_map::VisibilityMap;
 
 /// Fraction of a collection's sealed entities that must be tombstoned before
@@ -1476,6 +1477,21 @@ impl SegmentManager {
         (results, scan_stats)
     }
 
+    /// Scan every segment under an explicit MVCC snapshot.
+    ///
+    /// Visibility is evaluated while each segment iterator is active, before
+    /// the caller's filter. Unlike the raw iteration methods, this entry point
+    /// does not consult thread-local snapshot state, so it preserves the same
+    /// view when invoked from a different thread.
+    pub fn scan<F>(&self, snapshot: &SnapshotContext, filter: F) -> Vec<UnifiedEntity>
+    where
+        F: Fn(&UnifiedEntity) -> bool + Sync,
+    {
+        self.query_all(|entity| {
+            entity_visible_with_context(Some(snapshot), entity) && filter(entity)
+        })
+    }
+
     /// Query across all segments. Uses parallel scanning for sealed segments
     /// when more than one sealed segment exists.
     pub fn query_all<F>(&self, filter: F) -> Vec<UnifiedEntity>
@@ -2101,8 +2117,12 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
+    use crate::runtime::mvcc::SnapshotContext;
     use crate::storage::schema::Value;
+    use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityData, EntityKind, RowData};
 
     #[test]
@@ -2119,6 +2139,74 @@ mod tests {
         let id = manager.insert(entity).unwrap();
         assert!(manager.get(id).is_some());
         assert_eq!(manager.count(), 1);
+    }
+
+    #[test]
+    fn snapshot_scan_applies_table_driven_visibility_on_fresh_thread() {
+        let manager = Arc::new(SegmentManager::new("accounts"));
+        let cases = [
+            ("legacy row", 0, 0, true),
+            ("committed creator", 3, 0, true),
+            ("future creator", 11, 0, false),
+            ("in-progress creator", 4, 0, false),
+            ("committed deleter", 3, 7, false),
+            ("future deleter", 3, 11, true),
+            ("in-progress deleter", 3, 4, true),
+        ];
+
+        for (index, (_, xmin, xmax, _)) in cases.iter().enumerate() {
+            let row_id = index as u64 + 1;
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(row_id),
+                "accounts",
+                row_id,
+                vec![Value::Integer(row_id as i64)],
+            );
+            entity.set_xmin(*xmin);
+            entity.set_xmax(*xmax);
+            manager.insert(entity).unwrap();
+        }
+
+        let snapshot = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 10,
+                in_progress: HashSet::from([4]),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+
+        let raw_visible_row_ids: HashSet<u64> = manager
+            .query_all(|entity| entity_visible_with_context(Some(&snapshot), entity))
+            .into_iter()
+            .filter_map(|entity| match entity.kind {
+                EntityKind::TableRow { row_id, .. } => Some(row_id),
+                _ => None,
+            })
+            .collect();
+
+        let scanned = std::thread::spawn(move || manager.scan(&snapshot, |_| true))
+            .join()
+            .unwrap();
+        let visible_row_ids: HashSet<u64> = scanned
+            .into_iter()
+            .filter_map(|entity| match entity.kind {
+                EntityKind::TableRow { row_id, .. } => Some(row_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(visible_row_ids, raw_visible_row_ids);
+
+        for (index, (name, _, _, expected_visible)) in cases.iter().enumerate() {
+            let row_id = index as u64 + 1;
+            assert_eq!(
+                visible_row_ids.contains(&row_id),
+                *expected_visible,
+                "{name} visibility mismatch"
+            );
+        }
     }
 
     #[test]
