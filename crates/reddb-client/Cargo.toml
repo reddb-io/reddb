@@ -46,6 +46,7 @@ redwire-tls = [
 # rustls. Optional features layer the heavier transports on top.
 reddb-grpc-proto = { workspace = true }
 reddb-wire = { workspace = true }
+reddb-types = { workspace = true }
 # The gRPC connector type lives in its own crate to break the
 # would-be circular path dependency between this crate (with
 # `embedded`) and `reddb-server`.

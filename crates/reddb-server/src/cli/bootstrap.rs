@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use crate::auth::store::AuthStore;
 use crate::auth::AuthConfig;
 use crate::{RedDBOptions, RedDBRuntime};
+use reddb_types::encoding::json_escape;
 
 /// Parsed args for `red bootstrap`. Constructed by the bin dispatcher
 /// from the CLI flag map; kept as a plain struct so the unit tests
@@ -186,24 +187,6 @@ pub fn render_success(outcome: &BootstrapOutcome, args: &BootstrapArgs) {
         outcome.username
     );
     println!("{}", outcome.certificate);
-}
-
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 #[cfg(test)]

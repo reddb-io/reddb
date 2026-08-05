@@ -164,6 +164,7 @@ reddb-grpc-proto = { workspace = true }
 reddb-client = { workspace = true, features = ["http"] }
 reddb-server = { workspace = true }
 reddb-file = { workspace = true }
+reddb-types = { workspace = true }
 # `red` bin spins up its own multi-thread tokio runtime (server
 # subcommand needs explicit Builder configuration with custom
 # stack size). All other reddb modules pull tokio transitively
@@ -193,7 +194,6 @@ reddb-file = { workspace = true }
 # `crates/reddb-rql` against the current in-server engine. Keeping these deps
 # here preserves the pure `reddb-io-rql -> reddb-io-types` crate graph.
 reddb-rql = { workspace = true }
-reddb-types = { workspace = true }
 sqllogictest = "0.29"
 # Differential RQL-vs-SQLite conformance (issue #1353): the standard-SQL corpus
 # slice is replayed against a live in-memory SQLite oracle so divergence from
