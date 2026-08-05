@@ -86,6 +86,23 @@ re-exports the envelope and adds the server-only `key_from_env`); per ADR 0046 a
 facade carries no second format. See ADR 0046 for the umbrella authority rule and
 ADRs 0052–0054 for the type, query, and crypto crates respectively.
 
+### Reviewing authority concepts
+
+The authority fence in `crates/reddb-types/tests/type_authority.rs` blocks the
+32 known cross-boundary concepts by name and by exact declaration shape. A
+rename therefore does not make a copied enum or struct server-owned. Existing
+server declarations are path-specific grandfather entries, each with an issue
+pointer for its removal; do not broaden those entries when moving code.
+
+The mechanical shape check is intentionally exact to avoid treating unrelated
+Rust types as the same concept. During review, also reject structural
+near-duplicates: a new server type with substantially the same fields, variants,
+responsibility, or conversion loop as an authority type must reuse or extend the
+authority declaration. If temporary duplication is unavoidable, it requires a
+named removal issue and a narrow, path-specific grandfather entry. Renaming,
+reordering fields, or adding a variant is not sufficient justification for a
+second declaration.
+
 ## Adapters
 
 Adapters sit at a seam and translate between a contract module and an external

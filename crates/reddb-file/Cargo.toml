@@ -16,6 +16,7 @@ name = "reddb_file"
 path = "src/lib.rs"
 
 [dependencies]
+reddb-types = { workspace = true }
 blake3 = "1"
 crc32fast = "1.5"
 fs2 = "0.4"

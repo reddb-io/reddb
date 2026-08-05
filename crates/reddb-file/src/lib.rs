@@ -373,10 +373,7 @@ pub use store_wal::{
     decode_store_wal_action_frame, encode_store_wal_action_frame, StoreWalActionFrame,
     STORE_WAL_ACTION_VERSION,
 };
-pub use table_def::{
-    decode_table_def_frame, encode_table_def_frame, ColumnDefFrame, ConstraintFrame, IndexDefFrame,
-    TableDefFrame, TableDefFrameError, TABLE_DEF_MAGIC,
-};
+pub use table_def::{decode_table_def, encode_table_def, TABLE_DEF_MAGIC};
 pub use transaction_wal::{
     decode_transaction_wal_entry_payload, decode_transaction_wal_record_frame,
     encode_transaction_wal_entry_payload, encode_transaction_wal_record_frame,

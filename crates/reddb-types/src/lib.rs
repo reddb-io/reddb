@@ -52,6 +52,7 @@ pub mod parametric;
 pub mod polymorphic;
 pub mod queue_mode;
 pub mod serde_json;
+pub mod table;
 pub mod types;
 pub mod utils;
 pub mod value_codec;
@@ -61,4 +62,7 @@ pub mod vector_metadata;
 
 pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};
 pub use operator::BinOp;
+pub use table::{
+    ColumnDef, Constraint, ConstraintType, IndexDef, IndexType, TableDef, TableDefError,
+};
 pub use types::{DataType, Row, SqlTypeName, TypeCategory, TypeModifier, Value, ValueError};
