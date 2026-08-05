@@ -49,9 +49,7 @@ impl Value {
                 .into_iter()
                 .collect(),
             ),
-            Value::Color([r, g, b]) => {
-                JsonValue::String(format!("#{r:02X}{g:02X}{b:02X}"))
-            }
+            Value::Color([r, g, b]) => JsonValue::String(format!("#{r:02X}{g:02X}{b:02X}")),
             Value::Email(value) | Value::Url(value) => JsonValue::String(value.clone()),
             Value::Phone(value) => exact_u64_to_json(*value),
             Value::Semver(packed) => JsonValue::String(format!(
@@ -73,14 +71,10 @@ impl Value {
             Value::Decimal(_) => exact_decimal_to_json(self.display_string()),
             Value::DecimalText(value) => exact_decimal_to_json(value.clone()),
             Value::EnumValue(value) => JsonValue::Integer(i64::from(*value)),
-            Value::Array(values) => {
-                JsonValue::Array(values.iter().map(Value::to_json).collect())
-            }
+            Value::Array(values) => JsonValue::Array(values.iter().map(Value::to_json).collect()),
             Value::TimestampMs(value) => exact_i64_to_json(*value),
             Value::Ipv4(ip) => JsonValue::String(format_ipv4(*ip)),
-            Value::Ipv6(bytes) => {
-                JsonValue::String(std::net::Ipv6Addr::from(*bytes).to_string())
-            }
+            Value::Ipv6(bytes) => JsonValue::String(std::net::Ipv6Addr::from(*bytes).to_string()),
             Value::Subnet(ip, mask) => {
                 JsonValue::String(format!("{}/{}", format_ipv4(*ip), mask.leading_ones()))
             }
@@ -99,9 +93,7 @@ impl Value {
             Value::Country3(code) | Value::Currency(code) => {
                 JsonValue::String(String::from_utf8_lossy(code).to_string())
             }
-            Value::Lang5(code) => {
-                JsonValue::String(String::from_utf8_lossy(code).to_string())
-            }
+            Value::Lang5(code) => JsonValue::String(String::from_utf8_lossy(code).to_string()),
             Value::AssetCode(code) => JsonValue::String(code.clone()),
             Value::Money {
                 asset_code,
@@ -113,14 +105,8 @@ impl Value {
                         "asset_code".to_string(),
                         JsonValue::String(asset_code.clone()),
                     ),
-                    (
-                        "minor_units".to_string(),
-                        exact_i64_to_json(*minor_units),
-                    ),
-                    (
-                        "scale".to_string(),
-                        exact_i64_to_json(i64::from(*scale)),
-                    ),
+                    ("minor_units".to_string(), exact_i64_to_json(*minor_units)),
+                    ("scale".to_string(), exact_i64_to_json(i64::from(*scale))),
                 ]
                 .into_iter()
                 .collect(),
@@ -277,11 +263,7 @@ mod tests {
                 Value::MacAddr([0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]),
                 r#""00:1a:2b:3c:4d:5e""#,
             ),
-            (
-                "vector",
-                Value::Vector(vec![1.5, -2.0]),
-                "[1.5,-2]",
-            ),
+            ("vector", Value::Vector(vec![1.5, -2.0]), "[1.5,-2]"),
             (
                 "JSON",
                 Value::Json(br#"{"nested":[1,2.5],"text":"ok"}"#.to_vec()),
@@ -297,8 +279,16 @@ mod tests {
                 Value::Uuid([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
                 r#""000102030405060708090a0b0c0d0e0f""#,
             ),
-            ("node reference", Value::NodeRef("node:1".into()), r#""node:1""#),
-            ("edge reference", Value::EdgeRef("edge:1".into()), r#""edge:1""#),
+            (
+                "node reference",
+                Value::NodeRef("node:1".into()),
+                r#""node:1""#,
+            ),
+            (
+                "edge reference",
+                Value::EdgeRef("edge:1".into()),
+                r#""edge:1""#,
+            ),
             (
                 "vector reference",
                 Value::VectorRef("embeddings".into(), 7),
@@ -311,7 +301,11 @@ mod tests {
             ),
             ("color", Value::Color([0x12, 0xab, 0xff]), "\"#12ABFF\""),
             ("email", Value::Email("a@b.test".into()), r#""a@b.test""#),
-            ("URL", Value::Url("https://example.test".into()), r#""https://example.test""#),
+            (
+                "URL",
+                Value::Url("https://example.test".into()),
+                r#""https://example.test""#,
+            ),
             ("phone", Value::Phone(55_119_999), "55119999"),
             ("semver", Value::Semver(1_002_003), r#""1.2.3""#),
             ("CIDR", Value::Cidr(0xc0a8_0100, 24), r#""192.168.1.0/24""#),
@@ -330,10 +324,17 @@ mod tests {
             ("enum", Value::EnumValue(3), "3"),
             (
                 "array",
-                Value::Array(vec![Value::Boolean(false), Value::Array(vec![Value::Integer(2)])]),
+                Value::Array(vec![
+                    Value::Boolean(false),
+                    Value::Array(vec![Value::Integer(2)]),
+                ]),
                 "[false,[2]]",
             ),
-            ("millisecond timestamp", Value::TimestampMs(1_700_000_000_123), "1700000000123"),
+            (
+                "millisecond timestamp",
+                Value::TimestampMs(1_700_000_000_123),
+                "1700000000123",
+            ),
             ("IPv4", Value::Ipv4(0x7f00_0001), r#""127.0.0.1""#),
             (
                 "IPv6",
@@ -388,7 +389,11 @@ mod tests {
                 Value::DocRef("profiles".into(), 9),
                 r#"{"collection":"profiles","id":9}"#,
             ),
-            ("table reference", Value::TableRef("users".into()), r#""users""#),
+            (
+                "table reference",
+                Value::TableRef("users".into()),
+                r#""users""#,
+            ),
             ("page reference", Value::PageRef(17), "17"),
             ("secret", Value::Secret(vec![1, 2, 3]), r#""***""#),
             ("password", Value::Password("hash".into()), r#""***""#),
