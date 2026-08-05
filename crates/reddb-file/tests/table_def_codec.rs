@@ -1,7 +1,5 @@
 use reddb_file::{decode_table_def, encode_table_def};
-use reddb_types::{
-    ColumnDef, Constraint, ConstraintType, DataType, IndexDef, IndexType, TableDef,
-};
+use reddb_types::{ColumnDef, Constraint, ConstraintType, DataType, IndexDef, IndexType, TableDef};
 use std::collections::HashMap;
 
 fn fixture_corpus() -> Vec<(TableDef, &'static str)> {
