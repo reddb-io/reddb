@@ -505,6 +505,31 @@ pub struct CompiledEntityFilter {
     required_bloom: u64,
 }
 
+/// Result of evaluating one row with a [`CompiledEntityFilter`].
+///
+/// This deliberately is not a `bool`: fallback opcodes cannot be evaluated
+/// without runtime state, so every consumer must decide how to perform the
+/// full filter recheck before it can treat the row as a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "compiled filter decisions must handle NeedsFallback"]
+pub enum CompiledEntityFilterDecision {
+    Match,
+    Reject,
+    NeedsFallback,
+}
+
+impl CompiledEntityFilterDecision {
+    /// Convert the three-way decision to a match only after supplying the
+    /// runtime evaluation required by an undecided compiled predicate.
+    pub fn resolve_with_fallback(self, fallback: impl FnOnce() -> bool) -> bool {
+        match self {
+            Self::Match => true,
+            Self::Reject => false,
+            Self::NeedsFallback => fallback(),
+        }
+    }
+}
+
 impl CompiledEntityFilter {
     /// Walk the AST filter once and produce a flat opcode list.
     pub fn compile(filter: &Filter, table_name: &str, table_alias: &str) -> Self {
@@ -565,7 +590,7 @@ impl CompiledEntityFilter {
 
     /// Evaluate against an entity. Hot path — must stay allocation-free
     /// in the common case.
-    pub fn evaluate(&self, entity: &UnifiedEntity) -> bool {
+    pub fn evaluate(&self, entity: &UnifiedEntity) -> CompiledEntityFilterDecision {
         // Field-name bloom gate: if the entity is missing a required field,
         // it cannot satisfy any user-field predicate. Skip before any HashMap.
         // Only fires when entity.field_bloom is non-zero (named/document entities).
@@ -586,7 +611,7 @@ impl CompiledEntityFilter {
             && entity.field_bloom != 0
             && (entity.field_bloom & self.required_bloom) != self.required_bloom
         {
-            return false;
+            return CompiledEntityFilterDecision::Reject;
         }
 
         // Fixed-size three-valued stack — no heap allocation per row.
@@ -758,8 +783,11 @@ impl CompiledEntityFilter {
                 }
             }
         }
-        // Keep the row unless the prefilter proved it cannot match.
-        pop!(Some(true)) != Some(false)
+        match pop!(Some(true)) {
+            Some(true) => CompiledEntityFilterDecision::Match,
+            Some(false) => CompiledEntityFilterDecision::Reject,
+            None => CompiledEntityFilterDecision::NeedsFallback,
+        }
     }
 
     /// Evaluate the filter against a batch of entities. Appends the
@@ -773,25 +801,15 @@ impl CompiledEntityFilter {
     /// vectorizable `Compare` and `InSet` opcodes and widen `out` to
     /// a roaring bitmap. The signature here is forward-compatible.
     #[inline]
-    pub fn evaluate_batch(&self, entities: &[&UnifiedEntity], out: &mut Vec<bool>) {
+    pub fn evaluate_batch(
+        &self,
+        entities: &[&UnifiedEntity],
+        out: &mut Vec<CompiledEntityFilterDecision>,
+    ) {
         out.reserve(entities.len());
         for e in entities {
             out.push(self.evaluate(e));
         }
-    }
-
-    /// Convenience wrapper: run the batch evaluator and return only
-    /// the indices where the filter matched. Caller owns the
-    /// resulting vec. Reuses [`Self::evaluate_batch`] so future
-    /// vectorization benefits this path automatically.
-    #[inline]
-    pub fn matching_indices(&self, entities: &[&UnifiedEntity]) -> Vec<usize> {
-        let mut mask = Vec::with_capacity(entities.len());
-        self.evaluate_batch(entities, &mut mask);
-        mask.iter()
-            .enumerate()
-            .filter_map(|(i, &hit)| if hit { Some(i) } else { None })
-            .collect()
     }
 }
 
@@ -1255,7 +1273,10 @@ mod tests {
             }),
         );
 
-        assert!(compiled.evaluate(&entity));
+        assert_eq!(
+            compiled.evaluate(&entity),
+            CompiledEntityFilterDecision::Match
+        );
     }
 
     // Note: full evaluate() correctness is covered by the runtime
@@ -1300,10 +1321,34 @@ mod tests {
 
         let mut mask = Vec::new();
         compiled.evaluate_batch(&refs, &mut mask);
-        assert_eq!(mask, vec![false, true, true, false]);
+        assert_eq!(
+            mask,
+            vec![
+                CompiledEntityFilterDecision::Reject,
+                CompiledEntityFilterDecision::Match,
+                CompiledEntityFilterDecision::Match,
+                CompiledEntityFilterDecision::Reject,
+            ]
+        );
+    }
 
-        let indices = compiled.matching_indices(&refs);
-        assert_eq!(indices, vec![1, 2]);
+    #[test]
+    fn fallback_evaluation_requires_an_explicit_runtime_decision() {
+        let filter = Filter::Compare {
+            field: FieldRef::TableColumn {
+                table: String::new(),
+                column: "profile.role".to_string(),
+            },
+            op: CompareOp::Eq,
+            value: Value::text("admin"),
+        };
+        let compiled = CompiledEntityFilter::compile(&filter, "users", "u");
+        let entity = make_row_entity(1, vec![]);
+
+        assert_eq!(
+            compiled.evaluate(&entity),
+            CompiledEntityFilterDecision::NeedsFallback
+        );
     }
 
     #[test]
@@ -1321,6 +1366,5 @@ mod tests {
         let mut mask = Vec::new();
         compiled.evaluate_batch(&entities, &mut mask);
         assert!(mask.is_empty());
-        assert!(compiled.matching_indices(&entities).is_empty());
     }
 }
