@@ -167,7 +167,7 @@ pub mod output_stream;
 mod patch_support;
 mod request_body;
 mod request_context;
-mod route_catalog;
+pub(crate) mod route_catalog;
 mod routes;
 mod routing;
 mod serverless_support;

@@ -1521,6 +1521,8 @@ mod impl_telemetry_accessors;
 mod impl_tenant_registry;
 pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
+#[cfg(test)]
+mod evaluator_differential;
 mod impl_scrub;
 mod impl_search;
 mod impl_serverless;

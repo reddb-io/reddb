@@ -19,7 +19,7 @@
 //! `self.build_*_context(...)`; no public surface change.
 
 use crate::api::RedDBResult;
-use crate::application::OperationContext;
+use crate::application::{OperationContext, OperationContextFactory, OperationContextInput};
 use crate::runtime::write_gate::WriteKind;
 
 use super::RedDBServer;
@@ -32,14 +32,11 @@ impl RedDBServer {
         request_id: Option<&str>,
         principal: Option<&str>,
     ) -> OperationContext {
-        let ctx = match request_id {
-            Some(id) if !id.is_empty() => OperationContext::read_only(id),
-            _ => OperationContext::implicit(),
-        };
-        match principal {
-            Some(p) if !p.is_empty() => ctx.with_principal(p),
-            _ => ctx,
-        }
+        OperationContextFactory::build(OperationContextInput {
+            request_id: request_id.map(str::to_string),
+            principal: principal.map(str::to_string),
+            ..OperationContextInput::default()
+        })
     }
 
     /// Build a writing context. Calls `WriteGate::check_consent`,
@@ -57,20 +54,12 @@ impl RedDBServer {
         principal: Option<&str>,
     ) -> RedDBResult<OperationContext> {
         let consent = self.runtime.write_gate().check_consent(kind)?;
-        let request_id = request_id
-            .filter(|id| !id.is_empty())
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| {
-                // Borrow OperationContext::implicit's minter by
-                // routing through it — keeps the id format
-                // consistent across read / write contexts.
-                OperationContext::implicit().request_id
-            });
-        let mut ctx = OperationContext::writing(consent, request_id);
-        if let Some(p) = principal.filter(|p| !p.is_empty()) {
-            ctx = ctx.with_principal(p);
-        }
-        Ok(ctx)
+        Ok(OperationContextFactory::build(OperationContextInput {
+            request_id: request_id.map(str::to_string),
+            principal: principal.map(str::to_string),
+            write_consent: Some(consent),
+            ..OperationContextInput::default()
+        }))
     }
 }
 
