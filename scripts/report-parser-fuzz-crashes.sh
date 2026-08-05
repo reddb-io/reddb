@@ -11,6 +11,31 @@ if [ ! -d "${artifact_dir}" ] || ! find "${artifact_dir}" -type f | grep -q .; t
   exit 0
 fi
 
+# Partition artifacts into real reproducers (non-empty) and zero-byte files.
+# libFuzzer names artifacts by content hash, so a zero-byte artifact is named
+# for the SHA-1 of the empty string (da39a3ee...) and carries no input to
+# reproduce. That happens when an OOM is detected outside the execution of a
+# specific unit — for example while the evolved corpus cache is being loaded —
+# so the empty file is a signal about the run, not about an input. Filing an
+# issue from it produces an unreproducible report, so we exclude empty
+# artifacts here and never let one become a reproducer.
+empty_count=0
+non_empty_artifacts=()
+while IFS= read -r artifact; do
+  if [ -s "${artifact}" ]; then
+    non_empty_artifacts+=("${artifact}")
+  else
+    empty_count=$((empty_count + 1))
+    echo "Skipping zero-byte artifact ${artifact} (no input to reproduce)."
+  fi
+done < <(find "${artifact_dir}" -type f | sort)
+
+if [ "${#non_empty_artifacts[@]}" -eq 0 ]; then
+  echo "All ${empty_count} fuzz artifact(s) for ${target} are zero-byte; not filing an issue."
+  echo "Empty artifacts are the signature of an out-of-memory failure detected outside the execution of a unit (for example during corpus load), which leaves no reproducer input. Inspect the fuzzer log in the workflow run to diagnose the run."
+  exit 0
+fi
+
 gh label create "release-blocker" \
   --color "B60205" \
   --description "Blocks release until resolved" >/dev/null 2>&1 || true
@@ -40,13 +65,20 @@ trap 'rm -rf "${header}" "${tmin_log}" "${b64_file}" "${create_body}" "${comment
   echo
 } > "${header}"
 
+if [ "${empty_count}" -gt 0 ]; then
+  {
+    echo "> Note: ${empty_count} zero-byte artifact(s) were skipped (out-of-memory outside a unit, e.g. during corpus load; no reproducer input)."
+    echo
+  } >> "${header}"
+fi
+
 # Build one Markdown section per artifact, keyed by the libFuzzer artifact
 # basename. The basename is a content hash, so it is a stable dedup key: an
 # identical reproducer found on a later night has the same basename and adds
 # nothing, while a genuinely new input carries a new basename.
 declare -a basenames=()
 idx=0
-while IFS= read -r artifact; do
+for artifact in "${non_empty_artifacts[@]}"; do
   base="$(basename "${artifact}")"
   minimized="${RUNNER_TEMP:-/tmp}/${target}-${base}.min"
   cp "${artifact}" "${minimized}"
@@ -80,7 +112,7 @@ while IFS= read -r artifact; do
   } > "${sections_dir}/${idx}"
   basenames+=("${base}")
   idx=$((idx + 1))
-done < <(find "${artifact_dir}" -type f | sort)
+done
 
 title="release-blocker: parser fuzz ${title_suffix} in ${target}"
 

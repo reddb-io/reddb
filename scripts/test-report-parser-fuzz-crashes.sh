@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for scripts/report-parser-fuzz-crashes.sh dedup behaviour.
+# Tests for scripts/report-parser-fuzz-crashes.sh dedup and zero-byte behaviour.
 #
 # Every case stubs `gh` (and `cargo`, so no real fuzzer runs) via a temp bin
 # on PATH — the live tracker is never touched. Each stub appends one line per
@@ -131,9 +131,34 @@ STUB_ISSUE_NUMBER="" bash -c "cd '${WORK}/c4' && '${SCRIPT}' migration_parser" >
 [ "$(count create)" = "1" ] && pass "create called once" || fail "create count = $(count create) (want 1)"
 [ "$(grep -c '^comment ' "${CALL_LOG}" || true)" = "0" ] && pass "comment not called" || fail "comment called (want 0)"
 
+
+EMPTY_ART="oom-da39a3ee5e6b4b0d3255bfef95601890afd80709" # SHA-1 of the empty string
+
+# --- Case 5: all artifacts zero-byte -> no issue, no comment, exit 0 -------
+echo "case 5: all-empty artifacts -> no create, no comment, cause named"
+setup_case "${WORK}/c5" "${ART}"
+rm -f "${WORK}/c5/fuzz/artifacts/migration_parser/${ART}"
+: > "${WORK}/c5/fuzz/artifacts/migration_parser/${EMPTY_ART}"
+unset STUB_ISSUE_BODY
+OUT5="$(STUB_ISSUE_NUMBER="" bash -c "cd '${WORK}/c5' && '${SCRIPT}' migration_parser")"
+[ "$(count create)" = "0" ] && pass "create not called" || fail "create called (want 0)"
+[ "$(grep -c '^comment ' "${CALL_LOG}" || true)" = "0" ] && pass "comment not called" || fail "comment called (want 0)"
+if grep -qF "zero-byte" <<<"${OUT5}"; then pass "output names the zero-byte cause"; else fail "output missing zero-byte cause"; fi
+
+# --- Case 6: mixed empty + real artifact -> create from the real one only --
+echo "case 6: mixed artifacts -> one create, empty artifact never a reproducer"
+setup_case "${WORK}/c6" "${ART}"
+: > "${WORK}/c6/fuzz/artifacts/migration_parser/${EMPTY_ART}"
+unset STUB_ISSUE_BODY
+STUB_ISSUE_NUMBER="" bash -c "cd '${WORK}/c6' && '${SCRIPT}' migration_parser" >/dev/null
+[ "$(count create)" = "1" ] && pass "create called once" || fail "create count = $(count create) (want 1)"
+if grep -qF "${ART}" "${CREATE_BODY}"; then pass "body carries the real artifact"; else fail "body missing real artifact"; fi
+if grep -qF "${EMPTY_ART}" "${CREATE_BODY}"; then fail "body must not carry the empty artifact"; else pass "empty artifact absent from body"; fi
+if grep -qF "zero-byte artifact(s) were skipped" "${CREATE_BODY}"; then pass "body notes the skip"; else fail "body missing skip note"; fi
+
 echo
 if [ "${FAILURES}" -eq 0 ]; then
-  echo "All report-parser-fuzz-crashes dedup tests passed."
+  echo "All report-parser-fuzz-crashes dedup and zero-byte tests passed."
 else
   echo "${FAILURES} assertion(s) failed."
   exit 1
