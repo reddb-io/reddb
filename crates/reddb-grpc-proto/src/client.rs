@@ -38,9 +38,7 @@ impl RedDBClient {
         let mut request = Request::new(inner);
         if let Some(token) = &self.token {
             if let Ok(value) = bearer_authorization_value(token).parse() {
-                request
-                    .metadata_mut()
-                    .insert(AUTHORIZATION_HEADER, value);
+                request.metadata_mut().insert(AUTHORIZATION_HEADER, value);
             }
         }
         request
@@ -80,7 +78,12 @@ impl RedDBClient {
 
     pub async fn collections(&mut self) -> Result<Vec<String>, Box<dyn Error>> {
         let request = self.auth_request(Empty {});
-        Ok(self.inner.collections(request).await?.into_inner().collections)
+        Ok(self
+            .inner
+            .collections(request)
+            .await?
+            .into_inner()
+            .collections)
     }
 
     pub async fn scan(
@@ -165,7 +168,12 @@ impl RedDBClient {
     /// Fetch the canonical topology envelope bytes.
     pub async fn topology(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
         let request = self.auth_request(TopologyRequest {});
-        Ok(self.inner.topology(request).await?.into_inner().topology_bytes)
+        Ok(self
+            .inner
+            .topology(request)
+            .await?
+            .into_inner()
+            .topology_bytes)
     }
 
     pub async fn delete_entity(
