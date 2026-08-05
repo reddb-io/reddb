@@ -67,6 +67,13 @@ mod tests {
     }
 
     #[test]
+    fn every_discovered_http_command_has_a_handler_binding() {
+        let catalog = build_discovered_route_catalog().unwrap();
+
+        assert!(catalog.routes().all(|route| route.has_handler()));
+    }
+
+    #[test]
     fn discovered_routes_are_matchable() {
         let catalog = build_discovered_route_catalog().unwrap();
         let matched = catalog.find(RouteMethod::Get, "/health/live").unwrap();
