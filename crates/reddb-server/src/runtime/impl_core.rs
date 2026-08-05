@@ -337,6 +337,17 @@ impl RedDBRuntime {
         self.finish_query_lifecycle(query, started, result)
     }
 
+    pub(crate) fn execute_prepared_query(
+        &self,
+        query: &str,
+        expr: QueryExpr,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let started = std::time::Instant::now();
+        self.inner.node_load_telemetry.query_start();
+        let result = self.execute_bound_query_expr_in_frame(query, expr);
+        self.finish_query_lifecycle(query, started, result)
+    }
+
     fn finish_query_lifecycle(
         &self,
         query: &str,
