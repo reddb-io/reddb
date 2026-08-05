@@ -25,40 +25,41 @@ plugins:
         allowlist: "app/github-actions filipeforattini"
 
       # ----------------------------------------------------------------
-      # Worker model tiers. Pin every Codex tier to gpt-5.6/high and every
-      # Claude tier to opus-4-8/high so a worker never falls through to the
-      # cheaper per-tier defaults (validate defaults to low). Flattening
-      # every tier onto one slug is the ADR 0049 posture; this is the
-      # durable form of the RED_AFK_MODEL/RED_AFK_EFFORT env override, so
-      # no launch needs it.
+      # Worker model tiers. Pin every Codex tier to gpt-5.6-sol/high (the
+      # flagship of the sol/terra/luna family, mirroring red-skills' coding
+      # tiers) and every Claude tier to opus-5/high, so a worker never
+      # falls through to the cheaper per-tier defaults (validate defaults
+      # to low). Flattening every tier onto one slug is the ADR 0049
+      # posture; this is the durable form of the RED_AFK_MODEL/
+      # RED_AFK_EFFORT env override, so no launch needs it.
       # Precedence: --model flag > RED_AFK_MODEL env > this block > defaults.
       # ----------------------------------------------------------------
       models:
         codex:
           validate:
-            model: gpt-5.6
+            model: gpt-5.6-sol
             effort: high
           simple:
-            model: gpt-5.6
+            model: gpt-5.6-sol
             effort: high
           complex:
-            model: gpt-5.6
+            model: gpt-5.6-sol
             effort: high
           think:
-            model: gpt-5.6
+            model: gpt-5.6-sol
             effort: high
         claude:
           validate:
-            model: claude-opus-4-8
+            model: claude-opus-5
             effort: high
           simple:
-            model: claude-opus-4-8
+            model: claude-opus-5
             effort: high
           complex:
-            model: claude-opus-4-8
+            model: claude-opus-5
             effort: high
           think:
-            model: claude-opus-4-8
+            model: claude-opus-5
             effort: high
 
       # ----------------------------------------------------------------
