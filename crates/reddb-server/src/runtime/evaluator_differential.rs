@@ -81,8 +81,11 @@ fn evaluator_divergence_matrix_matches_v1_report() {
         return;
     }
 
+    // Normalize line endings so a CRLF checkout (e.g. Windows autocrlf)
+    // cannot fail the drift check spuriously.
+    let committed = COMMITTED_MATRIX.replace("\r\n", "\n");
     assert_eq!(
-        produced, COMMITTED_MATRIX,
+        produced, committed,
         "evaluator divergence matrix drifted; inspect the semantic change, then regenerate with \
          REDDB_UPDATE_EVALUATOR_MATRIX=1 cargo test -p reddb-io-server --lib \
          evaluator_divergence_matrix_matches_v1_report"
@@ -313,7 +316,11 @@ oracle: currently-known differences are expected. CI fails only when a produced 
 this committed matrix.\n\n\
 The table covers the known LIKE case/byte, NULL equality and 3VL, overflow, division-by-zero, \
 numeric coercion, decimal, Unicode, temporal, missing-column, and Boolean families. `unsupported` \
-means that the implementation has no representation for that operation or value family.\n\n\
+means that the implementation has no representation for that operation or value family. Caveat: \
+for the three filter engines the boolean-logic rows (`NULL AND TRUE`, `NULL OR FALSE`) are \
+encoded as `(left = TRUE) AND/OR (right = TRUE)` with a NULL operand — those cells measure a \
+comparison-to-NULL feeding a combinator, not the engines' own three-valued logic on a NULL \
+operand.\n\n\
 ## Implementations\n\n\
 - `typed-expr`: `storage/query/evaluator.rs`\n\
 - `runtime-expr`: `runtime/expr_eval.rs`\n\
@@ -414,16 +421,22 @@ fn eval_compiled_filter(case: &Case) -> String {
     let Some(fixture) = storage_filter_fixture(case) else {
         return "unsupported".to_string();
     };
-    let schema = fixture
+    // A missing column stays out of the schema so the matrix records the
+    // compiler's real missing-column behavior (an UnknownColumn compile
+    // error), not NULL-slot semantics.
+    let present = fixture
         .columns
+        .iter()
+        .filter_map(|(name, value)| value.clone().map(|value| (*name, value)))
+        .collect::<Vec<_>>();
+    let schema = present
         .iter()
         .enumerate()
         .map(|(index, (name, _))| ((*name).to_string(), index))
         .collect::<HashMap<_, _>>();
-    let slot = fixture
-        .columns
+    let slot = present
         .iter()
-        .map(|(_, value)| value.clone().unwrap_or(Value::Null))
+        .map(|(_, value)| value.clone())
         .collect::<Vec<_>>();
     match CompiledFilter::compile(&fixture.filter, &schema) {
         Ok(filter) => filter.evaluate(&slot).to_string(),

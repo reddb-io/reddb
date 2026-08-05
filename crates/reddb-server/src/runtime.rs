@@ -1521,6 +1521,8 @@ mod impl_telemetry_accessors;
 mod impl_tenant_registry;
 pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
+#[cfg(test)]
+mod evaluator_differential;
 mod impl_scrub;
 mod impl_search;
 mod impl_serverless;
@@ -1567,8 +1569,6 @@ pub(crate) mod retention_filter;
 pub(crate) mod retention_sweeper;
 mod rls_injection;
 pub(crate) mod scalar_evaluator;
-#[cfg(test)]
-mod evaluator_differential;
 pub mod schema_diff;
 pub mod schema_vocabulary;
 pub(crate) mod score_sketch;
