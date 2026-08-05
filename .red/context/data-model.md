@@ -30,6 +30,7 @@ Part of the [glossary map](../CONTEXT-MAP.md). How data is shaped and accessed, 
 - **Stream lease** — internal, unforwarded credential issued at `OpenStream`, bound to the snapshot pin. Outlives the bearer token so credential rotation does not terminate accepted streaming work; lease TTL is capped by snapshot TTL.
 - **Chunk page alignment** — output-stream production buffer reads in N × 16 KiB units (engine `PAGE_SIZE`). Server flushes when byte, row, or latency cap fires. Wire frames carry row-encoded data, not raw page bytes — drivers stay thin and storage layout stays free to evolve.
 - **Resumable annotation** — output-stream open returns `resumable: true|false` based on whether the query has a stable total order. Resume re-executes against the pinned snapshot with `resume_after_rid` filter; prefix hash detects substitution.
+- **TOON output format** — token-oriented object notation (RedDB's tooling at `reddb-io/toon`: Rust crate, `@reddb-io/toon`, `tq` CLI; TOONL is the append-only stream form) as a supported render target for query results, alongside table/CSV/JSON — decided 2026-08-05. A target encoding of the presentation renderer and a `RowFormat` variant in the client/CLI; agent/prompt-facing surfaces are its primary audience.
 
 ## Catalog & Discovery
 
