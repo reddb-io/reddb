@@ -1588,6 +1588,8 @@ pub(crate) mod retention_filter;
 pub(crate) mod retention_sweeper;
 mod rls_injection;
 pub(crate) mod scalar_evaluator;
+#[cfg(test)]
+mod evaluator_differential;
 pub mod schema_diff;
 pub mod schema_vocabulary;
 pub(crate) mod score_sketch;
