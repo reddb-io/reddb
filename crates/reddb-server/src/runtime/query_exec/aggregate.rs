@@ -18,7 +18,6 @@ use crate::runtime::join_filter::{
     projection_name, resolve_runtime_field, runtime_partial_cmp, sort_records_by_order_by_with_db,
 };
 use crate::runtime::runtime_table_record_from_entity_ref;
-use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
 };
@@ -323,12 +322,9 @@ pub(crate) fn execute_aggregate_query(
     >::new(spill_dir.path(), WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
 
-    let table_row_resolver = TableRowMvccReadResolver::current_statement();
-    manager.for_each_entity(|entity| {
-        if table_row_resolver.resolve_read_candidate(entity).is_none() {
-            return true;
-        }
-
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot()
+        .expect("aggregate scan executes inside a statement snapshot");
+    manager.scan_for_each(&snapshot, |entity| {
         // ── Lazy record materialisation ──────────────────────────────────
         // We defer `runtime_table_record_from_entity` until we actually
         // need it (complex filters, GROUP BY exprs or aggregate args that
@@ -3140,9 +3136,10 @@ fn try_execute_parallel_single_col_numeric_aggs(
         return Ok(None);
     };
 
-    let table_row_resolver =
-        TableRowMvccReadResolver::captured(crate::runtime::impl_core::capture_current_snapshot());
-    let acc = manager.fold_entities_parallel(
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot()
+        .expect("parallel aggregate scan executes inside a statement snapshot");
+    let acc = manager.scan_fold_parallel(
+        &snapshot,
         || FastNumericGroupAccumulator {
             groups: std::collections::HashMap::new(),
             unsupported_value: false,
@@ -3151,10 +3148,6 @@ fn try_execute_parallel_single_col_numeric_aggs(
             if local.unsupported_value {
                 return local;
             }
-            if table_row_resolver.resolve_read_candidate(entity).is_none() {
-                return local;
-            }
-
             let Some(value_cow) = group_accessor.get_value(entity) else {
                 local.unsupported_value = true;
                 return local;
