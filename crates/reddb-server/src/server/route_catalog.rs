@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
+
+use crate::application::OperationContext;
+use crate::auth::policies::{self, EvalContext, Policy, ResourceRef};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) enum RouteMethod {
@@ -53,7 +57,7 @@ impl fmt::Display for RouteMethod {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RouteAudience {
+pub(crate) enum CommandAudience {
     Client,
     Operator,
     Infra,
@@ -61,8 +65,22 @@ pub(crate) enum RouteAudience {
     Internal,
 }
 
+impl CommandAudience {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Operator => "operator",
+            Self::Infra => "infra",
+            Self::CompatibilityAdapter => "compatibility-adapter",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+pub(crate) type RouteAudience = CommandAudience;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RouteAuth {
+pub(crate) enum CommandAuthRequirement {
     Public,
     OptionalUser,
     UserRequired,
@@ -70,6 +88,8 @@ pub(crate) enum RouteAuth {
     OpsCapability(&'static str),
     StreamLease,
 }
+
+pub(crate) type RouteAuth = CommandAuthRequirement;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ListenerSurface {
@@ -79,11 +99,33 @@ pub(crate) enum ListenerSurface {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RouteStability {
+pub(crate) enum CommandStability {
     Stable,
     Compatibility,
     Deprecated,
     Internal,
+}
+
+pub(crate) type RouteStability = CommandStability;
+
+/// Transport-neutral payload shape carried by one command declaration.
+///
+/// Dispatchers may translate these shapes into HTTP bodies, protobuf
+/// messages, MCP values, or wire frames. `Unspecified` is accepted by the
+/// Rust type so catalog construction can report a useful error instead of
+/// forcing every declaration through a macro.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommandShape {
+    Unspecified,
+    Empty,
+    Structured,
+    Stream,
+}
+
+impl CommandShape {
+    pub(crate) const fn is_declared(self) -> bool {
+        !matches!(self, Self::Unspecified)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,18 +177,22 @@ impl RouteAlias {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RouteSpec {
+pub(crate) struct CommandSpec {
     pub(crate) id: &'static str,
+    pub(crate) input_shape: CommandShape,
+    pub(crate) output_shape: CommandShape,
     pub(crate) method: RouteMethod,
     pub(crate) pattern: &'static str,
     pub(crate) family: &'static str,
-    pub(crate) audience: RouteAudience,
-    pub(crate) auth: RouteAuth,
+    pub(crate) audience: CommandAudience,
+    pub(crate) auth: CommandAuthRequirement,
     pub(crate) surfaces: &'static [ListenerSurface],
-    pub(crate) stability: RouteStability,
+    pub(crate) stability: CommandStability,
     pub(crate) aliases: &'static [RouteAlias],
     pub(crate) middlewares: &'static [RouteMiddleware],
 }
+
+pub(crate) type RouteSpec = CommandSpec;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RouteGroupDefaults {
@@ -161,6 +207,8 @@ pub(crate) struct RouteGroupDefaults {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RouteEntry {
     pub(crate) id: &'static str,
+    pub(crate) input_shape: CommandShape,
+    pub(crate) output_shape: CommandShape,
     pub(crate) method: RouteMethod,
     pub(crate) pattern: &'static str,
     pub(crate) aliases: &'static [RouteAlias],
@@ -170,6 +218,8 @@ impl RouteEntry {
     pub(crate) const fn new(id: &'static str, method: RouteMethod, pattern: &'static str) -> Self {
         Self {
             id,
+            input_shape: CommandShape::Structured,
+            output_shape: CommandShape::Structured,
             method,
             pattern,
             aliases: &[],
@@ -184,6 +234,8 @@ impl RouteEntry {
     ) -> Self {
         Self {
             id,
+            input_shape: CommandShape::Structured,
+            output_shape: CommandShape::Structured,
             method,
             pattern,
             aliases,
@@ -205,6 +257,8 @@ impl RouteRegistry {
         for entry in entries {
             self.route(RouteSpec {
                 id: entry.id,
+                input_shape: entry.input_shape,
+                output_shape: entry.output_shape,
                 method: entry.method,
                 pattern: entry.pattern,
                 family: defaults.family,
@@ -224,14 +278,15 @@ impl RouteRegistry {
 }
 
 #[derive(Debug)]
-pub(crate) struct RouteCatalog {
+pub(crate) struct CommandCatalog {
     routes: Vec<CompiledRoute>,
+    command_index: BTreeMap<&'static str, usize>,
     exact_index: BTreeMap<(RouteMethod, &'static str), usize>,
     dynamic_indices: Vec<usize>,
     aliases: Vec<CompiledAlias>,
 }
 
-impl RouteCatalog {
+impl CommandCatalog {
     pub(crate) fn build(specs: Vec<RouteSpec>) -> Result<Self, RouteCatalogError> {
         let mut seen_ids = BTreeSet::new();
         let mut routes = Vec::with_capacity(specs.len());
@@ -239,6 +294,9 @@ impl RouteCatalog {
         for spec in specs {
             if !seen_ids.insert(spec.id) {
                 return Err(RouteCatalogError::DuplicateRouteId { id: spec.id });
+            }
+            if !spec.input_shape.is_declared() || !spec.output_shape.is_declared() {
+                return Err(RouteCatalogError::UndeclaredCommandShape { id: spec.id });
             }
 
             let pattern = RoutePattern::parse(spec.pattern).map_err(|reason| {
@@ -300,9 +358,11 @@ impl RouteCatalog {
         }
 
         let mut exact_index = BTreeMap::new();
+        let mut command_index = BTreeMap::new();
         let mut dynamic_indices = Vec::new();
         let mut aliases = Vec::new();
         for (index, route) in routes.iter().enumerate() {
+            command_index.insert(route.spec.id, index);
             if route.pattern.is_exact() {
                 exact_index.insert((route.spec.method, route.pattern.raw), index);
             } else {
@@ -319,6 +379,7 @@ impl RouteCatalog {
 
         Ok(Self {
             routes,
+            command_index,
             exact_index,
             dynamic_indices,
             aliases,
@@ -327,6 +388,16 @@ impl RouteCatalog {
 
     pub(crate) fn routes(&self) -> impl Iterator<Item = &RouteSpec> {
         self.routes.iter().map(|route| &route.spec)
+    }
+
+    pub(crate) fn commands(&self) -> impl ExactSizeIterator<Item = &CommandSpec> {
+        self.routes.iter().map(|route| &route.spec)
+    }
+
+    pub(crate) fn command(&self, id: &str) -> Option<&CommandSpec> {
+        self.command_index
+            .get(id)
+            .map(|index| &self.routes[*index].spec)
     }
 
     pub(crate) fn find(&self, method: RouteMethod, path: &str) -> Option<RouteMatch<'_>> {
@@ -402,6 +473,122 @@ impl RouteCatalog {
     }
 }
 
+pub(crate) type RouteCatalog = CommandCatalog;
+
+/// Boundary to the ADR 0021 policy engine. Dispatchers supply a context and
+/// command id to [`CommandAuthorizer`]; this is the only seam that receives
+/// the command's authentication requirement and audience.
+pub(crate) trait CommandPolicyEngine {
+    fn allows(&self, ctx: &OperationContext, command: &CommandSpec) -> bool;
+}
+
+/// Adapter from command declarations to the ADR 0021 IAM evaluator.
+pub(crate) struct IamCommandPolicyEngine<'a> {
+    policies: &'a [Arc<Policy>],
+}
+
+impl<'a> IamCommandPolicyEngine<'a> {
+    pub(crate) fn new(policies: &'a [Arc<Policy>]) -> Self {
+        Self { policies }
+    }
+}
+
+impl CommandPolicyEngine for IamCommandPolicyEngine<'_> {
+    fn allows(&self, ctx: &OperationContext, command: &CommandSpec) -> bool {
+        let Some(action) = command_policy_action(command) else {
+            return true;
+        };
+        if ctx.audit_principal == "anonymous" {
+            return false;
+        }
+
+        let resource_name = format!("{}:{}", command.audience.as_str(), command.id);
+        let mut resource = ResourceRef::new("command", resource_name);
+        if let Some(tenant) = &ctx.tenant {
+            resource = resource.with_tenant(tenant);
+        }
+        let eval_context = EvalContext {
+            principal_tenant: ctx.tenant.clone(),
+            current_tenant: ctx.tenant.clone(),
+            now_ms: crate::auth::now_ms(),
+            principal_is_platform_scoped: ctx.tenant.is_none(),
+            ..EvalContext::default()
+        };
+        let policies: Vec<&Policy> = self.policies.iter().map(Arc::as_ref).collect();
+
+        matches!(
+            policies::evaluate(&policies, action, &resource, &eval_context),
+            policies::Decision::Allow { .. } | policies::Decision::AdminBypass
+        )
+    }
+}
+
+fn command_policy_action(command: &CommandSpec) -> Option<&'static str> {
+    match command.auth {
+        RouteAuth::Public | RouteAuth::OptionalUser => None,
+        RouteAuth::UserRequired => match command.method {
+            RouteMethod::Get | RouteMethod::Options | RouteMethod::Head => Some("select"),
+            RouteMethod::Post
+            | RouteMethod::Put
+            | RouteMethod::Patch
+            | RouteMethod::Delete
+            | RouteMethod::Any => Some("write"),
+        },
+        RouteAuth::AdminToken => Some("admin:*"),
+        RouteAuth::OpsCapability(action) => Some(action),
+        RouteAuth::StreamLease => Some("stream"),
+    }
+}
+
+pub(crate) struct CommandAuthorizer<'a, P: ?Sized> {
+    catalog: &'a CommandCatalog,
+    policy_engine: &'a P,
+}
+
+impl<'a, P: CommandPolicyEngine + ?Sized> CommandAuthorizer<'a, P> {
+    pub(crate) fn new(catalog: &'a CommandCatalog, policy_engine: &'a P) -> Self {
+        Self {
+            catalog,
+            policy_engine,
+        }
+    }
+
+    pub(crate) fn authorize(
+        &self,
+        ctx: &OperationContext,
+        command_id: &str,
+    ) -> Result<(), CommandAuthorizationError> {
+        let command = self
+            .catalog
+            .command(command_id)
+            .ok_or_else(|| CommandAuthorizationError::UnknownCommand(command_id.to_string()))?;
+        if self.policy_engine.allows(ctx, command) {
+            Ok(())
+        } else {
+            Err(CommandAuthorizationError::Denied {
+                command_id: command.id,
+            })
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CommandAuthorizationError {
+    UnknownCommand(String),
+    Denied { command_id: &'static str },
+}
+
+impl fmt::Display for CommandAuthorizationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownCommand(id) => write!(f, "unknown command {id}"),
+            Self::Denied { command_id } => write!(f, "command {command_id} denied by policy"),
+        }
+    }
+}
+
+impl std::error::Error for CommandAuthorizationError {}
+
 pub(crate) struct RouteMatch<'a> {
     pub(crate) spec: &'a RouteSpec,
     pub(crate) params: BTreeMap<String, String>,
@@ -409,6 +596,9 @@ pub(crate) struct RouteMatch<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RouteCatalogError {
+    UndeclaredCommandShape {
+        id: &'static str,
+    },
     InvalidPattern {
         route_id: &'static str,
         pattern: &'static str,
@@ -435,6 +625,9 @@ pub(crate) enum RouteCatalogError {
 impl fmt::Display for RouteCatalogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UndeclaredCommandShape { id } => {
+                write!(f, "command {id} has an undeclared input or output shape")
+            }
             Self::InvalidPattern {
                 route_id,
                 pattern,
@@ -664,6 +857,9 @@ fn split_request_path(path: &str) -> Option<Vec<&str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::OperationContext;
+    use crate::auth::policies::Policy;
+    use std::sync::Arc;
 
     const NO_SURFACES: &[ListenerSurface] = &[ListenerSurface::Public];
     const NO_MIDDLEWARE: &[RouteMiddleware] = &[];
@@ -671,6 +867,8 @@ mod tests {
     fn spec(id: &'static str, method: RouteMethod, pattern: &'static str) -> RouteSpec {
         RouteSpec {
             id,
+            input_shape: CommandShape::Structured,
+            output_shape: CommandShape::Structured,
             method,
             pattern,
             family: "test",
@@ -860,5 +1058,134 @@ mod tests {
             catalog.resolve_alias(RouteMethod::Get, "/v1/ai/models/embedding-small"),
             Some("/ai/models/embedding-small".to_string())
         );
+    }
+
+    struct MatrixPolicyEngine {
+        allowed_auth: RouteAuth,
+        allowed_audience: RouteAudience,
+    }
+
+    impl CommandPolicyEngine for MatrixPolicyEngine {
+        fn allows(&self, _ctx: &OperationContext, command: &CommandSpec) -> bool {
+            command.auth == self.allowed_auth && command.audience == self.allowed_audience
+        }
+    }
+
+    #[test]
+    fn authorize_allows_and_denies_every_auth_requirement() {
+        for auth in [
+            RouteAuth::Public,
+            RouteAuth::OptionalUser,
+            RouteAuth::UserRequired,
+            RouteAuth::AdminToken,
+            RouteAuth::OpsCapability("ops:read:cluster"),
+            RouteAuth::StreamLease,
+        ] {
+            let catalog = CommandCatalog::build(vec![RouteSpec {
+                auth,
+                ..spec("test.command", RouteMethod::Post, "/test")
+            }])
+            .expect("command catalog");
+            let ctx = OperationContext::read_only("request-1");
+
+            let allow = MatrixPolicyEngine {
+                allowed_auth: auth,
+                allowed_audience: RouteAudience::Client,
+            };
+            assert!(CommandAuthorizer::new(&catalog, &allow)
+                .authorize(&ctx, "test.command")
+                .is_ok());
+
+            let deny = MatrixPolicyEngine {
+                allowed_auth: if auth == RouteAuth::Public {
+                    RouteAuth::UserRequired
+                } else {
+                    RouteAuth::Public
+                },
+                allowed_audience: RouteAudience::Client,
+            };
+            assert!(matches!(
+                CommandAuthorizer::new(&catalog, &deny).authorize(&ctx, "test.command"),
+                Err(CommandAuthorizationError::Denied { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn authorize_allows_and_denies_every_command_audience() {
+        for audience in [
+            RouteAudience::Client,
+            RouteAudience::Operator,
+            RouteAudience::Infra,
+            RouteAudience::CompatibilityAdapter,
+            RouteAudience::Internal,
+        ] {
+            let catalog = CommandCatalog::build(vec![RouteSpec {
+                audience,
+                ..spec("test.command", RouteMethod::Post, "/test")
+            }])
+            .expect("command catalog");
+            let ctx = OperationContext::read_only("request-1");
+
+            let allow = MatrixPolicyEngine {
+                allowed_auth: RouteAuth::UserRequired,
+                allowed_audience: audience,
+            };
+            assert!(CommandAuthorizer::new(&catalog, &allow)
+                .authorize(&ctx, "test.command")
+                .is_ok());
+
+            let deny = MatrixPolicyEngine {
+                allowed_auth: RouteAuth::UserRequired,
+                allowed_audience: RouteAudience::Internal,
+            };
+            if audience != RouteAudience::Internal {
+                assert!(matches!(
+                    CommandAuthorizer::new(&catalog, &deny).authorize(&ctx, "test.command"),
+                    Err(CommandAuthorizationError::Denied { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn iam_policy_engine_applies_explicit_deny_and_audience_resource() {
+        let allow = Arc::new(
+            Policy::from_json_str(
+                r#"{"id":"allow-operator","version":1,"statements":[
+                    {"effect":"allow","actions":["write"],
+                     "resources":["command:operator:test.command"]}
+                ]}"#,
+            )
+            .expect("allow policy"),
+        );
+        let deny = Arc::new(
+            Policy::from_json_str(
+                r#"{"id":"deny-command","version":1,"statements":[
+                    {"effect":"deny","actions":["write"],
+                     "resources":["command:operator:test.command"]}
+                ]}"#,
+            )
+            .expect("deny policy"),
+        );
+        let catalog = CommandCatalog::build(vec![RouteSpec {
+            audience: RouteAudience::Operator,
+            ..spec("test.command", RouteMethod::Post, "/test")
+        }])
+        .expect("command catalog");
+        let ctx = OperationContext::read_only("request-1").with_principal("operator");
+
+        let allow_policies = vec![allow.clone()];
+        let allow_engine = IamCommandPolicyEngine::new(&allow_policies);
+        assert!(CommandAuthorizer::new(&catalog, &allow_engine)
+            .authorize(&ctx, "test.command")
+            .is_ok());
+
+        let deny_policies = vec![allow, deny];
+        let deny_engine = IamCommandPolicyEngine::new(&deny_policies);
+        assert!(matches!(
+            CommandAuthorizer::new(&catalog, &deny_engine).authorize(&ctx, "test.command"),
+            Err(CommandAuthorizationError::Denied { .. })
+        ));
     }
 }
