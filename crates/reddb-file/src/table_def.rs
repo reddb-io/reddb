@@ -1,11 +1,7 @@
 //! Persisted SQL table-definition payload codec (`RTBL`).
 //!
-//! The schema engine owns column types, index/constraint semantics, and
-//! validation. This module owns only the durable byte layout of a serialized
-//! table definition. Type discriminants (`data_type`, `element_type`,
-//! `index_type`, `constraint_type`) are carried as opaque `u8` bytes: the
-//! engine maps them to/from its `DataType` / `IndexType` / `ConstraintType`
-//! enums and is responsible for rejecting unknown discriminants.
+//! [`reddb_types`] owns the logical table vocabulary and validation. This
+//! module owns only the durable byte layout of a serialized table definition.
 //!
 //! `reddb-file` already owns this table definition as the opaque
 //! `table_def_hex` field of `PhysicalCollectionContract`; this codec gives that
@@ -15,117 +11,54 @@
 //! integers are little-endian. DO NOT change magic/order/width — these bytes
 //! live in existing `.rdb` files.
 
+use reddb_types::{
+    ColumnDef, Constraint, ConstraintType, DataType, IndexDef, IndexType, TableDef, TableDefError,
+};
+use std::collections::HashMap;
+
 /// Magic prefix for a serialized table definition.
 pub const TABLE_DEF_MAGIC: [u8; 4] = *b"RTBL";
-
-/// A decoded column definition. Type bytes are opaque to this crate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ColumnDefFrame {
-    pub name: String,
-    pub data_type: u8,
-    pub nullable: bool,
-    pub default: Option<Vec<u8>>,
-    pub vector_dim: Option<u32>,
-    pub compress: bool,
-    pub enum_variants: Vec<String>,
-    pub decimal_precision: u8,
-    pub element_type: Option<u8>,
-    /// Key/value metadata, in on-disk order.
-    pub metadata: Vec<(String, String)>,
-}
-
-/// A decoded index definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexDefFrame {
-    pub name: String,
-    pub index_type: u8,
-    pub unique: bool,
-    pub columns: Vec<String>,
-}
-
-/// A decoded constraint definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConstraintFrame {
-    pub name: String,
-    pub constraint_type: u8,
-    pub columns: Vec<String>,
-    pub ref_table: Option<String>,
-    pub ref_columns: Option<Vec<String>>,
-}
-
-/// A decoded table definition (`RTBL`) payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableDefFrame {
-    pub name: String,
-    pub version: u32,
-    pub created_at: u64,
-    pub updated_at: u64,
-    pub columns: Vec<ColumnDefFrame>,
-    pub primary_key: Vec<String>,
-    pub indexes: Vec<IndexDefFrame>,
-    pub constraints: Vec<ConstraintFrame>,
-}
-
-/// Errors decoding a table-definition payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TableDefFrameError {
-    TruncatedData,
-    InvalidMagic,
-    VarintOverflow,
-}
-
-impl std::fmt::Display for TableDefFrameError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TruncatedData => write!(f, "truncated data"),
-            Self::InvalidMagic => write!(f, "invalid magic bytes"),
-            Self::VarintOverflow => write!(f, "varint overflow"),
-        }
-    }
-}
-
-impl std::error::Error for TableDefFrameError {}
 
 // ============================================================================
 // Encode
 // ============================================================================
 
 /// Serialize a table-definition payload to bytes.
-pub fn encode_table_def_frame(frame: &TableDefFrame) -> Vec<u8> {
+pub fn encode_table_def(table: &TableDef) -> Vec<u8> {
     let mut buf = Vec::new();
 
     buf.extend_from_slice(&TABLE_DEF_MAGIC);
-    buf.extend_from_slice(&frame.version.to_le_bytes());
-    write_string(&mut buf, &frame.name);
-    buf.extend_from_slice(&frame.created_at.to_le_bytes());
-    buf.extend_from_slice(&frame.updated_at.to_le_bytes());
+    buf.extend_from_slice(&table.version.to_le_bytes());
+    write_string(&mut buf, &table.name);
+    buf.extend_from_slice(&table.created_at.to_le_bytes());
+    buf.extend_from_slice(&table.updated_at.to_le_bytes());
 
-    write_varint(&mut buf, frame.columns.len() as u64);
-    for col in &frame.columns {
+    write_varint(&mut buf, table.columns.len() as u64);
+    for col in &table.columns {
         write_column(&mut buf, col);
     }
 
-    write_varint(&mut buf, frame.primary_key.len() as u64);
-    for pk in &frame.primary_key {
+    write_varint(&mut buf, table.primary_key.len() as u64);
+    for pk in &table.primary_key {
         write_string(&mut buf, pk);
     }
 
-    write_varint(&mut buf, frame.indexes.len() as u64);
-    for idx in &frame.indexes {
+    write_varint(&mut buf, table.indexes.len() as u64);
+    for idx in &table.indexes {
         write_index(&mut buf, idx);
     }
 
-    write_varint(&mut buf, frame.constraints.len() as u64);
-    for constraint in &frame.constraints {
+    write_varint(&mut buf, table.constraints.len() as u64);
+    for constraint in &table.constraints {
         write_constraint(&mut buf, constraint);
     }
 
     buf
 }
 
-fn write_column(buf: &mut Vec<u8>, col: &ColumnDefFrame) {
+fn write_column(buf: &mut Vec<u8>, col: &ColumnDef) {
     write_string(buf, &col.name);
-    buf.push(col.data_type);
+    buf.push(col.data_type.to_byte());
     buf.push(if col.nullable { 1 } else { 0 });
 
     if let Some(ref default) = col.default {
@@ -152,9 +85,9 @@ fn write_column(buf: &mut Vec<u8>, col: &ColumnDefFrame) {
 
     buf.push(col.decimal_precision);
 
-    if let Some(et) = col.element_type {
+    if let Some(element_type) = col.element_type {
         buf.push(1);
-        buf.push(et);
+        buf.push(element_type.to_byte());
     } else {
         buf.push(0);
     }
@@ -166,9 +99,9 @@ fn write_column(buf: &mut Vec<u8>, col: &ColumnDefFrame) {
     }
 }
 
-fn write_index(buf: &mut Vec<u8>, idx: &IndexDefFrame) {
+fn write_index(buf: &mut Vec<u8>, idx: &IndexDef) {
     write_string(buf, &idx.name);
-    buf.push(idx.index_type);
+    buf.push(idx.index_type as u8);
     buf.push(if idx.unique { 1 } else { 0 });
     write_varint(buf, idx.columns.len() as u64);
     for col in &idx.columns {
@@ -176,9 +109,9 @@ fn write_index(buf: &mut Vec<u8>, idx: &IndexDefFrame) {
     }
 }
 
-fn write_constraint(buf: &mut Vec<u8>, constraint: &ConstraintFrame) {
+fn write_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
     write_string(buf, &constraint.name);
-    buf.push(constraint.constraint_type);
+    buf.push(constraint.constraint_type as u8);
 
     write_varint(buf, constraint.columns.len() as u64);
     for col in &constraint.columns {
@@ -206,18 +139,18 @@ fn write_constraint(buf: &mut Vec<u8>, constraint: &ConstraintFrame) {
 // ============================================================================
 
 /// Deserialize a table-definition payload from bytes.
-pub fn decode_table_def_frame(data: &[u8]) -> Result<TableDefFrame, TableDefFrameError> {
+pub fn decode_table_def(data: &[u8]) -> Result<TableDef, TableDefError> {
     if data.len() < 4 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     if data[0..4] != TABLE_DEF_MAGIC {
-        return Err(TableDefFrameError::InvalidMagic);
+        return Err(TableDefError::InvalidMagic);
     }
 
     let mut offset = 4;
 
     if data.len() < offset + 4 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     let version = u32::from_le_bytes(data[offset..offset + 4].try_into().expect("u32 checked"));
     offset += 4;
@@ -226,7 +159,7 @@ pub fn decode_table_def_frame(data: &[u8]) -> Result<TableDefFrame, TableDefFram
     offset += name_len;
 
     if data.len() < offset + 16 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     let created_at = u64::from_le_bytes(data[offset..offset + 8].try_into().expect("u64 checked"));
     offset += 8;
@@ -269,7 +202,7 @@ pub fn decode_table_def_frame(data: &[u8]) -> Result<TableDefFrame, TableDefFram
         constraints.push(constraint);
     }
 
-    Ok(TableDefFrame {
+    Ok(TableDef {
         name,
         version,
         created_at,
@@ -281,34 +214,34 @@ pub fn decode_table_def_frame(data: &[u8]) -> Result<TableDefFrame, TableDefFram
     })
 }
 
-fn read_column(data: &[u8]) -> Result<(ColumnDefFrame, usize), TableDefFrameError> {
+fn read_column(data: &[u8]) -> Result<(ColumnDef, usize), TableDefError> {
     let mut offset = 0;
 
     let (name, name_len) = read_string(&data[offset..])?;
     offset += name_len;
 
     if data.len() < offset + 2 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
-    let data_type = data[offset];
+    let data_type = DataType::from_byte(data[offset]).ok_or(TableDefError::InvalidDataType)?;
     offset += 1;
     let nullable = data[offset] != 0;
     offset += 1;
 
     if data.len() < offset + 1 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     let has_default = data[offset] != 0;
     offset += 1;
     let default = if has_default {
         let (len, varint_len) = read_varint(&data[offset..])?;
         offset += varint_len;
-        let len = usize::try_from(len).map_err(|_| TableDefFrameError::TruncatedData)?;
+        let len = usize::try_from(len).map_err(|_| TableDefError::TruncatedData)?;
         let end = offset
             .checked_add(len)
-            .ok_or(TableDefFrameError::TruncatedData)?;
+            .ok_or(TableDefError::TruncatedData)?;
         if data.len() < end {
-            return Err(TableDefFrameError::TruncatedData);
+            return Err(TableDefError::TruncatedData);
         }
         let default_data = data[offset..end].to_vec();
         offset = end;
@@ -318,13 +251,13 @@ fn read_column(data: &[u8]) -> Result<(ColumnDefFrame, usize), TableDefFrameErro
     };
 
     if data.len() < offset + 1 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     let has_vector_dim = data[offset] != 0;
     offset += 1;
     let vector_dim = if has_vector_dim {
         if data.len() < offset + 4 {
-            return Err(TableDefFrameError::TruncatedData);
+            return Err(TableDefError::TruncatedData);
         }
         let dim = u32::from_le_bytes(data[offset..offset + 4].try_into().expect("u32 checked"));
         offset += 4;
@@ -334,7 +267,7 @@ fn read_column(data: &[u8]) -> Result<(ColumnDefFrame, usize), TableDefFrameErro
     };
 
     if data.len() < offset + 1 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     let compress = data[offset] != 0;
     offset += 1;
@@ -349,40 +282,41 @@ fn read_column(data: &[u8]) -> Result<(ColumnDefFrame, usize), TableDefFrameErro
     }
 
     if data.len() < offset + 1 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     let decimal_precision = data[offset];
     offset += 1;
 
     if data.len() < offset + 1 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     let has_element_type = data[offset] != 0;
     offset += 1;
     let element_type = if has_element_type {
         if data.len() < offset + 1 {
-            return Err(TableDefFrameError::TruncatedData);
+            return Err(TableDefError::TruncatedData);
         }
-        let et = data[offset];
+        let element_type =
+            DataType::from_byte(data[offset]).ok_or(TableDefError::InvalidDataType)?;
         offset += 1;
-        Some(et)
+        Some(element_type)
     } else {
         None
     };
 
     let (meta_count, varint_len) = read_varint(&data[offset..])?;
     offset += varint_len;
-    let mut metadata = Vec::new();
+    let mut metadata = HashMap::new();
     for _ in 0..meta_count {
         let (k, k_len) = read_string(&data[offset..])?;
         offset += k_len;
         let (v, v_len) = read_string(&data[offset..])?;
         offset += v_len;
-        metadata.push((k, v));
+        metadata.insert(k, v);
     }
 
     Ok((
-        ColumnDefFrame {
+        ColumnDef {
             name,
             data_type,
             nullable,
@@ -398,16 +332,16 @@ fn read_column(data: &[u8]) -> Result<(ColumnDefFrame, usize), TableDefFrameErro
     ))
 }
 
-fn read_index(data: &[u8]) -> Result<(IndexDefFrame, usize), TableDefFrameError> {
+fn read_index(data: &[u8]) -> Result<(IndexDef, usize), TableDefError> {
     let mut offset = 0;
 
     let (name, name_len) = read_string(&data[offset..])?;
     offset += name_len;
 
     if data.len() < offset + 2 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
-    let index_type = data[offset];
+    let index_type = IndexType::from_byte(data[offset]).ok_or(TableDefError::InvalidIndexType)?;
     offset += 1;
     let unique = data[offset] != 0;
     offset += 1;
@@ -422,7 +356,7 @@ fn read_index(data: &[u8]) -> Result<(IndexDefFrame, usize), TableDefFrameError>
     }
 
     Ok((
-        IndexDefFrame {
+        IndexDef {
             name,
             index_type,
             unique,
@@ -432,16 +366,17 @@ fn read_index(data: &[u8]) -> Result<(IndexDefFrame, usize), TableDefFrameError>
     ))
 }
 
-fn read_constraint(data: &[u8]) -> Result<(ConstraintFrame, usize), TableDefFrameError> {
+fn read_constraint(data: &[u8]) -> Result<(Constraint, usize), TableDefError> {
     let mut offset = 0;
 
     let (name, name_len) = read_string(&data[offset..])?;
     offset += name_len;
 
     if data.len() < offset + 1 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
-    let constraint_type = data[offset];
+    let constraint_type =
+        ConstraintType::from_byte(data[offset]).ok_or(TableDefError::InvalidConstraintType)?;
     offset += 1;
 
     let (col_count, varint_len) = read_varint(&data[offset..])?;
@@ -454,7 +389,7 @@ fn read_constraint(data: &[u8]) -> Result<(ConstraintFrame, usize), TableDefFram
     }
 
     if data.len() < offset + 1 {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     let has_ref = data[offset] != 0;
     offset += 1;
@@ -478,7 +413,7 @@ fn read_constraint(data: &[u8]) -> Result<(ConstraintFrame, usize), TableDefFram
     };
 
     Ok((
-        ConstraintFrame {
+        Constraint {
             name,
             constraint_type,
             columns,
@@ -507,20 +442,20 @@ fn write_varint(buf: &mut Vec<u8>, mut value: u64) {
     }
 }
 
-fn read_varint(data: &[u8]) -> Result<(u64, usize), TableDefFrameError> {
+fn read_varint(data: &[u8]) -> Result<(u64, usize), TableDefError> {
     let mut result: u64 = 0;
     let mut shift = 0;
     let mut offset = 0;
 
     loop {
         if offset >= data.len() {
-            return Err(TableDefFrameError::TruncatedData);
+            return Err(TableDefError::TruncatedData);
         }
         let byte = data[offset];
         offset += 1;
 
         if shift >= 64 {
-            return Err(TableDefFrameError::VarintOverflow);
+            return Err(TableDefError::VarintOverflow);
         }
 
         result |= ((byte & 0x7F) as u64) << shift;
@@ -540,18 +475,18 @@ fn write_string(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(bytes);
 }
 
-fn read_string(data: &[u8]) -> Result<(String, usize), TableDefFrameError> {
+fn read_string(data: &[u8]) -> Result<(String, usize), TableDefError> {
     let (len, varint_len) = read_varint(data)?;
     let offset = varint_len;
-    let len = usize::try_from(len).map_err(|_| TableDefFrameError::TruncatedData)?;
+    let len = usize::try_from(len).map_err(|_| TableDefError::TruncatedData)?;
     let end = offset
         .checked_add(len)
-        .ok_or(TableDefFrameError::TruncatedData)?;
+        .ok_or(TableDefError::TruncatedData)?;
     if data.len() < end {
-        return Err(TableDefFrameError::TruncatedData);
+        return Err(TableDefError::TruncatedData);
     }
     let s = String::from_utf8(data[offset..end].to_vec())
-        .map_err(|_| TableDefFrameError::TruncatedData)?;
+        .map_err(|_| TableDefError::TruncatedData)?;
     Ok((s, end))
 }
 
@@ -559,101 +494,27 @@ fn read_string(data: &[u8]) -> Result<(String, usize), TableDefFrameError> {
 mod tests {
     use super::*;
 
-    fn sample_frame() -> TableDefFrame {
-        TableDefFrame {
-            name: "embeddings".into(),
-            version: 1,
-            created_at: 1_700_000_000,
-            updated_at: 1_700_000_500,
-            columns: vec![
-                ColumnDefFrame {
-                    name: "id".into(),
-                    data_type: 2,
-                    nullable: false,
-                    default: None,
-                    vector_dim: None,
-                    compress: false,
-                    enum_variants: vec![],
-                    decimal_precision: 4,
-                    element_type: None,
-                    metadata: vec![],
-                },
-                ColumnDefFrame {
-                    name: "embedding".into(),
-                    data_type: 11,
-                    nullable: false,
-                    default: Some(vec![1, 2, 3]),
-                    vector_dim: Some(384),
-                    compress: true,
-                    enum_variants: vec!["a".into(), "b".into()],
-                    decimal_precision: 6,
-                    element_type: Some(3),
-                    metadata: vec![("unit".into(), "f32".into())],
-                },
-            ],
-            primary_key: vec!["id".into()],
-            indexes: vec![IndexDefFrame {
-                name: "idx_vec".into(),
-                index_type: 4,
-                unique: false,
-                columns: vec!["embedding".into()],
-            }],
-            constraints: vec![
-                ConstraintFrame {
-                    name: "fk".into(),
-                    constraint_type: 3,
-                    columns: vec!["id".into()],
-                    ref_table: Some("other".into()),
-                    ref_columns: Some(vec!["oid".into()]),
-                },
-                ConstraintFrame {
-                    name: "nn".into(),
-                    constraint_type: 5,
-                    columns: vec!["id".into()],
-                    ref_table: None,
-                    ref_columns: None,
-                },
-            ],
-        }
-    }
-
     #[test]
-    fn table_def_frame_round_trips() {
-        let frame = sample_frame();
-        let encoded = encode_table_def_frame(&frame);
-        let decoded = decode_table_def_frame(&encoded).unwrap();
-        assert_eq!(decoded, frame);
-        assert_eq!(encode_table_def_frame(&decoded), encoded);
-    }
-
-    #[test]
-    fn table_def_frame_pins_magic_and_version() {
-        let encoded = encode_table_def_frame(&sample_frame());
-        assert_eq!(&encoded[0..4], b"RTBL");
-        assert_eq!(&encoded[4..8], &1u32.to_le_bytes());
-    }
-
-    #[test]
-    fn table_def_frame_rejects_bad_input() {
+    fn table_def_rejects_bad_input() {
         assert_eq!(
-            decode_table_def_frame(&[0u8; 2]),
-            Err(TableDefFrameError::TruncatedData)
+            decode_table_def(&[0u8; 2]),
+            Err(TableDefError::TruncatedData)
         );
-        let mut bad = encode_table_def_frame(&sample_frame());
+        let mut bad = encode_table_def(&TableDef::new("t"));
         bad[0] = b'X';
         assert_eq!(
-            decode_table_def_frame(&bad),
-            Err(TableDefFrameError::InvalidMagic)
+            decode_table_def(&bad),
+            Err(TableDefError::InvalidMagic)
         );
-        let encoded = encode_table_def_frame(&sample_frame());
+        let encoded = encode_table_def(&TableDef::new("t"));
         assert_eq!(
-            decode_table_def_frame(&encoded[..encoded.len() - 1]),
-            Err(TableDefFrameError::TruncatedData)
+            decode_table_def(&encoded[..encoded.len() - 1]),
+            Err(TableDefError::TruncatedData)
         );
     }
 
     #[test]
-    fn table_def_frame_does_not_preallocate_untrusted_counts() {
+    fn table_def_does_not_preallocate_untrusted_counts() {
         let mut encoded = Vec::new();
         encoded.extend_from_slice(&TABLE_DEF_MAGIC);
         encoded.extend_from_slice(&1u32.to_le_bytes());
@@ -663,8 +524,8 @@ mod tests {
         write_varint(&mut encoded, u64::MAX);
 
         assert_eq!(
-            decode_table_def_frame(&encoded),
-            Err(TableDefFrameError::TruncatedData)
+            decode_table_def(&encoded),
+            Err(TableDefError::TruncatedData)
         );
     }
 }
