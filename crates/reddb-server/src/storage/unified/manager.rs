@@ -1492,6 +1492,76 @@ impl SegmentManager {
         })
     }
 
+    /// Visit every entity visible under an explicit MVCC snapshot.
+    ///
+    /// Returning `false` from `callback` stops the scan early. Hidden entities
+    /// never reach the callback and therefore cannot stop the scan.
+    pub fn scan_for_each<F>(&self, snapshot: &SnapshotContext, mut callback: F)
+    where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        self.for_each_entity(|entity| {
+            !entity_visible_with_context(Some(snapshot), entity) || callback(entity)
+        });
+    }
+
+    /// Fold entities visible under an explicit MVCC snapshot in parallel.
+    pub fn scan_fold_parallel<T, FInit, FFold, FReduce>(
+        &self,
+        snapshot: &SnapshotContext,
+        init: FInit,
+        fold: FFold,
+        reduce: FReduce,
+    ) -> T
+    where
+        T: Send,
+        FInit: Fn() -> T + Send + Sync,
+        FFold: Fn(T, &UnifiedEntity) -> T + Send + Sync,
+        FReduce: Fn(T, T) -> T + Send + Sync,
+    {
+        self.fold_entities_parallel(
+            init,
+            |acc, entity| {
+                if entity_visible_with_context(Some(snapshot), entity) {
+                    fold(acc, entity)
+                } else {
+                    acc
+                }
+            },
+            reduce,
+        )
+    }
+
+    /// Visit zone-map candidates visible under an explicit MVCC snapshot.
+    pub fn scan_for_each_zoned_with_stats<F>(
+        &self,
+        snapshot: &SnapshotContext,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        mut callback: F,
+    ) -> SegmentScanStats
+    where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        self.for_each_entity_zoned_with_stats(zone_preds, |entity| {
+            !entity_visible_with_context(Some(snapshot), entity) || callback(entity)
+        })
+    }
+
+    /// Collect zone-map candidates visible under an explicit MVCC snapshot.
+    pub fn scan_zoned_with_stats<F>(
+        &self,
+        snapshot: &SnapshotContext,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        filter: F,
+    ) -> (Vec<UnifiedEntity>, SegmentScanStats)
+    where
+        F: Fn(&UnifiedEntity) -> bool + Sync,
+    {
+        self.query_all_zoned_with_stats(zone_preds, |entity| {
+            entity_visible_with_context(Some(snapshot), entity) && filter(entity)
+        })
+    }
+
     /// Query across all segments. Uses parallel scanning for sealed segments
     /// when more than one sealed segment exists.
     pub fn query_all<F>(&self, filter: F) -> Vec<UnifiedEntity>
