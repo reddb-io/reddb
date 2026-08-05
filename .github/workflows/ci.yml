@@ -32,12 +32,13 @@ on:
 # Cost guard: new pushes cancel older runs on the same ref. Release-grade
 # validation lives in release.yml; CI push runs should stay quick.
 #
-# Cost policy (August 2026, Blacksmith bill): pushes and pull requests run only
-# the trunk correctness lane. Feature matrices, cross-platform builds, driver
-# conformance, containers, fuzz smoke, and packaging are release-adjacent and
-# run only through `workflow_dispatch` with full_ci=true. Stable release builds
-# remain authoritative in release.yml. rust-cache saves are restricted to
-# non-PR runs (save-if) so PR branches never persist multi-GB caches.
+# Cost policy (August 2026, Blacksmith bill): pushes and pull requests run the
+# trunk correctness lane on free standard runners for this public repository.
+# Feature matrices, cross-platform builds, driver conformance, containers,
+# fuzz smoke, and packaging are release-adjacent and run on Blacksmith only
+# through `workflow_dispatch` with full_ci=true. Stable release builds remain
+# authoritative in release.yml. rust-cache saves are restricted to non-PR runs
+# (save-if) so PR branches never persist multi-GB caches.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -224,7 +225,7 @@ jobs:
   quality:
     name: Quality (fmt, check, clippy)
     needs: gate
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -260,7 +261,7 @@ jobs:
     # every later RQL-extraction slice must keep green.
     name: RQL Conformance (sqllogictest)
     needs: gate
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -292,7 +293,7 @@ jobs:
     # that motivated this gate.
     name: Drivers / Python (cargo check)
     needs: gate
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -357,7 +358,7 @@ jobs:
   tests:
     name: Test Suite
     needs: gate
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       SCCACHE_GHA_ENABLED: "true"

@@ -276,7 +276,7 @@ test("weekly parser fuzz keeps bounded coverage for every smoke target", () => {
 
   assert.match(workflow, /cron: "17 3 \* \* 6"/);
   assert.match(workflow, /duration_minutes:[\s\S]*- '15'[\s\S]*- '45'[\s\S]*- '60'/);
-  assert.match(fuzz, /runs-on: blacksmith-4vcpu-ubuntu-2404/);
+  assert.match(fuzz, /runs-on: ubuntu-24\.04/);
   assert.match(fuzz, /timeout-minutes: 75/);
   for (const target of ["sql_parser", "migration_parser", "conn_string_parser", "query_with_params"]) {
     assert.match(fuzz, new RegExp(`- ${target}`));

@@ -28,7 +28,7 @@ env:
 jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     concurrency:
       group: parser-fuzz-weekly-${{ github.ref }}-${{ matrix.target }}
