@@ -36,6 +36,15 @@ function jobNames(yaml) {
   return [...yaml.matchAll(/^ {4}name: (.+)$/gm)].map((m) => m[1].trim());
 }
 
+function jobBlocks(yaml) {
+  const jobs = yaml.slice(yaml.indexOf("\njobs:\n") + "\njobs:\n".length);
+  const starts = [...jobs.matchAll(/^ {2}([a-zA-Z0-9_-]+):$/gm)];
+  return new Map(starts.map((match, index) => {
+    const end = starts[index + 1]?.index ?? jobs.length;
+    return [match[1], jobs.slice(match.index, end)];
+  }));
+}
+
 const manifest = JSON.parse(read(MANIFEST));
 const required = manifest.required_contexts;
 
@@ -97,4 +106,36 @@ test("the shim triggers exactly on the paths ci.yml ignores (so it covers the ga
   // skipped on the very docs-only PRs it exists to cover).
   assert.match(shim, /pull_request:/);
   assert.ok(!/^\s*paths-ignore:/m.test(shim), "ci-docs.yml must not use paths-ignore");
+});
+
+test("the first CI job classifies merge-group diffs with the docs-shim path set", () => {
+  const ci = read(CI);
+  const jobs = jobBlocks(ci);
+  assert.equal(jobs.keys().next().value, "gate", "gate must remain the first CI job");
+
+  const gate = jobs.get("gate");
+  assert.match(gate, /run_heavy: \$\{\{ steps\.classify\.outputs\.run_heavy \}\}/);
+  assert.match(gate, /fetch-depth: 2/, "the fast classifier should fetch only the merge commit and its parent");
+  assert.match(gate, /BASE_SHA: \$\{\{ github\.event\.merge_group\.base_sha \}\}/);
+  assert.match(gate, /HEAD_SHA: \$\{\{ github\.event\.merge_group\.head_sha \}\}/);
+  assert.match(gate, /git diff --name-only "\$BASE_SHA" "\$HEAD_SHA"/);
+  assert.match(gate, /run_heavy=true/);
+  assert.match(gate, /! grep -Eqv "\$DOCS_ONLY_PATTERN" "\$changed_files"; then\n {14}run_heavy=false/);
+
+  const pattern = gate.match(/DOCS_ONLY_PATTERN: '([^']+)'/)?.[1];
+  assert.ok(pattern, "gate must declare its docs-only path pattern");
+  const docsOnly = ["README.md", "guides/install.md", "docs/index.html", "CHANGELOG", "CHANGELOG.md", "LICENSE", "LICENSE-APACHE"];
+  const codeTouching = ["src/lib.rs", "Cargo.toml", "scripts/check.sh", "nested/CHANGELOG", "nested/LICENSE"];
+  for (const file of docsOnly) assert.match(file, new RegExp(pattern));
+  for (const file of codeTouching) assert.doesNotMatch(file, new RegExp(pattern));
+});
+
+test("docs-only merge groups skip every heavy job and code diffs keep them enabled", () => {
+  const jobs = jobBlocks(read(CI));
+  jobs.delete("gate");
+  assert.ok(jobs.size > 0);
+  for (const [jobId, block] of jobs) {
+    assert.ok(block.includes("needs.gate.outputs.run_heavy == 'true'"),
+      `${jobId} is not guarded by the merge-group classifier`);
+  }
 });

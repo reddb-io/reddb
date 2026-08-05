@@ -62,8 +62,29 @@ jobs:
     if: |
       github.actor != 'dependabot[bot]' &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    outputs:
+      run_heavy: ${{ steps.classify.outputs.run_heavy }}
     steps:
-      - run: echo "ok"
+      - uses: actions/checkout@v7
+        if: github.event_name == 'merge_group'
+        with:
+          fetch-depth: 2
+      - name: Classify merge-group diff
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          DOCS_ONLY_PATTERN: '(^docs/|\.md$|^CHANGELOG[^/]*$|^LICENSE[^/]*$)'
+        run: |
+          run_heavy=true
+          if [ "$GITHUB_EVENT_NAME" = "merge_group" ]; then
+            changed_files="$RUNNER_TEMP/merge-group-paths"
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$changed_files"
+            if [ -s "$changed_files" ] && ! grep -Eqv "$DOCS_ONLY_PATTERN" "$changed_files"; then
+              run_heavy=false
+            fi
+          fi
+          echo "run_heavy=$run_heavy" >> "$GITHUB_OUTPUT"
 
   serialization-lint:
     # Issue #180 / ADR 0010 — grep-based preflight that flags new
@@ -87,6 +108,7 @@ jobs:
     #      issue, same as clippy.
     name: Lint (no untyped serialization)
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     continue-on-error: true
@@ -128,13 +150,14 @@ jobs:
     # (fetch-depth: 0) so the drift guard can see the published tags.
     name: Version integrity
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Check version lock-step + drift guard
@@ -148,11 +171,12 @@ jobs:
     # .github/CODEOWNERS for docs/conformance/ and scripts/verify-contract-matrix.mjs).
     name: Contract Matrix Gate
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Verify every supported cell has a backing test
@@ -173,11 +197,12 @@ jobs:
     # matrix does not mark supported. Run `--write` locally to regenerate.
     name: Docs Match Contract Matrix
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Check public docs match the contract matrix
@@ -188,6 +213,7 @@ jobs:
   helm-chart:
     name: Helm Chart
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -202,13 +228,14 @@ jobs:
     # check activates when an AFK/CI caller supplies RED_AFK_VALIDATION_SIDECAR.
     name: AFK Validation Sidecar
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Sidecar tooling contract test
@@ -227,6 +254,7 @@ jobs:
   quality:
     name: Quality (fmt, check, clippy)
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -241,7 +269,7 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-rust-1.91.0
@@ -263,6 +291,7 @@ jobs:
     # every later RQL-extraction slice must keep green.
     name: RQL Conformance (sqllogictest)
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -275,7 +304,7 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-rust-1.91.0
@@ -295,6 +324,7 @@ jobs:
     # that motivated this gate.
     name: Drivers / Python (cargo check)
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -306,7 +336,7 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: drivers-python-rust-1.91.0
@@ -325,7 +355,7 @@ jobs:
     # operators may select for release artifacts.
     name: Feature Matrix (${{ matrix.features.label }})
     needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
@@ -360,6 +390,7 @@ jobs:
   tests:
     name: Test Suite
     needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -372,7 +403,7 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-rust-1.91.0
@@ -381,7 +412,7 @@ jobs:
           workspaces: |
             . -> target
             . -> target/persistent-tests
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: nextest
       - name: Prepare isolated temp dir
@@ -430,7 +461,7 @@ jobs:
   driver-param-conformance:
     name: Driver Param Conformance
     needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
@@ -439,10 +470,10 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.25'
           cache-dependency-path: drivers/go/go.sum
@@ -450,10 +481,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0.x'
-      - uses: dart-lang/setup-dart@v1
+      - uses: dart-lang/setup-dart@v1.7.2
         with:
           sdk: stable
       - uses: shivammathur/setup-php@v2
@@ -504,7 +535,7 @@ jobs:
     # statically links the engine, so `maturin develop` is self-contained.
     name: Driver Runnable Examples
     needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 35
     env:
@@ -517,15 +548,15 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: driver-runnable-examples-rust-1.91.0
           cache-on-failure: "true"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Build red (embedded engine for the JS SDK)
@@ -553,7 +584,7 @@ jobs:
     # tarball, so this also exercises the include manifest end-to-end.
     name: Publish Dry-Run (crates.io)
     needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     env:
@@ -566,7 +597,7 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-publish-dryrun-rust-1.91.0
@@ -580,7 +611,7 @@ jobs:
   containers:
     name: Container Stack
     needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
@@ -622,9 +653,9 @@ jobs:
     # the consolidated grouped test binaries. Failure is a release blocker.
     name: Chaos & Drill Suite
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     timeout-minutes: 25
-    needs: tests
+    needs: [gate, tests]
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -635,7 +666,7 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-rust-1.91.0
@@ -650,9 +681,9 @@ jobs:
     # backend-specific failure modes.
     name: Chaos Suite (Floci S3 backend)
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     timeout-minutes: 25
-    needs: tests
+    needs: [gate, tests]
     env:
       RED_BACKEND: s3
       RED_S3_ENDPOINT: http://localhost:55466
@@ -719,7 +750,7 @@ jobs:
     # (systemd install, mmap, Unix sockets) via cfg gates in the source.
     name: Windows (build + unit tests)
     needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-8vcpu-windows-2025
     timeout-minutes: 30
     steps:
@@ -744,7 +775,7 @@ jobs:
     # story complete. Same scope — library build + unit tests.
     name: macOS (build + unit tests)
     needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 30
     steps:
@@ -767,7 +798,7 @@ jobs:
     # exploration window lives in parser-fuzz-nightly.yml.
     name: Fuzz Parsers
     needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
@@ -781,7 +812,7 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-fuzz-pr-smoke
@@ -822,7 +853,7 @@ jobs:
   package:
     name: cargo package dry-run
     needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
+    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
