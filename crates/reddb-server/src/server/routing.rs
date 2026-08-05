@@ -3738,7 +3738,7 @@ mod tests {
         // with an active `BEGIN` is rejected with
         // `stream_in_transaction_unsupported`. We set a non-zero
         // connection id on this thread, execute `BEGIN` to populate
-        // the runtime's `tx_contexts` registry, then invoke the
+        // runtime's Transaction State registry, then invoke the
         // streaming dispatch and expect a structured 409 refusal.
         use crate::runtime::impl_core::{clear_current_connection_id, set_current_connection_id};
 

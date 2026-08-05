@@ -312,11 +312,7 @@ impl RedDBRuntime {
                 retention_sweeper: parking_lot::RwLock::new(
                     crate::runtime::retention_sweeper::RetentionSweeperState::new(),
                 ),
-                snapshot_manager: Arc::new(
-                    crate::storage::transaction::snapshot::SnapshotManager::new(),
-                ),
-                tx_contexts: parking_lot::RwLock::new(HashMap::new()),
-                tx_local_tenants: parking_lot::RwLock::new(HashMap::new()),
+                transaction_state: crate::runtime::transaction_state::TransactionState::new(),
                 env_config_overrides: crate::runtime::config_overlay::collect_env_overrides(),
                 lock_manager: Arc::new({
                     // Sourced from the matrix: Tier B key
@@ -1033,12 +1029,9 @@ impl RedDBRuntime {
                 continue;
             };
             for entity in manager.query_all(|_| true) {
-                self.inner
-                    .snapshot_manager
-                    .observe_committed_xid(entity.xmin);
-                self.inner
-                    .snapshot_manager
-                    .observe_committed_xid(entity.xmax);
+                let snapshot_manager = self.inner.transaction_state.snapshot_manager();
+                snapshot_manager.observe_committed_xid(entity.xmin);
+                snapshot_manager.observe_committed_xid(entity.xmax);
             }
         }
     }
