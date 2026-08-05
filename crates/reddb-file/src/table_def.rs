@@ -485,8 +485,8 @@ fn read_string(data: &[u8]) -> Result<(String, usize), TableDefError> {
     if data.len() < end {
         return Err(TableDefError::TruncatedData);
     }
-    let s = String::from_utf8(data[offset..end].to_vec())
-        .map_err(|_| TableDefError::TruncatedData)?;
+    let s =
+        String::from_utf8(data[offset..end].to_vec()).map_err(|_| TableDefError::TruncatedData)?;
     Ok((s, end))
 }
 
@@ -502,10 +502,7 @@ mod tests {
         );
         let mut bad = encode_table_def(&TableDef::new("t"));
         bad[0] = b'X';
-        assert_eq!(
-            decode_table_def(&bad),
-            Err(TableDefError::InvalidMagic)
-        );
+        assert_eq!(decode_table_def(&bad), Err(TableDefError::InvalidMagic));
         let encoded = encode_table_def(&TableDef::new("t"));
         assert_eq!(
             decode_table_def(&encoded[..encoded.len() - 1]),
