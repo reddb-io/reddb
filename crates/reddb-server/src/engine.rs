@@ -34,6 +34,10 @@ pub struct EngineInfo {
     pub options: RedDBOptions,
 }
 
+#[deprecated(
+    since = "1.23.2",
+    note = "use RedDBRuntime for embedded query execution or RedDBServer for serving requests; RedDBEngine will be removed in the next major release"
+)]
 pub struct RedDBEngine {
     options: RedDBOptions,
     layout: PhysicalLayout,
