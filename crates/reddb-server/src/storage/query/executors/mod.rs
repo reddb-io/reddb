@@ -22,7 +22,7 @@ pub mod parallel_scan;
 pub mod set_ops;
 pub mod sparql;
 pub mod subquery;
-mod value_compare;
+pub(crate) mod value_compare;
 pub mod vector;
 pub mod window;
 
