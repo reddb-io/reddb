@@ -1,23 +1,14 @@
 # reddb-client-connector
 
-Workspace-internal gRPC connector for [RedDB](https://github.com/reddb-io/reddb).
+Deprecated compatibility shim for the RedDB gRPC connector.
 
-This crate exists to break a path-dependency cycle between
-`reddb-client` (the published Rust driver, which pulls in
-`reddb-server` under the `embedded` feature) and `reddb-server`
-(which needs the gRPC connector for its `rpc_stdio` dispatch
-mode).
+Use `reddb_grpc_proto::RedDBClient` and the generated reply types from
+`reddb-grpc-proto` directly. The authenticated client now lives beside the
+generated tonic stubs, so client and server consumers share one reply shape.
 
-It exposes [`RedDBClient`] — a thin wrapper around the
-generated tonic `RedDbClient<Channel>` that adds bearer-token
-auth metadata and ergonomic typed responses. No engine
-dependencies: only `tonic` + `reddb-grpc-proto`.
+This crate only re-exports that canonical client and compatibility aliases for
+the former response names. It is deprecated and will be removed in the next
+major release.
 
-End users typically reach this crate transitively via
-`reddb-client::connector::RedDBClient` (re-exported for
-back-compat with the previous `reddb-client-internal` crate).
-
-See [`docs/migration/workspace-split.md`][migration] for the full
-crate map.
-
-[migration]: ../../docs/migration/workspace-split.md
+Most applications should continue to use the higher-level `reddb-client`
+crate.
