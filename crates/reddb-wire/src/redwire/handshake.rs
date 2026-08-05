@@ -7,6 +7,8 @@
 use serde_json::Value as JsonValue;
 use std::fmt;
 
+pub use reddb_types::encoding::base64_encode as base64_std;
+
 use super::{BuildError, Frame, FrameBuilder, MessageKind, MAX_KNOWN_MINOR_VERSION};
 
 /// Methods RedWire v2.1 knows how to negotiate.
@@ -485,39 +487,6 @@ pub fn parse_scram_client_final(payload: &[u8]) -> Result<(String, Vec<u8>, Stri
     }
     let no_proof = format!("c={channel_binding},r={nonce}");
     Ok((nonce, proof, no_proof))
-}
-
-const B64_ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-pub fn base64_std(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let chunks = input.chunks_exact(3);
-    let rem = chunks.remainder();
-    for c in chunks {
-        let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
-        out.push(B64_ALPHA[((n >> 18) & 0x3F) as usize] as char);
-        out.push(B64_ALPHA[((n >> 12) & 0x3F) as usize] as char);
-        out.push(B64_ALPHA[((n >> 6) & 0x3F) as usize] as char);
-        out.push(B64_ALPHA[(n & 0x3F) as usize] as char);
-    }
-    match rem {
-        [a] => {
-            let n = (*a as u32) << 16;
-            out.push(B64_ALPHA[((n >> 18) & 0x3F) as usize] as char);
-            out.push(B64_ALPHA[((n >> 12) & 0x3F) as usize] as char);
-            out.push('=');
-            out.push('=');
-        }
-        [a, b] => {
-            let n = ((*a as u32) << 16) | ((*b as u32) << 8);
-            out.push(B64_ALPHA[((n >> 18) & 0x3F) as usize] as char);
-            out.push(B64_ALPHA[((n >> 12) & 0x3F) as usize] as char);
-            out.push(B64_ALPHA[((n >> 6) & 0x3F) as usize] as char);
-            out.push('=');
-        }
-        _ => {}
-    }
-    out
 }
 
 pub fn base64_std_decode(input: &str) -> Option<Vec<u8>> {
