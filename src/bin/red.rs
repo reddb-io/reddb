@@ -25,6 +25,7 @@ use reddb::service_cli::{
     BootstrapConfig, ServerCommandConfig, ServerTransport, SystemdServiceConfig,
 };
 use reddb_client::{format_query_result, QueryResult, RowFormat, ValueOut};
+use reddb_types::encoding::{base64_encode, json_escape};
 
 // ---------------------------------------------------------------------------
 // JSON output helpers
@@ -5087,10 +5088,6 @@ fn build_tick_payload(operations: Option<&str>, dry_run: bool) -> String {
     }
 }
 
-fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 // ---------------------------------------------------------------------------
 // Inspect command implementation
 // ---------------------------------------------------------------------------
@@ -6073,7 +6070,7 @@ fn run_admin_cache_command(
                     std::process::exit(1);
                 }
             };
-            let b64 = bytes_to_base64(&raw_bytes);
+            let b64 = base64_encode(&raw_bytes);
 
             let expected_version_field = get_flag("--expected-version")
                 .and_then(|v| v.parse::<u64>().ok())
@@ -6165,28 +6162,6 @@ fn format_cache_stats_pretty(body: &str) -> String {
 
 fn print_cache_stats_pretty(body: &str) {
     print!("{}", format_cache_stats_pretty(body));
-}
-
-fn bytes_to_base64(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    let mut buf: u32 = 0;
-    let mut bits: u8 = 0;
-    for &b in data {
-        buf = (buf << 8) | b as u32;
-        bits += 8;
-        while bits >= 6 {
-            bits -= 6;
-            out.push(CHARS[((buf >> bits) & 0x3F) as usize] as char);
-        }
-    }
-    if bits > 0 {
-        out.push(CHARS[((buf << (6 - bits)) & 0x3F) as usize] as char);
-    }
-    while !out.len().is_multiple_of(4) {
-        out.push('=');
-    }
-    out
 }
 
 fn post_json_to_http_authed(
@@ -7999,36 +7974,36 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
 
     #[test]
     fn bytes_to_base64_empty_input() {
-        assert_eq!(bytes_to_base64(b""), "");
+        assert_eq!(base64_encode(b""), "");
     }
 
     #[test]
     fn bytes_to_base64_one_byte() {
         // b"f" → "Zg=="
-        assert_eq!(bytes_to_base64(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"f"), "Zg==");
     }
 
     #[test]
     fn bytes_to_base64_two_bytes() {
         // b"fo" → "Zm8="
-        assert_eq!(bytes_to_base64(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
     }
 
     #[test]
     fn bytes_to_base64_three_bytes_no_padding() {
         // b"foo" → "Zm9v"
-        assert_eq!(bytes_to_base64(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
     }
 
     #[test]
     fn bytes_to_base64_rfc_test_vector_foobar() {
         // b"foobar" → "Zm9vYmFy"
-        assert_eq!(bytes_to_base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
 
     #[test]
     fn bytes_to_base64_binary_zeros() {
-        assert_eq!(bytes_to_base64(&[0u8, 0, 0]), "AAAA");
+        assert_eq!(base64_encode(&[0u8, 0, 0]), "AAAA");
     }
 
     // ----------------------------------------------------------------

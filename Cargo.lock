@@ -2803,6 +2803,7 @@ dependencies = [
  "prost",
  "reddb-io-grpc-proto",
  "reddb-io-server",
+ "reddb-io-types",
  "reddb-io-wire",
  "reqwest",
  "rustls",
@@ -2830,6 +2831,7 @@ name = "reddb-io-crypto"
 version = "1.23.2"
 dependencies = [
  "aes-gcm",
+ "reddb-io-types",
 ]
 
 [[package]]

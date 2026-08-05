@@ -23,6 +23,7 @@
 //! crate convert via `Uuid::as_bytes`).
 
 use crate::types::JsonValue;
+use reddb_types::encoding::base64_encode;
 
 /// One parameter value for a `query_with(sql, params)` call.
 ///
@@ -334,39 +335,6 @@ fn serde_to_json(v: &serde_json::Value) -> JsonValue {
                 .collect(),
         ),
     }
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    let mut chunks = bytes.chunks_exact(3);
-    for c in chunks.by_ref() {
-        let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
-        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-        out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
-        out.push(TABLE[(n & 0x3F) as usize] as char);
-    }
-    let rem = chunks.remainder();
-    match rem.len() {
-        0 => {}
-        1 => {
-            let n = (rem[0] as u32) << 16;
-            out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-            out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-            out.push('=');
-            out.push('=');
-        }
-        2 => {
-            let n = ((rem[0] as u32) << 16) | ((rem[1] as u32) << 8);
-            out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-            out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-            out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
-            out.push('=');
-        }
-        _ => unreachable!(),
-    }
-    out
 }
 
 fn format_uuid(bytes: &[u8; 16]) -> String {

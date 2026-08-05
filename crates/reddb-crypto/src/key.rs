@@ -89,6 +89,7 @@ fn decode_base64(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reddb_types::encoding::base64_encode;
 
     #[test]
     fn parse_key_accepts_hex() {
@@ -112,32 +113,9 @@ mod tests {
 
     #[test]
     fn parse_key_accepts_base64() {
-        // 32 bytes of 0xAB base64-encoded, encoded inline to avoid a crate.
+        // 32 bytes of 0xAB base64-encoded.
         let raw = vec![0xAB_u8; 32];
-        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        let mut i = 0;
-        while i + 3 <= raw.len() {
-            let n = ((raw[i] as u32) << 16) | ((raw[i + 1] as u32) << 8) | (raw[i + 2] as u32);
-            out.push(alphabet[((n >> 18) & 0x3F) as usize] as char);
-            out.push(alphabet[((n >> 12) & 0x3F) as usize] as char);
-            out.push(alphabet[((n >> 6) & 0x3F) as usize] as char);
-            out.push(alphabet[(n & 0x3F) as usize] as char);
-            i += 3;
-        }
-        if i < raw.len() {
-            let rem = raw.len() - i;
-            let n = if rem == 1 {
-                (raw[i] as u32) << 16
-            } else {
-                ((raw[i] as u32) << 16) | ((raw[i + 1] as u32) << 8)
-            };
-            out.push(alphabet[((n >> 18) & 0x3F) as usize] as char);
-            out.push(alphabet[((n >> 12) & 0x3F) as usize] as char);
-            if rem == 2 {
-                out.push(alphabet[((n >> 6) & 0x3F) as usize] as char);
-            }
-        }
+        let out = base64_encode(&raw);
         let key = parse_key(&out).unwrap();
         assert_eq!(key, [0xABu8; 32]);
     }

@@ -16,6 +16,7 @@ use reddb_client::redwire::{
     Auth, BinaryValue, ConnectOptions, Flags, Frame, MessageKind, RedWireClient,
 };
 use reddb_client::{Value, ValueOut};
+use reddb_types::encoding::base64_encode;
 use tokio::net::TcpListener;
 
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -325,38 +326,6 @@ async fn scram_sha_256_end_to_end() {
     )
     .await;
 
-    // Tiny base64 helpers — keep the test self-contained without
-    // pulling another crate.
-    fn base64_encode(bytes: &[u8]) -> String {
-        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
-        let chunks = bytes.chunks_exact(3);
-        let rem = chunks.remainder();
-        for c in chunks {
-            let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
-            out.push(A[((n >> 18) & 0x3F) as usize] as char);
-            out.push(A[((n >> 12) & 0x3F) as usize] as char);
-            out.push(A[((n >> 6) & 0x3F) as usize] as char);
-            out.push(A[(n & 0x3F) as usize] as char);
-        }
-        match rem {
-            [a] => {
-                let n = (*a as u32) << 16;
-                out.push(A[((n >> 18) & 0x3F) as usize] as char);
-                out.push(A[((n >> 12) & 0x3F) as usize] as char);
-                out.push_str("==");
-            }
-            [a, b] => {
-                let n = ((*a as u32) << 16) | ((*b as u32) << 8);
-                out.push(A[((n >> 18) & 0x3F) as usize] as char);
-                out.push(A[((n >> 12) & 0x3F) as usize] as char);
-                out.push(A[((n >> 6) & 0x3F) as usize] as char);
-                out.push('=');
-            }
-            _ => {}
-        }
-        out
-    }
     fn base64_decode(input: &str) -> Vec<u8> {
         let trimmed = input.trim_end_matches('=');
         let mut out = Vec::with_capacity(trimmed.len() * 3 / 4);
