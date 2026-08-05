@@ -39,7 +39,10 @@ pub use graph::{
     GraphUseCases,
 };
 pub use native::{InspectNativeArtifactInput, NativeUseCases, RuntimeReadiness};
-pub use operation_context::{OperationContext, WriteConsent, WriteConsentSeal, Xid};
+pub use operation_context::{
+    OperationContext, OperationContextFactory, OperationContextInput, WriteConsent,
+    WriteConsentSeal, Xid,
+};
 pub use ports::{
     RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeEntityPortCtx,
     RuntimeGraphPort, RuntimeNativePort, RuntimeNativePortCtx, RuntimeQueryPort,
