@@ -86,7 +86,7 @@ impl RedDBRuntime {
         f: impl FnOnce() -> RedDBResult<T>,
     ) -> RedDBResult<T> {
         let conn_id = current_connection_id();
-        if !self.inner.tx_contexts.read().contains_key(&conn_id) {
+        if !self.inner.transaction_state.in_transaction(conn_id) {
             return f();
         }
 
@@ -108,7 +108,7 @@ impl RedDBRuntime {
         f: impl FnOnce() -> RedDBResult<T>,
     ) -> RedDBResult<T> {
         let conn_id = current_connection_id();
-        if self.inner.tx_contexts.read().contains_key(&conn_id) {
+        if self.inner.transaction_state.in_transaction(conn_id) {
             return self.with_deferred_store_wal_if_transaction(f);
         }
         if !capture_autocommit_events {
@@ -208,8 +208,16 @@ impl RedDBRuntime {
     ) -> bool {
         xid != 0
             && !own_xids.contains(&xid)
-            && !self.inner.snapshot_manager.is_aborted(xid)
-            && !self.inner.snapshot_manager.is_active(xid)
+            && !self
+                .inner
+                .transaction_state
+                .snapshot_manager()
+                .is_aborted(xid)
+            && !self
+                .inner
+                .transaction_state
+                .snapshot_manager()
+                .is_active(xid)
             && (xid > snapshot.xid || snapshot.in_progress.contains(&xid))
     }
 
@@ -322,7 +330,8 @@ impl RedDBRuntime {
         if isolation == crate::storage::transaction::IsolationLevel::Serializable
             && self
                 .inner
-                .snapshot_manager
+                .transaction_state
+                .snapshot_manager()
                 .serializable_commit_would_be_dangerous(
                     *own_xids.iter().min().unwrap_or(&0),
                     &serializable_write_set,
@@ -371,7 +380,11 @@ impl RedDBRuntime {
                 })
             }) {
                 if candidate.id == metadata_id
-                    || self.inner.snapshot_manager.is_aborted(candidate.xmin)
+                    || self
+                        .inner
+                        .transaction_state
+                        .snapshot_manager()
+                        .is_aborted(candidate.xmin)
                 {
                     continue;
                 }
@@ -664,21 +677,9 @@ impl RedDBRuntime {
     ///   implicit xid=0 — the read path treats pre-MVCC rows as always
     ///   visible so this degrades to "see everything committed".
     pub fn current_snapshot(&self) -> crate::storage::transaction::snapshot::Snapshot {
-        let conn_id = current_connection_id();
-        if let Some(ctx) = self.inner.tx_contexts.read().get(&conn_id).cloned() {
-            if ctx.isolation == crate::storage::transaction::IsolationLevel::ReadCommitted {
-                let high_water = self.inner.snapshot_manager.peek_next_xid();
-                return self.inner.snapshot_manager.snapshot(high_water);
-            }
-            return ctx.snapshot;
-        }
-        // Autocommit: take a fresh snapshot bounded by `peek_next_xid` so
-        // every already-committed xid (which is strictly less) passes the
-        // `xmin <= snap.xid` gate, while concurrently-active xids land in
-        // the `in_progress` set and stay hidden until they commit. Using
-        // xid=0 would incorrectly hide every MVCC-stamped tuple.
-        let high_water = self.inner.snapshot_manager.peek_next_xid();
-        self.inner.snapshot_manager.snapshot(high_water)
+        self.inner
+            .transaction_state
+            .current_snapshot(current_connection_id())
     }
 
     /// Xid of the current connection's active transaction, or `None` when
@@ -691,12 +692,9 @@ impl RedDBRuntime {
     /// (e.g. VACUUM min-active calculations) should read `ctx.xid`
     /// directly.
     pub fn current_xid(&self) -> Option<crate::storage::transaction::snapshot::Xid> {
-        let conn_id = current_connection_id();
         self.inner
-            .tx_contexts
-            .read()
-            .get(&conn_id)
-            .map(|ctx| ctx.writer_xid())
+            .transaction_state
+            .writer_xid(current_connection_id())
     }
 
     /// `true` when the given connection id has an open `BEGIN`. Issue
@@ -706,17 +704,17 @@ impl RedDBRuntime {
     /// connection-id plumbing run with id `0`, which never carries a
     /// transaction context, so this returns `false` on those paths.
     pub fn connection_in_transaction(&self, conn_id: u64) -> bool {
-        self.inner.tx_contexts.read().contains_key(&conn_id)
+        self.inner.transaction_state.in_transaction(conn_id)
     }
 
     /// Access the shared `SnapshotManager` — useful for VACUUM to compute
     /// the oldest-active xid when reclaiming dead tuples.
     pub fn snapshot_manager(&self) -> Arc<crate::storage::transaction::snapshot::SnapshotManager> {
-        Arc::clone(&self.inner.snapshot_manager)
+        self.inner.transaction_state.snapshot_manager()
     }
 
     pub(crate) fn mvcc_vacuum_cutoff_xid(&self) -> crate::storage::transaction::snapshot::Xid {
-        let manager = &self.inner.snapshot_manager;
+        let manager = self.inner.transaction_state.snapshot_manager();
         let next_xid = manager.peek_next_xid();
         let mut cutoff = next_xid;
         if let Some(oldest_active) = manager.oldest_active_xid() {
@@ -739,16 +737,8 @@ impl RedDBRuntime {
     pub fn current_txn_own_xids(
         &self,
     ) -> std::collections::HashSet<crate::storage::transaction::snapshot::Xid> {
-        let mut set = std::collections::HashSet::new();
-        if let Some(ctx) = self.inner.tx_contexts.read().get(&current_connection_id()) {
-            set.insert(ctx.xid);
-            for (_, sub) in &ctx.savepoints {
-                set.insert(*sub);
-            }
-            for sub in &ctx.released_sub_xids {
-                set.insert(*sub);
-            }
-        }
-        set
+        self.inner
+            .transaction_state
+            .own_xids(current_connection_id())
     }
 }

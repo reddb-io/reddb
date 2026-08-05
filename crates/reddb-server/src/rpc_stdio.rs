@@ -348,7 +348,7 @@ fn run_backend<W: Write>(backend: &Backend<'_>, stdin: Stdin, stdout: &mut W) ->
     let reader = BufReader::new(stdin.lock());
     let mut session = Session::new();
     // Bind the session to a stable connection id so the runtime's
-    // `tx_contexts` (keyed by conn_id) survives across `handle_line`
+    // Transaction State (keyed by conn_id) survives across `handle_line`
     // calls within the same session.
     let conn_id = next_stdio_conn_id();
     crate::runtime::impl_core::set_current_connection_id(conn_id);

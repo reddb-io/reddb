@@ -100,7 +100,7 @@ pub struct SnapshotContext {
 }
 
 /// Install a connection id on the current thread for the duration of a
-/// statement. Transaction state (`RuntimeInner::tx_contexts`) is keyed
+/// statement. The Transaction State module is keyed
 /// by this id so different connections can hold independent BEGINs.
 ///
 /// Pub so transports (PG wire, gRPC, HTTP per-request spawners) and
@@ -187,7 +187,7 @@ pub fn current_tenant() -> Option<String> {
 }
 
 thread_local! {
-    /// Snapshot of the active connection's `tx_local_tenants` entry for
+    /// Snapshot of the active connection's transaction-local tenant for
     /// the current `execute_query` call. Outer `Some(_)` means "a
     /// transaction-local tenant override is active for this call";
     /// inner is the override's value (`Some(s)` overrides to `s`,

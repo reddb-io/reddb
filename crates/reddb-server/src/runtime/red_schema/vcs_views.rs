@@ -120,9 +120,8 @@ pub(super) fn status_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<Unified
     let status = runtime.vcs_status(crate::application::vcs::StatusInput { connection_id })?;
     let isolation = runtime
         .inner
-        .tx_contexts
-        .read()
-        .get(&connection_id)
+        .transaction_state
+        .context(connection_id)
         .map(|ctx| ctx.isolation);
     Ok(vec![UnifiedRecord::with_schema(
         schema,

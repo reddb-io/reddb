@@ -512,8 +512,8 @@ impl RedDBRuntime {
         // ── ULTRA-TURBO: autocommit `SELECT * FROM t WHERE _entity_id = N` ──
         //
         // Moved above every boot-cost the normal path pays (WITHIN
-        // strip, SET LOCAL parse, tx_local_tenants read, snapshot
-        // guard, tracing span, tx_contexts read) because the bench's
+        // strip, SET LOCAL parse, transaction-state reads, snapshot
+        // guard, and tracing span) because the bench's
         // `select_point` scenario was observed at 28× vs PostgreSQL —
         // the dominant cost wasn't the entity fetch but the ceremony
         // before it. Only fires when there's no ambient transaction
@@ -525,9 +525,8 @@ impl RedDBRuntime {
             && !self.inner.query_audit.has_rules()
             && !self
                 .inner
-                .tx_contexts
-                .read()
-                .contains_key(&current_connection_id())
+                .transaction_state
+                .in_transaction(current_connection_id())
         {
             if let Some(result) = self.try_fast_entity_lookup(query) {
                 return result;
@@ -576,15 +575,14 @@ impl RedDBRuntime {
         // within an active transaction).
         if let Some(value) = parse_set_local_tenant(query)? {
             let conn_id = current_connection_id();
-            if !self.inner.tx_contexts.read().contains_key(&conn_id) {
+            if !self.inner.transaction_state.in_transaction(conn_id) {
                 return Err(RedDBError::Query(
                     "SET LOCAL TENANT requires an active transaction".to_string(),
                 ));
             }
             self.inner
-                .tx_local_tenants
-                .write()
-                .insert(conn_id, value.clone());
+                .transaction_state
+                .set_local_tenant(conn_id, value.clone());
             return Ok(RuntimeQueryResult::ok_message(
                 query.to_string(),
                 &match &value {
@@ -1430,7 +1428,6 @@ impl RedDBRuntime {
             // as autocommit (xid=0 → visible to every snapshot).
             QueryExpr::TransactionControl(ref ctl) => {
                 use crate::storage::query::ast::TxnControl;
-                use crate::storage::transaction::snapshot::{TxnContext, Xid};
                 use crate::storage::transaction::IsolationLevel;
 
                 // Phase 2.3 keys transactions by a thread-local connection id.
@@ -1444,107 +1441,61 @@ impl RedDBRuntime {
                         let isolation = requested_isolation
                             .map(IsolationLevel::from)
                             .unwrap_or(IsolationLevel::SnapshotIsolation);
-                        let mgr = Arc::clone(&self.inner.snapshot_manager);
-                        let xid = mgr.begin();
-                        if isolation == IsolationLevel::Serializable {
-                            mgr.begin_serializable(xid);
-                        }
-                        let snapshot = mgr.snapshot(xid);
-                        let ctx = TxnContext {
-                            xid,
-                            isolation,
-                            snapshot,
-                            savepoints: Vec::new(),
-                            released_sub_xids: Vec::new(),
-                        };
-                        self.inner.tx_contexts.write().insert(conn_id, ctx);
+                        let xid = self.inner.transaction_state.begin(conn_id, isolation);
                         ("begin", format!("BEGIN — xid={xid} (snapshot isolation)"))
                     }
                     TxnControl::Commit => {
-                        // SET LOCAL TENANT ends with the transaction.
-                        self.inner.tx_local_tenants.write().remove(&conn_id);
-                        let ctx = self.inner.tx_contexts.write().remove(&conn_id);
-                        match ctx {
+                        let context = self.inner.transaction_state.commit(conn_id, |ctx| {
+                            let mut own_xids = std::collections::HashSet::new();
+                            own_xids.insert(ctx.xid);
+                            for (_, sub) in &ctx.savepoints {
+                                own_xids.insert(*sub);
+                            }
+                            for sub in &ctx.released_sub_xids {
+                                own_xids.insert(*sub);
+                            }
+                            if let Err(err) = self.check_table_row_write_conflicts(
+                                conn_id,
+                                &ctx.snapshot,
+                                &own_xids,
+                                ctx.isolation,
+                            ) {
+                                self.revive_pending_versioned_updates(conn_id);
+                                self.revive_pending_tombstones(conn_id);
+                                self.discard_pending_kv_watch_events(conn_id);
+                                self.discard_pending_queue_wakes(conn_id);
+                                self.discard_pending_store_wal_actions(conn_id);
+                                self.release_pending_claim_locks(conn_id);
+                                return Err(err);
+                            }
+                            if let Err(err) = self.check_queue_dedup_write_conflicts(
+                                conn_id,
+                                &ctx.snapshot,
+                                &own_xids,
+                            ) {
+                                self.revive_pending_versioned_updates(conn_id);
+                                self.revive_pending_tombstones(conn_id);
+                                self.discard_pending_queue_dedup(conn_id);
+                                self.discard_pending_kv_watch_events(conn_id);
+                                self.discard_pending_queue_wakes(conn_id);
+                                self.discard_pending_store_wal_actions(conn_id);
+                                self.release_pending_claim_locks(conn_id);
+                                return Err(err);
+                            }
+                            self.restore_pending_write_stamps(conn_id);
+                            if let Err(err) = self.flush_pending_store_wal_actions(conn_id) {
+                                self.revive_pending_versioned_updates(conn_id);
+                                self.revive_pending_tombstones(conn_id);
+                                self.discard_pending_queue_dedup(conn_id);
+                                self.discard_pending_kv_watch_events(conn_id);
+                                self.discard_pending_queue_wakes(conn_id);
+                                self.release_pending_claim_locks(conn_id);
+                                return Err(err);
+                            }
+                            Ok(())
+                        })?;
+                        match context {
                             Some(ctx) => {
-                                let mut own_xids = std::collections::HashSet::new();
-                                own_xids.insert(ctx.xid);
-                                for (_, sub) in &ctx.savepoints {
-                                    own_xids.insert(*sub);
-                                }
-                                for sub in &ctx.released_sub_xids {
-                                    own_xids.insert(*sub);
-                                }
-                                if let Err(err) = self.check_table_row_write_conflicts(
-                                    conn_id,
-                                    &ctx.snapshot,
-                                    &own_xids,
-                                    ctx.isolation,
-                                ) {
-                                    for (_, sub) in &ctx.savepoints {
-                                        self.inner.snapshot_manager.rollback(*sub);
-                                    }
-                                    for sub in &ctx.released_sub_xids {
-                                        self.inner.snapshot_manager.rollback(*sub);
-                                    }
-                                    self.inner.snapshot_manager.rollback(ctx.xid);
-                                    self.revive_pending_versioned_updates(conn_id);
-                                    self.revive_pending_tombstones(conn_id);
-                                    self.discard_pending_kv_watch_events(conn_id);
-                                    self.discard_pending_queue_wakes(conn_id);
-                                    self.discard_pending_store_wal_actions(conn_id);
-                                    self.release_pending_claim_locks(conn_id);
-                                    return Err(err);
-                                }
-                                if let Err(err) = self.check_queue_dedup_write_conflicts(
-                                    conn_id,
-                                    &ctx.snapshot,
-                                    &own_xids,
-                                ) {
-                                    for (_, sub) in &ctx.savepoints {
-                                        self.inner.snapshot_manager.rollback(*sub);
-                                    }
-                                    for sub in &ctx.released_sub_xids {
-                                        self.inner.snapshot_manager.rollback(*sub);
-                                    }
-                                    self.inner.snapshot_manager.rollback(ctx.xid);
-                                    self.revive_pending_versioned_updates(conn_id);
-                                    self.revive_pending_tombstones(conn_id);
-                                    self.discard_pending_queue_dedup(conn_id);
-                                    self.discard_pending_kv_watch_events(conn_id);
-                                    self.discard_pending_queue_wakes(conn_id);
-                                    self.discard_pending_store_wal_actions(conn_id);
-                                    self.release_pending_claim_locks(conn_id);
-                                    return Err(err);
-                                }
-                                self.restore_pending_write_stamps(conn_id);
-                                if let Err(err) = self.flush_pending_store_wal_actions(conn_id) {
-                                    for (_, sub) in &ctx.savepoints {
-                                        self.inner.snapshot_manager.rollback(*sub);
-                                    }
-                                    for sub in &ctx.released_sub_xids {
-                                        self.inner.snapshot_manager.rollback(*sub);
-                                    }
-                                    self.inner.snapshot_manager.rollback(ctx.xid);
-                                    self.revive_pending_versioned_updates(conn_id);
-                                    self.revive_pending_tombstones(conn_id);
-                                    self.discard_pending_queue_dedup(conn_id);
-                                    self.discard_pending_kv_watch_events(conn_id);
-                                    self.discard_pending_queue_wakes(conn_id);
-                                    self.release_pending_claim_locks(conn_id);
-                                    return Err(err);
-                                }
-                                // Phase 2.3.2e: commit every open sub-xid
-                                // so they also become visible. Their
-                                // work is promoted to the parent txn's
-                                // result exactly like a RELEASE would
-                                // have done.
-                                for (_, sub) in &ctx.savepoints {
-                                    self.inner.snapshot_manager.commit(*sub);
-                                }
-                                for sub in &ctx.released_sub_xids {
-                                    self.inner.snapshot_manager.commit(*sub);
-                                }
-                                self.inner.snapshot_manager.commit(ctx.xid);
                                 self.finalize_pending_versioned_updates(conn_id);
                                 self.finalize_pending_tombstones(conn_id);
                                 self.finalize_pending_queue_dedup(conn_id);
@@ -1560,19 +1511,8 @@ impl RedDBRuntime {
                         }
                     }
                     TxnControl::Rollback => {
-                        self.inner.tx_local_tenants.write().remove(&conn_id);
-                        let ctx = self.inner.tx_contexts.write().remove(&conn_id);
-                        match ctx {
+                        match self.inner.transaction_state.rollback(conn_id) {
                             Some(ctx) => {
-                                // Phase 2.3.2e: abort every open sub-xid
-                                // too so their writes stay hidden.
-                                for (_, sub) in &ctx.savepoints {
-                                    self.inner.snapshot_manager.rollback(*sub);
-                                }
-                                for sub in &ctx.released_sub_xids {
-                                    self.inner.snapshot_manager.rollback(*sub);
-                                }
-                                self.inner.snapshot_manager.rollback(ctx.xid);
                                 // Phase 2.3.2b: tuples that the txn had
                                 // xmax-stamped become live again — wipe xmax
                                 // back to 0 so later snapshots see them.
@@ -1598,14 +1538,8 @@ impl RedDBRuntime {
                     // aborting; ROLLBACK TO aborts the sub-xid (and
                     // any nested ones) + revives their tombstones.
                     TxnControl::Savepoint(name) => {
-                        let mgr = Arc::clone(&self.inner.snapshot_manager);
-                        let mut guard = self.inner.tx_contexts.write();
-                        match guard.get_mut(&conn_id) {
-                            Some(ctx) => {
-                                let sub = mgr.begin();
-                                ctx.savepoints.push((name.clone(), sub));
-                                ("savepoint", format!("SAVEPOINT {name} — sub_xid={sub}"))
-                            }
+                        match self.inner.transaction_state.savepoint(conn_id, name) {
+                            Some(sub) => ("savepoint", format!("SAVEPOINT {name} — sub_xid={sub}")),
                             None => (
                                 "savepoint",
                                 "SAVEPOINT outside transaction — no-op".to_string(),
@@ -1613,38 +1547,15 @@ impl RedDBRuntime {
                         }
                     }
                     TxnControl::ReleaseSavepoint(name) => {
-                        let mut guard = self.inner.tx_contexts.write();
-                        match guard.get_mut(&conn_id) {
-                            Some(ctx) => {
-                                let pos = ctx
-                                    .savepoints
-                                    .iter()
-                                    .position(|(n, _)| n == name)
-                                    .ok_or_else(|| {
-                                        RedDBError::Internal(format!(
-                                            "savepoint {name} does not exist"
-                                        ))
-                                    })?;
-                                // RELEASE pops the named savepoint and
-                                // any nested ones. Their sub-xids move
-                                // to `released_sub_xids` so they commit
-                                // (or roll back) alongside the parent
-                                // xid — PG semantics: released
-                                // savepoints still contribute their
-                                // work, but their names are gone.
-                                let released = ctx.savepoints.len() - pos;
-                                let popped: Vec<Xid> = ctx
-                                    .savepoints
-                                    .split_off(pos)
-                                    .into_iter()
-                                    .map(|(_, x)| x)
-                                    .collect();
-                                ctx.released_sub_xids.extend(popped);
-                                (
-                                    "release_savepoint",
-                                    format!("RELEASE SAVEPOINT {name} — {released} level(s)"),
-                                )
-                            }
+                        match self
+                            .inner
+                            .transaction_state
+                            .release_savepoint(conn_id, name)?
+                        {
+                            Some(released) => (
+                                "release_savepoint",
+                                format!("RELEASE SAVEPOINT {name} — {released} level(s)"),
+                            ),
                             None => (
                                 "release_savepoint",
                                 "RELEASE outside transaction — no-op".to_string(),
@@ -1652,49 +1563,23 @@ impl RedDBRuntime {
                         }
                     }
                     TxnControl::RollbackToSavepoint(name) => {
-                        let mgr = Arc::clone(&self.inner.snapshot_manager);
-                        // Splice out the savepoint + nested ones under
-                        // a narrow lock, then run the snapshot-manager
-                        // + tombstone side-effects without the tx map
-                        // held so nothing re-enters.
-                        let drop_result: Option<(Xid, Vec<Xid>)> = {
-                            let mut guard = self.inner.tx_contexts.write();
-                            if let Some(ctx) = guard.get_mut(&conn_id) {
-                                let pos = ctx
-                                    .savepoints
-                                    .iter()
-                                    .position(|(n, _)| n == name)
-                                    .ok_or_else(|| {
-                                        RedDBError::Internal(format!(
-                                            "savepoint {name} does not exist"
-                                        ))
-                                    })?;
-                                let savepoint_xid = ctx.savepoints[pos].1;
-                                let aborted: Vec<Xid> = ctx
-                                    .savepoints
-                                    .split_off(pos)
-                                    .into_iter()
-                                    .map(|(_, x)| x)
-                                    .collect();
-                                Some((savepoint_xid, aborted))
-                            } else {
-                                None
-                            }
-                        };
-
-                        match drop_result {
-                            Some((savepoint_xid, aborted)) => {
-                                for x in &aborted {
-                                    mgr.rollback(*x);
-                                }
-                                let reverted_updates =
-                                    self.revive_versioned_updates_since(conn_id, savepoint_xid);
-                                let revived = self.revive_tombstones_since(conn_id, savepoint_xid);
+                        match self
+                            .inner
+                            .transaction_state
+                            .rollback_to_savepoint(conn_id, name)?
+                        {
+                            Some(rollback) => {
+                                let reverted_updates = self.revive_versioned_updates_since(
+                                    conn_id,
+                                    rollback.savepoint_xid,
+                                );
+                                let revived =
+                                    self.revive_tombstones_since(conn_id, rollback.savepoint_xid);
                                 (
                                     "rollback_to_savepoint",
                                     format!(
                                         "ROLLBACK TO SAVEPOINT {name} — aborted {} sub_xid(s), reverted {reverted_updates} update(s), revived {revived} tombstone(s)",
-                                        aborted.len(),
+                                        rollback.aborted_xids.len(),
                                     ),
                                 )
                             }
@@ -2337,7 +2222,10 @@ impl RedDBRuntime {
                             }
                             vacuum_stats.add(&stats);
                         }
-                        self.inner.snapshot_manager.prune_aborted(cutoff_xid);
+                        self.inner
+                            .transaction_state
+                            .snapshot_manager()
+                            .prune_aborted(cutoff_xid);
                         // Stats refresh covers every target (same as ANALYZE).
                         for t in &targets {
                             self.refresh_table_planner_stats(t);
@@ -3296,7 +3184,7 @@ impl RedDBRuntime {
 
         let explain = self.explain_query(inner_sql)?;
         let conn_id = current_connection_id();
-        if self.inner.tx_contexts.read().contains_key(&conn_id) {
+        if self.inner.transaction_state.in_transaction(conn_id) {
             return Err(RedDBError::Query(
                 "EXPLAIN ANALYZE requires no active transaction".to_string(),
             ));
