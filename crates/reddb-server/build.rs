@@ -32,32 +32,12 @@ fn main() {
     generated.push_str(
         "\npub(crate) fn register_discovered_routes(registry: &mut crate::server::route_catalog::RouteRegistry) {\n",
     );
-    for (index, path) in route_files.iter().enumerate() {
-        let handler = route_handler_name(&routes_dir, path);
-        generated.push_str(&format!(
-            "    registry.with_handler(crate::server::RedDBServer::dispatch_{handler}_routes, route_{index}::register);\n"
-        ));
+    for index in 0..route_files.len() {
+        generated.push_str(&format!("    route_{index}::register(registry);\n"));
     }
     generated.push_str("}\n");
 
     fs::write(out_file, generated).unwrap();
-}
-
-fn route_handler_name(routes_dir: &Path, path: &Path) -> String {
-    let relative = path
-        .strip_prefix(routes_dir)
-        .expect("discovered route file is below routes directory");
-    let mut parts: Vec<String> = relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    let file = parts
-        .pop()
-        .expect("discovered route file has a file name")
-        .trim_end_matches(".route.rs")
-        .to_string();
-    parts.push(file);
-    parts.join("_").replace('-', "_")
 }
 
 fn collect_route_files(dir: &Path, route_files: &mut Vec<PathBuf>) {

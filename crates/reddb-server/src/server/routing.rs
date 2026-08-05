@@ -26,19 +26,10 @@ fn extract_bearer(headers: &BTreeMap<String, String>) -> Option<&str> {
 const CATALOG_DEPRECATION_DATE: &str = "2026-08-08";
 const CATALOG_DEPRECATION_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
-struct HttpCommandPolicyDecision(bool);
-
-impl route_catalog::CommandPolicyEngine for HttpCommandPolicyDecision {
-    fn allows(
-        &self,
-        _ctx: &crate::application::OperationContext,
-        _command: &route_catalog::CommandSpec,
-    ) -> bool {
-        self.0
-    }
-}
-
-fn deprecated_catalog_response(endpoint: &'static str, mut response: HttpResponse) -> HttpResponse {
+pub(crate) fn deprecated_catalog_response(
+    endpoint: &'static str,
+    mut response: HttpResponse,
+) -> HttpResponse {
     warn_deprecated_catalog_endpoint(endpoint);
 
     response.extra_headers.push((
@@ -407,17 +398,28 @@ impl RedDBServer {
             return deny;
         }
 
-        if let Some(response) =
-            self.route_discovered_buffered(&method, &path, &query, &headers, &body)
-        {
-            return response;
+        // One catalog lookup serves both the handler dispatch and the
+        // canonical-404 decision below.
+        let matched = Self::discovered_route(&method, &path);
+        if let Some(matched) = &matched {
+            let request = route_catalog::RouteRequest {
+                matched,
+                method: &method,
+                path: &path,
+                query: &query,
+                headers: &headers,
+                body: &body,
+            };
+            if let Some(response) = self.route_discovered_buffered(&request) {
+                return response;
+            }
         }
         if Self::discovered_route_method_not_allowed(&method, &path) {
             return json_error(405, "method not allowed");
         }
         // A cataloged path whose handler declined (returned `None`) is a
         // canonical 404 — it must not fall through to the UI bundle surface.
-        if Self::discovered_route(&method, &path).is_some() {
+        if matched.is_some() {
             return json_error(404, "not found");
         }
 
@@ -448,1392 +450,21 @@ impl RedDBServer {
             .map_err(|err| json_error(400, err.to_string()))
     }
 
-    pub(crate) fn dispatch_auth_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "auth.bootstrap" => Some(self.handle_auth_bootstrap(body.to_vec())),
-            "auth.login" => Some(self.handle_auth_login(body.to_vec())),
-            "auth.browser.login" => Some(self.handle_browser_login(body.to_vec())),
-            "auth.browser.refresh" => Some(self.handle_browser_refresh(headers)),
-            "auth.browser.logout" => Some(self.handle_browser_logout()),
-            "auth.capabilities" => Some(self.handle_auth_capabilities(headers)),
-            "auth.users.list" => Some(self.handle_auth_list_users(headers, query)),
-            "auth.users.create" => Some(self.handle_auth_create_user(headers, body.to_vec(), None)),
-            "auth.users.delete" => {
-                let username = matched.params.get("username")?;
-                Some(self.handle_auth_delete_user(headers, query, None, username))
-            }
-            "auth.tenants.list" => Some(self.handle_auth_list_tenants(headers)),
-            "auth.tenant_users.list" => {
-                let tenant = matched.params.get("tenant")?;
-                let mut tenant_query = query.clone();
-                tenant_query.insert("tenant".to_string(), tenant.to_string());
-                Some(self.handle_auth_list_users(headers, &tenant_query))
-            }
-            "auth.tenant_users.create" => {
-                let tenant = matched.params.get("tenant")?;
-                Some(self.handle_auth_create_user(headers, body.to_vec(), Some(tenant)))
-            }
-            "auth.tenant_users.delete" => {
-                let tenant = matched.params.get("tenant")?;
-                let username = matched.params.get("username")?;
-                Some(self.handle_auth_delete_user(headers, query, Some(tenant), username))
-            }
-            "auth.policies.list" => Some(self.handle_auth_list_policies(headers)),
-            "auth.can" => Some(self.handle_auth_can(headers, body.to_vec())),
-            "auth.api_keys.create" => Some(self.handle_auth_create_api_key(body.to_vec())),
-            "auth.api_keys.delete" => {
-                let key = matched.params.get("key")?;
-                Some(self.handle_auth_revoke_api_key(key))
-            }
-            "auth.change_password" => {
-                Some(self.handle_auth_change_password(headers, body.to_vec()))
-            }
-            "auth.whoami" => Some(self.handle_auth_whoami(headers)),
-            "auth.admin.users.create" | "auth.admin.system_users.create" => {
-                Some(self.handle_admin_create_user(body.to_vec()))
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_health_live_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "health.live" => Some(self.handle_health_live()),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_health_ready_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "health.ready" => Some(self.handle_health_ready()),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_health_startup_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "health.startup" => Some(self.handle_health_startup()),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_query_streams_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "query.contract" => Some(self.handle_query_contract()),
-            "query.execute" => Some(self.handle_query(body.to_vec())),
-            "query.explain" => Some(self.handle_query_explain(body.to_vec())),
-            "query.search" => Some(self.handle_universal_search(body.to_vec())),
-            "query.context" => Some(self.handle_context_search(body.to_vec())),
-            "query.text_search" => Some(self.handle_text_search(body.to_vec())),
-            "query.multimodal_search" => Some(self.handle_multimodal_search(body.to_vec())),
-            "query.hybrid_search" => Some(self.handle_hybrid_search(body.to_vec())),
-            "streams.query.cancel" => {
-                let principal = principal_for(headers);
-                let tenant = self.stream_tenant_for(headers);
-                Some(self.handle_query_stream_cancel(body, &principal, &tenant))
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_admin_ops_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "admin.shutdown" => Some(self.handle_admin_shutdown()),
-            "admin.drain" => Some(self.handle_admin_drain()),
-            "admin.restore" => Some(self.handle_admin_restore(body.to_vec())),
-            "admin.backup" => Some(self.handle_admin_backup(query)),
-            "admin.readonly" => Some(self.handle_admin_readonly(body.to_vec())),
-            "admin.blob_cache.sweep" => Some(self.handle_admin_blob_cache_sweep(body.to_vec())),
-            "admin.blob_cache.flush_namespace" => {
-                Some(self.handle_admin_blob_cache_flush_namespace(body.to_vec()))
-            }
-            "admin.cache.compare_and_set" => {
-                Some(self.handle_admin_blob_cache_compare_and_set(body.to_vec()))
-            }
-            "admin.failover.promote" => Some(self.handle_admin_failover_promote(body.to_vec())),
-            "admin.replication.confirm_rewind" => {
-                Some(self.handle_admin_replication_confirm_rewind(body.to_vec()))
-            }
-            "admin.audit" => Some(self.handle_admin_audit_query(query)),
-            "admin.policies.list" => Some(self.handle_iam_policy_list()),
-            "admin.policies.put" => {
-                let id = matched.params.get("id")?;
-                Some(self.handle_iam_policy_put(headers, id, body.to_vec()))
-            }
-            "admin.policies.get" => {
-                let id = matched.params.get("id")?;
-                Some(self.handle_iam_policy_get(id))
-            }
-            "admin.policies.delete" => {
-                let id = matched.params.get("id")?;
-                Some(self.handle_iam_policy_delete(headers, id))
-            }
-            "admin.policies.simulate" => Some(self.handle_iam_simulate(body.to_vec())),
-            "admin.policies.lint" => Some(self.handle_iam_policy_lint(body.to_vec())),
-            "admin.policies.migrate_mode" => {
-                Some(self.handle_iam_policy_migrate_mode(body.to_vec()))
-            }
-            "admin.policies.actions" => Some(self.handle_iam_policy_actions()),
-            "admin.users.effective_permissions" => {
-                let user = matched.params.get("user")?;
-                Some(self.handle_iam_effective_permissions(user, query))
-            }
-            "admin.users.groups.add" => {
-                let user = matched.params.get("user")?;
-                let group = matched.params.get("group")?;
-                Some(self.handle_iam_add_user_group(user, group))
-            }
-            "admin.users.groups.remove" => {
-                let user = matched.params.get("user")?;
-                let group = matched.params.get("group")?;
-                Some(self.handle_iam_remove_user_group(user, group))
-            }
-            "admin.users.policies.attach" => {
-                let user = matched.params.get("user")?;
-                let policy = matched.params.get("policy")?;
-                Some(self.handle_iam_attach_user(headers, user, policy))
-            }
-            "admin.users.policies.detach" => {
-                let user = matched.params.get("user")?;
-                let policy = matched.params.get("policy")?;
-                Some(self.handle_iam_detach_user(headers, user, policy))
-            }
-            "admin.groups.policies.attach" => {
-                let group = matched.params.get("group")?;
-                let policy = matched.params.get("policy")?;
-                Some(self.handle_iam_attach_group(headers, group, policy))
-            }
-            "admin.groups.policies.detach" => {
-                let group = matched.params.get("group")?;
-                let policy = matched.params.get("policy")?;
-                Some(self.handle_iam_detach_group(headers, group, policy))
-            }
-            "admin.status" => Some(self.handle_admin_status()),
-            "admin.blob_cache.stats" => Some(self.handle_admin_blob_cache_stats(query)),
-            "ops.ec.status" => Some(handlers_ec::handle_ec_global_status(&self.runtime)),
-            "ops.ec.add" | "ops.ec.sub" | "ops.ec.set" => {
-                let collection = matched.params.get("collection")?;
-                let field = matched.params.get("field")?;
-                let operation = match matched.spec.id {
-                    "ops.ec.add" => "add",
-                    "ops.ec.sub" => "sub",
-                    _ => "set",
-                };
-                Some(handlers_ec::handle_ec_mutate(
-                    &self.runtime,
-                    collection,
-                    field,
-                    operation,
-                    body.to_vec(),
-                ))
-            }
-            "ops.ec.consolidate" => {
-                let collection = matched.params.get("collection")?;
-                let field = matched.params.get("field")?;
-                Some(handlers_ec::handle_ec_consolidate(
-                    &self.runtime,
-                    collection,
-                    field,
-                ))
-            }
-            "ops.ec.field_status" => {
-                let collection = matched.params.get("collection")?;
-                let field = matched.params.get("field")?;
-                Some(handlers_ec::handle_ec_status(
-                    &self.runtime,
-                    collection,
-                    field,
-                    query,
-                ))
-            }
-            "ops.backup.status" => Some(self.handle_backup_status()),
-            "ops.backup.trigger" => Some(self.handle_backup_trigger()),
-            "ops.recovery.restore_points" => Some(self.handle_restore_points()),
-            "ops.replication.status" => Some(self.handle_replication_status()),
-            "ops.replication.snapshot" => Some(self.handle_replication_snapshot()),
-            "ops.topology.graph" => Some(self.handle_topology_graph()),
-            "ops.cluster.status" => Some(self.handle_cluster_status()),
-            "ops.deployment.profiles" => {
-                let profile = query
-                    .get("profile")
-                    .and_then(|value| deployment_profile_from_token(value.as_str()));
-                Some(json_response(
-                    200,
-                    match profile {
-                        Some(profile) => {
-                            crate::presentation::deployment_json::deployment_profile_json(
-                                match profile {
-                                    DeploymentProfile::Embedded => crate::presentation::deployment_json::DeploymentProfileView::Embedded,
-                                    DeploymentProfile::Server => crate::presentation::deployment_json::DeploymentProfileView::Server,
-                                    DeploymentProfile::Serverless => crate::presentation::deployment_json::DeploymentProfileView::Serverless,
-                                },
-                            )
-                        }
-                        None => crate::presentation::deployment_json::deployment_profiles_catalog_json(
-                            &[
-                                crate::presentation::deployment_json::DeploymentProfileView::Embedded,
-                                crate::presentation::deployment_json::DeploymentProfileView::Server,
-                                crate::presentation::deployment_json::DeploymentProfileView::Serverless,
-                            ],
-                            "Use /deployment/profiles?profile=serverless to get the exact serverless contract.",
-                        ),
-                    },
-                ))
-            }
-            "ops.grpc.discovery" => Some(self.handle_grpc_discovery()),
-            "ops.cdc.changes" => Some(self.handle_cdc_poll(query)),
-            "ops.health.aggregate" => {
-                let report = self.native_use_cases().health();
-                let status = if report.allows_serving_traffic() {
-                    200
-                } else {
-                    503
-                };
-                Some(json_response(
-                    status,
-                    self.health_json_with_transport(&report),
-                ))
-            }
-            "ops.ready.aggregate" => {
-                let report = self.native_use_cases().health();
-                let status = if report.allows_serving_traffic() {
-                    200
-                } else {
-                    503
-                };
-                Some(json_response(
-                    status,
-                    self.health_json_with_transport(&report),
-                ))
-            }
-            "ops.ready.query" => {
-                let ready = self.native_use_cases().readiness().query;
-                Some(json_response(
-                    if ready { 200 } else { 503 },
-                    crate::presentation::catalog_json::readiness_json("query", ready),
-                ))
-            }
-            "ops.ready.write" => {
-                let ready = self.native_use_cases().readiness().write;
-                Some(json_response(
-                    if ready { 200 } else { 503 },
-                    crate::presentation::catalog_json::readiness_json("write", ready),
-                ))
-            }
-            "ops.ready.repair" => {
-                let ready = self.native_use_cases().readiness().repair;
-                Some(json_response(
-                    if ready { 200 } else { 503 },
-                    crate::presentation::catalog_json::readiness_json("repair", ready),
-                ))
-            }
-            "ops.ready.serverless" => {
-                let native = self.native_use_cases();
-                let readiness = native.readiness();
-                let health = native.health();
-                let authority = native.physical_authority_status();
-                let (query_ready, write_ready, repair_ready) = (
-                    readiness.query_serverless,
-                    readiness.write_serverless,
-                    readiness.repair_serverless,
-                );
-                let ready = query_ready && write_ready && repair_ready;
-                Some(json_response(
-                    if ready { 200 } else { 503 },
-                    serverless_readiness_summary_to_json(
-                        query_ready,
-                        write_ready,
-                        repair_ready,
-                        &health,
-                        &authority,
-                    ),
-                ))
-            }
-            "ops.ready.serverless.query" => {
-                let ready = self.native_use_cases().readiness().query_serverless;
-                Some(json_response(
-                    if ready { 200 } else { 503 },
-                    crate::presentation::catalog_json::readiness_json("query", ready),
-                ))
-            }
-            "ops.ready.serverless.write" => {
-                let ready = self.native_use_cases().readiness().write_serverless;
-                Some(json_response(
-                    if ready { 200 } else { 503 },
-                    crate::presentation::catalog_json::readiness_json("write", ready),
-                ))
-            }
-            "ops.ready.serverless.repair" => {
-                let ready = self.native_use_cases().readiness().repair_serverless;
-                Some(json_response(
-                    if ready { 200 } else { 503 },
-                    crate::presentation::catalog_json::readiness_json("repair", ready),
-                ))
-            }
-            "ops.capabilities" => Some(self.handle_capabilities()),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_catalog_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "catalog.readiness" => {
-                let native = self.native_use_cases();
-                let readiness = native.readiness();
-                let health = native.health();
-                let authority = native.physical_authority_status();
-                Some(json_response(
-                    200,
-                    crate::presentation::ops_json::catalog_readiness_json(
-                        readiness.query,
-                        readiness.write,
-                        readiness.repair,
-                        &health,
-                        &authority,
-                    ),
-                ))
-            }
-            "catalog.snapshot" => {
-                let snapshot = self.catalog_use_cases().snapshot();
-                let native = self.native_use_cases();
-                let readiness = native.readiness();
-                let health = native.health();
-                let authority = native.physical_authority_status();
-                Some(json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_model_snapshot_with_readiness_json(
-                        &snapshot,
-                        crate::presentation::ops_json::catalog_readiness_json(
-                            readiness.query,
-                            readiness.write,
-                            readiness.repair,
-                            &health,
-                            &authority,
-                        ),
-                    ),
-                ))
-            }
-            "catalog.attention" => Some(json_response(
-                200,
-                crate::presentation::catalog_json::catalog_attention_summary_json(
-                    &self.catalog_use_cases().attention_summary(),
-                ),
-            )),
-            "catalog.consistency" => Some(json_response(
-                200,
-                crate::presentation::catalog_json::catalog_consistency_json(
-                    &self.catalog_use_cases().consistency_report(),
-                ),
-            )),
-            "catalog.collections.metadata" => {
-                let name = matched.params.get("name")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "select", name) {
-                    return Some(deny);
-                }
-                Some(self.handle_collection_ui_metadata(name, headers))
-            }
-            "catalog.collections.readiness" => {
-                let catalog = self.catalog_use_cases().snapshot();
-                Some(deprecated_catalog_response(
-                    "/catalog/collections/readiness",
-                    json_response(
-                        200,
-                        crate::presentation::catalog_json::catalog_collection_readiness_json(
-                            &catalog.collections,
-                        ),
-                    ),
-                ))
-            }
-            "catalog.collections.readiness_attention" => Some(deprecated_catalog_response(
-                "/catalog/collections/readiness/attention",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_collection_attention_json(
-                        &self.catalog_use_cases().collection_attention(),
-                    ),
-                ),
-            )),
-            "catalog.indexes.declared" => Some(deprecated_catalog_response(
-                "/catalog/indexes/declared",
-                json_response(
-                    200,
-                    crate::presentation::admin_json::indexes_json(
-                        &self.catalog_use_cases().declared_indexes(),
-                    ),
-                ),
-            )),
-            "catalog.indexes.operational" => Some(deprecated_catalog_response(
-                "/catalog/indexes/operational",
-                json_response(
-                    200,
-                    crate::presentation::admin_json::indexes_json(
-                        &self.catalog_use_cases().indexes(),
-                    ),
-                ),
-            )),
-            "catalog.indexes.status" => Some(deprecated_catalog_response(
-                "/catalog/indexes/status",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_index_statuses_json(
-                        &self.catalog_use_cases().index_statuses(),
-                    ),
-                ),
-            )),
-            "catalog.indexes.attention" => Some(deprecated_catalog_response(
-                "/catalog/indexes/attention",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_index_attention_json(
-                        &self.catalog_use_cases().index_attention(),
-                    ),
-                ),
-            )),
-            "catalog.graph.projections.declared" => Some(deprecated_catalog_response(
-                "/catalog/graph/projections/declared",
-                match self.catalog_use_cases().graph_projections() {
-                    Ok(projections) => json_response(
-                        200,
-                        crate::presentation::admin_json::graph_projections_json(&projections),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                },
-            )),
-            "catalog.graph.projections.operational" => Some(deprecated_catalog_response(
-                "/catalog/graph/projections/operational",
-                json_response(
-                    200,
-                    crate::presentation::admin_json::graph_projections_json(
-                        &self.catalog_use_cases().operational_graph_projections(),
-                    ),
-                ),
-            )),
-            "catalog.graph.projections.status" => Some(deprecated_catalog_response(
-                "/catalog/graph/projections/status",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_graph_projection_statuses_json(
-                        &self.catalog_use_cases().graph_projection_statuses(),
-                    ),
-                ),
-            )),
-            "catalog.graph.projections.attention" => Some(deprecated_catalog_response(
-                "/catalog/graph/projections/attention",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_graph_projection_attention_json(
-                        &self.catalog_use_cases().graph_projection_attention(),
-                    ),
-                ),
-            )),
-            "catalog.analytics_jobs.declared" => Some(deprecated_catalog_response(
-                "/catalog/analytics-jobs/declared",
-                match self.catalog_use_cases().analytics_jobs() {
-                    Ok(jobs) => json_response(
-                        200,
-                        crate::presentation::admin_json::analytics_jobs_json(&jobs),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                },
-            )),
-            "catalog.analytics_jobs.operational" => Some(deprecated_catalog_response(
-                "/catalog/analytics-jobs/operational",
-                json_response(
-                    200,
-                    crate::presentation::admin_json::analytics_jobs_json(
-                        &self.catalog_use_cases().operational_analytics_jobs(),
-                    ),
-                ),
-            )),
-            "catalog.analytics_jobs.status" => Some(deprecated_catalog_response(
-                "/catalog/analytics-jobs/status",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
-                        &self.catalog_use_cases().analytics_job_statuses(),
-                    ),
-                ),
-            )),
-            "catalog.analytics_jobs.attention" => Some(deprecated_catalog_response(
-                "/catalog/analytics-jobs/attention",
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_analytics_job_attention_json(
-                        &self.catalog_use_cases().analytics_job_attention(),
-                    ),
-                ),
-            )),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_physical_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "physical.metadata" => Some(match self.native_use_cases().physical_metadata() {
-                Ok(metadata) => json_response(200, metadata.to_json_value()),
-                Err(err) => json_error(404, err.to_string()),
-            }),
-            "physical.native_header" => Some(match self.native_use_cases().native_header() {
-                Ok(header) => json_response(
-                    200,
-                    crate::presentation::native_json::native_header_json(header),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            }),
-            "physical.native_collection_roots" => {
-                Some(match self.native_use_cases().native_collection_roots() {
-                    Ok(roots) => json_response(
-                        200,
-                        crate::presentation::native_json::collection_roots_json(&roots),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.native_manifest" => {
-                Some(match self.native_use_cases().native_manifest_summary() {
-                    Ok(summary) => json_response(
-                        200,
-                        crate::presentation::native_json::native_manifest_summary_json(&summary),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.native_registry" => {
-                Some(match self.native_use_cases().native_registry_summary() {
-                    Ok(summary) => json_response(
-                        200,
-                        crate::presentation::ops_json::native_registry_summary_json(&summary),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.native_recovery" => {
-                Some(match self.native_use_cases().native_recovery_summary() {
-                    Ok(summary) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_recovery_summary_json(
-                            &summary,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.native_catalog" => {
-                Some(match self.native_use_cases().native_catalog_summary() {
-                    Ok(summary) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_catalog_summary_json(
-                            &summary,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.native_metadata_state" => Some(
-                match self.native_use_cases().native_metadata_state_summary() {
-                    Ok(summary) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_metadata_state_summary_json(
-                            &summary,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                },
-            ),
-            "physical.authority" => Some(json_response(
-                200,
-                crate::presentation::ops_json::physical_authority_status_json(
-                    &self.native_use_cases().physical_authority_status(),
-                ),
-            )),
-            "physical.native_state" => {
-                Some(match self.native_use_cases().native_physical_state() {
-                    Ok(state) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_physical_state_json(
-                            &state,
-                            crate::presentation::native_json::native_header_json,
-                            crate::presentation::native_json::collection_roots_json,
-                            crate::presentation::native_json::native_manifest_summary_json,
-                            crate::presentation::ops_json::native_registry_summary_json,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.native_vector_artifacts" => Some(
-                match self.native_use_cases().native_vector_artifact_pages() {
-                    Ok(summaries) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_pages_json(
-                            &summaries,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                },
-            ),
-            "physical.native_vector_artifacts.inspect" => {
-                Some(match self.native_use_cases().inspect_vector_artifacts() {
-                    Ok(batch) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_batch_json(
-                            &batch,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.native_header.repair_policy" => Some(
-                match self.native_use_cases().native_header_repair_policy() {
-                    Ok(policy) => json_response(
-                        200,
-                        crate::presentation::native_json::repair_policy_json(&policy),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                },
-            ),
-            "physical.manifest" => Some(
-                match self.native_use_cases().manifest_events_filtered(
-                    query.get("collection").map(String::as_str),
-                    query.get("kind").map(String::as_str),
-                    query
-                        .get("since_snapshot")
-                        .and_then(|value| value.parse::<u64>().ok()),
-                ) {
-                    Ok(events) => json_response(
-                        200,
-                        crate::presentation::native_json::manifest_events_json(&events),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                },
-            ),
-            "physical.roots" => Some(match self.native_use_cases().collection_roots() {
-                Ok(roots) => json_response(
-                    200,
-                    crate::presentation::native_json::collection_roots_json(&roots),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            }),
-            "physical.snapshots" => Some(match self.native_use_cases().snapshots() {
-                Ok(snapshots) => json_response(
-                    200,
-                    crate::presentation::native_json::snapshots_json(&snapshots),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            }),
-            "physical.exports" => Some(match self.native_use_cases().exports() {
-                Ok(exports) => json_response(
-                    200,
-                    crate::presentation::native_json::exports_json(&exports),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            }),
-            "physical.indexes" => Some(json_response(
-                200,
-                crate::presentation::admin_json::indexes_json(&self.catalog_use_cases().indexes()),
-            )),
-            "physical.stats" => Some(json_response(
-                200,
-                crate::presentation::query_result_json::runtime_stats_json(
-                    &self.catalog_use_cases().stats(),
-                ),
-            )),
-            "physical.checkpoint" => Some(match self.native_use_cases().checkpoint() {
-                Ok(()) => json_ok("checkpoint completed"),
-                Err(err) => json_error(500, err.to_string()),
-            }),
-            "physical.snapshot.create" => Some(match self.native_use_cases().create_snapshot() {
-                Ok(snapshot) => json_response(
-                    200,
-                    crate::presentation::native_json::snapshot_descriptor_json(&snapshot),
-                ),
-                Err(err) => json_error(500, err.to_string()),
-            }),
-            "physical.export.create" => Some(self.handle_export(body.to_vec())),
-            "physical.indexes.rebuild" => Some(self.handle_rebuild_indexes(body.to_vec(), None)),
-            "physical.retention.apply" => {
-                Some(match self.native_use_cases().apply_retention_policy() {
-                    Ok(()) => json_ok("retention policy applied"),
-                    Err(err) => json_error(500, err.to_string()),
-                })
-            }
-            "physical.maintenance" => Some(match self.native_use_cases().run_maintenance() {
-                Ok(()) => json_ok("maintenance completed"),
-                Err(err) => json_error(500, err.to_string()),
-            }),
-            "physical.native_header.repair" => Some(
-                match self.native_use_cases().repair_native_header_from_metadata() {
-                    Ok(policy) => json_response(
-                        200,
-                        crate::presentation::native_json::repair_policy_json(&policy),
-                    ),
-                    Err(err) => json_error(500, err.to_string()),
-                },
-            ),
-            "physical.metadata.rebuild" => Some(
-                match self
-                    .native_use_cases()
-                    .rebuild_physical_metadata_from_native_state()
-                {
-                    Ok(true) => json_ok("physical metadata rebuilt from native state"),
-                    Ok(false) => {
-                        json_error(409, "native state is not available for metadata rebuild")
-                    }
-                    Err(err) => json_error(500, err.to_string()),
-                },
-            ),
-            "physical.native_state.repair" => Some(
-                match self
-                    .native_use_cases()
-                    .repair_native_physical_state_from_metadata()
-                {
-                    Ok(true) => json_ok("native physical state republished from physical metadata"),
-                    Ok(false) => json_error(
-                        409,
-                        "native physical state repair is not available in this mode",
-                    ),
-                    Err(err) => json_error(500, err.to_string()),
-                },
-            ),
-            "physical.native_vector_artifacts.warmup" => {
-                Some(match self.native_use_cases().warmup_vector_artifacts() {
-                    Ok(batch) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_batch_json(
-                            &batch,
-                        ),
-                    ),
-                    Err(err) => json_error(500, err.to_string()),
-                })
-            }
-            "physical.collections.vector_artifacts.inspect" => {
-                let collection = matched.params.get("collection")?;
-                Some(match self.native_use_cases().inspect_vector_artifact(
-                    InspectNativeArtifactInput {
-                        collection: collection.to_string(),
-                        artifact_kind: query.get("kind").cloned(),
-                    },
-                ) {
-                    Ok(artifact) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_inspection_json(
-                            &artifact,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.collections.vector_artifacts.warmup" => {
-                let collection = matched.params.get("collection")?;
-                Some(match self.native_use_cases().warmup_vector_artifact(
-                    InspectNativeArtifactInput {
-                        collection: collection.to_string(),
-                        artifact_kind: query.get("kind").cloned(),
-                    },
-                ) {
-                    Ok(artifact) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_inspection_json(
-                            &artifact,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.collections.indexes" => {
-                let collection = matched.params.get("collection")?;
-                Some(json_response(
-                    200,
-                    crate::presentation::admin_json::indexes_json(
-                        &self.catalog_use_cases().indexes_for_collection(collection),
-                    ),
-                ))
-            }
-            "physical.collections.indexes.rebuild" => {
-                let collection = matched.params.get("collection")?;
-                Some(self.handle_rebuild_indexes(body.to_vec(), Some(collection)))
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_collections_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "collections.list" => {
-                let values = self
-                    .catalog_use_cases()
-                    .collections()
-                    .into_iter()
-                    .map(JsonValue::String)
-                    .collect();
-                let mut object = Map::new();
-                object.insert("collections".to_string(), JsonValue::Array(values));
-                Some(json_response(200, JsonValue::Object(object)))
-            }
-            "collections.create" => Some(self.handle_create_collection(body.to_vec())),
-            "collections.drop" => {
-                let collection = matched.params.get("collection")?;
-                Some(self.handle_drop_collection(collection))
-            }
-            "collections.schema" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "select", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_describe_collection(collection))
-            }
-            "collections.scan" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "select", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_scan(collection, query))
-            }
-            "collections.chain_tip" => {
-                let collection = matched.params.get("collection")?;
-                Some(handle_chain_tip(&self.runtime, collection))
-            }
-            "collections.entities.get" => {
-                let collection = matched.params.get("collection")?;
-                let id = matched.params.get("id")?.parse::<u64>().ok()?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "select", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_get_entity(collection, id))
-            }
-            "collections.entities.patch" => {
-                let collection = matched.params.get("collection")?;
-                let id = matched.params.get("id")?.parse::<u64>().ok()?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "update", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_patch_entity(collection, id, body.to_vec()))
-            }
-            "collections.entities.put" => {
-                let collection = matched.params.get("collection")?;
-                let id = matched.params.get("id")?.parse::<u64>().ok()?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "update", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_replace_document(collection, id, body.to_vec()))
-            }
-            "collections.entities.delete" => {
-                let collection = matched.params.get("collection")?;
-                let id = matched.params.get("id")?.parse::<u64>().ok()?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "delete", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_delete_entity(collection, id))
-            }
-            "collections.verify_chain" => {
-                let collection = matched.params.get("collection")?;
-                if !admin_token_ok(headers) {
-                    return Some(json_error(401, "verify-chain requires admin token"));
-                }
-                Some(handle_verify_chain(&self.runtime, collection))
-            }
-            "collections.clear_integrity_flag" => {
-                let collection = matched.params.get("collection")?;
-                if !admin_token_ok(headers) {
-                    return Some(json_error(401, "clear-integrity-flag requires admin token"));
-                }
-                Some(handle_clear_integrity_flag(&self.runtime, collection))
-            }
-            "collections.trees.create" => {
-                let collection = matched.params.get("collection")?;
-                Some(self.handle_create_tree(collection, body.to_vec()))
-            }
-            "collections.trees.nodes.insert" => {
-                let collection = matched.params.get("collection")?;
-                let tree = matched.params.get("tree")?;
-                Some(self.handle_tree_insert_node(collection, tree, body.to_vec()))
-            }
-            "collections.trees.move" => {
-                let collection = matched.params.get("collection")?;
-                let tree = matched.params.get("tree")?;
-                Some(self.handle_tree_move(collection, tree, body.to_vec()))
-            }
-            "collections.trees.validate" => {
-                let collection = matched.params.get("collection")?;
-                let tree = matched.params.get("tree")?;
-                Some(self.handle_tree_validate(collection, tree))
-            }
-            "collections.trees.rebalance" => {
-                let collection = matched.params.get("collection")?;
-                let tree = matched.params.get("tree")?;
-                Some(self.handle_tree_rebalance(collection, tree, body.to_vec()))
-            }
-            "collections.trees.nodes.delete" => {
-                let collection = matched.params.get("collection")?;
-                let tree = matched.params.get("tree")?;
-                let node = matched.params.get("node")?.parse::<u64>().ok()?;
-                Some(self.handle_tree_delete_node(collection, tree, node))
-            }
-            "collections.trees.drop" => {
-                let collection = matched.params.get("collection")?;
-                let tree = matched.params.get("tree")?;
-                Some(self.handle_drop_tree(collection, tree))
-            }
-            "collections.bulk.documents" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_bulk_create(
-                    collection,
-                    body.to_vec(),
-                    Self::handle_create_document,
-                ))
-            }
-            "collections.bulk.rows" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_bulk_create_rows_fast(collection, body.to_vec()))
-            }
-            "collections.bulk.nodes" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_bulk_create(collection, body.to_vec(), Self::handle_create_node))
-            }
-            "collections.bulk.edges" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_bulk_create(collection, body.to_vec(), Self::handle_create_edge))
-            }
-            "collections.bulk.vectors" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_bulk_create(collection, body.to_vec(), Self::handle_create_vector))
-            }
-            "collections.rows.create" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_create_row(collection, body.to_vec()))
-            }
-            "collections.batch.insert" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                let idempotency_key = headers.get("idempotency-key").map(|value| value.as_str());
-                Some(self.handle_batch_insert(collection, body.to_vec(), idempotency_key))
-            }
-            "collections.nodes.create" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_create_node(collection, body.to_vec()))
-            }
-            "collections.edges.create" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_create_edge(collection, body.to_vec()))
-            }
-            "collections.vectors.create" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_create_vector(collection, body.to_vec()))
-            }
-            "collections.documents.create" => {
-                let collection = matched.params.get("collection")?;
-                if let Some(deny) = self.check_collection_http_policy(headers, "insert", collection)
-                {
-                    return Some(deny);
-                }
-                Some(self.handle_create_document(collection, body.to_vec()))
-            }
-            "collections.similar" => {
-                let collection = matched.params.get("collection")?;
-                Some(self.handle_similar(collection, body.to_vec()))
-            }
-            "collections.ivf.search" => {
-                let collection = matched.params.get("collection")?;
-                Some(self.handle_ivf_search(collection, body.to_vec()))
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_geo_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "geo.distance" => Some(handlers_geo::handle_geo_distance(body.to_vec())),
-            "geo.bearing" => Some(handlers_geo::handle_geo_bearing(body.to_vec())),
-            "geo.midpoint" => Some(handlers_geo::handle_geo_midpoint(body.to_vec())),
-            "geo.destination" => Some(handlers_geo::handle_geo_destination(body.to_vec())),
-            "geo.bounding_box" => Some(handlers_geo::handle_geo_bounding_box(body.to_vec())),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_graph_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "graph.neighborhood" => Some(self.handle_graph_neighborhood(body.to_vec())),
-            "graph.traverse" => Some(self.handle_graph_traverse(body.to_vec())),
-            "graph.shortest_path" => Some(self.handle_graph_shortest_path(body.to_vec())),
-            "graph.analytics.components" => Some(self.handle_graph_components(body.to_vec())),
-            "graph.analytics.centrality" => Some(self.handle_graph_centrality(body.to_vec())),
-            "graph.analytics.community" => Some(self.handle_graph_community(body.to_vec())),
-            "graph.analytics.clustering" => Some(self.handle_graph_clustering(body.to_vec())),
-            "graph.analytics.pagerank_personalized" => {
-                Some(self.handle_graph_personalized_pagerank(body.to_vec()))
-            }
-            "graph.analytics.hits" => Some(self.handle_graph_hits(body.to_vec())),
-            "graph.analytics.cycles" => Some(self.handle_graph_cycles(body.to_vec())),
-            "graph.analytics.topological_sort" => {
-                Some(self.handle_graph_topological_sort(body.to_vec()))
-            }
-            "graph.analytics.properties" => Some(self.handle_graph_properties(body.to_vec())),
-            "graph.projections.list" => Some(match self.catalog_use_cases().graph_projections() {
-                Ok(projections) => json_response(
-                    200,
-                    crate::presentation::admin_json::graph_projections_json(&projections),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            }),
-            "graph.projections.upsert" => Some(self.handle_graph_projection_upsert(body.to_vec())),
-            "graph.projections.materialize" => {
-                let name = matched.params.get("name")?;
-                Some(self.materialize_graph_projection_transition(name))
-            }
-            "graph.projections.materializing" => {
-                let name = matched.params.get("name")?;
-                Some(
-                    match self
-                        .admin_use_cases()
-                        .mark_graph_projection_materializing(name)
-                    {
-                        Ok(projection) => json_response(200, graph_projection_json(&projection)),
-                        Err(err) => json_error(400, err.to_string()),
-                    },
-                )
-            }
-            "graph.projections.fail" => {
-                let name = matched.params.get("name")?;
-                Some(match self.admin_use_cases().fail_graph_projection(name) {
-                    Ok(projection) => json_response(200, graph_projection_json(&projection)),
-                    Err(err) => json_error(400, err.to_string()),
-                })
-            }
-            "graph.projections.stale" => {
-                let name = matched.params.get("name")?;
-                Some(
-                    match self.admin_use_cases().mark_graph_projection_stale(name) {
-                        Ok(projection) => json_response(200, graph_projection_json(&projection)),
-                        Err(err) => json_error(400, err.to_string()),
-                    },
-                )
-            }
-            "graph.jobs.list" => Some(match self.catalog_use_cases().analytics_jobs() {
-                Ok(jobs) => json_response(
-                    200,
-                    crate::presentation::admin_json::analytics_jobs_json(&jobs),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            }),
-            "graph.jobs.upsert" => Some(self.handle_analytics_job_upsert(body.to_vec())),
-            "graph.jobs.queue" => Some(self.handle_analytics_job_queue(body.to_vec())),
-            "graph.jobs.start" => Some(self.handle_analytics_job_start(body.to_vec())),
-            "graph.jobs.complete" => Some(self.handle_analytics_job_complete(body.to_vec())),
-            "graph.jobs.stale" => Some(self.handle_analytics_job_stale(body.to_vec())),
-            "graph.jobs.fail" => Some(self.handle_analytics_job_fail(body.to_vec())),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_ai_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "ai.ask" => Some(self.handle_ai_ask(body.to_vec())),
-            "ai.embeddings" => Some(self.handle_ai_embeddings(body.to_vec())),
-            "ai.prompt" => Some(self.handle_ai_prompt(body.to_vec())),
-            "ai.credentials" => Some(self.handle_ai_credentials(body.to_vec())),
-            "ai.models.list" => Some(self.handle_ai_model_list()),
-            "ai.models.register" => Some(self.handle_ai_model_register(body.to_vec())),
-            "ai.models.get" => {
-                let name = matched.params.get("name")?;
-                Some(self.handle_ai_model_get(name))
-            }
-            "ai.models.update" => {
-                let name = matched.params.get("name")?;
-                Some(self.handle_ai_model_update(name, body.to_vec()))
-            }
-            "ai.models.pull" => {
-                let name = matched.params.get("name")?;
-                Some(self.handle_ai_model_pull(name, body.to_vec()))
-            }
-            "ai.models.cache_status" => {
-                let name = matched.params.get("name")?;
-                Some(self.handle_ai_model_cache_status(name))
-            }
-            "ai.models.cache_drop" => {
-                let name = matched.params.get("name")?;
-                Some(self.handle_ai_model_cache_drop(name))
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_metrics_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "metrics.scrape" => Some(self.handle_metrics()),
-            "prometheus.query.get" => Some(self.handle_prometheus_query(headers, query, None)),
-            "prometheus.query.post" => {
-                Some(self.handle_prometheus_query(headers, query, Some(body.to_vec())))
-            }
-            "prometheus.query_range.get" => {
-                Some(self.handle_prometheus_query_range(headers, query, None))
-            }
-            "prometheus.query_range.post" => {
-                Some(self.handle_prometheus_query_range(headers, query, Some(body.to_vec())))
-            }
-            "prometheus.remote_write" => {
-                Some(self.handle_prometheus_remote_write(query, headers, body.to_vec()))
-            }
-            // Routing 3/3 (#1643) leftovers migrated from the legacy matcher.
-            _ => None,
-        }
-    }
-
-    pub(crate) fn dispatch_leftovers_routes(
-        &self,
-        matched: &route_catalog::RouteMatch<'_>,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
-    ) -> Option<HttpResponse> {
-        match matched.spec.id {
-            "root.index" => Some(match self.ui_dir() {
-                Some(ui_dir) => crate::server::ui_static::serve_bundle_asset(ui_dir, "/")
-                    .unwrap_or_else(|| self.handle_root_discovery()),
-                None => self.handle_root_discovery(),
-            }),
-            "config.export" => Some(self.handle_config_export()),
-            "config.import" => Some(self.handle_config_import(body.to_vec())),
-            "config.key" => self.handle_config_key_route(method, path, body),
-            "keyed.v1.kv" | "keyed.v1.config" | "keyed.v1.vault" => {
-                self.handle_v1_keyed_route(method, path, query, body)
-            }
-            "kv.dynamic.kvs" | "kv.dynamic.kv" => {
-                self.handle_collection_kv_route(method, path, query, headers, body)
-            }
-            "logs.dynamic" => {
-                let name = matched.params.get("name")?;
-                let action = matched.params.get("action")?;
-                Some(match (method, action.as_str()) {
-                    ("POST", "append") => {
-                        handlers_log::handle_log_append(&self.runtime, name, body.to_vec())
-                    }
-                    ("GET", "query") => handlers_log::handle_log_query(&self.runtime, name, query),
-                    ("POST", "retention") => {
-                        handlers_log::handle_log_retention(&self.runtime, name)
-                    }
-                    _ => json_error(405, "method not allowed for log endpoint"),
-                })
-            }
-            "indexes.action" => {
-                let name = matched.params.get("name")?;
-                let action = matched.params.get("action")?;
-                self.handle_index_action_route(method, name, action)
-            }
-            "vectors.cluster" => Some(handlers_vector::handle_vector_cluster(
-                &self.runtime,
-                body.to_vec(),
-            )),
-            "serverless.attach" => Some(self.handle_serverless_attach(body.to_vec())),
-            "serverless.warmup" => Some(self.handle_serverless_warmup(body.to_vec())),
-            "serverless.reclaim" | "serverless.tick" => {
-                Some(self.handle_serverless_reclaim(body.to_vec()))
-            }
-            "physical.native_vector_artifacts.by_collection" => {
-                let collection = matched.params.get("collection")?;
-                Some(match self.native_use_cases().inspect_vector_artifact(
-                    InspectNativeArtifactInput {
-                        collection: collection.to_string(),
-                        artifact_kind: query.get("kind").cloned(),
-                    },
-                ) {
-                    Ok(artifact) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_inspection_json(
-                            &artifact,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            "physical.native_vector_artifacts.by_collection.warmup" => {
-                let collection = matched.params.get("collection")?;
-                Some(match self.native_use_cases().warmup_vector_artifact(
-                    InspectNativeArtifactInput {
-                        collection: collection.to_string(),
-                        artifact_kind: query.get("kind").cloned(),
-                    },
-                ) {
-                    Ok(artifact) => json_response(
-                        200,
-                        crate::presentation::native_state_json::native_vector_artifact_inspection_json(
-                            &artifact,
-                        ),
-                    ),
-                    Err(err) => json_error(404, err.to_string()),
-                })
-            }
-            _ => None,
-        }
-    }
-
+    /// Buffered dispatch: invoke the handler the matched command declared.
+    /// The catalog is the only routing table — there is no id-keyed match
+    /// here, so a route can only be reached through the handler its own
+    /// declaration binds.
     fn route_discovered_buffered(
         &self,
-        method: &str,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        headers: &BTreeMap<String, String>,
-        body: &[u8],
+        request: &route_catalog::RouteRequest<'_>,
     ) -> Option<HttpResponse> {
-        let matched = Self::discovered_route(method, path)?;
-        (matched.spec.handler?)(self, &matched, method, path, query, headers, body)
+        (request.matched.spec.handler?)(self, request)
     }
 
     /// Routing 3/3 (#1643) — `/config/{key.path}` GET/PUT/DELETE. Re-runs the
     /// legacy `strip_prefix("/config/")` parse so multi-segment keys and the
     /// bare-`/config` fall-through (→ canonical 404) are preserved.
-    fn handle_config_key_route(
+    pub(crate) fn handle_config_key_route(
         &self,
         method: &str,
         path: &str,
@@ -1856,7 +487,7 @@ impl RedDBServer {
     /// watch alias) in the same order the legacy matcher used, returning
     /// `None` when none of the shapes match so the caller falls through to
     /// the canonical 404.
-    fn handle_collection_kv_route(
+    pub(crate) fn handle_collection_kv_route(
         &self,
         method: &str,
         path: &str,
@@ -1904,7 +535,7 @@ impl RedDBServer {
     /// (`POST /indexes/:name/:action`). Non-POST methods and unknown actions
     /// return `None` so the caller falls through to the canonical 404, exactly
     /// as the legacy `if method == "POST"` guard did.
-    fn handle_index_action_route(
+    pub(crate) fn handle_index_action_route(
         &self,
         method: &str,
         name: &str,
@@ -2037,29 +668,14 @@ impl RedDBServer {
         }
     }
 
+    /// Pre-IAM HTTP authorization: the catalog supplies the route's auth
+    /// class and the decision is made from the presented HTTP credentials
+    /// alone. `CommandAuthorizer` / `IamCommandPolicyEngine` are deliberately
+    /// *not* engaged here — routing HTTP through the policy engine is a
+    /// behavior change owned by a later slice of Spec #2109, and wiring it in
+    /// nominally would only cost a per-request principal hash and context
+    /// build whose result is discarded.
     fn is_authorized(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> bool {
-        let credential_decision = self.is_authorized_by_http_credentials(method, path, headers);
-        let Some(matched) = Self::discovered_route(method, path) else {
-            return credential_decision;
-        };
-        let principal = principal_for(headers);
-        let ctx = self.build_read_context(
-            headers.get("x-request-id").map(String::as_str),
-            Some(&principal),
-        );
-        let policy = HttpCommandPolicyDecision(credential_decision);
-
-        route_catalog::CommandAuthorizer::new(routes::discovered_route_catalog(), &policy)
-            .authorize(&ctx, matched.spec.id)
-            .is_ok()
-    }
-
-    fn is_authorized_by_http_credentials(
-        &self,
-        method: &str,
-        path: &str,
-        headers: &BTreeMap<String, String>,
-    ) -> bool {
         if let Some(matched) = Self::discovered_route(method, path) {
             if matches!(
                 matched.spec.auth,
@@ -2320,7 +936,10 @@ fn token_fingerprint(token: &str) -> String {
 /// tip JSON. 404 when the collection is not a `KIND blockchain` or has no
 /// rows yet (the engine guarantees a genesis row on creation, so the 404
 /// branch effectively means "wrong kind / collection absent").
-fn handle_chain_tip(runtime: &crate::runtime::RedDBRuntime, collection: &str) -> HttpResponse {
+pub(crate) fn handle_chain_tip(
+    runtime: &crate::runtime::RedDBRuntime,
+    collection: &str,
+) -> HttpResponse {
     let Some(tip) = runtime.chain_tip_for_collection(collection) else {
         return json_error(
             404,
@@ -2352,7 +971,7 @@ fn handle_chain_tip(runtime: &crate::runtime::RedDBRuntime, collection: &str) ->
 /// Issue #525 — admin-token gate for verify-chain + clear-integrity endpoints.
 /// When `RED_ADMIN_TOKEN` is unset the endpoints stay open (dev installs).
 /// When set, callers must present a matching `Authorization: Bearer <token>`.
-fn admin_token_ok(headers: &BTreeMap<String, String>) -> bool {
+pub(crate) fn admin_token_ok(headers: &BTreeMap<String, String>) -> bool {
     let Some(expected) = read_admin_token() else {
         return true;
     };
@@ -2364,7 +983,10 @@ fn admin_token_ok(headers: &BTreeMap<String, String>) -> bool {
 }
 
 /// Issue #525 — `POST /collections/:name/verify-chain`.
-fn handle_verify_chain(runtime: &crate::runtime::RedDBRuntime, collection: &str) -> HttpResponse {
+pub(crate) fn handle_verify_chain(
+    runtime: &crate::runtime::RedDBRuntime,
+    collection: &str,
+) -> HttpResponse {
     let Some(outcome) = runtime.verify_chain_for_collection(collection) else {
         return json_error(
             404,
@@ -2390,7 +1012,7 @@ fn handle_verify_chain(runtime: &crate::runtime::RedDBRuntime, collection: &str)
 }
 
 /// Issue #525 — `POST /collections/:name/clear-integrity-flag`.
-fn handle_clear_integrity_flag(
+pub(crate) fn handle_clear_integrity_flag(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
@@ -2709,6 +1331,29 @@ mod tests {
                 .any(|(name, value)| *name == "Allow" && value == "POST"),
             "GET /v1/query should keep the query discovery Allow header"
         );
+    }
+
+    /// The two commands the catalog declares without a buffered handler
+    /// (`streams.input`, `streams.query.output`) are served here instead —
+    /// `try_route_streaming` answers them before buffered dispatch runs.
+    #[test]
+    fn streaming_served_commands_are_recognized_by_the_streaming_entry() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let mut input = request_with("POST", "/streams/input", b"{}\n".to_vec());
+        input.headers.insert(
+            "content-type".to_string(),
+            "application/x-ndjson".to_string(),
+        );
+        assert!(server.is_streaming_request(&input));
+
+        let output = request_with(
+            "POST",
+            "/query/stream",
+            br#"{"query":"SELECT 1 as n"}"#.to_vec(),
+        );
+        assert!(server.is_streaming_request(&output));
     }
 
     #[test]

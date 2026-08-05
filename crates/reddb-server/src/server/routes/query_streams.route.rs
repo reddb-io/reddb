@@ -1,8 +1,9 @@
 use crate::server::route_catalog::{
     ListenerSurface, RouteAlias, RouteAudience, RouteAuth, RouteEntry, RouteGroupDefaults,
-    RouteMethod, RouteMiddleware, RouteRegistry, RouteStability,
+    RouteMethod, RouteMiddleware, RouteRegistry, RouteRequest, RouteStability,
 };
 use crate::server::routes::common::{PUBLIC_MIDDLEWARE, STANDARD_MIDDLEWARE};
+use crate::server::*;
 
 const QUERY_SURFACES: &[ListenerSurface] = &[ListenerSurface::Public];
 const STREAM_MIDDLEWARE: &[RouteMiddleware] = &[
@@ -101,46 +102,69 @@ const QUERY_PUBLIC_ROUTES: &[RouteEntry] = &[RouteEntry::with_aliases(
     RouteMethod::Get,
     "/query",
     QUERY_CONTRACT_ALIASES,
+    query_contract,
 )];
 
 const QUERY_USER_ROUTES: &[RouteEntry] = &[
-    RouteEntry::with_aliases("query.execute", RouteMethod::Post, "/query", QUERY_POST_ALIASES),
+    RouteEntry::with_aliases(
+        "query.execute",
+        RouteMethod::Post,
+        "/query",
+        QUERY_POST_ALIASES,
+        query_execute,
+    ),
     RouteEntry::with_aliases(
         "query.explain",
         RouteMethod::Post,
         "/query/explain",
         QUERY_EXPLAIN_ALIASES,
+        query_explain,
     ),
-    RouteEntry::with_aliases("query.search", RouteMethod::Post, "/search", SEARCH_ALIASES),
-    RouteEntry::with_aliases("query.context", RouteMethod::Post, "/context", CONTEXT_ALIASES),
+    RouteEntry::with_aliases(
+        "query.search",
+        RouteMethod::Post,
+        "/search",
+        SEARCH_ALIASES,
+        query_search,
+    ),
+    RouteEntry::with_aliases(
+        "query.context",
+        RouteMethod::Post,
+        "/context",
+        CONTEXT_ALIASES,
+        query_context,
+    ),
     RouteEntry::with_aliases(
         "query.text_search",
         RouteMethod::Post,
         "/text/search",
         TEXT_SEARCH_ALIASES,
+        query_text_search,
     ),
     RouteEntry::with_aliases(
         "query.multimodal_search",
         RouteMethod::Post,
         "/multimodal/search",
         MULTIMODAL_SEARCH_ALIASES,
+        query_multimodal_search,
     ),
     RouteEntry::with_aliases(
         "query.hybrid_search",
         RouteMethod::Post,
         "/hybrid/search",
         HYBRID_SEARCH_ALIASES,
+        query_hybrid_search,
     ),
 ];
 
 const STREAM_ROUTES: &[RouteEntry] = &[
-    RouteEntry::with_aliases(
+    RouteEntry::streaming(
         "streams.input",
         RouteMethod::Post,
         "/streams/input",
         INPUT_STREAM_ALIASES,
     ),
-    RouteEntry::with_aliases(
+    RouteEntry::streaming(
         "streams.query.output",
         RouteMethod::Post,
         "/query/stream",
@@ -151,6 +175,7 @@ const STREAM_ROUTES: &[RouteEntry] = &[
         RouteMethod::Post,
         "/query/stream/cancel",
         QUERY_STREAM_CANCEL_ALIASES,
+        streams_query_cancel,
     ),
 ];
 
@@ -158,4 +183,45 @@ pub(crate) fn register(registry: &mut RouteRegistry) {
     registry.routes(QUERY_PUBLIC, QUERY_PUBLIC_ROUTES);
     registry.routes(QUERY_USER, QUERY_USER_ROUTES);
     registry.routes(STREAM_USER, STREAM_ROUTES);
+}
+
+// Handlers. Each route above binds one of these by fn pointer, so a
+// declared route always has a live handler behind it.
+
+fn query_contract(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_query_contract())
+}
+
+fn query_execute(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_query(req.body.to_vec()))
+}
+
+fn query_explain(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_query_explain(req.body.to_vec()))
+}
+
+fn query_search(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_universal_search(req.body.to_vec()))
+}
+
+fn query_context(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_context_search(req.body.to_vec()))
+}
+
+fn query_text_search(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_text_search(req.body.to_vec()))
+}
+
+fn query_multimodal_search(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_multimodal_search(req.body.to_vec()))
+}
+
+fn query_hybrid_search(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_hybrid_search(req.body.to_vec()))
+}
+
+fn streams_query_cancel(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    let principal = principal_for(req.headers);
+    let tenant = server.stream_tenant_for(req.headers);
+    Some(server.handle_query_stream_cancel(req.body, &principal, &tenant))
 }

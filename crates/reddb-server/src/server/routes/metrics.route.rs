@@ -1,8 +1,9 @@
 use crate::server::route_catalog::{
     RouteAlias, RouteAudience, RouteAuth, RouteEntry, RouteGroupDefaults, RouteMethod,
-    RouteMiddleware, RouteRegistry, RouteStability,
+    RouteMiddleware, RouteRegistry, RouteRequest, RouteStability,
 };
 use crate::server::routes::common::{METRICS_SURFACES, STANDARD_MIDDLEWARE};
+use crate::server::*;
 
 const OPS_READ_CLUSTER_MIDDLEWARE: &[RouteMiddleware] = &[
     RouteMiddleware::CorsPreflight,
@@ -66,6 +67,7 @@ const METRICS_ROUTES: &[RouteEntry] = &[RouteEntry::with_aliases(
     RouteMethod::Get,
     "/metrics",
     METRICS_ALIASES,
+    metrics_scrape,
 )];
 
 const PROMETHEUS_ROUTES: &[RouteEntry] = &[
@@ -74,34 +76,72 @@ const PROMETHEUS_ROUTES: &[RouteEntry] = &[
         RouteMethod::Get,
         "/api/v1/query",
         PROM_QUERY_GET_ALIASES,
+        prometheus_query_get,
     ),
     RouteEntry::with_aliases(
         "prometheus.query.post",
         RouteMethod::Post,
         "/api/v1/query",
         PROM_QUERY_POST_ALIASES,
+        prometheus_query_post,
     ),
     RouteEntry::with_aliases(
         "prometheus.query_range.get",
         RouteMethod::Get,
         "/api/v1/query_range",
         PROM_QUERY_RANGE_GET_ALIASES,
+        prometheus_query_range_get,
     ),
     RouteEntry::with_aliases(
         "prometheus.query_range.post",
         RouteMethod::Post,
         "/api/v1/query_range",
         PROM_QUERY_RANGE_POST_ALIASES,
+        prometheus_query_range_post,
     ),
     RouteEntry::with_aliases(
         "prometheus.remote_write",
         RouteMethod::Post,
         "/api/v1/write",
         PROM_REMOTE_WRITE_ALIASES,
+        prometheus_remote_write,
     ),
 ];
 
 pub(crate) fn register(registry: &mut RouteRegistry) {
     registry.routes(METRICS_OPERATOR, METRICS_ROUTES);
     registry.routes(PROM_COMPAT, PROMETHEUS_ROUTES);
+}
+
+// Handlers. Each route above binds one of these by fn pointer, so a
+// declared route always has a live handler behind it.
+
+fn metrics_scrape(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_metrics())
+}
+
+fn prometheus_query_get(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_prometheus_query(req.headers, req.query, None))
+}
+
+fn prometheus_query_post(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_prometheus_query(req.headers, req.query, Some(req.body.to_vec())))
+}
+
+fn prometheus_query_range_get(
+    server: &RedDBServer,
+    req: &RouteRequest<'_>,
+) -> Option<HttpResponse> {
+    Some(server.handle_prometheus_query_range(req.headers, req.query, None))
+}
+
+fn prometheus_query_range_post(
+    server: &RedDBServer,
+    req: &RouteRequest<'_>,
+) -> Option<HttpResponse> {
+    Some(server.handle_prometheus_query_range(req.headers, req.query, Some(req.body.to_vec())))
+}
+
+fn prometheus_remote_write(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_prometheus_remote_write(req.query, req.headers, req.body.to_vec()))
 }
