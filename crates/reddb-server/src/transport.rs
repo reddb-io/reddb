@@ -26,7 +26,7 @@ impl TransportKind {
             Self::GrpcTls => "grpc-tls",
             Self::Wire => "wire",
             Self::WireTls => "wire-tls",
-            Self::Postgres => "postgres",
+            Self::Postgres => "pg-wire",
         }
     }
 }
