@@ -1,8 +1,8 @@
-name: DST Nightly
+name: DST Weekly
 
 on:
   schedule:
-    - cron: "23 7 * * *"
+    - cron: "23 7 * * 4"
   workflow_dispatch:
 
 permissions:

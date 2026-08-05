@@ -27,7 +27,7 @@ jobs:
   check:
     name: Verify update compiles
     if: github.actor == 'dependabot[bot]'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -64,7 +64,7 @@ jobs:
     name: Auto-approve patch/minor bumps
     needs: check
     if: github.actor == 'dependabot[bot]'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       pull-requests: write
     steps:

@@ -35,7 +35,7 @@ jobs:
   pgwire-clients:
     name: PG-Wire Clients (psycopg, pgx, pgjdbc)
     if: github.actor != 'dependabot[bot]'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"

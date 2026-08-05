@@ -1,14 +1,8 @@
 name: KV Benchmark Gate
 
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - '.github/workflows/kv-bench.yml'
-      - 'bench/kv/**'
-      - 'bench/results/kv-release-baseline.json'
-      - 'crates/reddb-server/**'
-      - 'src/bin/red.rs'
+  schedule:
+    - cron: '11 5 * * 0'
   workflow_dispatch:
 
 concurrency:

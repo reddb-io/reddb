@@ -20,7 +20,7 @@ concurrency:
 jobs:
   deploy:
     name: Deploy to GitHub Pages
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

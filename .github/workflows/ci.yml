@@ -32,13 +32,12 @@ on:
 # Cost guard: new pushes cancel older runs on the same ref. Release-grade
 # validation lives in release.yml; CI push runs should stay quick.
 #
-# Cost policy (July 2026, Blacksmith bill): expensive jobs (feature matrix,
-# cross-platform, driver conformance, containers, fuzz smoke, packaging) run
-# POST-MERGE on push to main/develop — never on an open PR. PRs keep the fast
-# correctness lane: gate, lints, contract gates, quality, tests, RQL
-# conformance. `workflow_dispatch` with full_ci=true still runs everything
-# on demand. rust-cache saves are restricted to non-PR runs (save-if) so PR
-# branches never persist multi-GB caches.
+# Cost policy (August 2026, Blacksmith bill): pushes and pull requests run only
+# the trunk correctness lane. Feature matrices, cross-platform builds, driver
+# conformance, containers, fuzz smoke, and packaging are release-adjacent and
+# run only through `workflow_dispatch` with full_ci=true. Stable release builds
+# remain authoritative in release.yml. rust-cache saves are restricted to
+# non-PR runs (save-if) so PR branches never persist multi-GB caches.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -55,7 +54,8 @@ jobs:
   # Dependabot (Dependabot PRs run the dedicated dependabot.yml workflow instead).
   gate:
     name: gate
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
     if: |
       github.actor != 'dependabot[bot]' &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
@@ -322,7 +322,7 @@ jobs:
     # operators may select for release artifacts.
     name: Feature Matrix (${{ matrix.features.label }})
     needs: gate
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
@@ -427,7 +427,7 @@ jobs:
   driver-param-conformance:
     name: Driver Param Conformance
     needs: gate
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
@@ -501,7 +501,7 @@ jobs:
     # statically links the engine, so `maturin develop` is self-contained.
     name: Driver Runnable Examples
     needs: gate
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 35
     env:
@@ -550,7 +550,7 @@ jobs:
     # tarball, so this also exercises the include manifest end-to-end.
     name: Publish Dry-Run (crates.io)
     needs: gate
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     env:
@@ -577,7 +577,7 @@ jobs:
   containers:
     name: Container Stack
     needs: gate
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
@@ -716,7 +716,7 @@ jobs:
     # (systemd install, mmap, Unix sockets) via cfg gates in the source.
     name: Windows (build + unit tests)
     needs: gate
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-8vcpu-windows-2025
     timeout-minutes: 30
     steps:
@@ -741,7 +741,7 @@ jobs:
     # story complete. Same scope — library build + unit tests.
     name: macOS (build + unit tests)
     needs: gate
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 30
     steps:
@@ -760,11 +760,11 @@ jobs:
         run: cargo test --locked --lib
 
   fuzz-parsers:
-    # Post-merge bounded smoke window (cost policy above); the long
+    # On-demand bounded smoke window (cost policy above); the long
     # exploration window lives in parser-fuzz-nightly.yml.
     name: Fuzz Parsers
     needs: gate
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
@@ -819,7 +819,7 @@ jobs:
   package:
     name: cargo package dry-run
     needs: gate
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:

@@ -1,0 +1,102 @@
+name: Blacksmith Testbox
+
+# Permanent reddb-only pilot. Warm with `--idle-timeout 10`, run the bounded
+# comparison command, then always call `blacksmith testbox stop --id <id>`.
+# Select exactly one job with `blacksmith testbox warmup blacksmith-testbox.yml
+# --job rust-{2,4,8}vcpu --idle-timeout 10`.
+on:
+  workflow_dispatch:
+    inputs:
+      testbox_id:
+        type: string
+        description: Testbox session ID
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rust-2vcpu:
+    name: Rust 2 vCPU
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 90
+    steps:
+      - name: Begin Testbox
+        uses: useblacksmith/begin-testbox@233448af4bfdc6fca509a7f0974411ac6d8a8043 # v2
+        with:
+          testbox_id: ${{ inputs.testbox_id }}
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: testbox-rust-1.91.0-2vcpu
+          cache-on-failure: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Run Testbox
+        uses: useblacksmith/run-testbox@5ca05834db1d3813554d1dd109e5f2087a8d7cbc # v2
+        if: always()
+
+  rust-4vcpu:
+    name: Rust 4 vCPU
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 90
+    steps:
+      - name: Begin Testbox
+        uses: useblacksmith/begin-testbox@233448af4bfdc6fca509a7f0974411ac6d8a8043 # v2
+        with:
+          testbox_id: ${{ inputs.testbox_id }}
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: testbox-rust-1.91.0-4vcpu
+          cache-on-failure: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Run Testbox
+        uses: useblacksmith/run-testbox@5ca05834db1d3813554d1dd109e5f2087a8d7cbc # v2
+        if: always()
+
+  rust-8vcpu:
+    name: Rust 8 vCPU
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 90
+    steps:
+      - name: Begin Testbox
+        uses: useblacksmith/begin-testbox@233448af4bfdc6fca509a7f0974411ac6d8a8043 # v2
+        with:
+          testbox_id: ${{ inputs.testbox_id }}
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: testbox-rust-1.91.0-8vcpu
+          cache-on-failure: 'true'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Run Testbox
+        uses: useblacksmith/run-testbox@5ca05834db1d3813554d1dd109e5f2087a8d7cbc # v2
+        if: always()

@@ -1,8 +1,8 @@
-name: Nightly DR Drill
+name: Weekly DR Drill
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 3 * * 2'
   workflow_dispatch:
 
 permissions:
