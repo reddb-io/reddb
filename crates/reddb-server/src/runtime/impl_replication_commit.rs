@@ -443,7 +443,9 @@ impl RedDBRuntime {
     }
 }
 
-fn commit_policy_violation_error(violation: crate::cluster::CommitPolicyViolation) -> RedDBError {
+pub(crate) fn commit_policy_violation_error(
+    violation: crate::cluster::CommitPolicyViolation,
+) -> RedDBError {
     let code = violation.code();
     let detail = violation.message();
     let mut validation = crate::json::Map::new();
