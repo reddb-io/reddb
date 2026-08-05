@@ -8,6 +8,7 @@ use crate::runtime::impl_core::{current_auth_identity, current_tenant};
 use crate::storage::schema::Value;
 use crate::storage::EntityData;
 use crate::RedDBRuntime;
+use reddb_types::encoding::json_escape;
 
 pub const EVIDENCE_EXPORT_ACTION: &str = "evidence:export";
 pub const EVIDENCE_EXPORT_RESOURCE_KIND: &str = "evidence";
@@ -397,29 +398,15 @@ fn push_filter_canonical(filter: &EvidenceExportFilter, out: &mut String) {
 
 fn push_json_field(name: &str, value: Option<&str>, out: &mut String) {
     out.push('"');
-    json_escape_into(name, out);
+    out.push_str(&json_escape(name));
     out.push_str("\":");
     match value {
         Some(value) => {
             out.push('"');
-            json_escape_into(value, out);
+            out.push_str(&json_escape(value));
             out.push('"');
         }
         None => out.push_str("null"),
     }
     out.push(';');
-}
-
-fn json_escape_into(s: &str, out: &mut String) {
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
 }

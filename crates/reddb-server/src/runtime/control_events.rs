@@ -22,6 +22,7 @@ use crate::storage::schema::types::Value;
 use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use crate::storage::UnifiedStore;
 use crate::utils::now_unix_millis;
+use reddb_types::encoding::json_escape;
 
 /// Canonical name of the managed control-event collection.
 pub const CONTROL_EVENTS_COLLECTION: &str = "red.control_events";
@@ -399,12 +400,12 @@ fn serialise_fields(fields: &HashMap<String, Sensitivity>) -> String {
             out.push(',');
         }
         out.push('"');
-        json_escape_into(k, &mut out);
+        out.push_str(&json_escape(k));
         out.push_str("\":");
         match &fields[*k] {
             Sensitivity::Raw(s) => {
                 out.push_str(r#"{"kind":"raw","value":""#);
-                json_escape_into(s, &mut out);
+                out.push_str(&json_escape(s));
                 out.push_str(r#""}"#);
             }
             Sensitivity::Hashed { algo, hex } => {
@@ -421,22 +422,6 @@ fn serialise_fields(fields: &HashMap<String, Sensitivity>) -> String {
     }
     out.push('}');
     out
-}
-
-fn json_escape_into(s: &str, out: &mut String) {
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
 }
 
 #[cfg(test)]

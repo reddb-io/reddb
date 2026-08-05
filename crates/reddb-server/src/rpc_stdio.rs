@@ -27,6 +27,7 @@ use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value as SchemaValue;
 use reddb_client_connector::RedDBClient;
+use reddb_types::encoding::base64_encode;
 
 /// Which backend the stdio loop is wrapping.
 ///
@@ -1673,38 +1674,6 @@ fn format_uuid(bytes: &[u8; 16]) -> String {
         bytes[14],
         bytes[15]
     )
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    let mut chunks = bytes.chunks_exact(3);
-    for chunk in chunks.by_ref() {
-        let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
-        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
-        out.push(TABLE[(n & 0x3f) as usize] as char);
-    }
-    match chunks.remainder() {
-        [] => {}
-        [a] => {
-            let n = (*a as u32) << 16;
-            out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-            out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-            out.push('=');
-            out.push('=');
-        }
-        [a, b] => {
-            let n = ((*a as u32) << 16) | ((*b as u32) << 8);
-            out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-            out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
-            out.push('=');
-        }
-        _ => unreachable!(),
-    }
-    out
 }
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
