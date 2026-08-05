@@ -15,5 +15,8 @@ mod cli_query_param;
 #[path = "grouped/cli_transport/e2e_issue_545_transport_listener_readiness.rs"]
 mod e2e_issue_545_transport_listener_readiness;
 
+#[path = "grouped/cli_transport/e2e_issue_2133_server_bootstrap.rs"]
+mod e2e_issue_2133_server_bootstrap;
+
 #[path = "grouped/cli_transport/http_batch_insert.rs"]
 mod http_batch_insert;
