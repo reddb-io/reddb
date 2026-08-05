@@ -51,6 +51,22 @@ mod tests {
     }
 
     #[test]
+    fn every_discovered_http_route_is_an_enumerable_command() {
+        let catalog = build_discovered_route_catalog().unwrap();
+        let route_ids: Vec<&str> = catalog.routes().map(|route| route.id).collect();
+        let commands: Vec<_> = catalog.commands().collect();
+        let command_ids: Vec<&str> = commands.iter().map(|command| command.id).collect();
+
+        assert_eq!(command_ids, route_ids);
+        assert!(commands
+            .iter()
+            .all(|command| command.input_shape.is_declared()));
+        assert!(commands
+            .iter()
+            .all(|command| command.output_shape.is_declared()));
+    }
+
+    #[test]
     fn discovered_routes_are_matchable() {
         let catalog = build_discovered_route_catalog().unwrap();
         let matched = catalog.find(RouteMethod::Get, "/health/live").unwrap();

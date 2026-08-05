@@ -1,11 +1,13 @@
 use crate::server::route_catalog::{
-    ListenerSurface, RouteAudience, RouteAuth, RouteMiddleware, RouteMethod, RouteRegistry,
-    RouteSpec, RouteStability,
+    CommandShape, ListenerSurface, RouteAudience, RouteAuth, RouteMiddleware, RouteMethod,
+    RouteRegistry, RouteSpec, RouteStability,
 };
 
 pub(crate) fn register(registry: &mut RouteRegistry) {
     registry.route(RouteSpec {
         id: "health.startup",
+        input_shape: CommandShape::Empty,
+        output_shape: CommandShape::Structured,
         method: RouteMethod::Get,
         pattern: "/health/startup",
         family: "health",
