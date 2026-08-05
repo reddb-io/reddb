@@ -1467,7 +1467,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         };
 
         // A5 — parallel scan: when there's no explicit LIMIT and the collection
-        // is large enough, use query_all_zoned which parallelises filter eval
+        // is large enough, use scan_zoned_with_stats which parallelises filter eval
         // across sealed segments using std::thread::scope. Sequential path kept
         // for LIMIT queries so the early-exit optimisation still works.
         let entity_count = manager.count();
