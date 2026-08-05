@@ -749,29 +749,38 @@ fn legacy_engine_and_client_connector_point_to_canonical_replacements() {
 
     assert!(
         engine.contains("#[deprecated(")
+            && engine.contains("SILENT NO-OP")
             && engine.contains("RedDBRuntime")
             && engine.contains("RedDBServer"),
-        "RedDBEngine should warn users and name both real execution entry points"
+        "RedDBEngine should say execute_query is a silent no-op and name both real entry points"
     );
 
     assert!(
-        connector.contains("#![deprecated(")
-            && connector.contains("reddb_grpc_proto")
-            && connector.contains("RedDBClient"),
-        "the published connector should be a deprecated re-export of reddb-grpc-proto"
+        connector.contains("reddb_grpc_proto") && connector.contains("RedDBClient"),
+        "the deprecated connector should delegate to reddb-grpc-proto"
     );
-    for mirrored in [
-        "pub struct HealthStatus",
-        "pub struct QueryResponse",
-        "pub struct CreatedEntity",
-        "pub struct BulkCreateStatus",
-        "pub struct OperationStatus",
+    // Shape-identical mirrors collapse to deprecated aliases; only the
+    // reshaped bulk reply keeps a real struct so `ids` still resolves.
+    for aliased in [
+        "HealthStatus",
+        "QueryResponse",
+        "CreatedEntity",
+        "OperationStatus",
     ] {
         assert!(
-            !connector.contains(mirrored) && !grpc_client.contains(mirrored),
-            "generated gRPC replies should replace mirror type {mirrored}"
+            connector.contains(&format!("pub type {aliased} = reddb_grpc_proto::")),
+            "connector {aliased} should be a deprecated alias of the generated reply"
+        );
+        assert!(
+            !connector.contains(&format!("pub struct {aliased}"))
+                && !grpc_client.contains(&format!("pub struct {aliased}")),
+            "generated gRPC replies should replace mirror type {aliased}"
         );
     }
+    assert!(
+        !grpc_client.contains("pub struct BulkCreateStatus"),
+        "the canonical client should not carry the connector's bulk mirror type"
+    );
 
     assert!(
         grpc_lib.contains("pub use client::RedDBClient"),
@@ -800,6 +809,88 @@ fn legacy_engine_and_client_connector_point_to_canonical_replacements() {
             && server_stdio.contains("use reddb_grpc_proto::RedDBClient;"),
         "workspace consumers should import the canonical client home"
     );
+}
+
+/// The deprecation is only real if dependents see it. Crate-level
+/// `#![deprecated]` and plain `pub use` provably emit no warning for
+/// downstream crates, so every public item must carry its own attribute.
+#[test]
+fn client_connector_public_items_carry_item_level_deprecation() {
+    const ITEM_PREFIXES: [&str; 8] = [
+        "pub type ",
+        "pub struct ",
+        "pub enum ",
+        "pub trait ",
+        "pub const ",
+        "pub fn ",
+        "pub async fn ",
+        "pub use ",
+    ];
+
+    let root = repo_root();
+    let connector = read(root.join("crates/reddb-client-connector/src/lib.rs"));
+    let lines: Vec<&str> = connector.lines().collect();
+
+    let mut last_item: isize = -1;
+    let mut last_deprecated: isize = -1;
+    let mut items = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[deprecated(") {
+            last_deprecated = index as isize;
+            continue;
+        }
+        if !ITEM_PREFIXES.iter().any(|kind| trimmed.starts_with(kind)) {
+            continue;
+        }
+        assert!(
+            !trimmed.starts_with("pub use "),
+            "connector line {} re-exports with `pub use`, which carries no deprecation \
+             to dependents: {trimmed}",
+            index + 1
+        );
+        assert!(
+            last_deprecated > last_item,
+            "connector line {} is public without its own #[deprecated]: {trimmed}",
+            index + 1
+        );
+        last_item = index as isize;
+        items += 1;
+    }
+    assert!(
+        items >= 20,
+        "expected the connector's full pre-fold surface to be restored, found {items} public items"
+    );
+}
+
+/// ADR 0011: a deprecation slice only adds attributes. The old connector
+/// surface must still compile for existing consumers — same names, same
+/// signatures, same display strings.
+#[test]
+fn client_connector_keeps_its_pre_deprecation_surface() {
+    let root = repo_root();
+    let connector = read(root.join("crates/reddb-client-connector/src/lib.rs"));
+
+    for required in [
+        // Deleted by the fold; restored as delegating wrappers.
+        "pub async fn health(&mut self) -> Result<String",
+        "pub async fn create_row(",
+        // Display-string returns that must not become reply structs.
+        "pub async fn scan(&mut self, collection: &str, limit: u64) -> Result<String",
+        "pub async fn stats(&mut self) -> Result<String",
+        "\"state: {}, healthy: {}\"",
+        "\"total: {}, items: [{}]\"",
+        "\"collections: {}, entities: {}, memory: {} bytes, started_at: {}\"",
+        "\"id: {}, entity: {}\"",
+        // Reshaped reply that must keep its old field.
+        "pub ids: Vec<u64>",
+        "impl From<BulkEntityReply> for BulkCreateStatus",
+    ] {
+        assert!(
+            connector.contains(required),
+            "the deprecated connector must keep working: missing {required:?}"
+        );
+    }
 }
 
 #[test]

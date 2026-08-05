@@ -38,7 +38,7 @@ pub struct EngineInfo {
 
 #[deprecated(
     since = "1.23.2",
-    note = "use RedDBRuntime for embedded query execution or RedDBServer for serving requests; RedDBEngine will be removed in the next major release"
+    note = "RedDBEngine::execute_query is a SILENT NO-OP — it returns Ok(()) without executing any query. Use RedDBRuntime (in-process) or RedDBServer (serving) instead. Removed at the next major."
 )]
 pub struct RedDBEngine {
     options: RedDBOptions,

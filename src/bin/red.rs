@@ -462,7 +462,7 @@ fn validate_mcp_remote_connect(options: &mut McpClientOptions) -> Result<(), Str
                 .build()
                 .map_err(|err| format!("build runtime: {err}"))?;
             rt.block_on(async {
-                tokio::time::timeout(options.timeout, client.health())
+                tokio::time::timeout(options.timeout, client.health_status())
                     .await
                     .map_err(|_| "connection timeout".to_string())?
                     .map_err(|err| format!("connect {}: {err}", options.redacted_uri))
