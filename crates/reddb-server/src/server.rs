@@ -54,9 +54,7 @@ mod tests {
     use super::*;
     use crate::api::RedDBOptions;
     use crate::health::HealthReport;
-    use crate::transport::{
-        TransportListenerFailure, TransportListenerState, TransportReadiness,
-    };
+    use crate::transport::{TransportListenerFailure, TransportListenerState, TransportReadiness};
 
     #[test]
     fn server_options_default_http_body_limit_is_32_mib() {
