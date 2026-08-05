@@ -2844,6 +2844,7 @@ dependencies = [
  "fs2",
  "hex",
  "lz4_flex",
+ "reddb-io-types",
  "serde",
  "serde_json",
  "sha2 0.11.0",
