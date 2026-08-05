@@ -1477,18 +1477,102 @@ impl SegmentManager {
         (results, scan_stats)
     }
 
+    /// Visibility predicate for the `scan_*` family. `Some` delegates to the
+    /// canonical `entity_visible_with_context`; `None` is a frameless read
+    /// (autocommit or the prepared-statement fast path, which installs no
+    /// statement snapshot) and keeps the documented resolver fallback —
+    /// moderation gate plus hiding superseded physical versions — instead of
+    /// showing every version.
+    fn scan_entity_visible(snapshot: Option<&SnapshotContext>, entity: &UnifiedEntity) -> bool {
+        match snapshot {
+            Some(ctx) => entity_visible_with_context(Some(ctx), entity),
+            None => {
+                !crate::runtime::ai::moderation::entity_moderation_hidden(entity)
+                    && entity.xmax == 0
+            }
+        }
+    }
+
     /// Scan every segment under an explicit MVCC snapshot.
     ///
     /// Visibility is evaluated while each segment iterator is active, before
     /// the caller's filter. Unlike the raw iteration methods, this entry point
     /// does not consult thread-local snapshot state, so it preserves the same
     /// view when invoked from a different thread.
-    pub fn scan<F>(&self, snapshot: &SnapshotContext, filter: F) -> Vec<UnifiedEntity>
+    pub fn scan<F>(&self, snapshot: Option<&SnapshotContext>, filter: F) -> Vec<UnifiedEntity>
     where
         F: Fn(&UnifiedEntity) -> bool + Sync,
     {
-        self.query_all(|entity| {
-            entity_visible_with_context(Some(snapshot), entity) && filter(entity)
+        self.query_all(|entity| Self::scan_entity_visible(snapshot, entity) && filter(entity))
+    }
+
+    /// Visit every entity visible under an explicit MVCC snapshot.
+    ///
+    /// Returning `false` from `callback` stops the scan early. Hidden entities
+    /// never reach the callback and therefore cannot stop the scan.
+    pub fn scan_for_each<F>(&self, snapshot: Option<&SnapshotContext>, mut callback: F)
+    where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        self.for_each_entity(|entity| {
+            !Self::scan_entity_visible(snapshot, entity) || callback(entity)
+        });
+    }
+
+    /// Fold entities visible under an explicit MVCC snapshot in parallel.
+    pub fn scan_fold_parallel<T, FInit, FFold, FReduce>(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        init: FInit,
+        fold: FFold,
+        reduce: FReduce,
+    ) -> T
+    where
+        T: Send,
+        FInit: Fn() -> T + Send + Sync,
+        FFold: Fn(T, &UnifiedEntity) -> T + Send + Sync,
+        FReduce: Fn(T, T) -> T + Send + Sync,
+    {
+        self.fold_entities_parallel(
+            init,
+            |acc, entity| {
+                if Self::scan_entity_visible(snapshot, entity) {
+                    fold(acc, entity)
+                } else {
+                    acc
+                }
+            },
+            reduce,
+        )
+    }
+
+    /// Visit zone-map candidates visible under an explicit MVCC snapshot.
+    pub fn scan_for_each_zoned_with_stats<F>(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        mut callback: F,
+    ) -> SegmentScanStats
+    where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        self.for_each_entity_zoned_with_stats(zone_preds, |entity| {
+            !Self::scan_entity_visible(snapshot, entity) || callback(entity)
+        })
+    }
+
+    /// Collect zone-map candidates visible under an explicit MVCC snapshot.
+    pub fn scan_zoned_with_stats<F>(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        filter: F,
+    ) -> (Vec<UnifiedEntity>, SegmentScanStats)
+    where
+        F: Fn(&UnifiedEntity) -> bool + Sync,
+    {
+        self.query_all_zoned_with_stats(zone_preds, |entity| {
+            Self::scan_entity_visible(snapshot, entity) && filter(entity)
         })
     }
 
@@ -2187,7 +2271,7 @@ mod tests {
             })
             .collect();
 
-        let scanned = std::thread::spawn(move || manager.scan(&snapshot, |_| true))
+        let scanned = std::thread::spawn(move || manager.scan(Some(&snapshot), |_| true))
             .join()
             .unwrap();
         let visible_row_ids: HashSet<u64> = scanned
@@ -2207,6 +2291,58 @@ mod tests {
                 "{name} visibility mismatch"
             );
         }
+    }
+
+    #[test]
+    fn frameless_scan_hides_superseded_versions_and_moderated_rows() {
+        // A `None` snapshot is the autocommit / prepared-fast-path read: it
+        // must keep the resolver fallback (xmax == 0), never show every
+        // version, and never panic (issue #2136 review).
+        let manager = SegmentManager::new("accounts");
+        let mut live =
+            UnifiedEntity::table_row(EntityId::new(1), "accounts", 1, vec![Value::Integer(1)]);
+        live.set_xmin(2);
+        live.set_xmax(0);
+        manager.insert(live).unwrap();
+
+        let mut superseded =
+            UnifiedEntity::table_row(EntityId::new(2), "accounts", 2, vec![Value::Integer(2)]);
+        superseded.set_xmin(2);
+        superseded.set_xmax(9);
+        manager.insert(superseded).unwrap();
+
+        let rows: Vec<u64> = manager
+            .scan(None, |_| true)
+            .into_iter()
+            .filter_map(|entity| match entity.kind {
+                EntityKind::TableRow { row_id, .. } => Some(row_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![1],
+            "frameless scan must hide superseded versions"
+        );
+    }
+
+    #[test]
+    fn query_scan_callers_use_snapshot_api_for_visibility() {
+        let table = include_str!("../../runtime/query_exec/table.rs");
+        let aggregate = include_str!("../../runtime/query_exec/aggregate.rs");
+
+        assert_eq!(
+            table.matches(".for_each_entity(|entity|").count(),
+            1,
+            "only the visibility-independent schema inspection may use the raw table iterator"
+        );
+        assert!(!table.contains(".query_all_zoned_with_stats("));
+        assert!(!table.contains(".for_each_entity_zoned_with_stats("));
+        assert!(!table.contains("TableRowMvccReadResolver::captured"));
+
+        assert!(!aggregate.contains("TableRowMvccReadResolver"));
+        assert!(!aggregate.contains(".for_each_entity("));
+        assert!(!aggregate.contains(".fold_entities_parallel("));
     }
 
     #[test]

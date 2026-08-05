@@ -190,14 +190,11 @@ fn execute_geo_candidate_scan(
         &crate::runtime::scalar_evaluator::PermissiveScope,
     );
 
-    let table_row_resolver = TableRowMvccReadResolver::current_statement();
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let hydrate_store = db.store();
     let mut records = Vec::new();
-    manager.for_each_entity(|entity| {
+    manager.scan_for_each(snapshot.as_ref(), |entity| {
         if !candidate_ids.contains(&entity.id.raw()) {
-            return true;
-        }
-        if table_row_resolver.resolve_read_candidate(entity).is_none() {
             return true;
         }
         if !db.replica_allows_entity_at_read(&query.table, entity) {
@@ -1469,7 +1466,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         };
 
         // A5 — parallel scan: when there's no explicit LIMIT and the collection
-        // is large enough, use query_all_zoned which parallelises filter eval
+        // is large enough, use scan_zoned_with_stats which parallelises filter eval
         // across sealed segments using std::thread::scope. Sequential path kept
         // for LIMIT queries so the early-exit optimisation still works.
         let entity_count = manager.count();
@@ -1483,15 +1480,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
         let mut records: Vec<UnifiedRecord> = Vec::new();
         let hydrate_store = store;
+        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         if use_parallel {
-            // Parallel scan spawns worker threads that don't inherit the
-            // main thread's CURRENT_SNAPSHOT thread-local. Capture the
-            // context here so each closure invocation (on any thread) runs
-            // the same MVCC visibility gate.
-            let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-            let table_row_resolver = TableRowMvccReadResolver::captured(snap_ctx);
             let (matching, scan_stats) =
-                manager.query_all_zoned_with_stats(&zone_preds, |entity| {
+                manager.scan_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
                     if let Some(candidates) = tag_series_candidates.as_ref() {
                         let EntityData::TimeSeries(point) = &entity.data else {
                             return false;
@@ -1505,8 +1497,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         hydrate_store.as_ref(),
                         entity,
                     );
-                    table_row_resolver.resolve_read_candidate(entity).is_some()
-                        && db.replica_allows_entity_at_read(&query.table, entity)
+                    db.replica_allows_entity_at_read(&query.table, entity)
                         && compiled.as_ref().is_none_or(|filter| {
                             requires_filter_recheck || filter.evaluate(&hydrated)
                         })
@@ -1577,13 +1568,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 }
             }
         } else {
-            let table_row_resolver = TableRowMvccReadResolver::current_statement();
-            let scan_stats = manager.for_each_entity_zoned_with_stats(&zone_preds, |entity| {
+            let scan_stats =
+                manager.scan_for_each_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
                 if records.len() >= limit {
                     return false; // stop iteration
-                }
-                if table_row_resolver.resolve_read_candidate(entity).is_none() {
-                    return true; // skip hidden tuple, keep scanning
                 }
                 if !db.replica_allows_entity_at_read(&query.table, entity) {
                     return true;
@@ -1951,13 +1939,10 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 };
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
-                let table_row_resolver = TableRowMvccReadResolver::current_statement();
-                manager.for_each_entity(|entity| {
+                let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+                manager.scan_for_each(snapshot.as_ref(), |entity| {
                     if records.len() >= limit {
                         return false;
-                    }
-                    if table_row_resolver.resolve_read_candidate(entity).is_none() {
-                        return true;
                     }
                     if !db.replica_allows_entity_at_read(&context.query.table, entity) {
                         return true;
