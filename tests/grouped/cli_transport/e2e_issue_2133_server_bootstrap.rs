@@ -57,40 +57,90 @@ fn kinds(config: &ServerCommandConfig) -> Vec<TransportKind> {
         .collect()
 }
 
+fn assert_shape(config: &ServerCommandConfig, expected: &[TransportKind]) {
+    let set = transport_set(config);
+    assert_eq!(kinds(config), expected);
+
+    let mut readiness = TransportReadiness::default();
+    let listeners: Vec<TcpListener> = set
+        .descriptors()
+        .iter()
+        .map(|descriptor| {
+            bind_listener_for_startup(
+                &mut readiness,
+                descriptor.kind.as_str(),
+                &descriptor.bind_addr,
+                descriptor.explicit,
+            )
+            .expect("descriptor bind")
+            .expect("free loopback address")
+        })
+        .collect();
+
+    assert_eq!(listeners.len(), expected.len());
+    assert_eq!(
+        readiness
+            .active
+            .iter()
+            .map(|listener| listener.transport.as_str())
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(readiness.failed.is_empty());
+}
+
 #[test]
-fn transport_set_shapes_are_declared_once() {
+fn router_transport_set_signals_readiness() {
     let mut router = config();
     router.router_bind_addr = Some("127.0.0.1:0".to_string());
     router.http_bind_addr = Some("127.0.0.1:0".to_string());
-    assert_eq!(kinds(&router), vec![TransportKind::Router]);
+    assert_shape(&router, &[TransportKind::Router]);
+}
 
+#[test]
+fn http_transport_set_signals_readiness() {
     let mut http = config();
     http.http_bind_addr = Some("127.0.0.1:0".to_string());
-    assert_eq!(kinds(&http), vec![TransportKind::Http]);
+    assert_shape(&http, &[TransportKind::Http]);
+}
 
+#[test]
+fn grpc_transport_set_signals_readiness() {
     let mut grpc = config();
     grpc.grpc_bind_addr = Some("127.0.0.1:0".to_string());
-    assert_eq!(kinds(&grpc), vec![TransportKind::Grpc]);
+    assert_shape(&grpc, &[TransportKind::Grpc]);
+}
 
+#[test]
+fn dual_transport_set_signals_readiness() {
     let mut dual = config();
     dual.http_bind_addr = Some("127.0.0.1:0".to_string());
     dual.grpc_bind_addr = Some("127.0.0.1:0".to_string());
-    assert_eq!(
-        kinds(&dual),
-        vec![TransportKind::Http, TransportKind::Grpc]
-    );
+    assert_shape(&dual, &[TransportKind::Http, TransportKind::Grpc]);
+}
 
+#[test]
+fn wire_transport_set_signals_readiness() {
     let mut wire = config();
     wire.wire_bind_addr = Some("127.0.0.1:0".to_string());
-    assert_eq!(kinds(&wire), vec![TransportKind::Wire]);
+    assert_shape(&wire, &[TransportKind::Wire]);
+}
 
+#[test]
+fn wire_tls_transport_set_signals_readiness() {
     let mut wire_tls = config();
     wire_tls.wire_tls_bind_addr = Some("127.0.0.1:0".to_string());
-    assert_eq!(kinds(&wire_tls), vec![TransportKind::WireTls]);
+    assert_shape(&wire_tls, &[TransportKind::WireTls]);
+}
 
+#[test]
+fn postgres_transport_set_signals_readiness() {
     let mut pg = config();
     pg.pg_bind_addr = Some("127.0.0.1:0".to_string());
-    assert_eq!(kinds(&pg), vec![TransportKind::Postgres]);
+    assert_shape(&pg, &[TransportKind::Postgres]);
 }
 
 #[test]
@@ -133,7 +183,7 @@ fn http_shape_includes_wire_and_postgres_in_readiness() {
             .iter()
             .map(|listener| listener.transport.as_str())
             .collect::<Vec<_>>(),
-        vec!["http", "wire", "postgres"]
+        vec!["http", "wire", "pg-wire"]
     );
     assert!(readiness.failed.is_empty());
 }
