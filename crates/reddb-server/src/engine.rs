@@ -2,6 +2,8 @@
 //!
 //! This module keeps the physical storage concerns separated from unified domain APIs.
 
+#![allow(deprecated)]
+
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
