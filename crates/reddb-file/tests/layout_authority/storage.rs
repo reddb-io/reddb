@@ -1593,10 +1593,7 @@ fn native_artifact_payload_codecs_live_only_in_reddb_file() {
         (
             "table_def.rs",
             "TABLE_DEF_MAGIC: [u8; 4] = *b\"RTBL\"",
-            &[
-                "pub fn encode_table_def_frame",
-                "pub fn decode_table_def_frame",
-            ][..],
+            &["pub fn encode_table_def", "pub fn decode_table_def"][..],
         ),
     ] {
         let text = read(file_src.join(module));
@@ -1634,7 +1631,7 @@ fn native_artifact_payload_codecs_live_only_in_reddb_file() {
     let server = root.join("crates/reddb-server/src");
     let hnsw = read(server.join("storage/engine/hnsw.rs"));
     let ivf = read(server.join("storage/engine/ivf.rs"));
-    let table = read(server.join("storage/schema/table.rs"));
+    let physical = read(server.join("physical/json_codec.rs"));
     let access = read(server.join("storage/unified/devx/reddb/impl_access.rs"));
 
     for (label, text, calls) in [
@@ -1655,11 +1652,11 @@ fn native_artifact_payload_codecs_live_only_in_reddb_file() {
             ][..],
         ),
         (
-            "table.rs",
-            &table,
+            "physical/json_codec.rs",
+            &physical,
             &[
-                "reddb_file::encode_table_def_frame",
-                "reddb_file::decode_table_def_frame",
+                "reddb_file::encode_table_def",
+                "reddb_file::decode_table_def",
             ][..],
         ),
         (

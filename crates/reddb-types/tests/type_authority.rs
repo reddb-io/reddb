@@ -572,6 +572,22 @@ fn types_crate_owns_the_logical_type_system() {
         declares_fn(&spine_rs, "resolve_function"),
         "reddb-types/src/coercion_spine.rs must declare the `resolve_function` entry point"
     );
+
+    let table_rs = read(root.join("crates/reddb-types/src/table.rs"));
+    for name in [
+        "TableDef",
+        "ColumnDef",
+        "IndexDef",
+        "Constraint",
+        "IndexType",
+        "ConstraintType",
+        "TableDefError",
+    ] {
+        assert!(
+            declares_type(&table_rs, name),
+            "reddb-types/src/table.rs must declare `{name}`"
+        );
+    }
 }
 
 /// The fence: the server source tree must never redeclare a logical
@@ -636,7 +652,17 @@ fn server_must_not_redeclare_the_logical_type_system() {
         let raw = read(&path);
         let text = non_test_source(&raw);
         let rel = path.strip_prefix(&root).unwrap_or(path.as_path());
-        for name in ["Value", "Row"] {
+        for name in [
+            "Value",
+            "Row",
+            "TableDef",
+            "ColumnDef",
+            "IndexDef",
+            "Constraint",
+            "IndexType",
+            "ConstraintType",
+            "TableDefError",
+        ] {
             assert!(
                 !declares_type(text, name),
                 "{} declares `{name}`; the logical type lives in reddb_types — re-export it",
@@ -717,6 +743,7 @@ fn schema_shims_reexport_from_types_crate() {
         "coercion_spine.rs",
         "function_catalog.rs",
         "operator_catalog.rs",
+        "table.rs",
         "value_codec.rs",
     ] {
         let text = read(schema.join(shim));
