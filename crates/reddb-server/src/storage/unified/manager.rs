@@ -2210,6 +2210,25 @@ mod tests {
     }
 
     #[test]
+    fn query_scan_callers_use_snapshot_api_for_visibility() {
+        let table = include_str!("../../runtime/query_exec/table.rs");
+        let aggregate = include_str!("../../runtime/query_exec/aggregate.rs");
+
+        assert_eq!(
+            table.matches(".for_each_entity(|entity|").count(),
+            1,
+            "only the visibility-independent schema inspection may use the raw table iterator"
+        );
+        assert!(!table.contains(".query_all_zoned_with_stats("));
+        assert!(!table.contains(".for_each_entity_zoned_with_stats("));
+        assert!(!table.contains("TableRowMvccReadResolver::captured"));
+
+        assert!(!aggregate.contains("TableRowMvccReadResolver"));
+        assert!(!aggregate.contains(".for_each_entity("));
+        assert!(!aggregate.contains(".fold_entities_parallel("));
+    }
+
+    #[test]
     fn bloom_may_contain_key_probes_inserted_rid_bytes() {
         let manager = SegmentManager::new("test_collection");
 
