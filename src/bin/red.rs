@@ -21,8 +21,8 @@ use std::time::Duration;
 use reddb::cli;
 use reddb::cli::types::FlagValue;
 use reddb::service_cli::{
-    install_systemd_service, probe_listener, render_systemd_unit, run_server_with_large_stack,
-    BootstrapConfig, ServerCommandConfig, ServerTransport, SystemdServiceConfig,
+    install_systemd_service, probe_listener, render_systemd_unit, run_server, BootstrapConfig,
+    ServerCommandConfig, ServerTransport, SystemdServiceConfig,
 };
 use reddb_client::{format_query_result, QueryResult, RowFormat, ValueOut};
 
@@ -1645,7 +1645,7 @@ fn main() {
             if json_mode {
                 eprintln!("{}", server_command_json("server", &config));
             }
-            if let Err(err) = run_server_with_large_stack(config) {
+            if let Err(err) = run_server(config) {
                 if json_mode {
                     json_error("server", &err.to_string());
                 }
@@ -1735,7 +1735,7 @@ fn main() {
             if json_mode {
                 eprintln!("{}", server_command_json("replica", &config));
             }
-            if let Err(err) = run_server_with_large_stack(config) {
+            if let Err(err) = run_server(config) {
                 if json_mode {
                     json_error("replica", &err.to_string());
                 }
