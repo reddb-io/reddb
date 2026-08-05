@@ -102,6 +102,43 @@ pub struct OperationContext {
     pub tenant: Option<String>,
 }
 
+/// Transport-neutral inputs collected at any request boundary.
+#[derive(Debug, Clone, Default)]
+pub struct OperationContextInput {
+    pub request_id: Option<String>,
+    pub principal: Option<String>,
+    pub tenant: Option<String>,
+    pub write_consent: Option<WriteConsent>,
+    pub connection_id: Option<u64>,
+    pub xid: Option<Xid>,
+}
+
+/// Canonical request-context factory shared by HTTP, gRPC, MCP, stdio, and
+/// wire adapters.
+pub struct OperationContextFactory;
+
+impl OperationContextFactory {
+    pub fn build(input: OperationContextInput) -> OperationContext {
+        let request_id = input
+            .request_id
+            .filter(|request_id| !request_id.is_empty())
+            .unwrap_or_else(mint_request_id);
+        let audit_principal = input
+            .principal
+            .filter(|principal| !principal.is_empty())
+            .unwrap_or_else(|| "anonymous".to_string());
+
+        OperationContext {
+            xid: input.xid,
+            connection_id: input.connection_id,
+            audit_principal,
+            request_id,
+            write_consent: input.write_consent,
+            tenant: input.tenant,
+        }
+    }
+}
+
 impl OperationContext {
     /// Anonymous, no-write-consent context. The default for any
     /// caller that hasn't been migrated to construct an explicit
@@ -233,5 +270,24 @@ mod tests {
         assert_eq!(ctx.connection_id, Some(42));
         assert_eq!(ctx.xid, Some(7));
         assert_eq!(ctx.tenant.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn factory_builds_the_same_context_for_every_transport() {
+        let ctx = OperationContextFactory::build(OperationContextInput {
+            request_id: Some("request-transport".to_string()),
+            principal: Some("acme/alice".to_string()),
+            tenant: Some("acme".to_string()),
+            write_consent: None,
+            connection_id: Some(42),
+            xid: Some(7),
+        });
+
+        assert_eq!(ctx.request_id, "request-transport");
+        assert_eq!(ctx.audit_principal, "acme/alice");
+        assert_eq!(ctx.tenant.as_deref(), Some("acme"));
+        assert_eq!(ctx.connection_id, Some(42));
+        assert_eq!(ctx.xid, Some(7));
+        assert!(ctx.write_consent.is_none());
     }
 }
