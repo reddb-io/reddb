@@ -449,6 +449,12 @@ pub fn parse_with_limits(
             let host = parsed.host_str().ok_or_else(|| {
                 ParseError::new(ParseErrorKind::InvalidUri, "red:// URI is missing a host")
             })?;
+            if host.contains(',') {
+                return Err(ParseError::new(
+                    ParseErrorKind::InvalidUri,
+                    "RedWire does not support comma-separated cluster hosts",
+                ));
+            }
             let port = parsed.port().unwrap_or(DEFAULT_PORT_RED);
             Ok(ConnectionTarget::RedWire {
                 host: host.to_string(),
