@@ -74,7 +74,7 @@ pub mod user_params;
 pub(crate) mod value_compare;
 
 // Re-export common types
-pub use crate::storage::schema::{SqlTypeName, TypeModifier};
+pub use reddb_types::{SqlTypeName, TypeModifier};
 pub use analyzer::{
     analyze_create_table, resolve_declared_data_type, resolve_sql_type_name, AnalysisError,
     AnalyzedColumnDef, AnalyzedCreateTableQuery,
