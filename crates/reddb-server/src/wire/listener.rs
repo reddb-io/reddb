@@ -20,7 +20,7 @@ use crate::runtime::query_request::{
 };
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::sql_lowering::effective_table_filter;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::{EntityData, EntityId};
 use reddb_wire::legacy::{
     build_legacy_bulk_ok_frame, build_legacy_bulk_stream_ack_frame,
@@ -440,7 +440,7 @@ fn bulk_stream_flush_thresholds() -> (usize, usize) {
 /// memory-pressure safety valve, not a transactional boundary.
 #[inline]
 fn value_bytes_estimate(v: &crate::storage::schema::Value) -> usize {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     match v {
         Value::Null => 1,
         Value::Boolean(_) => 2,
@@ -1654,7 +1654,7 @@ mod tests {
 
     #[test]
     fn bounded_stream_value_bytes_estimate_is_monotonic() {
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         assert!(value_bytes_estimate(&Value::Null) < value_bytes_estimate(&Value::Boolean(true)));
         assert!(
             value_bytes_estimate(&Value::Boolean(true)) < value_bytes_estimate(&Value::Integer(1))
