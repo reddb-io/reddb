@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::page::{Page, PageType, CONTENT_SIZE, HEADER_SIZE, PAGE_SIZE};
 use super::pager::Pager;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Offset where leaf data starts (after header + prev/next leaf pointers)
 const LEAF_DATA_OFFSET: usize = HEADER_SIZE + 8; // 40 bytes
