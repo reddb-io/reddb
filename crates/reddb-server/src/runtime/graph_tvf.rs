@@ -18,9 +18,7 @@
 //! bumped to `pub(crate)` and re-exported from `impl_core` for the call sites
 //! that still live there.
 use super::authz::policy_columns::parse_positive_iterations;
-use super::execution_context::{
-    capture_current_snapshot, current_auth_identity, entity_visible_with_context,
-};
+use super::execution_context::{capture_current_snapshot, current_auth_identity};
 use super::rls_injection::{edge_passes_rls, node_passes_rls};
 use super::*;
 
@@ -770,11 +768,8 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            let entities = manager.query_all(|_| true);
+            let entities = manager.scan(snap_ctx.as_ref(), |_| true);
             for entity in entities {
-                if !entity_visible_with_context(snap_ctx.as_ref(), &entity) {
-                    continue;
-                }
                 let EntityKind::GraphNode(ref node) = entity.kind else {
                     continue;
                 };
@@ -803,11 +798,8 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            let entities = manager.query_all(|_| true);
+            let entities = manager.scan(snap_ctx.as_ref(), |_| true);
             for entity in entities {
-                if !entity_visible_with_context(snap_ctx.as_ref(), &entity) {
-                    continue;
-                }
                 let EntityKind::GraphEdge(ref edge) = entity.kind else {
                     continue;
                 };

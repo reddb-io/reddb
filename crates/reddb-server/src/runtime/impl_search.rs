@@ -355,9 +355,10 @@ impl RedDBRuntime {
         let manager = store
             .get_collection(collection)
             .ok_or_else(|| RedDBError::NotFound(collection.to_string()))?;
+        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
 
         let vectors: Vec<(u64, Vec<f32>)> = manager
-            .query_all(|_| true)
+            .scan(snapshot.as_ref(), |_| true)
             .into_iter()
             .filter_map(|entity| match &entity.data {
                 EntityData::Vector(data) if !data.dense.is_empty() => {
@@ -697,13 +698,14 @@ impl RedDBRuntime {
 
         // Fallback: global scan if ContextIndex returned nothing
         if scored.is_empty() {
+            let snapshot = crate::runtime::impl_core::capture_current_snapshot();
             let query_tokens = tokenize_query(&query);
             if let Some(collections) = collection_scope {
                 for collection in collections {
                     let Some(manager) = store.get_collection(&collection) else {
                         continue;
                     };
-                    for entity in manager.query_all(|_| true) {
+                    for entity in manager.scan(snapshot.as_ref(), |_| true) {
                         let entity_tokens = entity_tokens_for_search(&entity);
                         let overlap = query_tokens
                             .iter()
@@ -906,18 +908,25 @@ impl RedDBRuntime {
         snap_ctx: Option<&crate::runtime::impl_core::SnapshotContext>,
         rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
     ) -> bool {
-        use crate::runtime::impl_core::{
-            entity_visible_with_context, rls_policy_filter, rls_policy_filter_for_kind,
-        };
-        use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
-        use crate::storage::unified::entity::EntityKind;
+        use crate::runtime::impl_core::entity_visible_with_context;
 
-        // 1. MVCC visibility (Phase 1).
         if !entity_visible_with_context(snap_ctx, entity) {
             return false;
         }
+        self.search_entity_rls_allowed(collection, entity, rls_cache)
+    }
 
-        // 2. RLS gate — only evaluate when the table has it enabled.
+    pub(crate) fn search_entity_rls_allowed(
+        &self,
+        collection: &str,
+        entity: &UnifiedEntity,
+        rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
+    ) -> bool {
+        use crate::runtime::impl_core::{rls_policy_filter, rls_policy_filter_for_kind};
+        use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
+        use crate::storage::unified::entity::EntityKind;
+
+        // RLS gate — only evaluate when the table has it enabled.
         if !self.is_rls_enabled(collection) {
             return true;
         }
@@ -1083,16 +1092,12 @@ impl RedDBRuntime {
                     let Some(manager) = store.get_collection(collection_name) else {
                         continue;
                     };
-                    for entity in manager.query_all(|_| true) {
+                    for entity in manager.scan(snap_ctx.as_ref(), |_| true) {
                         if scored.contains_key(&entity.id.raw()) {
                             continue;
                         }
-                        if !self.search_entity_allowed(
-                            collection_name,
-                            &entity,
-                            snap_ctx.as_ref(),
-                            &mut rls_cache,
-                        ) {
+                        if !self.search_entity_rls_allowed(collection_name, &entity, &mut rls_cache)
+                        {
                             continue;
                         }
                         let entity_tokens = entity_tokens_for_search(&entity);

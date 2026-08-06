@@ -1093,15 +1093,8 @@ pub fn filter_values(
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
 
-        for entity in manager.query_all(|_| true) {
-            if !ask_entity_allowed(
-                runtime,
-                scope,
-                collection,
-                &entity,
-                snap_ctx.as_ref(),
-                &mut rls_cache,
-            ) {
+        for entity in manager.scan(snap_ctx.as_ref(), |_| true) {
+            if !ask_scanned_entity_allowed(runtime, scope, collection, &entity, &mut rls_cache) {
                 continue;
             }
             if let Some(hit) = literal_match_in_entity(&entity, &tokens.literals, hint_columns) {
@@ -1135,6 +1128,22 @@ fn ask_entity_allowed(
         return false;
     }
     runtime.search_entity_allowed(collection, entity, snap_ctx, rls_cache)
+}
+
+fn ask_scanned_entity_allowed(
+    runtime: &RedDBRuntime,
+    scope: &EffectiveScope,
+    collection: &str,
+    entity: &UnifiedEntity,
+    rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
+) -> bool {
+    if scope
+        .visible_collections()
+        .is_some_and(|visible| !visible.contains(collection))
+    {
+        return false;
+    }
+    runtime.search_entity_rls_allowed(collection, entity, rls_cache)
 }
 
 struct AskScopeGuard {

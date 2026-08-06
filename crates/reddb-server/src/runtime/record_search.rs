@@ -1,5 +1,4 @@
 use super::*;
-use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::sql_lowering::effective_table_projections;
 use crate::storage::query::unified::{
     sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_red_capabilities,
@@ -151,6 +150,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
         .store()
         .get_collection(table)
         .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
 
     // A5 — parallel scan: for large unfiltered tables, collect entities once
     // then convert to records in parallel using the thread-pool coordinator.
@@ -165,13 +165,10 @@ pub(super) fn scan_runtime_table_source_records_limited(
         let schema = manager.column_schema();
         let table_name = table.to_string();
         let hydrate_store = db.store();
-        let table_row_resolver = TableRowMvccReadResolver::current_statement();
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
-        manager.for_each_entity(|e| {
-            if table_row_resolver.resolve_read_candidate(e).is_some()
-                && db.replica_allows_entity_at_read(table, e)
-            {
+        manager.scan_for_each(snapshot.as_ref(), |e| {
+            if db.replica_allows_entity_at_read(table, e) {
                 entities.push(e.clone());
             }
             true
@@ -224,11 +221,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
         Some(n) => Vec::with_capacity(n),
         None => Vec::new(),
     };
-    let table_row_resolver = TableRowMvccReadResolver::current_statement();
-    manager.for_each_entity(|entity| {
-        if table_row_resolver.resolve_read_candidate(entity).is_none() {
-            return true;
-        }
+    manager.scan_for_each(snapshot.as_ref(), |entity| {
         if !db.replica_allows_entity_at_read(table, entity) {
             return true;
         }
@@ -257,12 +250,11 @@ pub(super) fn scan_runtime_universal_source_records_limited(
     limit: Option<usize>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     use crate::runtime::impl_core::capture_current_snapshot;
-    use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 
     // Cross-collection scans may run inside std::thread::scope — capture
     // the snapshot so worker threads see the same MVCC view instead of
     // defaulting to "no snapshot" (every row visible).
-    let table_row_resolver = TableRowMvccReadResolver::captured(capture_current_snapshot());
+    let snapshot = capture_current_snapshot();
     if let Some(collections) = candidate_collections {
         let store = db.store();
         let mut records = match limit {
@@ -273,12 +265,9 @@ pub(super) fn scan_runtime_universal_source_records_limited(
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            manager.for_each_entity(|entity| {
+            manager.scan_for_each(snapshot.as_ref(), |entity| {
                 if records.len() >= limit.unwrap_or(usize::MAX) {
                     return false;
-                }
-                if table_row_resolver.resolve_read_candidate(entity).is_none() {
-                    return true;
                 }
                 if !db.replica_allows_entity_at_read(collection, entity) {
                     return true;
@@ -299,7 +288,7 @@ pub(super) fn scan_runtime_universal_source_records_limited(
 
     let records: Vec<UnifiedRecord> = db
         .store()
-        .query_all(move |e| table_row_resolver.resolve_read_candidate(e).is_some())
+        .scan(snapshot.as_ref(), |_| true)
         .into_iter()
         .filter_map(|(collection, entity)| {
             if !db.replica_allows_entity_at_read(&collection, &entity) {
@@ -338,8 +327,6 @@ pub(crate) fn stream_runtime_table_source_scan(
     table: &str,
     high_water_mark: usize,
 ) -> RedDBResult<super::query_exec::RowStream> {
-    use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
-
     let manager = db
         .store()
         .get_collection(table)
@@ -347,12 +334,10 @@ pub(crate) fn stream_runtime_table_source_scan(
     let schema = manager.column_schema();
     let table_name = table.to_string();
 
-    let table_row_resolver = TableRowMvccReadResolver::current_statement();
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> = Vec::new();
-    manager.for_each_entity(|entity| {
-        if table_row_resolver.resolve_read_candidate(entity).is_some()
-            && db.replica_allows_entity_at_read(table, entity)
-        {
+    manager.scan_for_each(snapshot.as_ref(), |entity| {
+        if db.replica_allows_entity_at_read(table, entity) {
             entities.push(entity.clone());
         }
         true
