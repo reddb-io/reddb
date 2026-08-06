@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::storage::query::unified::ExecutionError;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 use super::super::super::entity::EntityId;
 use super::super::super::store::UnifiedStore;
