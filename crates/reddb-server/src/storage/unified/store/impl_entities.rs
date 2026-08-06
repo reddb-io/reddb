@@ -1722,7 +1722,7 @@ fn flatten_config_json(
     value: &crate::serde_json::Value,
     out: &mut Vec<(String, crate::storage::schema::Value)>,
 ) {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     match value {
         crate::serde_json::Value::Object(map) => {
             for (k, v) in map {
