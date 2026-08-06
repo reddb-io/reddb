@@ -28,6 +28,8 @@ use std::sync::Arc;
 
 use tokio::sync::{oneshot, Mutex};
 
+use crate::application::OperationContext;
+use crate::auth::Role;
 use crate::runtime::RedDBRuntime;
 use crate::serde_json::Value as JsonValue;
 use crate::server::output_stream::{
@@ -177,6 +179,8 @@ pub async fn run_output_stream(
     in_transaction: bool,
     mut cancel_rx: oneshot::Receiver<()>,
     send: FrameTx,
+    operation_context: OperationContext,
+    role: Role,
 ) {
     let clock = SystemClock;
     let config = StreamConfig::load(&runtime);
@@ -214,7 +218,9 @@ pub async fn run_output_stream(
     send.send_frame(ack);
 
     // Materialise.
-    let result = runtime.execute_query(&request.sql);
+    let result = super::session::execute_with_redwire_context(&operation_context, role, || {
+        runtime.execute_query(&request.sql)
+    });
 
     // Stream rows out as StreamChunk envelopes.
     let mut seq: u64 = 0;
