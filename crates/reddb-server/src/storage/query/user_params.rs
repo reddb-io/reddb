@@ -9,7 +9,7 @@
 use crate::storage::query::ast::{Expr, QueryExpr, SearchCommand, Span};
 use crate::storage::query::planner::shape::bind_user_param_query;
 use crate::storage::query::sql_lowering::{expr_to_filter, fold_expr_to_value};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// One parameter placeholder found in the parsed query AST.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
