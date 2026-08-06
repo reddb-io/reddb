@@ -128,7 +128,7 @@ impl ScramServerHandshake {
                     kind,
                     payload,
                 },
-            ) => self.receive_client_first(correlation_id, kind, &payload),
+            ) => self.step_receive_client_first(correlation_id, kind, &payload),
             (
                 ScramServerState::AwaitVerifier {
                     correlation_id,
@@ -137,7 +137,7 @@ impl ScramServerHandshake {
                     client_first_bare,
                 },
                 ScramServerInput::Verifier(verifier),
-            ) => self.receive_verifier(
+            ) => self.step_receive_verifier(
                 correlation_id,
                 username,
                 client_nonce,
@@ -151,7 +151,7 @@ impl ScramServerHandshake {
                     kind,
                     payload,
                 },
-            ) => Self::receive_client_final(correlation_id, kind, &payload, final_state),
+            ) => Self::step_receive_client_final(correlation_id, kind, &payload, final_state),
             (_, ScramServerInput::ClientMessage { correlation_id, .. }) => {
                 ScramServerOutput::Failed {
                     correlation_id,
@@ -165,7 +165,7 @@ impl ScramServerHandshake {
         }
     }
 
-    fn receive_client_first(
+    fn step_receive_client_first(
         &mut self,
         correlation_id: u64,
         kind: MessageKind,
@@ -190,7 +190,7 @@ impl ScramServerHandshake {
         ScramServerOutput::NeedVerifier { username }
     }
 
-    fn receive_verifier(
+    fn step_receive_verifier(
         &mut self,
         correlation_id: u64,
         username: String,
@@ -226,7 +226,7 @@ impl ScramServerHandshake {
         }
     }
 
-    fn receive_client_final(
+    fn step_receive_client_final(
         correlation_id: u64,
         kind: MessageKind,
         payload: &[u8],
