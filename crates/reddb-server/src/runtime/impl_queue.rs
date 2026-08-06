@@ -3268,7 +3268,7 @@ fn delivered_message_json(
     );
     obj.insert(
         "payload".to_string(),
-        crate::presentation::entity_json::storage_value_to_json(&message.payload),
+        message.payload.to_json(),
     );
     obj.insert("consumer".to_string(), JsonValue::String(message.consumer));
     obj.insert(
