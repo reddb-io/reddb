@@ -69,8 +69,8 @@ pub(super) fn execute_runtime_table_query(
 /// allocated fresh per chunk, reusing one buffer across the chunk-fetches
 /// of the statement. Passing `None` reproduces the original
 /// allocate-per-chunk behaviour exactly, so observable results are
-/// byte-identical either way. The frameless dispatch paths (prepared
-/// statements, view/CTE subqueries) call the `None` form above.
+/// byte-identical either way. Dispatch paths without a frame-owned arena
+/// (prepared statements and view/CTE subqueries) call the `None` form above.
 pub(super) fn execute_runtime_table_query_in(
     db: &RedDB,
     query: &TableQuery,
