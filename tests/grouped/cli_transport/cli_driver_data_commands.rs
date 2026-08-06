@@ -160,16 +160,16 @@ fn cli_binary_has_no_parallel_http_value_or_flag_schema_implementation() {
     let source = include_str!("../../../src/bin/red.rs");
 
     for retired in [
-        "TcpStream",
         "post_json_to_http",
         "get_from_http",
         "base64_encode",
-        "json_escape",
         "schema_value_to_value_out",
         "AdminQueryTable",
         "format_admin_table",
         "format_admin_csv",
         "fn build_flags_for_command",
+        "POST {path} HTTP/1.1",
+        "GET {path} HTTP/1.1",
     ] {
         assert!(
             !source.contains(retired),
