@@ -88,33 +88,58 @@ plugins:
         threshold: complex
 
       # ----------------------------------------------------------------
-      # Backpressure — shell gates that run AFTER the agent's automatic
-      # feedback loop (`pnpm test`/cargo check/etc. on touched packages)
-      # and BEFORE the merge. If any command exits non-zero, the merge
-      # is BLOCKED and the issue goes to `ready-for-human` with
-      # `blocked:validation`; command + output land in the envelope.
-      # This is shift-left: we catch cheap, local failures before
-      # burning a CI round.
+      # Validation — the sole local validation authority. The engine runs
+      # these ordered lists at three named moments and nowhere else; an
+      # undeclared moment is skipped loudly, and `[]` is an explicit
+      # empty declaration.
+      #
+      #   iteration — handed to the inner agent while it writes.
+      #   post_done — runs at the branch's fork point after DONE.
+      #   landing   — runs before push/PR/queue.
+      #
+      # This replaced the retired `backpressure:` key. While `backpressure`
+      # was the only declaration here, all three moments read as undeclared
+      # and NO local validation ran at all: workers pushed straight to CI,
+      # and PRs arrived red on `fmt`, `clippy`, and the test suite — each
+      # one costing a full CI round-trip plus a rework cycle.
+      #
+      # A gate stricter than CI blocks work CI would accept, which defeats
+      # the purpose. Widen only by widening CI first. Specifically, clippy
+      # must stay byte-identical in scope to `.github/workflows/ci.yml`
+      # (`cargo clippy --locked --all -- -D warnings`). It carried
+      # `--all-targets` until 2026-07-19, which CI does not: that pulled in
+      # ~79 pre-existing test-target lints and failed the gate on every
+      # branch, parking innocent workers at `blocked:validation`.
       # ----------------------------------------------------------------
-      backpressure:
-        # 1. Formatting (mirrors `.githooks/pre-push`).
-        - cargo fmt --all -- --check
+      validation:
+        # Cheap and fast — the agent runs these as it works, so a
+        # formatting or lint slip is corrected in the same context that
+        # introduced it rather than a CI round later.
+        iteration:
+          - cargo fmt --all -- --check
+          - cargo check --locked --workspace --all-targets
 
-        # 2. Boundary-discipline lint (ADR 0010). Catches untyped
-        #    serialization in tracing headers, JSON, audit, etc.
-        - scripts/lint-no-untyped-serialization.sh
+        # After DONE, at the fork point. This is the shift-left gate: it
+        # must catch everything CI's Quality job would, because a failure
+        # here is one correction loop and a failure there is a rework.
+        post_done:
+          - cargo fmt --all -- --check
+          # Boundary-discipline lint (ADR 0010). Catches untyped
+          # serialization in tracing headers, JSON, audit, etc.
+          - scripts/lint-no-untyped-serialization.sh
+          - cargo clippy --locked --all -- -D warnings
+          - cargo check --locked --workspace --all-targets
+          # `drivers/` is a SEPARATE cargo workspace — the line above never
+          # compiles it, and a stale lock or a renamed type there fails only
+          # in the Drivers CI job. Cheap to catch here (#2190).
+          - cargo metadata --locked --format-version 1 --manifest-path drivers/python/Cargo.toml
 
-        # 3. Clippy at warn-as-error (mirrors CI's Quality gate).
-        #    Pulled in here so a red local clippy fails the merge
-        #    before the CI round-trip.
-        #    Must stay byte-identical in scope to `.github/workflows/ci.yml`
-        #    (`cargo clippy --locked --all -- -D warnings`). It carried
-        #    `--all-targets` until 2026-07-19, which CI does not: that pulled in
-        #    ~79 pre-existing test-target lints and failed the gate on every
-        #    branch, parking innocent workers at `blocked:validation`. A gate
-        #    stricter than CI blocks work CI would accept, which defeats the
-        #    stated purpose above. Widen only by widening CI first.
-        - cargo clippy --locked --all -- -D warnings
+        # Immediately before push/PR/queue, against the rebased tree.
+        # Deliberately the fast subset: the merge queue is the CI-side
+        # final moment and owns freshness against the merged result.
+        landing:
+          - cargo fmt --all -- --check
+          - cargo clippy --locked --all -- -D warnings
 
       # ----------------------------------------------------------------
       # Hooks — intercept the AFK loop at named lifecycle points.
