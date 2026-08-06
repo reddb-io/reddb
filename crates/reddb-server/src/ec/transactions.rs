@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use crate::storage::unified::store::UnifiedStore;
 
