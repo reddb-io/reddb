@@ -3,7 +3,7 @@ name = "reddb-io-client-connector"
 version = "1.23.2"
 edition.workspace = true
 authors.workspace = true
-description = "Workspace-internal gRPC connector used by `reddb-server` (rpc_stdio) and `reddb-client`. Splitting it out of `reddb-client` breaks the otherwise-circular path dependency between `reddb-client[embedded]` (which pulls `reddb-server`) and `reddb-server` (which needs the connector)."
+description = "Deprecated compatibility shim for the authenticated client now provided by reddb-grpc-proto."
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
@@ -23,8 +23,6 @@ path = "src/lib.rs"
 
 [dependencies]
 reddb-grpc-proto = { workspace = true }
-reddb-wire = { workspace = true }
-tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
 
 [lints]
 workspace = true

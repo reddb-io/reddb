@@ -1360,11 +1360,7 @@ impl RedDBRuntime {
                                 .unwrap_or(key.as_str()),
                             None => key.as_str(),
                         };
-                        insert_config_json_path(
-                            &mut tree,
-                            relative,
-                            crate::presentation::entity_json::storage_value_to_json(&val),
-                        );
+                        insert_config_json_path(&mut tree, relative, val.to_json());
                     }
                     return Ok(show_config_json_result(query, mode, prefix, tree));
                 }

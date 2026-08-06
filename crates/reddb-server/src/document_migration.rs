@@ -31,7 +31,6 @@ use std::path::{Path, PathBuf};
 
 use crate::application::{CreateDocumentInput, EntityUseCases};
 use crate::catalog::CollectionModel;
-use crate::presentation::entity_json::storage_json_bytes_to_json;
 use crate::storage::schema::Value;
 use crate::storage::EntityData;
 use crate::{RedDBError, RedDBOptions, RedDBResult, RedDBRuntime};
@@ -181,10 +180,8 @@ fn read_source_collections(store_dir: &Path) -> RedDBResult<Vec<SourceCollection
 /// handling both legacy plain-JSON and (already-)binary bodies.
 fn decode_body(row: &crate::storage::RowData) -> RedDBResult<crate::json::Value> {
     match row.get_field("body") {
-        Some(Value::Json(bytes)) => Ok(storage_json_bytes_to_json(bytes)),
-        Some(other) => Ok(crate::presentation::entity_json::storage_value_to_json(
-            other,
-        )),
+        Some(Value::Json(bytes)) => Ok(reddb_types::value_json::json_bytes_to_json(bytes)),
+        Some(other) => Ok(other.to_json()),
         None => Err(RedDBError::InvalidOperation(
             "document row is missing its `body` field".to_string(),
         )),

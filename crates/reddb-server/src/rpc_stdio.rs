@@ -26,7 +26,7 @@ use crate::json::{self as json, Value};
 use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value as SchemaValue;
-use reddb_client_connector::RedDBClient;
+use reddb_grpc_proto::RedDBClient;
 use reddb_types::encoding::base64_encode;
 
 /// Which backend the stdio loop is wrapping.
@@ -1857,9 +1857,9 @@ fn dispatch_method_remote(
                         "ids".to_string(),
                         Value::Array(
                             status
-                                .ids
+                                .items
                                 .into_iter()
-                                .map(|id| Value::Number(id as f64))
+                                .map(|item| Value::Number(item.id as f64))
                                 .collect(),
                         ),
                     ),
