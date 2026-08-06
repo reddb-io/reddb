@@ -10,7 +10,7 @@ use super::compression::{
 };
 use crate::catalog::AnalyticalStorageConfig;
 use crate::storage::index::{BloomSegment, HasBloom, ZoneDecision, ZoneMap, ZonePredicate};
-use crate::storage::schema::types::DataType;
+use reddb_types::types::DataType;
 use crate::storage::unified::column_block::{
     read_column_block, write_column_block, ColumnBlockError, ColumnInput,
 };
