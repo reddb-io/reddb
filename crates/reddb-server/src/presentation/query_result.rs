@@ -104,14 +104,17 @@ pub(crate) fn summary(result: &RuntimeQueryResult) -> JsonValue {
     )
 }
 
-pub(crate) fn wire_frame(correlation_id: u64, outcome: Result<&RuntimeQueryResult, &str>) -> Frame {
+pub(crate) fn wire_frame(
+    correlation_id: u64,
+    outcome: Result<&RuntimeQueryResult, String>,
+) -> Frame {
     match outcome {
         Ok(result) => build_dispatch_reply_frame(
             correlation_id,
             MessageKind::Result,
             json(result, &None, &None).to_string_compact().into_bytes(),
         ),
-        Err(message) => build_error_frame_lossy(correlation_id, message),
+        Err(message) => build_error_frame_lossy(correlation_id, &message),
     }
 }
 
@@ -479,7 +482,7 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Internal);
         assert_eq!(status.message(), "boom");
 
-        let frame = wire_frame(23, Err("boom"));
+        let frame = wire_frame(23, Err("boom".to_string()));
         assert_eq!(frame.kind, MessageKind::Error);
         assert_eq!(frame.correlation_id, 23);
         assert_eq!(frame.payload, b"boom");
