@@ -340,24 +340,22 @@ pub(crate) fn execute_aggregate_query(
         }
 
         if let Some(c) = compiled_filter.as_ref() {
-            if !c.evaluate(entity) {
-                return true;
-            }
-            if c.has_fallback() {
+            let matches = c.evaluate(entity).resolve_with_fallback(|| {
                 let Some(record) = get_or_make_record!() else {
-                    return true;
+                    return false;
                 };
-                if let Some(filter) = effective_filter.as_ref() {
-                    if !evaluate_runtime_filter_with_db(
+                effective_filter.as_ref().is_some_and(|filter| {
+                    evaluate_runtime_filter_with_db(
                         Some(db),
                         record,
                         filter,
                         Some(table_name),
                         Some(table_alias),
-                    ) {
-                        return true;
-                    }
-                }
+                    )
+                })
+            });
+            if !matches {
+                return true;
             }
         }
 

@@ -376,7 +376,9 @@ impl<'a> DmlTargetScan<'a> {
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
     ) -> bool {
         match (self.filter, compiled_filter) {
-            (_, Some(compiled)) => compiled.evaluate(entity),
+            (_, Some(compiled)) => {
+                compiled.evaluate(entity) == query_exec::CompiledEntityFilterDecision::Match
+            }
             (Some(filter), None) => query_exec::evaluate_entity_filter_with_db(
                 Some(self.runtime.db().as_ref()),
                 entity,

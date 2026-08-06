@@ -22,7 +22,10 @@
 use super::aggregate_planner::{
     AggregateExpr, AggregateOp, AggregateQueryAst, AggregateQueryPlanner, ScanIterator, ScanRow,
 };
-use super::filter_compiled::{classify_field, resolve_kind, CompiledEntityFilter, EntityFieldKind};
+use super::filter_compiled::{
+    classify_field, resolve_kind, CompiledEntityFilter, CompiledEntityFilterDecision,
+    EntityFieldKind,
+};
 use crate::api::{RedDBError, RedDBResult};
 use crate::storage::query::ast::{Expr, FieldRef, Projection};
 use crate::storage::query::sql_lowering::{
@@ -134,12 +137,18 @@ pub(super) fn try_execute_pushdown_aggregate(
     let compiled_filter = effective_table_filter(query)
         .as_ref()
         .map(|f| CompiledEntityFilter::compile(f, table_name, table_alias));
+    if compiled_filter
+        .as_ref()
+        .is_some_and(CompiledEntityFilter::has_fallback)
+    {
+        return Ok(None);
+    }
 
     let mut rows: Vec<ScanRow> = Vec::new();
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     manager.scan_for_each(snapshot.as_ref(), |entity| {
         if let Some(f) = compiled_filter.as_ref() {
-            if !f.evaluate(entity) {
+            if f.evaluate(entity) != CompiledEntityFilterDecision::Match {
                 return true;
             }
         }
