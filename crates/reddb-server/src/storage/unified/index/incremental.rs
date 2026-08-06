@@ -49,7 +49,7 @@
 use std::sync::Arc;
 
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::types::Value;
+use reddb_types::types::Value;
 use crate::storage::unified::entity::EntityId;
 
 /// Index method classification, mirrored locally so this deep module
@@ -324,7 +324,7 @@ fn apply_one(backend: &dyn SecondaryIndexBackend, op: IndexDeltaOp) -> Result<()
 mod tests {
     use super::*;
     use crate::storage::query::unified::UnifiedRecord;
-    use crate::storage::schema::types::Value;
+    use reddb_types::types::Value;
     use crate::storage::unified::entity::EntityId;
     use parking_lot::Mutex;
     use std::collections::HashMap;
