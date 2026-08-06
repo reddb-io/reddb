@@ -142,24 +142,6 @@ fn ok_cases() -> Vec<OkCase> {
             },
         },
         OkCase {
-            name: "red cluster uses 5050 default",
-            input: "red://a,b",
-            expect: ConnectionTarget::GrpcCluster {
-                primary: "http://a:5050".into(),
-                replicas: vec!["http://b:5050".into()],
-                force_primary: false,
-            },
-        },
-        OkCase {
-            name: "reds cluster uses 5050 default",
-            input: "reds://a,b",
-            expect: ConnectionTarget::GrpcCluster {
-                primary: "http://a:5050".into(),
-                replicas: vec!["http://b:5050".into()],
-                force_primary: false,
-            },
-        },
-        OkCase {
             name: "cluster per-host port overrides default",
             input: "grpc://a:7000,b:7001,c",
             expect: ConnectionTarget::GrpcCluster {
@@ -271,6 +253,16 @@ fn err_cases() -> Vec<ErrCase> {
         ErrCase {
             name: "cluster with non-numeric port",
             input: "grpc://a:nope,b:55055",
+            kind: ParseErrorKind::InvalidUri,
+        },
+        ErrCase {
+            name: "red URI does not fold to a gRPC cluster",
+            input: "red://a,b",
+            kind: ParseErrorKind::InvalidUri,
+        },
+        ErrCase {
+            name: "reds URI does not fold to a gRPC cluster",
+            input: "reds://a,b",
             kind: ParseErrorKind::InvalidUri,
         },
     ]
