@@ -10,8 +10,9 @@
 //! [`value_codec`] serialization that `Value::to_bytes`/`from_bytes` delegate
 //! to.
 //!
-//! The `reddb-server` `storage::schema` module keeps a re-export shim so the
-//! ~180 existing call-sites across the workspace stay untouched.
+//! The `reddb-server` `storage::schema` module no longer re-exports this
+//! vocabulary; every server, test, and driver call site names this crate
+//! directly.
 
 // The byte-faithful re-home (ADR 0052) preserves `types`/`value_codec`
 // exactly as they were authored under the server's crate-level
@@ -57,7 +58,7 @@ pub mod types;
 pub mod utils;
 pub mod value_codec;
 pub mod value_compare;
-mod value_json;
+pub mod value_json;
 pub mod vector_metadata;
 
 pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};

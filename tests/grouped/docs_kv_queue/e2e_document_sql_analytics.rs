@@ -6,8 +6,8 @@ use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 use reddb::server::RedDBServer;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use serde_json::{json, Value as JsonValue};
 
 fn runtime() -> RedDBRuntime {

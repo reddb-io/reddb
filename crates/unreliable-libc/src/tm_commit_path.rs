@@ -6,7 +6,6 @@
 //! and finally checks TM-specific commit semantics against the recovered prefix.
 
 use crate::prng::SplitMix64;
-use crate::vfs::{OpenMode, StdVfs, Vfs, VfsFile};
 use crate::wal_workload::WAL_FILE_NAME;
 use reddb_file::wal_header::{
     decode_wal_file_header, encode_wal_file_header, WAL_FILE_HEADER_BYTES,
@@ -14,6 +13,7 @@ use reddb_file::wal_header::{
 use reddb_file::wal_record::{
     decode_main_wal_record_frame, encode_main_wal_record_frame, MainWalRecordFrame,
 };
+use reddb_file::{OpenMode, StdVfs, Vfs, VfsFile};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Cursor};
 use std::path::Path;

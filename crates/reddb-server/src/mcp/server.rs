@@ -24,8 +24,8 @@ use crate::runtime::{
     RuntimeGraphComponentsMode, RuntimeGraphDirection, RuntimeGraphPathAlgorithm,
     RuntimeGraphTraversalStrategy,
 };
-use crate::storage::schema::Value;
 use crate::storage::EntityId;
+use reddb_types::Value;
 
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
@@ -185,13 +185,13 @@ impl McpServer {
                 obj.insert("name".to_string(), JsonValue::String(def.name.to_string()));
                 obj.insert(
                     "description".to_string(),
-                    JsonValue::String(def.description.to_string()),
+                    JsonValue::String(def.descriptor_description()),
                 );
                 obj.insert("inputSchema".to_string(), def.input_schema);
                 JsonValue::Object(obj)
             })
             .collect();
-        tools_json.push(crate::runtime::ai::mcp_ask_tool::descriptor());
+        tools_json.push(tools::ask_descriptor());
 
         let mut result = Map::new();
         result.insert("tools".to_string(), JsonValue::Array(tools_json));
@@ -280,50 +280,51 @@ impl McpServer {
         let empty = JsonValue::Object(Map::new());
         let args = params.and_then(|p| p.get("arguments")).unwrap_or(&empty);
 
-        let result = match name {
-            "reddb_query" => self.tool_query(args),
-            "reddb_collections" => self.tool_collections(),
-            "reddb_insert_row" => self.tool_insert_row(args),
-            "reddb_insert_node" => self.tool_insert_node(args),
-            "reddb_insert_edge" => self.tool_insert_edge(args),
-            "reddb_insert_vector" => self.tool_insert_vector(args),
-            "reddb_insert_document" => self.tool_insert_document(args),
-            "reddb_kv_get" => self.tool_kv_get(args),
-            "reddb_kv_set" => self.tool_kv_set(args),
-            "reddb_kv_invalidate_tags" => self.tool_kv_invalidate_tags(args),
-            "reddb_config_get" => self.tool_config_get(args),
-            "reddb_config_put" => self.tool_config_put(args),
-            "reddb_config_resolve" => self.tool_config_resolve(args),
-            "reddb_vault_get" => self.tool_vault_get(args),
-            "reddb_vault_put" => self.tool_vault_put(args),
-            "reddb_vault_unseal" => self.tool_vault_unseal(args),
-            "reddb_delete" => self.tool_delete(args),
-            "reddb_search_vector" => self.tool_search_vector(args),
-            "reddb_search_text" => self.tool_search_text(args),
-            "reddb_health" => self.tool_health(),
-            "reddb_graph_traverse" => self.tool_graph_traverse(args),
-            "reddb_graph_shortest_path" => self.tool_graph_shortest_path(args),
-            "reddb_update" => self.tool_update(args),
-            "reddb_scan" => self.tool_scan(args),
-            "reddb_graph_centrality" => self.tool_graph_centrality(args),
-            "reddb_graph_community" => self.tool_graph_community(args),
-            "reddb_graph_components" => self.tool_graph_components(args),
-            "reddb_graph_cycles" => self.tool_graph_cycles(args),
-            "reddb_graph_clustering" => self.tool_graph_clustering(args),
-            "reddb_create_collection" => self.tool_create_collection(args),
-            "reddb_drop_collection" => self.tool_drop_collection(args),
-            "reddb_rql_validate" => self.tool_rql_validate(args),
-            "reddb_rql_explain" => self.tool_rql_explain(args),
-            "reddb_type_of" => self.tool_type_of(args),
-            "reddb_explain_connection" => self.tool_explain_connection(args),
-            "reddb_auth_bootstrap" => self.tool_auth_bootstrap(args),
-            "reddb_auth_create_user" => self.tool_auth_create_user(args),
-            "reddb_auth_login" => self.tool_auth_login(args),
-            "reddb_auth_create_api_key" => self.tool_auth_create_api_key(args),
-            "reddb_auth_list_users" => self.tool_auth_list_users(),
-            crate::runtime::ai::mcp_ask_tool::TOOL_NAME => self.tool_ask(args),
-            _ => Err(format!("unknown tool: {name}")),
-        };
+        let result = tools::authorize_tool(name, tools::McpIdentityPosture::EmbeddedImplicitAdmin)
+            .and_then(|_| match name {
+                "reddb_query" => self.tool_query(args),
+                "reddb_collections" => self.tool_collections(),
+                "reddb_insert_row" => self.tool_insert_row(args),
+                "reddb_insert_node" => self.tool_insert_node(args),
+                "reddb_insert_edge" => self.tool_insert_edge(args),
+                "reddb_insert_vector" => self.tool_insert_vector(args),
+                "reddb_insert_document" => self.tool_insert_document(args),
+                "reddb_kv_get" => self.tool_kv_get(args),
+                "reddb_kv_set" => self.tool_kv_set(args),
+                "reddb_kv_invalidate_tags" => self.tool_kv_invalidate_tags(args),
+                "reddb_config_get" => self.tool_config_get(args),
+                "reddb_config_put" => self.tool_config_put(args),
+                "reddb_config_resolve" => self.tool_config_resolve(args),
+                "reddb_vault_get" => self.tool_vault_get(args),
+                "reddb_vault_put" => self.tool_vault_put(args),
+                "reddb_vault_unseal" => self.tool_vault_unseal(args),
+                "reddb_delete" => self.tool_delete(args),
+                "reddb_search_vector" => self.tool_search_vector(args),
+                "reddb_search_text" => self.tool_search_text(args),
+                "reddb_health" => self.tool_health(),
+                "reddb_graph_traverse" => self.tool_graph_traverse(args),
+                "reddb_graph_shortest_path" => self.tool_graph_shortest_path(args),
+                "reddb_update" => self.tool_update(args),
+                "reddb_scan" => self.tool_scan(args),
+                "reddb_graph_centrality" => self.tool_graph_centrality(args),
+                "reddb_graph_community" => self.tool_graph_community(args),
+                "reddb_graph_components" => self.tool_graph_components(args),
+                "reddb_graph_cycles" => self.tool_graph_cycles(args),
+                "reddb_graph_clustering" => self.tool_graph_clustering(args),
+                "reddb_create_collection" => self.tool_create_collection(args),
+                "reddb_drop_collection" => self.tool_drop_collection(args),
+                "reddb_rql_validate" => self.tool_rql_validate(args),
+                "reddb_rql_explain" => self.tool_rql_explain(args),
+                "reddb_type_of" => self.tool_type_of(args),
+                "reddb_explain_connection" => self.tool_explain_connection(args),
+                "reddb_auth_bootstrap" => self.tool_auth_bootstrap(args),
+                "reddb_auth_create_user" => self.tool_auth_create_user(args),
+                "reddb_auth_login" => self.tool_auth_login(args),
+                "reddb_auth_create_api_key" => self.tool_auth_create_api_key(args),
+                "reddb_auth_list_users" => self.tool_auth_list_users(),
+                crate::runtime::ai::mcp_ask_tool::TOOL_NAME => self.tool_ask(args),
+                _ => Err(format!("unknown tool: {name}")),
+            });
 
         match result {
             Ok(text) => {
@@ -2060,6 +2061,40 @@ mod tests {
             assert!(
                 options.contains_key(key),
                 "missing option {key} in {options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_dispatch_reaches_every_advertised_tool() {
+        let server = make_server();
+        let mut tool_names: Vec<&str> = tools::all_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        tool_names.push(crate::runtime::ai::mcp_ask_tool::TOOL_NAME);
+
+        for tool_name in tool_names {
+            let mut params = Map::new();
+            params.insert("name".to_string(), JsonValue::String(tool_name.to_string()));
+            params.insert("arguments".to_string(), JsonValue::Object(Map::new()));
+            let response = server.handle_tools_call(
+                Some(&JsonValue::Number(1.0)),
+                Some(&JsonValue::Object(params)),
+            );
+            let parsed = parse_json(&response);
+            let result = parsed.get("result").expect("tool result");
+            let text = result
+                .get("content")
+                .and_then(JsonValue::as_array)
+                .and_then(|content| content.first())
+                .and_then(|item| item.get("text"))
+                .and_then(JsonValue::as_str)
+                .expect("tool result text");
+
+            assert!(
+                !text.contains("unknown tool") && !text.contains("denied by policy"),
+                "embedded tool {tool_name} did not reach its dispatch arm: {text}"
             );
         }
     }

@@ -1,5 +1,4 @@
 async fn analytics_jobs(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let jobs = self.catalog_use_cases().analytics_jobs().map_err(to_status)?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::admin_json::analytics_jobs_json(&jobs),
@@ -17,7 +16,6 @@ async fn operational_analytics_jobs(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::admin_json::analytics_jobs_json(
             &self.catalog_use_cases().operational_analytics_jobs(),
@@ -29,7 +27,6 @@ async fn analytics_job_statuses(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
             &self.catalog_use_cases().analytics_job_statuses(),
@@ -41,7 +38,6 @@ async fn analytics_job_attention(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::catalog_json::catalog_analytics_job_attention_json(
             &self.catalog_use_cases().analytics_job_attention(),
@@ -50,7 +46,6 @@ async fn analytics_job_attention(
 }
 
 async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let request = request.into_inner();
     let page = self
         .query_use_cases()
@@ -64,7 +59,6 @@ async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanReply
 }
 
 async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let request = request.into_inner();
     let (entity_types, capabilities) = grpc_parse_query_filters(&request)?;
     let result = self
@@ -81,7 +75,6 @@ async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryRe
 }
 
 async fn batch_query(&self, request: Request<BatchQueryRequest>) -> Result<Response<BatchQueryReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let queries = request.into_inner().queries;
     let no_filter: Option<Vec<String>> = None;
     let mut results = Vec::with_capacity(queries.len());
@@ -99,7 +92,6 @@ async fn explain_query(
     &self,
     request: Request<QueryRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let result = self
         .query_use_cases()
         .explain(ExplainQueryInput {
@@ -125,7 +117,6 @@ async fn text_search(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload(&request.into_inner().payload_json)?;
     let input = crate::application::query_payload::parse_text_search_input(&payload)
         .map_err(to_status)?;
@@ -152,7 +143,6 @@ async fn hybrid_search(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload(&request.into_inner().payload_json)?;
     let input = crate::application::query_payload::parse_hybrid_search_input(
         &payload,
@@ -181,7 +171,6 @@ async fn similar(
     &self,
     request: Request<JsonCreateRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let request = request.into_inner();
     let payload = parse_json_payload(&request.payload_json)?;
     let input =
@@ -209,7 +198,6 @@ async fn ivf_search(
     &self,
     request: Request<JsonCreateRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let request = request.into_inner();
     let payload = parse_json_payload(&request.payload_json)?;
     let input =
@@ -231,7 +219,6 @@ async fn graph_neighborhood(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload(&request.into_inner().payload_json)?;
     let projection = resolve_projection_payload(self, &payload)?;
     let input = crate::application::graph_payload::parse_graph_neighborhood_input(
@@ -252,7 +239,6 @@ async fn graph_traverse(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload(&request.into_inner().payload_json)?;
     let projection = resolve_projection_payload(self, &payload)?;
     let input =
@@ -271,7 +257,6 @@ async fn graph_shortest_path(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload(&request.into_inner().payload_json)?;
     let projection = resolve_projection_payload(self, &payload)?;
     let input =
@@ -290,7 +275,6 @@ async fn graph_components(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let projection_name = json_string_field(&payload, "projection_name");
     let projection = resolve_projection_payload(self, &payload)?;
@@ -322,7 +306,6 @@ async fn graph_centrality(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let projection_name = json_string_field(&payload, "projection_name");
     let projection = resolve_projection_payload(self, &payload)?;
@@ -347,7 +330,6 @@ async fn graph_community(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let projection_name = json_string_field(&payload, "projection_name");
     let projection = resolve_projection_payload(self, &payload)?;
@@ -373,7 +355,6 @@ async fn prepare_query(
     &self,
     request: Request<PrepareQueryRequest>,
 ) -> Result<Response<PrepareQueryReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let sql = request.into_inner().query;
     let parsed = crate::storage::query::modes::parse_multi(&sql)
         .map_err(|e| Status::invalid_argument(format!("parse error: {e}")))?;
@@ -395,7 +376,6 @@ async fn execute_prepared(
     &self,
     request: Request<ExecutePreparedRequest>,
 ) -> Result<Response<QueryReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let inner = request.into_inner();
 
     let (shape, parameter_count) = self

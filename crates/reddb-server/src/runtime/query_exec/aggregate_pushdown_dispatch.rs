@@ -22,17 +22,19 @@
 use super::aggregate_planner::{
     AggregateExpr, AggregateOp, AggregateQueryAst, AggregateQueryPlanner, ScanIterator, ScanRow,
 };
-use super::filter_compiled::{classify_field, resolve_kind, CompiledEntityFilter, EntityFieldKind};
+use super::filter_compiled::{
+    classify_field, resolve_kind, CompiledEntityFilter, CompiledEntityFilterDecision,
+    EntityFieldKind,
+};
 use crate::api::{RedDBError, RedDBResult};
-use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::ast::{Expr, FieldRef, Projection};
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections,
 };
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::Value;
 use crate::RedDB;
+use reddb_types::Value;
 
 use super::TableQuery;
 
@@ -135,15 +137,18 @@ pub(super) fn try_execute_pushdown_aggregate(
     let compiled_filter = effective_table_filter(query)
         .as_ref()
         .map(|f| CompiledEntityFilter::compile(f, table_name, table_alias));
+    if compiled_filter
+        .as_ref()
+        .is_some_and(CompiledEntityFilter::has_fallback)
+    {
+        return Ok(None);
+    }
 
     let mut rows: Vec<ScanRow> = Vec::new();
-    let table_row_resolver = TableRowMvccReadResolver::current_statement();
-    manager.for_each_entity(|entity| {
-        if table_row_resolver.resolve_read_candidate(entity).is_none() {
-            return true;
-        }
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    manager.scan_for_each(snapshot.as_ref(), |entity| {
         if let Some(f) = compiled_filter.as_ref() {
-            if !f.evaluate(entity) {
+            if f.evaluate(entity) != CompiledEntityFilterDecision::Match {
                 return true;
             }
         }

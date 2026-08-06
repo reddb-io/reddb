@@ -381,10 +381,10 @@ fn row_has_document_capability(row: &crate::storage::RowData) -> bool {
         || row.columns.iter().any(value_is_document_like)
 }
 
-fn value_is_document_like(value: &crate::storage::schema::Value) -> bool {
+fn value_is_document_like(value: &reddb_types::Value) -> bool {
     matches!(
         value,
-        crate::storage::schema::Value::Json(_) | crate::storage::schema::Value::Blob(_)
+        reddb_types::Value::Json(_) | reddb_types::Value::Blob(_)
     )
 }
 

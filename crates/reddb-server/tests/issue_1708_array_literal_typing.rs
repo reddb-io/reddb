@@ -8,8 +8,8 @@
 //! concrete shape from the target: a vector-typed position coerces to a
 //! `Vec<f32>`, a JSON/KV position keeps the exact `Value::Array`.
 
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots")

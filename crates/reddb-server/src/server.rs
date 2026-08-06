@@ -39,24 +39,26 @@ use crate::runtime::{
     RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult,
     RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
 };
-use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::dsl::{MatchComponents, QueryResult as DslQueryResult};
 use crate::storage::unified::{MetadataValue, RefTarget, SparseVector};
 use crate::storage::{CrossRef, EntityData, EntityId, EntityKind, SimilarResult, UnifiedEntity};
+use reddb_types::Value;
 
 fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
     crate::presentation::admin_json::analytics_job_json(job)
 }
+
+// Process-wide test guard for every RED_ADMIN_TOKEN mutation in server tests.
+#[cfg(test)]
+pub(crate) static RED_ADMIN_TOKEN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::RedDBOptions;
     use crate::health::HealthReport;
-    use crate::service_cli::{
-        TransportListenerFailure, TransportListenerState, TransportReadiness,
-    };
+    use crate::transport::{TransportListenerFailure, TransportListenerState, TransportReadiness};
 
     #[test]
     fn server_options_default_http_body_limit_is_32_mib() {
@@ -196,6 +198,10 @@ use self::routing::*;
 use self::serverless_support::*;
 use self::transport::*;
 
+pub(crate) fn command_catalog() -> &'static route_catalog::CommandCatalog {
+    routes::discovered_route_catalog()
+}
+
 /// PLAN.md Phase 6.2 — endpoint segregation. A given HTTP listener
 /// can serve either every public surface (`Public`, default) or a
 /// restricted slice (`AdminOnly`, `MetricsOnly`). The route filter at
@@ -226,7 +232,7 @@ pub struct ServerOptions {
     /// `Public`. Set to `AdminOnly` / `MetricsOnly` for dedicated
     /// admin / scrape ports (PLAN.md Phase 6.2).
     pub surface: ServerSurface,
-    pub transport_readiness: crate::service_cli::TransportReadiness,
+    pub transport_readiness: crate::transport::TransportReadiness,
     /// Allowed `Origin` values for the RedWire-over-WSS browser endpoint
     /// (issue #935, ADR 0036). WebSocket is not covered by CORS, so the
     /// upgrade is gated on an explicit allowlist to block Cross-Site
@@ -257,7 +263,7 @@ impl Default for ServerOptions {
             write_timeout_ms: 5_000,
             max_scan_limit: 1_000,
             surface: ServerSurface::Public,
-            transport_readiness: crate::service_cli::TransportReadiness::default(),
+            transport_readiness: crate::transport::TransportReadiness::default(),
             websocket_allowed_origins: Vec::new(),
             ui_dir: None,
         }

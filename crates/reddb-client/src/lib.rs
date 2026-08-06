@@ -29,19 +29,16 @@
 //! ## Cargo features
 //!
 //! - `embedded` (default) — pulls the entire RedDB engine in-process.
-//! - `grpc` — opt-in remote client over tonic. Pulls the engine for
-//!   its `RedDBClient` type today; a thin proto-only client is tracked
-//!   in `PLAN_DRIVERS.md`.
+//! - `grpc` — opt-in remote client over tonic. The thin connector and
+//!   generated replies live in `reddb-grpc-proto` and do not pull in the engine.
 //! - `http` — REST client.
 //! - `redwire` — RedWire native TCP client (no engine dep).
 //!
 //! ## Internal connector
 //!
-//! The crate also hosts the gRPC connector + REPL used by the
-//! `red` and `red_client` binaries via the [`connector`] module.
-//! That layer is intentionally lighter than the published [`Reddb`]
-//! API: it speaks tonic + ureq + serde_json only and never pulls
-//! the engine in. It is exposed at the crate root as
+//! The crate also hosts the REPL used by the `red` and `red_client`
+//! binaries via the [`connector`] module. The connector itself lives
+//! in `reddb-grpc-proto` and is re-exported at the crate root as
 //! [`RedDBClient`] and [`repl`] for back-compat with the previous
 //! `reddb-client-internal` crate.
 

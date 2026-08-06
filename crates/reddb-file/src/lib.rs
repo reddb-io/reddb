@@ -59,6 +59,7 @@ pub mod vector_btree_page_format;
 pub mod vector_hnsw_index;
 pub mod vector_ivf_index;
 pub mod vector_value_codec;
+pub mod vfs;
 pub mod wal_header;
 pub mod wal_record;
 pub mod zone_map;
@@ -328,6 +329,7 @@ pub use vector_ivf_index::{
     decode_ivf_index_frame, encode_ivf_index_frame, IvfIndexFrame, IvfIndexFrameError,
     IvfListFrame, IVF_INDEX_HEADER_LEN, IVF_INDEX_MAGIC,
 };
+pub use vfs::{OpenMode, StdVfs, Vfs, VfsFile};
 
 pub use primary_replica::{
     cleanup_rebootstrap_artifacts, decode_rebootstrap_ready_marker_json,

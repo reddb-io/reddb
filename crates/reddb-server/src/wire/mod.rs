@@ -5,7 +5,7 @@ pub(crate) mod query_direct;
 pub mod redwire;
 pub mod tls;
 
-pub use postgres::{start_pg_wire_listener, PgWireConfig};
+pub use postgres::{start_pg_wire_listener, start_pg_wire_listener_on, PgWireConfig};
 #[cfg(unix)]
 pub use redwire::start_redwire_unix_listener;
 pub use redwire::{

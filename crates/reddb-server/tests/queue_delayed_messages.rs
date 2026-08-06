@@ -11,8 +11,8 @@
 //! These tests cover the runtime path under `execute_query` so all four
 //! transports inherit the behaviour by construction.
 
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};

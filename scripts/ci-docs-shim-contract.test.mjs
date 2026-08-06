@@ -139,3 +139,25 @@ test("docs-only merge groups skip every heavy job and code diffs keep them enabl
       `${jobId} is not guarded by the merge-group classifier`);
   }
 });
+
+test("Test Suite shards on free runners and reports one failure-propagating required context", () => {
+  const jobs = jobBlocks(read(CI));
+  const shards = jobs.get("test-shards");
+  const aggregate = jobs.get("tests");
+
+  assert.ok(shards, "ci.yml must define the test-shards matrix job");
+  assert.match(shards, /^ {4}name: Test Suite shard \(\$\{\{ matrix\.shard \}\}\/4\)$/m);
+  assert.match(shards, /^ {4}runs-on: ubuntu-24\.04$/m,
+    "test shards must use free GitHub-hosted public runners");
+  assert.match(shards, /shard: \[1, 2, 3, 4\]/);
+  assert.match(shards, /scripts\/nextest-e2e-shard\.sh "\$\{\{ matrix\.shard \}\}" 4/);
+
+  assert.ok(aggregate, "ci.yml must preserve a Test Suite aggregate job");
+  assert.match(aggregate, /^ {4}name: Test Suite$/m);
+  assert.match(aggregate, /^ {4}runs-on: ubuntu-latest$/m,
+    "the required-context aggregate must use a free GitHub-hosted public runner");
+  assert.match(aggregate, /needs: \[gate, test-shards\]/);
+  assert.match(aggregate, /always\(\).*needs\.gate\.outputs\.run_heavy == 'true'/);
+  assert.match(aggregate, /needs\.test-shards\.result.*success/,
+    "the required Test Suite context must fail when any shard fails");
+});

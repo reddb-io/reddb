@@ -355,9 +355,10 @@ impl RedDBRuntime {
         let manager = store
             .get_collection(collection)
             .ok_or_else(|| RedDBError::NotFound(collection.to_string()))?;
+        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
 
         let vectors: Vec<(u64, Vec<f32>)> = manager
-            .query_all(|_| true)
+            .scan(snapshot.as_ref(), |_| true)
             .into_iter()
             .filter_map(|entity| match &entity.data {
                 EntityData::Vector(data) if !data.dense.is_empty() => {
@@ -697,13 +698,14 @@ impl RedDBRuntime {
 
         // Fallback: global scan if ContextIndex returned nothing
         if scored.is_empty() {
+            let snapshot = crate::runtime::impl_core::capture_current_snapshot();
             let query_tokens = tokenize_query(&query);
             if let Some(collections) = collection_scope {
                 for collection in collections {
                     let Some(manager) = store.get_collection(&collection) else {
                         continue;
                     };
-                    for entity in manager.query_all(|_| true) {
+                    for entity in manager.scan(snapshot.as_ref(), |_| true) {
                         let entity_tokens = entity_tokens_for_search(&entity);
                         let overlap = query_tokens
                             .iter()
@@ -906,18 +908,25 @@ impl RedDBRuntime {
         snap_ctx: Option<&crate::runtime::impl_core::SnapshotContext>,
         rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
     ) -> bool {
-        use crate::runtime::impl_core::{
-            entity_visible_with_context, rls_policy_filter, rls_policy_filter_for_kind,
-        };
-        use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
-        use crate::storage::unified::entity::EntityKind;
+        use crate::runtime::impl_core::entity_visible_with_context;
 
-        // 1. MVCC visibility (Phase 1).
         if !entity_visible_with_context(snap_ctx, entity) {
             return false;
         }
+        self.search_entity_rls_allowed(collection, entity, rls_cache)
+    }
 
-        // 2. RLS gate — only evaluate when the table has it enabled.
+    pub(crate) fn search_entity_rls_allowed(
+        &self,
+        collection: &str,
+        entity: &UnifiedEntity,
+        rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
+    ) -> bool {
+        use crate::runtime::impl_core::{rls_policy_filter, rls_policy_filter_for_kind};
+        use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
+        use crate::storage::unified::entity::EntityKind;
+
+        // RLS gate — only evaluate when the table has it enabled.
         if !self.is_rls_enabled(collection) {
             return true;
         }
@@ -1083,16 +1092,12 @@ impl RedDBRuntime {
                     let Some(manager) = store.get_collection(collection_name) else {
                         continue;
                     };
-                    for entity in manager.query_all(|_| true) {
+                    for entity in manager.scan(snap_ctx.as_ref(), |_| true) {
                         if scored.contains_key(&entity.id.raw()) {
                             continue;
                         }
-                        if !self.search_entity_allowed(
-                            collection_name,
-                            &entity,
-                            snap_ctx.as_ref(),
-                            &mut rls_cache,
-                        ) {
+                        if !self.search_entity_rls_allowed(collection_name, &entity, &mut rls_cache)
+                        {
                             continue;
                         }
                         let entity_tokens = entity_tokens_for_search(&entity);
@@ -3959,10 +3964,10 @@ fn ask_source_dependencies(ctx: &crate::runtime::ask_pipeline::AskContext) -> Ha
     deps
 }
 
-fn provider_list_from_storage_value(value: &crate::storage::schema::Value) -> Option<Vec<String>> {
+fn provider_list_from_storage_value(value: &reddb_types::Value) -> Option<Vec<String>> {
     match value {
-        crate::storage::schema::Value::Text(text) => parse_provider_list_text(text.as_ref()),
-        crate::storage::schema::Value::Json(bytes) => {
+        reddb_types::Value::Text(text) => parse_provider_list_text(text.as_ref()),
+        reddb_types::Value::Json(bytes) => {
             let parsed: crate::json::Value = crate::json::from_slice(bytes).ok()?;
             provider_list_from_json_value(&parsed)
         }
@@ -4096,7 +4101,7 @@ fn strict_mode_label(mode: crate::runtime::ai::strict_validator::Mode) -> &'stat
     }
 }
 
-fn latest_config_value(runtime: &RedDBRuntime, key: &str) -> Option<crate::storage::schema::Value> {
+fn latest_config_value(runtime: &RedDBRuntime, key: &str) -> Option<reddb_types::Value> {
     use crate::application::ports::RuntimeEntityPort;
 
     runtime
@@ -4110,12 +4115,12 @@ fn config_bool_if_present(runtime: &RedDBRuntime, key: &str) -> Option<bool> {
     storage_value_bool(&latest_config_value(runtime, key)?)
 }
 
-fn storage_value_bool(value: &crate::storage::schema::Value) -> Option<bool> {
+fn storage_value_bool(value: &reddb_types::Value) -> Option<bool> {
     match value {
-        crate::storage::schema::Value::Boolean(b) => Some(*b),
-        crate::storage::schema::Value::Integer(n) => Some(*n != 0),
-        crate::storage::schema::Value::UnsignedInteger(n) => Some(*n != 0),
-        crate::storage::schema::Value::Text(s) => text_bool(s.as_ref()),
+        reddb_types::Value::Boolean(b) => Some(*b),
+        reddb_types::Value::Integer(n) => Some(*n != 0),
+        reddb_types::Value::UnsignedInteger(n) => Some(*n != 0),
+        reddb_types::Value::Text(s) => text_bool(s.as_ref()),
         _ => None,
     }
 }
@@ -4129,11 +4134,11 @@ fn text_bool(value: &str) -> Option<bool> {
 }
 
 fn provider_capability_object(
-    value: &crate::storage::schema::Value,
+    value: &reddb_types::Value,
 ) -> Option<crate::json::Map<String, crate::json::Value>> {
     let parsed = match value {
-        crate::storage::schema::Value::Json(bytes) => crate::json::from_slice(bytes).ok()?,
-        crate::storage::schema::Value::Text(s) => crate::json::from_str(s.as_ref()).ok()?,
+        reddb_types::Value::Json(bytes) => crate::json::from_slice(bytes).ok()?,
+        reddb_types::Value::Text(s) => crate::json::from_str(s.as_ref()).ok()?,
         _ => return None,
     };
     match parsed {
@@ -5145,10 +5150,10 @@ mod render_prompt_tests {
     use crate::runtime::ask_pipeline::{
         AskContext, CandidateCollections, FilteredRow, StageTimings, TokenSet,
     };
-    use crate::storage::schema::Value;
     use crate::storage::unified::entity::{
         EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
     };
+    use reddb_types::Value;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -5444,10 +5449,10 @@ mod citation_wedge_tests {
             AskContext, CandidateCollections, FilteredRow, GraphHit, GraphHitKind, StageTimings,
             TextHit, TokenSet, VectorHit,
         };
-        use crate::storage::schema::Value;
         use crate::storage::unified::entity::{
             EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
         };
+        use reddb_types::Value;
         use std::collections::HashMap;
         use std::sync::Arc;
 

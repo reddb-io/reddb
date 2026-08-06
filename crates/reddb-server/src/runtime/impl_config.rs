@@ -425,14 +425,10 @@ impl RedDBRuntime {
             if version.tombstone {
                 None
             } else {
-                Some(crate::presentation::entity_json::storage_value_to_json(
-                    &version.value,
-                ))
+                Some(reddb_types::Value::to_json(&version.value))
             }
         });
-        let after = Some(crate::presentation::entity_json::storage_value_to_json(
-            &value,
-        ));
+        let after = Some(reddb_types::Value::to_json(&value));
         let change_op = if latest.is_some() {
             crate::replication::cdc::ChangeOperation::Update
         } else {
@@ -616,9 +612,7 @@ impl RedDBRuntime {
             if version.tombstone {
                 None
             } else {
-                Some(crate::presentation::entity_json::storage_value_to_json(
-                    &version.value,
-                ))
+                Some(reddb_types::Value::to_json(&version.value))
             }
         }) {
             self.record_kv_watch_event(
@@ -879,7 +873,7 @@ impl RedDBRuntime {
             "from_lsn",
             from_lsn
                 .map(Value::UnsignedInteger)
-                .unwrap_or(crate::storage::schema::Value::Null),
+                .unwrap_or(reddb_types::Value::Null),
         );
         record.set("watch_url", Value::text(endpoint));
         record.set("streaming", Value::Boolean(true));
@@ -1816,7 +1810,7 @@ fn config_payload_sensitivity(
 }
 
 fn config_payload_bytes(value: &Value) -> Vec<u8> {
-    let json = crate::presentation::entity_json::storage_value_to_json(value);
+    let json = reddb_types::Value::to_json(value);
     crate::serde_json::to_vec(&json).unwrap_or_else(|_| value.to_string().into_bytes())
 }
 

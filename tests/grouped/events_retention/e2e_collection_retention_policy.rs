@@ -19,8 +19,8 @@
 mod support;
 
 use reddb::application::ExecuteQueryInput;
-use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBRuntime};
+use reddb_types::Value;
 
 #[test]
 fn lazy_filter_drops_expired_then_unset_reveals_them_again() {

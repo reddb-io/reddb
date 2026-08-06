@@ -509,8 +509,8 @@ mod tests {
         mutate: impl FnOnce(&LocalBackend, &[reddb_file::WalSegmentMeta]),
     ) -> Result<RecoveryResult, BackendError> {
         use crate::replication::cdc::{change_record_from_entity, ChangeRecord};
-        use crate::storage::schema::Value;
         use crate::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+        use reddb_types::Value;
         let temp_dir = std::env::temp_dir().join(format!(
             "reddb_chain_{}_{}_{}",
             tag,

@@ -16,9 +16,8 @@ use reddb_types::document_body_codec;
 
 use crate::application::entity::json_to_storage_value;
 use crate::json::{to_vec as json_to_vec, Map, Value as JsonValue};
-use crate::presentation::entity_json::storage_value_to_json;
-use crate::storage::schema::Value;
 use crate::{RedDBError, RedDBResult};
+use reddb_types::Value;
 
 /// True when `bytes` begin with the document-body container magic.
 ///
@@ -41,7 +40,7 @@ pub(crate) fn decode_container_to_json(bytes: &[u8]) -> Option<JsonValue> {
     for (key, value) in fields {
         let json = match &value {
             Value::Integer(n) => JsonValue::Integer(*n),
-            other => storage_value_to_json(other),
+            other => other.to_json(),
         };
         map.insert(key, json);
     }

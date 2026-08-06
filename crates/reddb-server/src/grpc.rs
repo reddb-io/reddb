@@ -4,7 +4,7 @@ pub(crate) use crate::application::json_input::{
 pub(crate) use crate::application::{
     AdminUseCases, CatalogUseCases, CreateEdgeInput, CreateEntityOutput, CreateNodeGraphLinkInput,
     CreateNodeInput, CreateNodeTableLinkInput, CreateRowInput, CreateVectorInput,
-    DeleteEntityInput, EntityUseCases, ExecuteQueryInput, ExplainQueryInput, GraphCentralityInput,
+    DeleteEntityInput, EntityUseCases, ExplainQueryInput, GraphCentralityInput,
     GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput, GraphCyclesInput,
     GraphHitsInput, GraphNeighborhoodInput, GraphPersonalizedPageRankInput, GraphShortestPathInput,
     GraphTopologicalSortInput, GraphTraversalInput, GraphUseCases, InspectNativeArtifactInput,
@@ -24,6 +24,10 @@ use crate::health::{HealthProvider, HealthState};
 use crate::json::{
     from_str as json_from_str, to_string as json_to_string, Map, Value as JsonValue,
 };
+use crate::runtime::query_request::{
+    ParamValue, PreparedId, PreparedRegistry, QueryRequest as RuntimeQueryRequest,
+    QueryRequestExecutor,
+};
 use crate::runtime::{
     RedDBRuntime, RuntimeFilter, RuntimeFilterValue, RuntimeGraphCentralityAlgorithm,
     RuntimeGraphCentralityResult, RuntimeGraphClusteringResult, RuntimeGraphCommunityAlgorithm,
@@ -34,10 +38,10 @@ use crate::runtime::{
     RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult,
     RuntimeQueryResult, RuntimeQueryWeights, RuntimeStats, ScanPage,
 };
-use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef};
 use crate::storage::unified::{Metadata, MetadataValue};
 use crate::storage::{EntityData, EntityId, UnifiedEntity};
+use reddb_types::Value;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
@@ -62,11 +66,13 @@ use proto::{
     UpdateEntityRequest, Validation, ValidationItem,
 };
 
+mod catalog_dispatch;
 mod control_support;
 mod entity_ops;
 mod input_support;
 pub(crate) mod scan_json;
 
+use self::catalog_dispatch::*;
 use self::control_support::*;
 use self::entity_ops::*;
 use self::input_support::*;
@@ -130,6 +136,7 @@ pub struct RedDBGrpcServer {
     runtime: RedDBRuntime,
     options: GrpcServerOptions,
     auth_store: Arc<AuthStore>,
+    prepared_registry: Arc<PreparedRegistry>,
     /// Optional OAuth/OIDC JWT validator. When set, the gRPC
     /// interceptor validates JWT-shaped bearers against the issuer's
     /// JWKS *before* attempting `AuthStore` session/api-key lookups.
@@ -183,6 +190,7 @@ impl RedDBGrpcServer {
             runtime,
             options,
             auth_store,
+            prepared_registry: Arc::new(PreparedRegistry::new()),
             oauth_validator: None,
         }
     }
@@ -214,11 +222,16 @@ impl RedDBGrpcServer {
         &self.auth_store
     }
 
+    pub(crate) fn with_listener_options(mut self, options: GrpcServerOptions) -> Self {
+        self.options = options;
+        self
+    }
+
     fn grpc_runtime(&self) -> GrpcRuntime {
         GrpcRuntime {
             runtime: self.runtime.clone(),
             auth_store: self.auth_store.clone(),
-            prepared_registry: PreparedStatementRegistry::new(),
+            prepared_registry: Arc::clone(&self.prepared_registry),
             oauth_validator: self.oauth_validator.clone(),
         }
     }
@@ -282,84 +295,18 @@ impl RedDBGrpcServer {
         Ok(())
     }
 
-    fn configured_service(runtime: GrpcRuntime) -> RedDbServer<GrpcRuntime> {
+    fn configured_service(runtime: GrpcRuntime) -> GrpcCatalogService {
         // Advertise zstd + gzip so clients can opt in. Server compresses
         // outbound replies with zstd; sticking to a single send codec keeps
         // CPU predictable while still accepting either on inbound.
         use tonic::codec::CompressionEncoding;
-        RedDbServer::new(runtime)
+        let service = RedDbServer::new(runtime.clone())
             .max_decoding_message_size(256 * 1024 * 1024)
             .max_encoding_message_size(256 * 1024 * 1024)
             .accept_compressed(CompressionEncoding::Zstd)
             .accept_compressed(CompressionEncoding::Gzip)
-            .send_compressed(CompressionEncoding::Zstd)
-    }
-}
-
-/// Server-side prepared statement — parsed + parameterized once, executed N times.
-struct GrpcPreparedStatement {
-    shape: std::sync::Arc<crate::storage::query::ast::QueryExpr>,
-    parameter_count: usize,
-    created_at: std::time::Instant,
-}
-
-/// Registry of prepared statements for one server instance.
-/// Session-independent: any connection can execute any prepared statement by ID.
-struct PreparedStatementRegistry {
-    // parking_lot::RwLock never poisons on panic — safe to use without unwrap().
-    map: parking_lot::RwLock<std::collections::HashMap<u64, GrpcPreparedStatement>>,
-    next_id: std::sync::atomic::AtomicU64,
-    get_count: std::sync::atomic::AtomicU64,
-}
-
-impl PreparedStatementRegistry {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            map: parking_lot::RwLock::new(std::collections::HashMap::new()),
-            next_id: std::sync::atomic::AtomicU64::new(1),
-            get_count: std::sync::atomic::AtomicU64::new(0),
-        })
-    }
-
-    fn prepare(&self, shape: crate::storage::query::ast::QueryExpr, parameter_count: usize) -> u64 {
-        use std::sync::atomic::Ordering;
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut map = self.map.write();
-        self.evict_old_locked(&mut map);
-        map.insert(
-            id,
-            GrpcPreparedStatement {
-                // Store as Arc to avoid cloning the full AST on every execute.
-                shape: std::sync::Arc::new(shape),
-                parameter_count,
-                created_at: std::time::Instant::now(),
-            },
-        );
-        id
-    }
-
-    fn get_shape_and_count(
-        &self,
-        id: u64,
-    ) -> Option<(std::sync::Arc<crate::storage::query::ast::QueryExpr>, usize)> {
-        // Periodic eviction on execute/get traffic so long-lived servers that
-        // prepare once and execute many times still age out stale statements.
-        let get_count = self
-            .get_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        if get_count.is_multiple_of(256) {
-            let mut map = self.map.write();
-            self.evict_old_locked(&mut map);
-        }
-        let map = self.map.read();
-        map.get(&id)
-            .map(|s| (std::sync::Arc::clone(&s.shape), s.parameter_count))
-    }
-
-    fn evict_old_locked(&self, map: &mut std::collections::HashMap<u64, GrpcPreparedStatement>) {
-        let threshold = std::time::Duration::from_secs(3600);
-        map.retain(|_, v| v.created_at.elapsed() < threshold);
+            .send_compressed(CompressionEncoding::Zstd);
+        GrpcCatalogService::new(service, runtime)
     }
 }
 
@@ -367,7 +314,7 @@ impl PreparedStatementRegistry {
 struct GrpcRuntime {
     runtime: RedDBRuntime,
     auth_store: Arc<AuthStore>,
-    prepared_registry: Arc<PreparedStatementRegistry>,
+    prepared_registry: Arc<PreparedRegistry>,
     /// OAuth/OIDC JWT validator built once from `auth_store.config().oauth`
     /// when the operator enables OAuth. `None` means JWT bearers fall
     /// back to the AuthStore lookup path.
@@ -400,28 +347,28 @@ impl GrpcRuntime {
     }
 }
 
-fn grpc_query_value_to_schema_value(value: QueryValue) -> Result<Value, Status> {
+fn grpc_query_value_to_param_value(value: QueryValue) -> Result<ParamValue, Status> {
     use proto::query_value::Kind;
 
     match value
         .kind
         .ok_or_else(|| Status::invalid_argument("missing query param value"))?
     {
-        Kind::NullValue(_) => Ok(Value::Null),
-        Kind::BoolValue(value) => Ok(Value::Boolean(value)),
-        Kind::IntValue(value) => Ok(Value::Integer(value)),
-        Kind::FloatValue(value) => Ok(Value::Float(value)),
-        Kind::TextValue(value) => Ok(Value::Text(std::sync::Arc::from(value))),
-        Kind::BytesValue(value) => Ok(Value::Blob(value)),
-        Kind::VectorValue(value) => Ok(Value::Vector(value.values)),
+        Kind::NullValue(_) => Ok(ParamValue::Null),
+        Kind::BoolValue(value) => Ok(ParamValue::Bool(value)),
+        Kind::IntValue(value) => Ok(ParamValue::Int64(value)),
+        Kind::FloatValue(value) => Ok(ParamValue::Float64(value)),
+        Kind::TextValue(value) => Ok(ParamValue::Text(value)),
+        Kind::BytesValue(value) => Ok(ParamValue::Bytes(value)),
+        Kind::VectorValue(value) => Ok(ParamValue::Vector(value.values)),
         Kind::JsonValue(value) => {
             let parsed = json_from_str::<JsonValue>(&value)
                 .map_err(|e| Status::invalid_argument(format!("json param parse error: {e}")))?;
             let encoded = json_to_string(&parsed)
                 .map_err(|e| Status::invalid_argument(format!("json param encode error: {e}")))?;
-            Ok(Value::Json(encoded.into_bytes()))
+            Ok(ParamValue::Json(encoded.into_bytes()))
         }
-        Kind::TimestampValue(value) => Ok(Value::Timestamp(value)),
+        Kind::TimestampValue(value) => Ok(ParamValue::Timestamp(value)),
         Kind::UuidValue(value) => {
             let bytes: [u8; 16] = value.try_into().map_err(|value: Vec<u8>| {
                 Status::invalid_argument(format!(
@@ -429,50 +376,93 @@ fn grpc_query_value_to_schema_value(value: QueryValue) -> Result<Value, Status> 
                     value.len()
                 ))
             })?;
-            Ok(Value::Uuid(bytes))
+            Ok(ParamValue::Uuid(bytes))
         }
     }
 }
 
-fn execute_grpc_query_with_optional_params(
+fn execute_grpc_query_request(
     runtime: &RedDBRuntime,
+    prepared: &PreparedRegistry,
     query: String,
     params: Vec<QueryValue>,
+    commit_policy: Option<crate::replication::CommitPolicy>,
 ) -> Result<RuntimeQueryResult, Status> {
     if query.trim().is_empty() {
         return Err(Status::invalid_argument("query field cannot be empty"));
     }
 
-    if params.is_empty() {
-        let result = runtime.execute_query(&query).map_err(to_status)?;
-        enforce_grpc_commit_policy_after_query_result(runtime, &result)?;
-        return Ok(result);
-    }
-
-    let binds = params
+    let params = params
         .into_iter()
-        .map(grpc_query_value_to_schema_value)
+        .map(grpc_query_value_to_param_value)
         .collect::<Result<Vec<_>, _>>()?;
-    let result = runtime
-        .execute_query_with_params(&query, &binds)
-        .map_err(to_status)?;
-    enforce_grpc_commit_policy_after_query_result(runtime, &result)?;
-    Ok(result)
+    let mut request = RuntimeQueryRequest::sql(query, params);
+    if let Some(commit_policy) = commit_policy {
+        request = request.with_commit_policy(commit_policy);
+    }
+    QueryRequestExecutor::new(runtime, prepared)
+        .execute(request)
+        .map_err(grpc_query_request_error)
 }
 
-fn enforce_grpc_commit_policy_after_query_result(
-    runtime: &RedDBRuntime,
-    result: &RuntimeQueryResult,
-) -> Result<(), Status> {
-    let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
-    if !is_mutation {
-        return Ok(());
+fn grpc_commit_policy_from_metadata(
+    metadata: &MetadataMap,
+) -> Result<Option<crate::replication::CommitPolicy>, Status> {
+    let Some(value) = metadata.get("x-reddb-commit-policy") else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| Status::invalid_argument("x-reddb-commit-policy must be ascii"))?;
+    crate::replication::CommitPolicy::parse_strict(value)
+        .map(Some)
+        .ok_or_else(|| Status::invalid_argument(format!("invalid commit policy '{value}'")))
+}
+
+fn grpc_json_bind_to_param_value(value: &str) -> Result<ParamValue, Status> {
+    let value = json_from_str::<JsonValue>(value)
+        .map_err(|error| Status::invalid_argument(format!("bind parse error: {error}")))?;
+    Ok(match value {
+        JsonValue::Null => ParamValue::Null,
+        JsonValue::Bool(value) => ParamValue::Bool(value),
+        JsonValue::Integer(value) => ParamValue::Int64(value),
+        JsonValue::Number(value) if value.fract() == 0.0 && value.abs() < i64::MAX as f64 => {
+            ParamValue::Int64(value as i64)
+        }
+        JsonValue::Number(value) => ParamValue::Float64(value),
+        JsonValue::String(value) => ParamValue::Text(value),
+        other => ParamValue::Text(json_to_string(&other).unwrap_or_default()),
+    })
+}
+
+fn grpc_query_request_error(error: crate::api::RedDBError) -> Status {
+    let message = error.to_string();
+    if message.contains("commit policy timed out") {
+        return Status::deadline_exceeded(message);
     }
-    let post_lsn = runtime.cdc_current_lsn();
-    runtime
-        .enforce_commit_policy(post_lsn)
-        .map(|_| ())
-        .map_err(|err| Status::deadline_exceeded(err.to_string()))
+    match error {
+        crate::api::RedDBError::Query(message) if message.contains("not found or expired") => {
+            Status::not_found(message)
+        }
+        crate::api::RedDBError::Query(message)
+            if message == "prepared_needs_replan" || message == "prepared statements disabled" =>
+        {
+            Status::failed_precondition(message)
+        }
+        // Client-shaped request errors stay INVALID_ARGUMENT: seam bind
+        // failures and commit-policy floor violations.
+        crate::api::RedDBError::Query(message)
+            if message.contains("prepared bind failed")
+                || message.contains("weaker than resolved floor") =>
+        {
+            Status::invalid_argument(message)
+        }
+        crate::api::RedDBError::Validation { message, .. } => Status::invalid_argument(message),
+        // Everything else keeps the pre-migration status surface: to_status
+        // routes the ask_primary_sync_unavailable prefix to UNAVAILABLE and
+        // generic Query errors to INTERNAL.
+        other => to_status(other),
+    }
 }
 
 #[cfg(test)]
@@ -481,37 +471,37 @@ mod grpc_query_value_tests {
     use proto::query_value::Kind;
 
     #[test]
-    fn grpc_query_value_maps_to_schema_value_variants() {
+    fn grpc_query_value_maps_to_request_param_variants() {
         let cases = vec![
             (
                 QueryValue {
                     kind: Some(Kind::NullValue(proto::QueryNull {})),
                 },
-                Value::Null,
+                ParamValue::Null,
             ),
             (
                 QueryValue {
                     kind: Some(Kind::BoolValue(true)),
                 },
-                Value::Boolean(true),
+                ParamValue::Bool(true),
             ),
             (
                 QueryValue {
                     kind: Some(Kind::IntValue(42)),
                 },
-                Value::Integer(42),
+                ParamValue::Int64(42),
             ),
             (
                 QueryValue {
                     kind: Some(Kind::FloatValue(1.5)),
                 },
-                Value::Float(1.5),
+                ParamValue::Float64(1.5),
             ),
             (
                 QueryValue {
                     kind: Some(Kind::BytesValue(vec![0, 1, 2])),
                 },
-                Value::Blob(vec![0, 1, 2]),
+                ParamValue::Bytes(vec![0, 1, 2]),
             ),
             (
                 QueryValue {
@@ -519,46 +509,46 @@ mod grpc_query_value_tests {
                         values: vec![0.25, 0.5],
                     })),
                 },
-                Value::Vector(vec![0.25, 0.5]),
+                ParamValue::Vector(vec![0.25, 0.5]),
             ),
             (
                 QueryValue {
                     kind: Some(Kind::TimestampValue(1_779_999_000)),
                 },
-                Value::Timestamp(1_779_999_000),
+                ParamValue::Timestamp(1_779_999_000),
             ),
             (
                 QueryValue {
                     kind: Some(Kind::UuidValue(vec![0x11; 16])),
                 },
-                Value::Uuid([0x11; 16]),
+                ParamValue::Uuid([0x11; 16]),
             ),
         ];
 
         for (input, expected) in cases {
-            assert_eq!(grpc_query_value_to_schema_value(input).unwrap(), expected);
+            assert_eq!(grpc_query_value_to_param_value(input).unwrap(), expected);
         }
 
         assert_eq!(
-            grpc_query_value_to_schema_value(QueryValue {
+            grpc_query_value_to_param_value(QueryValue {
                 kind: Some(Kind::TextValue("alice".into())),
             })
             .unwrap(),
-            Value::Text(std::sync::Arc::from("alice"))
+            ParamValue::Text("alice".to_string())
         );
         assert_eq!(
-            grpc_query_value_to_schema_value(QueryValue {
+            grpc_query_value_to_param_value(QueryValue {
                 kind: Some(Kind::JsonValue("{\"role\":\"admin\"}".into())),
             })
             .unwrap(),
-            Value::Json(b"{\"role\":\"admin\"}".to_vec())
+            ParamValue::Json(b"{\"role\":\"admin\"}".to_vec())
         );
     }
 
     #[test]
     fn grpc_query_value_rejects_missing_kind_and_bad_uuid() {
-        assert!(grpc_query_value_to_schema_value(QueryValue { kind: None }).is_err());
-        assert!(grpc_query_value_to_schema_value(QueryValue {
+        assert!(grpc_query_value_to_param_value(QueryValue { kind: None }).is_err());
+        assert!(grpc_query_value_to_param_value(QueryValue {
             kind: Some(Kind::UuidValue(vec![0; 15])),
         })
         .is_err());
@@ -568,8 +558,10 @@ mod grpc_query_value_tests {
     fn grpc_query_rejects_empty_query_before_runtime_parse() {
         let runtime =
             RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
-        let err = execute_grpc_query_with_optional_params(&runtime, "  ".to_string(), Vec::new())
-            .expect_err("empty query should fail");
+        let prepared = PreparedRegistry::new();
+        let err =
+            execute_grpc_query_request(&runtime, &prepared, "  ".to_string(), Vec::new(), None)
+                .expect_err("empty query should fail");
 
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert_eq!(err.message(), "query field cannot be empty");
@@ -580,11 +572,14 @@ mod grpc_query_value_tests {
         let runtime =
             RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
         seed_grpc_param_table(&runtime);
+        let prepared = PreparedRegistry::new();
 
-        let result = execute_grpc_query_with_optional_params(
+        let result = execute_grpc_query_request(
             &runtime,
+            &prepared,
             "SELECT id, name FROM p WHERE id = $1 AND name = $2".to_string(),
             grpc_param_values(),
+            None,
         )
         .expect("parameterized query");
 
@@ -607,11 +602,14 @@ mod grpc_query_value_tests {
                 .with_replication(crate::replication::ReplicationConfig::primary()),
         )
         .expect("runtime");
+        let prepared = PreparedRegistry::new();
 
-        let err = execute_grpc_query_with_optional_params(
+        let err = execute_grpc_query_request(
             &runtime,
+            &prepared,
             "INSERT INTO grpc_ack_items (id, name) VALUES (1, 'alpha')".to_string(),
             Vec::new(),
+            None,
         )
         .expect_err("ack_n without replica ack must fail closed");
 
@@ -637,7 +635,7 @@ mod grpc_query_value_tests {
         let service = GrpcRuntime {
             runtime,
             auth_store: Arc::new(AuthStore::new(crate::auth::AuthConfig::default())),
-            prepared_registry: PreparedStatementRegistry::new(),
+            prepared_registry: Arc::new(PreparedRegistry::new()),
             oauth_validator: None,
         };
 
@@ -657,6 +655,154 @@ mod grpc_query_value_tests {
         assert_eq!(reply.record_count, 1);
         assert!(reply.result_json.contains("Alice"), "{}", reply.result_json);
         assert!(!reply.result_json.contains("Bob"), "{}", reply.result_json);
+    }
+
+    #[tokio::test]
+    async fn grpc_prepared_id_is_shared_by_connection_listeners_only() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBGrpcServer::new(runtime.clone());
+        let plain_listener = server.grpc_runtime();
+        let tls_listener = server.grpc_runtime();
+        let second_connection = RedDBGrpcServer::new(runtime).grpc_runtime();
+
+        let prepared = RedDb::prepare_query(
+            &plain_listener,
+            Request::new(PrepareQueryRequest {
+                query: "SELECT 7 AS value".to_string(),
+            }),
+        )
+        .await
+        .expect("prepare on plaintext listener")
+        .into_inner();
+
+        let reply = RedDb::execute_prepared(
+            &tls_listener,
+            Request::new(ExecutePreparedRequest {
+                prepared_id: prepared.prepared_id,
+                bind_json: vec!["42".to_string()],
+            }),
+        )
+        .await
+        .expect("execute on TLS listener of the same connection")
+        .into_inner();
+        assert!(reply.result_json.contains("42"), "{}", reply.result_json);
+
+        let error = RedDb::execute_prepared(
+            &second_connection,
+            Request::new(ExecutePreparedRequest {
+                prepared_id: prepared.prepared_id,
+                bind_json: vec!["42".to_string()],
+            }),
+        )
+        .await
+        .expect_err("another connection must not resolve the prepared ID");
+        assert_eq!(error.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn grpc_execute_prepared_rejects_a_stale_ddl_epoch() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        let service = RedDBGrpcServer::new(runtime.clone()).grpc_runtime();
+        let prepared = RedDb::prepare_query(
+            &service,
+            Request::new(PrepareQueryRequest {
+                query: "SELECT 7 AS value".to_string(),
+            }),
+        )
+        .await
+        .expect("prepare query")
+        .into_inner();
+
+        runtime
+            .execute_query("CREATE TABLE grpc_prepared_epoch (id INTEGER)")
+            .expect("execute DDL");
+
+        let error = RedDb::execute_prepared(
+            &service,
+            Request::new(ExecutePreparedRequest {
+                prepared_id: prepared.prepared_id,
+                bind_json: vec!["42".to_string()],
+            }),
+        )
+        .await
+        .expect_err("DDL must invalidate the gRPC prepared shape");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), "prepared_needs_replan");
+    }
+
+    #[tokio::test]
+    async fn grpc_prepared_kill_switch_rejects_prepare_and_execute() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        let service = RedDBGrpcServer::new(runtime).grpc_runtime();
+        let prepared = RedDb::prepare_query(
+            &service,
+            Request::new(PrepareQueryRequest {
+                query: "SELECT 7 AS value".to_string(),
+            }),
+        )
+        .await
+        .expect("prepare before kill switch")
+        .into_inner();
+
+        service.prepared_registry.disable();
+
+        let prepare_error = RedDb::prepare_query(
+            &service,
+            Request::new(PrepareQueryRequest {
+                query: "SELECT 1".to_string(),
+            }),
+        )
+        .await
+        .expect_err("kill switch must reject prepare");
+        assert_eq!(prepare_error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(prepare_error.message(), "prepared statements disabled");
+
+        let execute_error = RedDb::execute_prepared(
+            &service,
+            Request::new(ExecutePreparedRequest {
+                prepared_id: prepared.prepared_id,
+                bind_json: vec!["42".to_string()],
+            }),
+        )
+        .await
+        .expect_err("kill switch must reject execute");
+        assert_eq!(execute_error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(execute_error.message(), "prepared statements disabled");
+    }
+
+    #[tokio::test]
+    async fn grpc_query_honors_per_request_commit_policy() {
+        let _env_lock = env_lock().lock().expect("env lock");
+        let _env = EnvGuard::set(&[("RED_PRIMARY_COMMIT_POLICY", "ack_n=1")]);
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE grpc_request_policy (id INTEGER)")
+            .expect("create table");
+        let service = RedDBGrpcServer::new(runtime.clone()).grpc_runtime();
+        let mut request = Request::new(QueryRequest {
+            query: "INSERT INTO grpc_request_policy (id) VALUES (1)".to_string(),
+            entity_types: Vec::new(),
+            capabilities: Vec::new(),
+            params: Vec::new(),
+        });
+        request
+            .metadata_mut()
+            .insert("x-reddb-commit-policy", "local".parse().expect("metadata"));
+
+        let error = RedDb::query(&service, request)
+            .await
+            .expect_err("weaker per-request policy must fail before mutation");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("weaker than resolved floor"));
+
+        let rows = runtime
+            .execute_query("SELECT id FROM grpc_request_policy")
+            .expect("read rows");
+        assert!(rows.result.records.is_empty());
     }
 
     #[tokio::test]
@@ -696,7 +842,7 @@ mod grpc_query_value_tests {
         let service = GrpcRuntime {
             runtime,
             auth_store,
-            prepared_registry: PreparedStatementRegistry::new(),
+            prepared_registry: Arc::new(PreparedRegistry::new()),
             oauth_validator: None,
         };
 
@@ -815,7 +961,7 @@ mod grpc_ask_query_reply_tests {
     use super::*;
     use crate::storage::query::modes::QueryMode;
     use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-    use crate::storage::schema::Value as SchemaValue;
+    use reddb_types::Value as SchemaValue;
 
     fn ask_runtime_result() -> RuntimeQueryResult {
         let mut result = UnifiedResult::with_columns(vec![

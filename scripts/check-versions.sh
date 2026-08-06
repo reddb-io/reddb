@@ -13,6 +13,21 @@ echo "engine: $ENGINE"
 
 fail=0
 
+# A workspace member that a lockfile no longer references is not drift: the
+# consumer legitimately dropped the dependency (e.g. the python driver moved
+# off the deprecated connector onto the canonical client). Absent means the
+# package is not in that dependency graph at all; a PRESENT-but-stale version
+# still fails.
+check_optional() {
+  local label=$1
+  local actual=$2
+  if [[ -z "$actual" ]]; then
+    echo "  · $label absent (not a dependency)"
+    return
+  fi
+  check "$label" "$actual"
+}
+
 check() {
   local label=$1
   local actual=$2
@@ -70,7 +85,7 @@ check "drivers/python/Cargo.lock reddb-io-wire" "$(lock_version drivers/python/C
 check "drivers/python/Cargo.lock reddb-io-grpc-proto" "$(lock_version drivers/python/Cargo.lock reddb-io-grpc-proto)"
 check "drivers/python/Cargo.lock reddb-io-server" "$(lock_version drivers/python/Cargo.lock reddb-io-server)"
 check "drivers/python/Cargo.lock reddb-io-client" "$(lock_version drivers/python/Cargo.lock reddb-io-client)"
-check "drivers/python/Cargo.lock reddb-io-client-connector" "$(lock_version drivers/python/Cargo.lock reddb-io-client-connector)"
+check_optional "drivers/python/Cargo.lock reddb-io-client-connector" "$(lock_version drivers/python/Cargo.lock reddb-io-client-connector)"
 check "drivers/python/Cargo.lock reddb-io-python" "$(lock_version drivers/python/Cargo.lock reddb-io-python)"
 check "drivers/js (@reddb-io/sdk)"  "$(grep -m1 '"version"' drivers/js/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "drivers/bun (@reddb-io/client-bun)"  "$(grep -m1 '"version"' drivers/bun/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"

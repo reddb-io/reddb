@@ -48,7 +48,7 @@
 //! ships steps 1+2 only; the hot-loop migration lives in a
 //! follow-up commit per executor.
 
-use super::types::Value;
+use reddb_types::types::Value;
 
 /// Pre-resolved column index. Wraps a u16 to make the AST
 /// ergonomic but stay one machine word.

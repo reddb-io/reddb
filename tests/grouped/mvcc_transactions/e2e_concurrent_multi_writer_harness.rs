@@ -7,8 +7,8 @@
 //! that share the same snapshot.
 
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};

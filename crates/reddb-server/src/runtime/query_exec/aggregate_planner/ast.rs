@@ -6,7 +6,7 @@
 //! lowers the relevant subset into this shape and falls back to the
 //! legacy path otherwise.
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Supported aggregate operations.
 ///

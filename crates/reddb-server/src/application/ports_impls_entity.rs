@@ -11,7 +11,7 @@ use crate::application::ttl_payload::{
     normalize_ttl_patch_operations, parse_top_level_ttl_metadata_entries,
 };
 use crate::json::{to_vec as json_to_vec, Value as JsonValue};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::MetadataValue;
 
 use super::*;
@@ -293,9 +293,7 @@ fn document_body_set_operation(column: &str, value: Value) -> PatchEntityOperati
     PatchEntityOperation {
         op: PatchEntityOperationType::Set,
         path: column.split('.').map(str::to_string).collect(),
-        value: Some(crate::presentation::entity_json::storage_value_to_json(
-            &value,
-        )),
+        value: Some(value.to_json()),
     }
 }
 
@@ -1760,7 +1758,7 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     runtime: &RedDBRuntime,
     collection: String,
     column_names: std::sync::Arc<Vec<String>>,
-    rows: Vec<Vec<crate::storage::schema::Value>>,
+    rows: Vec<Vec<reddb_types::Value>>,
 ) -> RedDBResult<Vec<CreateEntityOutput>> {
     use crate::storage::{
         unified::{EntityData, EntityKind, RowData},
@@ -1786,7 +1784,7 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
         .index_store_ref()
         .indexed_columns_set(collection.as_str());
     let has_secondary_indexes = !indexed_cols.is_empty();
-    let mut field_snapshots: Vec<Vec<(String, crate::storage::schema::Value)>> =
+    let mut field_snapshots: Vec<Vec<(String, reddb_types::Value)>> =
         if has_secondary_indexes {
             Vec::with_capacity(rows.len())
         } else {
@@ -1797,7 +1795,7 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
         .into_iter()
         .map(|values| {
             if has_secondary_indexes {
-                let mut snap: Vec<(String, crate::storage::schema::Value)> =
+                let mut snap: Vec<(String, reddb_types::Value)> =
                     Vec::with_capacity(indexed_cols.len());
                 for (name, val) in column_names.iter().zip(values.iter()) {
                     if indexed_cols.contains(name) {
@@ -1824,7 +1822,7 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
         .map_err(|e| crate::RedDBError::Internal(format!("{e:?}")))?;
 
     if has_secondary_indexes {
-        let index_rows: Vec<(EntityId, Vec<(String, crate::storage::schema::Value)>)> = ids
+        let index_rows: Vec<(EntityId, Vec<(String, reddb_types::Value)>)> = ids
             .iter()
             .zip(field_snapshots)
             .map(|(id, fields)| (*id, fields))
@@ -1959,7 +1957,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         &self,
         collection: String,
         column_names: std::sync::Arc<Vec<String>>,
-        rows: Vec<Vec<crate::storage::schema::Value>>,
+        rows: Vec<Vec<reddb_types::Value>>,
     ) -> RedDBResult<usize> {
         create_rows_batch_prevalidated_columnar_with_outputs(self, collection, column_names, rows)
             .map(|outputs| outputs.len())
@@ -1969,7 +1967,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         &self,
         collection: String,
         column_names: std::sync::Arc<Vec<String>>,
-        rows: Vec<Vec<crate::storage::schema::Value>>,
+        rows: Vec<Vec<reddb_types::Value>>,
     ) -> RedDBResult<usize> {
         self.create_rows_batch_columnar_with_outputs(collection, column_names, rows)
             .map(|outputs| outputs.len())
@@ -1979,7 +1977,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         &self,
         collection: String,
         column_names: std::sync::Arc<Vec<String>>,
-        rows: Vec<Vec<crate::storage::schema::Value>>,
+        rows: Vec<Vec<reddb_types::Value>>,
     ) -> RedDBResult<Vec<CreateEntityOutput>> {
         if rows.is_empty() {
             return Ok(Vec::new());
@@ -2030,7 +2028,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         let tuple_rows: Vec<CreateRowInput> = rows
             .into_iter()
             .map(|values| {
-                let mut fields: Vec<(String, crate::storage::schema::Value)> =
+                let mut fields: Vec<(String, reddb_types::Value)> =
                     Vec::with_capacity(ncols);
                 for (name, value) in column_names.iter().zip(values) {
                     fields.push((name.clone(), value));
@@ -2219,14 +2217,14 @@ impl RuntimeEntityPort for RedDBRuntime {
         // container; otherwise plain JSON. Reads decode either form to JSON.
         let binary_body = self.binary_document_body_enabled();
         let body_bytes = crate::document_body::serialize_document_body(&input.body, binary_body)?;
-        let fields: Vec<(String, crate::storage::schema::Value)> = vec![(
+        let fields: Vec<(String, reddb_types::Value)> = vec![(
             "body".to_string(),
-            crate::storage::schema::Value::Json(body_bytes),
+            reddb_types::Value::Json(body_bytes),
         )];
 
         let mut metadata = input.metadata;
         contract.apply_default_ttl(&mut metadata);
-        let columns: Vec<(&str, crate::storage::schema::Value)> = fields
+        let columns: Vec<(&str, reddb_types::Value)> = fields
             .iter()
             .map(|(key, value)| (key.as_str(), value.clone()))
             .collect();
@@ -2279,7 +2277,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         let fields = vec![
             (
                 "key".to_string(),
-                crate::storage::schema::Value::text(input.key),
+                reddb_types::Value::text(input.key),
             ),
             ("value".to_string(), value),
         ];
@@ -2312,18 +2310,18 @@ impl RuntimeEntityPort for RedDBRuntime {
         let mut fields = vec![
             (
                 "metric".to_string(),
-                crate::storage::schema::Value::text(input.metric),
+                reddb_types::Value::text(input.metric),
             ),
             (
                 "value".to_string(),
-                crate::storage::schema::Value::Float(input.value),
+                reddb_types::Value::Float(input.value),
             ),
         ];
 
         if let Some(timestamp_ns) = input.timestamp_ns {
             fields.push((
                 "timestamp".to_string(),
-                crate::storage::schema::Value::UnsignedInteger(timestamp_ns),
+                reddb_types::Value::UnsignedInteger(timestamp_ns),
             ));
         }
 
@@ -2340,7 +2338,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             })?;
             fields.push((
                 "tags".to_string(),
-                crate::storage::schema::Value::Json(tags_bytes),
+                reddb_types::Value::Json(tags_bytes),
             ));
         }
 
@@ -2361,7 +2359,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         &self,
         collection: &str,
         key: &str,
-    ) -> RedDBResult<Option<(crate::storage::schema::Value, crate::storage::EntityId)>> {
+    ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
         let db = self.db();
         ensure_collection_model_read(&db, collection, crate::catalog::CollectionModel::Kv)?;
         let store = db.store();
@@ -2372,12 +2370,12 @@ impl RuntimeEntityPort for RedDBRuntime {
         for entity in entities {
             if let crate::storage::EntityData::Row(ref row) = entity.data {
                 if let Some(ref named) = row.named {
-                    if let Some(crate::storage::schema::Value::Text(ref k)) = named.get("key") {
+                    if let Some(reddb_types::Value::Text(ref k)) = named.get("key") {
                         if &**k == key {
                             let value = named
                                 .get("value")
                                 .cloned()
-                                .unwrap_or(crate::storage::schema::Value::Null);
+                                .unwrap_or(reddb_types::Value::Null);
                             return Ok(Some((value, entity.id)));
                         }
                     }

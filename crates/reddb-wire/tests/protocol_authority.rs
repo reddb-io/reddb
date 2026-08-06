@@ -736,6 +736,164 @@ fn client_connector_redwire_is_compatibility_adapter_only() {
 }
 
 #[test]
+fn legacy_engine_and_client_connector_point_to_canonical_replacements() {
+    let root = repo_root();
+    let engine = read(root.join("crates/reddb-server/src/engine.rs"));
+    let connector = read(root.join("crates/reddb-client-connector/src/lib.rs"));
+    let grpc_lib = read(root.join("crates/reddb-grpc-proto/src/lib.rs"));
+    let grpc_client = read(root.join("crates/reddb-grpc-proto/src/client.rs"));
+    let client_manifest = read(root.join("crates/reddb-client/Cargo.toml"));
+    let server_manifest = read(root.join("crates/reddb-server/Cargo.toml"));
+    let client_connector = read(root.join("crates/reddb-client/src/connector/mod.rs"));
+    let server_stdio = read(root.join("crates/reddb-server/src/rpc_stdio.rs"));
+
+    assert!(
+        engine.contains("#[deprecated(")
+            && engine.contains("SILENT NO-OP")
+            && engine.contains("RedDBRuntime")
+            && engine.contains("RedDBServer"),
+        "RedDBEngine should say execute_query is a silent no-op and name both real entry points"
+    );
+
+    assert!(
+        connector.contains("reddb_grpc_proto") && connector.contains("RedDBClient"),
+        "the deprecated connector should delegate to reddb-grpc-proto"
+    );
+    // Shape-identical mirrors collapse to deprecated aliases; only the
+    // reshaped bulk reply keeps a real struct so `ids` still resolves.
+    for aliased in [
+        "HealthStatus",
+        "QueryResponse",
+        "CreatedEntity",
+        "OperationStatus",
+    ] {
+        assert!(
+            connector.contains(&format!("pub type {aliased} = reddb_grpc_proto::")),
+            "connector {aliased} should be a deprecated alias of the generated reply"
+        );
+        assert!(
+            !connector.contains(&format!("pub struct {aliased}"))
+                && !grpc_client.contains(&format!("pub struct {aliased}")),
+            "generated gRPC replies should replace mirror type {aliased}"
+        );
+    }
+    assert!(
+        !grpc_client.contains("pub struct BulkCreateStatus"),
+        "the canonical client should not carry the connector's bulk mirror type"
+    );
+
+    assert!(
+        grpc_lib.contains("pub use client::RedDBClient"),
+        "reddb-grpc-proto should publish the canonical RedDBClient"
+    );
+    assert!(
+        grpc_client.contains("Result<HealthReply")
+            && grpc_client.contains("Result<QueryReply")
+            && grpc_client.contains("Result<EntityReply")
+            && grpc_client.contains("Result<BulkEntityReply")
+            && grpc_client.contains("Result<OperationReply"),
+        "the canonical client should return generated reply types directly"
+    );
+
+    for (manifest_name, manifest) in [
+        ("reddb-client", client_manifest),
+        ("reddb-server", server_manifest),
+    ] {
+        assert!(
+            !manifest.contains("reddb-client-connector ="),
+            "{manifest_name} should depend on the canonical gRPC crate"
+        );
+    }
+    assert!(
+        client_connector.contains("pub use reddb_grpc_proto")
+            && server_stdio.contains("use reddb_grpc_proto::RedDBClient;"),
+        "workspace consumers should import the canonical client home"
+    );
+}
+
+/// The deprecation is only real if dependents see it. Crate-level
+/// `#![deprecated]` and plain `pub use` provably emit no warning for
+/// downstream crates, so every public item must carry its own attribute.
+#[test]
+fn client_connector_public_items_carry_item_level_deprecation() {
+    const ITEM_PREFIXES: [&str; 8] = [
+        "pub type ",
+        "pub struct ",
+        "pub enum ",
+        "pub trait ",
+        "pub const ",
+        "pub fn ",
+        "pub async fn ",
+        "pub use ",
+    ];
+
+    let root = repo_root();
+    let connector = read(root.join("crates/reddb-client-connector/src/lib.rs"));
+    let lines: Vec<&str> = connector.lines().collect();
+
+    let mut last_item: isize = -1;
+    let mut last_deprecated: isize = -1;
+    let mut items = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[deprecated(") {
+            last_deprecated = index as isize;
+            continue;
+        }
+        if !ITEM_PREFIXES.iter().any(|kind| trimmed.starts_with(kind)) {
+            continue;
+        }
+        assert!(
+            !trimmed.starts_with("pub use "),
+            "connector line {} re-exports with `pub use`, which carries no deprecation \
+             to dependents: {trimmed}",
+            index + 1
+        );
+        assert!(
+            last_deprecated > last_item,
+            "connector line {} is public without its own #[deprecated]: {trimmed}",
+            index + 1
+        );
+        last_item = index as isize;
+        items += 1;
+    }
+    assert!(
+        items >= 20,
+        "expected the connector's full pre-fold surface to be restored, found {items} public items"
+    );
+}
+
+/// ADR 0011: a deprecation slice only adds attributes. The old connector
+/// surface must still compile for existing consumers — same names, same
+/// signatures, same display strings.
+#[test]
+fn client_connector_keeps_its_pre_deprecation_surface() {
+    let root = repo_root();
+    let connector = read(root.join("crates/reddb-client-connector/src/lib.rs"));
+
+    for required in [
+        // Deleted by the fold; restored as delegating wrappers.
+        "pub async fn health(&mut self) -> Result<String",
+        "pub async fn create_row(",
+        // Display-string returns that must not become reply structs.
+        "pub async fn scan(&mut self, collection: &str, limit: u64) -> Result<String",
+        "pub async fn stats(&mut self) -> Result<String",
+        "\"state: {}, healthy: {}\"",
+        "\"total: {}, items: [{}]\"",
+        "\"collections: {}, entities: {}, memory: {} bytes, started_at: {}\"",
+        "\"id: {}, entity: {}\"",
+        // Reshaped reply that must keep its old field.
+        "pub ids: Vec<u64>",
+        "impl From<BulkEntityReply> for BulkCreateStatus",
+    ] {
+        assert!(
+            connector.contains(required),
+            "the deprecated connector must keep working: missing {required:?}"
+        );
+    }
+}
+
+#[test]
 fn client_redwire_client_type_has_single_definition() {
     let root = repo_root();
     let mut definitions = Vec::new();
@@ -1144,7 +1302,14 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
 fn redwire_json_operation_payloads_live_in_reddb_wire() {
     let root = repo_root();
     let client = read(root.join("crates/reddb-client/src/redwire/mod.rs"));
-    let server = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
+    // The RedWire reply renderers live in presentation (issue #2156); the
+    // session dispatches to them. Both files are held to the same rule:
+    // payload bytes come from reddb-wire, never hand-rolled server-side.
+    let server = format!(
+        "{}{}",
+        read(root.join("crates/reddb-server/src/wire/redwire/session.rs")),
+        read(root.join("crates/reddb-server/src/presentation/query_result.rs")),
+    );
 
     for forbidden in [
         "obj.insert(\n            \"collection\"",
@@ -1721,8 +1886,10 @@ fn redwire_generic_reply_frame_builders_live_in_reddb_wire() {
 fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
     let root = repo_root();
     let auth = read(root.join("crates/reddb-server/src/wire/redwire/auth.rs"));
+    let server_scram = read(root.join("crates/reddb-server/src/auth/scram.rs"));
     let session = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
     let wire = read(root.join("crates/reddb-wire/src/redwire/handshake.rs"));
+    let wire_scram = read(root.join("crates/reddb-wire/src/redwire/scram.rs"));
 
     for forbidden in [
         "fn parse_bearer_response",
@@ -1790,18 +1957,44 @@ fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
         "reddb-wire should own OAuth AuthResponse payload parsing"
     );
 
-    for required in [
+    for forbidden in [
         "parse_scram_client_first",
         "build_scram_server_first",
         "parse_scram_client_final",
+        "crate::auth::scram::",
     ] {
         assert!(
-            session.contains(&format!("reddb_wire::redwire::handshake::{required}")),
-            "server RedWire session should call reddb-wire SCRAM message helper {required}"
+            !session.contains(forbidden),
+            "server RedWire session must delegate SCRAM state and crypto, found {forbidden:?}"
         );
+    }
+    for required in [
+        "ScramServerHandshake",
+        "ScramServerInput",
+        "ScramServerOutput",
+    ] {
         assert!(
-            wire.contains(&format!("pub fn {required}")),
-            "reddb-wire should own SCRAM message helper {required}"
+            session.contains(required),
+            "server RedWire session should adapt the reddb-wire {required}"
+        );
+        let declaration = if required == "ScramServerHandshake" {
+            format!("pub struct {required}")
+        } else {
+            format!("pub enum {required}")
+        };
+        assert!(
+            wire_scram.contains(&declaration),
+            "reddb-wire should own SCRAM handshake type {required}"
+        );
+    }
+    assert!(
+        server_scram.contains("pub use reddb_wire::redwire::scram"),
+        "server SCRAM module should only preserve compatibility through wire re-exports"
+    );
+    for forbidden in ["use sha2", "pbkdf2_sha256", "fn verify_client_proof"] {
+        assert!(
+            !server_scram.contains(forbidden),
+            "server SCRAM module must not retain cryptographic implementation {forbidden:?}"
         );
     }
 }

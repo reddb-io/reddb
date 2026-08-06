@@ -28,7 +28,7 @@
 
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
+use reddb_types::Value;
 
 const MATRIX: &str = include_str!("../../../docs/conformance/public-surface-contract-matrix.md");
 

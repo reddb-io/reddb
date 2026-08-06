@@ -28,8 +28,9 @@ use reddb_wire::query_with_params::{
 use reddb_wire::redwire::operations::{
     decode_delete_payload, decode_get_payload, decode_insert_dispatch_payload,
     encode_bulk_ok_payload_from_json_id_literals, encode_delete_ok_payload,
-    encode_get_result_payload, encode_query_result_summary_payload,
+    encode_get_result_payload,
 };
+use reddb_wire::redwire::scram::{ScramServerHandshake, ScramServerInput, ScramServerOutput};
 
 use super::auth::{build_auth_ok, pick_auth_method, validate_auth_response, AuthOutcome};
 use super::validate_minor_version;
@@ -954,140 +955,79 @@ where
         }
     };
 
-    // 1. Client-first.
-    let cf = read_frame(stream).await?;
-    let cf_payload = match expect_auth_response_payload(
-        cf.kind,
-        &cf.payload,
-        "AuthResponse(client-first-message)",
-    ) {
-        Ok(payload) => payload,
-        Err(err) => {
-            let fail = encode_frame(&reply_frame_or_io_error(
-                cf.correlation_id,
-                MessageKind::AuthFail,
-                build_auth_fail_payload(&err.to_string()),
-            )?);
-            let _ = stream.write_all(&fail).await;
-            return Ok(None);
-        }
-    };
-    let (username, client_nonce, client_first_bare) =
-        match reddb_wire::redwire::handshake::parse_scram_client_first(cf_payload) {
-            Ok(t) => t,
-            Err(e) => {
-                let fail = encode_frame(&reply_frame_or_io_error(
-                    cf.correlation_id,
-                    MessageKind::AuthFail,
-                    build_auth_fail_payload(&format!("scram client-first: {e}")),
-                )?);
-                let _ = stream.write_all(&fail).await;
-                return Ok(None);
-            }
-        };
+    let mut handshake = ScramServerHandshake::new(
+        super::auth::new_server_nonce(),
+        crate::auth::store::random_bytes(16),
+    );
 
-    // 2. Look up the verifier. The wire handshake doesn't yet learn
+    // The wire handshake doesn't yet learn
     // a tenant before the SCRAM exchange completes, so we resolve
     // against the platform tenant. Tenant-scoped users authenticate
     // through the JWT path (which carries the tenant claim) or a
     // future explicit `tenant` extension to the AuthRequest payload.
-    // If the user doesn't exist or has no SCRAM verifier, run a
-    // dummy iteration count to keep the timing flat
-    // (no user-enumeration leak).
-    let verifier = store.lookup_scram_verifier_global(&username);
-    let (salt, iter, stored_key, server_key, user_known) = match &verifier {
-        Some(v) => (v.salt.clone(), v.iter, v.stored_key, v.server_key, true),
-        None => (
-            crate::auth::store::random_bytes(16),
-            crate::auth::scram::DEFAULT_ITER,
-            [0u8; 32],
-            [0u8; 32],
-            false,
-        ),
-    };
-
-    // 3. Server-first.
-    let server_nonce = super::auth::new_server_nonce();
-    let server_first = reddb_wire::redwire::handshake::build_scram_server_first(
-        &client_nonce,
-        &server_nonce,
-        &salt,
-        iter,
-    );
-    let req = encode_frame(&reply_frame_or_io_error(
-        cf.correlation_id,
-        MessageKind::AuthRequest,
-        server_first.as_bytes().to_vec(),
-    )?);
-    stream.write_all(&req).await?;
-
-    // 4. Client-final.
-    let cfinal = read_frame(stream).await?;
-    let cfinal_payload = match expect_auth_response_payload(
-        cfinal.kind,
-        &cfinal.payload,
-        "AuthResponse(client-final-message)",
-    ) {
-        Ok(payload) => payload,
-        Err(err) => {
+    let client_first = read_frame(stream).await?;
+    let username = match handshake.step(ScramServerInput::ClientMessage {
+        correlation_id: client_first.correlation_id,
+        kind: client_first.kind,
+        payload: client_first.payload,
+    }) {
+        ScramServerOutput::NeedVerifier { username } => username,
+        ScramServerOutput::Failed {
+            correlation_id,
+            reason,
+        } => {
             let fail = encode_frame(&reply_frame_or_io_error(
-                cfinal.correlation_id,
+                correlation_id,
                 MessageKind::AuthFail,
-                build_auth_fail_payload(&err.to_string()),
+                build_auth_fail_payload(&reason),
             )?);
             let _ = stream.write_all(&fail).await;
             return Ok(None);
         }
+        _ => unreachable!("client-first step must request a verifier or fail"),
     };
-    let (combined_nonce, presented_proof, client_final_no_proof) =
-        match reddb_wire::redwire::handshake::parse_scram_client_final(cfinal_payload) {
-            Ok(t) => t,
-            Err(e) => {
+    let verifier = store.lookup_scram_verifier_global(&username);
+    let (challenge_correlation_id, challenge_payload) =
+        match handshake.step(ScramServerInput::Verifier(verifier)) {
+            ScramServerOutput::Challenge {
+                correlation_id,
+                payload,
+            } => (correlation_id, payload),
+            _ => unreachable!("verifier step must produce a SCRAM challenge"),
+        };
+    let req = encode_frame(&reply_frame_or_io_error(
+        challenge_correlation_id,
+        MessageKind::AuthRequest,
+        challenge_payload,
+    )?);
+    stream.write_all(&req).await?;
+
+    let client_final = read_frame(stream).await?;
+    let (final_correlation_id, username, server_signature) =
+        match handshake.step(ScramServerInput::ClientMessage {
+            correlation_id: client_final.correlation_id,
+            kind: client_final.kind,
+            payload: client_final.payload,
+        }) {
+            ScramServerOutput::Authenticated {
+                correlation_id,
+                username,
+                server_signature,
+            } => (correlation_id, username, server_signature),
+            ScramServerOutput::Failed {
+                correlation_id,
+                reason,
+            } => {
                 let fail = encode_frame(&reply_frame_or_io_error(
-                    cfinal.correlation_id,
+                    correlation_id,
                     MessageKind::AuthFail,
-                    build_auth_fail_payload(&format!("scram client-final: {e}")),
+                    build_auth_fail_payload(&reason),
                 )?);
                 let _ = stream.write_all(&fail).await;
                 return Ok(None);
             }
+            _ => unreachable!("client-final step must authenticate or fail"),
         };
-    let expected_combined = format!("{client_nonce}{server_nonce}");
-    if combined_nonce != expected_combined {
-        let fail = encode_frame(&reply_frame_or_io_error(
-            cfinal.correlation_id,
-            MessageKind::AuthFail,
-            build_auth_fail_payload("scram nonce mismatch — replay protection failed"),
-        )?);
-        let _ = stream.write_all(&fail).await;
-        return Ok(None);
-    }
-
-    // 5. Verify proof.
-    let auth_message =
-        crate::auth::scram::auth_message(&client_first_bare, &server_first, &client_final_no_proof);
-    let proof_ok = if user_known {
-        let v = crate::auth::scram::ScramVerifier {
-            salt: salt.clone(),
-            iter,
-            stored_key,
-            server_key,
-        };
-        crate::auth::scram::verify_client_proof(&v, &auth_message, &presented_proof)
-    } else {
-        false
-    };
-    if !proof_ok {
-        let fail = encode_frame(&reply_frame_or_io_error(
-            cfinal.correlation_id,
-            MessageKind::AuthFail,
-            build_auth_fail_payload("invalid SCRAM proof"),
-        )?);
-        let _ = stream.write_all(&fail).await;
-        return Ok(None);
-    }
-
-    // 6. AuthOk with server signature.
     let user = store
         .list_users()
         .into_iter()
@@ -1096,17 +1036,16 @@ where
         .as_ref()
         .map(|u| u.role)
         .unwrap_or(crate::auth::Role::Read);
-    let server_sig = crate::auth::scram::server_signature(&server_key, &auth_message);
     let session_id = super::auth::new_session_id_for_scram();
     let ok_payload = super::auth::build_scram_auth_ok(
         &session_id,
         &username,
         role,
         server_features,
-        &server_sig,
+        &server_signature,
     );
     let ok = encode_frame(&reply_frame_or_io_error(
-        cfinal.correlation_id,
+        final_correlation_id,
         MessageKind::AuthOk,
         ok_payload,
     )?);
@@ -1149,14 +1088,12 @@ fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame)
             );
         }
     };
-    match QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new())) {
-        Ok(result) => {
-            let payload =
-                encode_query_result_summary_payload(result.statement_type, result.affected_rows);
-            build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
-        }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
-    }
+    let result =
+        QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new()));
+    crate::presentation::query_result::summary_frame(
+        frame.correlation_id,
+        result.as_ref().map_err(ToString::to_string),
+    )
 }
 
 fn run_query_with_params(
@@ -1182,16 +1119,11 @@ fn run_query_with_params(
     if let Some(policy) = commit_policy {
         query = query.with_commit_policy(policy);
     }
-    match QueryRequestExecutor::new(runtime, prepared).execute(query) {
-        Ok(result) => {
-            let payload =
-                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None)
-                    .to_string_compact()
-                    .into_bytes();
-            build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
-        }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
-    }
+    let result = QueryRequestExecutor::new(runtime, prepared).execute(query);
+    crate::presentation::query_result::envelope_frame(
+        frame.correlation_id,
+        result.as_ref().map_err(ToString::to_string),
+    )
 }
 
 fn parse_redwire_commit_policy(
@@ -1672,6 +1604,11 @@ mod tests {
             summary.get("statement").and_then(|value| value.as_str()),
             Some("select")
         );
+        assert_eq!(
+            summary.get("affected").and_then(|value| value.as_u64()),
+            Some(0),
+            "affected is pinned even when it is 0, got {summary}"
+        );
         assert!(
             summary.get("result").is_none(),
             "Query must not carry the full result envelope, got {summary}"
@@ -1970,7 +1907,7 @@ mod tests {
             .records
             .iter()
             .filter_map(|record| match record.get("name") {
-                Some(crate::storage::schema::Value::Text(s)) => Some(s.to_string()),
+                Some(reddb_types::Value::Text(s)) => Some(s.to_string()),
                 _ => None,
             })
             .collect();

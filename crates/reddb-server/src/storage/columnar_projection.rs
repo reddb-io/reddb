@@ -34,10 +34,10 @@
 //! follow-up slice; the equivalence/freshness/budget oracles here prove the
 //! loop is correct end to end first.
 
-use crate::storage::schema::types::{DataType, Value};
 use crate::storage::unified::{
     read_column_block, write_column_block, ColumnBlockError, ColumnInput, ColumnSemantics,
 };
+use reddb_types::types::{DataType, Value};
 
 /// Rows per sparse granule mark inside a sealed segment. Mirrors the default
 /// the timeseries seal path uses; the exact value only affects skip-index

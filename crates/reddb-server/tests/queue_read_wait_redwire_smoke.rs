@@ -28,8 +28,8 @@ use reddb_server::runtime::mvcc::{
 };
 use reddb_server::server::RedDBServer;
 use reddb_server::storage::query::unified::UnifiedRecord;
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 use reddb_wire::redwire::{
     build_auth_response_anonymous_payload, build_auth_response_bearer_payload,
     build_auth_response_frame, build_client_hello_frame, build_ping_frame,

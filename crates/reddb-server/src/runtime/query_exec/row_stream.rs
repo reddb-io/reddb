@@ -369,7 +369,7 @@ impl RowStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     fn row(i: u64) -> UnifiedRecord {
         let mut r = UnifiedRecord::new();

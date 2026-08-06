@@ -9,8 +9,8 @@ use support::{
 
 use reddb::application::{ExecuteQueryInput, QueryUseCases};
 use reddb::runtime::RuntimeQueryResult;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 
 #[test]
 #[ignore = "persistent multimodel fixture"]

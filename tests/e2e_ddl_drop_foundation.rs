@@ -7,11 +7,11 @@ use reddb::auth::{AuthConfig, AuthStore};
 use reddb::catalog::{CollectionModel, SchemaMode};
 use reddb::physical::{CollectionContract, ContractOrigin};
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::{
     storage::{DeployProfile, StoragePackaging, StorageProfileSelection},
     QueryUseCases, RedDBOptions, RedDBRuntime,
 };
+use reddb_types::Value;
 
 #[allow(dead_code)]
 mod support;

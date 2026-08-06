@@ -10,8 +10,8 @@
 //!    fields, plus the companion hash the BTREE builds for its own column).
 //!  - The index refreshes correctly on insert / update / delete.
 
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime, RuntimeQueryResult};
+use reddb_types::Value;
 
 /// Collect the `name` column of every returned record, preserving result
 /// order — the row identity we assert ordering against.

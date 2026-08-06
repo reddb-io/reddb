@@ -5,7 +5,7 @@
 
 use std::f64::consts::PI;
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 pub mod h3;
 

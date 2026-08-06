@@ -2,7 +2,6 @@ async fn catalog_consistency(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::catalog_json::catalog_consistency_json(
             &self.catalog_use_cases().consistency_report(),
@@ -14,7 +13,6 @@ async fn physical_metadata(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let metadata = self
         .native_use_cases()
         .physical_metadata()
@@ -24,7 +22,6 @@ async fn physical_metadata(
 }
 
 async fn native_header(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let header = self.native_use_cases().native_header().map_err(to_status)?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::native_json::native_header_json(header),
@@ -35,7 +32,6 @@ async fn native_collection_roots(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let roots = self
         .native_use_cases()
         .native_collection_roots()
@@ -49,7 +45,6 @@ async fn native_manifest_summary(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let summary = self
         .native_use_cases()
         .native_manifest_summary()
@@ -63,7 +58,6 @@ async fn native_registry_summary(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let summary = self
         .native_use_cases()
         .native_registry_summary()
@@ -77,7 +71,6 @@ async fn native_recovery_summary(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let summary = self
         .native_use_cases()
         .native_recovery_summary()
@@ -91,7 +84,6 @@ async fn native_catalog_summary(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let summary = self
         .native_use_cases()
         .native_catalog_summary()
@@ -105,7 +97,6 @@ async fn native_metadata_state_summary(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let summary = self
         .native_use_cases()
         .native_metadata_state_summary()
@@ -119,7 +110,6 @@ async fn physical_authority(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::ops_json::physical_authority_status_json(
             &self.native_use_cases().physical_authority_status(),
@@ -131,7 +121,6 @@ async fn native_physical_state(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let state = self
         .native_use_cases()
         .native_physical_state()
@@ -151,7 +140,6 @@ async fn native_vector_artifacts(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let summaries = self
         .native_use_cases()
         .native_vector_artifact_pages()
@@ -165,7 +153,6 @@ async fn inspect_native_vector_artifacts(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let batch = self
         .native_use_cases()
         .inspect_vector_artifacts()
@@ -179,7 +166,6 @@ async fn inspect_native_vector_artifact(
     &self,
     request: Request<CollectionRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let request = request.into_inner();
     let artifact = self
         .native_use_cases()
@@ -197,7 +183,6 @@ async fn native_header_repair_policy(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let policy = self
         .native_use_cases()
         .native_header_repair_policy()
@@ -211,7 +196,6 @@ async fn repair_native_header(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<OperationReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let policy = self
         .native_use_cases()
         .repair_native_header_from_metadata()
@@ -226,7 +210,6 @@ async fn warmup_native_vector_artifact(
     &self,
     request: Request<CollectionRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let artifact = self
         .native_use_cases()
@@ -244,7 +227,6 @@ async fn warmup_native_vector_artifacts(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let batch = self
         .native_use_cases()
         .warmup_vector_artifacts()
@@ -258,7 +240,6 @@ async fn repair_native_physical_state(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<OperationReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let repaired = self
         .native_use_cases()
         .repair_native_physical_state_from_metadata()
@@ -277,7 +258,6 @@ async fn rebuild_physical_metadata(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<OperationReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let rebuilt = self
         .native_use_cases()
         .rebuild_physical_metadata_from_native_state()
@@ -296,7 +276,6 @@ async fn manifest(
     &self,
     request: Request<ManifestRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let request = request.into_inner();
     let events = self
         .native_use_cases()
@@ -312,7 +291,6 @@ async fn manifest(
 }
 
 async fn roots(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let roots = self.native_use_cases().collection_roots().map_err(to_status)?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::native_json::collection_roots_json(&roots),
@@ -320,7 +298,6 @@ async fn roots(&self, request: Request<Empty>) -> Result<Response<PayloadReply>,
 }
 
 async fn snapshots(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let snapshots = self.native_use_cases().snapshots().map_err(to_status)?;
     Ok(Response::new(PayloadReply {
         ok: true,
@@ -329,7 +306,6 @@ async fn snapshots(&self, request: Request<Empty>) -> Result<Response<PayloadRep
 }
 
 async fn exports(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let exports = self.native_use_cases().exports().map_err(to_status)?;
     Ok(Response::new(PayloadReply {
         ok: true,
@@ -341,7 +317,6 @@ async fn indexes(
     &self,
     request: Request<CollectionRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let request = request.into_inner();
     let indexes = match none_if_empty(&request.collection) {
         Some(collection) => self.catalog_use_cases().indexes_for_collection(collection),
@@ -356,7 +331,6 @@ async fn declared_indexes(
     &self,
     request: Request<CollectionRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let request = request.into_inner();
     let indexes = match none_if_empty(&request.collection) {
         Some(collection) => self.catalog_use_cases().declared_indexes_for_collection(collection),
@@ -371,7 +345,6 @@ async fn operational_indexes(
     &self,
     request: Request<CollectionRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let request = request.into_inner();
     let indexes = match none_if_empty(&request.collection) {
         Some(collection) => self.catalog_use_cases().indexes_for_collection(collection),
@@ -383,7 +356,6 @@ async fn operational_indexes(
 }
 
 async fn index_statuses(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::catalog_json::catalog_index_statuses_json(
             &self.catalog_use_cases().index_statuses(),
@@ -392,7 +364,6 @@ async fn index_statuses(&self, request: Request<Empty>) -> Result<Response<Paylo
 }
 
 async fn index_attention(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::catalog_json::catalog_index_attention_json(
             &self.catalog_use_cases().index_attention(),
@@ -404,7 +375,6 @@ async fn set_index_enabled(
     &self,
     request: Request<IndexToggleRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     if request.name.trim().is_empty() {
         return Err(Status::invalid_argument("index name cannot be empty"));
@@ -422,7 +392,6 @@ async fn mark_index_building(
     &self,
     request: Request<IndexNameRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     if request.name.trim().is_empty() {
         return Err(Status::invalid_argument("index name cannot be empty"));
@@ -440,7 +409,6 @@ async fn mark_index_ready(
     &self,
     request: Request<IndexNameRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     if request.name.trim().is_empty() {
         return Err(Status::invalid_argument("index name cannot be empty"));
@@ -458,7 +426,6 @@ async fn fail_index(
     &self,
     request: Request<IndexNameRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     if request.name.trim().is_empty() {
         return Err(Status::invalid_argument("index name cannot be empty"));
@@ -476,7 +443,6 @@ async fn mark_index_stale(
     &self,
     request: Request<IndexNameRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     if request.name.trim().is_empty() {
         return Err(Status::invalid_argument("index name cannot be empty"));
@@ -494,7 +460,6 @@ async fn warmup_index(
     &self,
     request: Request<IndexNameRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     if request.name.trim().is_empty() {
         return Err(Status::invalid_argument("index name cannot be empty"));
@@ -512,7 +477,6 @@ async fn rebuild_indexes(
     &self,
     request: Request<CollectionRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let indexes = self
         .admin_use_cases()

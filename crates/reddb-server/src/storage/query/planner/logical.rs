@@ -13,8 +13,8 @@ use crate::storage::query::sql_lowering::{
     effective_join_projections, effective_path_filter, effective_path_projections,
     effective_table_filter, effective_table_projections, effective_vector_filter,
 };
-use crate::storage::schema::Value;
 use crate::storage::RedDB;
+use reddb_types::Value;
 
 use super::{AccessPathDecision, CanonicalLogicalNode, CardinalityEstimate, CostEstimator};
 use logical_helpers::*;

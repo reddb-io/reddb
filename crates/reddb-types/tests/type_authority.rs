@@ -3,9 +3,8 @@
 //! `reddb-io-types` is the neutral keystone crate that owns the logical type
 //! vocabulary — `Value`, `DataType`, `SqlTypeName`, `TypeModifier`,
 //! `TypeCategory`, `ValueError`, `Row` — and the coercion entry points
-//! (`coerce`, `find_cast`, the spine resolvers). The server tree may only
-//! *re-export* those items through its `storage::schema` shim; it must never
-//! *declare* them again.
+//! (`coerce`, `find_cast`, the spine resolvers). The server tree must import
+//! those items directly from `reddb_types`; it must never *declare* them again.
 //!
 //! This mirrors the layout-authority prior art in `reddb-file`'s test suite
 //! (`tests/layout_authority/boundary.rs`): a mechanical fence that fails the
@@ -21,8 +20,8 @@ struct SeededConcept {
     removal_slice: &'static str,
 }
 
-// These are the 32 architectural concepts that were declared on both sides of
-// an authority boundary when phase 2 began (#2113). Generic cross-domain names
+// These are the architectural concepts that were declared on both sides of an
+// authority boundary when phase 2 began (#2113) and are still duplicated. Generic cross-domain names
 // (`Cursor`, `JsonValue`, `ParseError`, and `Value`) are deliberately absent:
 // their declarations represent unrelated concepts and cannot seed this fence.
 const SEEDED_CONCEPTS: &[SeededConcept] = &[
@@ -37,12 +36,6 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
         "crates/reddb-rql/src/core.rs",
         &["crates/reddb-server/src/storage/query/executors/subquery.rs"],
         "#2165",
-    ),
-    concept(
-        "DistanceMetric",
-        "crates/reddb-types/src/distance.rs",
-        &["crates/reddb-server/src/storage/vector/introspection.rs"],
-        "#2164",
     ),
     concept(
         "EdgeDirection",
@@ -672,15 +665,18 @@ fn server_must_not_redeclare_the_logical_type_system() {
     }
 }
 
-/// The concept fence blocks all 32 known cross-boundary concepts by both name
+/// The concept fence blocks the known cross-boundary concepts by both name
 /// and exact declaration shape. Existing declarations are temporary,
 /// path-specific exceptions; moving or renaming one does not preserve the
 /// exception.
 #[test]
 fn server_must_not_redeclare_seeded_authority_concepts() {
+    // 32 concepts seeded at phase-2 start, minus `DistanceMetric`, whose
+    // duplicate this slice (#2164) removed. Retiring a concept means deleting
+    // its entry, never loosening this count.
     assert_eq!(
         SEEDED_CONCEPTS.len(),
-        32,
+        31,
         "the phase-2 concept seed must stay explicit"
     );
 
@@ -729,29 +725,81 @@ fn server_must_not_redeclare_seeded_authority_concepts() {
     );
 }
 
-/// The `storage::schema` shims must stay pure re-exports of the keystone crate.
-/// Guards the boundary from the positive side: if a shim is ever replaced by a
-/// real declaration, its `pub use reddb_types::` line disappears and this fails.
+/// Server imports must name the types keystone directly, and the retired
+/// `storage::schema` re-export shims must not return.
 #[test]
-fn schema_shims_reexport_from_types_crate() {
+fn server_imports_name_types_keystone_directly() {
     let root = repo_root();
     let schema = root.join("crates/reddb-server/src/storage/schema");
     for shim in [
         "types.rs",
-        "coerce.rs",
-        "cast_catalog.rs",
-        "coercion_spine.rs",
-        "function_catalog.rs",
-        "operator_catalog.rs",
-        "table.rs",
         "value_codec.rs",
+        "coerce.rs",
+        "polymorphic.rs",
+        "function_catalog.rs",
+        "canonical_key.rs",
+        "table.rs",
+        "coercion_spine.rs",
+        "operator_catalog.rs",
+        "parametric.rs",
+        "cast_catalog.rs",
     ] {
-        let text = read(schema.join(shim));
         assert!(
-            text.contains("pub use reddb_types::"),
-            "storage/schema/{shim} must re-export from reddb_types, not declare types locally"
+            !schema.join(shim).exists(),
+            "retired storage/schema/{shim} shim must not exist"
         );
     }
+
+    // The gate matches qualified paths anywhere on the line, not just `use`
+    // statements: the shim is only retired once no call site can still name a
+    // type through it, however the path is spelled.
+    let retired_paths = [
+        "crate::storage::schema::",
+        "reddb_server::storage::schema::",
+        "reddb::storage::schema::",
+    ];
+    let mut violations = Vec::new();
+    for dir in [
+        root.join("crates/reddb-server/src"),
+        root.join("crates/reddb-server/tests"),
+        root.join("crates/reddb-client/src"),
+        root.join("crates/reddb-client/tests"),
+        root.join("tests"),
+        root.join("examples"),
+        // drivers/ is a separate workspace, so `cargo check --workspace`
+        // never sees it — the gate is the only thing that does.
+        root.join("drivers"),
+    ] {
+        if !dir.exists() {
+            continue;
+        }
+        for path in rust_files_under(&dir) {
+            for (line_index, line) in read(&path).lines().enumerate() {
+                let line = line.trim_start();
+                if line.starts_with("//") {
+                    continue;
+                }
+                if retired_paths.iter().any(|p| line.contains(p)) {
+                    let rel = path.strip_prefix(&root).expect("source under repo root");
+                    violations.push(format!("{}:{}", rel.display(), line_index + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "call sites still name retired storage::schema paths:\n{}",
+        violations.join("\n")
+    );
+
+    // The mod-level re-export is the trunk of the shim: while it stands, every
+    // qualified path above keeps resolving.
+    let mod_rs = read(&schema.join("mod.rs"));
+    assert!(
+        !mod_rs.contains("pub use reddb_types::"),
+        "storage/schema/mod.rs must not re-export the keystone vocabulary"
+    );
 }
 
 #[test]

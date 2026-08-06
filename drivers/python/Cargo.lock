@@ -2311,7 +2311,6 @@ dependencies = [
 name = "reddb-io-client"
 version = "1.23.2"
 dependencies = [
- "reddb-io-client-connector",
  "reddb-io-grpc-proto",
  "reddb-io-server",
  "reddb-io-types",
@@ -2319,17 +2318,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
- "tonic",
  "ureq",
-]
-
-[[package]]
-name = "reddb-io-client-connector"
-version = "1.23.2"
-dependencies = [
- "reddb-io-grpc-proto",
- "reddb-io-wire",
- "tonic",
 ]
 
 [[package]]
@@ -2423,7 +2412,6 @@ dependencies = [
  "prost",
  "rayon",
  "rcgen",
- "reddb-io-client-connector",
  "reddb-io-crypto",
  "reddb-io-file",
  "reddb-io-grpc-proto",
@@ -2464,8 +2452,10 @@ dependencies = [
 name = "reddb-io-wire"
 version = "1.23.2"
 dependencies = [
+ "hmac 0.13.0",
  "reddb-io-types",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "url",
  "zstd",

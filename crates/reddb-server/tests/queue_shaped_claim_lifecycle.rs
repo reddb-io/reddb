@@ -14,8 +14,8 @@
 //!   `ORDER BY`, or `CLAIM EXACT`) returns a clear `InvalidOperation`
 //!   rather than silently mutating queue storage.
 
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots")

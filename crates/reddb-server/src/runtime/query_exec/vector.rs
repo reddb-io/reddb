@@ -222,20 +222,7 @@ pub(crate) fn runtime_vector_matches(
         query.k.max(1)
     };
 
-    for entity in manager.query_all(|entity| {
-        // `query_all` may fan out across worker threads that do not
-        // inherit the dispatch thread's snapshot thread-local, so we
-        // pass the captured snapshot context explicitly. In autocommit
-        // there is no captured context (`None`); the table-scan paths
-        // would treat that as "always visible", but a deleted/superseded
-        // vector carries `xmax != 0` and must be hidden — mirror the
-        // autocommit rule of `entity_visible_under_current_snapshot`.
-        if snap_ctx.is_none() {
-            return entity.xmax == 0
-                && !crate::runtime::ai::moderation::entity_moderation_hidden(entity);
-        }
-        crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
-    }) {
+    for entity in manager.scan(snap_ctx.as_ref(), |_| true) {
         if let Some(filter) = filter.as_ref() {
             if !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter) {
                 continue;

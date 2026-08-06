@@ -13,7 +13,7 @@ use super::error::DevXError;
 use super::refs::{NodeRef, TableRef, VectorRef};
 use super::{run_preprocessors, SharedPreprocessors};
 use crate::json::{to_vec as json_to_vec, Value as JsonValue};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 // ============================================================================
 // Node Builder

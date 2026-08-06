@@ -8,8 +8,8 @@
 //!
 //! All functions are `pub(super)` so only `query_exec.rs` can reach them.
 
-use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, EntityKind, UnifiedEntity};
+use reddb_types::Value;
 
 /// Wrap a `HashMap<String, String>` tag set as a `Value::Json` blob so it
 /// round-trips through the schema layer unchanged. Used by both the

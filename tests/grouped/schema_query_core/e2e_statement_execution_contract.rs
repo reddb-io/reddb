@@ -12,8 +12,8 @@ use reddb::runtime::mvcc::{
     clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
     set_current_tenant,
 };
-use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")

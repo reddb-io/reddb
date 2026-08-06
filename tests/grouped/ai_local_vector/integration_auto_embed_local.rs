@@ -25,8 +25,8 @@ use reddb::runtime::ai::local_embedding::{
     clear_local_embedding_backend_for_tests, install_local_embedding_backend,
     LocalEmbeddingBackend, LocalEmbeddingRequest,
 };
-use reddb::storage::schema::Value;
 use reddb::{RedDBError, RedDBResult, RedDBRuntime};
+use reddb_types::Value;
 
 use super::support::backend_lock;
 

@@ -2,8 +2,8 @@
 
 use crate::api::{RedDBError, RedDBResult};
 use crate::storage::memory_pools::{MemoryPool, MEMORY_POOLS};
-use crate::storage::schema::Value;
 use crate::storage::unified::entity::UnifiedEntity;
+use reddb_types::Value;
 
 const MAX_PRESSURE_TICKS: usize = 64;
 const FIELD_BASE_BYTES: u64 = 64;

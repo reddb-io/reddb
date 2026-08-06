@@ -255,12 +255,12 @@ impl RedDBRuntime {
             .augment_body_derived_index_fields(&post, &indexed_cols);
 
         if let Some(old_version) = applied.replaced_entity.as_ref() {
-            let old_index_fields: Vec<(String, crate::storage::schema::Value)> = pre
+            let old_index_fields: Vec<(String, reddb_types::Value)> = pre
                 .iter()
                 .filter(|(col, _)| indexed_cols.contains(col))
                 .cloned()
                 .collect();
-            let new_index_fields: Vec<(String, crate::storage::schema::Value)> = post
+            let new_index_fields: Vec<(String, reddb_types::Value)> = post
                 .iter()
                 .filter(|(col, _)| indexed_cols.contains(col))
                 .cloned()

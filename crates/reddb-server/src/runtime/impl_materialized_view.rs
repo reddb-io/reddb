@@ -122,15 +122,11 @@ impl RedDBRuntime {
                         .as_row()
                         .and_then(|row| row.get_field(other))
                         .and_then(|v| match v {
-                            crate::storage::schema::Value::TimestampMs(t) => Some(*t),
-                            crate::storage::schema::Value::Timestamp(t) => {
-                                Some(t.saturating_mul(1_000))
-                            }
-                            crate::storage::schema::Value::BigInt(t) => Some(*t),
-                            crate::storage::schema::Value::UnsignedInteger(t) => {
-                                i64::try_from(*t).ok()
-                            }
-                            crate::storage::schema::Value::Integer(t) => Some(*t),
+                            reddb_types::Value::TimestampMs(t) => Some(*t),
+                            reddb_types::Value::Timestamp(t) => Some(t.saturating_mul(1_000)),
+                            reddb_types::Value::BigInt(t) => Some(*t),
+                            reddb_types::Value::UnsignedInteger(t) => i64::try_from(*t).ok(),
+                            reddb_types::Value::Integer(t) => Some(*t),
                             _ => None,
                         }),
                 };

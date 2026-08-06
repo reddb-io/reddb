@@ -18,9 +18,7 @@
 //! bumped to `pub(crate)` and re-exported from `impl_core` for the call sites
 //! that still live there.
 use super::authz::policy_columns::parse_positive_iterations;
-use super::execution_context::{
-    capture_current_snapshot, current_auth_identity, entity_visible_with_context,
-};
+use super::execution_context::{capture_current_snapshot, current_auth_identity};
 use super::rls_injection::{edge_passes_rls, node_passes_rls};
 use super::*;
 
@@ -184,8 +182,8 @@ fn ordered_result_columns(result: &crate::storage::query::unified::UnifiedResult
 /// Canonical node-id string for a cell value, so the node universe (from the
 /// `nodes` subquery) and the edge endpoints (from the `edges` subquery)
 /// compare equal regardless of integer-vs-text typing. `Null` is not a node.
-fn value_to_node_id(value: &crate::storage::schema::Value) -> Option<String> {
-    use crate::storage::schema::Value;
+fn value_to_node_id(value: &reddb_types::Value) -> Option<String> {
+    use reddb_types::Value;
     match value {
         Value::Null => None,
         Value::Text(s) => Some(s.to_string()),
@@ -197,8 +195,8 @@ fn value_to_node_id(value: &crate::storage::schema::Value) -> Option<String> {
 }
 
 /// Numeric edge weight from a cell value (the optional third `edges` column).
-fn value_to_weight(value: &crate::storage::schema::Value) -> Option<f32> {
-    use crate::storage::schema::Value;
+fn value_to_weight(value: &reddb_types::Value) -> Option<f32> {
+    use reddb_types::Value;
     match value {
         Value::Float(f) => Some(*f as f32),
         Value::Integer(n) => Some(*n as f32),
@@ -270,7 +268,7 @@ fn inline_edges(
         };
         let weight = match weight_col {
             Some(col) => match record.get(col) {
-                None | Some(crate::storage::schema::Value::Null) => 1.0,
+                None | Some(reddb_types::Value::Null) => 1.0,
                 Some(value) => value_to_weight(value).ok_or_else(|| {
                     RedDBError::Query(format!(
                         "table function '{name}' inline form: `edges` weight column must be numeric"
@@ -431,7 +429,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
         use crate::storage::engine::graph_algorithms;
         use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         if name.eq_ignore_ascii_case("components") {
             reject_named_args(name, named_args)?;
@@ -629,7 +627,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
         use crate::storage::engine::graph_algorithms;
         use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         // Read-only materialization of the full active graph. The named
         // collection identifies the active graph scope; passing `None` for the
@@ -678,7 +676,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
         use crate::storage::engine::graph_algorithms;
         use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         let graph = super::graph_dsl::materialize_graph_with_projection(
             self.inner.db.store().as_ref(),
@@ -711,7 +709,7 @@ impl RedDBRuntime {
         rows: Vec<(String, f64)>,
     ) -> crate::storage::query::unified::UnifiedResult {
         use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "score".into()]);
         for (node_id, score) in rows {
             let mut record = UnifiedRecord::new();
@@ -734,10 +732,7 @@ impl RedDBRuntime {
         &self,
     ) -> RedDBResult<(
         crate::storage::engine::GraphStore,
-        std::collections::HashMap<
-            String,
-            std::collections::HashMap<String, crate::storage::schema::Value>,
-        >,
+        std::collections::HashMap<String, std::collections::HashMap<String, reddb_types::Value>>,
         crate::storage::query::unified::EdgeProperties,
     )> {
         use crate::storage::engine::GraphStore;
@@ -750,7 +745,7 @@ impl RedDBRuntime {
         let role = current_auth_identity().map(|(_, r)| r.as_str().to_string());
 
         let graph = GraphStore::new();
-        let mut node_properties: HashMap<String, HashMap<String, crate::storage::schema::Value>> =
+        let mut node_properties: HashMap<String, HashMap<String, reddb_types::Value>> =
             HashMap::new();
         let mut edge_properties: crate::storage::query::unified::EdgeProperties = HashMap::new();
         let mut allowed_nodes: HashSet<String> = HashSet::new();
@@ -770,11 +765,8 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            let entities = manager.query_all(|_| true);
+            let entities = manager.scan(snap_ctx.as_ref(), |_| true);
             for entity in entities {
-                if !entity_visible_with_context(snap_ctx.as_ref(), &entity) {
-                    continue;
-                }
                 let EntityKind::GraphNode(ref node) = entity.kind else {
                     continue;
                 };
@@ -803,11 +795,8 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            let entities = manager.query_all(|_| true);
+            let entities = manager.scan(snap_ctx.as_ref(), |_| true);
             for entity in entities {
-                if !entity_visible_with_context(snap_ctx.as_ref(), &entity) {
-                    continue;
-                }
                 let EntityKind::GraphEdge(ref edge) = entity.kind else {
                     continue;
                 };

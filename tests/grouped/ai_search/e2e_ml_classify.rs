@@ -9,8 +9,8 @@ use reddb::storage::ml::classifier::{
     IncrementalClassifier, LogisticRegression, LogisticRegressionConfig, TrainingExample,
 };
 use reddb::storage::ml::ModelVersion;
-use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBRuntime};
+use reddb_types::Value;
 
 use super::support::{env_lock, PersistentRuntime};
 

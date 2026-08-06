@@ -3,8 +3,8 @@
 mod support;
 
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")

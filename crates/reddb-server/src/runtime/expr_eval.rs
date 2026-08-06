@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::storage::query::ast::{BinOp, Expr, FieldRef, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::Value;
 use crate::storage::RedDB;
+use reddb_types::Value;
 
 /// Evaluate an `Expr` against a record and return its resulting
 /// `Value`, or `None` if the expression cannot be resolved (missing
@@ -555,7 +555,7 @@ fn value_as_number(v: &Value) -> Option<(f64, bool)> {
         Value::Integer(n) | Value::BigInt(n) => Some((*n as f64, false)),
         Value::UnsignedInteger(n) => Some((*n as f64, false)),
         Value::Float(f) => Some((*f, true)),
-        Value::Decimal(d) => Some((crate::storage::schema::decimal_to_f64(*d), true)),
+        Value::Decimal(d) => Some((reddb_types::types::decimal_to_f64(*d), true)),
         Value::Text(s) => s
             .parse::<i64>()
             .map(|n| (n as f64, false))
@@ -565,8 +565,8 @@ fn value_as_number(v: &Value) -> Option<(f64, bool)> {
     }
 }
 
-fn runtime_cast(src: &Value, target: crate::storage::schema::types::DataType) -> Value {
-    use crate::storage::schema::types::DataType as DT;
+fn runtime_cast(src: &Value, target: reddb_types::DataType) -> Value {
+    use reddb_types::types::DataType as DT;
     match (src, target) {
         (v, DT::Text) => Value::text(v.display_string()),
         (Value::Integer(n), DT::Float) => Value::Float(*n as f64),
@@ -580,11 +580,11 @@ fn runtime_cast(src: &Value, target: crate::storage::schema::types::DataType) ->
         (Value::Float(f), DT::UnsignedInteger) if *f >= 0.0 => Value::UnsignedInteger(*f as u64),
         (Value::Boolean(b), DT::Integer) => Value::Integer(if *b { 1 } else { 0 }),
         (Value::Integer(n), DT::Boolean) => Value::Boolean(*n != 0),
-        (Value::Text(s), t) => match crate::storage::schema::coerce::coerce(s, t, None) {
+        (Value::Text(s), t) => match reddb_types::coerce::coerce(s, t, None) {
             Ok(v) => v,
             Err(_) => Value::Null,
         },
-        (v, t) => match crate::storage::schema::coerce::coerce(&v.display_string(), t, None) {
+        (v, t) => match reddb_types::coerce::coerce(&v.display_string(), t, None) {
             Ok(v) => v,
             Err(_) => Value::Null,
         },
@@ -2124,11 +2124,7 @@ fn money_from_args(args: &[Value]) -> Option<Value> {
         [left, right] => format!("{} {}", money_arg_text(left)?, money_arg_text(right)?),
         _ => return Some(Value::Null),
     };
-    match crate::storage::schema::coerce::coerce(
-        &input,
-        crate::storage::schema::DataType::Money,
-        None,
-    ) {
+    match reddb_types::coerce::coerce(&input, reddb_types::DataType::Money, None) {
         Ok(value) => Some(value),
         Err(_) if args.len() == 2 => {
             let reversed = format!(
@@ -2136,12 +2132,7 @@ fn money_from_args(args: &[Value]) -> Option<Value> {
                 money_arg_text(&args[1])?,
                 money_arg_text(&args[0])?
             );
-            crate::storage::schema::coerce::coerce(
-                &reversed,
-                crate::storage::schema::DataType::Money,
-                None,
-            )
-            .ok()
+            reddb_types::coerce::coerce(&reversed, reddb_types::DataType::Money, None).ok()
         }
         Err(_) => Some(Value::Null),
     }
@@ -2357,7 +2348,7 @@ fn trim_text(text: &str, chars: Option<&str>, left: bool, right: bool) -> String
 #[cfg(test)]
 mod tests {
     use super::dispatch_builtin_function;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     #[test]
     fn test_money_constructor_two_args() {

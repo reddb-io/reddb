@@ -26,7 +26,6 @@ use super::request_body::parse_json_body_allow_empty;
 use super::transport::{json_error, json_response};
 use crate::application::CreateKvInput;
 use crate::json::{parse_json, to_string as json_to_string, Map, Value as JsonValue};
-use crate::storage::schema::Value;
 use crate::RedDBServer;
 use reddb_file::{
     ai_model_cache_manifest_path, ai_model_cache_root, ai_model_cache_staging_dir,
@@ -35,6 +34,7 @@ use reddb_file::{
     write_ai_model_cache_manifest, AiModelCacheManifest as Manifest,
     AiModelCacheManifestFile as ManifestFile, AI_MODEL_CACHE_MANIFEST_FILE,
 };
+use reddb_types::Value;
 
 const RED_CONFIG_COLLECTION: &str = "red_config";
 const AI_MODEL_KEY_PREFIX: &str = "red.config.ai.models.";

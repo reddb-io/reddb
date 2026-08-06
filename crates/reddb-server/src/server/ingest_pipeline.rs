@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 
 use crate::json::{parse_json, Map, Value as JsonValue};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// One parsed row ready for the storage batch path.
 pub type IngestRow = HashMap<String, Value>;

@@ -34,11 +34,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
 use reddb::replication::logical::{ApplyMode, ApplyOutcome, LogicalChangeApplier};
 use reddb::replication::ReplicationConfig;
-use reddb::storage::schema::Value;
 use reddb::storage::{
     EntityData, EntityId, EntityKind, RedDB, RowData, UnifiedEntity, UnifiedStore,
 };
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 const BACKING: &str = "paid_orders_596";
 

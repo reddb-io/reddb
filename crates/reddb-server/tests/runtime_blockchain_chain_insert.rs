@@ -11,8 +11,8 @@
 use reddb_server::storage::blockchain::{
     compute_block_hash, verify_chain, Block, GENESIS_PREV_HASH,
 };
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBError, RedDBOptions, RedDBRuntime, RuntimeQueryResult};
+use reddb_types::Value;
 use std::sync::Arc;
 
 fn rt() -> RedDBRuntime {

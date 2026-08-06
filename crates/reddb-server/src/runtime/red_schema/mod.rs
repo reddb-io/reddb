@@ -16,9 +16,9 @@ use crate::catalog::{CollectionModel, SchemaMode};
 use crate::runtime::mvcc::current_connection_id;
 use crate::storage::query::ast::{CompareOp, Expr, FieldRef, Filter, PolicyAction, UnaryOp};
 use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
-use crate::storage::schema::DataType;
 use crate::storage::unified::EntityData;
 use crate::storage::unified::UnifiedStore;
+use reddb_types::DataType;
 
 pub(super) const COLLECTIONS: &str = "red.collections";
 pub(super) const COLLECTIONS_INTERNAL: &str = "__red_schema_collections";
@@ -1439,7 +1439,7 @@ mod tests {
     // introspection surface; both contracts pivot on this shape.
     #[test]
     fn policy_actions_snapshot_encodes_lifecycle_columns() {
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         let rows = super::governance_views::policy_actions_snapshot();
         assert_eq!(rows.len(), crate::auth::action_catalog::ACTIONS.len());
 

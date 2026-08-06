@@ -1,8 +1,8 @@
 use reddb_server::runtime::query_request::{
     ParamValue, PreparedRegistry, QueryRequest, QueryRequestExecutor,
 };
-use reddb_server::storage::schema::Value;
 use reddb_server::{replication::CommitPolicy, RedDBRuntime};
+use reddb_types::Value;
 use std::sync::{Mutex, OnceLock};
 
 fn env_lock() -> &'static Mutex<()> {

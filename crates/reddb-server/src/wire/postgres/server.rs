@@ -23,7 +23,7 @@ use crate::runtime::ai::ask_response_envelope::{
 };
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Startup-tuned configuration for the PG wire listener.
 #[derive(Debug, Clone)]
@@ -195,6 +195,15 @@ pub async fn start_pg_wire_listener(
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
+    start_pg_wire_listener_on(listener, config, runtime).await
+}
+
+/// Serve PostgreSQL wire traffic on a listener bound during node bootstrap.
+pub async fn start_pg_wire_listener_on(
+    listener: TcpListener,
+    config: PgWireConfig,
+    runtime: Arc<RedDBRuntime>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Posture: with no auth store enabled, PG-Wire falls back to trust
     // auth for loopback binds only (see `authenticate_startup`). Surface a
     // startup warning whenever that fallback is active so an operator never

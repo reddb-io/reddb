@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Which end of the queue to push/pop from
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

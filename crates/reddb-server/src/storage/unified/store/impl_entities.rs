@@ -337,7 +337,7 @@ impl UnifiedStore {
                     columns: Vec::new(),
                     named: Some(
                         [
-                            ("key".to_string(), crate::storage::schema::Value::text(key)),
+                            ("key".to_string(), reddb_types::Value::text(key)),
                             ("value".to_string(), value),
                         ]
                         .into_iter()
@@ -354,7 +354,7 @@ impl UnifiedStore {
     }
 
     /// Read a single config value from `red_config` by dot-notation key.
-    pub fn get_config(&self, key: &str) -> Option<crate::storage::schema::Value> {
+    pub fn get_config(&self, key: &str) -> Option<reddb_types::Value> {
         let manager = self.get_collection("red_config")?;
         for entity in manager.query_all(|_| true) {
             if let EntityData::Row(row) = &entity.data {
@@ -362,7 +362,7 @@ impl UnifiedStore {
                     let key_matches = named
                         .get("key")
                         .and_then(|v| match v {
-                            crate::storage::schema::Value::Text(s) => Some(s.as_ref() == key),
+                            reddb_types::Value::Text(s) => Some(s.as_ref() == key),
                             _ => None,
                         })
                         .unwrap_or(false);
@@ -1584,6 +1584,59 @@ impl UnifiedStore {
         collection_results.into_iter().flatten().collect()
     }
 
+    /// Scan every collection under an explicit MVCC snapshot.
+    pub fn scan<F>(
+        &self,
+        snapshot: Option<&crate::runtime::impl_core::SnapshotContext>,
+        filter: F,
+    ) -> Vec<(String, UnifiedEntity)>
+    where
+        F: Fn(&UnifiedEntity) -> bool + Clone + Send + Sync,
+    {
+        let pairs: Vec<(String, Arc<SegmentManager>)> = {
+            let collections = self.collections.read();
+            collections
+                .iter()
+                .map(|(name, manager)| (name.clone(), Arc::clone(manager)))
+                .collect()
+        };
+
+        let use_parallel = pairs.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
+        if !use_parallel {
+            return pairs
+                .into_iter()
+                .flat_map(|(name, manager)| {
+                    manager
+                        .scan(snapshot, filter.clone())
+                        .into_iter()
+                        .map(move |entity| (name.clone(), entity))
+                })
+                .collect();
+        }
+
+        let filter_ref = &filter;
+        let collection_results: Vec<Vec<(String, UnifiedEntity)>> = std::thread::scope(|scope| {
+            pairs
+                .iter()
+                .map(|(name, manager)| {
+                    let name = name.clone();
+                    scope.spawn(move || {
+                        manager
+                            .scan(snapshot, |entity| filter_ref(entity))
+                            .into_iter()
+                            .map(|entity| (name.clone(), entity))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap_or_default())
+                .collect()
+        });
+
+        collection_results.into_iter().flatten().collect()
+    }
+
     /// Filter by metadata across all collections
     pub fn filter_metadata_all(
         &self,
@@ -1667,9 +1720,9 @@ impl UnifiedStore {
 fn flatten_config_json(
     prefix: &str,
     value: &crate::serde_json::Value,
-    out: &mut Vec<(String, crate::storage::schema::Value)>,
+    out: &mut Vec<(String, reddb_types::Value)>,
 ) {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     match value {
         crate::serde_json::Value::Object(map) => {
             for (k, v) in map {

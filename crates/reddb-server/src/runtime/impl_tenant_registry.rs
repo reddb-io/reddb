@@ -31,7 +31,7 @@ impl RedDBRuntime {
                 continue;
             };
             let Some(named) = &row.named else { continue };
-            let Some(crate::storage::schema::Value::Text(key)) = named.get("key") else {
+            let Some(reddb_types::Value::Text(key)) = named.get("key") else {
                 continue;
             };
             // Shape: tenant_tables.{table}.column
@@ -60,11 +60,11 @@ impl RedDBRuntime {
                 continue;
             }
             match named.get("value") {
-                Some(crate::storage::schema::Value::Text(column)) => {
+                Some(reddb_types::Value::Text(column)) => {
                     self.register_tenant_table(table, column);
                 }
                 // Null / missing value = DISABLE TENANCY marker.
-                Some(crate::storage::schema::Value::Null) | None => {
+                Some(reddb_types::Value::Null) | None => {
                     self.unregister_tenant_table(table);
                 }
                 _ => {}
@@ -265,7 +265,7 @@ impl RedDBRuntime {
         let entities = manager.query_all(|_| true);
         let entity_fields: Vec<(
             crate::storage::unified::EntityId,
-            Vec<(String, crate::storage::schema::Value)>,
+            Vec<(String, reddb_types::Value)>,
         )> = entities
             .iter()
             .map(|e| {

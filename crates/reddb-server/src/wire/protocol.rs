@@ -3,7 +3,7 @@
 //! The byte-level contract lives in `reddb-wire::legacy`. This module
 //! only converts between protocol `WireValue` and engine `Value`.
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use reddb_wire::legacy::WireValue;
 
 // The `WireValue`<->`Value` conversion impls moved to `reddb-wire`'s

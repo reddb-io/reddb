@@ -24,7 +24,7 @@ use crate::storage::query::ast::{FusionStrategy, HybridQuery, VectorQuery};
 use crate::storage::query::unified::{
     ExecutionError, QueryStats, UnifiedExecutor, UnifiedRecord, UnifiedResult,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 use super::vector::VectorExecutor;
 

@@ -12,9 +12,6 @@ pub mod index;
 // RedDB Storage Engine (page-based, B-tree indexed)
 pub mod engine;
 
-// B+ Tree with MVCC (Concurrent Storage)
-pub mod btree;
-
 // Transaction Management (ACID)
 pub mod transaction;
 

@@ -23,9 +23,9 @@ use crate::storage::queue::lifecycle::{
     QueueStoreError, QueueTxn, QueueTxnContext, Result, DEFAULT_READ_MAX_ATTEMPTS,
 };
 use crate::storage::queue::QueueMode;
-use crate::storage::schema::Value;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::{EntityData, EntityId, EntityKind, UnifiedEntity, UnifiedStore};
+use reddb_types::Value;
 
 use super::impl_core::current_connection_id;
 use super::queue_lifecycle::LifecycleConfig;
@@ -415,13 +415,9 @@ impl PrimaryQueueStore {
         // the message on subsequent reads.
         let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
         let mut out: Vec<QueueMessageOrdered> = manager
-            .query_all(move |entity| {
-                if !matches!(entity.kind, EntityKind::QueueMessage { .. })
-                    || !matches!(entity.data, EntityData::QueueMessage(_))
-                {
-                    return false;
-                }
-                crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
+            .scan(snap_ctx.as_ref(), |entity| {
+                matches!(entity.kind, EntityKind::QueueMessage { .. })
+                    && matches!(entity.data, EntityData::QueueMessage(_))
             })
             .into_iter()
             .filter_map(|entity| {

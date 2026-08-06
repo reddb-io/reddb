@@ -31,7 +31,7 @@ use super::super::ast::{
     CteDefinition, Expr, Filter, Projection, QueryExpr, QueryWithCte, SelectItem, TableSource,
 };
 use super::super::unified::{ExecutionError, UnifiedRecord, UnifiedResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Maximum recursion depth to prevent infinite loops
 const MAX_RECURSION_DEPTH: usize = 1000;

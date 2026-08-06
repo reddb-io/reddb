@@ -3,8 +3,8 @@ use std::sync::Arc;
 const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 use reddb_server::auth::{store::AuthStore, AuthConfig};
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime, RuntimeQueryResult, StorageDeployPreset};
+use reddb_types::Value;
 
 fn int_at(result: &RuntimeQueryResult, row: usize, column: &str) -> i64 {
     match result.result.records[row].get(column) {

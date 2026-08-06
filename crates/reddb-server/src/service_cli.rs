@@ -10,9 +10,13 @@ use crate::replication::ReplicationConfig;
 use crate::runtime::RedDBRuntime;
 use crate::service_router::{serve_tcp_router, InProcessRouterConfig};
 use crate::storage::StorageProfileSelection;
+pub use crate::transport::{TransportListenerFailure, TransportListenerState, TransportReadiness};
 use crate::{
     GrpcServerOptions, RedDBGrpcServer, RedDBOptions, RedDBServer, ServerOptions, StorageMode,
 };
+
+mod server_bootstrap;
+pub use server_bootstrap::{bootstrap_server, run_server, transport_set, BootedNode};
 
 pub const DEFAULT_ROUTER_BIND_ADDR: &str = "127.0.0.1:5050";
 
@@ -182,46 +186,6 @@ pub struct BootstrapConfig {
     /// bootstrap-creating boot; a re-boot against an existing vault does
     /// not rewrite it.
     pub cert_out: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransportListenerState {
-    pub transport: String,
-    pub bind_addr: String,
-    pub explicit: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransportListenerFailure {
-    pub transport: String,
-    pub bind_addr: String,
-    pub explicit: bool,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TransportReadiness {
-    pub active: Vec<TransportListenerState>,
-    pub failed: Vec<TransportListenerFailure>,
-}
-
-impl TransportReadiness {
-    fn active(&mut self, transport: &str, bind_addr: &str, explicit: bool) {
-        self.active.push(TransportListenerState {
-            transport: transport.to_string(),
-            bind_addr: bind_addr.to_string(),
-            explicit,
-        });
-    }
-
-    fn failed(&mut self, transport: &str, bind_addr: &str, explicit: bool, reason: String) {
-        self.failed.push(TransportListenerFailure {
-            transport: transport.to_string(),
-            bind_addr: bind_addr.to_string(),
-            explicit,
-            reason,
-        });
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1317,44 +1281,6 @@ fn run_command<const N: usize>(program: &str, args: [&str; N]) -> Result<(), Str
     Err(format!("{program} failed: {detail}"))
 }
 
-pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), String> {
-    let has_any = config.router_bind_addr.is_some()
-        || config.grpc_bind_addr.is_some()
-        || config.http_bind_addr.is_some()
-        || config.wire_bind_addr.is_some()
-        || config.wire_tls_bind_addr.is_some()
-        || config.pg_bind_addr.is_some();
-    if !has_any {
-        return Err("at least one server bind address must be configured".into());
-    }
-    let thread_name = if config.router_bind_addr.is_some() {
-        "red-server-router"
-    } else {
-        match (
-            config.grpc_bind_addr.is_some(),
-            config.http_bind_addr.is_some(),
-        ) {
-            (true, true) => "red-server-dual",
-            (true, false) => "red-server-grpc",
-            (false, true) => "red-server-http",
-            (false, false) if config.wire_bind_addr.is_some() => "red-server-wire",
-            (false, false) if config.wire_tls_bind_addr.is_some() => "red-server-wire-tls",
-            (false, false) => "red-server-pg-wire",
-        }
-    };
-
-    let handle = thread::Builder::new()
-        .name(thread_name.into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || run_configured_servers(config))
-        .map_err(|err| format!("failed to spawn server thread: {err}"))?;
-
-    match handle.join() {
-        Ok(result) => result,
-        Err(_) => Err("server thread panicked".to_string()),
-    }
-}
-
 fn render_systemd_exec_start(config: &SystemdServiceConfig) -> String {
     let mut parts = vec![
         config.binary_path.display().to_string(),
@@ -1387,37 +1313,6 @@ pub fn probe_listener(target: &str, timeout: Duration) -> bool {
     addresses
         .into_iter()
         .any(|address| TcpStream::connect_timeout(&address, timeout).is_ok())
-}
-
-#[inline(never)]
-fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
-    // Phase 6 logging is initialised inside each runner once the
-    // runtime is open — see `build_runtime_and_auth_store`. Going
-    // after DB open lets us read `red.logging.*` config keys out of
-    // the persistent red_config store and merge them with the CLI
-    // flags (flag > red_config > built-in default).
-    if let Some(router_bind_addr) = config.router_bind_addr.clone() {
-        return run_routed_server(config, router_bind_addr);
-    }
-
-    match (config.grpc_bind_addr.clone(), config.http_bind_addr.clone()) {
-        (Some(grpc_bind_addr), Some(http_bind_addr)) => {
-            run_dual_server(config, grpc_bind_addr, http_bind_addr)
-        }
-        (Some(grpc_bind_addr), None) => run_grpc_server(config, grpc_bind_addr),
-        (None, Some(http_bind_addr)) => run_http_server(config, http_bind_addr),
-        (None, None) => {
-            if let Some(wire_addr) = config.wire_bind_addr.clone() {
-                run_wire_only_server(config, wire_addr)
-            } else if let Some(wire_tls_addr) = config.wire_tls_bind_addr.clone() {
-                run_wire_tls_only_server(config, wire_tls_addr)
-            } else if let Some(pg_addr) = config.pg_bind_addr.clone() {
-                run_pg_only_server(config, pg_addr)
-            } else {
-                Err("at least one server bind address must be configured".to_string())
-            }
-        }
-    }
 }
 
 /// Bind a TCP listener for a transport at startup and record the
@@ -1651,213 +1546,6 @@ fn handle_sighup_reload(runtime: &RedDBRuntime) {
     );
 }
 
-#[inline(never)]
-fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> Result<(), String> {
-    let workers = config.workers;
-    let db_options = config.to_db_options()?;
-    let rt_config = detect_runtime_config();
-    let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
-    let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(&config, db_options.clone())?;
-    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
-
-    spawn_admin_metrics_listeners(&runtime, &auth_store);
-
-    // Issue #933: collapse the loopback proxy. All three transports are
-    // served from one in-process acceptor that shares the single tokio
-    // runtime (ADR 0035) — no internal HTTP/gRPC/wire listeners, no
-    // `copy_bidirectional` hop. We build the handler objects here and hand
-    // them to the demux, which classifies each connection and dispatches.
-    let http_server = build_http_server(
-        runtime.clone(),
-        auth_store.clone(),
-        router_bind_addr.clone(),
-    );
-    let http_server = apply_http_limits(http_server, &config, &runtime);
-    let http_server = apply_ui_bundle(http_server, &config)?;
-
-    let grpc_server = RedDBGrpcServer::with_options(
-        runtime.clone(),
-        GrpcServerOptions {
-            bind_addr: router_bind_addr.clone(),
-            tls: None,
-        },
-        auth_store,
-    );
-
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(worker_threads)
-        .thread_stack_size(rt_config.stack_size)
-        .build()
-        .map_err(|err| format!("tokio runtime: {err}"))?;
-
-    let signal_runtime = runtime.clone();
-    let wire_runtime = Arc::new(runtime);
-    tokio_runtime.block_on(async move {
-        spawn_lifecycle_signal_handler(signal_runtime).await;
-        tracing::info!(
-            bind = %router_bind_addr,
-            cpus = rt_config.available_cpus,
-            workers = worker_threads,
-            "router bootstrapping"
-        );
-        serve_tcp_router(InProcessRouterConfig {
-            bind_addr: router_bind_addr,
-            http_server,
-            grpc_server,
-            wire_runtime,
-        })
-        .await
-        .map_err(|err| err.to_string())
-    })
-}
-
-/// Spawn RedWire listeners (plaintext + TLS) as background tokio tasks.
-async fn spawn_wire_listeners(
-    config: &ServerCommandConfig,
-    runtime: &RedDBRuntime,
-    readiness: &mut TransportReadiness,
-) -> Result<(), String> {
-    // Plaintext RedWire — TCP or Unix socket
-    if let Some(wire_addr) = config.wire_bind_addr.clone() {
-        let wire_rt = Arc::new(runtime.clone());
-        // Address starting with `unix://` or an absolute filesystem path
-        // switches to Unix domain sockets.
-        #[cfg(unix)]
-        {
-            if wire_addr.starts_with("unix://") || wire_addr.starts_with('/') {
-                readiness.active("wire", &wire_addr, config.wire_bind_explicit);
-                tokio::spawn(async move {
-                    if let Err(e) = crate::wire::redwire::listener::start_redwire_unix_listener(
-                        &wire_addr, wire_rt,
-                    )
-                    .await
-                    {
-                        tracing::error!(err = %e, "redwire unix listener error");
-                    }
-                });
-                return Ok(());
-            }
-        }
-        match tokio::net::TcpListener::bind(&wire_addr).await {
-            Ok(listener) => {
-                readiness.active("wire", &wire_addr, config.wire_bind_explicit);
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::wire::redwire::listener::start_redwire_listener_on(listener, wire_rt)
-                            .await
-                    {
-                        tracing::error!(err = %e, "redwire listener error");
-                    }
-                });
-            }
-            Err(err) => {
-                let reason = format!("wire listener bind {wire_addr}: {err}");
-                readiness.failed(
-                    "wire",
-                    &wire_addr,
-                    config.wire_bind_explicit,
-                    reason.clone(),
-                );
-                if config.wire_bind_explicit {
-                    tracing::error!(
-                        transport = "wire",
-                        bind = %wire_addr,
-                        error = %err,
-                        "fatal explicit bind failure"
-                    );
-                    return Err(format!("explicit {reason}"));
-                }
-                tracing::warn!(
-                    transport = "wire",
-                    bind = %wire_addr,
-                    error = %err,
-                    "non-fatal implicit bind failure; listener degraded"
-                );
-            }
-        }
-    }
-
-    // RedWire over TLS. A `--wire-tls-bind` is always an explicit request
-    // (there is no implicit/default TLS bind), so per the #545 contract it
-    // fails closed: a TLS config/resolve error (including the gated auto-gen
-    // refusal) or a bind failure is fatal to boot — never a silent degrade to
-    // "healthy HTTP, dead TLS". That silent mode shipped provision loops that
-    // only a downstream TLS probe caught (reddb-io/rio-lair#255). Mirrors the
-    // TLS-only path (`run_wire_tls_only_server`) and the plaintext branch's
-    // explicit handling above.
-    if let Some(wire_tls_addr) = config.wire_tls_bind_addr.clone() {
-        let tls_cfg = match resolve_wire_tls_config(config) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                let reason = format!("redwire TLS config error: {e}");
-                readiness.failed("wire-tls", &wire_tls_addr, true, reason.clone());
-                tracing::error!(
-                    transport = "wire-tls",
-                    bind = %wire_tls_addr,
-                    error = %e,
-                    "fatal explicit redwire TLS config error"
-                );
-                return Err(format!("explicit {reason}"));
-            }
-        };
-        // Bind up front so a contested/unbindable port fails the explicit
-        // request here instead of dying inside a fire-and-forget task.
-        let listener = match tokio::net::TcpListener::bind(&wire_tls_addr).await {
-            Ok(listener) => listener,
-            Err(err) => {
-                let reason = format!("wire-tls listener bind {wire_tls_addr}: {err}");
-                readiness.failed("wire-tls", &wire_tls_addr, true, reason.clone());
-                tracing::error!(
-                    transport = "wire-tls",
-                    bind = %wire_tls_addr,
-                    error = %err,
-                    "fatal explicit bind failure"
-                );
-                return Err(format!("explicit {reason}"));
-            }
-        };
-        readiness.active("wire-tls", &wire_tls_addr, true);
-        // The bind-first `_on` variant does not log online itself, so emit
-        // the transport-online line here (parity with the plaintext wire
-        // branch and the internally-binding `start_redwire_tls_listener`).
-        tracing::info!(transport = "redwire+tls", bind = %wire_tls_addr, "listener online");
-        let wire_rt = Arc::new(runtime.clone());
-        tokio::spawn(async move {
-            if let Err(e) =
-                crate::wire::start_redwire_tls_listener_on(listener, wire_rt, &tls_cfg).await
-            {
-                tracing::error!(err = %e, "redwire+tls listener error");
-            }
-        });
-    }
-    Ok(())
-}
-
-/// Spawn the PostgreSQL wire-protocol listener (Phase 3.1 PG parity).
-///
-/// Only runs when `--pg-bind` is supplied. Uses the v3 protocol so
-/// psql, JDBC drivers, DBeaver, etc. can connect directly. Runs
-/// alongside the native wire listener; the two transports do not
-/// share a port.
-fn spawn_pg_listener(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
-    if let Some(pg_addr) = config.pg_bind_addr.clone() {
-        let tls = resolve_pg_wire_tls(config);
-        let rt = Arc::new(runtime.clone());
-        tokio::spawn(async move {
-            let cfg = crate::wire::PgWireConfig {
-                bind_addr: pg_addr,
-                tls,
-                ..Default::default()
-            };
-            if let Err(e) = crate::wire::start_pg_wire_listener(cfg, rt).await {
-                tracing::error!(err = %e, "pg wire listener error");
-            }
-        });
-    }
-}
-
 /// Resolve the TLS material the PG-Wire listener shares with the native
 /// wire transport, if any.
 ///
@@ -1997,45 +1685,6 @@ fn resolve_grpc_tls_options(config: &ServerCommandConfig) -> Result<crate::GrpcT
     })
 }
 
-/// Spawn a TLS-terminated gRPC listener when `grpc_tls_bind_addr` is
-/// configured. Logs and continues on TLS-config errors so the plain
-/// listener stays up; this matches the wire-listener pattern.
-fn spawn_grpc_tls_listener_if_configured(
-    config: &ServerCommandConfig,
-    runtime: RedDBRuntime,
-    auth_store: Arc<AuthStore>,
-) {
-    let Some(tls_bind) = config.grpc_tls_bind_addr.clone() else {
-        return;
-    };
-    let tls_opts = match resolve_grpc_tls_options(config) {
-        Ok(opts) => opts,
-        Err(err) => {
-            tracing::error!(
-                target: "reddb::security",
-                transport = "grpc",
-                err = %err,
-                "gRPC TLS config error; TLS listener will not start"
-            );
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        let server = RedDBGrpcServer::with_options(
-            runtime,
-            GrpcServerOptions {
-                bind_addr: tls_bind.clone(),
-                tls: Some(tls_opts),
-            },
-            auth_store,
-        );
-        tracing::info!(transport = "grpc+tls", bind = %tls_bind, "listener online");
-        if let Err(err) = server.serve().await {
-            tracing::error!(transport = "grpc+tls", err = %err, "gRPC TLS listener error");
-        }
-    });
-}
-
 /// Hex-encoded SHA-256 of a PEM blob, used for cert-pin operator log
 /// lines. Constant-time hash; no token contents leave this fn.
 fn sha256_pem_fingerprint(pem: &[u8]) -> String {
@@ -2070,126 +1719,6 @@ fn resolve_wire_tls_config(
             crate::wire::tls::auto_generate_cert(&dir).map_err(|e| e.to_string())
         }
     }
-}
-
-#[inline(never)]
-fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Result<(), String> {
-    let rt_config = detect_runtime_config();
-    let workers = config.workers.unwrap_or(rt_config.suggested_workers);
-    let db_options = config.to_db_options()?;
-    let mut transport_readiness = TransportReadiness::default();
-
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(workers)
-        .thread_stack_size(rt_config.stack_size)
-        .build()
-        .map_err(|err| format!("tokio runtime: {err}"))?;
-
-    // Guard lives on the outer thread's stack so it outlives the
-    // tokio runtime — dropping it only after the listener returns
-    // flushes the file log writer.
-    let (runtime, _auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(&config, db_options.clone())?;
-    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
-    let signal_runtime = runtime.clone();
-    tokio_runtime.block_on(async move {
-        spawn_lifecycle_signal_handler(signal_runtime).await;
-        spawn_pg_listener(&config, &runtime);
-        let wire_rt = Arc::new(runtime);
-        let listener = tokio::net::TcpListener::bind(&wire_addr)
-            .await
-            .map_err(|err| {
-                let reason = format!("wire listener bind {wire_addr}: {err}");
-                transport_readiness.failed(
-                    "wire",
-                    &wire_addr,
-                    config.wire_bind_explicit,
-                    reason.clone(),
-                );
-                if config.wire_bind_explicit {
-                    format!("explicit {reason}")
-                } else {
-                    reason
-                }
-            })?;
-        transport_readiness.active("wire", &wire_addr, config.wire_bind_explicit);
-        crate::wire::redwire::listener::start_redwire_listener_on(listener, wire_rt)
-            .await
-            .map_err(|e| e.to_string())
-    })
-}
-
-/// Serve only the TLS RedWire listener (`--wire-tls-bind` with no
-/// explicit plaintext `--wire-bind`, gRPC, or HTTP bind).
-///
-/// Issue #1588: the default router is suppressed whenever
-/// `--wire-tls-bind` is set (see `build_server_config`), so a
-/// TLS-only wire deployment lands here instead of colliding with the
-/// router on port 5050. The TLS listener owns the bind directly.
-#[inline(never)]
-fn run_wire_tls_only_server(
-    config: ServerCommandConfig,
-    wire_tls_addr: String,
-) -> Result<(), String> {
-    let rt_config = detect_runtime_config();
-    let workers = config.workers.unwrap_or(rt_config.suggested_workers);
-    let db_options = config.to_db_options()?;
-    // Resolve TLS material up front so a bad cert/key (or a failed
-    // auto-generation) fails the explicit bind before we open the
-    // runtime.
-    let tls_cfg = resolve_wire_tls_config(&config)?;
-
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(workers)
-        .thread_stack_size(rt_config.stack_size)
-        .build()
-        .map_err(|err| format!("tokio runtime: {err}"))?;
-
-    let (runtime, _auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(&config, db_options.clone())?;
-    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
-    let signal_runtime = runtime.clone();
-    tokio_runtime.block_on(async move {
-        spawn_lifecycle_signal_handler(signal_runtime).await;
-        spawn_pg_listener(&config, &runtime);
-        let wire_rt = Arc::new(runtime);
-        crate::wire::start_redwire_tls_listener(&wire_tls_addr, wire_rt, &tls_cfg)
-            .await
-            .map_err(|e| format!("explicit wire-tls listener bind {wire_tls_addr}: {e}"))
-    })
-}
-
-#[inline(never)]
-fn run_pg_only_server(config: ServerCommandConfig, pg_addr: String) -> Result<(), String> {
-    let rt_config = detect_runtime_config();
-    let workers = config.workers.unwrap_or(rt_config.suggested_workers);
-    let db_options = config.to_db_options()?;
-
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(workers)
-        .thread_stack_size(rt_config.stack_size)
-        .build()
-        .map_err(|err| format!("tokio runtime: {err}"))?;
-
-    let (runtime, _auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(&config, db_options.clone())?;
-    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
-    let pg_tls = resolve_pg_wire_tls(&config);
-    let signal_runtime = runtime.clone();
-    tokio_runtime.block_on(async move {
-        spawn_lifecycle_signal_handler(signal_runtime).await;
-        let cfg = crate::wire::PgWireConfig {
-            bind_addr: pg_addr,
-            tls: pg_tls,
-            ..Default::default()
-        };
-        crate::wire::start_pg_wire_listener(cfg, Arc::new(runtime))
-            .await
-            .map_err(|e| e.to_string())
-    })
 }
 
 #[inline(never)]
@@ -2944,7 +2473,7 @@ fn merge_telemetry_with_config(
     mut cli: crate::telemetry::TelemetryConfig,
     runtime: &RedDBRuntime,
 ) -> crate::telemetry::TelemetryConfig {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     let store = runtime.db().store();
 
@@ -3113,9 +2642,9 @@ fn apply_http_limits(
         crate::server::http_limits::resolve_http_limits(&config.http_limits_cli, |key| match store
             .get_config(key)
         {
-            Some(crate::storage::schema::Value::Text(v)) => Some(v.to_string()),
-            Some(crate::storage::schema::Value::Integer(n)) if n >= 0 => Some(n.to_string()),
-            Some(crate::storage::schema::Value::UnsignedInteger(n)) => Some(n.to_string()),
+            Some(reddb_types::Value::Text(v)) => Some(v.to_string()),
+            Some(reddb_types::Value::Integer(n)) if n >= 0 => Some(n.to_string()),
+            Some(reddb_types::Value::UnsignedInteger(n)) => Some(n.to_string()),
             _ => None,
         });
     tracing::info!(
@@ -3235,112 +2764,6 @@ fn spawn_admin_metrics_listeners(runtime: &RedDBRuntime, auth_store: &Arc<AuthSt
     }
 }
 
-#[inline(never)]
-fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
-    let mut transport_readiness = TransportReadiness::default();
-    let Some(listener) = bind_listener_for_startup(
-        &mut transport_readiness,
-        "http",
-        &bind_addr,
-        config.http_bind_explicit,
-    )?
-    else {
-        return Err(format!(
-            "no HTTP listener started; implicit bind {} failed",
-            bind_addr
-        ));
-    };
-    let db_options = config.to_db_options()?;
-    let rt_config = detect_runtime_config();
-    let worker_threads = config.workers.unwrap_or(rt_config.suggested_workers);
-
-    // Issue #2055 — the RedWire (and PG) accept loops are `tokio::spawn`ed
-    // and die with the runtime that hosted them, so — like `run_grpc_server`
-    // and `run_dual_server` — the HTTP-only path owns a multi-thread tokio
-    // runtime kept alive for the process lifetime. The synchronous axum HTTP
-    // server runs on its own OS thread (`serve_in_background_on`, which builds
-    // its own edge runtime), and this runtime's `block_on` stays parked on
-    // that thread's completion so the wire listeners spawned underneath keep
-    // running. Before this, binding HTTP without gRPC spawned no wire listener
-    // at all: `--wire-bind` / `--wire-tls-bind` and the env-derived plaintext
-    // default (`REDDB_WIRE_BIND_ADDR`) all silently vanished.
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(worker_threads)
-        .thread_stack_size(rt_config.stack_size)
-        .build()
-        .map_err(|err| format!("tokio runtime: {err}"))?;
-
-    // Guard lives on the outer stack so it outlives the tokio runtime.
-    let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(&config, db_options.clone())?;
-    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
-    spawn_admin_metrics_listeners(&runtime, &auth_store);
-    spawn_http_tls_listener(&config, &runtime, &auth_store)?;
-
-    let signal_runtime = runtime.clone();
-    tokio_runtime.block_on(async move {
-        spawn_lifecycle_signal_handler(signal_runtime).await;
-        // Bring up the RedWire listeners (plaintext + TLS) and the PG wire
-        // listener before the HTTP surface is built, so the readiness the
-        // HTTP `/health` snapshot captures enumerates every wire transport —
-        // parity with what `run_dual_server` records.
-        spawn_wire_listeners(&config, &runtime, &mut transport_readiness).await?;
-        spawn_pg_listener(&config, &runtime);
-
-        let server = build_http_server_with_transport_readiness(
-            runtime.clone(),
-            auth_store,
-            bind_addr.clone(),
-            transport_readiness,
-        );
-        let server = apply_http_limits(server, &config, &runtime);
-        let server = apply_ui_bundle(server, &config)?;
-        tracing::info!(transport = "http", bind = %bind_addr, "listener online");
-        let http_handle = server.serve_in_background_on(listener);
-
-        // Park on the HTTP thread. Keeping `block_on` here alive holds the
-        // runtime — and the wire accept loops spawned above — open for as
-        // long as the HTTP server runs; a return means the process is done.
-        match tokio::task::spawn_blocking(move || http_handle.join()).await {
-            Ok(Ok(Ok(()))) => Err("HTTP server exited unexpectedly".to_string()),
-            Ok(Ok(Err(err))) => Err(err.to_string()),
-            Ok(Err(_)) => Err("HTTP server thread panicked".to_string()),
-            Err(join_err) => Err(format!("HTTP server monitor task failed: {join_err}")),
-        }
-    })
-}
-
-/// PLAN.md HTTP TLS — when `http_tls_bind_addr` is set, spawn a
-/// rustls-terminated listener alongside the plain HTTP server. Cert
-/// + key paths come from CLI flags or `REDDB_HTTP_TLS_*` env vars; if
-///   both are absent and `RED_HTTP_TLS_DEV=1` is set, a self-signed cert
-///   is auto-generated next to the data directory (refused otherwise).
-fn spawn_http_tls_listener(
-    config: &ServerCommandConfig,
-    runtime: &RedDBRuntime,
-    auth_store: &Arc<AuthStore>,
-) -> Result<(), String> {
-    let Some(addr) = config.http_tls_bind_addr.clone() else {
-        return Ok(());
-    };
-
-    let tls_config = resolve_http_tls_config(config)?;
-    let server_config = crate::server::tls::build_server_config(&tls_config)
-        .map_err(|err| format!("HTTP TLS: {err}"))?;
-
-    let server = build_http_server(runtime.clone(), auth_store.clone(), addr.clone());
-    let server = apply_http_limits(server, config, runtime);
-    let _handle = server.serve_tls_in_background(server_config);
-    tracing::info!(
-        transport = "https",
-        bind = %addr,
-        mtls = %tls_config.client_ca_path.is_some(),
-        "TLS listener online"
-    );
-    Ok(())
-}
-
 /// Resolve the HTTP TLS config from CLI / env / dev defaults.
 fn resolve_http_tls_config(
     config: &ServerCommandConfig,
@@ -3368,188 +2791,6 @@ fn resolve_http_tls_config(
         }
         _ => Err("HTTP TLS requires both --http-tls-cert and --http-tls-key (or neither, with RED_HTTP_TLS_DEV=1)".to_string()),
     }
-}
-
-#[inline(never)]
-fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
-    let workers = config.workers;
-    let db_options = config.to_db_options()?;
-    let rt_config = detect_runtime_config();
-    let mut transport_readiness = TransportReadiness::default();
-    let Some(grpc_listener) = bind_listener_for_startup(
-        &mut transport_readiness,
-        "grpc",
-        &bind_addr,
-        config.grpc_bind_explicit,
-    )?
-    else {
-        return Err(format!(
-            "no gRPC listener started; implicit bind {} failed",
-            bind_addr
-        ));
-    };
-
-    let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
-
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(worker_threads)
-        .thread_stack_size(rt_config.stack_size)
-        .build()
-        .map_err(|err| format!("tokio runtime: {err}"))?;
-
-    // Guard lives on the outer stack so it outlives the tokio runtime.
-    let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(&config, db_options.clone())?;
-    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
-    let signal_runtime = runtime.clone();
-    tokio_runtime.block_on(async move {
-        spawn_lifecycle_signal_handler(signal_runtime).await;
-        // Start wire protocol listeners (plaintext + TLS)
-        spawn_wire_listeners(&config, &runtime, &mut transport_readiness).await?;
-
-        // Start PostgreSQL wire listener when --pg-bind is configured.
-        spawn_pg_listener(&config, &runtime);
-
-        // Optional TLS gRPC listener. When `grpc_tls_bind_addr` is set
-        // it spawns a separate listener so plaintext + TLS can run
-        // side-by-side (55055 plain + 55555 TLS, etc.).
-        spawn_grpc_tls_listener_if_configured(&config, runtime.clone(), auth_store.clone());
-
-        let server = RedDBGrpcServer::with_options(
-            runtime,
-            GrpcServerOptions {
-                bind_addr: bind_addr.clone(),
-                tls: None,
-            },
-            auth_store,
-        );
-
-        tracing::info!(
-            transport = "grpc",
-            bind = %bind_addr,
-            cpus = rt_config.available_cpus,
-            workers = worker_threads,
-            "listener online"
-        );
-        server
-            .serve_on(grpc_listener)
-            .await
-            .map_err(|err| err.to_string())
-    })
-}
-
-#[inline(never)]
-fn run_dual_server(
-    config: ServerCommandConfig,
-    grpc_bind_addr: String,
-    http_bind_addr: String,
-) -> Result<(), String> {
-    let workers = config.workers;
-    let db_options = config.to_db_options()?;
-    let rt_config = detect_runtime_config();
-    let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
-    let mut transport_readiness = TransportReadiness::default();
-    let http_listener = bind_listener_for_startup(
-        &mut transport_readiness,
-        "http",
-        &http_bind_addr,
-        config.http_bind_explicit,
-    )?;
-    let grpc_listener = bind_listener_for_startup(
-        &mut transport_readiness,
-        "grpc",
-        &grpc_bind_addr,
-        config.grpc_bind_explicit,
-    )?;
-    if http_listener.is_none() && grpc_listener.is_none() {
-        return Err("no listener started; implicit HTTP and gRPC binds failed".to_string());
-    }
-    let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(&config, db_options.clone())?;
-    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
-
-    spawn_admin_metrics_listeners(&runtime, &auth_store);
-    spawn_http_tls_listener(&config, &runtime, &auth_store)?;
-
-    let http_handle = if let Some(listener) = http_listener {
-        let http_server = build_http_server_with_transport_readiness(
-            runtime.clone(),
-            auth_store.clone(),
-            http_bind_addr.clone(),
-            transport_readiness.clone(),
-        );
-        let http_server = apply_http_limits(http_server, &config, &runtime);
-        let http_server = apply_ui_bundle(http_server, &config)?;
-        Some(http_server.serve_in_background_on(listener))
-    } else {
-        None
-    };
-
-    thread::sleep(Duration::from_millis(150));
-    if let Some(handle) = http_handle.as_ref() {
-        if handle.is_finished() {
-            let handle = http_handle.unwrap();
-            return match handle.join() {
-                Ok(Ok(())) => Err("HTTP server exited unexpectedly".to_string()),
-                Ok(Err(err)) => Err(err.to_string()),
-                Err(_) => Err("HTTP server thread panicked".to_string()),
-            };
-        }
-    }
-    if grpc_listener.is_none() {
-        let Some(handle) = http_handle else {
-            return Err("no listener started".to_string());
-        };
-        return match handle.join() {
-            Ok(Ok(())) => Err("HTTP server exited unexpectedly".to_string()),
-            Ok(Err(err)) => Err(err.to_string()),
-            Err(_) => Err("HTTP server thread panicked".to_string()),
-        };
-    }
-    let grpc_listener = grpc_listener.expect("checked above");
-
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(worker_threads)
-        .thread_stack_size(rt_config.stack_size)
-        .build()
-        .map_err(|err| format!("tokio runtime: {err}"))?;
-
-    let signal_runtime = runtime.clone();
-    tokio_runtime.block_on(async move {
-        spawn_lifecycle_signal_handler(signal_runtime).await;
-        // Start wire protocol listeners (plaintext + TLS)
-        spawn_wire_listeners(&config, &runtime, &mut transport_readiness).await?;
-
-        // Start PostgreSQL wire listener when --pg-bind is configured.
-        spawn_pg_listener(&config, &runtime);
-
-        // Optional TLS gRPC listener — runs alongside the plaintext one.
-        spawn_grpc_tls_listener_if_configured(&config, runtime.clone(), auth_store.clone());
-
-        let server = RedDBGrpcServer::with_options(
-            runtime,
-            GrpcServerOptions {
-                bind_addr: grpc_bind_addr.clone(),
-                tls: None,
-            },
-            auth_store,
-        );
-
-        tracing::info!(transport = "http", bind = %http_bind_addr, "listener online");
-        tracing::info!(
-            transport = "grpc",
-            bind = %grpc_bind_addr,
-            cpus = rt_config.available_cpus,
-            workers = worker_threads,
-            "listener online"
-        );
-        server
-            .serve_on(grpc_listener)
-            .await
-            .map_err(|err| err.to_string())
-    })
 }
 
 #[cfg(test)]
@@ -3928,15 +3169,12 @@ mod tests {
         let completed = store
             .get_config(BOOTSTRAP_COMPLETED_KEY)
             .expect("completed key persisted");
-        assert!(matches!(
-            completed,
-            crate::storage::schema::Value::Boolean(true)
-        ));
+        assert!(matches!(completed, reddb_types::Value::Boolean(true)));
         let preset = store
             .get_config(BOOTSTRAP_PRESET_KEY)
             .expect("preset key persisted");
         match preset {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_SIMPLE),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_SIMPLE),
             other => panic!("expected Text(simple), got {other:?}"),
         }
         assert!(
@@ -4008,11 +3246,11 @@ mod tests {
             .get_config(BOOTSTRAP_FIRST_ADMIN_KEY)
             .expect("first_admin_id persisted")
         {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), "ops"),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), "ops"),
             other => panic!("expected Text(ops), got {other:?}"),
         }
         match store.get_config(BOOTSTRAP_PRESET_KEY).unwrap() {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_PRODUCTION),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_PRODUCTION),
             other => panic!("expected Text(production), got {other:?}"),
         }
 
@@ -4126,11 +3364,11 @@ mod tests {
             .get_config(BOOTSTRAP_FIRST_ADMIN_KEY)
             .expect("head admin id persisted")
         {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), "head"),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), "head"),
             other => panic!("expected Text(head), got {other:?}"),
         }
         match store.get_config(BOOTSTRAP_PRESET_KEY).unwrap() {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
             other => panic!("expected Text(cloud), got {other:?}"),
         }
 
@@ -4306,7 +3544,7 @@ mod tests {
             .get_config(BOOTSTRAP_PRESET_KEY)
             .expect("preset key persisted")
         {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
             other => panic!("expected Text(cloud), got {other:?}"),
         }
 
@@ -4393,7 +3631,7 @@ mod tests {
         use crate::auth::store::PrincipalRef;
         use crate::auth::{Role, UserId};
         use crate::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
@@ -4584,7 +3822,7 @@ mod tests {
     fn bootstrap_manifest_installs_initial_users_policies_guardrails_and_config() {
         use crate::auth::policies::{EvalContext, ResourceRef};
         use crate::auth::UserId;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();

@@ -2368,7 +2368,7 @@ pub fn resolve_defaults_from_runtime(
     use crate::application::ports::RuntimeEntityPort;
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
         match runtime.get_kv("red_config", key)? {
-            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s.to_string())),
+            Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
     };
@@ -2388,7 +2388,7 @@ pub fn resolve_ask_planner_model_from_runtime(
     use crate::application::ports::RuntimeEntityPort;
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
         match runtime.get_kv("red_config", key)? {
-            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s.to_string())),
+            Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
     };
@@ -2403,7 +2403,7 @@ pub fn resolve_defaults_from_runtime_port<
 ) -> (AiProvider, String) {
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
         match runtime.get_kv("red_config", key)? {
-            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s.to_string())),
+            Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
     };
@@ -2430,7 +2430,7 @@ pub fn resolve_embeddings_provider_from_runtime<
     }
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
         match runtime.get_kv("red_config", key)? {
-            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s.to_string())),
+            Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
     };
@@ -2452,7 +2452,7 @@ pub fn resolve_embeddings_model_from_runtime<
     }
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
         match runtime.get_kv("red_config", key)? {
-            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s.to_string())),
+            Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
     };
@@ -2698,7 +2698,7 @@ pub fn resolve_api_key_from_runtime(
             return Ok(value);
         }
         match runtime.get_kv("red_config", kv_key)? {
-            Some((crate::storage::schema::Value::Text(secret), _)) => {
+            Some((reddb_types::Value::Text(secret), _)) => {
                 audited_paths.borrow_mut().push((kv_key.to_string(), true));
                 Ok(Some(secret.to_string()))
             }
@@ -2987,7 +2987,7 @@ fn grpc_collect_inputs_from_source_query(
             for rec in &result.result.records {
                 for (key, value) in rec.iter_fields() {
                     if key.as_ref() == field {
-                        if let crate::storage::schema::Value::Text(text) = value {
+                        if let reddb_types::Value::Text(text) = value {
                             let trimmed = text.trim();
                             if !trimmed.is_empty() {
                                 out.push(trimmed.to_string());
@@ -3000,7 +3000,7 @@ fn grpc_collect_inputs_from_source_query(
         "result" => {
             for rec in &result.result.records {
                 for (_, value) in rec.iter_fields() {
-                    if let crate::storage::schema::Value::Text(text) = value {
+                    if let reddb_types::Value::Text(text) = value {
                         let trimmed = text.trim();
                         if !trimmed.is_empty() {
                             out.push(trimmed.to_string());

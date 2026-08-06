@@ -1,4 +1,4 @@
-use reddb::storage::schema::Value;
+use reddb_types::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn runtime() -> RedDBRuntime {

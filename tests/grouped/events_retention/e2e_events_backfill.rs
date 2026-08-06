@@ -1,7 +1,7 @@
 use reddb::application::ExecuteQueryInput;
 use reddb::runtime::mvcc::{clear_current_tenant, set_current_tenant};
-use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBRuntime};
+use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")

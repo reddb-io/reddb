@@ -42,6 +42,7 @@ const GRPC_DEMUX_CHANNEL_DEPTH: usize = 128;
 /// same server object the standalone single-transport runners use, so the
 /// served surface on the shared port matches the dedicated ports exactly.
 pub(crate) struct InProcessRouterConfig {
+    pub listener: std::net::TcpListener,
     pub bind_addr: String,
     pub http_server: RedDBServer,
     pub grpc_server: RedDBGrpcServer,
@@ -52,13 +53,15 @@ pub(crate) async fn serve_tcp_router(
     config: InProcessRouterConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let InProcessRouterConfig {
+        listener,
         bind_addr,
         http_server,
         grpc_server,
         wire_runtime,
     } = config;
 
-    let listener = TcpListener::bind(&bind_addr).await?;
+    listener.set_nonblocking(true)?;
+    let listener = TcpListener::from_std(listener)?;
     tracing::info!(
         transport = "router",
         bind = %bind_addr,

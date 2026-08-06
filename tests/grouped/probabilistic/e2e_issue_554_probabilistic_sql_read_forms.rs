@@ -25,7 +25,7 @@ mod support;
 
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::storage::query::UnifiedRecord;
-use reddb::storage::schema::Value;
+use reddb_types::Value;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("runtime")

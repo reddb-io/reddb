@@ -2,9 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use reddb_file::EmbeddedRdbArtifact;
-use reddb_server::storage::schema::Value;
 use reddb_server::storage::{EntityId, UnifiedStore, UnifiedStoreConfig};
 use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 /// Auto-cleaning temp dir: the returned [`tempfile::TempDir`] guard removes the
 /// directory and the `.rdb` artifact (incl. internal WAL) on drop, including on
