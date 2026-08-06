@@ -232,7 +232,7 @@ pub struct ConnStringLimits {
     /// Maximum number of `key=value` query parameters. Default `32`.
     pub max_query_params: usize,
     /// Maximum number of comma-separated cluster hosts allowed in a
-    /// `red://`/`reds://`/`grpc://` cluster URI. Default `64`.
+    /// `grpc://`/`grpcs://` cluster URI. Default `64`.
     pub max_cluster_hosts: usize,
 }
 
@@ -622,11 +622,6 @@ fn try_parse_grpc_cluster(
         (r, DEFAULT_PORT_GRPC)
     } else if let Some(r) = uri.strip_prefix("grpcs://") {
         (r, DEFAULT_PORT_GRPCS)
-    } else if let Some(r) = uri
-        .strip_prefix("red://")
-        .or_else(|| uri.strip_prefix("reds://"))
-    {
-        (r, DEFAULT_PORT_RED)
     } else {
         return Ok(None);
     };
