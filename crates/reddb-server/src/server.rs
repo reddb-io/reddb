@@ -39,7 +39,7 @@ use crate::runtime::{
     RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult,
     RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::dsl::{MatchComponents, QueryResult as DslQueryResult};
 use crate::storage::unified::{MetadataValue, RefTarget, SparseVector};
