@@ -18,7 +18,7 @@
 
 use std::sync::{Arc, OnceLock, RwLock};
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::entity::{EntityData, UnifiedEntity};
 use crate::{RedDBError, RedDBResult};
 
