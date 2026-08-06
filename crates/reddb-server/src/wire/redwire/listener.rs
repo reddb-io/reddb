@@ -50,7 +50,7 @@ pub async fn start_redwire_listener(
 }
 
 /// Start a RedWire listener on an already-bound TCP listener (used by
-/// service_cli's spawn_wire_listeners when binding the user-facing wire
+/// the server bootstrap when binding the user-facing wire
 /// port directly; the shared-port demux instead dispatches per connection
 /// through [`handle_router_connection`]).
 ///

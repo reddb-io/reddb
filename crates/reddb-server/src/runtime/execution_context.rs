@@ -643,6 +643,32 @@ pub(crate) fn update_current_secret_value(path: &str, value: Option<String>) {
 mod tests {
     use super::*;
 
+    /// Companion to `raw_iteration_confined_to_maintenance_allowlist`:
+    /// the snapshot thread-local is an implementation detail of the
+    /// statement frame (issue #2138). It must stay private to this module,
+    /// so the only way any other module can observe ambient snapshot state
+    /// is `capture_current_snapshot`, which hands back an owned `Option`
+    /// the caller then passes explicitly into the scan API.
+    #[test]
+    fn snapshot_thread_local_stays_private_to_the_statement_frame() {
+        let src = include_str!("execution_context.rs");
+
+        for name in ["CURRENT_SNAPSHOT", "HAS_SNAPSHOT"] {
+            assert!(
+                !src.contains(&format!("pub static {name}"))
+                    && !src.contains(&format!("pub(crate) static {name}")),
+                "{name} must stay private to execution_context; expose an explicit \
+                 Option<SnapshotContext> via capture_current_snapshot instead"
+            );
+        }
+
+        assert!(
+            src.contains("the only sanctioned ambient read"),
+            "capture_current_snapshot must keep documenting that it is the single \
+             sanctioned ambient read of the snapshot thread-local"
+        );
+    }
+
     fn with_secret_values<T>(values: HashMap<String, String>, f: impl FnOnce() -> T) -> T {
         CURRENT_SECRET_RESOLVER.with(|cell| {
             cell.replace(Some(SecretResolver {
@@ -1070,6 +1096,17 @@ pub(crate) fn xids_visible_under_current_snapshot(xmin: u64, xmax: u64) -> bool 
 /// can be moved into every worker closure. Worker threads do not
 /// inherit thread-locals, so calling `entity_visible_under_current_snapshot`
 /// from inside a spawned closure would silently skip the filter.
+///
+/// This is the only sanctioned ambient read of the snapshot thread-local
+/// (issue #2138). `CURRENT_SNAPSHOT` and `HAS_SNAPSHOT` are private to this
+/// module and stay that way: they exist for statement-frame entry and for
+/// detecting a frameless read, nothing else. Everything downstream must
+/// take the resulting `Option<SnapshotContext>` as an explicit argument —
+/// that is what makes `SegmentManager::scan*` thread-independent. The
+/// `Option` is load-bearing: `None` means no statement frame is installed
+/// (autocommit, or the prepared-statement fast path of #2183), and the
+/// scan API keeps a documented fallback for that case rather than assuming
+/// a frame always exists.
 pub fn capture_current_snapshot() -> Option<SnapshotContext> {
     CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone())
 }

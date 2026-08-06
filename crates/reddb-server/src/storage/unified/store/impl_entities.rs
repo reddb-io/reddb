@@ -1584,6 +1584,59 @@ impl UnifiedStore {
         collection_results.into_iter().flatten().collect()
     }
 
+    /// Scan every collection under an explicit MVCC snapshot.
+    pub fn scan<F>(
+        &self,
+        snapshot: Option<&crate::runtime::impl_core::SnapshotContext>,
+        filter: F,
+    ) -> Vec<(String, UnifiedEntity)>
+    where
+        F: Fn(&UnifiedEntity) -> bool + Clone + Send + Sync,
+    {
+        let pairs: Vec<(String, Arc<SegmentManager>)> = {
+            let collections = self.collections.read();
+            collections
+                .iter()
+                .map(|(name, manager)| (name.clone(), Arc::clone(manager)))
+                .collect()
+        };
+
+        let use_parallel = pairs.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
+        if !use_parallel {
+            return pairs
+                .into_iter()
+                .flat_map(|(name, manager)| {
+                    manager
+                        .scan(snapshot, filter.clone())
+                        .into_iter()
+                        .map(move |entity| (name.clone(), entity))
+                })
+                .collect();
+        }
+
+        let filter_ref = &filter;
+        let collection_results: Vec<Vec<(String, UnifiedEntity)>> = std::thread::scope(|scope| {
+            pairs
+                .iter()
+                .map(|(name, manager)| {
+                    let name = name.clone();
+                    scope.spawn(move || {
+                        manager
+                            .scan(snapshot, |entity| filter_ref(entity))
+                            .into_iter()
+                            .map(|entity| (name.clone(), entity))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap_or_default())
+                .collect()
+        });
+
+        collection_results.into_iter().flatten().collect()
+    }
+
     /// Filter by metadata across all collections
     pub fn filter_metadata_all(
         &self,

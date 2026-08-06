@@ -610,12 +610,11 @@ fn first_boot_tolerates_cert_file_env_pointing_at_absent_bootstrap_cert_out() {
 /// non-fatally killed the TLS listener. The explicit TLS flag must own
 /// the port: the plaintext default is suppressed and the TLS listener
 /// comes up.
-// Issue #2055: with `--http-bind` and no gRPC the dispatch in `run_server`
-// picks `run_http_server`, which now owns a tokio runtime and spawns the
-// wire listeners (plaintext + TLS) like `run_grpc_server` /
-// `run_dual_server`. Before the fix neither wire listener came up in the
-// HTTP-only path while `red.rs` still suppressed the env-derived plaintext
-// default, orphaning the port.
+// Issue #2055: with `--http-bind` and no gRPC the server bootstrap detects the
+// HTTP-only shape, which attaches the wire listeners (plaintext + TLS) to its
+// node like the gRPC-only and dual shapes do. Before the fix neither wire
+// listener came up in the HTTP-only path while `red.rs` still suppressed the
+// env-derived plaintext default, orphaning the port.
 #[test]
 fn wire_tls_flag_owns_port_over_env_plaintext_default() {
     let dir = support::temp_data_dir("wire-tls-owns-port");
@@ -719,7 +718,7 @@ fn explicit_wire_tls_bind_failure_is_fatal() {
 
 /// Issue #2055 — the DaaS provisioning shape: the release container image
 /// bakes `REDDB_WIRE_BIND_ADDR=0.0.0.0:5050`, and a run with `--http-bind`
-/// and no gRPC used to route to `run_http_server`, which never spawned any
+/// and no gRPC used to route to an HTTP-only runner that never spawned any
 /// wire listener. The env-derived plaintext RedWire listener must come up in
 /// the HTTP-only path and accept a connection on its port.
 #[test]
@@ -769,8 +768,8 @@ fn http_only_env_plaintext_wire_listener_accepts_connections() {
 }
 
 /// Issue #2055 (acceptance) — the HTTP-only path must record the wire
-/// transport in `TransportReadiness`, the same `active("wire", …)` state
-/// `run_dual_server` records, so the HTTP `/health` snapshot enumerates it
+/// transport in `TransportReadiness`, the same `active("wire", …)` state the
+/// dual shape records, so the HTTP `/health` snapshot enumerates it
 /// as ready rather than silently omitting a live listener.
 #[test]
 fn http_only_reports_wire_transport_ready_on_health() {

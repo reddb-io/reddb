@@ -21,8 +21,8 @@ use std::time::Duration;
 use reddb::cli;
 use reddb::cli::types::FlagValue;
 use reddb::service_cli::{
-    install_systemd_service, probe_listener, render_systemd_unit, run_server_with_large_stack,
-    BootstrapConfig, ServerCommandConfig, ServerTransport, SystemdServiceConfig,
+    install_systemd_service, probe_listener, render_systemd_unit, run_server, BootstrapConfig,
+    ServerCommandConfig, ServerTransport, SystemdServiceConfig,
 };
 use reddb_client::{format_query_result, QueryResult, RowFormat, ValueOut};
 use reddb_types::encoding::{base64_encode, json_escape};
@@ -386,6 +386,16 @@ fn resolve_mcp_client_options(
             spec.redacted_uri
         ));
     }
+    if !matches!(
+        spec.target,
+        reddb_wire::ConnectionTarget::Memory | reddb_wire::ConnectionTarget::File { .. }
+    ) && matches!(spec.auth, reddb_wire::ConnectionAuth::Anonymous)
+    {
+        return Err(format!(
+            "remote MCP requires credentials: {}",
+            spec.redacted_uri
+        ));
+    }
 
     let timeout = resolve_mcp_timeout(&raw_uri)?;
     Ok(Some(McpClientOptions {
@@ -690,13 +700,13 @@ impl RemoteMcpServer {
                 );
                 obj.insert(
                     "description".to_string(),
-                    reddb::json::Value::String(def.description.to_string()),
+                    reddb::json::Value::String(def.descriptor_description()),
                 );
                 obj.insert("inputSchema".to_string(), def.input_schema);
                 reddb::json::Value::Object(obj)
             })
             .collect();
-        tools_json.push(reddb::runtime::ai::mcp_ask_tool::descriptor());
+        tools_json.push(reddb::mcp::tools::ask_descriptor());
 
         let mut result = reddb::json::Map::new();
         result.insert("tools".to_string(), reddb::json::Value::Array(tools_json));
@@ -788,12 +798,17 @@ impl RemoteMcpServer {
         };
         let empty = reddb::json::Value::Object(reddb::json::Map::new());
         let args = params.and_then(|p| p.get("arguments")).unwrap_or(&empty);
-        let result = match name {
+        let posture = if matches!(self.options.auth, reddb_wire::ConnectionAuth::Anonymous) {
+            reddb::mcp::tools::McpIdentityPosture::RemoteCredentialsMissing
+        } else {
+            reddb::mcp::tools::McpIdentityPosture::RemoteCredentialsPresented
+        };
+        let result = reddb::mcp::tools::authorize_tool(name, posture).and_then(|_| match name {
             "reddb_query" => self.remote_query_tool(args),
             _ => Err(format!(
                 "remote MCP client mode currently forwards reddb_query only; tool requires embedded runtime: {name}"
             )),
-        };
+        });
         mcp_tool_text_result(id, result)
     }
 
@@ -1646,7 +1661,7 @@ fn main() {
             if json_mode {
                 eprintln!("{}", server_command_json("server", &config));
             }
-            if let Err(err) = run_server_with_large_stack(config) {
+            if let Err(err) = run_server(config) {
                 if json_mode {
                     json_error("server", &err.to_string());
                 }
@@ -1736,7 +1751,7 @@ fn main() {
             if json_mode {
                 eprintln!("{}", server_command_json("replica", &config));
             }
-            if let Err(err) = run_server_with_large_stack(config) {
+            if let Err(err) = run_server(config) {
                 if json_mode {
                     json_error("replica", &err.to_string());
                 }
@@ -6881,11 +6896,17 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     fn mcp_url_flag_wins_over_env_and_defaults_timeout() {
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(&[("REDDB_MCP_URI", "https://env.example:443")]);
-        let flags = HashMap::from([("url".to_string(), str_flag("reds://cli.example:5050"))]);
+        let flags = HashMap::from([(
+            "url".to_string(),
+            str_flag("reds://user:pass@cli.example:5050"),
+        )]);
 
         let options = resolve_mcp_client_options(&flags).unwrap().unwrap();
 
-        assert_eq!(options.redacted_uri, "reds://cli.example:5050");
+        assert_eq!(
+            options.redacted_uri,
+            "reds://<redacted>:<redacted>@cli.example:5050"
+        );
         assert_eq!(options.timeout, Duration::from_secs(20));
     }
 
@@ -6893,7 +6914,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     fn mcp_url_env_is_used_when_flag_absent_and_timeout_env_overrides_default() {
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(&[
-            ("REDDB_MCP_URI", "https://env.example:443"),
+            ("REDDB_MCP_URI", "https://user:pass@env.example:443"),
             ("REDDB_MCP_TIMEOUT_S", "7"),
         ]);
 
@@ -6901,7 +6922,10 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             .unwrap()
             .unwrap();
 
-        assert_eq!(options.redacted_uri, "https://env.example:443");
+        assert_eq!(
+            options.redacted_uri,
+            "https://<redacted>:<redacted>@env.example:443"
+        );
         assert_eq!(options.timeout, Duration::from_secs(7));
     }
 
@@ -6909,7 +6933,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     fn mcp_url_query_timeout_overrides_env_timeout() {
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(&[("REDDB_MCP_TIMEOUT_S", "7")]);
-        let flags = HashMap::from([("url".to_string(), str_flag("https://h?timeout=3"))]);
+        let flags = HashMap::from([("url".to_string(), str_flag("https://user:pass@h?timeout=3"))]);
 
         let options = resolve_mcp_client_options(&flags).unwrap().unwrap();
 
@@ -6927,6 +6951,80 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
 
         assert!(err.contains("bearer token requires TLS"), "{err}");
         assert!(!err.contains("secret-token-1"), "{err}");
+    }
+
+    #[test]
+    fn mcp_remote_uri_requires_credentials() {
+        let flags = HashMap::from([("url".to_string(), str_flag("https://db.example"))]);
+
+        let error = resolve_mcp_client_options(&flags).unwrap_err();
+
+        assert!(error.contains("remote MCP requires credentials"), "{error}");
+    }
+
+    fn assert_anonymous_remote_mcp_tools_are_denied(tool_names: &[&str]) {
+        let options = McpClientOptions {
+            redacted_uri: "https://db.example".to_string(),
+            target: reddb_wire::ConnectionTarget::Http {
+                base_url: "https://db.example".to_string(),
+            },
+            auth: reddb_wire::ConnectionAuth::Anonymous,
+            timeout: Duration::from_secs(1),
+        };
+        let server = RemoteMcpServer::new(options);
+
+        for tool_name in tool_names {
+            let mut params = reddb::json::Map::new();
+            params.insert(
+                "name".to_string(),
+                reddb::json::Value::String((*tool_name).to_string()),
+            );
+            params.insert(
+                "arguments".to_string(),
+                reddb::json::Value::Object(reddb::json::Map::new()),
+            );
+            let params = reddb::json::Value::Object(params);
+            let response =
+                server.handle_tools_call(Some(&reddb::json::Value::Number(1.0)), Some(&params));
+            let parsed: reddb::json::Value = reddb::json::from_str(&response).unwrap();
+            let result = parsed.get("result").expect("MCP result");
+            assert_eq!(
+                result.get("isError").and_then(reddb::json::Value::as_bool),
+                Some(true),
+                "anonymous remote call unexpectedly reached {tool_name}: {response}"
+            );
+            let text = result
+                .get("content")
+                .and_then(reddb::json::Value::as_array)
+                .and_then(|content| content.first())
+                .and_then(|item| item.get("text"))
+                .and_then(reddb::json::Value::as_str)
+                .expect("MCP error text");
+            assert!(
+                text.contains("remote MCP requires credentials"),
+                "unexpected denial for {tool_name}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn anonymous_remote_mcp_rejects_every_vault_tool() {
+        assert_anonymous_remote_mcp_tools_are_denied(&[
+            "reddb_vault_get",
+            "reddb_vault_put",
+            "reddb_vault_unseal",
+        ]);
+    }
+
+    #[test]
+    fn anonymous_remote_mcp_rejects_every_auth_tool() {
+        assert_anonymous_remote_mcp_tools_are_denied(&[
+            "reddb_auth_bootstrap",
+            "reddb_auth_create_user",
+            "reddb_auth_login",
+            "reddb_auth_create_api_key",
+            "reddb_auth_list_users",
+        ]);
     }
 
     struct EnvGuard {

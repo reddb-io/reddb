@@ -2447,11 +2447,8 @@ pub(super) fn load_queue_message_views_with_runtime(
     let filter_arc = rls_filter.map(std::sync::Arc::new);
     let rt_arc = runtime;
     Ok(manager
-        .query_all(move |entity| {
+        .scan(snap_ctx.as_ref(), move |entity| {
             if !matches!(entity.kind, EntityKind::QueueMessage { .. }) {
-                return false;
-            }
-            if !crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity) {
                 return false;
             }
             if let (Some(filter), Some(rt)) = (filter_arc.as_ref(), rt_arc) {
@@ -3064,10 +3061,7 @@ pub(super) fn find_queue_dedup(
     let dedup_key = dedup_key.to_string();
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     manager
-        .query_all(|entity| {
-            if !crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity) {
-                return false;
-            }
+        .scan(snap_ctx.as_ref(), |entity| {
             entity.data.as_row().is_some_and(|row| {
                 row_text(row, "kind").as_deref() == Some(KIND_QUEUE_PUSH_DEDUP)
                     && row_text(row, "queue").as_deref() == Some(&queue)
