@@ -3,13 +3,126 @@
 //! Each tool exposes a specific RedDB capability to AI agents with a
 //! typed JSON Schema input specification.
 
+use crate::application::{OperationContextFactory, OperationContextInput};
 use crate::json::{Map, Value as JsonValue};
+use crate::server::route_catalog::{
+    CommandAuthorizer, CommandPolicyEngine, CommandSpec, RouteAuth,
+};
 
 /// Definition of an MCP tool exposed by the RedDB server.
 pub struct ToolDef {
     pub name: &'static str,
     pub description: &'static str,
+    pub command_id: &'static str,
     pub input_schema: JsonValue,
+}
+
+impl ToolDef {
+    pub fn descriptor_description(&self) -> String {
+        descriptor_description(self.name, self.description, self.command_id)
+    }
+}
+
+pub fn ask_descriptor() -> JsonValue {
+    let mut descriptor = crate::runtime::ai::mcp_ask_tool::descriptor();
+    let description = descriptor
+        .get("description")
+        .and_then(JsonValue::as_str)
+        .expect("reddb.ask descriptor has a description");
+    let decorated = descriptor_description(
+        crate::runtime::ai::mcp_ask_tool::TOOL_NAME,
+        description,
+        "ai.ask",
+    );
+    let JsonValue::Object(object) = &mut descriptor else {
+        panic!("reddb.ask descriptor is an object");
+    };
+    object.insert("description".to_string(), JsonValue::String(decorated));
+    descriptor
+}
+
+fn descriptor_description(tool_name: &str, description: &str, command_id: &str) -> String {
+    let command = crate::server::command_catalog()
+        .command(command_id)
+        .unwrap_or_else(|| panic!("MCP tool {tool_name} maps to unknown command {command_id}"));
+    format!(
+        "{description}\n\nAuthorization: Embedded/local mode runs as implicit admin because the process owns the database. Remote mode requires credentials before dispatching canonical command `{}` ({}); the remote transport verifies those credentials and enforces IAM policy.",
+        command.id,
+        command_auth_label(command.auth),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum McpIdentityPosture {
+    EmbeddedImplicitAdmin,
+    RemoteCredentialsPresented,
+    RemoteCredentialsMissing,
+}
+
+struct McpCommandPolicyEngine {
+    posture: McpIdentityPosture,
+}
+
+impl CommandPolicyEngine for McpCommandPolicyEngine {
+    fn allows(
+        &self,
+        _operation_context: &crate::application::OperationContext,
+        _command: &CommandSpec,
+    ) -> bool {
+        // Remote MCP is a client-side proxy: only the remote endpoint can
+        // verify the presented credential and evaluate its IAM policies.
+        // This local catalog gate establishes the mandatory-credential
+        // posture before connector work; the forwarded transport request
+        // remains the authoritative policy decision.
+        !matches!(self.posture, McpIdentityPosture::RemoteCredentialsMissing)
+    }
+}
+
+pub fn authorize_tool(
+    tool_name: &str,
+    posture: McpIdentityPosture,
+) -> Result<&'static str, String> {
+    let command_id = if tool_name == crate::runtime::ai::mcp_ask_tool::TOOL_NAME {
+        "ai.ask"
+    } else {
+        all_tools()
+            .into_iter()
+            .find(|tool| tool.name == tool_name)
+            .map(|tool| tool.command_id)
+            .ok_or_else(|| format!("unknown tool: {tool_name}"))?
+    };
+    let principal = match posture {
+        McpIdentityPosture::EmbeddedImplicitAdmin => Some("mcp:embedded-admin".to_string()),
+        McpIdentityPosture::RemoteCredentialsPresented => {
+            Some("mcp:remote-credentials-presented".to_string())
+        }
+        McpIdentityPosture::RemoteCredentialsMissing => None,
+    };
+    let operation_context = OperationContextFactory::build(OperationContextInput {
+        principal,
+        ..OperationContextInput::default()
+    });
+    let engine = McpCommandPolicyEngine { posture };
+    CommandAuthorizer::new(crate::server::command_catalog(), &engine)
+        .authorize(&operation_context, command_id)
+        .map_err(|error| match posture {
+            McpIdentityPosture::RemoteCredentialsMissing => {
+                format!("remote MCP requires credentials: {error}")
+            }
+            _ => error.to_string(),
+        })?;
+    Ok(command_id)
+}
+
+fn command_auth_label(auth: RouteAuth) -> &'static str {
+    match auth {
+        RouteAuth::Public => "public",
+        RouteAuth::OptionalUser => "optional user",
+        RouteAuth::UserRequired => "user required",
+        RouteAuth::AdminToken => "admin token",
+        RouteAuth::OpsCapability(_) => "operations capability",
+        RouteAuth::StreamLease => "stream lease",
+    }
 }
 
 /// Definition of a read-only MCP knowledge resource (ADR 0061).
@@ -212,6 +325,7 @@ pub fn all_tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "reddb_query",
+            command_id: "query.execute",
             description: "Execute a SQL or universal query against RedDB. Supports SELECT, INSERT, UPDATE, DELETE, and graph queries (Gremlin, Cypher, SPARQL).\n\nALWAYS pass user-provided values via the `params` array using `$1`, `$2`, ... placeholders rather than interpolating them into the SQL string. Example: `{\"sql\": \"SELECT * FROM users WHERE id = $1\", \"params\": [42]}`. Interpolating user input directly is unsafe and brittle; the parameterized form is type-checked and immune to injection.",
             input_schema: schema_with_nested(
                 vec![
@@ -248,11 +362,13 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_collections",
+            command_id: "collections.list",
             description: "List all collections in the database.",
             input_schema: schema(vec![], vec![]),
         },
         ToolDef {
             name: "reddb_insert_row",
+            command_id: "collections.rows.create",
             description: "Insert a table row into a collection.",
             input_schema: schema_with_nested(
                 vec![
@@ -265,6 +381,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_insert_node",
+            command_id: "collections.nodes.create",
             description: "Insert a graph node into a collection.",
             input_schema: schema_with_nested(
                 vec![
@@ -279,6 +396,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_insert_edge",
+            command_id: "collections.edges.create",
             description: "Insert a graph edge between two nodes.",
             input_schema: schema_with_nested(
                 vec![
@@ -295,6 +413,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_insert_vector",
+            command_id: "collections.vectors.create",
             description: "Insert a vector embedding into a collection.",
             input_schema: schema_with_nested(
                 vec![
@@ -308,6 +427,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_insert_document",
+            command_id: "collections.documents.create",
             description: "Insert a JSON document into a collection.",
             input_schema: schema_with_nested(
                 vec![
@@ -320,6 +440,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_kv_get",
+            command_id: "keyed.v1.kv",
             description: "Get a value by key from a key-value collection.",
             input_schema: schema(
                 vec![
@@ -331,6 +452,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_kv_set",
+            command_id: "keyed.v1.kv",
             description: "Set a key-value pair in a collection.",
             input_schema: schema_with_nested(
                 vec![
@@ -349,6 +471,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_kv_invalidate_tags",
+            command_id: "keyed.v1.kv",
             description: "Delete every KV entry in a collection tagged with any listed tag.",
             input_schema: schema_with_nested(
                 vec![
@@ -360,6 +483,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_config_get",
+            command_id: "keyed.v1.config",
             description: "Get a Config value without resolving SecretRef targets.",
             input_schema: schema(
                 vec![
@@ -371,6 +495,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_config_put",
+            command_id: "keyed.v1.config",
             description: "Set a Config value. TTL and counter operations are not supported for Config.",
             input_schema: schema_with_nested(
                 vec![
@@ -389,6 +514,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_config_resolve",
+            command_id: "keyed.v1.config",
             description: "Explicitly resolve a Config SecretRef. Requires the corresponding Vault unseal permission.",
             input_schema: schema(
                 vec![
@@ -400,6 +526,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_vault_get",
+            command_id: "keyed.v1.vault",
             description: "Get Vault metadata for a secret. Does not return plaintext.",
             input_schema: schema(
                 vec![
@@ -411,6 +538,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_vault_put",
+            command_id: "keyed.v1.vault",
             description: "Store a sealed Vault secret. TTL and counter operations are not supported for Vault.",
             input_schema: schema_with_nested(
                 vec![
@@ -428,6 +556,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_vault_unseal",
+            command_id: "keyed.v1.vault",
             description: "Explicitly unseal a Vault secret and return plaintext to an authorized caller.",
             input_schema: schema(
                 vec![
@@ -439,6 +568,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_delete",
+            command_id: "collections.entities.delete",
             description: "Delete an entity by ID from a collection.",
             input_schema: schema(
                 vec![
@@ -450,6 +580,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_search_vector",
+            command_id: "collections.similar",
             description: "Search for similar vectors using cosine similarity.",
             input_schema: schema_with_nested(
                 vec![
@@ -463,6 +594,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_search_text",
+            command_id: "query.text_search",
             description: "Full-text search across collections.",
             input_schema: schema_with_nested(
                 vec![
@@ -484,11 +616,13 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_health",
+            command_id: "health.live",
             description: "Check database health and return runtime statistics.",
             input_schema: schema(vec![], vec![]),
         },
         ToolDef {
             name: "reddb_graph_traverse",
+            command_id: "graph.traverse",
             description: "Traverse the graph from a source node using BFS or DFS.",
             input_schema: schema_with_nested(
                 vec![
@@ -502,6 +636,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_graph_shortest_path",
+            command_id: "graph.shortest_path",
             description: "Find the shortest path between two graph nodes.",
             input_schema: schema_with_nested(
                 vec![
@@ -521,6 +656,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         // Auth tools
         ToolDef {
             name: "reddb_auth_bootstrap",
+            command_id: "auth.bootstrap",
             description: "Bootstrap the first admin user. Only works when no users exist yet. Returns the admin user and an API key.",
             input_schema: schema(
                 vec![
@@ -532,6 +668,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_auth_create_user",
+            command_id: "auth.users.create",
             description: "Create a new database user with a role (admin, write, or read).",
             input_schema: schema(
                 vec![
@@ -544,6 +681,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_auth_login",
+            command_id: "auth.login",
             description: "Login with username and password. Returns a session token.",
             input_schema: schema(
                 vec![
@@ -555,6 +693,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_auth_create_api_key",
+            command_id: "auth.api_keys.create",
             description: "Create a persistent API key for a user.",
             input_schema: schema(
                 vec![
@@ -567,12 +706,14 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_auth_list_users",
+            command_id: "auth.users.list",
             description: "List all database users and their roles.",
             input_schema: schema(vec![], vec![]),
         },
         // Update / Scan tools
         ToolDef {
             name: "reddb_update",
+            command_id: "collections.entities.patch",
             description: "Update entities in a collection matching a filter.",
             input_schema: schema_with_nested(
                 vec![
@@ -590,6 +731,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_scan",
+            command_id: "collections.scan",
             description: "Scan entities from a collection with pagination.",
             input_schema: schema_with_nested(
                 vec![
@@ -603,6 +745,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         // Graph analytics tools
         ToolDef {
             name: "reddb_graph_centrality",
+            command_id: "graph.analytics.centrality",
             description: "Compute centrality scores for graph nodes. Algorithms: degree, closeness, betweenness, eigenvector, pagerank.",
             input_schema: schema_with_nested(
                 vec![(
@@ -616,6 +759,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_graph_community",
+            command_id: "graph.analytics.community",
             description: "Detect communities in the graph. Algorithms: label_propagation, louvain.",
             input_schema: schema_with_nested(
                 vec![
@@ -635,6 +779,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_graph_components",
+            command_id: "graph.analytics.components",
             description: "Find connected components in the graph.",
             input_schema: schema_with_nested(
                 vec![(
@@ -648,6 +793,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_graph_cycles",
+            command_id: "graph.analytics.cycles",
             description: "Detect cycles in the graph.",
             input_schema: schema_with_nested(
                 vec![
@@ -665,12 +811,14 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_graph_clustering",
+            command_id: "graph.analytics.clustering",
             description: "Compute clustering coefficient for the graph.",
             input_schema: schema(vec![], vec![]),
         },
         // DDL tools
         ToolDef {
             name: "reddb_create_collection",
+            command_id: "collections.create",
             description: "Create a new collection (table) in the database.",
             input_schema: schema(
                 vec![("name", "string", "Collection name to create")],
@@ -679,6 +827,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_drop_collection",
+            command_id: "collections.drop",
             description: "Drop (delete) a collection from the database.",
             input_schema: schema(
                 vec![("name", "string", "Collection name to drop")],
@@ -690,6 +839,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         // submitting, not by guessing.
         ToolDef {
             name: "reddb_rql_validate",
+            command_id: "query.contract",
             description: "Validate an RQL (RedDB Query Language) string by parsing it with the real reddb-io-rql parser. Returns `{ valid: true, statement }` with the statement kind on success, or `{ valid: false, error }` with a structured diagnostic (message, line, column, offset, kind, expected) on failure. Submit a query to learn the dialect instead of guessing.",
             input_schema: schema(
                 vec![("rql", "string", "RQL query string to validate")],
@@ -698,6 +848,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "reddb_rql_explain",
+            command_id: "query.explain",
             description: "Explain an RQL (RedDB Query Language) string: parse it with the real reddb-io-rql parser and, when valid, also return its AST and the optimizer plan (`ast`, `optimized_ast`, `applied_passes`). Invalid input returns the same structured diagnostic as reddb_rql_validate with no AST/plan.",
             input_schema: schema(
                 vec![("rql", "string", "RQL query string to parse and explain")],
@@ -708,6 +859,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         // generated reddb-io-types catalog.
         ToolDef {
             name: "reddb_type_of",
+            command_id: "catalog.snapshot",
             description: "Look up a RedDB value type from the generated `reddb-io-types` catalog. Given either a type name (`type`, e.g. \"INTEGER\" or the SQL alias \"int\") or a literal JSON value (`value`, e.g. 42 or true), returns the canonical type, its coercion category, the casts available out of it, and the operator overloads that accept it. Provide exactly one of `type` or `value`; `type` wins if both are given.\n\nThe answer is read live from the engine's function/operator/cast catalogs — it never drifts from the type system.",
             input_schema: schema_with_nested(
                 vec![
@@ -737,6 +889,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         // and topology facts.
         ToolDef {
             name: "reddb_explain_connection",
+            command_id: "ops.capabilities",
             description: "Decode a RedDB connection URI with the canonical `reddb-io-wire` parser and return its scheme, transport, mode (`embedded` or `remote`), topology, and normalized target details. Use this to learn the scheme dispatch: `memory://` is embedded ephemeral, `file://` is embedded persisted, `red://` / `reds://` are remote RedWire, and `grpc://` / `http(s)://` are remote non-RedWire transports.",
             input_schema: schema(
                 vec![(
@@ -753,6 +906,53 @@ pub fn all_tools() -> Vec<ToolDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_identity_authorizes_the_full_tool_catalog() {
+        for tool in all_tools() {
+            authorize_tool(&tool.name, McpIdentityPosture::EmbeddedImplicitAdmin)
+                .unwrap_or_else(|err| panic!("embedded tool {} was denied: {err}", tool.name));
+        }
+        authorize_tool(
+            crate::runtime::ai::mcp_ask_tool::TOOL_NAME,
+            McpIdentityPosture::EmbeddedImplicitAdmin,
+        )
+        .expect("embedded reddb.ask is authorized");
+    }
+
+    #[test]
+    fn tool_descriptors_document_catalog_authorization_posture() {
+        for tool in all_tools() {
+            let description = tool.descriptor_description();
+            assert!(
+                description.contains("Embedded/local mode runs as implicit admin"),
+                "embedded posture missing from {}: {}",
+                tool.name,
+                description
+            );
+            assert!(
+                description.contains("Remote mode requires credentials"),
+                "remote posture missing from {}: {}",
+                tool.name,
+                description
+            );
+            assert!(
+                description.contains(tool.command_id),
+                "canonical command id {} missing from {} descriptor",
+                tool.command_id,
+                tool.name
+            );
+        }
+
+        let ask = ask_descriptor();
+        let ask_description = ask
+            .get("description")
+            .and_then(JsonValue::as_str)
+            .expect("reddb.ask description");
+        assert!(ask_description.contains("Embedded/local mode runs as implicit admin"));
+        assert!(ask_description.contains("Remote mode requires credentials"));
+        assert!(ask_description.contains("ai.ask"));
+    }
 
     #[test]
     fn test_all_tools_defined() {
