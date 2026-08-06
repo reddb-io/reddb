@@ -9,8 +9,8 @@
 //! "at least one server bind address must be configured".
 //!
 //! These spawn the real `red` binary via `CARGO_BIN_EXE_red` so the
-//! whole `build_server_config` → `run_configured_servers` boot path is
-//! exercised end-to-end, and assert against process liveness (not a
+//! whole `build_server_config` → `service_cli::server_bootstrap` boot
+//! path is exercised end-to-end, and assert against process liveness (not a
 //! bare port probe) so a stray listener cannot mask a failed boot.
 
 #[path = "../../support/mod.rs"]

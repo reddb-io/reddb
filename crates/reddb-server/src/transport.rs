@@ -31,19 +31,37 @@ impl TransportKind {
     }
 }
 
+/// What a listener's exit means for the node that hosts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportRole {
+    /// The shape's own transport. Losing its bind ends the boot and its
+    /// accept loop returning ends the process.
+    Primary,
+    /// A listener attached to another shape's node. It is spawned and
+    /// forgotten: its exit is logged and the node keeps serving.
+    Secondary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportDescriptor {
     pub kind: TransportKind,
     pub bind_addr: String,
     pub explicit: bool,
+    pub role: TransportRole,
 }
 
 impl TransportDescriptor {
-    pub fn new(kind: TransportKind, bind_addr: String, explicit: bool) -> Self {
+    pub fn new(
+        kind: TransportKind,
+        bind_addr: String,
+        explicit: bool,
+        role: TransportRole,
+    ) -> Self {
         Self {
             kind,
             bind_addr,
             explicit,
+            role,
         }
     }
 }
