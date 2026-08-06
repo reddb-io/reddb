@@ -446,8 +446,18 @@ fn grpc_query_request_error(error: crate::api::RedDBError) -> Status {
         {
             Status::failed_precondition(message)
         }
-        crate::api::RedDBError::Query(message) => Status::invalid_argument(message),
+        // Client-shaped request errors stay INVALID_ARGUMENT: seam bind
+        // failures and commit-policy floor violations.
+        crate::api::RedDBError::Query(message)
+            if message.contains("prepared bind failed")
+                || message.contains("weaker than resolved floor") =>
+        {
+            Status::invalid_argument(message)
+        }
         crate::api::RedDBError::Validation { message, .. } => Status::invalid_argument(message),
+        // Everything else keeps the pre-migration status surface: to_status
+        // routes the ask_primary_sync_unavailable prefix to UNAVAILABLE and
+        // generic Query errors to INTERNAL.
         other => to_status(other),
     }
 }
