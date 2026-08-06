@@ -224,9 +224,7 @@ pub(super) fn find_document_body_json(
         }
         // A JSON-position array literal parses losslessly into `Value::Array`
         // (issue #1708); resolve it to a JSON array here.
-        Value::Array(_) => Ok(crate::presentation::entity_json::storage_value_to_json(
-            &val,
-        )),
+        Value::Array(_) => Ok(val.to_json()),
         // ADR 0067 (#1721): a document body is an inline strict-JSON literal.
         // A runtime string bound through a parameter (`DOCUMENT VALUES ($1)`)
         // is no longer silently coerced — wrap it with `JSON_PARSE(<expr>)`.
