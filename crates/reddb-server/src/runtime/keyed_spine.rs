@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::{EntityId, RowData};
 
 pub(super) trait KeyedVersion {
