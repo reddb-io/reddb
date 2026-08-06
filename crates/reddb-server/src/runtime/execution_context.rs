@@ -1074,6 +1074,15 @@ pub fn capture_current_snapshot() -> Option<SnapshotContext> {
     CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone())
 }
 
+/// Clone the snapshot installed by statement entry.
+///
+/// Query scans require this handle explicitly. Reaching a scan without a
+/// statement frame is an internal contract violation rather than a request to
+/// bypass MVCC visibility.
+pub(crate) fn current_snapshot() -> SnapshotContext {
+    capture_current_snapshot().expect("query scan requires a statement snapshot")
+}
+
 /// Whether the active read snapshot may need historical tuple versions
 /// that the current secondary indexes cannot prove. Index paths can still
 /// recheck visible candidates, but only a heap scan can discover versions
