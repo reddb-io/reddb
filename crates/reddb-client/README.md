@@ -258,7 +258,7 @@ engine, no embedded backend, just transports:
 | Scheme              | Status     |
 |---------------------|------------|
 | `red://host[:port]` | RedWire, default port 5050 |
-| `reds://host[:port]`| TODO (TLS not yet wired in the bin) |
+| `reds://host[:port]`| Parsed as RedWire-over-TLS; the bin rejects it (the library supports TLS behind `redwire-tls`) |
 | `grpc://host[:port]`| gRPC, default port 55055 |
 | `http://host[:port]`| REST |
 | `memory:` / `file://` | rejected (exit 2, points to `red`) |

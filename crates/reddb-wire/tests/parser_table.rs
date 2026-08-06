@@ -363,3 +363,30 @@ fn connection_auth_parse_errors_redact_userinfo() {
     assert!(!rendered.contains("secret-token"), "{rendered}");
     assert!(rendered.contains("<redacted>"), "{rendered}");
 }
+
+/// A `red://` cluster URI must say *why* it is wrong. The ported form
+/// (`red://a:1,b:2`) reaches `Url::parse` first, which rejects it as
+/// "invalid port number" — the right kind for the wrong reason, and a
+/// message that sends the reader looking at their ports. Both forms must
+/// name the actual constraint and the transport that lifts it.
+#[test]
+fn red_cluster_uri_is_rejected_with_an_actionable_message() {
+    for uri in [
+        "red://a,b",
+        "reds://a,b",
+        "red://a:5050,b:5051",
+        "reds://a:5050,b:5051,c",
+        "red://a,b/path?route=primary",
+    ] {
+        let err = parse(uri).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("comma-separated cluster hosts"),
+            "{uri} did not name the constraint: {rendered}"
+        );
+        assert!(
+            rendered.contains("grpc://"),
+            "{uri} did not point at the transport that supports clusters: {rendered}"
+        );
+    }
+}

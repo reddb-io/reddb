@@ -27,13 +27,73 @@ pub fn parse(uri: &str) -> Result<ConnectionTarget> {
             ClientError::new(ErrorCode::InvalidUri, e.message)
         }
     })?;
+    reject_unusable_redwire_userinfo(uri, &target)?;
     Ok(target)
+}
+
+/// `ConnectionTarget::RedWire` carries no auth, and the transport connects
+/// with [`Auth::Anonymous`]. Credentials in the URI would therefore be
+/// dropped on the floor and the connection would proceed as an anonymous
+/// principal — a silent privilege downgrade. Refuse instead. RedWire SCRAM
+/// auth is sequenced separately in Spec #2112; when it lands, this guard is
+/// what has to be replaced with real credential plumbing.
+fn reject_unusable_redwire_userinfo(uri: &str, target: &ConnectionTarget) -> Result<()> {
+    if !matches!(target, ConnectionTarget::RedWire { .. }) {
+        return Ok(());
+    }
+    let carries_userinfo = reddb_wire::parse_with_auth(uri)
+        .map(|spec| !matches!(spec.auth, reddb_wire::ConnectionAuth::Anonymous))
+        .unwrap_or(false);
+    if carries_userinfo {
+        // The message must not echo the URI — it holds the secret.
+        return Err(ClientError::new(
+            ErrorCode::InvalidUri,
+            "red:// and reds:// do not carry credentials yet; the userinfo in \
+             this URI would be silently ignored and the connection made \
+             anonymously. Use grpc:// or http:// for an authenticated \
+             connection.",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn redwire_uri_with_credentials_is_refused_rather_than_downgraded() {
+        for uri in [
+            "red://alice:secret-token@primary.svc",
+            "reds://alice:secret-token@primary.svc:5051",
+            "red://sk-abc@primary.svc",
+        ] {
+            let err = parse(uri).expect_err(uri);
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("anonymously"),
+                "{uri} did not name the downgrade: {rendered}"
+            );
+            assert!(
+                !rendered.contains("secret-token") && !rendered.contains("sk-abc"),
+                "{uri} leaked the credential: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn redwire_uri_without_credentials_still_parses() {
+        assert!(parse("red://primary.svc").is_ok());
+        assert!(parse("reds://primary.svc:5051").is_ok());
+    }
+
+    #[test]
+    fn credentials_are_still_accepted_on_transports_that_carry_them() {
+        assert!(parse("grpc://alice:secret-token@primary.svc").is_ok());
+        assert!(parse("http://alice:secret-token@primary.svc").is_ok());
+    }
 
     #[test]
     fn parses_memory() {

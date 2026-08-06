@@ -603,6 +603,16 @@ jobs:
           python-version: '3.x'
       - name: Build red (embedded engine for the JS SDK)
         run: cargo build --locked --bin red
+      - name: Rust client transport conformance over RedWire (red://)
+        # The `redwire` feature is not in the client's default set, so a plain
+        # `cargo test` exercises the embedded path only and the wire path goes
+        # silently untested. Spec #2112 requires wire-path cases to execute on
+        # every PR, so run them here against the `red` binary this job already
+        # built. Without RED_SMOKE=1 + RED_BIN the suite self-skips.
+        env:
+          RED_SMOKE: '1'
+          RED_BIN: ${{ github.workspace }}/target/debug/red
+        run: cargo test -p reddb-io-client --features redwire --test conformance client_transport
       - name: JS SDK runnable README examples
         working-directory: drivers/js
         env:

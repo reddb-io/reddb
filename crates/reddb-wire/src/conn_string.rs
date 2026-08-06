@@ -439,6 +439,25 @@ pub fn parse_with_limits(
         return Ok(cluster);
     }
 
+    // Before `Url::parse`, because a multi-host authority like
+    // `red://a:1,b:2` fails URL parsing with "invalid port number" — a
+    // message that hides the real problem. `red://` no longer folds to
+    // gRPC (#2159), and RedWire has no multi-host form, so a cluster URI
+    // has to name the transport that supports one.
+    if let Some(rest) = uri
+        .strip_prefix("red://")
+        .or_else(|| uri.strip_prefix("reds://"))
+    {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        if authority.contains(',') {
+            return Err(ParseError::new(
+                ParseErrorKind::InvalidUri,
+                "RedWire does not support comma-separated cluster hosts; \
+                 use grpc:// or grpcs:// for a cluster URI",
+            ));
+        }
+    }
+
     let parsed = Url::parse(uri)
         .map_err(|e| ParseError::new(ParseErrorKind::InvalidUri, format!("{e}: {uri}")))?;
 
