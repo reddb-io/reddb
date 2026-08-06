@@ -171,6 +171,7 @@ mod request_body;
 mod request_context;
 pub(crate) mod route_catalog;
 mod routes;
+pub(crate) use routes::discovered_route_catalog;
 mod routing;
 mod serverless_support;
 pub mod tls;

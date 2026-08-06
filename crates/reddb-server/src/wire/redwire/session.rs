@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
+use crate::application::{OperationContext, OperationContextFactory, OperationContextInput};
 use crate::auth::store::AuthStore;
 use crate::auth::Role;
 use crate::runtime::query_request::{
@@ -49,8 +50,157 @@ struct AuthedSession {
     username: String,
     role: Role,
     tenant: Option<String>,
-    #[allow(dead_code)]
     session_id: String,
+}
+
+struct RedWireAuthenticatedSessionPolicy;
+
+impl crate::server::route_catalog::CommandPolicyEngine for RedWireAuthenticatedSessionPolicy {
+    fn allows(
+        &self,
+        _ctx: &OperationContext,
+        _command: &crate::server::route_catalog::CommandSpec,
+    ) -> bool {
+        // Reaching the frame loop means the RedWire handshake accepted this
+        // session (including explicitly configured anonymous sessions). The
+        // catalog authorizer still owns command lookup and the mandatory
+        // authorization consult, while this adapter preserves the handshake's
+        // existing credential decision.
+        true
+    }
+}
+
+fn redwire_operation_context(session: &AuthedSession, correlation_id: u64) -> OperationContext {
+    OperationContextFactory::build(OperationContextInput {
+        request_id: Some(format!("redwire-{}-{correlation_id}", session.session_id)),
+        principal: Some(session.username.clone()),
+        tenant: session.tenant.clone(),
+        ..OperationContextInput::default()
+    })
+}
+
+fn authorize_redwire_frame<P: crate::server::route_catalog::CommandPolicyEngine + ?Sized>(
+    ctx: &OperationContext,
+    kind: MessageKind,
+    policy: &P,
+) -> Result<(), crate::server::route_catalog::CommandAuthorizationError> {
+    crate::server::route_catalog::CommandAuthorizer::new(
+        crate::server::discovered_route_catalog(),
+        policy,
+    )
+    .authorize(ctx, redwire_command_id(kind))
+}
+
+/// Canonical command id for every RedWire frame kind. Reply and push kinds map
+/// to the command that owns their request/reply exchange; only client-originated
+/// kinds reach execution, but keeping this match exhaustive makes additions to
+/// the wire vocabulary fail compilation until their catalog decision is made.
+pub(crate) const fn redwire_command_id(kind: MessageKind) -> &'static str {
+    match kind {
+        MessageKind::Hello
+        | MessageKind::HelloAck
+        | MessageKind::AuthRequest
+        | MessageKind::AuthResponse
+        | MessageKind::AuthOk
+        | MessageKind::AuthFail => "auth.login",
+
+        MessageKind::Bye | MessageKind::Ping | MessageKind::Pong => "health.live",
+
+        MessageKind::Query
+        | MessageKind::Result
+        | MessageKind::Error
+        | MessageKind::QueryBinary
+        | MessageKind::Prepare
+        | MessageKind::PreparedOk
+        | MessageKind::ExecutePrepared
+        | MessageKind::QueryWithParams
+        | MessageKind::QueueWaitOpen
+        | MessageKind::QueueEventPush
+        | MessageKind::QueueWaitTimeout
+        | MessageKind::MovedRedirect
+        | MessageKind::Compress => "query.execute",
+
+        MessageKind::BulkInsert
+        | MessageKind::BulkOk
+        | MessageKind::BulkInsertBinary
+        | MessageKind::BulkInsertPrevalidated
+        | MessageKind::BulkStreamStart
+        | MessageKind::BulkStreamRows
+        | MessageKind::BulkStreamCommit
+        | MessageKind::BulkStreamAck => "collections.batch.insert",
+
+        MessageKind::Get => "collections.entities.get",
+        MessageKind::Delete | MessageKind::DeleteOk => "collections.entities.delete",
+        MessageKind::VectorSearch => "collections.ivf.search",
+        MessageKind::GraphTraverse => "graph.traverse",
+
+        MessageKind::OpenStream
+        | MessageKind::OpenAck
+        | MessageKind::RowDescription
+        | MessageKind::StreamEnd => "streams.query.output",
+        MessageKind::StreamChunk => "streams.input",
+        MessageKind::Cancel | MessageKind::StreamCancel | MessageKind::StreamError => {
+            "streams.query.cancel"
+        }
+        MessageKind::SetSession | MessageKind::Notice => "query.context",
+    }
+}
+
+struct RedWireExecutionContextGuard {
+    previous_tenant: Option<String>,
+    previous_identity: Option<(String, Role)>,
+}
+
+impl RedWireExecutionContextGuard {
+    fn install(ctx: &OperationContext, role: Role) -> Self {
+        let previous_tenant = crate::runtime::execution_context::current_tenant();
+        let previous_identity = crate::runtime::execution_context::current_auth_identity();
+        match &ctx.tenant {
+            Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant.clone()),
+            None => crate::runtime::execution_context::clear_current_tenant(),
+        }
+        // Anonymous sessions exist only when server auth is disabled (the
+        // handshake refuses anonymous otherwise) and historically ran with
+        // NO installed identity — enforcement off. Installing the handshake's
+        // `Read` role here would reject every anonymous write (issue #2149
+        // review). The tenant install above still applies for RLS.
+        if ctx.audit_principal == "anonymous" {
+            crate::runtime::execution_context::clear_current_auth_identity();
+        } else {
+            crate::runtime::execution_context::set_current_auth_identity(
+                ctx.audit_principal.clone(),
+                role,
+            );
+        }
+        Self {
+            previous_tenant,
+            previous_identity,
+        }
+    }
+}
+
+impl Drop for RedWireExecutionContextGuard {
+    fn drop(&mut self) {
+        match self.previous_identity.take() {
+            Some((username, role)) => {
+                crate::runtime::execution_context::set_current_auth_identity(username, role)
+            }
+            None => crate::runtime::execution_context::clear_current_auth_identity(),
+        }
+        match self.previous_tenant.take() {
+            Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant),
+            None => crate::runtime::execution_context::clear_current_tenant(),
+        }
+    }
+}
+
+pub(super) fn execute_with_redwire_context<T>(
+    ctx: &OperationContext,
+    role: Role,
+    execute: impl FnOnce() -> T,
+) -> T {
+    let _guard = RedWireExecutionContextGuard::install(ctx, role);
+    execute()
 }
 
 pub async fn handle_session<S>(
@@ -148,6 +298,17 @@ where
             Err(err) => return Err(redwire_io_err(err)),
         };
 
+        let operation_context = redwire_operation_context(&session, frame.correlation_id);
+        if let Err(error) = authorize_redwire_frame(
+            &operation_context,
+            frame.kind,
+            &RedWireAuthenticatedSessionPolicy,
+        ) {
+            let err_frame = build_error_frame_lossy(frame.correlation_id, &error.to_string());
+            queue_send(&out_tx, encode_frame(&err_frame))?;
+            continue;
+        }
+
         // Catalog-driven direction gate: server-only kinds (PreparedOk,
         // AuthOk/Fail, BulkOk, …) must never arrive *from* a client.
         // The catalog (`MessageKind::direction`) is the single source
@@ -180,23 +341,33 @@ where
                 queue_send(&out_tx, pong)?;
             }
             MessageKind::Query => {
-                let response = run_query(&runtime, prepared_stmts.registry(), &frame);
+                let response =
+                    execute_with_redwire_context(&operation_context, session.role, || {
+                        run_query(&runtime, prepared_stmts.registry(), &frame)
+                    });
                 queue_send(&out_tx, encode_frame(&response))?;
             }
             MessageKind::QueryWithParams => {
-                let response = run_query_with_params(&runtime, prepared_stmts.registry(), &frame);
+                let response =
+                    execute_with_redwire_context(&operation_context, session.role, || {
+                        run_query_with_params(&runtime, prepared_stmts.registry(), &frame)
+                    });
                 queue_send(&out_tx, encode_frame(&response))?;
             }
             // BulkInsert handles both single-row and bulk shapes off
             // the same frame kind: payload `payload` = single,
             // payload `payloads` = array.
             MessageKind::BulkInsert => {
-                let response = run_insert_dispatch(&runtime, &frame);
+                let response =
+                    execute_with_redwire_context(&operation_context, session.role, || {
+                        run_insert_dispatch(&runtime, &frame)
+                    });
                 queue_send(&out_tx, encode_frame(&response))?;
             }
             MessageKind::BulkInsertBinary => {
-                let raw =
-                    crate::wire::listener::handle_bulk_insert_binary(&runtime, &frame.payload);
+                let raw = execute_with_redwire_context(&operation_context, session.role, || {
+                    crate::wire::listener::handle_bulk_insert_binary(&runtime, &frame.payload)
+                });
                 queue_send(
                     &out_tx,
                     encode_frame(&rewrap_length_prefixed_handler_response(
@@ -206,10 +377,12 @@ where
                 )?;
             }
             MessageKind::BulkInsertPrevalidated => {
-                let raw = crate::wire::listener::handle_bulk_insert_binary_prevalidated(
-                    &runtime,
-                    &frame.payload,
-                );
+                let raw = execute_with_redwire_context(&operation_context, session.role, || {
+                    crate::wire::listener::handle_bulk_insert_binary_prevalidated(
+                        &runtime,
+                        &frame.payload,
+                    )
+                });
                 queue_send(
                     &out_tx,
                     encode_frame(&rewrap_length_prefixed_handler_response(
@@ -219,7 +392,9 @@ where
                 )?;
             }
             MessageKind::QueryBinary => {
-                let raw = crate::wire::listener::handle_query_binary(&runtime, &frame.payload);
+                let raw = execute_with_redwire_context(&operation_context, session.role, || {
+                    crate::wire::listener::handle_query_binary(&runtime, &frame.payload)
+                });
                 queue_send(
                     &out_tx,
                     encode_frame(&rewrap_length_prefixed_handler_response(
@@ -241,11 +416,13 @@ where
                 )?;
             }
             MessageKind::BulkStreamRows => {
-                let raw = crate::wire::listener::handle_stream_rows(
-                    &runtime,
-                    &frame.payload,
-                    &mut stream_session,
-                );
+                let raw = execute_with_redwire_context(&operation_context, session.role, || {
+                    crate::wire::listener::handle_stream_rows(
+                        &runtime,
+                        &frame.payload,
+                        &mut stream_session,
+                    )
+                });
                 if !raw.is_empty() {
                     queue_send(
                         &out_tx,
@@ -257,8 +434,9 @@ where
                 }
             }
             MessageKind::BulkStreamCommit => {
-                let raw =
-                    crate::wire::listener::handle_stream_commit(&runtime, &mut stream_session);
+                let raw = execute_with_redwire_context(&operation_context, session.role, || {
+                    crate::wire::listener::handle_stream_commit(&runtime, &mut stream_session)
+                });
                 queue_send(
                     &out_tx,
                     encode_frame(&rewrap_length_prefixed_handler_response(
@@ -268,11 +446,13 @@ where
                 )?;
             }
             MessageKind::Prepare => {
-                let raw = crate::wire::listener::handle_prepare(
-                    &runtime,
-                    &frame.payload,
-                    &mut prepared_stmts,
-                );
+                let raw = execute_with_redwire_context(&operation_context, session.role, || {
+                    crate::wire::listener::handle_prepare(
+                        &runtime,
+                        &frame.payload,
+                        &mut prepared_stmts,
+                    )
+                });
                 queue_send(
                     &out_tx,
                     encode_frame(&rewrap_length_prefixed_handler_response(
@@ -282,11 +462,13 @@ where
                 )?;
             }
             MessageKind::ExecutePrepared => {
-                let raw = crate::wire::listener::handle_execute_prepared(
-                    &runtime,
-                    &frame.payload,
-                    &prepared_stmts,
-                );
+                let raw = execute_with_redwire_context(&operation_context, session.role, || {
+                    crate::wire::listener::handle_execute_prepared(
+                        &runtime,
+                        &frame.payload,
+                        &prepared_stmts,
+                    )
+                });
                 queue_send(
                     &out_tx,
                     encode_frame(&rewrap_length_prefixed_handler_response(
@@ -296,11 +478,17 @@ where
                 )?;
             }
             MessageKind::Get => {
-                let response = run_get(&runtime, &frame);
+                let response =
+                    execute_with_redwire_context(&operation_context, session.role, || {
+                        run_get(&runtime, &frame)
+                    });
                 queue_send(&out_tx, encode_frame(&response))?;
             }
             MessageKind::Delete => {
-                let response = run_delete(&runtime, &frame);
+                let response =
+                    execute_with_redwire_context(&operation_context, session.role, || {
+                        run_delete(&runtime, &frame)
+                    });
                 queue_send(&out_tx, encode_frame(&response))?;
             }
             // Output-stream lifecycle (issue #762 / PRD #759 S3).
@@ -401,15 +589,26 @@ where
                 let runtime_ref = Arc::clone(&runtime);
                 let registry_ref = Arc::clone(&stream_registry);
                 let send = os::FrameTx::new(out_tx.clone());
-                // RedWire today binds every connection to the
-                // default tenant id (0); transactions are managed
-                // per-connection via the task-local context that
-                // HTTP also relies on. The S3 acceptance gate
-                // mirrors S1's HTTP refusal.
+                let stream_context = operation_context.clone();
+                let stream_role = session.role;
+                // Transactions are still managed per connection using the
+                // default connection id. The stream's authenticated tenant
+                // and principal travel separately in `stream_context` and
+                // are installed only around its synchronous query execution.
                 let in_tx = runtime.connection_in_transaction(0);
                 tokio::spawn(async move {
-                    os::run_output_stream(runtime_ref, frame_id, sid, req, in_tx, cancel_rx, send)
-                        .await;
+                    os::run_output_stream(
+                        runtime_ref,
+                        frame_id,
+                        sid,
+                        req,
+                        in_tx,
+                        cancel_rx,
+                        send,
+                        stream_context,
+                        stream_role,
+                    )
+                    .await;
                     registry_ref.unregister(sid).await;
                 });
             }
@@ -585,7 +784,9 @@ where
                             "stream snapshot pin TTL elapsed".to_string(),
                         ))
                     } else {
-                        state.commit_chunk(&runtime, &chunk.rows)
+                        execute_with_redwire_context(&operation_context, session.role, || {
+                            state.commit_chunk(&runtime, &chunk.rows)
+                        })
                     }
                 };
                 match commit_result {
@@ -1383,12 +1584,135 @@ mod tests {
     use super::*;
 
     use crate::runtime::RedDBRuntime;
+    use std::cell::Cell;
     use std::sync::{Mutex, OnceLock};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn all_message_kinds() -> Vec<MessageKind> {
+        (u8::MIN..=u8::MAX)
+            .filter_map(MessageKind::from_u8)
+            .collect()
+    }
+
+    #[test]
+    fn every_redwire_frame_kind_resolves_to_a_catalog_command() {
+        let catalog = crate::server::discovered_route_catalog();
+
+        for kind in all_message_kinds() {
+            let command_id = redwire_command_id(kind);
+            assert!(
+                catalog.command(command_id).is_some(),
+                "{kind:?} maps to missing catalog command {command_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_coverage_matrix_reports_redwire_bindings() {
+        let matrix = crate::server::route_catalog::render_command_coverage_matrix(
+            crate::server::discovered_route_catalog(),
+            all_message_kinds().into_iter().map(redwire_command_id),
+        );
+
+        assert!(
+            matrix.contains("| command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |")
+        );
+        assert!(matrix.contains(
+            "| query.execute | user-required | served | undeclared | undeclared | undeclared | served |"
+        ));
+        assert!(matrix.contains(
+            "| catalog.snapshot | user-required | served | undeclared | undeclared | undeclared | undeclared |"
+        ));
+    }
+
+    struct DenyAndCountPolicy(Cell<usize>);
+
+    impl crate::server::route_catalog::CommandPolicyEngine for DenyAndCountPolicy {
+        fn allows(
+            &self,
+            _ctx: &OperationContext,
+            _command: &crate::server::route_catalog::CommandSpec,
+        ) -> bool {
+            self.0.set(self.0.get() + 1);
+            false
+        }
+    }
+
+    #[test]
+    fn redwire_dispatch_consults_catalog_authorization() {
+        let policy = DenyAndCountPolicy(Cell::new(0));
+        let ctx = OperationContext::read_only("redwire-auth-test").with_principal("reader");
+
+        let error = authorize_redwire_frame(&ctx, MessageKind::Query, &policy)
+            .expect_err("denying policy must reject the frame");
+
+        assert_eq!(policy.0.get(), 1);
+        assert_eq!(
+            error,
+            crate::server::route_catalog::CommandAuthorizationError::Denied {
+                command_id: "query.execute"
+            }
+        );
+    }
+
+    #[test]
+    fn redwire_query_uses_operation_context_tenant_for_rls() {
+        crate::runtime::execution_context::clear_current_tenant();
+        crate::runtime::execution_context::clear_current_auth_identity();
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let prepared = PreparedRegistry::new();
+        runtime
+            .execute_query("CREATE TABLE docs (id INT, tenant_id TEXT)")
+            .expect("create table");
+        runtime
+            .execute_query(
+                "INSERT INTO docs (id, tenant_id) VALUES \
+                 (1, 'acme'), (2, 'acme'), (3, 'globex')",
+            )
+            .expect("seed rows");
+        runtime
+            .execute_query(
+                "CREATE POLICY tenant_read ON docs FOR SELECT \
+                 USING (tenant_id = CURRENT_TENANT())",
+            )
+            .expect("create policy");
+        runtime
+            .execute_query("ALTER TABLE docs ENABLE ROW LEVEL SECURITY")
+            .expect("enable rls");
+
+        let payload =
+            reddb_wire::query_with_params::encode_query_with_params("SELECT id FROM docs", &[])
+                .expect("encode query");
+        let frame = reddb_wire::redwire::build_query_with_params_frame(7, payload)
+            .expect("build query frame");
+
+        let visible_rows = |tenant: &str| {
+            let ctx = OperationContextFactory::build(OperationContextInput {
+                request_id: Some(format!("redwire-rls-{tenant}")),
+                principal: Some("reader".to_string()),
+                tenant: Some(tenant.to_string()),
+                ..OperationContextInput::default()
+            });
+            let reply = execute_with_redwire_context(&ctx, Role::Read, || {
+                run_query_with_params(&runtime, &prepared, &frame)
+            });
+            assert_eq!(reply.kind, MessageKind::Result);
+            let body: JsonValue = serde_json::from_slice(&reply.payload).expect("result envelope");
+            body.get("result")
+                .and_then(|result| result.get("records"))
+                .and_then(JsonValue::as_array)
+                .map_or(0, |records| records.len())
+        };
+
+        assert_eq!(visible_rows("acme"), 2);
+        assert_eq!(visible_rows("globex"), 1);
+        assert!(crate::runtime::execution_context::current_tenant().is_none());
+        assert!(crate::runtime::execution_context::current_auth_identity().is_none());
     }
 
     struct EnvGuard {
