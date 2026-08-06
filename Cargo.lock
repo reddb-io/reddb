@@ -2816,6 +2816,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "ureq",
+ "webpki-roots",
  "zstd",
 ]
 
