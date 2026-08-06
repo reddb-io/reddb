@@ -114,16 +114,16 @@ pub(crate) async fn connect(target: ConnectionTarget) -> Result<DynTransport> {
             }
         }
         ConnectionTarget::RedWire { host, port, tls } => {
-            let mut options = ConnectOptions::new(host, port).with_auth(Auth::Anonymous);
+            let options = ConnectOptions::new(host, port).with_auth(Auth::Anonymous);
+            #[cfg(feature = "redwire-tls")]
+            let options = if tls {
+                options.with_tls(crate::redwire::TlsConfig::new())
+            } else {
+                options
+            };
+            #[cfg(not(feature = "redwire-tls"))]
             if tls {
-                #[cfg(feature = "redwire-tls")]
-                {
-                    options = options.with_tls(crate::redwire::TlsConfig::new());
-                }
-                #[cfg(not(feature = "redwire-tls"))]
-                {
-                    return Err(ClientError::feature_disabled("redwire-tls"));
-                }
+                return Err(ClientError::feature_disabled("redwire-tls"));
             }
             Ok(redwire(RedWireClient::connect(options).await?))
         }
