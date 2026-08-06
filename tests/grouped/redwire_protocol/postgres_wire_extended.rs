@@ -174,6 +174,143 @@ async fn postgres_extended_execute_emits_row_description_without_describe() {
 }
 
 #[tokio::test]
+async fn postgres_extended_repeated_execute_reuses_prepared_shape() {
+    let (addr, _server) = start_server().await;
+    let mut stream = TcpStream::connect(addr).await.expect("connect pg wire");
+
+    write_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'Q',
+        query_body("CREATE TABLE pg_ext_repeated (id INT)"),
+    )
+    .await;
+    read_until_ready(&mut stream).await;
+    write_frontend_frame(
+        &mut stream,
+        b'Q',
+        query_body("INSERT INTO pg_ext_repeated (id) VALUES (42)"),
+    )
+    .await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'P',
+        parse_body(
+            "repeated_stmt",
+            "SELECT id FROM pg_ext_repeated WHERE id = $1",
+            &[PgOid::Int4.as_u32()],
+        ),
+    )
+    .await;
+    write_frontend_frame(
+        &mut stream,
+        b'B',
+        bind_body(
+            "repeated_portal",
+            "repeated_stmt",
+            &[0],
+            &[Some(b"42".as_slice())],
+            &[],
+        ),
+    )
+    .await;
+    write_frontend_frame(&mut stream, b'E', execute_body("repeated_portal", 0)).await;
+    write_frontend_frame(&mut stream, b'E', execute_body("repeated_portal", 0)).await;
+    write_frontend_frame(&mut stream, b'S', Vec::new()).await;
+
+    let frames = read_until_ready(&mut stream).await;
+    assert_eq!(
+        frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        b"12TDCTDCZ"
+    );
+    assert_eq!(
+        decode_data_row(&frames[3].1)[0].as_deref(),
+        Some(b"42".as_slice())
+    );
+    assert_eq!(
+        decode_data_row(&frames[6].1)[0].as_deref(),
+        Some(b"42".as_slice())
+    );
+
+    write_frontend_frame(&mut stream, b'X', Vec::new()).await;
+}
+
+#[tokio::test]
+async fn postgres_extended_execute_rejects_stale_ddl_epoch() {
+    let (addr, _server) = start_server().await;
+    let mut stream = TcpStream::connect(addr).await.expect("connect pg wire");
+
+    write_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'Q',
+        query_body("CREATE TABLE pg_ext_epoch (id INT)"),
+    )
+    .await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'P',
+        parse_body(
+            "epoch_stmt",
+            "SELECT id FROM pg_ext_epoch WHERE id = $1",
+            &[PgOid::Int4.as_u32()],
+        ),
+    )
+    .await;
+    write_frontend_frame(
+        &mut stream,
+        b'B',
+        bind_body(
+            "epoch_portal",
+            "epoch_stmt",
+            &[0],
+            &[Some(b"1".as_slice())],
+            &[],
+        ),
+    )
+    .await;
+    write_frontend_frame(&mut stream, b'S', Vec::new()).await;
+    let prepared_frames = read_until_ready(&mut stream).await;
+    assert_eq!(
+        prepared_frames
+            .iter()
+            .map(|(tag, _)| *tag)
+            .collect::<Vec<_>>(),
+        b"12Z"
+    );
+
+    write_frontend_frame(
+        &mut stream,
+        b'Q',
+        query_body("CREATE INDEX pg_ext_epoch_id ON pg_ext_epoch (id) USING HASH"),
+    )
+    .await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(&mut stream, b'E', execute_body("epoch_portal", 0)).await;
+    write_frontend_frame(&mut stream, b'S', Vec::new()).await;
+    let stale_frames = read_until_ready(&mut stream).await;
+    assert_eq!(
+        stale_frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        b"EZ"
+    );
+    assert_eq!(
+        decode_error_message(&stale_frames[0].1),
+        "prepared_needs_replan"
+    );
+
+    write_frontend_frame(&mut stream, b'X', Vec::new()).await;
+}
+
+#[tokio::test]
 async fn postgres_extended_query_supports_binary_text_params_insert_and_close() {
     let (addr, _server) = start_server().await;
     let mut stream = TcpStream::connect(addr).await.expect("connect pg wire");
