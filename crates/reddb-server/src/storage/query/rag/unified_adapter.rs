@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::storage::query::unified::ExecutionError;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::{CrossRef, EntityData, EntityId, EntityKind, RefType, Store, UnifiedEntity};
 
 use super::context::{ChunkSource, ContextChunk, RetrievalContext};
