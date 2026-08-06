@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 
-use reddb_client::{format_query_result, Reddb, RowFormat};
+use reddb_client::{format_query_result, QueryResult, Reddb, RowFormat};
 
 use crate::support;
 
@@ -153,4 +153,113 @@ fn migrated_data_command_slice_has_no_raw_http_client() {
     assert!(!migrated.contains("TcpStream"));
     assert!(!migrated.contains("post_json_to_http"));
     assert!(!migrated.contains("get_from_http"));
+}
+
+#[test]
+fn cli_binary_has_no_parallel_http_value_or_flag_schema_implementation() {
+    let source = include_str!("../../../src/bin/red.rs");
+
+    for retired in [
+        "TcpStream",
+        "post_json_to_http",
+        "get_from_http",
+        "base64_encode",
+        "json_escape",
+        "schema_value_to_value_out",
+        "AdminQueryTable",
+        "format_admin_table",
+        "format_admin_csv",
+        "fn build_flags_for_command",
+    ] {
+        assert!(
+            !source.contains(retired),
+            "red binary still contains retired parallel-client symbol {retired}"
+        );
+    }
+
+    let cli_commands = include_str!("../../../crates/reddb-server/src/cli/commands.rs");
+    assert!(cli_commands.contains("pub fn flags_for_command"));
+}
+
+#[test]
+fn admin_query_output_matches_driver_row_format_golden() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock HTTP server");
+    let address = listener.local_addr().expect("mock HTTP address");
+    let server = thread::spawn(move || {
+        for (expected_request, body) in [
+            ("GET /health ", r#"{"ok":true,"status":"ok"}"#),
+            (
+                "POST /query ",
+                r#"{"ok":true,"result":{"statement":"select","affected":0,"columns":["kind","value"],"rows":[{"kind":"null","value":null},{"kind":"bool","value":true},{"kind":"integer","value":42},{"kind":"float","value":1.5},{"kind":"text","value":"line\nquote\""}]}}"#,
+            ),
+        ] {
+            let (mut stream, _) = listener.accept().expect("accept HTTP request");
+            let mut request = [0u8; 4096];
+            let count = stream.read(&mut request).expect("read HTTP request");
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(
+                request.starts_with(expected_request),
+                "unexpected request: {request}"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write HTTP response");
+        }
+    });
+
+    let output = Command::new(red_binary())
+        .args([
+            "admin",
+            "query",
+            "SELECT kind, value FROM fixture",
+            "--bind",
+            &address.to_string(),
+            "--json",
+        ])
+        .output()
+        .expect("spawn red admin query");
+    assert!(
+        output.status.success(),
+        "red admin query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let driver_result = QueryResult {
+        statement: "select".to_string(),
+        affected: 0,
+        columns: vec!["kind".to_string(), "value".to_string()],
+        rows: vec![
+            vec![
+                ("kind".to_string(), reddb_client::ValueOut::String("null".to_string())),
+                ("value".to_string(), reddb_client::ValueOut::Null),
+            ],
+            vec![
+                ("kind".to_string(), reddb_client::ValueOut::String("bool".to_string())),
+                ("value".to_string(), reddb_client::ValueOut::Bool(true)),
+            ],
+            vec![
+                ("kind".to_string(), reddb_client::ValueOut::String("integer".to_string())),
+                ("value".to_string(), reddb_client::ValueOut::Integer(42)),
+            ],
+            vec![
+                ("kind".to_string(), reddb_client::ValueOut::String("float".to_string())),
+                ("value".to_string(), reddb_client::ValueOut::Float(1.5)),
+            ],
+            vec![
+                ("kind".to_string(), reddb_client::ValueOut::String("text".to_string())),
+                (
+                    "value".to_string(),
+                    reddb_client::ValueOut::String("line\nquote\"".to_string()),
+                ),
+            ],
+        ],
+        notice: None,
+    };
+    assert_eq!(output.stdout, format_query_result(&driver_result, RowFormat::Json));
+    server.join().expect("mock HTTP server");
 }
