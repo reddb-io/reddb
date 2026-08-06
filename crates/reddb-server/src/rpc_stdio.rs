@@ -1231,75 +1231,7 @@ pub(crate) fn value_to_sql_literal(v: &Value) -> String {
 }
 
 pub(crate) fn query_result_to_json(qr: &RuntimeQueryResult) -> Value {
-    if let Some(ask) = ask_query_result_to_json(qr) {
-        return ask;
-    }
-
-    let mut envelope = json::Map::new();
-    envelope.insert(
-        "statement".to_string(),
-        Value::String(qr.statement_type.to_string()),
-    );
-    envelope.insert(
-        "affected".to_string(),
-        Value::Number(qr.affected_rows as f64),
-    );
-
-    let mut columns = Vec::new();
-    if let Some(first) = qr.result.records.first() {
-        let mut keys: Vec<String> = first
-            .column_names()
-            .into_iter()
-            .map(|k| k.to_string())
-            .collect();
-        keys.sort();
-        columns = keys.into_iter().map(Value::String).collect();
-    }
-    envelope.insert("columns".to_string(), Value::Array(columns));
-
-    let rows: Vec<Value> = qr
-        .result
-        .records
-        .iter()
-        .map(record_to_json_object)
-        .collect();
-    envelope.insert("rows".to_string(), Value::Array(rows));
-
-    Value::Object(envelope)
-}
-
-fn ask_query_result_to_json(qr: &RuntimeQueryResult) -> Option<Value> {
-    if qr.statement != "ask" {
-        return None;
-    }
-    let row = qr.result.records.first()?;
-    let answer = text_field(row, "answer")?;
-    let provider = text_field(row, "provider").unwrap_or_default();
-    let model = text_field(row, "model").unwrap_or_default();
-    let sources_flat_json = json_field(row, "sources_flat").unwrap_or(Value::Array(Vec::new()));
-    let citations_json = json_field(row, "citations").unwrap_or(Value::Array(Vec::new()));
-    let validation_json = json_field(row, "validation").unwrap_or(Value::Object(json::Map::new()));
-
-    let effective_mode = match text_field(row, "mode").as_deref() {
-        Some("lenient") => crate::runtime::ai::ask_response_envelope::Mode::Lenient,
-        _ => crate::runtime::ai::ask_response_envelope::Mode::Strict,
-    };
-
-    let result = crate::runtime::ai::ask_response_envelope::AskResult {
-        answer,
-        sources_flat: envelope_sources_flat(&sources_flat_json),
-        citations: envelope_citations(&citations_json),
-        validation: envelope_validation(&validation_json),
-        cache_hit: bool_field(row, "cache_hit").unwrap_or(false),
-        provider,
-        model,
-        prompt_tokens: u32_field(row, "prompt_tokens").unwrap_or(0),
-        completion_tokens: u32_field(row, "completion_tokens").unwrap_or(0),
-        cost_usd: f64_field(row, "cost_usd").unwrap_or(0.0),
-        effective_mode,
-        retry_count: u32_field(row, "retry_count").unwrap_or(0),
-    };
-    Some(crate::runtime::ai::ask_response_envelope::build(&result))
+    crate::presentation::query_result::summary(qr)
 }
 
 fn record_field<'a>(record: &'a UnifiedRecord, name: &str) -> Option<&'a SchemaValue> {
