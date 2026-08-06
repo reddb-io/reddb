@@ -2262,16 +2262,7 @@ mod tests {
             serializable_reader: None,
         };
 
-        let raw_visible_row_ids: HashSet<u64> = manager
-            .query_all(|entity| entity_visible_with_context(Some(&snapshot), entity))
-            .into_iter()
-            .filter_map(|entity| match entity.kind {
-                EntityKind::TableRow { row_id, .. } => Some(row_id),
-                _ => None,
-            })
-            .collect();
-
-        let scanned = std::thread::spawn(move || manager.scan(Some(&snapshot), |_| true))
+        let scanned = std::thread::spawn(move || manager.scan(&snapshot, |_| true))
             .join()
             .unwrap();
         let visible_row_ids: HashSet<u64> = scanned
@@ -2281,7 +2272,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(visible_row_ids, raw_visible_row_ids);
+        assert_eq!(visible_row_ids, HashSet::from([1, 2, 6, 7]));
 
         for (index, (name, _, _, expected_visible)) in cases.iter().enumerate() {
             let row_id = index as u64 + 1;
