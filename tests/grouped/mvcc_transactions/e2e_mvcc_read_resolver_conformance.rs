@@ -160,6 +160,48 @@ fn snapshot_table_scan_indexed_read_and_logical_lookup_agree() {
 }
 
 #[test]
+fn prepared_runtime_seam_matches_text_snapshot_during_concurrent_write() {
+    let rt = rt();
+    let sql = "SELECT status FROM mvcc_prepared_snapshot WHERE id = 1";
+    let prepared = reddb::storage::query::modes::parse_multi(sql).expect("prepare SELECT");
+
+    set_current_connection_id(51404);
+    exec(
+        &rt,
+        "CREATE TABLE mvcc_prepared_snapshot (id INT, status TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO mvcc_prepared_snapshot (id, status) VALUES (1, 'old')",
+    );
+
+    set_current_connection_id(51405);
+    exec(&rt, "BEGIN");
+    assert_eq!(single_text(&rt, sql, "status"), "old");
+
+    set_current_connection_id(51406);
+    exec(
+        &rt,
+        "UPDATE mvcc_prepared_snapshot SET status = 'new' WHERE id = 1",
+    );
+
+    set_current_connection_id(51405);
+    let text_status = single_text(&rt, sql, "status");
+    let prepared_result = rt
+        .execute_query_expr(prepared)
+        .expect("prepared SELECT executes through the runtime seam");
+    let prepared_status = match prepared_result.result.records[0].get("status") {
+        Some(Value::Text(value)) => value.as_ref(),
+        other => panic!("expected prepared text status, got {other:?}"),
+    };
+
+    assert_eq!(text_status, "old");
+    assert_eq!(prepared_status, text_status);
+    exec(&rt, "ROLLBACK");
+    clear_current_connection_id();
+}
+
+#[test]
 fn snapshot_select_update_and_delete_visibility_agree() {
     let rt = rt();
     set_current_connection_id(51411);
