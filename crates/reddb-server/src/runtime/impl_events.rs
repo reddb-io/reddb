@@ -68,8 +68,7 @@ impl RedDBRuntime {
         entities.sort_by_key(|entity| entity.id.raw());
 
         let effective_queue = crate::runtime::mutation::effective_queue_name(&subscription);
-        let mut existing_event_ids =
-            queue_event_ids(store.as_ref(), &effective_queue, &snap_ctx)?;
+        let mut existing_event_ids = queue_event_ids(store.as_ref(), &effective_queue, &snap_ctx)?;
         let subscription_id = subscription_identity(&subscription);
         let mut matched = 0u64;
         let mut enqueued = 0u64;
@@ -201,8 +200,7 @@ fn queue_event_ids(
     let mut ids = HashSet::new();
     for entity in manager.scan(Some(snapshot), |entity| {
         matches!(entity.kind, EntityKind::QueueMessage { .. })
-    })
-    {
+    }) {
         let EntityData::QueueMessage(message) = entity.data else {
             continue;
         };
