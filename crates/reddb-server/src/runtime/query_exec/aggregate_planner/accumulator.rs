@@ -9,7 +9,7 @@
 //! the life of the group.
 
 use super::ast::{AggregateExpr, AggregateOp};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -238,7 +238,7 @@ fn update_extreme(current: &mut Option<Value>, candidate: &Value, target: std::c
 mod tests {
     use super::numeric_value;
     use crate::runtime::query_exec::aggregate::value_to_f64;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     /// The planner's `SUM`/`AVG` cast and the legacy path's must agree on
     /// every value they both accept.
