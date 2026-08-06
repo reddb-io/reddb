@@ -30,7 +30,7 @@ use crate::storage::query::sql_lowering::{
     effective_table_projections,
 };
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::RedDB;
 
 use super::TableQuery;
