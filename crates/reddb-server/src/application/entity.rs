@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::application::ports::RuntimeEntityPort;
 use crate::json::{parse_json, to_vec as json_to_vec, Map, Value as JsonValue};
-use crate::storage::schema::{DataType, Value};
+use reddb_types::{DataType, Value};
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::{Metadata, MetadataValue, RefTarget, SparseVector, VectorData};
 use crate::storage::{EntityId, UnifiedEntity};
