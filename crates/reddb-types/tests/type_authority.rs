@@ -3,9 +3,8 @@
 //! `reddb-io-types` is the neutral keystone crate that owns the logical type
 //! vocabulary — `Value`, `DataType`, `SqlTypeName`, `TypeModifier`,
 //! `TypeCategory`, `ValueError`, `Row` — and the coercion entry points
-//! (`coerce`, `find_cast`, the spine resolvers). The server tree may only
-//! *re-export* those items through its `storage::schema` shim; it must never
-//! *declare* them again.
+//! (`coerce`, `find_cast`, the spine resolvers). The server tree must import
+//! those items directly from `reddb_types`; it must never *declare* them again.
 //!
 //! This mirrors the layout-authority prior art in `reddb-file`'s test suite
 //! (`tests/layout_authority/boundary.rs`): a mechanical fence that fails the
@@ -729,29 +728,50 @@ fn server_must_not_redeclare_seeded_authority_concepts() {
     );
 }
 
-/// The `storage::schema` shims must stay pure re-exports of the keystone crate.
-/// Guards the boundary from the positive side: if a shim is ever replaced by a
-/// real declaration, its `pub use reddb_types::` line disappears and this fails.
+/// Server imports must name the types keystone directly, and the retired
+/// `storage::schema` re-export shims must not return.
 #[test]
-fn schema_shims_reexport_from_types_crate() {
+fn server_imports_name_types_keystone_directly() {
     let root = repo_root();
     let schema = root.join("crates/reddb-server/src/storage/schema");
     for shim in [
         "types.rs",
-        "coerce.rs",
-        "cast_catalog.rs",
-        "coercion_spine.rs",
-        "function_catalog.rs",
-        "operator_catalog.rs",
-        "table.rs",
         "value_codec.rs",
+        "coerce.rs",
+        "polymorphic.rs",
+        "function_catalog.rs",
+        "canonical_key.rs",
+        "table.rs",
+        "coercion_spine.rs",
+        "operator_catalog.rs",
+        "parametric.rs",
+        "cast_catalog.rs",
     ] {
-        let text = read(schema.join(shim));
         assert!(
-            text.contains("pub use reddb_types::"),
-            "storage/schema/{shim} must re-export from reddb_types, not declare types locally"
+            !schema.join(shim).exists(),
+            "retired storage/schema/{shim} shim must not exist"
         );
     }
+
+    let server_src = root.join("crates/reddb-server/src");
+    let mut violations = Vec::new();
+    for path in rust_files_under(&server_src) {
+        for (line_index, line) in read(&path).lines().enumerate() {
+            let line = line.trim_start();
+            if line.starts_with("use crate::storage::schema")
+                || line.starts_with("pub use crate::storage::schema")
+            {
+                let rel = path.strip_prefix(&root).expect("server source under repo root");
+                violations.push(format!("{}:{}", rel.display(), line_index + 1));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "server imports retired storage::schema paths:\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]
