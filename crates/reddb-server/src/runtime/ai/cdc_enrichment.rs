@@ -33,7 +33,7 @@ use crate::runtime::ai::moderation::{
     MODERATION_STATUS_REJECTED,
 };
 use crate::runtime::mutation::MutationRow;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::{EntityData, EntityId};
 use crate::{RedDBError, RedDBResult, RedDBRuntime};
 
