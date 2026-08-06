@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use super::{FdwError, FdwOptions, ForeignDataWrapper, WrapperState};
 use crate::storage::import::csv::{CsvConfig, CsvImporter};
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// The CSV wrapper registers under the kind `"csv"`:
 /// `CREATE SERVER srv FOREIGN DATA WRAPPER csv OPTIONS (base_path '/data/csv')`.
