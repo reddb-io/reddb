@@ -3,7 +3,7 @@
 //! Provides sorting, ordering, and limiting capabilities for query results.
 
 use super::value_compare::total_compare_values;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use std::cmp::Ordering;
 
 /// Sort direction
