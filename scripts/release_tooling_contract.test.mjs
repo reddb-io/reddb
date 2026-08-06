@@ -14,6 +14,28 @@ function workflowJob(workflow, name) {
   return job?.[0] ?? "";
 }
 
+test("Python driver CI reports the mirrored lockfile remediation before locked builds", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const pythonDriver = workflowJob(workflow, "drivers-python-build");
+  const lockGuard = pythonDriver.indexOf("name: Verify drivers/python/Cargo.lock is current");
+  const firstLockedBuild = pythonDriver.indexOf("run: cargo check --locked");
+
+  assert.ok(lockGuard >= 0, "Python driver CI must check its mirrored lockfile explicitly");
+  assert.ok(lockGuard < firstLockedBuild, "the lockfile guard must run before either locked build");
+  assert.match(
+    pythonDriver,
+    /if ! cargo metadata --locked --format-version 1 > \/dev\/null 2>&1; then/,
+  );
+  assert.match(
+    pythonDriver,
+    /echo "::error::drivers\/python\/Cargo\.lock is stale; regenerate with: cd drivers\/python && cargo check"/,
+  );
+  assert.match(
+    pythonDriver,
+    /# Regenerate the intentionally separate lockfile with: cd drivers\/python && cargo check/,
+  );
+});
+
 test("red_client size guard is wired to a documented local and CI budget check", () => {
   const budget = read("crates/reddb-client/SIZE_BUDGET").trim();
   const sizeScript = read("scripts/check-red-client-size.sh");
