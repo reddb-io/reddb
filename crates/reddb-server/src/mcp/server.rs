@@ -24,7 +24,7 @@ use crate::runtime::{
     RuntimeGraphComponentsMode, RuntimeGraphDirection, RuntimeGraphPathAlgorithm,
     RuntimeGraphTraversalStrategy,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::EntityId;
 
 use std::io::{self, BufRead, Write};
