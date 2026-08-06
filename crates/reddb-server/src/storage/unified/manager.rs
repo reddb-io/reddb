@@ -2205,7 +2205,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::mvcc::SnapshotContext;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityData, EntityKind, RowData};
 
