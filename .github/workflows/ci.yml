@@ -343,6 +343,17 @@ jobs:
           cache-on-failure: "true"
           save-if: ${{ github.event_name != 'pull_request' }}
           workspaces: drivers/python -> target
+      # `drivers/python` intentionally owns a separate lockfile because it is
+      # a maturin cdylib outside the Rust workspace. Keep stale-lock failures
+      # concise instead of exposing Cargo's generic multi-line error.
+      # Regenerate the intentionally separate lockfile with: cd drivers/python && cargo check
+      - name: Verify drivers/python/Cargo.lock is current
+        working-directory: drivers/python
+        run: |
+          if ! cargo metadata --locked --format-version 1 > /dev/null 2>&1; then
+            echo "::error::drivers/python/Cargo.lock is stale; regenerate with: cd drivers/python && cargo check"
+            exit 1
+          fi
       - name: cargo check --no-default-features (slim grpc/wire client only)
         working-directory: drivers/python
         run: cargo check --locked --no-default-features
