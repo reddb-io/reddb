@@ -2346,6 +2346,42 @@ mod tests {
     }
 
     #[test]
+    fn remaining_visibility_scan_callers_use_snapshot_api() {
+        let aggregate_pushdown =
+            include_str!("../../runtime/query_exec/aggregate_pushdown_dispatch.rs");
+        let ask = include_str!("../../runtime/ask_pipeline.rs");
+        let dml = include_str!("../../runtime/impl_dml.rs");
+        let dml_targets = include_str!("../../runtime/dml_target_scan.rs");
+        let events = include_str!("../../runtime/impl_events.rs");
+        let graph_commands = include_str!("../../runtime/impl_graph_commands.rs");
+        let graph_dsl = include_str!("../../runtime/graph_dsl.rs");
+        let graph_tvf = include_str!("../../runtime/graph_tvf.rs");
+        let kv = include_str!("../../runtime/impl_kv.rs");
+        let queue = include_str!("../../runtime/impl_queue.rs");
+        let primary_queue = include_str!("../../runtime/primary_queue_store.rs");
+        let record_search = include_str!("../../runtime/record_search.rs");
+        let search = include_str!("../../runtime/impl_search.rs");
+        let vector = include_str!("../../runtime/query_exec/vector.rs");
+
+        assert!(!aggregate_pushdown.contains("TableRowMvccReadResolver"));
+        assert!(!aggregate_pushdown.contains(".for_each_entity("));
+        assert!(!ask.contains("for entity in manager.query_all(|_| true)"));
+        assert!(!dml.contains("let entities = manager.query_all(|_| true);"));
+        assert!(!dml_targets.contains(".for_each_entity_zoned("));
+        assert!(!dml_targets.contains("manager.for_each_entity(|entity|"));
+        assert!(!events.contains("manager.query_all("));
+        assert!(!graph_commands.contains("TableRowMvccReadResolver"));
+        assert!(!graph_dsl.contains("entity_visible_with_context(snap_ctx.as_ref(), e)"));
+        assert!(!graph_tvf.contains("entity_visible_with_context(snap_ctx.as_ref(), &entity)"));
+        assert!(!kv.contains("TableRowMvccReadResolver"));
+        assert!(!queue.contains("entity_visible_with_context(snap_ctx.as_ref(), entity)"));
+        assert!(!primary_queue.contains("entity_visible_with_context(snap_ctx.as_ref(), entity)"));
+        assert!(!record_search.contains("TableRowMvccReadResolver"));
+        assert!(!search.contains("for entity in manager.query_all(|_| true)"));
+        assert!(!vector.contains("manager.query_all("));
+    }
+
+    #[test]
     fn bloom_may_contain_key_probes_inserted_rid_bytes() {
         let manager = SegmentManager::new("test_collection");
 
