@@ -926,8 +926,8 @@ impl RedDBRuntime {
                     // streaming path so chunk buffers are reused across
                     // this statement's chunk-fetches instead of allocated
                     // fresh per chunk. This is the table-query dispatch
-                    // that runs under a `StatementExecutionFrame`; the
-                    // frameless prepared/subquery paths keep `None`.
+                    // that receives a frame-owned arena; the prepared and
+                    // subquery dispatch paths keep `None` for the arena.
                     result: execute_runtime_table_query_in(
                         &self.inner.db,
                         &table_with_rls,
