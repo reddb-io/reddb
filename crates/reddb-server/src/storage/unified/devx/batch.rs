@@ -11,7 +11,7 @@ use super::super::{
 };
 use super::error::DevXError;
 use super::{run_preprocessors, SharedPreprocessors};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::devx::refs::{NodeRef, VectorRef};
 
 /// Batch operations for high-performance bulk inserts
