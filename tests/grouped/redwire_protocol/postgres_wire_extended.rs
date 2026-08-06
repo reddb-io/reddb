@@ -304,7 +304,7 @@ async fn postgres_extended_execute_rejects_stale_ddl_epoch() {
     );
     assert_eq!(
         decode_error_message(&stale_frames[0].1),
-        "prepared_needs_replan"
+        Some("prepared_needs_replan".to_string())
     );
 
     write_frontend_frame(&mut stream, b'X', Vec::new()).await;
