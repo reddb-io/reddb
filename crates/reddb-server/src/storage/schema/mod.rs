@@ -8,23 +8,12 @@
 //! The schema system is designed to support security-focused data types
 //! like IP addresses, MAC addresses, and vectors for similarity search.
 
-pub mod canonical_key;
-pub mod cast_catalog;
-pub mod coerce;
-pub mod coercion_spine;
-pub mod function_catalog;
-pub mod operator_catalog;
-pub mod parametric;
-pub mod polymorphic;
 pub mod row_slot;
-pub mod table;
-pub mod types;
-pub mod value_codec;
 
 // Re-export common types
-pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};
-pub use coerce::coerce;
-pub use table::{ColumnDef, Constraint, ConstraintType, IndexDef, IndexType, TableDef};
-pub use types::{
+pub use reddb_types::canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};
+pub use reddb_types::coerce::coerce;
+pub use reddb_types::table::{ColumnDef, Constraint, ConstraintType, IndexDef, IndexType, TableDef};
+pub use reddb_types::types::{
     decimal_to_f64, DataType, Row, SqlTypeName, TypeModifier, Value, ValueError, DECIMAL_SCALE,
 };
