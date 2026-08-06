@@ -15,7 +15,7 @@ use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::ast::{Filter, UpdateTarget};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::entity::EntityKind;
 use crate::storage::{EntityData, EntityId};
 
