@@ -413,9 +413,8 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("auth").with_description("Enable authentication for this boot"),
         FlagSchema::boolean("require-auth")
             .with_description("Reject anonymous requests; implies --auth"),
-        FlagSchema::new("vault")
-            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
-            .with_default("false"),
+        FlagSchema::boolean("vault")
+            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)"),
         FlagSchema::boolean("no-auth").with_description(
             "Hard-disable auth: anonymous access, ignores REDDB_USERNAME/PASSWORD/vault, \
              prints a startup warning. Local-dev shortcut — NEVER use in production.",
@@ -537,9 +536,8 @@ fn replica_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("auth").with_description("Enable authentication for this boot"),
         FlagSchema::boolean("require-auth")
             .with_description("Reject anonymous requests; implies --auth"),
-        FlagSchema::new("vault")
-            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
-            .with_default("false"),
+        FlagSchema::boolean("vault")
+            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)"),
         FlagSchema::boolean("no-auth")
             .with_description("Hard-disable auth: anonymous access, ignores vault"),
     ]
