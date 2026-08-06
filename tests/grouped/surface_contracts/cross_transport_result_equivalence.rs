@@ -38,20 +38,13 @@ use reddb::wire::redwire::start_redwire_listener_on;
 use reddb::{GrpcServerOptions, RedDBGrpcServer, RedDBOptions, RedDBRuntime};
 
 use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
-use reddb_client::{QueryResult, Value as ClientValue, ValueOut};
+use reddb_client::{QueryResult, ValueOut};
 
 use serde_json::json;
 use tonic::transport::Endpoint;
 
 const TABLE: &str = "xport_equiv_1354";
 const SELECT_SQL: &str = "SELECT id, label FROM xport_equiv_1354 ORDER BY id";
-/// RedWire's plain `Query` frame returns a summary envelope only (no column
-/// or row data) — this is documented protocol behaviour, not a bug.  For
-/// result-row parity we use `QueryWithParams` (triggered by passing at least
-/// one parameter), which serialises the full `runtime_query_json` envelope.
-/// `WHERE id > $1` with `$1 = 0` is semantically equivalent to the
-/// unfiltered SELECT since all inserted rows have id ∈ {1, 2, 3}.
-const SELECT_SQL_REDWIRE: &str = "SELECT id, label FROM xport_equiv_1354 WHERE id > $1 ORDER BY id";
 
 /// Transport-independent normalized result: (column names, rows-as-strings).
 type NormResult = (Vec<String>, Vec<Vec<String>>);
@@ -209,13 +202,8 @@ async fn drive_grpc_sql(port: u16, sql: &str) -> NormResult {
 
 /// RedWire: reference client over the wire protocol.
 ///
-/// Must use `query_with` (which sends a `QueryWithParams` frame) to obtain
-/// the full `runtime_query_json` envelope including columns and rows.
-/// The plain `Query` frame only returns a summary (statement + affected count)
-/// so we pass `WHERE id > $1` with `$1 = 0` — semantically identical to the
-/// unfiltered SELECT since all rows have id ∈ {1, 2, 3}.
 async fn drive_redwire(addr: SocketAddr) -> NormResult {
-    drive_redwire_sql(addr, SELECT_SQL_REDWIRE).await
+    drive_redwire_sql(addr, SELECT_SQL).await
 }
 
 async fn drive_redwire_sql(addr: SocketAddr, sql: &str) -> NormResult {
@@ -224,10 +212,7 @@ async fn drive_redwire_sql(addr: SocketAddr, sql: &str) -> NormResult {
     )
     .await
     .expect("redwire connect");
-    let qr = c
-        .query_with(sql, &[ClientValue::Int(0)])
-        .await
-        .expect("redwire query_with");
+    let qr = c.query(sql).await.expect("redwire query");
     let _ = c.close().await;
     norm_from_query_result(&qr)
 }
