@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use crate::storage::query::unified::ExecutionError;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::entity::{EntityData, EntityId};
 use crate::storage::unified::store::UnifiedStore;
 
