@@ -14,7 +14,7 @@
 //! handler use. The runtime caches the parsed ranges in-memory so the common
 //! no-tombstone read path pays only a single relaxed atomic load.
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::{EntityData, UnifiedStore};
 
 /// `red_config` collection holding the durable tombstone list.
