@@ -101,12 +101,27 @@ pub(crate) type RouteAudience = CommandAudience;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandAuthRequirement {
+    Undeclared,
     Public,
     OptionalUser,
     UserRequired,
     AdminToken,
     OpsCapability(&'static str),
     StreamLease,
+}
+
+impl CommandAuthRequirement {
+    fn matrix_label(self) -> String {
+        match self {
+            Self::Undeclared => "undeclared".to_string(),
+            Self::Public => "public".to_string(),
+            Self::OptionalUser => "optional-user".to_string(),
+            Self::UserRequired => "user-required".to_string(),
+            Self::AdminToken => "admin-token".to_string(),
+            Self::OpsCapability(action) => format!("ops-capability:{action}"),
+            Self::StreamLease => "stream-lease".to_string(),
+        }
+    }
 }
 
 pub(crate) type RouteAuth = CommandAuthRequirement;
@@ -350,6 +365,9 @@ impl CommandCatalog {
             if !seen_ids.insert(spec.id) {
                 return Err(RouteCatalogError::DuplicateRouteId { id: spec.id });
             }
+            if spec.auth == CommandAuthRequirement::Undeclared {
+                return Err(RouteCatalogError::UndeclaredCommandAuth { id: spec.id });
+            }
             if !spec.input_shape.is_declared() || !spec.output_shape.is_declared() {
                 return Err(RouteCatalogError::UndeclaredCommandShape { id: spec.id });
             }
@@ -528,6 +546,30 @@ impl CommandCatalog {
     }
 }
 
+/// Render the review artifact for the canonical catalog. HTTP is `served`
+/// because this catalog is discovered from HTTP route declarations; the other
+/// adapters remain visible as gaps until they register against the catalog in
+/// their migration slices.
+pub(crate) fn render_command_coverage_matrix(catalog: &CommandCatalog) -> String {
+    let mut commands: Vec<_> = catalog.commands().collect();
+    commands.sort_by_key(|command| command.id);
+
+    let mut matrix = String::from(
+        "# Command coverage matrix\n\n\
+         `undeclared` is a coverage gap, not an explicit unsupported decision.\n\n\
+         | command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |\n\
+         | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+    for command in commands {
+        matrix.push_str(&format!(
+            "| {} | {} | served | undeclared | undeclared | undeclared | undeclared |\n",
+            command.id,
+            command.auth.matrix_label()
+        ));
+    }
+    matrix
+}
+
 pub(crate) type RouteCatalog = CommandCatalog;
 
 /// Boundary to the ADR 0021 policy engine. Dispatchers supply a context and
@@ -602,6 +644,9 @@ fn command_policy(command: &CommandSpec) -> CommandPolicy {
         | RouteMethod::Any => "write",
     };
     match command.auth {
+        RouteAuth::Undeclared => {
+            unreachable!("command catalog rejects undeclared authorization requirements")
+        }
         RouteAuth::Public | RouteAuth::OptionalUser => CommandPolicy {
             action: method_action,
             default_allow: true,
@@ -681,6 +726,9 @@ pub(crate) struct RouteMatch<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RouteCatalogError {
+    UndeclaredCommandAuth {
+        id: &'static str,
+    },
     UndeclaredCommandShape {
         id: &'static str,
     },
@@ -710,6 +758,9 @@ pub(crate) enum RouteCatalogError {
 impl fmt::Display for RouteCatalogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UndeclaredCommandAuth { id } => {
+                write!(f, "command {id} has no authorization decision")
+            }
             Self::UndeclaredCommandShape { id } => {
                 write!(f, "command {id} has an undeclared input or output shape")
             }
