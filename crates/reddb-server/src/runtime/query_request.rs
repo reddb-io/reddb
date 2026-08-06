@@ -3,7 +3,7 @@ use crate::storage::query::ast::QueryExpr;
 use crate::storage::query::modes::parse_multi;
 use crate::storage::query::planner::shape::{bind_parameterized_query, parameterize_query_expr};
 use crate::storage::query::user_params;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::{RedDBError, RedDBResult};
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
