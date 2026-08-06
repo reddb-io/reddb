@@ -66,11 +66,13 @@ use proto::{
     UpdateEntityRequest, Validation, ValidationItem,
 };
 
+mod catalog_dispatch;
 mod control_support;
 mod entity_ops;
 mod input_support;
 pub(crate) mod scan_json;
 
+use self::catalog_dispatch::*;
 use self::control_support::*;
 use self::entity_ops::*;
 use self::input_support::*;
@@ -293,17 +295,18 @@ impl RedDBGrpcServer {
         Ok(())
     }
 
-    fn configured_service(runtime: GrpcRuntime) -> RedDbServer<GrpcRuntime> {
+    fn configured_service(runtime: GrpcRuntime) -> GrpcCatalogService {
         // Advertise zstd + gzip so clients can opt in. Server compresses
         // outbound replies with zstd; sticking to a single send codec keeps
         // CPU predictable while still accepting either on inbound.
         use tonic::codec::CompressionEncoding;
-        RedDbServer::new(runtime)
+        let service = RedDbServer::new(runtime.clone())
             .max_decoding_message_size(256 * 1024 * 1024)
             .max_encoding_message_size(256 * 1024 * 1024)
             .accept_compressed(CompressionEncoding::Zstd)
             .accept_compressed(CompressionEncoding::Gzip)
-            .send_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd);
+        GrpcCatalogService::new(service, runtime)
     }
 }
 
