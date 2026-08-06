@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use super::execution_context::capture_current_snapshot;
 use super::impl_core::{
     collections_referenced, current_auth_identity, current_connection_id, current_tenant,
     has_with_prefix, intent_lock_modes_for, peek_top_level_as_of_with_table,
@@ -234,6 +235,32 @@ fn statement_kind(query: &str) -> &'static str {
     }
 }
 
+/// Refuse a pre-parsed expression that carries a top-level `AS OF`.
+///
+/// `AS OF` is resolved from the statement text (`AsOfSpec` -> commit /
+/// branch / tag / timestamp -> xid) and `TableQuery::as_of` is consumed
+/// nowhere in the runtime or scan path. An expression-only frame
+/// therefore cannot honour it, and installing a live snapshot for a
+/// historical read would answer with current rows presented as history.
+/// Fail loudly instead; callers that have the text (`execute_query`,
+/// `execute_prepared_query`, `execute_query_with_params`) resolve it
+/// correctly. Mirrors `peek_top_level_as_of_with_table`, which likewise
+/// only recognises a top-level `AS OF`.
+fn reject_unresolvable_as_of(expr: &QueryExpr) -> RedDBResult<()> {
+    let QueryExpr::Table(table) = expr else {
+        return Ok(());
+    };
+    if table.as_of.is_none() {
+        return Ok(());
+    }
+    Err(RedDBError::InvalidOperation(
+        "AS OF cannot be resolved from a pre-parsed expression — \
+         execute the statement text (execute_query / execute_prepared_query / \
+         execute_query_with_params) so the historical snapshot is resolved"
+            .to_string(),
+    ))
+}
+
 fn classify_privilege(query: &str) -> Privilege {
     match statement_kind(query) {
         "read" => Privilege::Read,
@@ -316,8 +343,52 @@ pub(super) struct PreparedStatement {
     pub(super) mode: QueryMode,
 }
 
+/// What a `StatementExecutionFrame` is built from.
+///
+/// The frame derives the statement snapshot (including any `AS OF`
+/// floor), the coarse privilege class, the lock intent, the volatility
+/// flag, and the result-cache key from its input. Feeding it anything
+/// other than the statement itself makes every one of those describe a
+/// different statement than the one that runs, so the input is named
+/// explicitly here rather than being "some string".
+pub(super) enum StatementIdentity<'a> {
+    /// The statement's SQL text. All five derivations are exact.
+    Text(&'a str),
+    /// A pre-parsed expression with no accompanying text — the nested
+    /// in-statement callers (CTE prelude, materialized-view refresh,
+    /// inline graph TVF) hold an expression the outer statement already
+    /// parsed.
+    ///
+    /// Text-derived facts are not guessed from a kind label: there is no
+    /// stable cache key (a label would collide across every statement of
+    /// the same kind), and the coarse privilege / lock short-circuits are
+    /// left at `None` so the deep grant engine stays the gate. `AS OF` is
+    /// rejected up front by `build` because it cannot be resolved without
+    /// the text.
+    Expr(&'a QueryExpr),
+}
+
+impl<'a> StatementIdentity<'a> {
+    /// SQL text when the frame was built from text, `""` otherwise. Used
+    /// for the text-derived classifications, all of which degrade to the
+    /// deliberately inert `unknown` / `None` classes on the expr path.
+    fn text(&self) -> &'a str {
+        match self {
+            Self::Text(query) => query,
+            Self::Expr(_) => "",
+        }
+    }
+}
+
 impl StatementExecutionFrame {
-    pub(super) fn build(runtime: &RedDBRuntime, query: &str) -> RedDBResult<Self> {
+    pub(super) fn build(
+        runtime: &RedDBRuntime,
+        identity_source: StatementIdentity<'_>,
+    ) -> RedDBResult<Self> {
+        let query = identity_source.text();
+        if let StatementIdentity::Expr(expr) = identity_source {
+            reject_unresolvable_as_of(expr)?;
+        }
         let conn_id = current_connection_id();
         let tx_local_tenant = runtime.inner.transaction_state.local_tenant(conn_id);
         let tx_context = runtime.inner.transaction_state.context(conn_id);
@@ -330,8 +401,17 @@ impl StatementExecutionFrame {
             .map(|ctx| ctx.xid);
         let (snapshot, as_of_floor) = runtime.statement_snapshot(query)?;
         let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
-        let cache_key = result_cache_key(query);
-        let is_volatile_query = query_has_volatile_builtin(query) || query_is_ask_statement(query);
+        let (cache_key, is_volatile_query) = match identity_source {
+            StatementIdentity::Text(_) => (
+                result_cache_key(query),
+                query_has_volatile_builtin(query) || query_is_ask_statement(query),
+            ),
+            // No text means no stable key, so the frame opts out of the
+            // result cache on both sides: an empty key is never read from
+            // or written to, and `is_volatile_query` is set so
+            // `should_cache_result` refuses regardless of the key.
+            StatementIdentity::Expr(_) => (String::new(), true),
+        };
         let cache_safe = runtime.result_cache_safe(conn_id);
         // Capture identity + effective scope under the same
         // thread-local view that the cache key was built from, so
@@ -343,6 +423,10 @@ impl StatementExecutionFrame {
         // Coarse classification of the statement, computed once from
         // the SQL prefix so downstream callers don't re-derive it
         // from the parsed `QueryExpr` at every privilege / lock site.
+        // On the expr path `query` is empty, so both classify as the
+        // inert `None` class: the coarse gate can only deny, never
+        // allow (see `check_query_privilege`), so declining to
+        // short-circuit leaves the deep grant engine as the gate.
         let required_privilege = classify_privilege(query);
         let lock_intent = classify_lock_intent(query);
 
@@ -951,6 +1035,15 @@ impl RedDBRuntime {
     /// `Snapshot.xid` for AS OF reads — exposing it separately lets
     /// the `ReadFrame` Interface tell "live read" from "historical
     /// read" without inferring from `in_progress.is_empty()`.
+    ///
+    /// A live read nested inside an already-installed frame inherits that
+    /// frame's snapshot instead of minting a fresh one. A CTE prelude, a
+    /// materialized-view refresh, or an inline graph TVF is part of one
+    /// statement and must observe one snapshot; re-minting under
+    /// autocommit / Read Committed takes a new high-water mark, so the
+    /// nodes and edges of a single graph TVF could otherwise be
+    /// materialized under two different snapshots. `AS OF` still wins —
+    /// it names its own snapshot explicitly.
     fn statement_snapshot(&self, query: &str) -> RedDBResult<(Snapshot, Option<Xid>)> {
         match peek_top_level_as_of_with_table(query) {
             Some((spec, Some(table))) => {
@@ -980,7 +1073,10 @@ impl RedDBRuntime {
                     Some(xid),
                 ))
             }
-            None => Ok((self.current_snapshot(), None)),
+            None => match capture_current_snapshot() {
+                Some(outer) => Ok((outer.snapshot, None)),
+                None => Ok((self.current_snapshot(), None)),
+            },
         }
     }
 
@@ -1041,8 +1137,8 @@ mod tests {
     fn autocommit_select_takes_live_snapshot() {
         reset_thread_locals();
         let rt = fresh_runtime();
-        let frame =
-            StatementExecutionFrame::build(&rt, "SELECT 1").expect("frame builds for SELECT 1");
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text("SELECT 1"))
+            .expect("frame builds for SELECT 1");
 
         // Live reads: no AS OF floor, snapshot bounded by the
         // manager's `peek_next_xid` so committed tuples are visible.
@@ -1061,7 +1157,8 @@ mod tests {
         set_current_auth_identity("alice".to_string(), Role::Write);
 
         let rt = fresh_runtime();
-        let frame = StatementExecutionFrame::build(&rt, "SELECT 1").expect("frame builds");
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text("SELECT 1"))
+            .expect("frame builds");
         let f: &dyn ReadFrame = &frame;
 
         assert_eq!(f.effective_scope(), Some("acme"));
@@ -1090,7 +1187,7 @@ mod tests {
         // `vcs.set_versioned`.
         let err = match StatementExecutionFrame::build(
             &rt,
-            "SELECT * FROM not_versioned AS OF COMMIT 'deadbeef'",
+            StatementIdentity::Text("SELECT * FROM not_versioned AS OF COMMIT 'deadbeef'"),
         ) {
             Err(e) => e,
             Ok(_) => panic!("AS OF on non-versioned user collection rejected"),
@@ -1165,8 +1262,11 @@ mod tests {
         // Frame-level invariant: the volatile-builtin signal collapses
         // `should_cache_result` to false even for an autocommit /
         // out-of-tx connection.
-        let frame =
-            StatementExecutionFrame::build(&rt, "SELECT pg_advisory_unlock(1)").expect("frame");
+        let frame = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("SELECT pg_advisory_unlock(1)"),
+        )
+        .expect("frame");
         let f: &dyn ReadFrame = &frame;
         assert!(
             !f.should_cache_result(),
@@ -1271,9 +1371,11 @@ mod tests {
 
         // `red_*` collections always allow AS OF. The frame should
         // resolve to a concrete xid and surface it via the Interface.
-        let frame =
-            StatementExecutionFrame::build(&rt, "SELECT * FROM red_commits AS OF SNAPSHOT 1")
-                .expect("AS OF SNAPSHOT 1 on red_commits resolves");
+        let frame = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("SELECT * FROM red_commits AS OF SNAPSHOT 1"),
+        )
+        .expect("AS OF SNAPSHOT 1 on red_commits resolves");
 
         let f: &dyn ReadFrame = &frame;
         assert_eq!(
@@ -1343,7 +1445,7 @@ mod tests {
         ];
 
         for (q, want_priv, want_lock) in cases {
-            let frame = StatementExecutionFrame::build(&rt, q)
+            let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text(q))
                 .unwrap_or_else(|e| panic!("frame builds for {q:?}: {e}"));
             let f: &dyn ReadFrame = &frame;
             assert_eq!(f.required_privilege(), want_priv, "privilege for {q:?}");
@@ -1378,8 +1480,11 @@ mod tests {
         // needing an auth_store wired up. Driving end-to-end via
         // `execute_query` would also reject (no table `t`), but for
         // a different reason — we want to pin the privilege seam.
-        let frame = StatementExecutionFrame::build(&rt, "INSERT INTO t (id) VALUES (1)")
-            .expect("frame builds for INSERT");
+        let frame = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("INSERT INTO t (id) VALUES (1)"),
+        )
+        .expect("frame builds for INSERT");
         let f: &dyn ReadFrame = &frame;
         assert_eq!(
             f.required_privilege(),
@@ -1524,7 +1629,8 @@ mod tests {
         reset_thread_locals();
         let rt = fresh_runtime();
 
-        let frame = StatementExecutionFrame::build(&rt, "BEGIN").expect("frame builds for BEGIN");
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text("BEGIN"))
+            .expect("frame builds for BEGIN");
         let f: &dyn ReadFrame = &frame;
         assert_eq!(f.lock_intent(), LockIntent::None);
 
@@ -1538,6 +1644,85 @@ mod tests {
         assert!(
             guard.is_none(),
             "BEGIN frame's lock_intent=None must short-circuit lock acquisition"
+        );
+    }
+
+    /// Nested sub-execution inside one statement (CTE prelude,
+    /// materialized-view refresh, inline graph TVF) must read the
+    /// enclosing statement's snapshot. Autocommit is the case that used
+    /// to break: `current_snapshot()` mints a fresh high-water mark per
+    /// call, so an inline graph TVF could materialize its nodes and its
+    /// edges under two different snapshots within one statement.
+    #[test]
+    fn nested_frame_inherits_outer_statement_snapshot() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE nested_snap (id INT)")
+            .expect("create table");
+
+        let outer = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("SELECT * FROM nested_snap"),
+        )
+        .expect("outer frame builds");
+        let _outer_guards = outer.install(&rt);
+
+        // A write between the two builds moves the high-water mark, so a
+        // re-minting nested frame would land on a different xid.
+        rt.execute_query("INSERT INTO nested_snap (id) VALUES (1)")
+            .expect("concurrent insert");
+
+        let expr = QueryExpr::Table(crate::storage::query::ast::TableQuery::new("nested_snap"));
+        let nested = StatementExecutionFrame::build(&rt, StatementIdentity::Expr(&expr))
+            .expect("nested frame builds");
+
+        assert_eq!(
+            ReadFrame::snapshot(&nested).xid,
+            ReadFrame::snapshot(&outer).xid,
+            "nested execution must inherit the outer statement's snapshot"
+        );
+    }
+
+    /// A frame with no statement text must not silently answer an
+    /// `AS OF` read with live data. `TableQuery::as_of` is consumed
+    /// nowhere in the runtime or scan path, so the only correct
+    /// behaviours are "resolve it" (text path) or "refuse".
+    #[test]
+    fn expr_frame_rejects_as_of_instead_of_reading_live() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+
+        let mut table = crate::storage::query::ast::TableQuery::new("red_commits");
+        table.as_of = Some(crate::storage::query::ast::AsOfClause::Snapshot(1));
+        let expr = QueryExpr::Table(table);
+
+        let err = match StatementExecutionFrame::build(&rt, StatementIdentity::Expr(&expr)) {
+            Err(err) => err,
+            Ok(_) => panic!("AS OF without statement text must be refused, not read live"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("AS OF cannot be resolved from a pre-parsed expression"),
+            "expected a loud AS OF refusal, got: {msg}"
+        );
+    }
+
+    /// The expression path has no stable text key, so it must opt out of
+    /// the result cache entirely. A kind label (`"table"`, `"insert"`)
+    /// would key every statement of the same kind to one cache slot.
+    #[test]
+    fn expr_frame_opts_out_of_the_result_cache() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+
+        let expr = QueryExpr::Table(crate::storage::query::ast::TableQuery::new("t"));
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Expr(&expr))
+            .expect("expr frame builds");
+
+        assert!(frame.cache_key().is_empty(), "expr frame has no cache key");
+        assert!(
+            !frame.can_read_result_cache(),
+            "expr frame must never serve from the result cache"
         );
     }
 }

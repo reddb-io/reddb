@@ -1102,11 +1102,18 @@ pub(crate) fn xids_visible_under_current_snapshot(xmin: u64, xmax: u64) -> bool 
 /// module and stay that way: they exist for statement-frame entry and for
 /// detecting a frameless read, nothing else. Everything downstream must
 /// take the resulting `Option<SnapshotContext>` as an explicit argument —
-/// that is what makes `SegmentManager::scan*` thread-independent. The
-/// `Option` is load-bearing: `None` means no statement frame is installed
-/// (autocommit, or the prepared-statement fast path of #2183), and the
-/// scan API keeps a documented fallback for that case rather than assuming
-/// a frame always exists.
+/// that is what makes `SegmentManager::scan*` thread-independent.
+///
+/// Statement-frame build also reads it, so a nested sub-execution inside
+/// one statement (CTE prelude, materialized-view refresh, inline graph
+/// TVF) inherits the enclosing snapshot instead of minting a fresh one
+/// (#2183).
+///
+/// The `Option` is load-bearing: `None` means no statement frame is
+/// installed — the low-level callers that intentionally bypass MVCC
+/// (VACUUM, snapshot export, admin introspection) — and the scan API
+/// keeps a documented fallback for that case rather than assuming a frame
+/// always exists.
 pub fn capture_current_snapshot() -> Option<SnapshotContext> {
     CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone())
 }

@@ -7,9 +7,7 @@ use std::sync::Arc;
 
 use reddb::api::RedDBOptions;
 use reddb::runtime::RedDBRuntime;
-use reddb::storage::query::modes::parse_multi;
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::query::user_params;
 use reddb::storage::schema::Value as SchemaValue;
 use reddb::RuntimeEntityPort;
 
@@ -65,14 +63,15 @@ impl EmbeddedRuntime {
         Ok(map_query_result(&qr))
     }
 
-    /// Parameterized query: parse `sql`, bind `$N` slots with `params`,
-    /// then run the expression directly (skips the SQL plan cache).
+    /// Parameterized query: bind the `$N` slots of `sql` with `params`.
+    ///
+    /// Runs through the runtime's parameterized entry so the statement keeps
+    /// the same frame as textual SQL — snapshot isolation, `AS OF`
+    /// resolution, intent locks, and slow-query logging (#2183).
     pub fn query_with_params(&self, sql: &str, params: &[ParamValue]) -> Result<QueryRows, String> {
-        let parsed = parse_multi(sql).map_err(|e| e.to_string())?;
-        let bound = user_params::bind(&parsed, params).map_err(|e| e.to_string())?;
         let qr = self
             .runtime
-            .execute_query_expr(bound)
+            .execute_query_with_params(sql, params)
             .map_err(|e| e.to_string())?;
         Ok(map_query_result(&qr))
     }

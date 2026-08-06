@@ -117,6 +117,11 @@ pub(crate) const MAX_CURSOR_BATCH_SIZE: usize = 10_000;
 // A server-side prepared statement bound to this session.
 // When parameter_count == 0, shape == the exact plan (no substitution needed).
 struct StdioPreparedStatement {
+    /// SQL text the shape was prepared from. The runtime builds the
+    /// statement frame — snapshot, `AS OF`, privilege class, intent locks,
+    /// cache key — from the statement text (#2183), so the text has to
+    /// travel with the shape to `execute_prepared`.
+    sql: String,
     shape: crate::storage::query::ast::QueryExpr,
     parameter_count: usize,
 }
@@ -756,6 +761,7 @@ fn dispatch_method(
             session.prepared.insert(
                 id,
                 StdioPreparedStatement {
+                    sql: sql.to_string(),
                     shape,
                     parameter_count,
                 },
@@ -823,8 +829,10 @@ fn dispatch_method(
                     .ok_or((error_code::QUERY_ERROR, "bind failed".to_string()))?
             };
 
+            // Execute with the prepared text (#2183) so the statement frame
+            // matches the one the identical SQL text would get.
             let qr = runtime
-                .execute_query_expr(expr)
+                .execute_prepared_query(&stmt.sql, expr)
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
             Ok(query_result_to_json(&qr))
         }

@@ -186,31 +186,13 @@ fn run_ephemeral_query(
     let exec_result = if params.is_empty() {
         rt.execute_query(sql_to_run)
     } else {
-        use reddb::storage::query::modes::parse_multi;
-        use reddb::storage::query::user_params;
         let params: Vec<_> = params
             .into_iter()
             .map(reddb_client::Value::into_schema_value)
             .collect();
-        match parse_multi(sql_to_run) {
-            Ok(expr) => match user_params::bind(&expr, &params) {
-                Ok(bound) => rt.execute_query_expr(bound),
-                Err(err) => {
-                    if json_mode {
-                        json_error("query", &err.to_string());
-                    }
-                    eprintln!("query error: {err}");
-                    std::process::exit(1);
-                }
-            },
-            Err(err) => {
-                if json_mode {
-                    json_error("query", &err.to_string());
-                }
-                eprintln!("query error: {err}");
-                std::process::exit(1);
-            }
-        }
+        // Bind inside the runtime's statement frame (#2183) so `--param`
+        // queries keep the same snapshot isolation as textual SQL.
+        rt.execute_query_with_params(sql_to_run, &params)
     };
 
     match exec_result {

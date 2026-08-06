@@ -337,7 +337,17 @@ impl RedDBRuntime {
         self.finish_query_lifecycle(query, started, result)
     }
 
-    pub(crate) fn execute_prepared_query(
+    /// Execute an already-bound prepared statement together with the SQL text
+    /// it was prepared from.
+    ///
+    /// This is the prepared-statement entry point for transports. The text is
+    /// what the statement frame is built from — snapshot (including `AS OF`),
+    /// coarse privilege class, intent locks, result-cache key, and slow-query
+    /// logging all describe the real statement — so a prepared execution gets
+    /// the same statement semantics as the identical SQL text (#2183). A
+    /// transport that holds a shape in a prepared registry must keep the
+    /// original text alongside it and pass it here.
+    pub fn execute_prepared_query(
         &self,
         query: &str,
         expr: QueryExpr,
@@ -442,7 +452,10 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         let rewritten_query = super::red_schema::rewrite_virtual_names(query);
         let execution_query = rewritten_query.as_deref().unwrap_or(query);
-        let frame = super::statement_frame::StatementExecutionFrame::build(self, execution_query)?;
+        let frame = super::statement_frame::StatementExecutionFrame::build(
+            self,
+            super::statement_frame::StatementIdentity::Text(execution_query),
+        )?;
         // Box the guards so the ~640-byte StatementFrameGuards struct lives on
         // the heap rather than the call stack — important for recursive paths
         // (view refresh, nested queries) where the stack can be as small as 2 MB.
@@ -644,7 +657,10 @@ impl RedDBRuntime {
         let rewritten_query = super::red_schema::rewrite_virtual_names(query);
         let execution_query = rewritten_query.as_deref().unwrap_or(query);
 
-        let frame = super::statement_frame::StatementExecutionFrame::build(self, execution_query)?;
+        let frame = super::statement_frame::StatementExecutionFrame::build(
+            self,
+            super::statement_frame::StatementIdentity::Text(execution_query),
+        )?;
         let _frame_guards = Box::new(frame.install(self));
 
         // Phase 6 logging: enter a span stamped with conn_id / tenant
@@ -2379,14 +2395,30 @@ impl RedDBRuntime {
         query_result
     }
 
-    /// Execute a pre-parsed `QueryExpr` directly, bypassing SQL parsing and the
-    /// plan cache. Used by the prepared-statement fast path so that `execute_prepared`
-    /// calls pay zero parse + cache overhead.
+    /// Execute a pre-parsed `QueryExpr` that has no accompanying SQL text,
+    /// bypassing SQL parsing and the plan cache.
+    ///
+    /// Prefer [`Self::execute_prepared_query`] or
+    /// [`Self::execute_query_with_params`]: they carry the statement text, so
+    /// the frame's snapshot (including `AS OF`), coarse privilege class, lock
+    /// intent, and result-cache key all describe the statement that actually
+    /// runs. This entry exists for the nested in-statement callers — the CTE
+    /// prelude, materialized-view refresh, and the inline graph TVF — which
+    /// hold an expression the outer statement already parsed.
+    ///
+    /// Cost: this is no longer a "zero overhead" path. It builds and installs
+    /// a full `StatementExecutionFrame` (tenant / config / secret / KV guards
+    /// plus an MVCC snapshot), which is what buys it the same snapshot
+    /// isolation as textual SQL. Nested calls inherit the enclosing
+    /// statement's snapshot rather than minting a new one, and the frame opts
+    /// out of the result cache because there is no stable text key.
     ///
     /// Applies secret decryption on SELECT results, identical to `execute_query`.
     pub fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
-        let statement = query_expr_name(&expr);
-        let frame = super::statement_frame::StatementExecutionFrame::build(self, statement)?;
+        let frame = super::statement_frame::StatementExecutionFrame::build(
+            self,
+            super::statement_frame::StatementIdentity::Expr(&expr),
+        )?;
         let _frame_guards = Box::new(frame.install(self));
         // View rewrite (Phase 2.1): substitute any `QueryExpr::Table(tq)`
         // whose `tq.table` matches a registered view with the view's
@@ -2401,6 +2433,7 @@ impl RedDBRuntime {
             return Err(RedDBError::Query(format!("permission denied: {err}")));
         }
 
+        let statement = query_expr_name(&expr);
         let mode = detect_mode(statement);
         let query_str = statement;
 

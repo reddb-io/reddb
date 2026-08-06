@@ -298,6 +298,11 @@ impl RedDBGrpcServer {
 
 /// Server-side prepared statement — parsed + parameterized once, executed N times.
 struct GrpcPreparedStatement {
+    /// SQL text the shape was prepared from. Kept because the runtime
+    /// builds the statement frame — snapshot, `AS OF`, privilege class,
+    /// intent locks, cache key — from the statement text (#2183); a bound
+    /// expression alone cannot reconstruct it.
+    sql: std::sync::Arc<str>,
     shape: std::sync::Arc<crate::storage::query::ast::QueryExpr>,
     parameter_count: usize,
     created_at: std::time::Instant,
@@ -321,7 +326,12 @@ impl PreparedStatementRegistry {
         })
     }
 
-    fn prepare(&self, shape: crate::storage::query::ast::QueryExpr, parameter_count: usize) -> u64 {
+    fn prepare(
+        &self,
+        sql: &str,
+        shape: crate::storage::query::ast::QueryExpr,
+        parameter_count: usize,
+    ) -> u64 {
         use std::sync::atomic::Ordering;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut map = self.map.write();
@@ -329,6 +339,7 @@ impl PreparedStatementRegistry {
         map.insert(
             id,
             GrpcPreparedStatement {
+                sql: std::sync::Arc::from(sql),
                 // Store as Arc to avoid cloning the full AST on every execute.
                 shape: std::sync::Arc::new(shape),
                 parameter_count,
@@ -338,10 +349,14 @@ impl PreparedStatementRegistry {
         id
     }
 
-    fn get_shape_and_count(
+    fn get_sql_shape_and_count(
         &self,
         id: u64,
-    ) -> Option<(std::sync::Arc<crate::storage::query::ast::QueryExpr>, usize)> {
+    ) -> Option<(
+        std::sync::Arc<str>,
+        std::sync::Arc<crate::storage::query::ast::QueryExpr>,
+        usize,
+    )> {
         // Periodic eviction on execute/get traffic so long-lived servers that
         // prepare once and execute many times still age out stale statements.
         let get_count = self
@@ -353,8 +368,13 @@ impl PreparedStatementRegistry {
             self.evict_old_locked(&mut map);
         }
         let map = self.map.read();
-        map.get(&id)
-            .map(|s| (std::sync::Arc::clone(&s.shape), s.parameter_count))
+        map.get(&id).map(|s| {
+            (
+                std::sync::Arc::clone(&s.sql),
+                std::sync::Arc::clone(&s.shape),
+                s.parameter_count,
+            )
+        })
     }
 
     fn evict_old_locked(&self, map: &mut std::collections::HashMap<u64, GrpcPreparedStatement>) {

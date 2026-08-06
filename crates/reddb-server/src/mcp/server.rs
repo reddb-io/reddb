@@ -377,13 +377,12 @@ impl McpServer {
                 .map(crate::rpc_stdio::json_value_to_schema_value)
                 .collect();
 
-            use crate::storage::query::modes::parse_multi;
-            use crate::storage::query::user_params;
-            let parsed = parse_multi(sql).map_err(|e| format!("{}", e))?;
-            let bound = user_params::bind(&parsed, &binds).map_err(|e| format!("{}", e))?;
+            // Bind inside the runtime's statement frame (#2183) so a
+            // parameterized MCP query keeps the same snapshot isolation and
+            // `AS OF` resolution as textual SQL.
             let result = self
                 .runtime
-                .execute_query_expr(bound)
+                .execute_query_with_params(sql, &binds)
                 .map_err(|e| format!("{}", e))?;
             let json = runtime_query_json(&result, &None, &None);
             return json_to_string(&json).map_err(|e| format!("serialization error: {}", e));

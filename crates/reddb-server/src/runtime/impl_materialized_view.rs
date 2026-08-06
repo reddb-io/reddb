@@ -188,7 +188,7 @@ impl RedDBRuntime {
         };
         for name in due {
             // Round-trip through `execute_query` (rather than the
-            // prepared-statement `execute_query_expr` fast path, which
+            // expression-only `execute_query_expr` entry, which
             // explicitly rejects DDL/maintenance statements). Failures
             // are captured inside the RefreshMaterializedView handler
             // via `record_refresh_failure`; the scheduler ignores the

@@ -1805,7 +1805,7 @@ impl RedDb for GrpcRuntime {
             None => (parsed, 0),
         };
 
-        let id = self.prepared_registry.prepare(shape, parameter_count);
+        let id = self.prepared_registry.prepare(&sql, shape, parameter_count);
         Ok(Response::new(PrepareQueryReply {
             prepared_id: id,
             parameter_count: parameter_count as u32,
@@ -1819,9 +1819,9 @@ impl RedDb for GrpcRuntime {
         self.authorize_read(request.metadata())?;
         let inner = request.into_inner();
 
-        let (shape, parameter_count) = self
+        let (sql, shape, parameter_count) = self
             .prepared_registry
-            .get_shape_and_count(inner.prepared_id)
+            .get_sql_shape_and_count(inner.prepared_id)
             .ok_or_else(|| Status::not_found("prepared statement not found or expired"))?;
 
         if inner.bind_json.len() != parameter_count {
@@ -1862,7 +1862,12 @@ impl RedDb for GrpcRuntime {
                 .ok_or_else(|| Status::internal("bind failed"))?
         };
 
-        let result = self.runtime.execute_query_expr(expr).map_err(to_status)?;
+        // Execute with the prepared text (#2183): the statement frame —
+        // snapshot, `AS OF`, coarse privilege, intent locks — derives from it.
+        let result = self
+            .runtime
+            .execute_prepared_query(&sql, expr)
+            .map_err(to_status)?;
         enforce_grpc_commit_policy_after_query_result(&self.runtime, &result)?;
         let no_filter: Option<Vec<String>> = None;
         Ok(Response::new(query_reply(result, &no_filter, &no_filter)))
