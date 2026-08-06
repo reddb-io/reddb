@@ -23,7 +23,7 @@
 //! | `memory://`               | Ephemeral in-memory                  | ✅    |
 //! | `file:///abs/path`        | Embedded engine on disk              | ✅    |
 //! | `grpc://host:port`        | Remote tonic client                  | ✅    |
-//! | `red://host:port`         | Remote tonic client (default port 5050) | ✅    |
+//! | `red://host:port`         | Remote RedWire client (default port 5050) | ✅    |
 //! | `http://host:port`        | REST client                          | ✅    |
 //!
 //! ## Cargo features
