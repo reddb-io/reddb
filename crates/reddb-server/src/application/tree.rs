@@ -1,6 +1,6 @@
 use crate::application::ports::RuntimeTreePort;
 use crate::runtime::RuntimeQueryResult;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::MetadataValue;
 use crate::RedDBResult;
 
