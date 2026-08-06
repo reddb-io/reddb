@@ -118,11 +118,13 @@ pub fn file_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
 /// `grpc://primary,replica1,replica2` cluster URI. Optional
 /// `?route=primary` flips `force_primary`.
 pub fn grpc_cluster_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
+    // `red://` / `reds://` are absent on purpose: since #2159 they name
+    // RedWire, which has no multi-host form, so a comma-separated authority
+    // under those schemes is an error rather than a cluster. The rejection is
+    // pinned by `red_cluster_uri_is_rejected_with_an_actionable_message`.
     let scheme_strategy = prop_oneof![
         Just(("grpc", DEFAULT_PORT_GRPC)),
         Just(("grpcs", DEFAULT_PORT_GRPCS)),
-        Just(("red", DEFAULT_PORT_RED)),
-        Just(("reds", DEFAULT_PORT_RED)),
     ];
     (
         scheme_strategy,

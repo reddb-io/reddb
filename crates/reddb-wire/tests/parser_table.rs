@@ -142,24 +142,6 @@ fn ok_cases() -> Vec<OkCase> {
             },
         },
         OkCase {
-            name: "red cluster uses 5050 default",
-            input: "red://a,b",
-            expect: ConnectionTarget::GrpcCluster {
-                primary: "http://a:5050".into(),
-                replicas: vec!["http://b:5050".into()],
-                force_primary: false,
-            },
-        },
-        OkCase {
-            name: "reds cluster uses 5050 default",
-            input: "reds://a,b",
-            expect: ConnectionTarget::GrpcCluster {
-                primary: "http://a:5050".into(),
-                replicas: vec!["http://b:5050".into()],
-                force_primary: false,
-            },
-        },
-        OkCase {
             name: "cluster per-host port overrides default",
             input: "grpc://a:7000,b:7001,c",
             expect: ConnectionTarget::GrpcCluster {
@@ -273,6 +255,16 @@ fn err_cases() -> Vec<ErrCase> {
             input: "grpc://a:nope,b:55055",
             kind: ParseErrorKind::InvalidUri,
         },
+        ErrCase {
+            name: "red URI does not fold to a gRPC cluster",
+            input: "red://a,b",
+            kind: ParseErrorKind::InvalidUri,
+        },
+        ErrCase {
+            name: "reds URI does not fold to a gRPC cluster",
+            input: "reds://a,b",
+            kind: ParseErrorKind::InvalidUri,
+        },
     ]
 }
 
@@ -370,4 +362,31 @@ fn connection_auth_parse_errors_redact_userinfo() {
     assert!(!rendered.contains("alice"), "{rendered}");
     assert!(!rendered.contains("secret-token"), "{rendered}");
     assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+/// A `red://` cluster URI must say *why* it is wrong. The ported form
+/// (`red://a:1,b:2`) reaches `Url::parse` first, which rejects it as
+/// "invalid port number" — the right kind for the wrong reason, and a
+/// message that sends the reader looking at their ports. Both forms must
+/// name the actual constraint and the transport that lifts it.
+#[test]
+fn red_cluster_uri_is_rejected_with_an_actionable_message() {
+    for uri in [
+        "red://a,b",
+        "reds://a,b",
+        "red://a:5050,b:5051",
+        "reds://a:5050,b:5051,c",
+        "red://a,b/path?route=primary",
+    ] {
+        let err = parse(uri).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("comma-separated cluster hosts"),
+            "{uri} did not name the constraint: {rendered}"
+        );
+        assert!(
+            rendered.contains("grpc://"),
+            "{uri} did not point at the transport that supports clusters: {rendered}"
+        );
+    }
 }

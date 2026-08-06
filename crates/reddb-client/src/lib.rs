@@ -23,7 +23,7 @@
 //! | `memory://`               | Ephemeral in-memory                  | ✅    |
 //! | `file:///abs/path`        | Embedded engine on disk              | ✅    |
 //! | `grpc://host:port`        | Remote tonic client                  | ✅    |
-//! | `red://host:port`         | Remote tonic client (default port 5050) | ✅    |
+//! | `red://host:port`         | Remote RedWire client (default port 5050) | ✅    |
 //! | `http://host:port`        | REST client                          | ✅    |
 //!
 //! ## Cargo features
@@ -57,6 +57,7 @@ pub mod error;
 pub mod params;
 pub mod routing_cache;
 pub mod topology;
+mod transport;
 pub mod types;
 
 #[cfg(feature = "embedded")]
@@ -92,92 +93,64 @@ pub use connector::{
     RedDBClient,
 };
 
-use connect::Target;
-
 /// Top-level client handle. Use [`Reddb::connect`] to get one.
-#[derive(Debug)]
-pub enum Reddb {
-    #[cfg(feature = "embedded")]
-    Embedded(embedded::EmbeddedClient),
-    #[cfg(feature = "grpc")]
-    Grpc(grpc::GrpcClient),
-    #[cfg(feature = "http")]
-    Http(http::HttpClient),
-    /// Constructed when a feature gate would have produced a real
-    /// variant but the feature is disabled. Every method on this
-    /// variant returns a `FEATURE_DISABLED` error so build-time
-    /// configuration bugs surface as runtime errors with a clear
-    /// remediation, not as missing trait impls.
-    Unavailable(&'static str),
+pub struct Reddb {
+    transport: Option<transport::DynTransport>,
+    unavailable: Option<&'static str>,
+}
+
+impl std::fmt::Debug for Reddb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reddb")
+            .field("transport", &self.transport)
+            .field("unavailable", &self.unavailable)
+            .finish()
+    }
 }
 
 impl Reddb {
     /// Open a connection. The backend is selected from the URI scheme.
     pub async fn connect(uri: &str) -> Result<Self> {
         let target = connect::parse(uri)?;
-        match target {
-            Target::Memory => {
-                #[cfg(feature = "embedded")]
-                {
-                    embedded::EmbeddedClient::in_memory().map(Reddb::Embedded)
-                }
-                #[cfg(not(feature = "embedded"))]
-                {
-                    Err(ClientError::feature_disabled("embedded"))
-                }
-            }
-            Target::File { path } => {
-                #[cfg(feature = "embedded")]
-                {
-                    embedded::EmbeddedClient::open(path).map(Reddb::Embedded)
-                }
-                #[cfg(not(feature = "embedded"))]
-                {
-                    let _ = path;
-                    Err(ClientError::feature_disabled("embedded"))
-                }
-            }
-            Target::Grpc { endpoint } => {
-                #[cfg(feature = "grpc")]
-                {
-                    grpc::GrpcClient::connect(endpoint).await.map(Reddb::Grpc)
-                }
-                #[cfg(not(feature = "grpc"))]
-                {
-                    let _ = endpoint;
-                    Err(ClientError::feature_disabled("grpc"))
-                }
-            }
-            Target::GrpcCluster {
-                primary,
-                replicas,
-                force_primary,
-            } => {
-                #[cfg(feature = "grpc")]
-                {
-                    grpc::GrpcClient::connect_cluster(primary, replicas, force_primary)
-                        .await
-                        .map(Reddb::Grpc)
-                }
-                #[cfg(not(feature = "grpc"))]
-                {
-                    let _ = (primary, replicas, force_primary);
-                    Err(ClientError::feature_disabled("grpc"))
-                }
-            }
-            Target::Http { base_url } => {
-                #[cfg(feature = "http")]
-                {
-                    http::HttpClient::connect(http::HttpOptions::new(base_url))
-                        .await
-                        .map(Reddb::Http)
-                }
-                #[cfg(not(feature = "http"))]
-                {
-                    let _ = base_url;
-                    Err(ClientError::feature_disabled("http"))
-                }
-            }
+        Ok(Self::from_transport(transport::connect(target).await?))
+    }
+
+    fn from_transport(transport: transport::DynTransport) -> Self {
+        Self {
+            transport: Some(transport),
+            unavailable: None,
+        }
+    }
+
+    fn transport(&self) -> Result<&dyn transport::Transport> {
+        self.transport
+            .as_deref()
+            .ok_or_else(|| ClientError::feature_disabled(self.unavailable.unwrap_or("transport")))
+    }
+
+    #[cfg(feature = "embedded")]
+    #[allow(non_snake_case)]
+    pub fn Embedded(client: embedded::EmbeddedClient) -> Self {
+        Self::from_transport(transport::embedded(client))
+    }
+
+    #[cfg(feature = "grpc")]
+    #[allow(non_snake_case)]
+    pub fn Grpc(client: grpc::GrpcClient) -> Self {
+        Self::from_transport(transport::grpc(client))
+    }
+
+    #[cfg(feature = "http")]
+    #[allow(non_snake_case)]
+    pub fn Http(client: http::HttpClient) -> Self {
+        Self::from_transport(transport::http(client))
+    }
+
+    #[allow(non_snake_case)]
+    pub fn Unavailable(name: &'static str) -> Self {
+        Self {
+            transport: None,
+            unavailable: Some(name),
         }
     }
 
@@ -191,15 +164,7 @@ impl Reddb {
                 "query SQL must not be empty",
             ));
         }
-        match self {
-            #[cfg(feature = "embedded")]
-            Reddb::Embedded(c) => c.query(sql),
-            #[cfg(feature = "grpc")]
-            Reddb::Grpc(c) => c.query(sql).await,
-            #[cfg(feature = "http")]
-            Reddb::Http(c) => c.query(sql).await,
-            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
-        }
+        self.transport()?.query(sql).await
     }
 
     pub async fn query_with_options(
@@ -213,21 +178,7 @@ impl Reddb {
                 "query SQL must not be empty",
             ));
         }
-        match self {
-            #[cfg(feature = "embedded")]
-            Reddb::Embedded(c) => {
-                let _ = options;
-                c.query(sql)
-            }
-            #[cfg(feature = "grpc")]
-            Reddb::Grpc(c) => c.query_with_options(sql, options).await,
-            #[cfg(feature = "http")]
-            Reddb::Http(c) => {
-                let _ = options;
-                c.query(sql).await
-            }
-            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
-        }
+        self.transport()?.query_with_options(sql, options).await
     }
 
     /// Parameterized query — `$N` placeholders in `sql` are bound to
@@ -248,19 +199,10 @@ impl Reddb {
     /// | [`Value::Timestamp`]    | `Timestamp` (seconds)  |
     /// | [`Value::Uuid`]         | `Uuid` (16 raw bytes)  |
     ///
-    /// Today the [`Reddb::Embedded`], [`Reddb::Grpc`], and [`Reddb::Http`]
-    /// transports carry parameters end-to-end.
+    /// Every transport carries parameters end-to-end.
     pub async fn query_with<P: IntoParams>(&self, sql: &str, params: P) -> Result<QueryResult> {
         let values = params.into_params();
-        match self {
-            #[cfg(feature = "embedded")]
-            Reddb::Embedded(c) => c.query_with(sql, values),
-            #[cfg(feature = "grpc")]
-            Reddb::Grpc(c) => c.query_with(sql, &values).await,
-            #[cfg(feature = "http")]
-            Reddb::Http(c) => c.query_with(sql, &values).await,
-            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
-        }
+        self.transport()?.query_with(sql, &values).await
     }
 
     /// Parameterized execution for DML statements. This is an alias for
@@ -271,15 +213,7 @@ impl Reddb {
     }
 
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
-        match self {
-            #[cfg(feature = "embedded")]
-            Reddb::Embedded(c) => c.insert(collection, payload),
-            #[cfg(feature = "grpc")]
-            Reddb::Grpc(c) => c.insert(collection, payload).await,
-            #[cfg(feature = "http")]
-            Reddb::Http(c) => c.insert(collection, payload).await,
-            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
-        }
+        self.transport()?.insert(collection, payload).await
     }
 
     pub async fn bulk_insert(
@@ -287,27 +221,11 @@ impl Reddb {
         collection: &str,
         payloads: &[JsonValue],
     ) -> Result<BulkInsertResult> {
-        match self {
-            #[cfg(feature = "embedded")]
-            Reddb::Embedded(c) => c.bulk_insert(collection, payloads),
-            #[cfg(feature = "grpc")]
-            Reddb::Grpc(c) => c.bulk_insert(collection, payloads).await,
-            #[cfg(feature = "http")]
-            Reddb::Http(c) => c.bulk_insert(collection, payloads).await,
-            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
-        }
+        self.transport()?.bulk_insert(collection, payloads).await
     }
 
     pub async fn delete(&self, collection: &str, rid: &str) -> Result<u64> {
-        match self {
-            #[cfg(feature = "embedded")]
-            Reddb::Embedded(c) => c.delete(collection, rid),
-            #[cfg(feature = "grpc")]
-            Reddb::Grpc(c) => c.delete(collection, rid).await,
-            #[cfg(feature = "http")]
-            Reddb::Http(c) => c.delete(collection, rid).await,
-            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
-        }
+        self.transport()?.delete(collection, rid).await
     }
 
     pub fn documents(&self) -> DocumentClient<'_> {
@@ -338,14 +256,10 @@ impl Reddb {
     }
 
     pub async fn close(&self) -> Result<()> {
-        match self {
-            #[cfg(feature = "embedded")]
-            Reddb::Embedded(c) => c.close(),
-            #[cfg(feature = "grpc")]
-            Reddb::Grpc(c) => c.close().await,
-            #[cfg(feature = "http")]
-            Reddb::Http(c) => c.close().await,
-            Reddb::Unavailable(_) => Ok(()),
+        if let Some(transport) = &self.transport {
+            transport.close().await
+        } else {
+            Ok(())
         }
     }
 
@@ -756,21 +670,10 @@ impl<'a> KvClient<'a> {
         key: &str,
         from_lsn: Option<u64>,
     ) -> Result<Vec<KvWatchEvent>> {
-        #[cfg(not(feature = "http"))]
-        {
-            let _ = key;
-            let _ = from_lsn;
-            let _ = self.collection;
-        }
-        match self.db {
-            #[cfg(feature = "http")]
-            Reddb::Http(c) => c.watch_kv(self.collection, key, from_lsn, None).await,
-            #[cfg(feature = "embedded")]
-            Reddb::Embedded(_) => Err(ClientError::feature_disabled("kv.watch embedded")),
-            #[cfg(feature = "grpc")]
-            Reddb::Grpc(_) => Err(ClientError::feature_disabled("kv.watch grpc")),
-            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
-        }
+        self.db
+            .transport()?
+            .watch_kv(self.collection, key, from_lsn)
+            .await
     }
 
     pub async fn watch_prefix(&self, prefix: &str) -> Result<Vec<KvWatchEvent>> {
