@@ -227,6 +227,33 @@ pub fn all_commands() -> Vec<CommandDef> {
   ]
 }
 
+/// Build the parser schema for one top-level command.
+///
+/// This is the single argv-schema authority used by the `red` binary and the
+/// help/completion surfaces in this module.
+pub fn flags_for_command(command: Option<&str>) -> Vec<FlagSchema> {
+    let mut flags = super::types::global_flags();
+    if matches!(command, Some("dump")) {
+        flags.retain(|flag| flag.long != "output" && flag.short != Some('o'));
+    }
+
+    if command == Some("admin") {
+        flags.extend(admin_flags());
+        return flags;
+    }
+    if command == Some("rpc") {
+        flags.extend(rpc_flags());
+        return flags;
+    }
+    if let Some(definition) = all_commands()
+        .into_iter()
+        .find(|definition| Some(definition.name) == command)
+    {
+        flags.extend(definition.flags);
+    }
+    flags
+}
+
 /// Return the help text for the main `red` command.
 pub fn main_help_text() -> String {
     let mut out = String::with_capacity(1024);
@@ -348,6 +375,12 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("http").with_description("Serve the HTTP API"),
         FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
         FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
+        FlagSchema::new("http-tls-bind")
+            .with_description("HTTPS bind address (host:port). Runs alongside --http-bind"),
+        FlagSchema::new("http-tls-cert").with_description("Path to HTTPS server certificate PEM"),
+        FlagSchema::new("http-tls-key").with_description("Path to HTTPS server private key PEM"),
+        FlagSchema::new("http-tls-client-ca")
+            .with_description("Path to PEM CA bundle for client cert verification (mTLS)"),
         FlagSchema::new("wire-bind")
             .with_description("Explicit wire bind address (host:port or unix:///path/to/socket)"),
         FlagSchema::new("wire-tls-bind")
@@ -364,6 +397,15 @@ fn server_flags() -> Vec<FlagSchema> {
             .with_description("Replication role")
             .with_choices(&["standalone", "primary", "replica"])
             .with_default("standalone"),
+        storage_profile_flag(),
+        storage_packaging_flag(),
+        storage_preset_flag(),
+        FlagSchema::new("replica-count")
+            .with_description("Expected replica count for storage profile validation"),
+        FlagSchema::boolean("managed-backup")
+            .with_description("Declare managed backup for storage profile validation"),
+        FlagSchema::boolean("wal-retention")
+            .with_description("Declare WAL retention for storage profile validation"),
         FlagSchema::new("primary-addr").with_description("Primary gRPC address for replica mode"),
         FlagSchema::boolean("read-only").with_description("Open the database in read-only mode"),
         FlagSchema::boolean("no-create-if-missing")
@@ -371,9 +413,8 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("auth").with_description("Enable authentication for this boot"),
         FlagSchema::boolean("require-auth")
             .with_description("Reject anonymous requests; implies --auth"),
-        FlagSchema::new("vault")
-            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
-            .with_default("false"),
+        FlagSchema::boolean("vault")
+            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)"),
         FlagSchema::boolean("no-auth").with_description(
             "Hard-disable auth: anonymous access, ignores REDDB_USERNAME/PASSWORD/vault, \
              prints a startup warning. Local-dev shortcut — NEVER use in production.",
@@ -418,6 +459,12 @@ fn server_flags() -> Vec<FlagSchema> {
              REDDB_CERTIFICATE_FILE unseal. Written only on the bootstrap-creating boot; a \
              re-boot against the existing vault does not rewrite it.",
         ),
+        FlagSchema::boolean("ui")
+            .with_description("Serve the pinned red-ui bundle as static assets"),
+        FlagSchema::new("ui-dir").with_description("Directory containing the red-ui bundle"),
+        FlagSchema::new("workers")
+            .with_short('w')
+            .with_description("Worker thread count (default: auto-detect from CPUs)"),
         FlagSchema::new("log-dir").with_description(
             "Directory for rotating log files (defaults to the parent of --path / ./logs)",
         ),
@@ -477,12 +524,20 @@ fn replica_flags() -> Vec<FlagSchema> {
         FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
         FlagSchema::new("wire-bind")
             .with_description("Explicit wire bind address (host:port or unix:///path/to/socket)"),
+        storage_profile_flag(),
+        storage_packaging_flag(),
+        storage_preset_flag(),
+        FlagSchema::new("replica-count")
+            .with_description("Expected replica count for storage profile validation"),
+        FlagSchema::boolean("managed-backup")
+            .with_description("Declare managed backup for storage profile validation"),
+        FlagSchema::boolean("wal-retention")
+            .with_description("Declare WAL retention for storage profile validation"),
         FlagSchema::boolean("auth").with_description("Enable authentication for this boot"),
         FlagSchema::boolean("require-auth")
             .with_description("Reject anonymous requests; implies --auth"),
-        FlagSchema::new("vault")
-            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
-            .with_default("false"),
+        FlagSchema::boolean("vault")
+            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)"),
         FlagSchema::boolean("no-auth")
             .with_description("Hard-disable auth: anonymous access, ignores vault"),
     ]
@@ -537,6 +592,9 @@ fn vcs_flags() -> Vec<FlagSchema> {
         FlagSchema::new("limit")
             .with_description("Max log entries")
             .with_default("20"),
+        FlagSchema::new("mode")
+            .with_description("Reset mode: soft | mixed | hard")
+            .with_default("mixed"),
         FlagSchema::boolean("ff-only").with_description("Merge only if fast-forward"),
         FlagSchema::boolean("no-ff").with_description("Always create a merge commit"),
     ]
@@ -581,30 +639,26 @@ fn query_flags() -> Vec<FlagSchema> {
             .with_short('p')
             .with_description("Positional parameter for $1, $2, ... (repeatable)"),
         FlagSchema::new("param-type").with_description("Type override for the preceding --param"),
+        FlagSchema::new("format").with_description(
+            "Row output format for query results (table|json|ndjson|csv|tsv|toon)",
+        ),
+        FlagSchema::new("save")
+            .with_description("Persist an ephemeral data-file query session as a new .rdb file"),
         FlagSchema::boolean("dry-run")
             .with_description("Preview the statement via EXPLAIN without executing it"),
     ]
 }
 
 fn insert_flags() -> Vec<FlagSchema> {
-    vec![FlagSchema::new("bind")
-        .with_short('b')
-        .with_description("Server address")
-        .with_default("0.0.0.0:6380")]
+    data_target_flags(Some('p'))
 }
 
 fn get_flags() -> Vec<FlagSchema> {
-    vec![FlagSchema::new("bind")
-        .with_short('b')
-        .with_description("Server address")
-        .with_default("0.0.0.0:6380")]
+    data_target_flags(Some('p'))
 }
 
 fn delete_flags() -> Vec<FlagSchema> {
-    vec![FlagSchema::new("bind")
-        .with_short('b')
-        .with_description("Server address")
-        .with_default("0.0.0.0:6380")]
+    data_target_flags(Some('p'))
 }
 
 fn health_flags() -> Vec<FlagSchema> {
@@ -643,8 +697,6 @@ fn doctor_flags() -> Vec<FlagSchema> {
             .with_default("127.0.0.1:5000"),
         FlagSchema::new("token")
             .with_description("Admin bearer token; defaults to RED_ADMIN_TOKEN env"),
-        FlagSchema::boolean("json")
-            .with_description("Emit a single JSON object instead of human text"),
         FlagSchema::new("backup-age-warn-secs")
             .with_description("Warn when last successful backup is older than N seconds")
             .with_default("600"),
@@ -665,6 +717,9 @@ fn dump_flags() -> Vec<FlagSchema> {
         FlagSchema::new("path")
             .with_description("Local database file to dump from")
             .with_default("./data/reddb.rdb"),
+        storage_profile_flag(),
+        storage_packaging_flag(),
+        storage_preset_flag(),
         FlagSchema::new("collection")
             .with_short('c')
             .with_description("Single collection to dump (omit for all)"),
@@ -679,6 +734,9 @@ fn restore_flags() -> Vec<FlagSchema> {
         FlagSchema::new("path")
             .with_description("Local database file to restore into")
             .with_default("./data/reddb.rdb"),
+        storage_profile_flag(),
+        storage_packaging_flag(),
+        storage_preset_flag(),
         FlagSchema::new("input")
             .with_short('i')
             .with_description("Dump file to read (required)"),
@@ -755,10 +813,7 @@ fn salvage_flags() -> Vec<FlagSchema> {
 }
 
 fn status_flags() -> Vec<FlagSchema> {
-    vec![FlagSchema::new("bind")
-        .with_short('b')
-        .with_description("Server address")
-        .with_default("0.0.0.0:6380")]
+    data_target_flags(Some('p'))
 }
 
 fn inspect_flags() -> Vec<FlagSchema> {
@@ -773,6 +828,8 @@ fn inspect_flags() -> Vec<FlagSchema> {
 
 fn mcp_flags() -> Vec<FlagSchema> {
     vec![
+        FlagSchema::new("uri")
+            .with_description("Connection URI (overrides --url and REDDB_MCP_URI)"),
         FlagSchema::new("path")
             .with_short('d')
             .with_description("Data directory path (omit for in-memory)")
@@ -821,6 +878,86 @@ fn auth_flags() -> Vec<FlagSchema> {
             .with_short('u')
             .with_description("Target username"),
     ]
+}
+
+fn admin_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("bind")
+            .with_short('b')
+            .with_description("Server HTTP address")
+            .with_default("127.0.0.1:5000"),
+        FlagSchema::new("token")
+            .with_short('t')
+            .with_description("Admin bearer token (env: RED_ADMIN_TOKEN)"),
+        FlagSchema::boolean("csv").with_description("Emit CSV for tabular admin catalog commands"),
+        FlagSchema::new("limit").with_description("Max rows for list/stats/query commands"),
+        FlagSchema::new("type").with_description("Filter collections by model"),
+        FlagSchema::boolean("include-internal").with_description("Include internal collections"),
+        FlagSchema::new("collection").with_description("Filter by collection"),
+        FlagSchema::boolean("yes")
+            .with_short('y')
+            .with_description("Skip destructive-command confirmation"),
+        FlagSchema::boolean("if-exists")
+            .with_description("Suppress errors for a missing collection"),
+    ]
+}
+
+fn rpc_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::boolean("stdio")
+            .with_description("Speak JSON-RPC 2.0 line-delimited over stdin/stdout"),
+        FlagSchema::new("path")
+            .with_short('d')
+            .with_description("Persistent database file path (omit for in-memory)"),
+        FlagSchema::new("connect")
+            .with_short('c')
+            .with_description("Proxy to a remote gRPC server"),
+        FlagSchema::new("token")
+            .with_short('t')
+            .with_description("Auth token forwarded to the remote server"),
+    ]
+}
+
+fn data_target_flags(path_short: Option<char>) -> Vec<FlagSchema> {
+    let path = FlagSchema::new("path").with_description("Open a local .rdb file in embedded mode");
+    let path = match path_short {
+        Some(short) => path.with_short(short),
+        None => path,
+    };
+    vec![
+        FlagSchema::new("bind")
+            .with_short('b')
+            .with_description("Server address")
+            .with_default("0.0.0.0:6380"),
+        path,
+    ]
+}
+
+fn storage_profile_flag() -> FlagSchema {
+    FlagSchema::new("storage-profile")
+        .with_description("Storage deploy profile")
+        .with_choices(&["embedded", "serverless", "primary-replica", "cluster"])
+}
+
+fn storage_packaging_flag() -> FlagSchema {
+    FlagSchema::new("storage-packaging")
+        .with_description("Storage packaging contract")
+        .with_choices(&["single-file", "operational-directory"])
+}
+
+fn storage_preset_flag() -> FlagSchema {
+    FlagSchema::new("storage-preset")
+        .with_description("Storage/deploy preset")
+        .with_choices(&[
+            "embedded",
+            "serverless",
+            "primary-replica-dev",
+            "primary-replica-small",
+            "primary-replica-production-ha",
+            "primary-replica-backup",
+            "primary-replica-wal-retention",
+            "cluster",
+        ])
 }
 
 // ============================================================================
