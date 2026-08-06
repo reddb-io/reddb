@@ -439,7 +439,7 @@ fn normalize_row_fields_for_contract_at(
         provided.insert(name.clone(), value.clone());
     }
 
-    let resolved_columns = resolved_contract_columns(&contract)?;
+    let resolved_columns = resolved_contract_columns(contract)?;
     let declared_names: std::collections::BTreeSet<String> = resolved_columns
         .iter()
         .map(|column| column.name.clone())
@@ -540,6 +540,19 @@ fn enforce_row_uniqueness(
     let Some(contract) = db.collection_contract(collection) else {
         return Ok(());
     };
+    // Gate the full-collection scan behind the same cheap contract checks the
+    // pure evaluator applies. Without this, every single-row insert would
+    // materialize the whole collection before discovering it has no
+    // uniqueness rules, making bulk loads quadratic.
+    if !matches!(
+        contract.declared_model,
+        crate::catalog::CollectionModel::Table | crate::catalog::CollectionModel::Mixed
+    ) {
+        return Ok(());
+    }
+    if resolved_uniqueness_rules(&contract).is_empty() {
+        return Ok(());
+    }
     let Some(manager) = db.store().get_collection(collection) else {
         return Ok(());
     };
@@ -764,7 +777,7 @@ fn build_row_update_contract_plan_for_contract(
                 .map(|table| table.columns.is_empty())
                 .unwrap_or(true))
     {
-        resolved_contract_columns(&contract)?
+        resolved_contract_columns(contract)?
             .into_iter()
             .map(|rule| {
                 (
@@ -787,7 +800,7 @@ fn build_row_update_contract_plan_for_contract(
         contract.declared_model,
         crate::catalog::CollectionModel::Table | crate::catalog::CollectionModel::Mixed
     ) {
-        resolved_uniqueness_rules(&contract)
+        resolved_uniqueness_rules(contract)
             .into_iter()
             .flat_map(|rule| rule.columns.into_iter())
             .map(|column| (column, ()))
