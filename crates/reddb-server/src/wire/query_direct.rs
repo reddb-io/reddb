@@ -24,7 +24,7 @@ use crate::storage::query::ast::{
     Expr, FieldRef, Filter, QueryExpr, SelectItem, TableQuery, TableSource,
 };
 use crate::storage::query::sql_lowering::effective_table_filter;
-use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 use crate::storage::unified::{EntityData, EntityId, RowData, UnifiedEntity};
 
 use super::protocol::encode_value;
@@ -1974,7 +1974,7 @@ mod tests {
 
     #[test]
     fn fast_path_resolves_projection_alias_from_source_column() {
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         use crate::wire::protocol::decode_value;
 
         let rt = mk_runtime();
