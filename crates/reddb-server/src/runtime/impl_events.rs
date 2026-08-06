@@ -68,7 +68,7 @@ impl RedDBRuntime {
         entities.sort_by_key(|entity| entity.id.raw());
 
         let effective_queue = crate::runtime::mutation::effective_queue_name(&subscription);
-        let mut existing_event_ids = queue_event_ids(store.as_ref(), &effective_queue, &snap_ctx)?;
+        let mut existing_event_ids = queue_event_ids(store.as_ref(), &effective_queue)?;
         let subscription_id = subscription_identity(&subscription);
         let mut matched = 0u64;
         let mut enqueued = 0u64;
@@ -189,18 +189,17 @@ fn subscription_identity(subscription: &crate::catalog::SubscriptionDescriptor) 
     }
 }
 
-fn queue_event_ids(
-    store: &UnifiedStore,
-    queue: &str,
-    snapshot: &crate::runtime::impl_core::SnapshotContext,
-) -> RedDBResult<HashSet<String>> {
+fn queue_event_ids(store: &UnifiedStore, queue: &str) -> RedDBResult<HashSet<String>> {
     let Some(manager) = store.get_collection(queue) else {
         return Ok(HashSet::new());
     };
     let mut ids = HashSet::new();
-    for entity in manager.scan(Some(snapshot), |entity| {
-        matches!(entity.kind, EntityKind::QueueMessage { .. })
-    }) {
+    // Deliberately visibility-free: the backfill dedup set must include
+    // consumed/ACKed messages (committed xmax, pre-vacuum). Filtering by
+    // snapshot would drop them from the set and re-enqueue events that
+    // were already delivered (issue #2137 review).
+    for entity in manager.query_all(|entity| matches!(entity.kind, EntityKind::QueueMessage { .. }))
+    {
         let EntityData::QueueMessage(message) = entity.data else {
             continue;
         };

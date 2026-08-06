@@ -2367,9 +2367,24 @@ mod tests {
         assert!(!aggregate_pushdown.contains(".for_each_entity("));
         assert!(!ask.contains("for entity in manager.query_all(|_| true)"));
         assert!(!dml.contains("let entities = manager.query_all(|_| true);"));
-        assert!(!dml_targets.contains(".for_each_entity_zoned("));
-        assert!(!dml_targets.contains("manager.for_each_entity(|entity|"));
-        assert!(!events.contains("manager.query_all("));
+        // The DML target scan keeps raw iteration on purpose: its
+        // visibility is kind-conditional (live table rows at the tip
+        // version, everything else under the snapshot), which the uniform
+        // scan API cannot express. `candidate_visible` is the single gate.
+        assert_eq!(
+            dml_targets
+                .matches("self.candidate_visible(snapshot.as_ref(), entity)")
+                .count(),
+            2,
+            "both raw DML iterations must route through candidate_visible"
+        );
+        // The event-backfill dedup set is deliberately visibility-free:
+        // it must include consumed messages or backfill re-enqueues them.
+        assert_eq!(
+            events.matches("manager.query_all(").count(),
+            1,
+            "only the visibility-free backfill dedup may use query_all"
+        );
         assert!(!graph_commands.contains("TableRowMvccReadResolver"));
         assert!(!graph_dsl.contains("entity_visible_with_context(snap_ctx.as_ref(), e)"));
         assert!(!graph_tvf.contains("entity_visible_with_context(snap_ctx.as_ref(), &entity)"));

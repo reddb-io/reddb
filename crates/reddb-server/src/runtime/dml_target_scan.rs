@@ -147,11 +147,7 @@ impl<'a> DmlTargetScan<'a> {
             }
         }
 
-        let snapshot = if self.live_table_rows {
-            None
-        } else {
-            crate::runtime::impl_core::capture_current_snapshot()
-        };
+        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         let mut ids = Vec::new();
         if let Some(filter) = self.filter {
             let mut owned_zone_preds = Vec::new();
@@ -184,8 +180,9 @@ impl<'a> DmlTargetScan<'a> {
                 })
                 .collect();
 
-            manager.scan_for_each_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
-                if self.matches_update_target(entity)
+            manager.for_each_entity_zoned_with_stats(&zone_preds, |entity| {
+                if self.candidate_visible(snapshot.as_ref(), entity)
+                    && self.matches_update_target(entity)
                     && self.matches_filter(entity, compiled_filter.as_ref())
                 {
                     ids.push(entity.id);
@@ -196,8 +193,10 @@ impl<'a> DmlTargetScan<'a> {
                 true
             });
         } else {
-            manager.scan_for_each(snapshot.as_ref(), |entity| {
-                if self.matches_update_target(entity) {
+            manager.for_each_entity(|entity| {
+                if self.candidate_visible(snapshot.as_ref(), entity)
+                    && self.matches_update_target(entity)
+                {
                     ids.push(entity.id);
                     if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
                         return false;
@@ -316,6 +315,30 @@ impl<'a> DmlTargetScan<'a> {
             return self.table_row_resolver.resolve_candidate(entity).is_some();
         }
         crate::runtime::impl_core::entity_visible_under_current_snapshot(entity)
+    }
+
+    /// DML-target visibility is kind-conditional, which the uniform
+    /// `scan_*` API cannot express (issue #2137 review): under
+    /// `live_table_rows` (the RMW UPDATE path) table rows are targeted at
+    /// their tip version (`xmax == 0`, including rows whose inserting
+    /// transaction has not committed — the lock wants the latest physical
+    /// version), while every other entity kind keeps the full snapshot
+    /// check. The moderation gate applies to all kinds (#1274).
+    fn candidate_visible(
+        &self,
+        snapshot: Option<&crate::runtime::impl_core::SnapshotContext>,
+        entity: &crate::storage::UnifiedEntity,
+    ) -> bool {
+        if crate::runtime::ai::moderation::entity_moderation_hidden(entity) {
+            return false;
+        }
+        if self.live_table_rows && matches!(entity.kind, EntityKind::TableRow { .. }) {
+            return entity.xmax == 0;
+        }
+        match snapshot {
+            Some(ctx) => crate::runtime::mvcc::entity_visible_with_context(Some(ctx), entity),
+            None => entity.xmax == 0,
+        }
     }
 
     fn matches_update_target(&self, entity: &crate::storage::UnifiedEntity) -> bool {
