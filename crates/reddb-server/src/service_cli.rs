@@ -2473,7 +2473,7 @@ fn merge_telemetry_with_config(
     mut cli: crate::telemetry::TelemetryConfig,
     runtime: &RedDBRuntime,
 ) -> crate::telemetry::TelemetryConfig {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     let store = runtime.db().store();
 
@@ -3634,7 +3634,7 @@ mod tests {
         use crate::auth::store::PrincipalRef;
         use crate::auth::{Role, UserId};
         use crate::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
@@ -3825,7 +3825,7 @@ mod tests {
     fn bootstrap_manifest_installs_initial_users_policies_guardrails_and_config() {
         use crate::auth::policies::{EvalContext, ResourceRef};
         use crate::auth::UserId;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
