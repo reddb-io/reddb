@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use crate::application::{CreateDocumentInput, EntityUseCases};
 use crate::catalog::CollectionModel;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::EntityData;
 use crate::{RedDBError, RedDBOptions, RedDBResult, RedDBRuntime};
 
