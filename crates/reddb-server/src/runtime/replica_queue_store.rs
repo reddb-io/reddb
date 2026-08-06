@@ -38,7 +38,7 @@ use crate::storage::queue::lifecycle::{
     BumpedAttempt, DeliveryId, MessageId, PendingDeliveryView, QueueSide, QueueStore,
     QueueStoreError, QueueTxn, Result, DEFAULT_READ_MAX_ATTEMPTS,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::entity::RowData;
 use crate::storage::{EntityData, EntityId, EntityKind, UnifiedStore};
 
