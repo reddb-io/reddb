@@ -127,6 +127,10 @@ name = "grouped_general_multimodel"
 path = "tests/grouped/general_multimodel.rs"
 
 [[test]]
+name = "grouped_http_grpc_auth"
+path = "tests/grouped_http_grpc_auth.rs"
+
+[[test]]
 name = "grouped_graph_topology"
 path = "tests/grouped/graph_topology.rs"
 
