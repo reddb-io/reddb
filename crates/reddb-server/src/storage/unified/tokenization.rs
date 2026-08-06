@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 pub const MAX_INDEX_TOKENS: usize = 256;
 pub const MAX_TOKEN_LEN: usize = 160;
