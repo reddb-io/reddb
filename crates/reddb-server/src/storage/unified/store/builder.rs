@@ -75,7 +75,7 @@ impl EntityBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
