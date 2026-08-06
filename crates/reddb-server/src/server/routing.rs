@@ -1525,6 +1525,9 @@ mod tests {
 
     #[test]
     fn admin_users_requires_shared_secret_and_creates_regular_user() {
+        let _guard = crate::server::RED_ADMIN_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let previous = std::env::var_os("RED_ADMIN_TOKEN");
         std::env::set_var("RED_ADMIN_TOKEN", "admin-secret");
 

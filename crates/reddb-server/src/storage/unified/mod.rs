@@ -51,6 +51,7 @@ pub mod segment;
 pub mod segment_codec;
 pub mod store;
 pub mod tokenization;
+pub(super) mod visibility_map;
 
 pub use bitmap_index::{BitmapColumnIndex, BitmapIndexManager, BitmapIndexStats};
 pub use column_block::{

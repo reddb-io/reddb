@@ -18,9 +18,9 @@
 
 use crate::prng::SplitMix64;
 use crate::superblock::{self, Superblock};
-use crate::vfs::{OpenMode, StdVfs, Vfs, VfsFile};
 use reddb_file::wal_header::{encode_wal_file_header, WAL_FILE_VERSION};
 use reddb_file::wal_record::{encode_main_wal_record_frame, MainWalRecordFrame};
+use reddb_file::{OpenMode, StdVfs, Vfs, VfsFile};
 use std::io::{self, SeekFrom};
 use std::path::Path;
 

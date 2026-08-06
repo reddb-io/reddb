@@ -19,6 +19,7 @@ pub mod io;
 pub mod operations;
 pub mod prepared;
 pub mod queue;
+pub mod scram;
 pub mod stream;
 pub mod ws_gate;
 

@@ -51,9 +51,8 @@
 //!   - Any tuple on the page is updated, deleted, or inserted.
 //!   - Even a no-op WAL replay: clearing is conservative.
 //!
-//! reddb's MVCC version chains live in the btree itself
-//! (`storage/btree/node.rs:300`), not in row headers, so the
-//! "page" concept here is an *abstract* page — call sites use
+//! The unified store's MVCC version chains are not tied to fixed-size
+//! heap pages, so the "page" concept here is an *abstract* page: call sites use
 //! the entity ID divided by `entries_per_page` (~256 for 8 KB
 //! pages) as the page index.
 
@@ -199,8 +198,8 @@ impl Default for VisibilityMap {
 }
 
 /// Helper: convert an entity ID to a page index using the given
-/// `rows_per_page` constant. The btree's MVCC version chain
-/// doesn't actually map onto fixed-size pages, so this is an
+/// `rows_per_page` constant. The unified store's MVCC version chain
+/// does not map onto fixed-size pages, so this is an
 /// abstraction layer that lets the planner reason about
 /// "page-shaped" visibility regions without committing to a
 /// specific physical layout.
@@ -211,7 +210,7 @@ pub fn page_of(entity_id: u64, rows_per_page: u32) -> u32 {
     (entity_id / rows_per_page as u64) as u32
 }
 
-/// Phase 3.5 wiring callback. The btree write path calls this
+/// Phase 3.5 wiring callback. The unified write path calls this
 /// after every insert / update / delete to clear the all-visible
 /// bit for the affected page. Centralised so a single function
 /// can be hooked into multiple write call sites without each

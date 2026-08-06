@@ -27,7 +27,6 @@ use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value as SchemaValue;
 use reddb_grpc_proto::RedDBClient;
-use reddb_types::encoding::base64_encode;
 
 /// Which backend the stdio loop is wrapping.
 ///
@@ -1230,217 +1229,10 @@ pub(crate) fn value_to_sql_literal(v: &Value) -> String {
     }
 }
 
+/// The stdio JSON-RPC result envelope. Presentation owns the tagged
+/// lossless encoding every driver decodes; this is only the entry point.
 pub(crate) fn query_result_to_json(qr: &RuntimeQueryResult) -> Value {
-    if let Some(ask) = ask_query_result_to_json(qr) {
-        return ask;
-    }
-
-    let mut envelope = json::Map::new();
-    envelope.insert(
-        "statement".to_string(),
-        Value::String(qr.statement_type.to_string()),
-    );
-    envelope.insert(
-        "affected".to_string(),
-        Value::Number(qr.affected_rows as f64),
-    );
-
-    let mut columns = Vec::new();
-    if let Some(first) = qr.result.records.first() {
-        let mut keys: Vec<String> = first
-            .column_names()
-            .into_iter()
-            .map(|k| k.to_string())
-            .collect();
-        keys.sort();
-        columns = keys.into_iter().map(Value::String).collect();
-    }
-    envelope.insert("columns".to_string(), Value::Array(columns));
-
-    let rows: Vec<Value> = qr
-        .result
-        .records
-        .iter()
-        .map(record_to_json_object)
-        .collect();
-    envelope.insert("rows".to_string(), Value::Array(rows));
-
-    Value::Object(envelope)
-}
-
-fn ask_query_result_to_json(qr: &RuntimeQueryResult) -> Option<Value> {
-    if qr.statement != "ask" {
-        return None;
-    }
-    let row = qr.result.records.first()?;
-    let answer = text_field(row, "answer")?;
-    let provider = text_field(row, "provider").unwrap_or_default();
-    let model = text_field(row, "model").unwrap_or_default();
-    let sources_flat_json = json_field(row, "sources_flat").unwrap_or(Value::Array(Vec::new()));
-    let citations_json = json_field(row, "citations").unwrap_or(Value::Array(Vec::new()));
-    let validation_json = json_field(row, "validation").unwrap_or(Value::Object(json::Map::new()));
-
-    let effective_mode = match text_field(row, "mode").as_deref() {
-        Some("lenient") => crate::runtime::ai::ask_response_envelope::Mode::Lenient,
-        _ => crate::runtime::ai::ask_response_envelope::Mode::Strict,
-    };
-
-    let result = crate::runtime::ai::ask_response_envelope::AskResult {
-        answer,
-        sources_flat: envelope_sources_flat(&sources_flat_json),
-        citations: envelope_citations(&citations_json),
-        validation: envelope_validation(&validation_json),
-        cache_hit: bool_field(row, "cache_hit").unwrap_or(false),
-        provider,
-        model,
-        prompt_tokens: u32_field(row, "prompt_tokens").unwrap_or(0),
-        completion_tokens: u32_field(row, "completion_tokens").unwrap_or(0),
-        cost_usd: f64_field(row, "cost_usd").unwrap_or(0.0),
-        effective_mode,
-        retry_count: u32_field(row, "retry_count").unwrap_or(0),
-    };
-    Some(crate::runtime::ai::ask_response_envelope::build(&result))
-}
-
-fn record_field<'a>(record: &'a UnifiedRecord, name: &str) -> Option<&'a SchemaValue> {
-    record
-        .iter_fields()
-        .find_map(|(key, value)| (key.as_ref() == name).then_some(value))
-}
-
-fn text_field(record: &UnifiedRecord, name: &str) -> Option<String> {
-    match record_field(record, name)? {
-        SchemaValue::Text(s) => Some(s.to_string()),
-        SchemaValue::Email(s)
-        | SchemaValue::Url(s)
-        | SchemaValue::NodeRef(s)
-        | SchemaValue::EdgeRef(s) => Some(s.clone()),
-        other => Some(format!("{other}")),
-    }
-}
-
-fn u32_field(record: &UnifiedRecord, name: &str) -> Option<u32> {
-    match record_field(record, name)? {
-        SchemaValue::Integer(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
-        SchemaValue::UnsignedInteger(n) => Some((*n).min(u32::MAX as u64) as u32),
-        SchemaValue::BigInt(n)
-        | SchemaValue::TimestampMs(n)
-        | SchemaValue::Timestamp(n)
-        | SchemaValue::Duration(n)
-        | SchemaValue::Decimal(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
-        SchemaValue::Float(n) => (*n >= 0.0).then_some((*n).min(u32::MAX as f64) as u32),
-        _ => None,
-    }
-}
-
-fn f64_field(record: &UnifiedRecord, name: &str) -> Option<f64> {
-    match record_field(record, name)? {
-        SchemaValue::Integer(n) => Some(*n as f64),
-        SchemaValue::UnsignedInteger(n) => Some(*n as f64),
-        SchemaValue::BigInt(n)
-        | SchemaValue::TimestampMs(n)
-        | SchemaValue::Timestamp(n)
-        | SchemaValue::Duration(n)
-        | SchemaValue::Decimal(n) => Some(*n as f64),
-        SchemaValue::Float(n) => Some(*n),
-        _ => None,
-    }
-}
-
-fn bool_field(record: &UnifiedRecord, name: &str) -> Option<bool> {
-    match record_field(record, name)? {
-        SchemaValue::Boolean(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn json_field(record: &UnifiedRecord, name: &str) -> Option<Value> {
-    match record_field(record, name)? {
-        SchemaValue::Json(bytes) => {
-            // Decode the native binary document-body container (PRD-1398) if present.
-            crate::document_body::decode_container_to_json(bytes)
-                .or_else(|| json::from_slice(bytes).ok())
-        }
-        SchemaValue::Text(text) => json::from_str(text).ok(),
-        _ => None,
-    }
-}
-
-fn envelope_sources_flat(
-    value: &Value,
-) -> Vec<crate::runtime::ai::ask_response_envelope::SourceRow> {
-    value
-        .as_array()
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|source| {
-            let urn = source.get("urn").and_then(Value::as_str)?.to_string();
-            let payload = source
-                .get("payload")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-                .unwrap_or_else(|| source.to_string_compact());
-            Some(crate::runtime::ai::ask_response_envelope::SourceRow { urn, payload })
-        })
-        .collect()
-}
-
-fn envelope_citations(value: &Value) -> Vec<crate::runtime::ai::ask_response_envelope::Citation> {
-    value
-        .as_array()
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|citation| {
-            let marker = citation.get("marker").and_then(Value::as_u64)?;
-            let urn = citation.get("urn").and_then(Value::as_str)?.to_string();
-            Some(crate::runtime::ai::ask_response_envelope::Citation {
-                marker: marker.min(u32::MAX as u64) as u32,
-                urn,
-            })
-        })
-        .collect()
-}
-
-fn envelope_validation(value: &Value) -> crate::runtime::ai::ask_response_envelope::Validation {
-    crate::runtime::ai::ask_response_envelope::Validation {
-        ok: value.get("ok").and_then(Value::as_bool).unwrap_or(true),
-        warnings: validation_items(value, "warnings")
-            .into_iter()
-            .map(
-                |(kind, detail)| crate::runtime::ai::ask_response_envelope::ValidationWarning {
-                    kind,
-                    detail,
-                },
-            )
-            .collect(),
-        errors: validation_items(value, "errors")
-            .into_iter()
-            .map(
-                |(kind, detail)| crate::runtime::ai::ask_response_envelope::ValidationError {
-                    kind,
-                    detail,
-                },
-            )
-            .collect(),
-    }
-}
-
-fn validation_items(value: &Value, key: &str) -> Vec<(String, String)> {
-    value
-        .get(key)
-        .and_then(Value::as_array)
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|item| {
-            Some((
-                item.get("kind").and_then(Value::as_str)?.to_string(),
-                item.get("detail")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-            ))
-        })
-        .collect()
+    crate::presentation::query_result::tagged_summary(qr)
 }
 
 pub(crate) fn insert_result_to_json(qr: &RuntimeQueryResult) -> Value {
@@ -1466,81 +1258,11 @@ pub(crate) fn insert_result_to_json(qr: &RuntimeQueryResult) -> Value {
 }
 
 fn record_to_json_object(record: &UnifiedRecord) -> Value {
-    let mut map = json::Map::new();
-    // iter_fields merges the columnar fast-path + HashMap so scan
-    // rows (columnar only) contribute their values.
-    let mut entries: Vec<(&str, &SchemaValue)> =
-        record.iter_fields().map(|(k, v)| (k.as_ref(), v)).collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-    for (k, v) in entries {
-        map.insert(k.to_string(), schema_value_to_json(v));
-    }
-    Value::Object(map)
+    crate::presentation::query_result::tagged_record(record)
 }
 
 fn schema_value_to_json(v: &SchemaValue) -> Value {
-    match v {
-        SchemaValue::Null => Value::Null,
-        SchemaValue::Boolean(b) => Value::Bool(*b),
-        SchemaValue::Integer(n) => exact_i64_to_json(*n),
-        SchemaValue::UnsignedInteger(n) => exact_u64_to_json(*n),
-        SchemaValue::Float(n) if n.is_finite() => Value::Number(*n),
-        SchemaValue::Float(n) => {
-            let token = if n.is_nan() {
-                "NaN"
-            } else if n.is_sign_positive() {
-                "Infinity"
-            } else {
-                "-Infinity"
-            };
-            single_key_object("$float", Value::String(token.to_string()))
-        }
-        SchemaValue::BigInt(n) => exact_i64_to_json(*n),
-        SchemaValue::TimestampMs(n) | SchemaValue::Duration(n) => exact_i64_to_json(*n),
-        SchemaValue::Decimal(n) => exact_decimal_to_json(SchemaValue::Decimal(*n).display_string()),
-        SchemaValue::DecimalText(n) => exact_decimal_to_json(n.clone()),
-        SchemaValue::Timestamp(n) => single_key_object("$ts", Value::String(n.to_string())),
-        SchemaValue::Password(_) | SchemaValue::Secret(_) => Value::String("***".to_string()),
-        SchemaValue::Text(s) => Value::String(s.to_string()),
-        SchemaValue::Blob(bytes) => {
-            single_key_object("$bytes", Value::String(base64_encode(bytes)))
-        }
-        SchemaValue::Json(bytes) => {
-            crate::presentation::entity_json::storage_json_bytes_to_json(bytes)
-        }
-        SchemaValue::Uuid(bytes) => single_key_object("$uuid", Value::String(format_uuid(bytes))),
-        SchemaValue::Email(s)
-        | SchemaValue::Url(s)
-        | SchemaValue::NodeRef(s)
-        | SchemaValue::EdgeRef(s) => Value::String(s.clone()),
-        other => Value::String(format!("{other}")),
-    }
-}
-
-fn single_key_object(key: &str, value: Value) -> Value {
-    Value::Object([(key.to_string(), value)].into_iter().collect())
-}
-
-const MAX_JSON_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
-
-fn exact_i64_to_json(value: i64) -> Value {
-    if (-MAX_JSON_SAFE_INTEGER..=MAX_JSON_SAFE_INTEGER).contains(&value) {
-        Value::Integer(value)
-    } else {
-        single_key_object("$int", Value::String(value.to_string()))
-    }
-}
-
-fn exact_u64_to_json(value: u64) -> Value {
-    if value <= MAX_JSON_SAFE_INTEGER as u64 {
-        Value::Integer(value as i64)
-    } else {
-        single_key_object("$uint", Value::String(value.to_string()))
-    }
-}
-
-fn exact_decimal_to_json(value: String) -> Value {
-    single_key_object("$decimal", Value::String(value))
+    crate::presentation::query_result::tagged_value(v)
 }
 
 /// Convert a JSON `Value` to a `SchemaValue` for use as a bind parameter
@@ -1652,28 +1374,6 @@ fn json_i64(value: &Value) -> Option<i64> {
         Value::String(s) => s.parse::<i64>().ok(),
         _ => None,
     }
-}
-
-fn format_uuid(bytes: &[u8; 16]) -> String {
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
 }
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
@@ -1940,6 +1640,7 @@ fn dispatch_method_remote(
 mod tests {
     use super::*;
     use crate::json::json;
+    use crate::presentation::query_result::single_key_object;
     use proptest::prelude::*;
 
     fn make_runtime() -> RedDBRuntime {
