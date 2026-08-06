@@ -23,6 +23,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::application::entity::{CreateRowInput, CreateRowsBatchInput};
 use crate::application::ports::RuntimeEntityPort;
 use crate::json::{self as json, Value};
+use crate::runtime::query_request::{
+    ParamValue, PreparedId, PreparedRegistry, QueryRequest, QueryRequestExecutor,
+};
 use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::unified::UnifiedRecord;
 use reddb_grpc_proto::RedDBClient;
@@ -113,22 +116,13 @@ pub(crate) const MAX_CURSOR_BATCH_SIZE: usize = 10_000;
 
 /// Per-connection session that tracks the currently open transaction
 /// and any active streaming cursors.
-// A server-side prepared statement bound to this session.
-// When parameter_count == 0, shape == the exact plan (no substitution needed).
-struct StdioPreparedStatement {
-    shape: crate::storage::query::ast::QueryExpr,
-    parameter_count: usize,
-}
-
 pub(crate) struct Session {
     next_tx_id: u64,
     current_tx: Option<OpenTx>,
     next_cursor_id: u64,
     cursors: std::collections::HashMap<u64, Cursor>,
-    /// Monotone counter for prepared statement IDs within this session.
-    next_prepared_id: u64,
-    /// Active prepared statements, keyed by the ID returned to the client.
-    prepared: std::collections::HashMap<u64, StdioPreparedStatement>,
+    /// Request-module prepared state scoped to this stdio connection.
+    prepared: PreparedRegistry,
 }
 
 impl Session {
@@ -138,8 +132,7 @@ impl Session {
             current_tx: None,
             next_cursor_id: 1,
             cursors: std::collections::HashMap::new(),
-            next_prepared_id: 1,
-            prepared: std::collections::HashMap::new(),
+            prepared: PreparedRegistry::new(),
         }
     }
 
@@ -691,7 +684,7 @@ fn dispatch_method(
 
             // Optional positional `$N` bind parameters (#353 tracer slice).
             // Absence preserves the legacy single-arg `query(sql)` path.
-            let bind_values: Option<Vec<SchemaValue>> = params
+            let bind_values: Vec<ParamValue> = params
                 .get("params")
                 .map(|v| {
                     v.as_array()
@@ -701,29 +694,23 @@ fn dispatch_method(
                         ))
                         .and_then(|arr| {
                             arr.iter()
-                                .map(try_json_value_to_schema_value)
+                                .map(ParamValue::decode_json)
                                 .collect::<Result<Vec<_>, _>>()
                                 .map_err(|message| (error_code::INVALID_PARAMS, message))
                         })
                 })
-                .transpose()?;
+                .transpose()?
+                .unwrap_or_default();
 
-            if let Some(binds) = bind_values {
-                let qr = runtime
-                    .execute_query_with_params(sql, &binds)
-                    .map_err(|e| {
-                        if matches!(e, crate::api::RedDBError::Validation { .. }) {
-                            (error_code::INVALID_PARAMS, e.to_string())
-                        } else {
-                            (error_code::QUERY_ERROR, e.to_string())
-                        }
-                    })?;
-                return Ok(query_result_to_json(&qr));
-            }
-
-            let qr = runtime
-                .execute_query(sql)
-                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+            let qr = QueryRequestExecutor::new(runtime, &session.prepared)
+                .execute(QueryRequest::sql(sql, bind_values))
+                .map_err(|error| {
+                    if matches!(error, crate::api::RedDBError::Validation { .. }) {
+                        (error_code::INVALID_PARAMS, error.to_string())
+                    } else {
+                        (error_code::QUERY_ERROR, error.to_string())
+                    }
+                })?;
             Ok(query_result_to_json(&qr))
         }
 
@@ -736,35 +723,23 @@ fn dispatch_method(
         // This mirrors the PostgreSQL extended-query protocol semantics and is the
         // server-side half of the client driver's `PreparedStatement` abstraction.
         "prepare" => {
-            use crate::storage::query::modes::parse_multi;
-            use crate::storage::query::planner::shape::parameterize_query_expr;
-
             let sql = params.get("sql").and_then(Value::as_str).ok_or((
                 error_code::INVALID_PARAMS,
                 "missing 'sql' string".to_string(),
             ))?;
-            let parsed = parse_multi(sql).map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
-            let (shape, parameter_count) = if let Some(prepared) = parameterize_query_expr(&parsed)
-            {
-                (prepared.shape, prepared.parameter_count)
-            } else {
-                (parsed, 0)
-            };
-            let id = session.next_prepared_id;
-            session.next_prepared_id = session.next_prepared_id.saturating_add(1);
-            session.prepared.insert(
-                id,
-                StdioPreparedStatement {
-                    shape,
-                    parameter_count,
-                },
-            );
+            let prepared = session
+                .prepared
+                .prepare_auto_parameterized(runtime, sql)
+                .map_err(|error| (error_code::QUERY_ERROR, error.to_string()))?;
             Ok(Value::Object(
                 [
-                    ("prepared_id".to_string(), Value::Number(id as f64)),
+                    (
+                        "prepared_id".to_string(),
+                        Value::Number(prepared.id.into_raw() as f64),
+                    ),
                     (
                         "parameter_count".to_string(),
-                        Value::Number(parameter_count as f64),
+                        Value::Number(prepared.parameter_count as f64),
                     ),
                 ]
                 .into_iter()
@@ -773,9 +748,6 @@ fn dispatch_method(
         }
 
         "execute_prepared" => {
-            use crate::storage::query::planner::shape::bind_parameterized_query;
-            use reddb_types::Value as SV;
-
             let id = params
                 .get("prepared_id")
                 .and_then(Value::as_f64)
@@ -785,46 +757,27 @@ fn dispatch_method(
                     "missing 'prepared_id'".to_string(),
                 ))?;
 
-            let stmt = session.prepared.get(&id).ok_or((
-                error_code::QUERY_ERROR,
-                format!("no prepared statement with id {id}"),
-            ))?;
-
             // Parse bind values from JSON array of JSON-encoded literals.
             let binds_json: Vec<Value> = params
                 .get("binds")
                 .and_then(Value::as_array)
                 .map(|a| a.to_vec())
                 .unwrap_or_default();
-            if binds_json.len() != stmt.parameter_count {
-                return Err((
-                    error_code::INVALID_PARAMS,
-                    format!(
-                        "expected {} bind values, got {}",
-                        stmt.parameter_count,
-                        binds_json.len()
-                    ),
-                ));
-            }
-
-            // Convert JSON bind values to SchemaValue.
-            let binds: Vec<SV> = binds_json
+            let binds: Vec<ParamValue> = binds_json
                 .iter()
-                .map(try_json_value_to_schema_value)
+                .map(ParamValue::decode_json)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|message| (error_code::INVALID_PARAMS, message))?;
 
-            // Bind literals into the parameterized shape.
-            let expr = if stmt.parameter_count == 0 {
-                stmt.shape.clone()
-            } else {
-                bind_parameterized_query(&stmt.shape, &binds, stmt.parameter_count)
-                    .ok_or((error_code::QUERY_ERROR, "bind failed".to_string()))?
-            };
-
-            let qr = runtime
-                .execute_query_expr(expr)
-                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+            let qr = QueryRequestExecutor::new(runtime, &session.prepared)
+                .execute(QueryRequest::prepared(PreparedId::from_raw(id), binds))
+                .map_err(|error| {
+                    if matches!(error, crate::api::RedDBError::Validation { .. }) {
+                        (error_code::INVALID_PARAMS, error.to_string())
+                    } else {
+                        (error_code::QUERY_ERROR, error.to_string())
+                    }
+                })?;
             Ok(query_result_to_json(&qr))
         }
 
@@ -1091,7 +1044,12 @@ fn flat_payload_to_row_input(
         collection: collection.to_string(),
         fields: payload
             .iter()
-            .map(|(key, value)| (key.clone(), json_value_to_schema_value(value)))
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    SchemaValue::from(ParamValue::decode_json_lossy(value)),
+                )
+            })
             .collect(),
         metadata: Vec::new(),
         node_links: Vec::new(),
@@ -1263,161 +1221,6 @@ fn record_to_json_object(record: &UnifiedRecord) -> Value {
 
 fn schema_value_to_json(v: &SchemaValue) -> Value {
     crate::presentation::query_result::tagged_value(v)
-}
-
-/// Convert a JSON `Value` to a `SchemaValue` for use as a bind parameter
-/// in a prepared statement. JSON-RPC envelopes preserve values that
-/// ordinary JSON cannot represent losslessly.
-pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
-    try_json_value_to_schema_value(v)
-        .unwrap_or_else(|_| SchemaValue::Json(crate::json::to_vec(v).unwrap_or_default()))
-}
-
-fn try_json_value_to_schema_value(v: &Value) -> Result<SchemaValue, String> {
-    match v {
-        Value::Null => Ok(SchemaValue::Null),
-        Value::Bool(b) => Ok(SchemaValue::Boolean(*b)),
-        Value::Integer(n) => Ok(SchemaValue::Integer(*n)),
-        Value::Number(n) => {
-            if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
-                Ok(SchemaValue::Integer(*n as i64))
-            } else {
-                Ok(SchemaValue::Float(*n))
-            }
-        }
-        Value::Decimal(n) => Ok(SchemaValue::DecimalText(n.clone())),
-        Value::String(s) => Ok(SchemaValue::text(s.clone())),
-        Value::Array(items) => {
-            // A JSON array of numbers (or empty) is taken as `Vector`
-            // for the #355 query-param contract. Other arrays are
-            // JSON values, so JSON columns can bind array payloads.
-            if items
-                .iter()
-                .all(|v| matches!(v, Value::Integer(_) | Value::Number(_)))
-            {
-                let floats: Vec<f32> = items
-                    .iter()
-                    .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-                    .collect();
-                Ok(SchemaValue::Vector(floats))
-            } else {
-                Ok(SchemaValue::Json(
-                    crate::json::to_vec(v).unwrap_or_default(),
-                ))
-            }
-        }
-        Value::Object(map) => {
-            if map.len() == 1 {
-                if let Some(Value::String(encoded)) = map.get("$bytes") {
-                    if let Ok(bytes) = base64_decode(encoded) {
-                        return Ok(SchemaValue::Blob(bytes));
-                    }
-                }
-                if let Some(value) = map.get("$ts") {
-                    if let Some(ts) = json_i64(value) {
-                        return Ok(SchemaValue::Timestamp(ts));
-                    }
-                }
-                if let Some(Value::String(value)) = map.get("$uuid") {
-                    if let Ok(uuid) = crate::crypto::Uuid::parse_str(value) {
-                        return Ok(SchemaValue::Uuid(*uuid.as_bytes()));
-                    }
-                }
-                if let Some(Value::String(value)) = map.get("$float") {
-                    return Ok(match value.as_str() {
-                        "NaN" => SchemaValue::Float(f64::NAN),
-                        "Infinity" | "+Infinity" | "inf" | "+inf" => {
-                            SchemaValue::Float(f64::INFINITY)
-                        }
-                        "-Infinity" | "-inf" => SchemaValue::Float(f64::NEG_INFINITY),
-                        _ => SchemaValue::Json(crate::json::to_vec(v).unwrap_or_default()),
-                    });
-                }
-                if map.contains_key("$number") || map.contains_key("$decimalText") {
-                    return Err("superseded exact-number envelope".to_string());
-                }
-                if let Some(value) = map.get("$int") {
-                    return json_i64(value)
-                        .map(SchemaValue::Integer)
-                        .ok_or_else(|| "invalid $int exact-number envelope".to_string());
-                }
-                if let Some(value) = map.get("$uint") {
-                    if let Value::String(value) = value {
-                        return value
-                            .parse::<u64>()
-                            .map(SchemaValue::UnsignedInteger)
-                            .map_err(|_| "invalid $uint exact-number envelope".to_string());
-                    }
-                    return Err("invalid $uint exact-number envelope".to_string());
-                }
-                if let Some(Value::String(value)) = map.get("$decimal") {
-                    return Ok(SchemaValue::DecimalText(value.clone()));
-                }
-            }
-            Ok(SchemaValue::Json(
-                crate::json::to_vec(v).unwrap_or_default(),
-            ))
-        }
-    }
-}
-
-fn json_i64(value: &Value) -> Option<i64> {
-    match value {
-        Value::Integer(n) => Some(*n),
-        Value::Number(n) => {
-            if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
-                Some(*n as i64)
-            } else {
-                None
-            }
-        }
-        Value::String(s) => s.parse::<i64>().ok(),
-        _ => None,
-    }
-}
-
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    let bytes = input.as_bytes();
-    if !bytes.len().is_multiple_of(4) {
-        return Err("base64 length must be a multiple of 4".to_string());
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks_exact(4) {
-        let pad = chunk.iter().rev().take_while(|&&b| b == b'=').count();
-        let a = base64_value(chunk[0])?;
-        let b = base64_value(chunk[1])?;
-        let c = if chunk[2] == b'=' {
-            0
-        } else {
-            base64_value(chunk[2])?
-        };
-        let d = if chunk[3] == b'=' {
-            0
-        } else {
-            base64_value(chunk[3])?
-        };
-        let n = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | d as u32;
-        out.push(((n >> 16) & 0xff) as u8);
-        if pad < 2 {
-            out.push(((n >> 8) & 0xff) as u8);
-        }
-        if pad < 1 {
-            out.push((n & 0xff) as u8);
-        }
-    }
-    Ok(out)
-}
-
-fn base64_value(byte: u8) -> Result<u8, String> {
-    match byte {
-        b'A'..=b'Z' => Ok(byte - b'A'),
-        b'a'..=b'z' => Ok(byte - b'a' + 26),
-        b'0'..=b'9' => Ok(byte - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        b'=' => Ok(0),
-        _ => Err(format!("invalid base64 character: {}", byte as char)),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2127,53 +1930,6 @@ mod tests {
         assert_eq!(
             payload.get("hex").and_then(Value::as_str),
             Some("7b6e6f74206a736f6e")
-        );
-    }
-
-    #[test]
-    fn json_value_to_schema_value_decodes_typed_envelopes() {
-        let SchemaValue::Blob(bytes) = json_value_to_schema_value(&json!({ "$bytes": "AAECAw==" }))
-        else {
-            panic!("expected blob");
-        };
-        assert_eq!(bytes, vec![0, 1, 2, 3]);
-
-        assert_eq!(
-            json_value_to_schema_value(&json!({ "$ts": "9223372036854775807" })),
-            SchemaValue::Timestamp(i64::MAX)
-        );
-
-        let SchemaValue::Uuid(bytes) = json_value_to_schema_value(&json!({
-            "$uuid": "00112233-4455-6677-8899-aabbccddeeff"
-        })) else {
-            panic!("expected uuid");
-        };
-        assert_eq!(
-            bytes,
-            [
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
-                0xee, 0xff
-            ]
-        );
-
-        let SchemaValue::Float(value) =
-            json_value_to_schema_value(&json!({ "$float": "-Infinity" }))
-        else {
-            panic!("expected float");
-        };
-        assert!(value.is_infinite() && value.is_sign_negative());
-
-        assert_eq!(
-            json_value_to_schema_value(&json!({ "$int": "9007199254740993" })),
-            SchemaValue::Integer(9_007_199_254_740_993)
-        );
-        assert_eq!(
-            json_value_to_schema_value(&json!({ "$uint": "9223372036854775808" })),
-            SchemaValue::UnsignedInteger(i64::MAX as u64 + 1)
-        );
-        assert_eq!(
-            json_value_to_schema_value(&json!({ "$decimal": "3.14159265358979323846" })),
-            SchemaValue::DecimalText("3.14159265358979323846".to_string())
         );
     }
 
