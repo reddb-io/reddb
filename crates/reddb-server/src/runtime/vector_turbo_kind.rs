@@ -21,7 +21,7 @@ use crate::storage::engine::distance::DistanceMetric;
 use crate::storage::engine::turboquant::extent::TurboExtent;
 use crate::storage::engine::turboquant::index::TurboQuantIndex;
 use crate::storage::engine::Pager;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::{EntityData, UnifiedStore};
 use crate::storage::EntityId;
 use reddb_file::{
