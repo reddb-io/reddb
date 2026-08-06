@@ -989,7 +989,8 @@ impl RedDBRuntime {
             let manager = store
                 .get_collection(&query.table)
                 .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-            let entities = manager.query_all(|_| true);
+            let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+            let entities = manager.scan(snapshot.as_ref(), |_| true);
             let recent: Vec<_> = entities
                 .into_iter()
                 .rev()
