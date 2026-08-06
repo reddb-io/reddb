@@ -2,7 +2,6 @@ async fn graph_clustering(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let projection_name = json_string_field(&payload, "projection_name");
     let projection = resolve_projection_payload(self, &payload)?;
@@ -35,7 +34,6 @@ async fn graph_personalized_pagerank(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload(&request.into_inner().payload_json)?;
     let projection_name = json_string_field(&payload, "projection_name");
     let projection = resolve_projection_payload(self, &payload)?;
@@ -75,7 +73,6 @@ async fn graph_hits(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let projection_name = json_string_field(&payload, "projection_name");
     let projection = resolve_projection_payload(self, &payload)?;
@@ -103,7 +100,6 @@ async fn graph_cycles(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let projection_name = json_string_field(&payload, "projection_name");
     let projection = resolve_projection_payload(self, &payload)?;
@@ -131,7 +127,6 @@ async fn graph_topological_sort(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let projection_name = json_string_field(&payload, "projection_name");
     let projection = resolve_projection_payload(self, &payload)?;
@@ -166,7 +161,6 @@ async fn create_row(
     &self,
     request: Request<JsonCreateRequest>,
 ) -> Result<Response<EntityReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
     tokio::task::spawn_blocking(move || create_row_reply(&rt, request))
@@ -179,7 +173,6 @@ async fn create_node(
     &self,
     request: Request<JsonCreateRequest>,
 ) -> Result<Response<EntityReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
     tokio::task::spawn_blocking(move || create_node_reply(&rt, request))
@@ -192,7 +185,6 @@ async fn create_edge(
     &self,
     request: Request<JsonCreateRequest>,
 ) -> Result<Response<EntityReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
     tokio::task::spawn_blocking(move || create_edge_reply(&rt, request))
@@ -205,7 +197,6 @@ async fn create_vector(
     &self,
     request: Request<JsonCreateRequest>,
 ) -> Result<Response<EntityReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
     tokio::task::spawn_blocking(move || create_vector_reply(&rt, request))
@@ -218,7 +209,6 @@ async fn bulk_create_rows(
     &self,
     request: Request<JsonBulkCreateRequest>,
 ) -> Result<Response<BulkEntityReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
     tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_row_reply))
@@ -231,7 +221,6 @@ async fn bulk_create_nodes(
     &self,
     request: Request<JsonBulkCreateRequest>,
 ) -> Result<Response<BulkEntityReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
     tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_node_reply))
@@ -244,7 +233,6 @@ async fn bulk_create_edges(
     &self,
     request: Request<JsonBulkCreateRequest>,
 ) -> Result<Response<BulkEntityReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
     tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_edge_reply))
@@ -257,7 +245,6 @@ async fn bulk_create_vectors(
     &self,
     request: Request<JsonBulkCreateRequest>,
 ) -> Result<Response<BulkEntityReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
     tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_vector_reply))
@@ -270,13 +257,11 @@ async fn patch_entity(
     &self,
     request: Request<UpdateEntityRequest>,
 ) -> Result<Response<EntityReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     Ok(Response::new(patch_entity_reply(self, request)?))
 }
 
 async fn create_snapshot(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let snapshot = self.native_use_cases().create_snapshot().map_err(to_status)?;
     Ok(Response::new(PayloadReply {
         ok: true,
@@ -288,7 +273,6 @@ async fn create_export(
     &self,
     request: Request<ExportRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     if request.name.trim().is_empty() {
         return Err(Status::invalid_argument("export name cannot be empty"));
@@ -307,7 +291,6 @@ async fn apply_retention(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<OperationReply>, Status> {
-    self.authorize_write(request.metadata())?;
     self.native_use_cases()
         .apply_retention_policy()
         .map_err(to_status)?;
@@ -321,7 +304,6 @@ async fn delete_entity(
     &self,
     request: Request<DeleteEntityRequest>,
 ) -> Result<Response<OperationReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let output = self
         .entity_use_cases()
@@ -343,7 +325,6 @@ async fn delete_entity(
 }
 
 async fn checkpoint(&self, _request: Request<Empty>) -> Result<Response<OperationReply>, Status> {
-    self.authorize_write(_request.metadata())?;
     self.native_use_cases().checkpoint().map_err(to_status)?;
     Ok(Response::new(OperationReply {
         ok: true,
