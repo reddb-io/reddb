@@ -183,7 +183,7 @@ fn ordered_result_columns(result: &crate::storage::query::unified::UnifiedResult
 /// `nodes` subquery) and the edge endpoints (from the `edges` subquery)
 /// compare equal regardless of integer-vs-text typing. `Null` is not a node.
 fn value_to_node_id(value: &crate::storage::schema::Value) -> Option<String> {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     match value {
         Value::Null => None,
         Value::Text(s) => Some(s.to_string()),
@@ -196,7 +196,7 @@ fn value_to_node_id(value: &crate::storage::schema::Value) -> Option<String> {
 
 /// Numeric edge weight from a cell value (the optional third `edges` column).
 fn value_to_weight(value: &crate::storage::schema::Value) -> Option<f32> {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     match value {
         Value::Float(f) => Some(*f as f32),
         Value::Integer(n) => Some(*n as f32),
@@ -429,7 +429,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
         use crate::storage::engine::graph_algorithms;
         use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         if name.eq_ignore_ascii_case("components") {
             reject_named_args(name, named_args)?;
@@ -627,7 +627,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
         use crate::storage::engine::graph_algorithms;
         use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         // Read-only materialization of the full active graph. The named
         // collection identifies the active graph scope; passing `None` for the
@@ -676,7 +676,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
         use crate::storage::engine::graph_algorithms;
         use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         let graph = super::graph_dsl::materialize_graph_with_projection(
             self.inner.db.store().as_ref(),
@@ -709,7 +709,7 @@ impl RedDBRuntime {
         rows: Vec<(String, f64)>,
     ) -> crate::storage::query::unified::UnifiedResult {
         use crate::storage::query::unified::UnifiedResult;
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         let mut result = UnifiedResult::with_columns(vec!["node_id".into(), "score".into()]);
         for (node_id, score) in rows {
             let mut record = UnifiedRecord::new();
