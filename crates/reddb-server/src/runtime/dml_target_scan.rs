@@ -5,9 +5,9 @@
 //! DELETE path into a small testable module. The same Interface will
 //! be reused by UPDATE in a follow-up; this commit covers DELETE only.
 //!
-//! Candidate discovery stays with each scan path. Table-row visibility
-//! is centralized through `TableRowMvccReadResolver` before any
-//! candidate id is returned to UPDATE or DELETE.
+//! Candidate discovery stays with each scan path. Segment scans apply
+//! visibility through the snapshot API; point/index candidates use the
+//! table-row resolver before reaching UPDATE or DELETE.
 
 use std::collections::HashMap;
 
@@ -147,6 +147,11 @@ impl<'a> DmlTargetScan<'a> {
             }
         }
 
+        let snapshot = if self.live_table_rows {
+            None
+        } else {
+            crate::runtime::impl_core::capture_current_snapshot()
+        };
         let mut ids = Vec::new();
         if let Some(filter) = self.filter {
             let mut owned_zone_preds = Vec::new();
@@ -179,10 +184,7 @@ impl<'a> DmlTargetScan<'a> {
                 })
                 .collect();
 
-            manager.for_each_entity_zoned(&zone_preds, |entity| {
-                if !self.visible_candidate(entity) {
-                    return true;
-                }
+            manager.scan_for_each_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
                 if self.matches_update_target(entity)
                     && self.matches_filter(entity, compiled_filter.as_ref())
                 {
@@ -194,8 +196,8 @@ impl<'a> DmlTargetScan<'a> {
                 true
             });
         } else {
-            manager.for_each_entity(|entity| {
-                if self.visible_candidate(entity) && self.matches_update_target(entity) {
+            manager.scan_for_each(snapshot.as_ref(), |entity| {
+                if self.matches_update_target(entity) {
                     ids.push(entity.id);
                     if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
                         return false;
