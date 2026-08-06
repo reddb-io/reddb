@@ -7,7 +7,7 @@
 //! is deferred to later slices.
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::{EntityData, UnifiedStore};
 use crate::utils::json::{parse_json, JsonValue};
 
