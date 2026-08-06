@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::cost::{ColumnStats, TableStats};
 use super::histogram::{Bucket, ColumnValue, Histogram, MostCommonValues};
 use crate::api::CatalogSnapshot;
-use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 use crate::storage::unified::entity::{EntityId, RowData};
 use crate::storage::UnifiedStore;
 use crate::storage::{EntityData, EntityKind, UnifiedEntity};
