@@ -449,16 +449,15 @@ impl RedDBRuntime {
                 return true;
             };
             let namespace_matches = row.get_field("namespace").and_then(|value| match value {
-                crate::storage::schema::Value::Text(value) => Some(value.as_ref()),
+                reddb_types::Value::Text(value) => Some(value.as_ref()),
                 _ => None,
             }) == Some(RESULT_CACHE_BLOB_NAMESPACE);
             let key_matches = row.get_field("key").and_then(|value| match value {
-                crate::storage::schema::Value::Text(value) => Some(value.as_ref()),
+                reddb_types::Value::Text(value) => Some(value.as_ref()),
                 _ => None,
             }) == Some(key);
             if namespace_matches && key_matches {
-                if let Some(crate::storage::schema::Value::Blob(payload)) = row.get_field("payload")
-                {
+                if let Some(reddb_types::Value::Blob(payload)) = row.get_field("payload") {
                     let id = entity.id.raw();
                     if latest
                         .as_ref()
@@ -560,19 +559,16 @@ impl RedDBRuntime {
                 named: Some(HashMap::from([
                     (
                         "namespace".to_string(),
-                        crate::storage::schema::Value::text(RESULT_CACHE_BLOB_NAMESPACE),
+                        reddb_types::Value::text(RESULT_CACHE_BLOB_NAMESPACE),
                     ),
-                    (
-                        "key".to_string(),
-                        crate::storage::schema::Value::text(key.to_string()),
-                    ),
+                    ("key".to_string(), reddb_types::Value::text(key.to_string())),
                     (
                         "payload".to_string(),
-                        crate::storage::schema::Value::Blob(bytes.to_vec()),
+                        reddb_types::Value::Blob(bytes.to_vec()),
                     ),
                     (
                         "scopes".to_string(),
-                        crate::storage::schema::Value::text(scopes.join("\n")),
+                        reddb_types::Value::text(scopes.join("\n")),
                     ),
                 ])),
                 schema: None,
@@ -620,7 +616,7 @@ impl RedDBRuntime {
                     .as_row()
                     .and_then(|row| row.get_field("scopes"))
                     .and_then(|value| match value {
-                        crate::storage::schema::Value::Text(value) => Some(value.as_ref()),
+                        reddb_types::Value::Text(value) => Some(value.as_ref()),
                         _ => None,
                     })
                     .is_some_and(|scopes| scopes.lines().any(|entry| entry == scope))

@@ -33,8 +33,8 @@ use std::sync::Arc;
 use super::helpers::evaluate_entity_filter;
 use super::*;
 use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
-use reddb_types::Value;
 use crate::storage::unified::entity::{field_name_bloom, EntityData, EntityKind, UnifiedEntity};
+use reddb_types::Value;
 
 /// Pre-classified field reference. The classifier in
 /// [`classify_field`] turns every `FieldRef` into one of these

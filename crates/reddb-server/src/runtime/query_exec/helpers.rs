@@ -146,7 +146,7 @@ pub(crate) fn extract_index_candidate(
 /// Stops at OR / NOT — not AND-combinable.
 pub(crate) fn extract_all_eq_candidates(
     filter: &crate::storage::query::ast::Filter,
-    out: &mut Vec<(String, Vec<u8>, crate::storage::schema::Value)>,
+    out: &mut Vec<(String, Vec<u8>, reddb_types::Value)>,
 ) {
     use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
     match filter {
@@ -160,9 +160,9 @@ pub(crate) fn extract_all_eq_candidates(
                 _ => return,
             };
             let bytes = match value {
-                crate::storage::schema::Value::Text(s) => s.as_bytes().to_vec(),
-                crate::storage::schema::Value::Integer(n) => n.to_le_bytes().to_vec(),
-                crate::storage::schema::Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
+                reddb_types::Value::Text(s) => s.as_bytes().to_vec(),
+                reddb_types::Value::Integer(n) => n.to_le_bytes().to_vec(),
+                reddb_types::Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
                 _ => return,
             };
             out.push((col, bytes, value.clone()));
@@ -188,7 +188,7 @@ pub(crate) fn extract_zone_predicates(
     filter: &crate::storage::query::ast::Filter,
     out: &mut Vec<(
         String,
-        crate::storage::schema::Value,
+        reddb_types::Value,
         crate::storage::unified::segment::ZoneColPredKind,
     )>,
 ) {

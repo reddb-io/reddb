@@ -672,9 +672,9 @@ mod record_layout_tests {
     //! to drive empty-schema generators alongside the schemaful path.
 
     use super::*;
-    use reddb_types::Value;
     use proptest::collection::vec;
     use proptest::prelude::*;
+    use reddb_types::Value;
 
     fn arb_value() -> impl Strategy<Value = Value> {
         prop_oneof![

@@ -959,8 +959,7 @@ impl GrowingSegment {
 
     fn rebuild_sealed_col_zones(&mut self) {
         let mut values_by_col: HashMap<String, Vec<(CanonicalKey, Value)>> = HashMap::new();
-        let mut family_by_col: HashMap<String, crate::storage::schema::CanonicalKeyFamily> =
-            HashMap::new();
+        let mut family_by_col: HashMap<String, reddb_types::CanonicalKeyFamily> = HashMap::new();
         let mut mixed_family_cols = HashSet::new();
         let mut unsupported_cols = HashSet::new();
 
@@ -1833,9 +1832,9 @@ fn canonical_gap_score(left: &CanonicalKey, right: &CanonicalKey) -> Option<f64>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reddb_types::Value;
     use crate::storage::unified::entity::RowData;
     use crate::storage::unified::MetadataValue;
+    use reddb_types::Value;
 
     #[test]
     fn test_growing_segment_basic() {

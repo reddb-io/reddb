@@ -20,8 +20,8 @@ struct SeededConcept {
     removal_slice: &'static str,
 }
 
-// These are the 32 architectural concepts that were declared on both sides of
-// an authority boundary when phase 2 began (#2113). Generic cross-domain names
+// These are the architectural concepts that were declared on both sides of an
+// authority boundary when phase 2 began (#2113) and are still duplicated. Generic cross-domain names
 // (`Cursor`, `JsonValue`, `ParseError`, and `Value`) are deliberately absent:
 // their declarations represent unrelated concepts and cannot seed this fence.
 const SEEDED_CONCEPTS: &[SeededConcept] = &[
@@ -36,12 +36,6 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
         "crates/reddb-rql/src/core.rs",
         &["crates/reddb-server/src/storage/query/executors/subquery.rs"],
         "#2165",
-    ),
-    concept(
-        "DistanceMetric",
-        "crates/reddb-types/src/distance.rs",
-        &["crates/reddb-server/src/storage/vector/introspection.rs"],
-        "#2164",
     ),
     concept(
         "EdgeDirection",
@@ -671,15 +665,18 @@ fn server_must_not_redeclare_the_logical_type_system() {
     }
 }
 
-/// The concept fence blocks all 32 known cross-boundary concepts by both name
+/// The concept fence blocks the known cross-boundary concepts by both name
 /// and exact declaration shape. Existing declarations are temporary,
 /// path-specific exceptions; moving or renaming one does not preserve the
 /// exception.
 #[test]
 fn server_must_not_redeclare_seeded_authority_concepts() {
+    // 32 concepts seeded at phase-2 start, minus `DistanceMetric`, whose
+    // duplicate this slice (#2164) removed. Retiring a concept means deleting
+    // its entry, never loosening this count.
     assert_eq!(
         SEEDED_CONCEPTS.len(),
-        32,
+        31,
         "the phase-2 concept seed must stay explicit"
     );
 
@@ -753,24 +750,52 @@ fn server_imports_name_types_keystone_directly() {
         );
     }
 
-    let server_src = root.join("crates/reddb-server/src");
+    // The gate matches qualified paths anywhere on the line, not just `use`
+    // statements: the shim is only retired once no call site can still name a
+    // type through it, however the path is spelled.
+    let retired_paths = [
+        "crate::storage::schema::",
+        "reddb_server::storage::schema::",
+        "reddb::storage::schema::",
+    ];
     let mut violations = Vec::new();
-    for path in rust_files_under(&server_src) {
-        for (line_index, line) in read(&path).lines().enumerate() {
-            let line = line.trim_start();
-            if line.starts_with("use crate::storage::schema")
-                || line.starts_with("pub use crate::storage::schema")
-            {
-                let rel = path.strip_prefix(&root).expect("server source under repo root");
-                violations.push(format!("{}:{}", rel.display(), line_index + 1));
+    for dir in [
+        root.join("crates/reddb-server/src"),
+        root.join("crates/reddb-server/tests"),
+        root.join("crates/reddb-client/src"),
+        root.join("crates/reddb-client/tests"),
+        root.join("tests"),
+        root.join("examples"),
+    ] {
+        if !dir.exists() {
+            continue;
+        }
+        for path in rust_files_under(&dir) {
+            for (line_index, line) in read(&path).lines().enumerate() {
+                let line = line.trim_start();
+                if line.starts_with("//") {
+                    continue;
+                }
+                if retired_paths.iter().any(|p| line.contains(p)) {
+                    let rel = path.strip_prefix(&root).expect("source under repo root");
+                    violations.push(format!("{}:{}", rel.display(), line_index + 1));
+                }
             }
         }
     }
 
     assert!(
         violations.is_empty(),
-        "server imports retired storage::schema paths:\n{}",
+        "call sites still name retired storage::schema paths:\n{}",
         violations.join("\n")
+    );
+
+    // The mod-level re-export is the trunk of the shim: while it stands, every
+    // qualified path above keeps resolving.
+    let mod_rs = read(&schema.join("mod.rs"));
+    assert!(
+        !mod_rs.contains("pub use reddb_types::"),
+        "storage/schema/mod.rs must not re-export the keystone vocabulary"
     );
 }
 

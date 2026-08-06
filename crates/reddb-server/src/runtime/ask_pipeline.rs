@@ -43,8 +43,8 @@ use super::statement_frame::{EffectiveScope, ReadFrame};
 use super::RedDBRuntime;
 use crate::api::{RedDBError, RedDBResult};
 use crate::application::SearchContextInput;
-use reddb_types::Value;
 use crate::storage::unified::entity::{EntityData, EntityKind, UnifiedEntity};
+use reddb_types::Value;
 
 /// Default cap for Stage 4 row output. Override per-call via
 /// [`AskPipeline::execute_with_limit`].
@@ -1315,11 +1315,11 @@ mod tests {
     use crate::auth::Role;
     use crate::runtime::statement_frame::EffectiveScope;
     use crate::runtime::RedDBRuntime;
-    use reddb_types::Value;
     use crate::storage::transaction::snapshot::Snapshot;
     use crate::storage::unified::entity::{
         EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
     };
+    use reddb_types::Value;
     use std::sync::Arc;
 
     fn make_scope(visible: HashSet<String>) -> EffectiveScope {

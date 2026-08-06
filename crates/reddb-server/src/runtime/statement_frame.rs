@@ -1455,7 +1455,7 @@ mod tests {
         for (i, record) in result.result.records.iter().enumerate() {
             assert_eq!(
                 record.get("id"),
-                Some(&crate::storage::schema::Value::Integer(i as i64)),
+                Some(&reddb_types::Value::Integer(i as i64)),
                 "row {i} is byte-identical to the per-request-allocation baseline"
             );
         }

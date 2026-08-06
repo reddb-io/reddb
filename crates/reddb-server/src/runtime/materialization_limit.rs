@@ -18,8 +18,8 @@
 //! materialising execute path.
 
 use crate::api::{RedDBError, RedDBResult};
-use reddb_types::Value;
 use crate::RedDB;
+use reddb_types::Value;
 
 /// Collection that backs `red.config` over the runtime KV store.
 const RED_CONFIG_COLLECTION: &str = "red_config";

@@ -3,7 +3,7 @@
 //! Tracer-bullet implementation of issue #364 (Rust leg of PRD #351).
 //! Mirrors the same `Value` taxonomy the Go (`drivers/go/redwire/value.go`)
 //! and JS (`drivers/js/src/redwire.js`) drivers ship: 10 variants that map
-//! 1:1 to the engine's binder slots through `reddb_server::storage::schema::Value`.
+//! 1:1 to the engine's binder slots through `reddb_types::Value`.
 //!
 //! Deep module pattern: this module owns *only* parameter serialization.
 //! Transports import it; they don't reimplement type mapping. Two conversions
@@ -88,8 +88,8 @@ impl Value {
     /// round-trip on the embedded path. Available only when the crate
     /// is built with `embedded`.
     #[cfg(feature = "embedded")]
-    pub fn into_schema_value(self) -> reddb_server::storage::schema::Value {
-        use reddb_server::storage::schema::Value as SV;
+    pub fn into_schema_value(self) -> reddb_types::Value {
+        use reddb_types::Value as SV;
         match self {
             Value::Null => SV::Null,
             Value::Bool(b) => SV::Boolean(b),
@@ -431,7 +431,7 @@ mod tests {
     #[cfg(feature = "embedded")]
     #[test]
     fn into_schema_value_covers_all_variants() {
-        use reddb_server::storage::schema::Value as SV;
+        use reddb_types::Value as SV;
         assert!(matches!(Value::Null.into_schema_value(), SV::Null));
         assert!(matches!(
             Value::Bool(true).into_schema_value(),

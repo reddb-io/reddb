@@ -297,7 +297,7 @@ pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> 
     let has_capability = record
         .get("red_capabilities")
         .and_then(|value| match value {
-            crate::storage::schema::Value::Text(value) => Some(value),
+            reddb_types::Value::Text(value) => Some(value),
             _ => None,
         })
         .map(|capabilities| {
@@ -318,7 +318,7 @@ pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> 
     record
         .get("kind")
         .and_then(|value| match value {
-            crate::storage::schema::Value::Text(value) => Some(value),
+            reddb_types::Value::Text(value) => Some(value),
             _ => None,
         })
         .map(|kind| kind.as_ref() == "document")

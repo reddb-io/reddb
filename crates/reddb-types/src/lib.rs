@@ -10,8 +10,9 @@
 //! [`value_codec`] serialization that `Value::to_bytes`/`from_bytes` delegate
 //! to.
 //!
-//! The `reddb-server` `storage::schema` module re-exports the public vocabulary
-//! for compatibility, while server internals import this crate directly.
+//! The `reddb-server` `storage::schema` module no longer re-exports this
+//! vocabulary; every server, test, and driver call site names this crate
+//! directly.
 
 // The byte-faithful re-home (ADR 0052) preserves `types`/`value_codec`
 // exactly as they were authored under the server's crate-level

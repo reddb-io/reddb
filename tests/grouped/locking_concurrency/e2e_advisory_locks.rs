@@ -6,8 +6,8 @@
 //! simulated connections.
 
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;

@@ -98,12 +98,9 @@ pub(crate) fn cross_modal_parse_entity_id_token(token: &str) -> Option<EntityId>
         .map(EntityId::new)
 }
 
-pub(crate) fn cross_modal_value_matches_token(
-    value: &crate::storage::schema::Value,
-    token: &str,
-) -> bool {
+pub(crate) fn cross_modal_value_matches_token(value: &reddb_types::Value, token: &str) -> bool {
     match value {
-        crate::storage::schema::Value::UnsignedInteger(value) => {
+        reddb_types::Value::UnsignedInteger(value) => {
             let token = token.trim();
             token == value.to_string()
                 || token
@@ -111,7 +108,7 @@ pub(crate) fn cross_modal_value_matches_token(
                     .and_then(|item| item.parse::<u64>().ok())
                     .is_some_and(|item| item == *value)
         }
-        crate::storage::schema::Value::Integer(value) => {
+        reddb_types::Value::Integer(value) => {
             let token = token.trim();
             token == value.to_string()
                 || (*value >= 0
@@ -120,11 +117,11 @@ pub(crate) fn cross_modal_value_matches_token(
                         .and_then(|item| item.parse::<u64>().ok())
                         .is_some_and(|item| item == *value as u64))
         }
-        crate::storage::schema::Value::Text(_)
-        | crate::storage::schema::Value::NodeRef(_)
-        | crate::storage::schema::Value::EdgeRef(_)
-        | crate::storage::schema::Value::VectorRef(_, _)
-        | crate::storage::schema::Value::RowRef(_, _) => cross_modal_value_tokens(value)
+        reddb_types::Value::Text(_)
+        | reddb_types::Value::NodeRef(_)
+        | reddb_types::Value::EdgeRef(_)
+        | reddb_types::Value::VectorRef(_, _)
+        | reddb_types::Value::RowRef(_, _) => cross_modal_value_tokens(value)
             .into_iter()
             .any(|item| cross_modal_normalize_token(&item) == cross_modal_normalize_token(token)),
         _ => cross_modal_normalize_token(&value.to_string()) == cross_modal_normalize_token(token),
@@ -132,19 +129,17 @@ pub(crate) fn cross_modal_value_matches_token(
 }
 
 pub(crate) fn cross_modal_value_matches_entity_id(
-    value: &crate::storage::schema::Value,
+    value: &reddb_types::Value,
     entity_id: EntityId,
 ) -> bool {
     match value {
-        crate::storage::schema::Value::UnsignedInteger(value) => *value == entity_id.raw(),
-        crate::storage::schema::Value::Integer(value) if *value >= 0 => {
-            *value as u64 == entity_id.raw()
-        }
-        crate::storage::schema::Value::Text(_)
-        | crate::storage::schema::Value::NodeRef(_)
-        | crate::storage::schema::Value::EdgeRef(_)
-        | crate::storage::schema::Value::VectorRef(_, _)
-        | crate::storage::schema::Value::RowRef(_, _) => cross_modal_value_tokens(value)
+        reddb_types::Value::UnsignedInteger(value) => *value == entity_id.raw(),
+        reddb_types::Value::Integer(value) if *value >= 0 => *value as u64 == entity_id.raw(),
+        reddb_types::Value::Text(_)
+        | reddb_types::Value::NodeRef(_)
+        | reddb_types::Value::EdgeRef(_)
+        | reddb_types::Value::VectorRef(_, _)
+        | reddb_types::Value::RowRef(_, _) => cross_modal_value_tokens(value)
             .into_iter()
             .any(|item| cross_modal_token_matches_entity_id(&item, entity_id)),
         _ => {
@@ -154,16 +149,16 @@ pub(crate) fn cross_modal_value_matches_entity_id(
     }
 }
 
-pub(crate) fn cross_modal_value_tokens(value: &crate::storage::schema::Value) -> Vec<String> {
+pub(crate) fn cross_modal_value_tokens(value: &reddb_types::Value) -> Vec<String> {
     match value {
-        crate::storage::schema::Value::UnsignedInteger(value) => {
+        reddb_types::Value::UnsignedInteger(value) => {
             vec![value.to_string(), format!("e{value}")]
         }
-        crate::storage::schema::Value::Integer(value) if *value >= 0 => {
+        reddb_types::Value::Integer(value) if *value >= 0 => {
             vec![value.to_string(), format!("e{value}")]
         }
-        crate::storage::schema::Value::Integer(value) => vec![value.to_string()],
-        crate::storage::schema::Value::Text(value) => {
+        reddb_types::Value::Integer(value) => vec![value.to_string()],
+        reddb_types::Value::Text(value) => {
             let trimmed = value.trim();
             let mut tokens = vec![trimmed.to_string()];
             if trimmed.contains([',', ';', '|']) {
@@ -177,8 +172,7 @@ pub(crate) fn cross_modal_value_tokens(value: &crate::storage::schema::Value) ->
             }
             tokens
         }
-        crate::storage::schema::Value::NodeRef(value)
-        | crate::storage::schema::Value::EdgeRef(value) => {
+        reddb_types::Value::NodeRef(value) | reddb_types::Value::EdgeRef(value) => {
             let trimmed = value.trim();
             if trimmed.is_empty() {
                 Vec::new()
@@ -186,21 +180,21 @@ pub(crate) fn cross_modal_value_tokens(value: &crate::storage::schema::Value) ->
                 vec![trimmed.to_string()]
             }
         }
-        crate::storage::schema::Value::RowRef(collection, row_id) => vec![
+        reddb_types::Value::RowRef(collection, row_id) => vec![
             row_id.to_string(),
             format!("e{row_id}"),
             collection.trim().to_string(),
             format!("{}:{row_id}", collection.trim()),
             format!("{}:e{row_id}", collection.trim()),
         ],
-        crate::storage::schema::Value::VectorRef(collection, vector_id) => vec![
+        reddb_types::Value::VectorRef(collection, vector_id) => vec![
             vector_id.to_string(),
             format!("e{vector_id}"),
             collection.trim().to_string(),
             format!("{}:{vector_id}", collection.trim()),
             format!("{}:e{vector_id}", collection.trim()),
         ],
-        crate::storage::schema::Value::Json(bytes) => {
+        reddb_types::Value::Json(bytes) => {
             fn push(tokens: &mut Vec<String>, seen: &mut HashSet<String>, token: String) {
                 let normalized = cross_modal_normalize_token(&token);
                 if !normalized.is_empty() && seen.insert(normalized) {
@@ -293,7 +287,7 @@ pub(crate) fn cross_modal_value_tokens(value: &crate::storage::schema::Value) ->
 pub(crate) fn cross_modal_extend_reference_tokens(
     tokens: &mut Vec<String>,
     seen: &mut HashSet<String>,
-    value: &crate::storage::schema::Value,
+    value: &reddb_types::Value,
 ) {
     for token in cross_modal_value_tokens(value) {
         let normalized = cross_modal_normalize_token(&token);
@@ -413,7 +407,7 @@ pub(crate) fn cross_modal_entity_reference_tokens(entity: &UnifiedEntity) -> Vec
 }
 
 pub(crate) fn cross_modal_value_matches_entity(
-    value: &crate::storage::schema::Value,
+    value: &reddb_types::Value,
     entity: &UnifiedEntity,
 ) -> bool {
     if cross_modal_value_matches_entity_id(value, entity.id) {

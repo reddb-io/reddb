@@ -430,9 +430,7 @@ fn h3_cell_candidate_ids(
     }
     let keys: Vec<_> = cells
         .iter()
-        .filter_map(|cell| {
-            crate::storage::schema::value_to_canonical_key(&Value::UnsignedInteger(*cell))
-        })
+        .filter_map(|cell| reddb_types::value_to_canonical_key(&Value::UnsignedInteger(*cell)))
         .collect();
     if keys.is_empty() {
         return None;
@@ -962,7 +960,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         &effective_filter,
         uses_document_projection,
     ) {
-        let mut eq_candidates: Vec<(String, Vec<u8>, crate::storage::schema::Value)> = Vec::new();
+        let mut eq_candidates: Vec<(String, Vec<u8>, reddb_types::Value)> = Vec::new();
         extract_all_eq_candidates(filter, &mut eq_candidates);
 
         // Collect one TidBitmap per indexed equality column.
@@ -1391,7 +1389,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // Sealed segments whose column min/max proves no row can match are skipped.
         let mut zone_raw: Vec<(
             String,
-            crate::storage::schema::Value,
+            reddb_types::Value,
             crate::storage::unified::segment::ZoneColPredKind,
         )> = Vec::new();
         if let Some(filter) = residual_filter.as_ref() {
@@ -2699,9 +2697,9 @@ fn fields_match_any(fields: &[String], candidates: &[&str]) -> bool {
 mod tests {
     use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
     use crate::storage::query::ast::{CompareOp, FieldRef, Filter, QueryExpr};
-    use reddb_types::Value;
     use crate::storage::unified::EntityId;
     use crate::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")

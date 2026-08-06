@@ -16,9 +16,9 @@
 #[path = "../../support/mod.rs"]
 mod support;
 
-use reddb::storage::schema::Value;
 use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 

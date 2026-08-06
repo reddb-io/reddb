@@ -14,8 +14,8 @@ use reddb_server::runtime::control_events::{
     EventKind, Outcome, Sensitivity,
 };
 use reddb_server::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 #[derive(Debug, Clone)]
 struct CapturedEvent {

@@ -163,7 +163,7 @@ pub(crate) fn ask_answer_tokens_from_unified_result(
 fn record_field<'a>(
     record: &'a crate::storage::query::unified::UnifiedRecord,
     key: &str,
-) -> Option<&'a crate::storage::schema::Value> {
+) -> Option<&'a reddb_types::Value> {
     record.iter_fields().find_map(|(name, value)| {
         let name: &str = name;
         (name == key).then_some(value)
@@ -172,52 +172,46 @@ fn record_field<'a>(
 
 fn text_field(record: &crate::storage::query::unified::UnifiedRecord, key: &str) -> Option<String> {
     match record_field(record, key)? {
-        crate::storage::schema::Value::Text(s) => Some(s.to_string()),
-        crate::storage::schema::Value::Email(s)
-        | crate::storage::schema::Value::Url(s)
-        | crate::storage::schema::Value::NodeRef(s)
-        | crate::storage::schema::Value::EdgeRef(s) => Some(s.clone()),
+        reddb_types::Value::Text(s) => Some(s.to_string()),
+        reddb_types::Value::Email(s)
+        | reddb_types::Value::Url(s)
+        | reddb_types::Value::NodeRef(s)
+        | reddb_types::Value::EdgeRef(s) => Some(s.clone()),
         other => Some(other.to_string()),
     }
 }
 
 fn bool_field(record: &crate::storage::query::unified::UnifiedRecord, key: &str) -> Option<bool> {
     match record_field(record, key)? {
-        crate::storage::schema::Value::Boolean(value) => Some(*value),
+        reddb_types::Value::Boolean(value) => Some(*value),
         _ => None,
     }
 }
 
 fn u32_field(record: &crate::storage::query::unified::UnifiedRecord, key: &str) -> Option<u32> {
     match record_field(record, key)? {
-        crate::storage::schema::Value::Integer(n) => {
-            (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32)
-        }
-        crate::storage::schema::Value::UnsignedInteger(n) => Some((*n).min(u32::MAX as u64) as u32),
-        crate::storage::schema::Value::BigInt(n)
-        | crate::storage::schema::Value::TimestampMs(n)
-        | crate::storage::schema::Value::Timestamp(n)
-        | crate::storage::schema::Value::Duration(n)
-        | crate::storage::schema::Value::Decimal(n) => {
-            (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32)
-        }
-        crate::storage::schema::Value::Float(n) => {
-            (*n >= 0.0).then_some((*n).min(u32::MAX as f64) as u32)
-        }
+        reddb_types::Value::Integer(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
+        reddb_types::Value::UnsignedInteger(n) => Some((*n).min(u32::MAX as u64) as u32),
+        reddb_types::Value::BigInt(n)
+        | reddb_types::Value::TimestampMs(n)
+        | reddb_types::Value::Timestamp(n)
+        | reddb_types::Value::Duration(n)
+        | reddb_types::Value::Decimal(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
+        reddb_types::Value::Float(n) => (*n >= 0.0).then_some((*n).min(u32::MAX as f64) as u32),
         _ => None,
     }
 }
 
 fn f64_field(record: &crate::storage::query::unified::UnifiedRecord, key: &str) -> Option<f64> {
     match record_field(record, key)? {
-        crate::storage::schema::Value::Integer(n) => Some(*n as f64),
-        crate::storage::schema::Value::UnsignedInteger(n) => Some(*n as f64),
-        crate::storage::schema::Value::BigInt(n)
-        | crate::storage::schema::Value::TimestampMs(n)
-        | crate::storage::schema::Value::Timestamp(n)
-        | crate::storage::schema::Value::Duration(n)
-        | crate::storage::schema::Value::Decimal(n) => Some(*n as f64),
-        crate::storage::schema::Value::Float(n) => Some(*n),
+        reddb_types::Value::Integer(n) => Some(*n as f64),
+        reddb_types::Value::UnsignedInteger(n) => Some(*n as f64),
+        reddb_types::Value::BigInt(n)
+        | reddb_types::Value::TimestampMs(n)
+        | reddb_types::Value::Timestamp(n)
+        | reddb_types::Value::Duration(n)
+        | reddb_types::Value::Decimal(n) => Some(*n as f64),
+        reddb_types::Value::Float(n) => Some(*n),
         _ => None,
     }
 }
@@ -227,12 +221,12 @@ fn json_field(
     key: &str,
 ) -> Option<crate::json::Value> {
     match record_field(record, key)? {
-        crate::storage::schema::Value::Json(bytes) => {
+        reddb_types::Value::Json(bytes) => {
             // Decode the native binary document-body container (PRD-1398) if present.
             crate::document_body::decode_container_to_json(bytes)
                 .or_else(|| crate::json::from_slice(bytes).ok())
         }
-        crate::storage::schema::Value::Text(text) => crate::json::from_str(text).ok(),
+        reddb_types::Value::Text(text) => crate::json::from_str(text).ok(),
         _ => None,
     }
 }
@@ -421,7 +415,7 @@ pub fn write_json_string(buf: &mut String, s: &str) {
 
 /// Write a storage Value as JSON to a buffer (no intermediate JsonValue).
 #[inline]
-pub fn write_value_json(buf: &mut String, value: &crate::storage::schema::Value) {
+pub fn write_value_json(buf: &mut String, value: &reddb_types::Value) {
     use reddb_types::Value;
     match value {
         Value::Null => buf.push_str("null"),

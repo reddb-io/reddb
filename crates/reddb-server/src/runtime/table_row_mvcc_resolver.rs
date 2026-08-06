@@ -103,9 +103,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use reddb_types::Value;
     use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityId, UnifiedEntity};
+    use reddb_types::Value;
 
     fn row_with_xids(xmin: u64, xmax: u64) -> UnifiedEntity {
         let mut row =

@@ -28,7 +28,7 @@ pub(crate) fn view_records_to_entities(
     let table_arc: std::sync::Arc<str> = std::sync::Arc::from(table);
     let mut out = Vec::with_capacity(records.len());
     for record in records {
-        let mut named: HashMap<String, crate::storage::schema::Value> = HashMap::new();
+        let mut named: HashMap<String, reddb_types::Value> = HashMap::new();
         for (name, value) in record.iter_fields() {
             named.insert(name.to_string(), value.clone());
         }
@@ -88,7 +88,7 @@ fn system_keyed_collection_contract(
 
 pub(crate) fn table_row_index_fields(
     entity: &crate::storage::unified::entity::UnifiedEntity,
-) -> Vec<(String, crate::storage::schema::Value)> {
+) -> Vec<(String, reddb_types::Value)> {
     let crate::storage::EntityData::Row(row) = &entity.data else {
         return Vec::new();
     };
@@ -905,18 +905,18 @@ impl RedDBRuntime {
                 manager.for_each_entity(|entity| {
                     if let Some(row) = entity.data.as_row() {
                         let key = row.get_field("key").and_then(|v| match v {
-                            crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
+                            reddb_types::Value::Text(s) => Some(s.as_ref()),
                             _ => None,
                         });
                         let val = row.get_field("value");
                         if key == Some("red.config.backup.enabled") {
                             backup_enabled = match val {
-                                Some(crate::storage::schema::Value::Boolean(true)) => true,
-                                Some(crate::storage::schema::Value::Text(s)) => &**s == "true",
+                                Some(reddb_types::Value::Boolean(true)) => true,
+                                Some(reddb_types::Value::Text(s)) => &**s == "true",
                                 _ => false,
                             };
                         } else if key == Some("red.config.backup.interval_secs") {
-                            if let Some(crate::storage::schema::Value::Integer(n)) = val {
+                            if let Some(reddb_types::Value::Integer(n)) = val {
                                 backup_interval = *n as u64;
                             }
                         }

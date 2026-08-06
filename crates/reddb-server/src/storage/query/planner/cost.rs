@@ -979,7 +979,7 @@ impl Default for CostEstimator {
 /// [`super::histogram::ColumnValue`]. Returns `None` for value types
 /// that histograms don't support (Bool, Null, Bytes, etc.) — callers
 /// fall through to the heuristic path.
-fn column_value_from(v: &crate::storage::schema::Value) -> Option<super::histogram::ColumnValue> {
+fn column_value_from(v: &reddb_types::Value) -> Option<super::histogram::ColumnValue> {
     use super::histogram::ColumnValue;
     use reddb_types::Value;
     match v {

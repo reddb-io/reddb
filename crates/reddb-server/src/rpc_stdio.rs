@@ -25,9 +25,9 @@ use crate::application::ports::RuntimeEntityPort;
 use crate::json::{self as json, Value};
 use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::unified::UnifiedRecord;
-use reddb_types::Value as SchemaValue;
 use reddb_grpc_proto::RedDBClient;
 use reddb_types::encoding::base64_encode;
+use reddb_types::Value as SchemaValue;
 
 /// Which backend the stdio loop is wrapping.
 ///

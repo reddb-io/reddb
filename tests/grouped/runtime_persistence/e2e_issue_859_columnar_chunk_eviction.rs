@@ -13,9 +13,9 @@
 
 use reddb::application::ExecuteQueryInput;
 use reddb::storage::engine::PageLocation;
-use reddb::storage::schema::Value;
 use reddb::storage::timeseries::{ChunkId, ChunkMeta};
 use reddb::{QueryUseCases, RedDBRuntime};
+use reddb_types::Value;
 
 const HOUR_NS: u64 = 3_600_000_000_000;
 

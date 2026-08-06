@@ -31,8 +31,8 @@ use std::time::Duration;
 use super::support::env_lock;
 use super::support::PersistentRuntime;
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 
 fn open_rt() -> PersistentRuntime {
     super::support::persistent_test_runtime("ask-planner-core")

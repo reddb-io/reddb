@@ -15,9 +15,9 @@ use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::ast::{Filter, UpdateTarget};
-use reddb_types::Value;
 use crate::storage::unified::entity::EntityKind;
 use crate::storage::{EntityData, EntityId};
+use reddb_types::Value;
 
 pub(super) struct DmlTargetScan<'a> {
     runtime: &'a RedDBRuntime,

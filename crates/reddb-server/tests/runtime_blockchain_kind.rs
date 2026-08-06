@@ -6,8 +6,8 @@
 //! `storage::blockchain` and `runtime::blockchain_kind` unit tests — this
 //! file is the integration glue.
 
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBError, RedDBOptions, RedDBRuntime, RuntimeQueryResult};
+use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots")

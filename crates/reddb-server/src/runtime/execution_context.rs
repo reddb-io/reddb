@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::api::{RedDBError, RedDBResult};
-use reddb_types::Value;
 use crate::storage::RedDB;
+use reddb_types::Value;
 
 thread_local! {
     /// Current connection id for the executing statement. Set by the

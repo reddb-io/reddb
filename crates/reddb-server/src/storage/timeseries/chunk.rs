@@ -10,11 +10,11 @@ use super::compression::{
 };
 use crate::catalog::AnalyticalStorageConfig;
 use crate::storage::index::{BloomSegment, HasBloom, ZoneDecision, ZoneMap, ZonePredicate};
-use reddb_types::types::DataType;
 use crate::storage::unified::column_block::{
     read_column_block, write_column_block, ColumnBlockError, ColumnInput,
 };
 use crate::storage::unified::segment_codec::ColumnSemantics;
+use reddb_types::types::DataType;
 
 /// Stable column id of the timestamp column within a v1 columnar chunk.
 pub const COLUMNAR_TS_COLUMN_ID: u32 = 0;

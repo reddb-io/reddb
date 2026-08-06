@@ -745,8 +745,8 @@ fn hex_digest(bytes: &[u8; 32]) -> String {
 mod tests {
     use super::*;
     use crate::replication::cdc::ChangeOperation;
-    use reddb_types::Value;
     use crate::storage::{EntityData, EntityId, EntityKind, RedDB, RowData, UnifiedEntity};
+    use reddb_types::Value;
     use std::sync::Arc;
 
     fn open_db() -> (RedDB, std::path::PathBuf) {

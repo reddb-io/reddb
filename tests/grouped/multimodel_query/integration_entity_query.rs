@@ -15,9 +15,9 @@ use reddb::application::{
     SearchTextInput,
 };
 use reddb::json::Value as JsonValue;
-use reddb::storage::schema::Value;
 use reddb::MetadataValue;
 use reddb::{EntityUseCases, NativeUseCases, QueryUseCases, RedDBRuntime};
+use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")

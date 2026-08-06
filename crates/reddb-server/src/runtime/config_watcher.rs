@@ -261,7 +261,7 @@ fn json_to_str(v: &JsonValue) -> String {
     }
 }
 
-fn schema_value_to_str(v: &crate::storage::schema::Value) -> String {
+fn schema_value_to_str(v: &reddb_types::Value) -> String {
     format!("{v}")
 }
 

@@ -159,7 +159,7 @@ fn search_contents(rt: &RedDBRuntime, collection: &str, query: &[f32], k: usize)
         .records
         .iter()
         .filter_map(|r| match r.get("content") {
-            Some(reddb_server::storage::schema::Value::Text(s)) => Some(s.to_string()),
+            Some(reddb_types::Value::Text(s)) => Some(s.to_string()),
             _ => None,
         })
         .collect()

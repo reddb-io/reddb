@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::id::{LogId, LogIdGenerator};
-use reddb_types::Value;
 use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use crate::storage::unified::store::UnifiedStore;
+use reddb_types::Value;
 
 /// Retention policy for log collections.
 #[derive(Debug, Clone, Default)]

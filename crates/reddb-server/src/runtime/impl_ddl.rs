@@ -484,7 +484,7 @@ impl RedDBRuntime {
         }
 
         let fields = blockchain_kind::genesis_fields(blockchain_kind::now_ms());
-        let named: std::collections::HashMap<String, crate::storage::schema::Value> =
+        let named: std::collections::HashMap<String, reddb_types::Value> =
             fields.into_iter().collect();
         let entity = UnifiedEntity::new(
             EntityId::new(0),
@@ -1995,7 +1995,7 @@ fn collection_contract_from_create_table(
         declared_columns.push(crate::physical::DeclaredColumnContract {
             name: "created_at".to_string(),
             data_type: "BIGINT".to_string(),
-            sql_type: Some(crate::storage::schema::SqlTypeName::simple("BIGINT")),
+            sql_type: Some(reddb_types::SqlTypeName::simple("BIGINT")),
             not_null: true,
             default: None,
             compress: None,
@@ -2008,7 +2008,7 @@ fn collection_contract_from_create_table(
         declared_columns.push(crate::physical::DeclaredColumnContract {
             name: "updated_at".to_string(),
             data_type: "BIGINT".to_string(),
-            sql_type: Some(crate::storage::schema::SqlTypeName::simple("BIGINT")),
+            sql_type: Some(reddb_types::SqlTypeName::simple("BIGINT")),
             not_null: true,
             default: None,
             compress: None,
@@ -2068,7 +2068,7 @@ fn default_collection_contract_for_existing_table(
         vector_metric: None,
         context_index_fields: Vec::new(),
         declared_columns: Vec::new(),
-        table_def: Some(crate::storage::schema::TableDef::new(name.to_string())),
+        table_def: Some(reddb_types::TableDef::new(name.to_string())),
         timestamps_enabled: false,
         context_index_enabled: false,
         metrics_raw_retention_ms: None,
@@ -2221,7 +2221,7 @@ fn apply_alter_operations_to_contract(
     operations: &[AlterOperation],
 ) {
     if contract.table_def.is_none() {
-        contract.table_def = Some(crate::storage::schema::TableDef::new(contract.name.clone()));
+        contract.table_def = Some(reddb_types::TableDef::new(contract.name.clone()));
     }
     for operation in operations {
         match operation {
@@ -2241,27 +2241,27 @@ fn apply_alter_operations_to_contract(
                             if column.primary_key {
                                 table_def.primary_key.push(column.name.clone());
                                 table_def.constraints.push(
-                                    crate::storage::schema::Constraint::new(
+                                    reddb_types::Constraint::new(
                                         format!("pk_{}", column.name),
-                                        crate::storage::schema::ConstraintType::PrimaryKey,
+                                        reddb_types::ConstraintType::PrimaryKey,
                                     )
                                     .on_columns(vec![column.name.clone()]),
                                 );
                             }
                             if column.unique {
                                 table_def.constraints.push(
-                                    crate::storage::schema::Constraint::new(
+                                    reddb_types::Constraint::new(
                                         format!("uniq_{}", column.name),
-                                        crate::storage::schema::ConstraintType::Unique,
+                                        reddb_types::ConstraintType::Unique,
                                     )
                                     .on_columns(vec![column.name.clone()]),
                                 );
                             }
                             if column.not_null {
                                 table_def.constraints.push(
-                                    crate::storage::schema::Constraint::new(
+                                    reddb_types::Constraint::new(
                                         format!("not_null_{}", column.name),
-                                        crate::storage::schema::ConstraintType::NotNull,
+                                        reddb_types::ConstraintType::NotNull,
                                     )
                                     .on_columns(vec![column.name.clone()]),
                                 );
@@ -2785,33 +2785,33 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
 
 fn build_table_def_from_create_table(
     query: &CreateTableQuery,
-) -> RedDBResult<crate::storage::schema::TableDef> {
-    let mut table = crate::storage::schema::TableDef::new(query.name.clone());
+) -> RedDBResult<reddb_types::TableDef> {
+    let mut table = reddb_types::TableDef::new(query.name.clone());
     for column in &query.columns {
         if column.primary_key {
             table.primary_key.push(column.name.clone());
             table.constraints.push(
-                crate::storage::schema::Constraint::new(
+                reddb_types::Constraint::new(
                     format!("pk_{}", column.name),
-                    crate::storage::schema::ConstraintType::PrimaryKey,
+                    reddb_types::ConstraintType::PrimaryKey,
                 )
                 .on_columns(vec![column.name.clone()]),
             );
         }
         if column.unique {
             table.constraints.push(
-                crate::storage::schema::Constraint::new(
+                reddb_types::Constraint::new(
                     format!("uniq_{}", column.name),
-                    crate::storage::schema::ConstraintType::Unique,
+                    reddb_types::ConstraintType::Unique,
                 )
                 .on_columns(vec![column.name.clone()]),
             );
         }
         if column.not_null {
             table.constraints.push(
-                crate::storage::schema::Constraint::new(
+                reddb_types::Constraint::new(
                     format!("not_null_{}", column.name),
-                    crate::storage::schema::ConstraintType::NotNull,
+                    reddb_types::ConstraintType::NotNull,
                 )
                 .on_columns(vec![column.name.clone()]),
             );
@@ -2824,30 +2824,30 @@ fn build_table_def_from_create_table(
     // not-nullable; the write path auto-fills them.
     if query.timestamps {
         table.columns.push(
-            crate::storage::schema::ColumnDef::new(
+            reddb_types::ColumnDef::new(
                 "created_at".to_string(),
-                crate::storage::schema::DataType::UnsignedInteger,
+                reddb_types::DataType::UnsignedInteger,
             )
             .not_null(),
         );
         table.columns.push(
-            crate::storage::schema::ColumnDef::new(
+            reddb_types::ColumnDef::new(
                 "updated_at".to_string(),
-                crate::storage::schema::DataType::UnsignedInteger,
+                reddb_types::DataType::UnsignedInteger,
             )
             .not_null(),
         );
         table.constraints.push(
-            crate::storage::schema::Constraint::new(
+            reddb_types::Constraint::new(
                 "not_null_created_at".to_string(),
-                crate::storage::schema::ConstraintType::NotNull,
+                reddb_types::ConstraintType::NotNull,
             )
             .on_columns(vec!["created_at".to_string()]),
         );
         table.constraints.push(
-            crate::storage::schema::Constraint::new(
+            reddb_types::Constraint::new(
                 "not_null_updated_at".to_string(),
-                crate::storage::schema::ConstraintType::NotNull,
+                reddb_types::ConstraintType::NotNull,
             )
             .on_columns(vec!["updated_at".to_string()]),
         );
@@ -2858,10 +2858,10 @@ fn build_table_def_from_create_table(
     Ok(table)
 }
 
-fn column_def_from_ddl(column: &CreateColumnDef) -> RedDBResult<crate::storage::schema::ColumnDef> {
+fn column_def_from_ddl(column: &CreateColumnDef) -> RedDBResult<reddb_types::ColumnDef> {
     let data_type = resolve_declared_data_type(&column.data_type)
         .map_err(|err| RedDBError::Query(err.to_string()))?;
-    let mut column_def = crate::storage::schema::ColumnDef::new(column.name.clone(), data_type);
+    let mut column_def = reddb_types::ColumnDef::new(column.name.clone(), data_type);
     if column.not_null {
         column_def = column_def.not_null();
     }
@@ -2907,8 +2907,8 @@ mod tests {
     use crate::auth::UserId;
     use crate::auth::{AuthConfig, Role};
     use crate::runtime::impl_core::{clear_current_auth_identity, set_current_auth_identity};
-    use reddb_types::Value;
     use crate::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
     use std::sync::Arc;
 
     fn make_allow_policy(id: &str, action: &str, collection: &str) -> Policy {

@@ -33,9 +33,9 @@ use crate::runtime::ai::moderation::{
     MODERATION_STATUS_REJECTED,
 };
 use crate::runtime::mutation::MutationRow;
-use reddb_types::Value;
 use crate::storage::{EntityData, EntityId};
 use crate::{RedDBError, RedDBResult, RedDBRuntime};
+use reddb_types::Value;
 
 /// Derived field that receives the structured component-detections array
 /// (`[{label, confidence, bbox:[x,y,w,h]}]`). It is a normal row field, so

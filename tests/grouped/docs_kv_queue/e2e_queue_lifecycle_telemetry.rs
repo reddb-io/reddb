@@ -12,8 +12,8 @@ mod support;
 use std::time::Duration;
 
 use reddb::application::{ExecuteQueryInput, QueryUseCases};
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 
 use support::prometheus::get;
 

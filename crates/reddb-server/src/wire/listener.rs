@@ -20,8 +20,8 @@ use crate::runtime::query_request::{
 };
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::sql_lowering::effective_table_filter;
-use reddb_types::Value;
 use crate::storage::unified::{EntityData, EntityId};
+use reddb_types::Value;
 use reddb_wire::legacy::{
     build_legacy_bulk_ok_frame, build_legacy_bulk_stream_ack_frame,
     build_legacy_cursor_batch_frame, build_legacy_cursor_ok_frame, build_legacy_error_frame,
@@ -324,11 +324,11 @@ pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) 
     };
     let collection = decoded.collection;
     let column_names = std::sync::Arc::new(decoded.columns);
-    let mut rows: Vec<Vec<crate::storage::schema::Value>> = Vec::with_capacity(decoded.rows.len());
+    let mut rows: Vec<Vec<reddb_types::Value>> = Vec::with_capacity(decoded.rows.len());
     for row in decoded.rows {
         let mut values = Vec::with_capacity(row.len());
         for value in row {
-            match crate::storage::schema::Value::try_from(value) {
+            match reddb_types::Value::try_from(value) {
                 Ok(value) => values.push(value),
                 Err(err) => return make_error(format!("binary bulk: {err}").as_bytes()),
             }
@@ -365,11 +365,11 @@ pub(crate) fn handle_bulk_insert_binary_prevalidated(
     };
     let collection = decoded.collection;
     let schema = std::sync::Arc::new(decoded.columns);
-    let mut rows: Vec<Vec<crate::storage::schema::Value>> = Vec::with_capacity(decoded.rows.len());
+    let mut rows: Vec<Vec<reddb_types::Value>> = Vec::with_capacity(decoded.rows.len());
     for row in decoded.rows {
         let mut values = Vec::with_capacity(row.len());
         for value in row {
-            match crate::storage::schema::Value::try_from(value) {
+            match reddb_types::Value::try_from(value) {
                 Ok(value) => values.push(value),
                 Err(err) => return make_error(format!("prevalidated: {err}").as_bytes()),
             }
@@ -410,7 +410,7 @@ pub(crate) fn handle_bulk_insert_binary_prevalidated(
 pub(crate) struct BulkStreamSession {
     collection: String,
     schema: std::sync::Arc<Vec<String>>,
-    pending: Vec<Vec<crate::storage::schema::Value>>,
+    pending: Vec<Vec<reddb_types::Value>>,
     pending_bytes: usize,
     total_flushed: u64,
     flush_row_threshold: usize,
@@ -439,7 +439,7 @@ fn bulk_stream_flush_thresholds() -> (usize, usize) {
 /// monotonic and in the right order of magnitude; the threshold is a
 /// memory-pressure safety valve, not a transactional boundary.
 #[inline]
-fn value_bytes_estimate(v: &crate::storage::schema::Value) -> usize {
+fn value_bytes_estimate(v: &reddb_types::Value) -> usize {
     use reddb_types::Value;
     match v {
         Value::Null => 1,
@@ -532,7 +532,7 @@ pub(crate) fn handle_stream_rows(
         let mut values = Vec::with_capacity(row.len());
         let mut row_bytes = 0usize;
         for value in row {
-            let value = match crate::storage::schema::Value::try_from(value) {
+            let value = match reddb_types::Value::try_from(value) {
                 Ok(value) => value,
                 Err(err) => return make_error(format!("stream rows: {err}").as_bytes()),
             };

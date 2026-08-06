@@ -1,9 +1,9 @@
 mod support;
 
 use reddb::application::{ExecuteQueryInput, QueryUseCases};
-use reddb::storage::schema::Value;
 use reddb::storage::EntityKind;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 
 use support::{checkpoint_and_reopen, PersistentDbPath};
 

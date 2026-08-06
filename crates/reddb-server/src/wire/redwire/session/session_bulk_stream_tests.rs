@@ -36,11 +36,8 @@ fn stream_rows_payload(rows: &[(i64, &str)]) -> Vec<u8> {
     let mut p = Vec::new();
     p.extend_from_slice(&(rows.len() as u32).to_le_bytes());
     for (id, name) in rows {
-        crate::wire::protocol::encode_value(&mut p, &crate::storage::schema::Value::Integer(*id));
-        crate::wire::protocol::encode_value(
-            &mut p,
-            &crate::storage::schema::Value::text(name.to_string()),
-        );
+        crate::wire::protocol::encode_value(&mut p, &reddb_types::Value::Integer(*id));
+        crate::wire::protocol::encode_value(&mut p, &reddb_types::Value::text(name.to_string()));
     }
     p
 }

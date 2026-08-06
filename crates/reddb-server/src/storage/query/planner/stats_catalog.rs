@@ -4,10 +4,10 @@ use std::sync::Arc;
 use super::cost::{ColumnStats, TableStats};
 use super::histogram::{Bucket, ColumnValue, Histogram, MostCommonValues};
 use crate::api::CatalogSnapshot;
-use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 use crate::storage::unified::entity::{EntityId, RowData};
 use crate::storage::UnifiedStore;
 use crate::storage::{EntityData, EntityKind, UnifiedEntity};
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 pub(crate) const STATS_COLLECTION: &str = "red_stats";
 const DEFAULT_ROWS_PER_PAGE: u64 = 100;

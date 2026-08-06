@@ -731,7 +731,7 @@ fn value_as_number(v: &Value) -> Option<(f64, bool)> {
         Value::Integer(n) | Value::BigInt(n) => Some((*n as f64, false)),
         Value::UnsignedInteger(n) => Some((*n as f64, false)),
         Value::Float(f) => Some((*f, true)),
-        Value::Decimal(d) => Some((crate::storage::schema::decimal_to_f64(*d), true)),
+        Value::Decimal(d) => Some((reddb_types::types::decimal_to_f64(*d), true)),
         Value::Text(s) => s
             .parse::<i64>()
             .map(|n| (n as f64, false))
@@ -756,11 +756,8 @@ fn apply_cast(src: &Value, target: DataType) -> Value {
         (Value::Float(f), DT::UnsignedInteger) if *f >= 0.0 => Value::UnsignedInteger(*f as u64),
         (Value::Boolean(b), DT::Integer) => Value::Integer(if *b { 1 } else { 0 }),
         (Value::Integer(n), DT::Boolean) => Value::Boolean(*n != 0),
-        (Value::Text(s), t) => {
-            reddb_types::coerce::coerce(s, t, None).unwrap_or(Value::Null)
-        }
-        (v, t) => reddb_types::coerce::coerce(&v.display_string(), t, None)
-            .unwrap_or(Value::Null),
+        (Value::Text(s), t) => reddb_types::coerce::coerce(s, t, None).unwrap_or(Value::Null),
+        (v, t) => reddb_types::coerce::coerce(&v.display_string(), t, None).unwrap_or(Value::Null),
     }
 }
 

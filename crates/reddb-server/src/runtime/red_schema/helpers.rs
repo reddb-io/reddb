@@ -16,7 +16,7 @@ pub(super) fn timestamp_ms_value(value: u128) -> Value {
         .unwrap_or(Value::Null)
 }
 
-pub(super) fn value_as_ms(value: &crate::storage::schema::Value) -> Option<i64> {
+pub(super) fn value_as_ms(value: &reddb_types::Value) -> Option<i64> {
     use reddb_types::Value;
     match value {
         Value::TimestampMs(v) => Some(*v),

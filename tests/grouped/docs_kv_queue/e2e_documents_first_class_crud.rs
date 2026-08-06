@@ -11,9 +11,9 @@ use reddb::application::{
 };
 use reddb::json::Value as RedJsonValue;
 use reddb::server::RedDBServer;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
 use reddb::{EntityUseCases, QueryUseCases};
+use reddb_types::Value;
 use serde_json::{json, Value as JsonValue};
 use support::{checkpoint_and_reopen, PersistentDbPath};
 

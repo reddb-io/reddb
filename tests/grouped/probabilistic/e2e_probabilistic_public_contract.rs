@@ -9,10 +9,10 @@ use reddb::api::DurabilityMode;
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::server::RedDBServer;
 use reddb::storage::query::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::storage::wal::{WalReader, WalRecord};
 use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, StorageDeployPreset};
+use reddb_types::Value;
 use serde_json::{json, Value as JsonValue};
 use support::{checkpoint_and_reopen, PersistentDbPath};
 

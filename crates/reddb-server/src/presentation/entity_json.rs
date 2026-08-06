@@ -5,8 +5,8 @@ use crate::json::{
     from_slice as json_from_slice, to_string as json_to_string, Map, Value as JsonValue,
 };
 use crate::runtime::ScanPage;
-use reddb_types::Value;
 use crate::storage::{CrossRef, EntityData, EntityKind, UnifiedEntity};
+use reddb_types::Value;
 
 const MAX_JSON_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
@@ -121,7 +121,7 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         Value::Date(days) => JsonValue::Integer(i64::from(*days)),
         Value::Time(ms) => JsonValue::Integer(i64::from(*ms)),
         Value::Decimal(v) => {
-            exact_decimal_to_json(crate::storage::schema::Value::Decimal(*v).display_string())
+            exact_decimal_to_json(reddb_types::Value::Decimal(*v).display_string())
         }
         Value::DecimalText(v) => exact_decimal_to_json(v.clone()),
         Value::EnumValue(i) => JsonValue::Integer(i64::from(*i)),

@@ -138,7 +138,7 @@ fn key_already_present(store: &UnifiedStore, key: &str) -> bool {
     let mut found = false;
     manager.for_each_entity(|entity| {
         if let Some(row) = entity.data.as_row() {
-            if let Some(crate::storage::schema::Value::Text(s)) = row.get_field("key") {
+            if let Some(reddb_types::Value::Text(s)) = row.get_field("key") {
                 if s.as_ref() == key {
                     found = true;
                     return false;
@@ -177,7 +177,7 @@ fn flatten_json(prefix: &str, value: &JsonValue, out: &mut Vec<(String, JsonValu
 /// Coerce a raw env-var string into the matrix-declared default's
 /// type. Returns `None` when the key is unknown to the matrix or the
 /// coercion fails; the caller falls back to the persisted value.
-pub fn coerce_env_value(key: &str, raw: &str) -> Option<crate::storage::schema::Value> {
+pub fn coerce_env_value(key: &str, raw: &str) -> Option<reddb_types::Value> {
     use reddb_types::Value;
 
     let default = default_for(key)?;

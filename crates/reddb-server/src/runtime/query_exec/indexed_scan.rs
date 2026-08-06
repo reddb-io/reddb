@@ -120,7 +120,7 @@ pub(crate) fn try_sorted_index_lookup(
                 return None;
             }
             // Convert Value → CanonicalKey (skip unsupported values)
-            let keys: Vec<crate::storage::schema::CanonicalKey> = values
+            let keys: Vec<reddb_types::CanonicalKey> = values
                 .iter()
                 .filter_map(super::super::index_store::value_to_sorted_key)
                 .collect();
@@ -555,7 +555,7 @@ pub(crate) fn try_covered_sorted_index_query(
     idx_store: &IndexStore,
     explicit_cols: &[String],
     limit: usize,
-) -> Option<Vec<crate::storage::schema::Value>> {
+) -> Option<Vec<reddb_types::Value>> {
     // Only covers single-column projections on the exact indexed column.
     if explicit_cols.len() != 1 {
         return None;
@@ -613,7 +613,7 @@ pub(crate) fn try_covered_sorted_index_query(
             if col != proj_col.as_str() {
                 return None;
             }
-            let keys: Vec<crate::storage::schema::CanonicalKey> = values
+            let keys: Vec<reddb_types::CanonicalKey> = values
                 .iter()
                 .filter_map(super::super::index_store::value_to_sorted_key)
                 .collect();
@@ -779,7 +779,7 @@ pub(crate) fn try_sorted_index_filtered_by_set(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            let keys: Vec<crate::storage::schema::CanonicalKey> = values
+            let keys: Vec<reddb_types::CanonicalKey> = values
                 .iter()
                 .filter_map(super::super::index_store::value_to_sorted_key)
                 .collect();

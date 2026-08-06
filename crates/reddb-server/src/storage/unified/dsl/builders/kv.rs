@@ -5,9 +5,9 @@
 use std::sync::Arc;
 
 use crate::storage::query::unified::ExecutionError;
-use reddb_types::Value;
 use crate::storage::unified::entity::{EntityData, EntityId};
 use crate::storage::unified::store::UnifiedStore;
+use reddb_types::Value;
 
 use super::super::filters::{Filter, FilterAcceptor, WhereClause};
 use super::super::types::{MatchComponents, QueryResult, ScoredMatch};

@@ -24,8 +24,8 @@ use crate::storage::query::ast::{
     Expr, FieldRef, Filter, QueryExpr, SelectItem, TableQuery, TableSource,
 };
 use crate::storage::query::sql_lowering::effective_table_filter;
-use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 use crate::storage::unified::{EntityData, EntityId, RowData, UnifiedEntity};
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 use super::protocol::encode_value;
 use reddb_wire::legacy::{
@@ -1974,8 +1974,8 @@ mod tests {
 
     #[test]
     fn fast_path_resolves_projection_alias_from_source_column() {
-        use reddb_types::Value;
         use crate::wire::protocol::decode_value;
+        use reddb_types::Value;
 
         let rt = mk_runtime();
         rt.execute_query("CREATE TABLE t (id INT, age INT)")

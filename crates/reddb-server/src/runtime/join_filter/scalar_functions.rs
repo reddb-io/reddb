@@ -271,8 +271,7 @@ fn evaluate_scalar_function_legacy(
             let Some(type_name) = col.strip_prefix("TYPE:") else {
                 return Some(Value::Null);
             };
-            let Some(target) = reddb_types::DataType::from_sql_name(type_name)
-            else {
+            let Some(target) = reddb_types::DataType::from_sql_name(type_name) else {
                 return Some(Value::Null);
             };
             Some(cast_value_to(&src, target))
@@ -664,18 +663,14 @@ fn money_from_scalar_args(args: &[Projection], source: &UnifiedRecord) -> Option
         }
         _ => return Some(Value::Null),
     };
-    match reddb_types::coerce::coerce(
-        &input,
-        crate::storage::schema::DataType::Money,
-        None,
-    ) {
+    match reddb_types::coerce::coerce(&input, reddb_types::DataType::Money, None) {
         Ok(value) => Some(value),
         Err(_) if args.len() == 2 => {
             let lhs = money_arg_text(resolve_scalar_arg(args, 1, source)?)?;
             let rhs = money_arg_text(resolve_scalar_arg(args, 0, source)?)?;
             reddb_types::coerce::coerce(
                 &format!("{} {}", lhs, rhs),
-                crate::storage::schema::DataType::Money,
+                reddb_types::DataType::Money,
                 None,
             )
             .ok()
@@ -847,12 +842,10 @@ fn cast_value_to(src: &Value, target: reddb_types::DataType) -> Value {
             Ok(v) => v,
             Err(_) => Value::Null,
         },
-        (v, target) => {
-            match reddb_types::coerce::coerce(&v.display_string(), target, None) {
-                Ok(v) => v,
-                Err(_) => Value::Null,
-            }
-        }
+        (v, target) => match reddb_types::coerce::coerce(&v.display_string(), target, None) {
+            Ok(v) => v,
+            Err(_) => Value::Null,
+        },
     }
 }
 

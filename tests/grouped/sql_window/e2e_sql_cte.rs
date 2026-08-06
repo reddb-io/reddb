@@ -4,8 +4,8 @@
 //! rows as the equivalent un-CTE'd query, and that `WITH RECURSIVE`
 //! errors out with a clear message rather than silently misparsing.
 
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn seed_users(rt: &RedDBRuntime) {
     rt.execute_query("CREATE TABLE users (id INT, name TEXT, status TEXT, age INT)")

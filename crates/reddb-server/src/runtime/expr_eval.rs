@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::storage::query::ast::{BinOp, Expr, FieldRef, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
-use reddb_types::Value;
 use crate::storage::RedDB;
+use reddb_types::Value;
 
 /// Evaluate an `Expr` against a record and return its resulting
 /// `Value`, or `None` if the expression cannot be resolved (missing
@@ -555,7 +555,7 @@ fn value_as_number(v: &Value) -> Option<(f64, bool)> {
         Value::Integer(n) | Value::BigInt(n) => Some((*n as f64, false)),
         Value::UnsignedInteger(n) => Some((*n as f64, false)),
         Value::Float(f) => Some((*f, true)),
-        Value::Decimal(d) => Some((crate::storage::schema::decimal_to_f64(*d), true)),
+        Value::Decimal(d) => Some((reddb_types::types::decimal_to_f64(*d), true)),
         Value::Text(s) => s
             .parse::<i64>()
             .map(|n| (n as f64, false))
@@ -2124,11 +2124,7 @@ fn money_from_args(args: &[Value]) -> Option<Value> {
         [left, right] => format!("{} {}", money_arg_text(left)?, money_arg_text(right)?),
         _ => return Some(Value::Null),
     };
-    match reddb_types::coerce::coerce(
-        &input,
-        crate::storage::schema::DataType::Money,
-        None,
-    ) {
+    match reddb_types::coerce::coerce(&input, reddb_types::DataType::Money, None) {
         Ok(value) => Some(value),
         Err(_) if args.len() == 2 => {
             let reversed = format!(
@@ -2136,12 +2132,7 @@ fn money_from_args(args: &[Value]) -> Option<Value> {
                 money_arg_text(&args[1])?,
                 money_arg_text(&args[0])?
             );
-            reddb_types::coerce::coerce(
-                &reversed,
-                crate::storage::schema::DataType::Money,
-                None,
-            )
-            .ok()
+            reddb_types::coerce::coerce(&reversed, reddb_types::DataType::Money, None).ok()
         }
         Err(_) => Some(Value::Null),
     }

@@ -25,7 +25,7 @@ use reddb::json::Value as JsonValue;
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::server::RedDBServer;
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
+use reddb_types::Value;
 use serde_json::{json, Value as SerdeValue};
 
 const SETUP_SQL: [&str; 2] = [

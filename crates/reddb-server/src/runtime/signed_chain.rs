@@ -27,11 +27,11 @@
 use crate::storage::blockchain::{
     compute_block_hash, verify_chain, Block, SignedFields, VerifyReport, GENESIS_PREV_HASH,
 };
-use reddb_types::Value;
 use crate::storage::signed_writes::{
     reverify_row, RESERVED_SIGNATURE_COL, RESERVED_SIGNER_PUBKEY_COL, SIGNATURE_LEN,
     SIGNER_PUBKEY_LEN,
 };
+use reddb_types::Value;
 
 use super::blockchain_kind::{COL_BLOCK_HEIGHT, COL_HASH, COL_PREV_HASH, COL_TIMESTAMP};
 

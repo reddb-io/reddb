@@ -218,10 +218,7 @@ impl NaturalExecutor {
         }
 
         let mut record = UnifiedRecord::new();
-        record.set(
-            "count",
-            crate::storage::schema::Value::Integer(count as i64),
-        );
+        record.set("count", reddb_types::Value::Integer(count as i64));
         result.push(record);
         result.columns.push("count".to_string());
 
@@ -249,7 +246,7 @@ impl NaturalExecutor {
                         record.set_node("related", MatchedNode::from_stored(&target_node));
                         record.set(
                             "relationship",
-                            crate::storage::schema::Value::text(format!("{:?}", edge_type)),
+                            reddb_types::Value::text(format!("{:?}", edge_type)),
                         );
                         result.push(record);
                     }
@@ -286,13 +283,10 @@ impl NaturalExecutor {
                 }
                 record.set(
                     "relationship",
-                    crate::storage::schema::Value::text(format!("{:?}", edge_type)),
+                    reddb_types::Value::text(format!("{:?}", edge_type)),
                 );
-                record.set("exists", crate::storage::schema::Value::Boolean(true));
-                record.set(
-                    "weight",
-                    crate::storage::schema::Value::Float(weight as f64),
-                );
+                record.set("exists", reddb_types::Value::Boolean(true));
+                record.set("weight", reddb_types::Value::Float(weight as f64));
                 result.push(record);
                 break;
             }
@@ -301,9 +295,9 @@ impl NaturalExecutor {
         if !found {
             // Report that no relationship was found
             let mut record = UnifiedRecord::new();
-            record.set("exists", crate::storage::schema::Value::Boolean(false));
-            record.set("source", crate::storage::schema::Value::text(source));
-            record.set("target", crate::storage::schema::Value::text(target));
+            record.set("exists", reddb_types::Value::Boolean(false));
+            record.set("source", reddb_types::Value::text(source));
+            record.set("target", reddb_types::Value::text(target));
             result.push(record);
         }
 

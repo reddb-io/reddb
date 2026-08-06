@@ -2642,9 +2642,9 @@ fn apply_http_limits(
         crate::server::http_limits::resolve_http_limits(&config.http_limits_cli, |key| match store
             .get_config(key)
         {
-            Some(crate::storage::schema::Value::Text(v)) => Some(v.to_string()),
-            Some(crate::storage::schema::Value::Integer(n)) if n >= 0 => Some(n.to_string()),
-            Some(crate::storage::schema::Value::UnsignedInteger(n)) => Some(n.to_string()),
+            Some(reddb_types::Value::Text(v)) => Some(v.to_string()),
+            Some(reddb_types::Value::Integer(n)) if n >= 0 => Some(n.to_string()),
+            Some(reddb_types::Value::UnsignedInteger(n)) => Some(n.to_string()),
             _ => None,
         });
     tracing::info!(
@@ -3169,15 +3169,12 @@ mod tests {
         let completed = store
             .get_config(BOOTSTRAP_COMPLETED_KEY)
             .expect("completed key persisted");
-        assert!(matches!(
-            completed,
-            crate::storage::schema::Value::Boolean(true)
-        ));
+        assert!(matches!(completed, reddb_types::Value::Boolean(true)));
         let preset = store
             .get_config(BOOTSTRAP_PRESET_KEY)
             .expect("preset key persisted");
         match preset {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_SIMPLE),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_SIMPLE),
             other => panic!("expected Text(simple), got {other:?}"),
         }
         assert!(
@@ -3249,11 +3246,11 @@ mod tests {
             .get_config(BOOTSTRAP_FIRST_ADMIN_KEY)
             .expect("first_admin_id persisted")
         {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), "ops"),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), "ops"),
             other => panic!("expected Text(ops), got {other:?}"),
         }
         match store.get_config(BOOTSTRAP_PRESET_KEY).unwrap() {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_PRODUCTION),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_PRODUCTION),
             other => panic!("expected Text(production), got {other:?}"),
         }
 
@@ -3367,11 +3364,11 @@ mod tests {
             .get_config(BOOTSTRAP_FIRST_ADMIN_KEY)
             .expect("head admin id persisted")
         {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), "head"),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), "head"),
             other => panic!("expected Text(head), got {other:?}"),
         }
         match store.get_config(BOOTSTRAP_PRESET_KEY).unwrap() {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
             other => panic!("expected Text(cloud), got {other:?}"),
         }
 
@@ -3547,7 +3544,7 @@ mod tests {
             .get_config(BOOTSTRAP_PRESET_KEY)
             .expect("preset key persisted")
         {
-            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
+            reddb_types::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_CLOUD),
             other => panic!("expected Text(cloud), got {other:?}"),
         }
 

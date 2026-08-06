@@ -12,8 +12,8 @@
 // `CONTAINS(body.tags, 'checkout')` form on a document collection.
 
 use reddb::storage::query::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("runtime")
