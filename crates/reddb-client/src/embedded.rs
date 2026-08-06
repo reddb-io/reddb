@@ -61,7 +61,7 @@ impl EmbeddedClient {
             .runtime
             .execute_query(sql)
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
-        Ok(map_query_result(&qr))
+        Ok(query_result_from_runtime(&qr))
     }
 
     /// Parameterized embedded query — see [`crate::Reddb::query_with`].
@@ -87,7 +87,7 @@ impl EmbeddedClient {
             .runtime
             .execute_query_expr(bound)
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
-        Ok(map_query_result(&qr))
+        Ok(query_result_from_runtime(&qr))
     }
 
     /// Parameterized execution for INSERT / UPDATE / DELETE. RedDB uses the
@@ -288,7 +288,12 @@ fn json_value_to_schema_value(v: &JsonValue) -> SchemaValue {
     }
 }
 
-fn map_query_result(qr: &reddb_server::runtime::RuntimeQueryResult) -> QueryResult {
+/// Convert an engine query result through the same value mapping used by the
+/// embedded driver. Kept public for in-process tools that already own a
+/// runtime, such as the CLI's ephemeral data-file query path.
+pub fn query_result_from_runtime(
+    qr: &reddb_server::runtime::RuntimeQueryResult,
+) -> QueryResult {
     let columns = if qr.result.columns.is_empty() {
         qr.result
             .records
