@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::auth::UserId;
 use crate::crypto::uuid::Uuid;
-use crate::storage::schema::types::Value;
+use reddb_types::types::Value;
 use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use crate::storage::UnifiedStore;
 use crate::utils::now_unix_millis;
