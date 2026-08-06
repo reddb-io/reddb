@@ -1,12 +1,8 @@
 # `storage/engine/btree` — Page-based on-disk B+tree
 
 This is the **on-disk** B+tree used by the durable storage engine. Pages live
-in the SIEVE buffer pool (`src/storage/cache/`), are flushed by the pager
-(`src/storage/engine/pager/`), and recovered from the WAL on startup.
-
-> **Sister module:** `src/storage/btree/` is the *in-memory* MVCC B+tree
-> with version chains. It has different invariants. Do not copy code between
-> the two without re-reading both READMEs.
+in the SIEVE buffer pool (`src/storage/engine/page_cache.rs`), are flushed by
+the pager (`src/storage/engine/pager/`), and recovered from the WAL on startup.
 
 ## Module layout
 
