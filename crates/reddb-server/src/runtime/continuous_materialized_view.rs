@@ -12,7 +12,7 @@
 //! the API opens.
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 
 /// Name of the system collection that stores one row per
