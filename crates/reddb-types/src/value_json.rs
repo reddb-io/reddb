@@ -168,7 +168,9 @@ fn single_key_object(key: &str, value: JsonValue) -> JsonValue {
     JsonValue::Object([(key.to_string(), value)].into_iter().collect())
 }
 
-fn json_bytes_to_json(bytes: &[u8]) -> JsonValue {
+/// Decode a stored JSON payload into a JSON value, mirroring
+/// `Value::Json` rendering for callers that hold raw bytes.
+pub fn json_bytes_to_json(bytes: &[u8]) -> JsonValue {
     if bytes.starts_with(crate::document_body_codec::MAGIC) {
         if let Ok(fields) = crate::document_body_codec::decode(bytes) {
             let mut object = Map::new();

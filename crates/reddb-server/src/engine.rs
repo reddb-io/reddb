@@ -2,6 +2,8 @@
 //!
 //! This module keeps the physical storage concerns separated from unified domain APIs.
 
+#![allow(deprecated)]
+
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,6 +36,10 @@ pub struct EngineInfo {
     pub options: RedDBOptions,
 }
 
+#[deprecated(
+    since = "1.23.2",
+    note = "RedDBEngine::execute_query is a SILENT NO-OP — it returns Ok(()) without executing any query. Use RedDBRuntime (in-process) or RedDBServer (serving) instead. Removed at the next major."
+)]
 pub struct RedDBEngine {
     options: RedDBOptions,
     layout: PhysicalLayout,

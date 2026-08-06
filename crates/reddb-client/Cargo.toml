@@ -42,16 +42,11 @@ redwire-tls = [
 
 [dependencies]
 # Always-on workspace deps. The connector + bin paths only need
-# tonic, ureq, and serde_json — no engine, no reqwest, no
+# the shared gRPC stub crate, ureq, and serde_json — no engine, no reqwest, no
 # rustls. Optional features layer the heavier transports on top.
 reddb-grpc-proto = { workspace = true }
 reddb-wire = { workspace = true }
 reddb-types = { workspace = true }
-# The gRPC connector type lives in its own crate to break the
-# would-be circular path dependency between this crate (with
-# `embedded`) and `reddb-server`.
-reddb-client-connector = { workspace = true }
-tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
 # `red_client` binary spins up a current-thread tokio runtime via
 # `#[tokio::main]`. Library callers (the `red` bin) bring their
 # own runtime, so the macro feature is only needed for the bin.

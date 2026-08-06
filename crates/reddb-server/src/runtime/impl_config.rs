@@ -425,14 +425,10 @@ impl RedDBRuntime {
             if version.tombstone {
                 None
             } else {
-                Some(crate::presentation::entity_json::storage_value_to_json(
-                    &version.value,
-                ))
+                Some(crate::storage::schema::Value::to_json(&version.value))
             }
         });
-        let after = Some(crate::presentation::entity_json::storage_value_to_json(
-            &value,
-        ));
+        let after = Some(crate::storage::schema::Value::to_json(&value));
         let change_op = if latest.is_some() {
             crate::replication::cdc::ChangeOperation::Update
         } else {
@@ -616,9 +612,7 @@ impl RedDBRuntime {
             if version.tombstone {
                 None
             } else {
-                Some(crate::presentation::entity_json::storage_value_to_json(
-                    &version.value,
-                ))
+                Some(crate::storage::schema::Value::to_json(&version.value))
             }
         }) {
             self.record_kv_watch_event(
@@ -1816,7 +1810,7 @@ fn config_payload_sensitivity(
 }
 
 fn config_payload_bytes(value: &Value) -> Vec<u8> {
-    let json = crate::presentation::entity_json::storage_value_to_json(value);
+    let json = crate::storage::schema::Value::to_json(value);
     crate::serde_json::to_vec(&json).unwrap_or_else(|_| value.to_string().into_bytes())
 }
 

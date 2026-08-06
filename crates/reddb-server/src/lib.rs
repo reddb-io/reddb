@@ -35,6 +35,7 @@ pub mod document_body;
 pub mod document_migration;
 pub mod ec;
 pub mod engine;
+pub(crate) mod entity_render;
 pub mod geo;
 pub mod grpc;
 pub mod health;
@@ -100,6 +101,7 @@ pub mod prelude {
     pub use crate::catalog::{
         snapshot_store, CatalogModelSnapshot, CollectionDescriptor, CollectionModel, SchemaMode,
     };
+    #[allow(deprecated)]
     pub use crate::engine::{EngineInfo, EngineStats, RedDBEngine};
     pub use crate::grpc::{GrpcServerOptions, GrpcTlsOptions, RedDBGrpcServer};
     pub use crate::health::{HealthIssue, HealthProvider, HealthReport, HealthState};
@@ -147,6 +149,7 @@ pub use crate::application::{
 pub use crate::catalog::{
     snapshot_store, CatalogModelSnapshot, CollectionDescriptor, CollectionModel, SchemaMode,
 };
+#[allow(deprecated)]
 pub use crate::engine::{EngineInfo, EngineStats, RedDBEngine};
 pub use crate::grpc::{GrpcServerOptions, GrpcTlsOptions, RedDBGrpcServer};
 pub use crate::health::{HealthIssue, HealthProvider, HealthReport, HealthState};

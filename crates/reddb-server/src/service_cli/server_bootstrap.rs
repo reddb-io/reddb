@@ -103,6 +103,11 @@ struct ServeContext {
     readiness: TransportReadiness,
     rt_config: RuntimeConfig,
     worker_threads: usize,
+    /// Issue #2140: one gRPC server per node, so the plain and TLS gRPC
+    /// listeners share a single `Arc<PreparedRegistry>` and a prepared_id
+    /// minted on one socket resolves on the other. `None` when the node
+    /// carries no gRPC transport.
+    grpc_server: Option<RedDBGrpcServer>,
 }
 
 type TransportFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -209,6 +214,7 @@ impl BootedNode {
             readiness: TransportReadiness::default(),
             rt_config: self.rt_config.clone(),
             worker_threads: self.worker_threads,
+            grpc_server: None,
         };
 
         self.tokio_runtime.block_on(async move {
@@ -229,6 +235,8 @@ impl BootedNode {
             // Every listener is accounted for now, so the HTTP surfaces built
             // below snapshot a complete `/health` transport view.
             context.readiness = readiness;
+            let shared_grpc = build_shared_grpc_server(&context, &transports);
+            context.grpc_server = shared_grpc;
             let mut primary: Option<TransportFuture> = None;
             for bound in transports {
                 let kind = bound.descriptor.kind;
@@ -658,6 +666,34 @@ fn bind_degrading_listener(
     }
 }
 
+/// Build the node's single gRPC server, shared by its plain and TLS gRPC
+/// listeners (issue #2140). Constructing one server per listener would give
+/// each its own `PreparedRegistry`, so a prepared_id minted on the plain port
+/// would not resolve on the TLS port. Returns `None` when the node carries no
+/// gRPC transport, so non-gRPC shapes build no server at all.
+fn build_shared_grpc_server(
+    context: &ServeContext,
+    transports: &[BoundTransport],
+) -> Option<RedDBGrpcServer> {
+    let bind_addr = transports
+        .iter()
+        .find(|bound| bound.descriptor.kind == TransportKind::Grpc)
+        .or_else(|| {
+            transports
+                .iter()
+                .find(|bound| bound.descriptor.kind == TransportKind::GrpcTls)
+        })
+        .map(|bound| bound.descriptor.bind_addr.clone())?;
+    Some(RedDBGrpcServer::with_options(
+        context.runtime.clone(),
+        GrpcServerOptions {
+            bind_addr,
+            tls: None,
+        },
+        context.auth_store.clone(),
+    ))
+}
+
 /// Build the future that serves one bound transport for the node's lifetime.
 fn serve_transport(
     bound: BoundTransport,
@@ -670,6 +706,7 @@ fn serve_transport(
         readiness,
         rt_config,
         worker_threads,
+        grpc_server,
     } = context;
     let bind_addr = bound.descriptor.bind_addr.clone();
 
@@ -743,14 +780,11 @@ fn serve_transport(
             }))
         }
         (TransportKind::Grpc, Some(listener), PreparedTransport::Plain) => {
-            let server = RedDBGrpcServer::with_options(
-                runtime.clone(),
-                GrpcServerOptions {
+            let server =
+                shared_grpc_server(grpc_server)?.with_listener_options(GrpcServerOptions {
                     bind_addr: bind_addr.clone(),
                     tls: None,
-                },
-                auth_store.clone(),
-            );
+                });
             let cpus = rt_config.available_cpus;
             let workers = *worker_threads;
             Ok(Box::pin(async move {
@@ -768,14 +802,13 @@ fn serve_transport(
             }))
         }
         (TransportKind::GrpcTls, Some(listener), PreparedTransport::GrpcTls(tls)) => {
-            let server = RedDBGrpcServer::with_options(
-                runtime.clone(),
-                GrpcServerOptions {
+            // Issue #2140: the same server instance the plain gRPC listener
+            // serves, so both sockets share one `Arc<PreparedRegistry>`.
+            let server =
+                shared_grpc_server(grpc_server)?.with_listener_options(GrpcServerOptions {
                     bind_addr: bind_addr.clone(),
                     tls: Some(tls),
-                },
-                auth_store.clone(),
-            );
+                });
             Ok(Box::pin(async move {
                 tracing::info!(transport = "grpc+tls", bind = %bind_addr, "listener online");
                 server
@@ -835,6 +868,14 @@ fn serve_transport(
         }
         _ => Err("transport descriptor preparation mismatch".to_string()),
     }
+}
+
+/// Clone the node's shared gRPC server for one listener. Absent only if a gRPC
+/// transport reached [`serve_transport`] without one being built.
+fn shared_grpc_server(server: &Option<RedDBGrpcServer>) -> Result<RedDBGrpcServer, String> {
+    server
+        .clone()
+        .ok_or_else(|| "gRPC transport served without a bootstrapped gRPC server".to_string())
 }
 
 /// Hand a listener bound during bootstrap over to tokio.

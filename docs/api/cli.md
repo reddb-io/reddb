@@ -37,7 +37,7 @@ red <command> [args] [flags]
 | `--json` | `-j` | Force JSON output |
 | `--output FORMAT` | `-o` | Output format: `text`, `json`, `yaml` |
 | `--verbose` | `-v` | Verbose output |
-| `--no-color` | | Disable colored output |
+| `--no-color` | | Accepted for compatibility; currently a no-op (command output is not colored) |
 | `--version` | | Show version |
 
 ## red server

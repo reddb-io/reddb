@@ -19,7 +19,7 @@ Common flags:
 | `--json` | Emit JSON arrays for tabular results. |
 | `--csv` | Emit CSV for tabular results. |
 | `--limit <n>` | Add a `LIMIT` to list, stats, and passthrough query commands when the SQL has no limit. |
-| `--no-color` | Disable ANSI color in human output. |
+| `--no-color` | Accepted for compatibility. Admin output is never colored, so this flag is a no-op. |
 
 ## Collections
 

@@ -210,15 +210,13 @@ impl<'a> KvAtomicOps<'a> {
 
         let before = existing
             .as_ref()
-            .map(|(value, _)| crate::presentation::entity_json::storage_value_to_json(value));
+            .map(|(value, _)| crate::storage::schema::Value::to_json(value));
         let op = if was_present {
             crate::replication::cdc::ChangeOperation::Update
         } else {
             crate::replication::cdc::ChangeOperation::Insert
         };
-        let after = Some(crate::presentation::entity_json::storage_value_to_json(
-            &value,
-        ));
+        let after = Some(crate::storage::schema::Value::to_json(&value));
 
         // Versioned KV retains MVCC history: the prior visible version is
         // tombstoned (set_xmax) *after* the new version is created, so both
@@ -384,9 +382,7 @@ impl<'a> KvAtomicOps<'a> {
                 collection,
                 key,
                 id.raw(),
-                value
-                    .as_ref()
-                    .map(crate::presentation::entity_json::storage_value_to_json),
+                value.as_ref().map(crate::storage::schema::Value::to_json),
                 None,
             );
             self.runtime.inner.kv_stats.incr_deletes();
@@ -408,9 +404,7 @@ impl<'a> KvAtomicOps<'a> {
                         collection,
                         key,
                         id.raw(),
-                        Some(crate::presentation::entity_json::storage_value_to_json(
-                            &value,
-                        )),
+                        Some(crate::storage::schema::Value::to_json(&value)),
                         None,
                     );
                     self.runtime.inner.kv_stats.incr_deletes();
@@ -546,8 +540,8 @@ impl<'a> KvAtomicOps<'a> {
             output.id.raw(),
             existing
                 .as_ref()
-                .map(|(value, _)| crate::presentation::entity_json::storage_value_to_json(value)),
-            Some(crate::presentation::entity_json::storage_value_to_json(
+                .map(|(value, _)| crate::storage::schema::Value::to_json(value)),
+            Some(crate::storage::schema::Value::to_json(
                 &crate::storage::schema::Value::Integer(next),
             )),
         );
@@ -624,12 +618,8 @@ impl<'a> KvAtomicOps<'a> {
             collection,
             key,
             output.id.raw(),
-            current
-                .as_ref()
-                .map(crate::presentation::entity_json::storage_value_to_json),
-            Some(crate::presentation::entity_json::storage_value_to_json(
-                &new_value,
-            )),
+            current.as_ref().map(crate::storage::schema::Value::to_json),
+            Some(crate::storage::schema::Value::to_json(&new_value)),
         );
 
         self.runtime.inner.kv_stats.incr_cas_success();
@@ -667,9 +657,7 @@ impl<'a> KvAtomicOps<'a> {
                     collection,
                     &key,
                     id.raw(),
-                    before
-                        .as_ref()
-                        .map(crate::presentation::entity_json::storage_value_to_json),
+                    before.as_ref().map(crate::storage::schema::Value::to_json),
                     None,
                 );
                 removed += 1;
@@ -1824,7 +1812,7 @@ impl RedDBRuntime {
                             insert_kv_json_path(
                                 &mut tree,
                                 relative,
-                                crate::presentation::entity_json::storage_value_to_json(&value),
+                                crate::storage::schema::Value::to_json(&value),
                             );
                         }
                         Ok(kv_list_json_result(raw_query, collection, prefix, tree))

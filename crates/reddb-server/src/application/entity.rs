@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::application::ports::RuntimeEntityPort;
 use crate::json::{parse_json, to_vec as json_to_vec, Map, Value as JsonValue};
-use crate::presentation::entity_json::storage_value_to_json;
 use crate::storage::schema::{DataType, Value};
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::{Metadata, MetadataValue, RefTarget, SparseVector, VectorData};
@@ -397,7 +396,7 @@ pub(crate) fn apply_patch_operations_to_storage_map(
     let mut patch_target = JsonValue::Object(
         fields
             .iter()
-            .map(|(key, value)| (key.clone(), storage_value_to_json(value)))
+            .map(|(key, value)| (key.clone(), value.to_json()))
             .collect(),
     );
     apply_patch_operations_to_json(&mut patch_target, operations)
