@@ -87,11 +87,10 @@ pub(super) async fn wrap_client(
                 .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("add CA cert: {e}")))?;
         }
     } else {
-        // Trust the system roots when no explicit CA was supplied.
-        // Allows `reds://` against a public-cert server without
-        // forcing operators to pass `?ca=`.
-        let webpki_roots: Vec<CertificateDer<'static>> = Vec::new();
-        let _ = webpki_roots;
+        // Trust the public WebPKI roots when no explicit CA was supplied.
+        // Allows `reds://` against a public-cert server without forcing
+        // callers to provide a CA bundle through the lower-level API.
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
     let builder = ClientConfig::builder().with_root_certificates(roots);
