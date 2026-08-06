@@ -1302,7 +1302,14 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
 fn redwire_json_operation_payloads_live_in_reddb_wire() {
     let root = repo_root();
     let client = read(root.join("crates/reddb-client/src/redwire/mod.rs"));
-    let server = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
+    // The RedWire reply renderers live in presentation (issue #2156); the
+    // session dispatches to them. Both files are held to the same rule:
+    // payload bytes come from reddb-wire, never hand-rolled server-side.
+    let server = format!(
+        "{}{}",
+        read(root.join("crates/reddb-server/src/wire/redwire/session.rs")),
+        read(root.join("crates/reddb-server/src/presentation/query_result.rs")),
+    );
 
     for forbidden in [
         "obj.insert(\n            \"collection\"",

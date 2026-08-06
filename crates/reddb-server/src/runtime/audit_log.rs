@@ -546,7 +546,7 @@ impl AuditField {
 ///
 /// The other two encoder paths in the codebase
 /// (`utils::json::JsonValue::write_json` and
-/// `grpc::scan_json::write_json_string`) are correct after #181 but
+/// `presentation::query_result::write_json_string`) are correct after #181 but
 /// not the canonical owner of the audit boundary. Both are marked
 /// `#[deprecated]` on the audit path and remain in place for
 /// non-audit call sites pending follow-up retirement.

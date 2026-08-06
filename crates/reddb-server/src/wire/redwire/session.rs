@@ -28,7 +28,7 @@ use reddb_wire::query_with_params::{
 use reddb_wire::redwire::operations::{
     decode_delete_payload, decode_get_payload, decode_insert_dispatch_payload,
     encode_bulk_ok_payload_from_json_id_literals, encode_delete_ok_payload,
-    encode_get_result_payload, encode_query_result_summary_payload,
+    encode_get_result_payload,
 };
 
 use super::auth::{build_auth_ok, pick_auth_method, validate_auth_response, AuthOutcome};
@@ -1149,14 +1149,12 @@ fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame)
             );
         }
     };
-    match QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new())) {
-        Ok(result) => {
-            let payload =
-                encode_query_result_summary_payload(result.statement_type, result.affected_rows);
-            build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
-        }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
-    }
+    let result =
+        QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new()));
+    crate::presentation::query_result::summary_frame(
+        frame.correlation_id,
+        result.as_ref().map_err(ToString::to_string),
+    )
 }
 
 fn run_query_with_params(
@@ -1182,16 +1180,11 @@ fn run_query_with_params(
     if let Some(policy) = commit_policy {
         query = query.with_commit_policy(policy);
     }
-    match QueryRequestExecutor::new(runtime, prepared).execute(query) {
-        Ok(result) => {
-            let payload =
-                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None)
-                    .to_string_compact()
-                    .into_bytes();
-            build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
-        }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
-    }
+    let result = QueryRequestExecutor::new(runtime, prepared).execute(query);
+    crate::presentation::query_result::envelope_frame(
+        frame.correlation_id,
+        result.as_ref().map_err(ToString::to_string),
+    )
 }
 
 fn parse_redwire_commit_policy(
@@ -1671,6 +1664,11 @@ mod tests {
         assert_eq!(
             summary.get("statement").and_then(|value| value.as_str()),
             Some("select")
+        );
+        assert_eq!(
+            summary.get("affected").and_then(|value| value.as_u64()),
+            Some(0),
+            "affected is pinned even when it is 0, got {summary}"
         );
         assert!(
             summary.get("result").is_none(),
