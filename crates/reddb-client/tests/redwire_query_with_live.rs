@@ -4,8 +4,15 @@ use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
-use reddb_client::{Value, ValueOut};
+use reddb_client::{ErrorCode, Reddb, Value, ValueOut};
+
+#[tokio::test]
+async fn red_uri_uses_redwire_transport() {
+    let error = Reddb::connect("red://127.0.0.1:1")
+        .await
+        .expect_err("closed RedWire port must fail");
+    assert_eq!(error.code, ErrorCode::Network);
+}
 
 #[tokio::test]
 async fn redwire_query_with_params_against_live_server() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,7 +53,7 @@ async fn redwire_query_with_params_against_live_server() -> Result<(), Box<dyn s
 }
 
 async fn run_live_query_with(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = wait_for_client(port).await?;
+    let client = wait_for_client(port).await?;
 
     client
         .query("CREATE TABLE rust_params (id INT, name TEXT)")
@@ -77,15 +84,15 @@ async fn run_live_query_with(port: u16) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-async fn wait_for_client(port: u16) -> Result<RedWireClient, Box<dyn std::error::Error>> {
+async fn wait_for_client(port: u16) -> Result<Reddb, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
-    let opts = ConnectOptions::new("127.0.0.1", port).with_auth(Auth::Anonymous);
+    let uri = format!("red://127.0.0.1:{port}");
     let mut last_error = None;
 
     while Instant::now() < deadline {
-        match RedWireClient::connect(opts.clone()).await {
-            Ok(mut client) => match client.ping().await {
-                Ok(()) => return Ok(client),
+        match Reddb::connect(&uri).await {
+            Ok(client) => match client.query("SELECT 1").await {
+                Ok(_) => return Ok(client),
                 Err(err) => {
                     last_error = Some(err.to_string());
                     let _ = client.close().await;
