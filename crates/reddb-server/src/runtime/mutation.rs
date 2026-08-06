@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::json::{Map as JsonMap, Value as JsonValue};
-use crate::presentation::entity_json::storage_value_to_json;
 use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, VectorRef};
 use crate::storage::unified::{
@@ -859,12 +858,12 @@ fn table_row_after_json(entity: &UnifiedEntity) -> JsonValue {
     if let EntityData::Row(row) = &entity.data {
         if let Some(named) = &row.named {
             for (key, value) in named {
-                object.insert(key.to_string(), storage_value_to_json(value));
+                object.insert(key.to_string(), value.to_json());
             }
         } else if let Some(schema) = &row.schema {
             for (idx, column) in schema.iter().enumerate() {
                 if let Some(value) = row.columns.get(idx) {
-                    object.insert(column.clone(), storage_value_to_json(value));
+                    object.insert(column.clone(), value.to_json());
                 }
             }
         }
@@ -1004,7 +1003,7 @@ fn build_update_before_json(
     let mut object = JsonMap::new();
     for (key, value) in &mutation.pre_mutation_fields {
         if changed.contains(key.as_str()) {
-            object.insert(key.clone(), storage_value_to_json(value));
+            object.insert(key.clone(), value.to_json());
         }
     }
     JsonValue::Object(object)
@@ -1028,7 +1027,7 @@ fn build_update_after_json(
         if let Some(named) = &row.named {
             for (key, value) in named {
                 if changed.contains(key.as_str()) {
-                    object.insert(key.clone(), storage_value_to_json(value));
+                    object.insert(key.clone(), value.to_json());
                 }
             }
             // Post-cutover (PRD-1398) a document's canonical data lives only in
@@ -1042,7 +1041,7 @@ fn build_update_after_json(
                         for (name, value) in body_fields {
                             object
                                 .entry(name)
-                                .or_insert_with(|| storage_value_to_json(&value));
+                                .or_insert_with(|| value.to_json());
                         }
                     }
                 }
@@ -1051,7 +1050,7 @@ fn build_update_after_json(
             for (idx, column) in schema.iter().enumerate() {
                 if changed.contains(column.as_str()) {
                     if let Some(value) = row.columns.get(idx) {
-                        object.insert(column.clone(), storage_value_to_json(value));
+                        object.insert(column.clone(), value.to_json());
                     }
                 }
             }
