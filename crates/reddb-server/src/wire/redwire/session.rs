@@ -1135,6 +1135,10 @@ fn redwire_io_err(err: reddb_wire::redwire::RedWireIoError) -> io::Error {
     }
 }
 
+/// `Query` (0x01) answers with the pinned summary payload — statement type
+/// plus affected rows — not the full result envelope. `QueryWithParams`
+/// (0x28) is the frame that carries records back; clients pick the frame by
+/// the reply shape they want.
 fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame) -> Frame {
     let sql = match std::str::from_utf8(&frame.payload) {
         Ok(s) => s,
@@ -1147,7 +1151,7 @@ fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame)
     };
     let result =
         QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new()));
-    crate::presentation::query_result::wire_frame(
+    crate::presentation::query_result::summary_frame(
         frame.correlation_id,
         result.as_ref().map_err(ToString::to_string),
     )
@@ -1177,7 +1181,7 @@ fn run_query_with_params(
         query = query.with_commit_policy(policy);
     }
     let result = QueryRequestExecutor::new(runtime, prepared).execute(query);
-    crate::presentation::query_result::wire_frame(
+    crate::presentation::query_result::envelope_frame(
         frame.correlation_id,
         result.as_ref().map_err(ToString::to_string),
     )
@@ -1641,9 +1645,12 @@ mod tests {
         );
     }
 
-    /// Both query frame variants render the same presentation envelope.
+    /// The two query frames answer with deliberately different shapes:
+    /// `Query` (0x01) replies with the summary payload the protocol pins,
+    /// `QueryWithParams` (0x28) with the full result envelope. Clients pick
+    /// the frame by the reply they want, so neither may drift into the other.
     #[test]
-    fn redwire_query_frames_share_one_result_shape() {
+    fn redwire_query_replies_summary_and_query_with_params_replies_full_envelope() {
         let runtime = RedDBRuntime::in_memory().expect("runtime");
         let prepared = PreparedRegistry::new();
 
@@ -1651,8 +1658,22 @@ mod tests {
             reddb_wire::redwire::build_query_frame(98, "SELECT 7 AS value").expect("query frame");
         let query_reply = run_query(&runtime, &prepared, &query);
         assert_eq!(query_reply.kind, MessageKind::Result);
-        let query_body: JsonValue =
-            crate::json::from_slice(&query_reply.payload).expect("Query result envelope");
+        let summary =
+            reddb_wire::redwire::operations::decode_query_result_payload(&query_reply.payload)
+                .expect("Query replies with the summary payload");
+        assert_eq!(
+            summary.get("statement").and_then(|value| value.as_str()),
+            Some("select")
+        );
+        assert_eq!(
+            summary.get("affected").and_then(|value| value.as_u64()),
+            Some(0),
+            "affected is pinned even when it is 0, got {summary}"
+        );
+        assert!(
+            summary.get("result").is_none(),
+            "Query must not carry the full result envelope, got {summary}"
+        );
 
         let payload = reddb_wire::query_with_params::encode_query_with_params(
             "SELECT $1 AS value",
@@ -1665,7 +1686,6 @@ mod tests {
         assert_eq!(params_reply.kind, MessageKind::Result);
         let body: JsonValue =
             serde_json::from_slice(&params_reply.payload).expect("full result envelope");
-        assert_eq!(query_body.get("result"), body.get("result"));
         assert_eq!(
             body.get("result")
                 .and_then(|result| result.get("records"))

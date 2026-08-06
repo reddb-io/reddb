@@ -1,0 +1,1 @@
+{"current_lsn":456,"last_archived_lsn":456,"snapshot_id":1,"snapshot_key":"snapshots/000000000001-123.snapshot","snapshot_time":123,"timeline_id":"main","wal_prefix":"wal/"}

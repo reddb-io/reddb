@@ -27,7 +27,7 @@ pub(crate) fn query_reply(
     entity_types: &Option<Vec<String>>,
     capabilities: &Option<Vec<String>>,
 ) -> QueryReply {
-    crate::presentation::query_result::proto_reply(&result, entity_types, capabilities)
+    crate::presentation::query_result::proto_reply(result, entity_types, capabilities)
 }
 
 pub(crate) fn grpc_parse_query_filters(
