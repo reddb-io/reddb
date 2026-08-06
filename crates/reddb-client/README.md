@@ -62,7 +62,7 @@ callers wanting savepoints issue them directly via `db.query`.
 
 Every case ID below is wired in `tests/conformance.rs` and runs against
 **both** transports the helper surface targets — embedded (`memory://`,
-always) and a live client (`red://` gRPC, gated):
+always) and a live client (`red://` RedWire, gated):
 
 | Case ID                              | Status |
 |--------------------------------------|--------|
@@ -257,7 +257,7 @@ engine, no embedded backend, just transports:
 
 | Scheme              | Status     |
 |---------------------|------------|
-| `red://host[:port]` | gRPC, default port 5050 |
+| `red://host[:port]` | RedWire, default port 5050 |
 | `reds://host[:port]`| TODO (TLS not yet wired in the bin) |
 | `grpc://host[:port]`| gRPC, default port 55055 |
 | `http://host[:port]`| REST |
