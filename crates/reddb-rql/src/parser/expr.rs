@@ -186,8 +186,9 @@ impl<'a> Parser<'a> {
             let Some((op, prec)) = self.peek_binop() else {
                 // Not a standard infix op — check for postfix forms.
                 if min_prec <= 32 {
-                    if let Some(node) = self.try_parse_postfix(&left)? {
-                        left = node;
+                    let (node, consumed_postfix) = self.try_parse_postfix(left)?;
+                    left = node;
+                    if consumed_postfix {
                         continue;
                     }
                 }
@@ -1192,25 +1193,25 @@ impl<'a> Parser<'a> {
     /// So seeing `NOT` here means the user wrote `x NOT BETWEEN …`
     /// or `x NOT IN …`; we consume it eagerly and require BETWEEN
     /// or IN to follow.
-    fn try_parse_postfix(&mut self, left: &Expr) -> Result<Option<Expr>, ParseError> {
-        let start = self.span_start_of(left);
+    fn try_parse_postfix(&mut self, left: Expr) -> Result<(Expr, bool), ParseError> {
+        let start = self.span_start_of(&left);
 
         // IS [NOT] NULL
         if self.consume(&Token::Is)? {
             let negated = self.consume(&Token::Not)?;
             self.expect(Token::Null)?;
             let end = self.position();
-            return Ok(Some(Expr::IsNull {
-                operand: Box::new(left.clone()),
-                negated,
-                span: Span::new(start, end),
-            }));
+            return Ok((
+                Expr::IsNull {
+                    operand: Box::new(left),
+                    negated,
+                    span: Span::new(start, end),
+                },
+                true,
+            ));
         }
 
-        // Detect NOT BETWEEN / NOT IN. NOT is consumed eagerly — we
-        // don't have two-token lookahead and the grammar guarantees
-        // no other valid postfix starts with NOT.
-        let negated = if matches!(self.peek(), Token::Not) {
+        if matches!(self.peek(), Token::Not) {
             self.advance()?;
             if !matches!(self.peek(), Token::Between | Token::In) {
                 return Err(ParseError::new(
@@ -1218,24 +1219,34 @@ impl<'a> Parser<'a> {
                     self.position(),
                 ));
             }
-            true
-        } else {
-            false
-        };
+            return self.parse_between_or_in_postfix(left, start, true);
+        }
 
+        self.parse_between_or_in_postfix(left, start, false)
+    }
+
+    fn parse_between_or_in_postfix(
+        &mut self,
+        left: Expr,
+        start: crate::lexer::Position,
+        negated: bool,
+    ) -> Result<(Expr, bool), ParseError> {
         // BETWEEN low AND high
         if self.consume(&Token::Between)? {
             let low = self.parse_expr_prec(34)?;
             self.expect(Token::And)?;
             let high = self.parse_expr_prec(34)?;
             let end = self.position();
-            return Ok(Some(Expr::Between {
-                target: Box::new(left.clone()),
-                low: Box::new(low),
-                high: Box::new(high),
-                negated,
-                span: Span::new(start, end),
-            }));
+            return Ok((
+                Expr::Between {
+                    target: Box::new(left),
+                    low: Box::new(low),
+                    high: Box::new(high),
+                    negated,
+                    span: Span::new(start, end),
+                },
+                true,
+            ));
         }
 
         // IN (v1, v2, …)
@@ -1248,7 +1259,7 @@ impl<'a> Parser<'a> {
                     query: ExprSubquery {
                         query: Box::new(query),
                     },
-                    span: Span::new(self.span_start_of(left), self.position()),
+                    span: Span::new(start, self.position()),
                 });
             } else if !self.check(&Token::RParen) {
                 loop {
@@ -1260,24 +1271,27 @@ impl<'a> Parser<'a> {
             }
             self.expect(Token::RParen)?;
             let end = self.position();
-            return Ok(Some(Expr::InList {
-                target: Box::new(left.clone()),
-                values,
-                negated,
-                span: Span::new(start, end),
-            }));
+            return Ok((
+                Expr::InList {
+                    target: Box::new(left),
+                    values,
+                    negated,
+                    span: Span::new(start, end),
+                },
+                true,
+            ));
         }
 
         if negated {
-            // Unreachable because the early-return above already
-            // validated NOT is followed by BETWEEN or IN. Guarded
-            // to keep callers loud if the grammar grows later.
+            // Unreachable because the caller already validated NOT is followed
+            // by BETWEEN or IN. Guarded to keep callers loud if the grammar
+            // grows later.
             return Err(ParseError::new(
                 "internal: NOT consumed without BETWEEN/IN follow".to_string(),
                 self.position(),
             ));
         }
-        Ok(None)
+        Ok((left, false))
     }
 
     /// Peek the current token and translate it into a `BinOp` plus
