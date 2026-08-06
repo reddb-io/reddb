@@ -30,7 +30,6 @@ async fn catalog_readiness(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let native = self.native_use_cases();
     let readiness = native.readiness();
     let health = native.health();
@@ -50,7 +49,6 @@ async fn deployment_profiles(
     &self,
     request: Request<DeploymentProfileRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let profile = {
         let profile = request.into_inner().profile;
         let normalized = profile.trim().to_lowercase();
@@ -77,7 +75,6 @@ async fn deployment_profiles(
 }
 
 async fn stats(&self, _request: Request<Empty>) -> Result<Response<StatsReply>, Status> {
-    self.authorize_read(_request.metadata())?;
     let stats = self.catalog_use_cases().stats();
     Ok(Response::new(StatsReply {
         collection_count: stats.store.collection_count as u64,
@@ -96,7 +93,6 @@ async fn collections(
     &self,
     _request: Request<Empty>,
 ) -> Result<Response<CollectionsReply>, Status> {
-    self.authorize_read(_request.metadata())?;
     Ok(Response::new(CollectionsReply {
         collections: self.catalog_use_cases().collections(),
     }))
@@ -106,7 +102,6 @@ async fn collection_readiness(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     let catalog = self.catalog_use_cases().snapshot();
     Ok(Response::new(json_payload_reply(
         crate::presentation::catalog_json::catalog_collection_readiness_json(&catalog.collections),
@@ -117,7 +112,6 @@ async fn collection_attention(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::catalog_json::catalog_collection_attention_json(
             &self.catalog_use_cases().collection_attention(),
@@ -129,7 +123,6 @@ async fn catalog_attention_summary(
     &self,
     request: Request<Empty>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_read(request.metadata())?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::catalog_json::catalog_attention_summary_json(
             &self.catalog_use_cases().attention_summary(),
@@ -141,7 +134,6 @@ async fn serverless_attach(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let required =
         grpc_parse_serverless_readiness_requirements(&payload).map_err(Status::invalid_argument)?;
@@ -182,7 +174,6 @@ async fn serverless_warmup(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
 
     let force = json_bool_field(&payload, "force").unwrap_or(false);
@@ -423,7 +414,6 @@ async fn serverless_reclaim(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
-    self.authorize_write(request.metadata())?;
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let dry_run = json_bool_field(&payload, "dry_run").unwrap_or(false);
     let operations =
