@@ -46,7 +46,9 @@ fn unreachable_storage_modules_stay_retired() {
     }
 
     assert!(
-        !manifest.join("benches/cache_ring_contention_bench.rs").exists(),
+        !manifest
+            .join("benches/cache_ring_contention_bench.rs")
+            .exists(),
         "benchmark for the retired cache ring remains"
     );
 }

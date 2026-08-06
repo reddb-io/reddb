@@ -1107,11 +1107,7 @@ impl Pager {
     /// performance miss, never a correctness bug.
     pub fn prefetch_hint(&self, page_id: u32) {
         if let Ok(file) = self.file_lock() {
-            let _ = super::super::prefetch::prefetch_page(
-                &file,
-                page_id as u64,
-                PAGE_SIZE as u32,
-            );
+            let _ = super::super::prefetch::prefetch_page(&file, page_id as u64, PAGE_SIZE as u32);
         }
     }
 
