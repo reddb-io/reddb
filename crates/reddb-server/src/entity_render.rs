@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::json::{to_string as json_to_string, Map, Value as JsonValue};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::{EntityData, EntityKind, RowData, UnifiedEntity};
 
 pub(crate) fn compact_entity_json(entity: &UnifiedEntity) -> JsonValue {
