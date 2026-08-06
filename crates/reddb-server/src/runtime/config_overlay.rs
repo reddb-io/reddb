@@ -178,7 +178,7 @@ fn flatten_json(prefix: &str, value: &JsonValue, out: &mut Vec<(String, JsonValu
 /// type. Returns `None` when the key is unknown to the matrix or the
 /// coercion fails; the caller falls back to the persisted value.
 pub fn coerce_env_value(key: &str, raw: &str) -> Option<crate::storage::schema::Value> {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     let default = default_for(key)?;
     match default {
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn coerce_bool_accepts_common_forms() {
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         assert_eq!(
             coerce_env_value("concurrency.locking.enabled", "true"),
             Some(Value::Boolean(true))
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn coerce_number_rejects_garbage() {
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         assert_eq!(
             coerce_env_value("storage.wal.max_interval_ms", "25"),
             Some(Value::UnsignedInteger(25))
