@@ -27,7 +27,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use crate::crypto::sha256::Sha256;
 use crate::json::{parse_json, Value as JsonValue};
 use crate::runtime::RedDBRuntime;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::RedDB;
 use crate::{RedDBError, RedDBResult};
 
