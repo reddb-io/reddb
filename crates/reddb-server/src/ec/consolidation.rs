@@ -4,7 +4,7 @@ use super::config::{EcFieldConfig, EcReducer};
 use super::transactions::{
     mark_transactions_applied, query_pending_transactions, EcOperation, EcTransaction,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::entity::{EntityData, EntityId};
 use crate::storage::unified::store::UnifiedStore;
 
