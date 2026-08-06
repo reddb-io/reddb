@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::engine::cancel::CancelToken;
-use crate::storage::schema::types::Value;
+use reddb_types::types::Value;
 
 const RED_CONFIG_COLLECTION: &str = "red_config";
 
