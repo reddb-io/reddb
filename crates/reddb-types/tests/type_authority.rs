@@ -766,6 +766,9 @@ fn server_imports_name_types_keystone_directly() {
         root.join("crates/reddb-client/tests"),
         root.join("tests"),
         root.join("examples"),
+        // drivers/ is a separate workspace, so `cargo check --workspace`
+        // never sees it — the gate is the only thing that does.
+        root.join("drivers"),
     ] {
         if !dir.exists() {
             continue;

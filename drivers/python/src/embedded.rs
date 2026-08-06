@@ -10,10 +10,10 @@ use reddb::runtime::RedDBRuntime;
 use reddb::storage::query::modes::parse_multi;
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::query::user_params;
-use reddb::storage::schema::Value as SchemaValue;
+use reddb_types::Value as SchemaValue;
 use reddb::RuntimeEntityPort;
 
-pub use reddb::storage::schema::Value as ParamValue;
+pub use reddb_types::Value as ParamValue;
 
 #[derive(Clone)]
 pub struct EmbeddedRuntime {
