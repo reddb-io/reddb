@@ -351,6 +351,7 @@ pub(super) struct PreparedStatement {
 /// other than the statement itself makes every one of those describe a
 /// different statement than the one that runs, so the input is named
 /// explicitly here rather than being "some string".
+#[derive(Clone, Copy)]
 pub(super) enum StatementIdentity<'a> {
     /// The statement's SQL text. All five derivations are exact.
     Text(&'a str),
@@ -399,7 +400,7 @@ impl StatementExecutionFrame {
                 ctx.isolation == crate::storage::transaction::IsolationLevel::Serializable
             })
             .map(|ctx| ctx.xid);
-        let (snapshot, as_of_floor) = runtime.statement_snapshot(query)?;
+        let (snapshot, as_of_floor) = runtime.statement_snapshot(query, identity_source)?;
         let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) => (
@@ -1037,14 +1038,32 @@ impl RedDBRuntime {
     /// read" without inferring from `in_progress.is_empty()`.
     ///
     /// A live read nested inside an already-installed frame inherits that
-    /// frame's snapshot instead of minting a fresh one. A CTE prelude, a
-    /// materialized-view refresh, or an inline graph TVF is part of one
-    /// statement and must observe one snapshot; re-minting under
-    /// autocommit / Read Committed takes a new high-water mark, so the
-    /// nodes and edges of a single graph TVF could otherwise be
-    /// materialized under two different snapshots. `AS OF` still wins —
-    /// it names its own snapshot explicitly.
-    fn statement_snapshot(&self, query: &str) -> RedDBResult<(Snapshot, Option<Xid>)> {
+    /// frame's snapshot instead of minting a fresh one — but only when it
+    /// is genuinely *part of* that statement, which is exactly what
+    /// [`StatementIdentity::Expr`] means. A CTE prelude, a
+    /// materialized-view refresh, or an inline graph TVF is one statement
+    /// and must observe one snapshot; re-minting under autocommit / Read
+    /// Committed takes a new high-water mark, so the nodes and edges of a
+    /// single graph TVF could otherwise be materialized under two
+    /// different snapshots.
+    ///
+    /// A nested `Text` statement is a different thing entirely: a driver
+    /// loop issuing statement after statement through `execute_query`.
+    /// Those are sequential autocommit statements and each must see its
+    /// predecessors' commits. Inheriting there froze the loop's view —
+    /// `apply_batched` (`impl_migrations.rs`) drives `APPLY MIGRATION …
+    /// BATCH N ROWS` by re-running the body with `LIMIT N` until fewer
+    /// than `N` rows are affected, so a frozen snapshot re-selected the
+    /// same rows forever and the migration never converged. Twenty-five
+    /// rows at `BATCH 7` should finish in four iterations; it hung
+    /// unbounded instead.
+    ///
+    /// `AS OF` still wins over both — it names its own snapshot explicitly.
+    fn statement_snapshot(
+        &self,
+        query: &str,
+        identity: StatementIdentity<'_>,
+    ) -> RedDBResult<(Snapshot, Option<Xid>)> {
         match peek_top_level_as_of_with_table(query) {
             Some((spec, Some(table))) => {
                 if !table.starts_with("red_") && !self.vcs_is_versioned(&table)? {
@@ -1073,9 +1092,9 @@ impl RedDBRuntime {
                     Some(xid),
                 ))
             }
-            None => match capture_current_snapshot() {
-                Some(outer) => Ok((outer.snapshot, None)),
-                None => Ok((self.current_snapshot(), None)),
+            None => match (identity, capture_current_snapshot()) {
+                (StatementIdentity::Expr(_), Some(outer)) => Ok((outer.snapshot, None)),
+                _ => Ok((self.current_snapshot(), None)),
             },
         }
     }
@@ -1680,6 +1699,49 @@ mod tests {
             ReadFrame::snapshot(&nested).xid,
             ReadFrame::snapshot(&outer).xid,
             "nested execution must inherit the outer statement's snapshot"
+        );
+    }
+
+    /// The other side of the same rule, and the one that matters more:
+    /// a nested statement built from *text* is a statement in its own
+    /// right, not part of the enclosing one, so it must mint a fresh
+    /// snapshot and observe everything committed before it.
+    ///
+    /// `apply_batched` (`impl_migrations.rs`) is the load-bearing caller:
+    /// it drives `APPLY MIGRATION … BATCH N ROWS` by re-running the body
+    /// with `LIMIT N` through `execute_query` until fewer than `N` rows
+    /// are affected. Inheriting the outer `APPLY MIGRATION` statement's
+    /// snapshot froze that loop's view, so every iteration re-selected
+    /// the same rows and the migration never converged — 25 rows at
+    /// `BATCH 7` hung instead of finishing in four iterations.
+    #[test]
+    fn nested_text_statement_sees_commits_made_since_the_outer_frame() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE nested_text_snap (id INT)")
+            .expect("create table");
+
+        let outer = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("SELECT * FROM nested_text_snap"),
+        )
+        .expect("outer frame builds");
+        let _outer_guards = outer.install(&rt);
+
+        rt.execute_query("INSERT INTO nested_text_snap (id) VALUES (1)")
+            .expect("concurrent insert");
+
+        let nested = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("SELECT * FROM nested_text_snap"),
+        )
+        .expect("nested frame builds");
+
+        assert_ne!(
+            ReadFrame::snapshot(&nested).xid,
+            ReadFrame::snapshot(&outer).xid,
+            "a nested text statement must mint a fresh snapshot, not inherit \
+             the enclosing statement's frozen view"
         );
     }
 
