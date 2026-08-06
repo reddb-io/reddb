@@ -2000,11 +2000,7 @@ fn resolve_grpc_tls_options(config: &ServerCommandConfig) -> Result<crate::GrpcT
 /// Spawn a TLS-terminated gRPC listener when `grpc_tls_bind_addr` is
 /// configured. Logs and continues on TLS-config errors so the plain
 /// listener stays up; this matches the wire-listener pattern.
-fn spawn_grpc_tls_listener_if_configured(
-    config: &ServerCommandConfig,
-    runtime: RedDBRuntime,
-    auth_store: Arc<AuthStore>,
-) {
+fn spawn_grpc_tls_listener_if_configured(config: &ServerCommandConfig, server: RedDBGrpcServer) {
     let Some(tls_bind) = config.grpc_tls_bind_addr.clone() else {
         return;
     };
@@ -2021,14 +2017,10 @@ fn spawn_grpc_tls_listener_if_configured(
         }
     };
     tokio::spawn(async move {
-        let server = RedDBGrpcServer::with_options(
-            runtime,
-            GrpcServerOptions {
-                bind_addr: tls_bind.clone(),
-                tls: Some(tls_opts),
-            },
-            auth_store,
-        );
+        let server = server.with_listener_options(GrpcServerOptions {
+            bind_addr: tls_bind.clone(),
+            tls: Some(tls_opts),
+        });
         tracing::info!(transport = "grpc+tls", bind = %tls_bind, "listener online");
         if let Err(err) = server.serve().await {
             tracing::error!(transport = "grpc+tls", err = %err, "gRPC TLS listener error");
@@ -3411,19 +3403,17 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
         // Start PostgreSQL wire listener when --pg-bind is configured.
         spawn_pg_listener(&config, &runtime);
 
-        // Optional TLS gRPC listener. When `grpc_tls_bind_addr` is set
-        // it spawns a separate listener so plaintext + TLS can run
-        // side-by-side (55055 plain + 55555 TLS, etc.).
-        spawn_grpc_tls_listener_if_configured(&config, runtime.clone(), auth_store.clone());
-
         let server = RedDBGrpcServer::with_options(
-            runtime,
+            runtime.clone(),
             GrpcServerOptions {
                 bind_addr: bind_addr.clone(),
                 tls: None,
             },
             auth_store,
         );
+        // Optional TLS gRPC listener. Both listeners clone this connection's
+        // prepared registry so a prepared ID resolves on either socket.
+        spawn_grpc_tls_listener_if_configured(&config, server.clone());
 
         tracing::info!(
             transport = "grpc",
@@ -3525,17 +3515,17 @@ fn run_dual_server(
         // Start PostgreSQL wire listener when --pg-bind is configured.
         spawn_pg_listener(&config, &runtime);
 
-        // Optional TLS gRPC listener — runs alongside the plaintext one.
-        spawn_grpc_tls_listener_if_configured(&config, runtime.clone(), auth_store.clone());
-
         let server = RedDBGrpcServer::with_options(
-            runtime,
+            runtime.clone(),
             GrpcServerOptions {
                 bind_addr: grpc_bind_addr.clone(),
                 tls: None,
             },
             auth_store,
         );
+        // Optional TLS gRPC listener — runs alongside the plaintext one and
+        // shares this connection's prepared registry.
+        spawn_grpc_tls_listener_if_configured(&config, server.clone());
 
         tracing::info!(transport = "http", bind = %http_bind_addr, "listener online");
         tracing::info!(
