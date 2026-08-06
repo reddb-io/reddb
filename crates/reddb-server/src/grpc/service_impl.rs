@@ -1760,10 +1760,16 @@ impl RedDb for GrpcRuntime {
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
         self.authorize_read(request.metadata())?;
+        let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
         let request = request.into_inner();
         let (entity_types, capabilities) = grpc_parse_query_filters(&request)?;
-        let result =
-            execute_grpc_query_with_optional_params(&self.runtime, request.query, request.params)?;
+        let result = execute_grpc_query_request(
+            &self.runtime,
+            &self.prepared_registry,
+            request.query,
+            request.params,
+            commit_policy,
+        )?;
         Ok(Response::new(query_reply(
             result,
             &entity_types,
@@ -1776,15 +1782,18 @@ impl RedDb for GrpcRuntime {
         request: Request<BatchQueryRequest>,
     ) -> Result<Response<BatchQueryReply>, Status> {
         self.authorize_read(request.metadata())?;
+        let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
         let queries = request.into_inner().queries;
         let no_filter: Option<Vec<String>> = None;
         let mut results = Vec::with_capacity(queries.len());
         for sql in queries {
-            let result = self
-                .query_use_cases()
-                .execute(ExecuteQueryInput { query: sql })
-                .map_err(to_status)?;
-            enforce_grpc_commit_policy_after_query_result(&self.runtime, &result)?;
+            let result = execute_grpc_query_request(
+                &self.runtime,
+                &self.prepared_registry,
+                sql,
+                Vec::new(),
+                commit_policy,
+            )?;
             results.push(query_reply(result, &no_filter, &no_filter));
         }
         Ok(Response::new(BatchQueryReply { results }))
@@ -1796,19 +1805,13 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PrepareQueryReply>, Status> {
         self.authorize_read(request.metadata())?;
         let sql = request.into_inner().query;
-        let parsed = crate::storage::query::modes::parse_multi(&sql)
-            .map_err(|e| Status::invalid_argument(format!("parse error: {e}")))?;
-
-        use crate::storage::query::planner::shape::parameterize_query_expr;
-        let (shape, parameter_count) = match parameterize_query_expr(&parsed) {
-            Some(pq) => (pq.shape, pq.parameter_count),
-            None => (parsed, 0),
-        };
-
-        let id = self.prepared_registry.prepare(shape, parameter_count);
+        let prepared = self
+            .prepared_registry
+            .prepare_auto_parameterized(&self.runtime, &sql)
+            .map_err(grpc_query_request_error)?;
         Ok(Response::new(PrepareQueryReply {
-            prepared_id: id,
-            parameter_count: parameter_count as u32,
+            prepared_id: prepared.id.into_raw(),
+            parameter_count: prepared.parameter_count as u32,
         }))
     }
 
@@ -1817,53 +1820,21 @@ impl RedDb for GrpcRuntime {
         request: Request<ExecutePreparedRequest>,
     ) -> Result<Response<QueryReply>, Status> {
         self.authorize_read(request.metadata())?;
+        let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
         let inner = request.into_inner();
-
-        let (shape, parameter_count) = self
-            .prepared_registry
-            .get_shape_and_count(inner.prepared_id)
-            .ok_or_else(|| Status::not_found("prepared statement not found or expired"))?;
-
-        if inner.bind_json.len() != parameter_count {
-            return Err(Status::invalid_argument(format!(
-                "expected {parameter_count} bind values, got {}",
-                inner.bind_json.len()
-            )));
-        }
-
-        let binds = inner
+        let params = inner
             .bind_json
             .iter()
-            .map(|s| {
-                json_from_str::<JsonValue>(s)
-                    .map_err(|e| Status::invalid_argument(format!("bind parse error: {e}")))
-                    .map(|v| match v {
-                        JsonValue::Null => Value::Null,
-                        JsonValue::Bool(b) => Value::Boolean(b),
-                        JsonValue::Integer(n) => Value::Integer(n),
-                        JsonValue::Number(n) => {
-                            if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
-                                Value::Integer(n as i64)
-                            } else {
-                                Value::Float(n)
-                            }
-                        }
-                        JsonValue::String(s) => Value::text(s),
-                        other => Value::text(json_to_string(&other).unwrap_or_default()),
-                    })
-            })
+            .map(|value| grpc_json_bind_to_param_value(value))
             .collect::<Result<Vec<_>, _>>()?;
-
-        let expr = if parameter_count == 0 {
-            (*shape).clone()
-        } else {
-            use crate::storage::query::planner::shape::bind_parameterized_query;
-            bind_parameterized_query(&shape, &binds, parameter_count)
-                .ok_or_else(|| Status::internal("bind failed"))?
-        };
-
-        let result = self.runtime.execute_query_expr(expr).map_err(to_status)?;
-        enforce_grpc_commit_policy_after_query_result(&self.runtime, &result)?;
+        let mut request =
+            RuntimeQueryRequest::prepared(PreparedId::from_raw(inner.prepared_id), params);
+        if let Some(commit_policy) = commit_policy {
+            request = request.with_commit_policy(commit_policy);
+        }
+        let result = QueryRequestExecutor::new(&self.runtime, &self.prepared_registry)
+            .execute(request)
+            .map_err(grpc_query_request_error)?;
         let no_filter: Option<Vec<String>> = None;
         Ok(Response::new(query_reply(result, &no_filter, &no_filter)))
     }
