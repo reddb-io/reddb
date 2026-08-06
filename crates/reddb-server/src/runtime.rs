@@ -44,7 +44,7 @@ use crate::storage::query::planner::{
     CanonicalLogicalPlan, CanonicalPlanner, CostEstimator, QueryPlanner,
 };
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::dsl::{
     apply_filters, cosine_similarity, Filter as DslFilter, FilterOp as DslFilterOp,
     FilterValue as DslFilterValue, GraphPatternDsl, HybridQueryBuilder, MatchComponents,
