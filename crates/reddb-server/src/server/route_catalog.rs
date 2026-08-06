@@ -1096,6 +1096,35 @@ mod tests {
     }
 
     #[test]
+    fn catalog_rejects_commands_without_an_authorization_decision() {
+        let err = CommandCatalog::build(vec![RouteSpec {
+            auth: RouteAuth::Undeclared,
+            ..spec("missing.auth", RouteMethod::Get, "/missing-auth")
+        }])
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            RouteCatalogError::UndeclaredCommandAuth { id: "missing.auth" }
+        );
+    }
+
+    #[test]
+    fn coverage_matrix_exposes_a_seeded_transport_gap() {
+        let catalog = CommandCatalog::build(vec![RouteSpec {
+            auth: RouteAuth::Public,
+            ..spec("health.live", RouteMethod::Get, "/health/live")
+        }])
+        .unwrap();
+
+        let matrix = render_command_coverage_matrix(&catalog);
+
+        assert!(matrix.contains(
+            "| health.live | public | served | undeclared | undeclared | undeclared | undeclared |"
+        ));
+    }
+
+    #[test]
     fn optional_params_are_rejected() {
         let err = RouteCatalog::build(vec![spec("optional", RouteMethod::Get, "/users/:id?")])
             .unwrap_err();
