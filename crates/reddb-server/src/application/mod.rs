@@ -1,6 +1,7 @@
 pub mod admin;
 pub(crate) mod admin_payload;
 pub mod catalog;
+pub(crate) mod collection_contract_enforcer;
 pub mod entity;
 pub(crate) mod entity_payload;
 pub mod graph;
