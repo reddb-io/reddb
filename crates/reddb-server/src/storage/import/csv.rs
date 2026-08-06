@@ -34,7 +34,7 @@
 //! let stats = importer.import_file("users.csv", &mut store)?;
 //! ```
 
-use crate::storage::schema::types::Value;
+use reddb_types::types::Value;
 use crate::storage::Store;
 use crate::storage::{EntityData, EntityKind, RowData, UnifiedEntity};
 use std::collections::HashMap;
