@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::application::OperationContext;
 use crate::auth::policies::{self, EvalContext, Policy, ResourceRef};
 
-use super::{HttpResponse, RedDBServer};
+use super::{transport_surface, HttpResponse, RedDBServer};
 
 /// The buffered HTTP request handed to a route's handler, alongside the
 /// catalog match that selected it (so handlers read their path params from
@@ -546,28 +546,133 @@ impl CommandCatalog {
     }
 }
 
-/// Render the review artifact for the canonical catalog. HTTP is `served`
-/// because this catalog is discovered from HTTP route declarations; the other
-/// adapters remain visible as gaps until they register against the catalog in
-/// their migration slices.
+/// Render the command-coverage review artifact.
+///
+/// Regenerate with
+/// `cargo run --locked -p reddb-io-server --bin command-coverage > command-coverage.md`.
+///
+/// Only HTTP is catalog-driven today, so there is no id-level join across
+/// transports: the other adapters enter the catalog in their own Spec #2109
+/// migration slices. Until then each transport contributes an inventory read
+/// from its own source of truth, so a dispatcher change moves this artifact:
+///
+/// - HTTP commands: the discovered [`CommandCatalog`] behind HTTP dispatch.
+/// - gRPC: `service RedDb` in `crates/reddb-grpc-proto/proto/reddb.proto`.
+/// - MCP: [`crate::mcp::tools::all_tools`] plus the `handle_tools_call`
+///   dispatch in `crates/reddb-server/src/mcp/server.rs`.
+/// - stdio: `dispatch_method` / `dispatch_method_remote` in
+///   `crates/reddb-server/src/rpc_stdio.rs`.
+/// - RedWire: `handle_session` frame dispatch in
+///   `crates/reddb-server/src/wire/redwire/session.rs`.
 pub(crate) fn render_command_coverage_matrix(catalog: &CommandCatalog) -> String {
+    let mut matrix = String::from(
+        "# Command coverage matrix\n\n\
+         Each section is extracted from that transport's own source of truth. \
+         Regenerate with `cargo run --locked -p reddb-io-server --bin command-coverage`.\n",
+    );
+    render_http_commands(catalog, &mut matrix);
+    render_grpc_surface(&mut matrix);
+    render_mcp_surface(&mut matrix);
+    render_stdio_surface(&mut matrix);
+    render_redwire_surface(&mut matrix);
+    matrix
+}
+
+/// Source of truth: the catalog discovered from HTTP route declarations.
+fn render_http_commands(catalog: &CommandCatalog, matrix: &mut String) {
     let mut commands: Vec<_> = catalog.commands().collect();
     commands.sort_by_key(|command| command.id);
 
-    let mut matrix = String::from(
-        "# Command coverage matrix\n\n\
-         `undeclared` is a coverage gap, not an explicit unsupported decision.\n\n\
-         | command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |\n\
-         | --- | --- | --- | --- | --- | --- | --- |\n",
-    );
+    matrix.push_str(&format!(
+        "\n## HTTP commands (source: discovered command catalog)\n\n\
+         {} commands, each with a declared authorization requirement.\n\n\
+         | command | auth requirement |\n| --- | --- |\n",
+        commands.len()
+    ));
     for command in commands {
         matrix.push_str(&format!(
-            "| {} | {} | served | undeclared | undeclared | undeclared | undeclared |\n",
+            "| {} | {} |\n",
             command.id,
             command.auth.matrix_label()
         ));
     }
-    matrix
+}
+
+/// Source of truth: `service RedDb` in the canonical proto.
+fn render_grpc_surface(matrix: &mut String) {
+    let methods = transport_surface::grpc_rpc_methods();
+    matrix.push_str(&format!(
+        "\n## gRPC surface (source: crates/reddb-grpc-proto/proto/reddb.proto)\n\n\
+         {} rpc methods on `service RedDb`. Not catalog-joined yet.\n\n\
+         | rpc |\n| --- |\n",
+        methods.len()
+    ));
+    for method in methods {
+        matrix.push_str(&format!("| {method} |\n"));
+    }
+}
+
+/// Source of truth: the MCP tool registry and the `handle_tools_call` dispatch.
+fn render_mcp_surface(matrix: &mut String) {
+    let tools = transport_surface::mcp_advertised_tools();
+    let markers = transport_surface::mcp_authorization_markers();
+    let auth = if markers.is_empty() { "none" } else { "gated" };
+    matrix.push_str(&format!(
+        "\n## MCP tools (source: crates/reddb-server/src/mcp/tools.rs, mcp/server.rs)\n\n\
+         {} tools advertised by `tools/list`. The tool dispatcher carries no \
+         authorization gate, so every tool below executes with the host \
+         process's privileges.\n\n\
+         | tool | auth |\n| --- | --- |\n",
+        tools.len()
+    ));
+    for tool in tools {
+        matrix.push_str(&format!("| {tool} | {auth} |\n"));
+    }
+}
+
+/// Source of truth: both stdio dispatch tables in `rpc_stdio.rs`.
+fn render_stdio_surface(matrix: &mut String) {
+    let local = transport_surface::stdio_local_methods();
+    let remote = transport_surface::stdio_remote_methods();
+    let gap = transport_surface::stdio_remote_gap();
+
+    matrix.push_str(&format!(
+        "\n## stdio JSON-RPC (source: crates/reddb-server/src/rpc_stdio.rs)\n\n\
+         {} methods in the local (embedded) table, {} in the remote (gRPC \
+         proxy) table. {} locally served methods have no remote arm: {}.\n\n\
+         | method | local | remote |\n| --- | --- | --- |\n",
+        local.len(),
+        remote.len(),
+        gap.len(),
+        gap.join(", ")
+    ));
+    for method in local {
+        let local_state = if method.starts_with(transport_surface::STDIO_AUTH_PREFIX) {
+            "rejected"
+        } else {
+            "served"
+        };
+        let remote_state = if remote.contains(&method) {
+            "served"
+        } else {
+            "missing"
+        };
+        matrix.push_str(&format!("| {method} | {local_state} | {remote_state} |\n"));
+    }
+}
+
+/// Source of truth: the `handle_session` frame-kind dispatch.
+fn render_redwire_surface(matrix: &mut String) {
+    let kinds = transport_surface::redwire_frame_kinds();
+    matrix.push_str(&format!(
+        "\n## RedWire (source: crates/reddb-server/src/wire/redwire/session.rs)\n\n\
+         {} client-to-server `MessageKind`s dispatched by `handle_session`.\n\n\
+         | message kind |\n| --- |\n",
+        kinds.len()
+    ));
+    for kind in kinds {
+        matrix.push_str(&format!("| {kind} |\n"));
+    }
 }
 
 pub(crate) type RouteCatalog = CommandCatalog;
@@ -1160,19 +1265,77 @@ mod tests {
         );
     }
 
-    #[test]
-    fn coverage_matrix_exposes_a_seeded_transport_gap() {
+    fn one_command_matrix() -> String {
         let catalog = CommandCatalog::build(vec![RouteSpec {
             auth: RouteAuth::Public,
             ..spec("health.live", RouteMethod::Get, "/health/live")
         }])
         .unwrap();
+        render_command_coverage_matrix(&catalog)
+    }
 
-        let matrix = render_command_coverage_matrix(&catalog);
+    #[test]
+    fn coverage_matrix_lists_every_transport_section_and_its_source() {
+        let matrix = one_command_matrix();
 
+        assert!(matrix.contains("## HTTP commands (source: discovered command catalog)"));
+        assert!(
+            matrix.contains("## gRPC surface (source: crates/reddb-grpc-proto/proto/reddb.proto)")
+        );
         assert!(matrix.contains(
-            "| health.live | public | served | undeclared | undeclared | undeclared | undeclared |"
+            "## MCP tools (source: crates/reddb-server/src/mcp/tools.rs, mcp/server.rs)"
         ));
+        assert!(matrix.contains("## stdio JSON-RPC (source: crates/reddb-server/src/rpc_stdio.rs)"));
+        assert!(
+            matrix.contains("## RedWire (source: crates/reddb-server/src/wire/redwire/session.rs)")
+        );
+        assert!(matrix.contains("| health.live | public |"));
+    }
+
+    #[test]
+    fn coverage_matrix_renders_the_extracted_transport_inventories() {
+        let matrix = one_command_matrix();
+
+        for method in transport_surface::grpc_rpc_methods() {
+            assert!(
+                matrix.contains(&format!("| {method} |\n")),
+                "missing rpc {method}"
+            );
+        }
+        for kind in transport_surface::redwire_frame_kinds() {
+            assert!(
+                matrix.contains(&format!("| {kind} |\n")),
+                "missing kind {kind}"
+            );
+        }
+        for tool in transport_surface::mcp_advertised_tools() {
+            assert!(
+                matrix.contains(&format!("| {tool} | none |\n")),
+                "MCP tool {tool} is not flagged auth-none"
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_matrix_shows_the_stdio_remote_gap_by_name() {
+        let matrix = one_command_matrix();
+        let gap = transport_surface::stdio_remote_gap();
+
+        assert_eq!(gap.len(), 8);
+        assert!(matrix.contains(&format!(
+            "{} locally served methods have no remote arm: {}.",
+            gap.len(),
+            gap.join(", ")
+        )));
+        for method in gap {
+            assert!(
+                matrix.contains(&format!("| {method} | served | missing |\n")),
+                "stdio method {method} is not shown as a remote gap"
+            );
+        }
+        for method in transport_surface::stdio_remote_methods() {
+            assert!(matrix.contains(&format!("| {method} | served | served |\n")));
+        }
     }
 
     #[test]

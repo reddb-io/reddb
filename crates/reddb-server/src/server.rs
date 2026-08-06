@@ -171,9 +171,11 @@ mod routing;
 mod serverless_support;
 pub mod tls;
 mod transport;
+mod transport_surface;
 
-/// Generate the command-by-transport authorization coverage artifact from the
-/// same discovered catalog used by HTTP dispatch.
+/// Generate the command-coverage artifact: the discovered HTTP command catalog
+/// plus one inventory per non-HTTP transport, each read from that transport's
+/// own source of truth. See [`route_catalog::render_command_coverage_matrix`].
 #[doc(hidden)]
 pub fn command_coverage_matrix() -> String {
     route_catalog::render_command_coverage_matrix(routes::discovered_route_catalog())
