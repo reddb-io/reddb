@@ -14,6 +14,15 @@ async fn red_uri_uses_redwire_transport() {
     assert_eq!(error.code, ErrorCode::Network);
 }
 
+#[cfg(feature = "redwire-tls")]
+#[tokio::test]
+async fn reds_uri_uses_redwire_tls_transport() {
+    let error = Reddb::connect("reds://127.0.0.1:1")
+        .await
+        .expect_err("closed RedWire TLS port must fail");
+    assert_eq!(error.code, ErrorCode::Network);
+}
+
 #[tokio::test]
 async fn redwire_query_with_params_against_live_server() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("RED_SMOKE").as_deref() != Ok("1") {
