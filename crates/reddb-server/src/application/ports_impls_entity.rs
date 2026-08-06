@@ -9,7 +9,8 @@ use crate::application::ttl_payload::{
 };
 use crate::json::{to_vec as json_to_vec, Value as JsonValue};
 use crate::storage::query::resolve_declared_data_type;
-use crate::storage::schema::{coerce as coerce_schema_value, DataType, Value};
+use reddb_types::coerce::coerce as coerce_schema_value;
+use reddb_types::{DataType, Value};
 use crate::storage::unified::MetadataValue;
 
 use super::*;
