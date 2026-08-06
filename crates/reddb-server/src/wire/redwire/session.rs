@@ -158,10 +158,19 @@ impl RedWireExecutionContextGuard {
             Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant.clone()),
             None => crate::runtime::execution_context::clear_current_tenant(),
         }
-        crate::runtime::execution_context::set_current_auth_identity(
-            ctx.audit_principal.clone(),
-            role,
-        );
+        // Anonymous sessions exist only when server auth is disabled (the
+        // handshake refuses anonymous otherwise) and historically ran with
+        // NO installed identity — enforcement off. Installing the handshake's
+        // `Read` role here would reject every anonymous write (issue #2149
+        // review). The tenant install above still applies for RLS.
+        if ctx.audit_principal == "anonymous" {
+            crate::runtime::execution_context::clear_current_auth_identity();
+        } else {
+            crate::runtime::execution_context::set_current_auth_identity(
+                ctx.audit_principal.clone(),
+                role,
+            );
+        }
         Self {
             previous_tenant,
             previous_identity,
