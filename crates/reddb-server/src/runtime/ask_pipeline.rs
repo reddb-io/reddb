@@ -43,7 +43,7 @@ use super::statement_frame::{EffectiveScope, ReadFrame};
 use super::RedDBRuntime;
 use crate::api::{RedDBError, RedDBResult};
 use crate::application::SearchContextInput;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::entity::{EntityData, EntityKind, UnifiedEntity};
 
 /// Default cap for Stage 4 row output. Override per-call via
@@ -1315,7 +1315,7 @@ mod tests {
     use crate::auth::Role;
     use crate::runtime::statement_frame::EffectiveScope;
     use crate::runtime::RedDBRuntime;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use crate::storage::transaction::snapshot::Snapshot;
     use crate::storage::unified::entity::{
         EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
