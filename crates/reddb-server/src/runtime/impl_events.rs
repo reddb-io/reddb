@@ -194,6 +194,10 @@ fn queue_event_ids(store: &UnifiedStore, queue: &str) -> RedDBResult<HashSet<Str
         return Ok(HashSet::new());
     };
     let mut ids = HashSet::new();
+    // Deliberately visibility-free: the backfill dedup set must include
+    // consumed/ACKed messages (committed xmax, pre-vacuum). Filtering by
+    // snapshot would drop them from the set and re-enqueue events that
+    // were already delivered (issue #2137 review).
     for entity in manager.query_all(|entity| matches!(entity.kind, EntityKind::QueueMessage { .. }))
     {
         let EntityData::QueueMessage(message) = entity.data else {

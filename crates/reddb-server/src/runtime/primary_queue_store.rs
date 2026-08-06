@@ -415,13 +415,9 @@ impl PrimaryQueueStore {
         // the message on subsequent reads.
         let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
         let mut out: Vec<QueueMessageOrdered> = manager
-            .query_all(move |entity| {
-                if !matches!(entity.kind, EntityKind::QueueMessage { .. })
-                    || !matches!(entity.data, EntityData::QueueMessage(_))
-                {
-                    return false;
-                }
-                crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
+            .scan(snap_ctx.as_ref(), |entity| {
+                matches!(entity.kind, EntityKind::QueueMessage { .. })
+                    && matches!(entity.data, EntityData::QueueMessage(_))
             })
             .into_iter()
             .filter_map(|entity| {

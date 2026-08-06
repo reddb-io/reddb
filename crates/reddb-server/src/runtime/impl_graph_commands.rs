@@ -1406,20 +1406,15 @@ fn scan_collection_with_candidates(
     collection: &str,
     candidates: &Option<std::collections::HashSet<u64>>,
 ) -> Vec<UnifiedEntity> {
-    let resolver =
-        crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     match candidates {
         Some(ids) => store
             .get_collection(collection)
-            .map(|m| {
-                m.query_all(|e| {
-                    ids.contains(&e.id.raw()) && resolver.resolve_read_candidate(e).is_some()
-                })
-            })
+            .map(|manager| manager.scan(snapshot.as_ref(), |e| ids.contains(&e.id.raw())))
             .unwrap_or_default(),
         None => store
             .get_collection(collection)
-            .map(|m| m.query_all(|e| resolver.resolve_read_candidate(e).is_some()))
+            .map(|manager| manager.scan(snapshot.as_ref(), |_| true))
             .unwrap_or_default(),
     }
 }

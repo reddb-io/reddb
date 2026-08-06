@@ -36,6 +36,9 @@ mod e2e_issue_1786_ephemeral_query;
 #[path = "cli_transport/e2e_issue_1788_row_formats.rs"]
 mod e2e_issue_1788_row_formats;
 
+#[path = "cli_transport/e2e_issue_2133_server_bootstrap.rs"]
+mod e2e_issue_2133_server_bootstrap;
+
 #[path = "surface_contracts/cross_binary_smoke.rs"]
 mod cross_binary_smoke;
 
