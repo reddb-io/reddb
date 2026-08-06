@@ -35,7 +35,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::metadata::{Metadata, MetadataStorage};
 use crate::storage::query::value_compare::partial_compare_values;
-use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 /// Unique identifier for a segment
 pub type SegmentId = u64;
@@ -1833,7 +1833,7 @@ fn canonical_gap_score(left: &CanonicalKey, right: &CanonicalKey) -> Option<f64>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use crate::storage::unified::entity::RowData;
     use crate::storage::unified::MetadataValue;
 
