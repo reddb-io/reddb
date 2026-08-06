@@ -22,7 +22,7 @@
 //! Timescale / Postgres contract.
 
 use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::timeseries::{ChunkMeta, HypertableSpec};
 
 use super::partition_pruning::{
