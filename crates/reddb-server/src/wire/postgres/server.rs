@@ -195,6 +195,15 @@ pub async fn start_pg_wire_listener(
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
+    start_pg_wire_listener_on(listener, config, runtime).await
+}
+
+/// Serve PostgreSQL wire traffic on a listener bound during node bootstrap.
+pub async fn start_pg_wire_listener_on(
+    listener: TcpListener,
+    config: PgWireConfig,
+    runtime: Arc<RedDBRuntime>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Posture: with no auth store enabled, PG-Wire falls back to trust
     // auth for loopback binds only (see `authenticate_startup`). Surface a
     // startup warning whenever that fallback is active so an operator never

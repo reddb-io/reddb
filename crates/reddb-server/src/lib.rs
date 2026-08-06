@@ -61,6 +61,7 @@ pub mod sqlstate;
 pub mod storage;
 pub mod streams;
 pub mod telemetry;
+pub mod transport;
 pub mod utils;
 pub mod wire;
 
