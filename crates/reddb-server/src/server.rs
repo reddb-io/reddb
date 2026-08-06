@@ -194,6 +194,10 @@ use self::routing::*;
 use self::serverless_support::*;
 use self::transport::*;
 
+pub(crate) fn command_catalog() -> &'static route_catalog::CommandCatalog {
+    routes::discovered_route_catalog()
+}
+
 /// PLAN.md Phase 6.2 — endpoint segregation. A given HTTP listener
 /// can serve either every public surface (`Public`, default) or a
 /// restricted slice (`AdminOnly`, `MetricsOnly`). The route filter at
