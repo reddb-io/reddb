@@ -11,8 +11,8 @@ use crate::application::ttl_payload::{
     normalize_ttl_patch_operations, parse_top_level_ttl_metadata_entries,
 };
 use crate::json::{to_vec as json_to_vec, Value as JsonValue};
-use reddb_types::Value;
 use crate::storage::unified::MetadataValue;
+use reddb_types::Value;
 
 use super::*;
 
@@ -1784,12 +1784,11 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
         .index_store_ref()
         .indexed_columns_set(collection.as_str());
     let has_secondary_indexes = !indexed_cols.is_empty();
-    let mut field_snapshots: Vec<Vec<(String, reddb_types::Value)>> =
-        if has_secondary_indexes {
-            Vec::with_capacity(rows.len())
-        } else {
-            Vec::new()
-        };
+    let mut field_snapshots: Vec<Vec<(String, reddb_types::Value)>> = if has_secondary_indexes {
+        Vec::with_capacity(rows.len())
+    } else {
+        Vec::new()
+    };
 
     let entities: Vec<UnifiedEntity> = rows
         .into_iter()
@@ -2028,8 +2027,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         let tuple_rows: Vec<CreateRowInput> = rows
             .into_iter()
             .map(|values| {
-                let mut fields: Vec<(String, reddb_types::Value)> =
-                    Vec::with_capacity(ncols);
+                let mut fields: Vec<(String, reddb_types::Value)> = Vec::with_capacity(ncols);
                 for (name, value) in column_names.iter().zip(values) {
                     fields.push((name.clone(), value));
                 }
@@ -2217,10 +2215,8 @@ impl RuntimeEntityPort for RedDBRuntime {
         // container; otherwise plain JSON. Reads decode either form to JSON.
         let binary_body = self.binary_document_body_enabled();
         let body_bytes = crate::document_body::serialize_document_body(&input.body, binary_body)?;
-        let fields: Vec<(String, reddb_types::Value)> = vec![(
-            "body".to_string(),
-            reddb_types::Value::Json(body_bytes),
-        )];
+        let fields: Vec<(String, reddb_types::Value)> =
+            vec![("body".to_string(), reddb_types::Value::Json(body_bytes))];
 
         let mut metadata = input.metadata;
         contract.apply_default_ttl(&mut metadata);
@@ -2275,10 +2271,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             input.value
         };
         let fields = vec![
-            (
-                "key".to_string(),
-                reddb_types::Value::text(input.key),
-            ),
+            ("key".to_string(), reddb_types::Value::text(input.key)),
             ("value".to_string(), value),
         ];
         let collection = input.collection;
@@ -2308,14 +2301,8 @@ impl RuntimeEntityPort for RedDBRuntime {
         contract.ensure_model(crate::catalog::CollectionModel::TimeSeries)?;
 
         let mut fields = vec![
-            (
-                "metric".to_string(),
-                reddb_types::Value::text(input.metric),
-            ),
-            (
-                "value".to_string(),
-                reddb_types::Value::Float(input.value),
-            ),
+            ("metric".to_string(), reddb_types::Value::text(input.metric)),
+            ("value".to_string(), reddb_types::Value::Float(input.value)),
         ];
 
         if let Some(timestamp_ns) = input.timestamp_ns {
@@ -2336,10 +2323,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             let tags_bytes = json_to_vec(&tags_json).map_err(|err| {
                 crate::RedDBError::Query(format!("failed to serialize timeseries tags: {err}"))
             })?;
-            fields.push((
-                "tags".to_string(),
-                reddb_types::Value::Json(tags_bytes),
-            ));
+            fields.push(("tags".to_string(), reddb_types::Value::Json(tags_bytes)));
         }
 
         let collection = input.collection;

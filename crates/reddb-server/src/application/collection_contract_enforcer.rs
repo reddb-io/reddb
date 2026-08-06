@@ -4,9 +4,10 @@ use crate::application::entity::{RowUpdateColumnRule, RowUpdateContractPlan};
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::physical::CollectionContract;
 use crate::storage::query::resolve_declared_data_type;
-use crate::storage::schema::{coerce as coerce_schema_value, DataType, Value};
 use crate::storage::unified::MetadataValue;
 use crate::RedDBResult;
+use reddb_types::coerce::coerce as coerce_schema_value;
+use reddb_types::{DataType, Value};
 
 /// Pure collection-contract evaluator used by unit tests and non-runtime callers.
 pub(crate) struct CollectionContractEnforcer<'a> {
@@ -187,7 +188,7 @@ fn ensure_collection_model_contract(
         context_index_fields: Vec::new(),
         declared_columns: Vec::new(),
         table_def: matches!(requested_model, crate::catalog::CollectionModel::Table)
-            .then(|| crate::storage::schema::TableDef::new(collection.to_string())),
+            .then(|| reddb_types::TableDef::new(collection.to_string())),
         timestamps_enabled: false,
         context_index_enabled: false,
         metrics_raw_retention_ms: None,
@@ -891,7 +892,7 @@ fn resolved_uniqueness_rules(
         for constraint in &table_def.constraints {
             if matches!(
                 constraint.constraint_type,
-                crate::storage::schema::ConstraintType::PrimaryKey
+                reddb_types::ConstraintType::PrimaryKey
             ) && !constraint.columns.is_empty()
             {
                 rules.push(UniquenessRule {
@@ -901,7 +902,7 @@ fn resolved_uniqueness_rules(
                 });
             } else if matches!(
                 constraint.constraint_type,
-                crate::storage::schema::ConstraintType::Unique
+                reddb_types::ConstraintType::Unique
             ) && !constraint.columns.is_empty()
             {
                 rules.push(UniquenessRule {
@@ -1275,7 +1276,7 @@ mod tests {
     use super::*;
     use crate::catalog::{CollectionModel, SchemaMode};
     use crate::physical::ContractOrigin;
-    use crate::storage::schema::{ColumnDef, Constraint, ConstraintType, DataType, TableDef};
+    use reddb_types::{ColumnDef, Constraint, ConstraintType, DataType, TableDef};
 
     fn table_contract(schema_mode: SchemaMode) -> CollectionContract {
         let mut table_def = TableDef::new("people");
