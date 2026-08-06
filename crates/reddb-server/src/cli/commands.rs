@@ -893,12 +893,10 @@ fn admin_flags() -> Vec<FlagSchema> {
         FlagSchema::new("token")
             .with_short('t')
             .with_description("Admin bearer token (env: RED_ADMIN_TOKEN)"),
-        FlagSchema::boolean("csv")
-            .with_description("Emit CSV for tabular admin catalog commands"),
+        FlagSchema::boolean("csv").with_description("Emit CSV for tabular admin catalog commands"),
         FlagSchema::new("limit").with_description("Max rows for list/stats/query commands"),
         FlagSchema::new("type").with_description("Filter collections by model"),
-        FlagSchema::boolean("include-internal")
-            .with_description("Include internal collections"),
+        FlagSchema::boolean("include-internal").with_description("Include internal collections"),
         FlagSchema::new("collection").with_description("Filter by collection"),
         FlagSchema::boolean("yes")
             .with_short('y')
