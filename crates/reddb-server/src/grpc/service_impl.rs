@@ -280,7 +280,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<KvWatchRequest>,
     ) -> Result<Response<Self::KvWatchStream>, Status> {
-        self.authorize_read(request.metadata())?;
         let req = request.into_inner();
         if req.collection.trim().is_empty() || req.key.trim().is_empty() {
             return Err(Status::invalid_argument("collection and key are required"));
@@ -358,7 +357,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let native = self.native_use_cases();
         let readiness = native.readiness();
         let health = native.health();
@@ -378,7 +376,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<DeploymentProfileRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let profile = {
             let profile = request.into_inner().profile;
             let normalized = profile.trim().to_lowercase();
@@ -405,7 +402,6 @@ impl RedDb for GrpcRuntime {
     }
 
     async fn stats(&self, _request: Request<Empty>) -> Result<Response<StatsReply>, Status> {
-        self.authorize_read(_request.metadata())?;
         let stats = self.catalog_use_cases().stats();
         Ok(Response::new(StatsReply {
             collection_count: stats.store.collection_count as u64,
@@ -424,7 +420,6 @@ impl RedDb for GrpcRuntime {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<CollectionsReply>, Status> {
-        self.authorize_read(_request.metadata())?;
         Ok(Response::new(CollectionsReply {
             collections: self.catalog_use_cases().collections(),
         }))
@@ -434,7 +429,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let catalog = self.catalog_use_cases().snapshot();
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_collection_readiness_json(
@@ -447,7 +441,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_collection_attention_json(
                 &self.catalog_use_cases().collection_attention(),
@@ -459,7 +452,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_attention_summary_json(
                 &self.catalog_use_cases().attention_summary(),
@@ -471,7 +463,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let required = grpc_parse_serverless_readiness_requirements(&payload)
             .map_err(Status::invalid_argument)?;
@@ -512,7 +503,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
 
         let force = json_bool_field(&payload, "force").unwrap_or(false);
@@ -758,7 +748,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let dry_run = json_bool_field(&payload, "dry_run").unwrap_or(false);
         let operations =
@@ -879,7 +868,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_consistency_json(
                 &self.catalog_use_cases().consistency_report(),
@@ -891,7 +879,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let metadata = self
             .native_use_cases()
             .physical_metadata()
@@ -905,7 +892,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let header = self.native_use_cases().native_header().map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::native_json::native_header_json(header),
@@ -916,7 +902,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let roots = self
             .native_use_cases()
             .native_collection_roots()
@@ -930,7 +915,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let summary = self
             .native_use_cases()
             .native_manifest_summary()
@@ -944,7 +928,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let summary = self
             .native_use_cases()
             .native_registry_summary()
@@ -958,7 +941,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let summary = self
             .native_use_cases()
             .native_recovery_summary()
@@ -972,7 +954,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let summary = self
             .native_use_cases()
             .native_catalog_summary()
@@ -986,7 +967,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let summary = self
             .native_use_cases()
             .native_metadata_state_summary()
@@ -1000,7 +980,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::ops_json::physical_authority_status_json(
                 &self.native_use_cases().physical_authority_status(),
@@ -1012,7 +991,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let state = self
             .native_use_cases()
             .native_physical_state()
@@ -1032,7 +1010,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let summaries = self
             .native_use_cases()
             .native_vector_artifact_pages()
@@ -1046,7 +1023,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let batch = self
             .native_use_cases()
             .inspect_vector_artifacts()
@@ -1060,7 +1036,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<CollectionRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let request = request.into_inner();
         let artifact = self
             .native_use_cases()
@@ -1080,7 +1055,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let policy = self
             .native_use_cases()
             .native_header_repair_policy()
@@ -1094,7 +1068,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<OperationReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let policy = self
             .native_use_cases()
             .repair_native_header_from_metadata()
@@ -1109,7 +1082,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<CollectionRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let artifact = self
             .native_use_cases()
@@ -1129,7 +1101,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let batch = self
             .native_use_cases()
             .warmup_vector_artifacts()
@@ -1143,7 +1114,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<OperationReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let repaired = self
             .native_use_cases()
             .repair_native_physical_state_from_metadata()
@@ -1162,7 +1132,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<OperationReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let rebuilt = self
             .native_use_cases()
             .rebuild_physical_metadata_from_native_state()
@@ -1181,7 +1150,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<ManifestRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let request = request.into_inner();
         let events = self
             .native_use_cases()
@@ -1197,7 +1165,6 @@ impl RedDb for GrpcRuntime {
     }
 
     async fn roots(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let roots = self
             .native_use_cases()
             .collection_roots()
@@ -1208,7 +1175,6 @@ impl RedDb for GrpcRuntime {
     }
 
     async fn snapshots(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let snapshots = self.native_use_cases().snapshots().map_err(to_status)?;
         // Round-trip through the JSON guard rather than emit raw
         // `Debug` text — the inner snapshot struct can carry user-
@@ -1220,7 +1186,6 @@ impl RedDb for GrpcRuntime {
     }
 
     async fn exports(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let exports = self.native_use_cases().exports().map_err(to_status)?;
         // See `snapshots` above — `exports` Debug text can carry user
         // path fragments. ADR 0010 §3 / #178.
@@ -1234,7 +1199,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<CollectionRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let request = request.into_inner();
         let indexes = match none_if_empty(&request.collection) {
             Some(collection) => self.catalog_use_cases().indexes_for_collection(collection),
@@ -1249,7 +1213,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<CollectionRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let request = request.into_inner();
         let indexes = match none_if_empty(&request.collection) {
             Some(collection) => self
@@ -1266,7 +1229,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<CollectionRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let request = request.into_inner();
         let indexes = match none_if_empty(&request.collection) {
             Some(collection) => self.catalog_use_cases().indexes_for_collection(collection),
@@ -1281,7 +1243,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_index_statuses_json(
                 &self.catalog_use_cases().index_statuses(),
@@ -1293,7 +1254,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_index_attention_json(
                 &self.catalog_use_cases().index_attention(),
@@ -1305,7 +1265,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexToggleRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument("index name cannot be empty"));
@@ -1323,7 +1282,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexNameRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument("index name cannot be empty"));
@@ -1341,7 +1299,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexNameRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument("index name cannot be empty"));
@@ -1359,7 +1316,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexNameRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument("index name cannot be empty"));
@@ -1377,7 +1333,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexNameRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument("index name cannot be empty"));
@@ -1395,7 +1350,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexNameRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument("index name cannot be empty"));
@@ -1413,7 +1367,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<CollectionRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let indexes = self
             .admin_use_cases()
@@ -1427,7 +1380,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let projections = self
             .catalog_use_cases()
             .graph_projections()
@@ -1448,7 +1400,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::graph_projections_json(
                 &self.catalog_use_cases().operational_graph_projections(),
@@ -1460,7 +1411,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_graph_projection_statuses_json(
                 &self.catalog_use_cases().graph_projection_statuses(),
@@ -1472,7 +1422,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_graph_projection_attention_json(
                 &self.catalog_use_cases().graph_projection_attention(),
@@ -1484,7 +1433,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<GraphProjectionUpsertRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let input = crate::application::admin_payload::finalize_graph_projection_upsert_input(
             request.name,
@@ -1511,7 +1459,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexNameRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument(
@@ -1542,7 +1489,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexNameRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument(
@@ -1562,7 +1508,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexNameRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument(
@@ -1582,7 +1527,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<IndexNameRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument(
@@ -1602,7 +1546,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::admin_payload::parse_analytics_job_mutation_input(&payload)
             .map_err(to_status)?;
@@ -1617,7 +1560,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::admin_payload::parse_analytics_job_mutation_input(&payload)
             .map_err(to_status)?;
@@ -1632,7 +1574,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::admin_payload::parse_analytics_job_mutation_input(&payload)
             .map_err(to_status)?;
@@ -1647,7 +1588,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::admin_payload::parse_analytics_job_mutation_input(&payload)
             .map_err(to_status)?;
@@ -1662,7 +1602,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::admin_payload::parse_analytics_job_mutation_input(&payload)
             .map_err(to_status)?;
@@ -1677,7 +1616,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::admin_payload::parse_analytics_job_mutation_input(&payload)
             .map_err(to_status)?;
@@ -1691,7 +1629,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let jobs = self
             .catalog_use_cases()
             .analytics_jobs()
@@ -1712,7 +1649,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::analytics_jobs_json(
                 &self.catalog_use_cases().operational_analytics_jobs(),
@@ -1724,7 +1660,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
                 &self.catalog_use_cases().analytics_job_statuses(),
@@ -1736,7 +1671,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_analytics_job_attention_json(
                 &self.catalog_use_cases().analytics_job_attention(),
@@ -1745,7 +1679,6 @@ impl RedDb for GrpcRuntime {
     }
 
     async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let request = request.into_inner();
         let page = self
             .query_use_cases()
@@ -1759,7 +1692,6 @@ impl RedDb for GrpcRuntime {
     }
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
         let request = request.into_inner();
         let (entity_types, capabilities) = grpc_parse_query_filters(&request)?;
@@ -1781,7 +1713,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<BatchQueryRequest>,
     ) -> Result<Response<BatchQueryReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
         let queries = request.into_inner().queries;
         let no_filter: Option<Vec<String>> = None;
@@ -1803,7 +1734,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<PrepareQueryRequest>,
     ) -> Result<Response<PrepareQueryReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let sql = request.into_inner().query;
         let prepared = self
             .prepared_registry
@@ -1819,7 +1749,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<ExecutePreparedRequest>,
     ) -> Result<Response<QueryReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
         let inner = request.into_inner();
         let params = inner
@@ -1843,7 +1772,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<QueryRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let result = self
             .query_use_cases()
             .explain(ExplainQueryInput {
@@ -1868,7 +1796,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::query_payload::parse_unified_search_input(&payload)
             .map_err(to_status)?;
@@ -1929,7 +1856,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::query_payload::parse_text_search_input(&payload)
             .map_err(to_status)?;
@@ -1956,7 +1882,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::query_payload::parse_multimodal_search_input(&payload)
             .map_err(to_status)?;
@@ -1983,7 +1908,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::query_payload::parse_unified_search_input(&payload)
             .map_err(to_status)?;
@@ -2044,7 +1968,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let request = request.into_inner();
         let payload = parse_json_payload(&request.payload_json)?;
         let input = crate::application::query_payload::parse_similar_search_input(
@@ -2074,7 +1997,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let request = request.into_inner();
         let payload = parse_json_payload(&request.payload_json)?;
         let input =
@@ -2096,7 +2018,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let projection = resolve_projection_payload(self, &payload)?;
         let input =
@@ -2115,7 +2036,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let projection = resolve_projection_payload(self, &payload)?;
         let input =
@@ -2131,7 +2051,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let projection = resolve_projection_payload(self, &payload)?;
         let input = crate::application::graph_payload::parse_graph_shortest_path_input(
@@ -2151,7 +2070,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let projection_name = json_string_field(&payload, "projection_name");
         let projection = resolve_projection_payload(self, &payload)?;
@@ -2184,7 +2102,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let projection_name = json_string_field(&payload, "projection_name");
         let projection = resolve_projection_payload(self, &payload)?;
@@ -2211,7 +2128,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let projection_name = json_string_field(&payload, "projection_name");
         let projection = resolve_projection_payload(self, &payload)?;
@@ -2237,7 +2153,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let projection_name = json_string_field(&payload, "projection_name");
         let projection = resolve_projection_payload(self, &payload)?;
@@ -2270,7 +2185,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let projection_name = json_string_field(&payload, "projection_name");
         let projection = resolve_projection_payload(self, &payload)?;
@@ -2310,7 +2224,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let projection_name = json_string_field(&payload, "projection_name");
         let projection = resolve_projection_payload(self, &payload)?;
@@ -2338,7 +2251,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let projection_name = json_string_field(&payload, "projection_name");
         let projection = resolve_projection_payload(self, &payload)?;
@@ -2367,7 +2279,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
         let projection_name = json_string_field(&payload, "projection_name");
         let projection = resolve_projection_payload(self, &payload)?;
@@ -2400,7 +2311,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<EntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || create_row_reply(&rt, request))
@@ -2414,7 +2324,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<EntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || create_node_reply(&rt, request))
@@ -2428,7 +2337,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<EntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || create_edge_reply(&rt, request))
@@ -2442,7 +2350,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<EntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || create_vector_reply(&rt, request))
@@ -2456,7 +2363,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<EntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let reply = create_document_reply(self, request)?;
         self.enforce_commit_policy_after_write()?;
@@ -2467,7 +2373,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<EntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let reply = create_kv_reply(self, request)?;
         self.enforce_commit_policy_after_write()?;
@@ -2478,7 +2383,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonBulkCreateRequest>,
     ) -> Result<Response<BulkEntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         // spawn_blocking: bulk_create_rows_fast acquires segment_arc.write() internally.
         // Running it directly inside an async fn would block the Tokio worker thread,
@@ -2495,7 +2399,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<proto::BinaryBulkInsertRequest>,
     ) -> Result<Response<proto::BulkInsertReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || bulk_insert_binary(&rt, request))
@@ -2528,7 +2431,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<tonic::Streaming<BatchInsertChunk>>,
     ) -> Result<Response<BatchInsertReply>, Status> {
-        self.authorize_write(request.metadata())?;
 
         let idempotency_key = request
             .metadata()
@@ -2588,7 +2490,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonBulkCreateRequest>,
     ) -> Result<Response<BulkEntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let rt = self.clone();
         let reply =
@@ -2603,7 +2504,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonBulkCreateRequest>,
     ) -> Result<Response<BulkEntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let rt = self.clone();
         let reply =
@@ -2618,7 +2518,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonBulkCreateRequest>,
     ) -> Result<Response<BulkEntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || {
@@ -2634,7 +2533,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonBulkCreateRequest>,
     ) -> Result<Response<BulkEntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || {
@@ -2647,7 +2545,6 @@ impl RedDb for GrpcRuntime {
     }
 
     async fn ask(&self, request: Request<AskRequest>) -> Result<Response<AskReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let ask_query = ask_query_from_request(request.into_inner(), false)?;
         let runtime = self.runtime.clone();
 
@@ -2665,7 +2562,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<AskRequest>,
     ) -> Result<Response<Self::AskStreamStream>, Status> {
-        self.authorize_read(request.metadata())?;
         let ask_query = ask_query_from_request(request.into_inner(), true)?;
         let runtime = self.runtime.clone();
         let events = tokio::task::spawn_blocking(move || {
@@ -2684,7 +2580,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::query_payload::parse_context_search_input(&payload)
             .map_err(to_status)?;
@@ -2701,7 +2596,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let result = crate::ai::grpc_embeddings(&self.runtime, &payload).map_err(to_status)?;
         Ok(Response::new(json_payload_reply(result)))
@@ -2711,7 +2605,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let result = crate::ai::grpc_prompt(&self.runtime, &payload).map_err(to_status)?;
         Ok(Response::new(json_payload_reply(result)))
@@ -2721,7 +2614,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let result = crate::ai::grpc_credentials(&self.runtime, &payload).map_err(to_status)?;
         Ok(Response::new(json_payload_reply(result)))
@@ -2731,7 +2623,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<UpdateEntityRequest>,
     ) -> Result<Response<EntityReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         Ok(Response::new(patch_entity_reply(self, request)?))
     }
@@ -2740,7 +2631,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let snapshot = self
             .native_use_cases()
             .create_snapshot()
@@ -2755,7 +2645,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<ExportRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         if request.name.trim().is_empty() {
             return Err(Status::invalid_argument("export name cannot be empty"));
@@ -2774,7 +2663,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<OperationReply>, Status> {
-        self.authorize_write(request.metadata())?;
         self.native_use_cases()
             .apply_retention_policy()
             .map_err(to_status)?;
@@ -2788,7 +2676,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<DeleteEntityRequest>,
     ) -> Result<Response<OperationReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let request = request.into_inner();
         let output = self
             .entity_use_cases()
@@ -2814,7 +2701,6 @@ impl RedDb for GrpcRuntime {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<OperationReply>, Status> {
-        self.authorize_write(_request.metadata())?;
         self.native_use_cases().checkpoint().map_err(to_status)?;
         Ok(Response::new(OperationReply {
             ok: true,
@@ -2867,7 +2753,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let db = self.runtime.db();
         let role = &db.options().replication.role;
         let mut map = crate::json::Map::new();
@@ -3056,7 +2941,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_replication_stream(&request)?;
         let db = self.runtime.db();
         let repl = db.replication.as_ref().ok_or_else(|| {
             Status::failed_precondition("this instance is not a replication primary")
@@ -3228,7 +3112,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let authenticated_replica_id = self.authorize_replication_ack(&request)?;
+        let authenticated_replica_id = authorized_principal(&request)?.to_string();
         let db = self.runtime.db();
         db.replication.as_ref().ok_or_else(|| {
             Status::failed_precondition("this instance is not a replication primary")
@@ -3278,6 +3162,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
+        let replica_id = authorized_principal(&request)?.to_string();
         // Issue #830 resumable transfer control headers (all optional — their
         // absence preserves the legacy whole-snapshot envelope).
         let snapshot_max_bytes =
@@ -3286,7 +3171,6 @@ impl RedDb for GrpcRuntime {
             snapshot_metadata_usize(request.metadata(), "x-reddb-snapshot-offset")?.unwrap_or(0);
         let requested_snapshot_token =
             snapshot_metadata_string(request.metadata(), "x-reddb-snapshot-token")?;
-        let replica_id = self.authorize_replication_stream(&request)?;
         let db = self.runtime.db();
 
         let repl = db.replication.as_ref().ok_or_else(|| {
@@ -3402,7 +3286,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         if !matches!(
             self.runtime.db().options().replication.role,
             crate::replication::ReplicationRole::Primary
@@ -3507,8 +3390,9 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
+        // The admin gate runs at dispatch (`GrpcAuthClass::Admin`); this
+        // resolve is only for the per-target lifecycle authorization below.
         let auth = self.resolve_auth(request.metadata());
-        check_permission(&auth, false, true).map_err(Status::permission_denied)?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
@@ -3567,8 +3451,9 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
+        // The admin gate runs at dispatch (`GrpcAuthClass::Admin`); this
+        // resolve is only for the per-target lifecycle authorization below.
         let auth = self.resolve_auth(request.metadata());
-        check_permission(&auth, false, true).map_err(Status::permission_denied)?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
@@ -3613,7 +3498,6 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
-        self.authorize_admin(request.metadata())?;
 
         let users = self.auth_store.list_users();
         let user_list: Vec<JsonValue> = users
@@ -3669,7 +3553,6 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
-        self.authorize_admin(request.metadata())?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
@@ -3708,7 +3591,6 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
-        self.authorize_admin(request.metadata())?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let key = json_string_field(&payload, "key")
@@ -3832,7 +3714,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_write(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let name = json_string_field(&payload, "name")
             .ok_or_else(|| Status::invalid_argument("missing field: name"))?;
@@ -3877,7 +3758,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<OperationReply>, Status> {
-        self.authorize_admin(request.metadata())?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let name = json_string_field(&payload, "name")
             .ok_or_else(|| Status::invalid_argument("missing field: name"))?;
@@ -3903,7 +3783,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<CollectionRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        self.authorize_read(request.metadata())?;
         let collection = &request.into_inner().collection;
         let store = self.runtime.db().store();
 
