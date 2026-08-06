@@ -697,8 +697,6 @@ fn doctor_flags() -> Vec<FlagSchema> {
             .with_default("127.0.0.1:5000"),
         FlagSchema::new("token")
             .with_description("Admin bearer token; defaults to RED_ADMIN_TOKEN env"),
-        FlagSchema::boolean("json")
-            .with_description("Emit a single JSON object instead of human text"),
         FlagSchema::new("backup-age-warn-secs")
             .with_description("Warn when last successful backup is older than N seconds")
             .with_default("600"),

@@ -65,7 +65,11 @@ impl HttpOptions {
 }
 
 impl HttpClient {
-    pub async fn connect(opts: HttpOptions) -> Result<Self> {
+    /// Build a handle without touching the network.
+    ///
+    /// Callers that must not pay a round-trip up front (one-shot CLI
+    /// commands) use this and let the first real request report failure.
+    pub fn new(opts: HttpOptions) -> Result<Self> {
         let mut builder =
             ClientBuilder::new().user_agent(format!("reddb-rs/{}", env!("CARGO_PKG_VERSION")));
         if opts.dangerous_accept_invalid_certs {
@@ -74,11 +78,15 @@ impl HttpClient {
         let client = builder
             .build()
             .map_err(|e| ClientError::new(ErrorCode::Network, format!("reqwest: {e}")))?;
-        let handle = Self {
+        Ok(Self {
             base_url: opts.base_url,
             inner: client,
             token: opts.token,
-        };
+        })
+    }
+
+    pub async fn connect(opts: HttpOptions) -> Result<Self> {
+        let handle = Self::new(opts)?;
         // Sanity check before returning.
         handle.health().await?;
         Ok(handle)
@@ -138,6 +146,29 @@ impl HttpClient {
             .await
             .map_err(net_err)?;
         decode_text(response).await
+    }
+
+    /// Fetch a non-streaming HTTP endpoint and return the raw status code
+    /// alongside the body.
+    ///
+    /// Operator probes (`red doctor`) diagnose on the status itself — a gated
+    /// `/metrics` answers 401 rather than failing to connect — so they need
+    /// the code instead of a mapped [`ClientError`].
+    pub async fn get_text_with_status(&self, path: &str) -> Result<(u16, String)> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .inner
+            .get(&url)
+            .headers(self.headers())
+            .send()
+            .await
+            .map_err(net_err)?;
+        let status = response.status().as_u16();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::Network, format!("read body: {e}")))?;
+        Ok((status, text))
     }
 
     /// Compare-and-set a blob-cache value without exposing the wire-level
@@ -407,7 +438,7 @@ async fn decode_text(response: reqwest::Response) -> Result<String> {
     if status.is_success() {
         return Ok(text);
     }
-    let body = serde_json::from_str::<Value>(&text).unwrap_or_else(|_| Value::String(text));
+    let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
     Err(http_err(status, Some(body)))
 }
 

@@ -12,6 +12,7 @@
 ///
 /// Parses argv using the schema-driven CLI parser, routes to the
 /// appropriate command, and dispatches execution.
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::ToSocketAddrs;
@@ -4502,10 +4503,43 @@ fn operator_http_client(
     if let Some(token) = token {
         options = options.with_token(token);
     }
-    let client = runtime
-        .block_on(HttpClient::connect(options))
-        .map_err(|err| err.to_string())?;
+    let client = HttpClient::new(options).map_err(|err| err.to_string())?;
     Ok((runtime, client))
+}
+
+/// Operator HTTP handle that materialises on first request.
+///
+/// Usage errors, help text, and argument validation must all work with no
+/// server reachable, so nothing is built at dispatch time; the runtime and
+/// the driver handle appear when a command actually issues a request.
+struct OperatorClient {
+    bind: String,
+    token: Option<String>,
+    handle: OnceCell<(tokio::runtime::Runtime, HttpClient)>,
+}
+
+impl OperatorClient {
+    fn new(bind: &str, token: Option<&str>) -> Self {
+        Self {
+            bind: bind.to_string(),
+            token: token.map(ToString::to_string),
+            handle: OnceCell::new(),
+        }
+    }
+
+    /// Runtime + driver handle for `command`, built on first call.
+    /// Terminates the process when the handle cannot be built at all.
+    fn get(&self, command: &str, json_mode: bool) -> &(tokio::runtime::Runtime, HttpClient) {
+        self.handle.get_or_init(|| {
+            operator_http_client(&self.bind, self.token.as_deref()).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error(command, &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            })
+        })
+    }
 }
 
 fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
@@ -4514,44 +4548,47 @@ fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
     let token = admin_token_from_flags_or_env(flags);
     let subcommand = remaining.first().map(String::as_str).unwrap_or("help");
     let args: Vec<&str> = remaining.iter().skip(1).map(String::as_str).collect();
+    let client = OperatorClient::new(&bind, token.as_deref());
 
-    let (runtime, client) = match subcommand {
-        "cache" | "collections" | "indices" | "policies" | "query" => {
-            operator_http_client(&bind, token.as_deref()).unwrap_or_else(|err| {
-                if json_mode {
-                    json_error("admin", &err);
-                }
-                eprintln!("error: {err}");
-                std::process::exit(1);
-            })
-        }
+    match subcommand {
+        "cache" => run_admin_cache_command(&client, json_mode, &args),
+        "collections" => run_admin_collections_command(flags, &client, json_mode, &args),
+        "indices" => run_admin_indices_command(flags, &client, json_mode, &args),
+        "policies" => run_admin_policies_command(flags, &client, json_mode, &args),
+        "query" => run_admin_query_command(flags, &client, json_mode, &args),
         _ => {
             if json_mode {
                 json_ok(
                     "admin",
-                    "{\"subcommands\":[\"cache\",\"collections\",\"indices\",\"policies\",\"query\"]}",
+                    "{\"subcommands\":[\"cache\",\"collections\",\"indices\",\"policies\",\"query\"],\"message\":\"use a subcommand, e.g. red admin collections list\"}",
                 );
             } else {
-                println!("Usage: red admin <cache|collections|indices|policies|query>");
+                println!("Usage: red admin <subcommand>");
+                println!();
+                println!("Subcommands:");
+                println!("  cache        Blob cache admin operations");
+                println!("  collections  Collection catalog queries via red.collections/red.columns/red.stats");
+                println!("  indices      Index catalog queries via red.indices");
+                println!("  policies     Policy catalog queries via red.policies");
+                println!("  query        Run a native SQL catalog query via /query");
+                println!();
+                println!("Flags:");
+                println!("  --bind <addr>   Server HTTP address (default: 127.0.0.1:5000, env: REDDB_BIND_ADDR)");
+                println!("  --token <tok>   Admin bearer token (env: RED_ADMIN_TOKEN)");
+                println!("  --json          JSON output");
+                println!("  --csv           CSV output for tabular commands");
+                println!("  --limit <n>     Limit rows for list/stats/query commands");
+                println!(
+                    "  --no-color      Accepted for compatibility; admin output is never colored"
+                );
             }
-            return;
         }
-    };
-
-    match subcommand {
-        "cache" => run_admin_cache_command(&runtime, &client, json_mode, &args),
-        "collections" => run_admin_collections_command(flags, &runtime, &client, json_mode, &args),
-        "indices" => run_admin_indices_command(flags, &runtime, &client, json_mode, &args),
-        "policies" => run_admin_policies_command(flags, &runtime, &client, json_mode, &args),
-        "query" => run_admin_query_command(flags, &runtime, &client, json_mode, &args),
-        _ => unreachable!(),
     }
 }
 
 fn run_admin_collections_command(
     flags: &HashMap<String, FlagValue>,
-    runtime: &tokio::runtime::Runtime,
-    client: &HttpClient,
+    client: &OperatorClient,
     json_mode: bool,
     args: &[&str],
 ) {
@@ -4574,14 +4611,7 @@ fn run_admin_collections_command(
                 sql.push_str(&filters.join(" AND "));
             }
             push_limit(&mut sql, flags);
-            emit_admin_query_result(
-                "admin.collections.list",
-                runtime,
-                client,
-                &sql,
-                format,
-                json_mode,
-            );
+            emit_admin_query_result("admin.collections.list", client, &sql, format, json_mode);
         }
         "show" => {
             let Some(name) = sub_args.first().copied().filter(|name| !name.is_empty()) else {
@@ -4592,7 +4622,7 @@ fn run_admin_collections_command(
                     json_mode,
                 );
             };
-            emit_admin_collection_show(runtime, client, name, format, json_mode);
+            emit_admin_collection_show(client, name, format, json_mode);
         }
         "stats" => {
             let mut sql = "SELECT * FROM red.stats".to_string();
@@ -4602,24 +4632,18 @@ fn run_admin_collections_command(
                 sql.push('\'');
             }
             push_limit(&mut sql, flags);
-            emit_admin_query_result(
-                "admin.collections.stats",
-                runtime,
-                client,
-                &sql,
-                format,
-                json_mode,
-            );
+            emit_admin_query_result("admin.collections.stats", client, &sql, format, json_mode);
         }
         "drop" | "truncate" => {
             let command = format!("admin.collections.{subcommand}");
+            // `drop` confirms interactively, so only it advertises --yes.
+            let usage = if subcommand == "drop" {
+                "usage: red admin collections drop <name> [--if-exists] [--yes] [--json]"
+            } else {
+                "usage: red admin collections truncate <name> [--if-exists] [--json]"
+            };
             let Some(name) = sub_args.first().copied().filter(|name| !name.is_empty()) else {
-                admin_usage_error(
-                    &command,
-                    "collection name is required",
-                    &format!("usage: red admin collections {subcommand} <name>"),
-                    json_mode,
-                );
+                admin_usage_error(&command, "collection name is required", usage, json_mode);
             };
             if subcommand == "drop" && !flag_bool(flags, "yes") && !json_mode {
                 eprint!("Drop collection '{name}'? This is irreversible. Type 'yes' to confirm: ");
@@ -4641,7 +4665,6 @@ fn run_admin_collections_command(
             );
             admin_execute_ddl_command(
                 &command,
-                runtime,
                 client,
                 &sql,
                 name,
@@ -4661,6 +4684,15 @@ fn run_admin_collections_command(
                 );
             } else {
                 println!("Usage: red admin collections <list|show|stats|drop|truncate> [args]");
+                println!();
+                println!("Subcommands:");
+                println!("  list [--type table|queue|vector|document|timeseries|graph|kv] [--include-internal]");
+                println!("  show <name>");
+                println!("  stats [<name>]");
+                println!("  drop <name> [--if-exists] [--yes]");
+                println!("  truncate <name> [--if-exists]");
+                println!();
+                println!("Flags: --json --csv --limit <n> --no-color --bind <addr> --token <tok>");
             }
         }
     }
@@ -4668,13 +4700,12 @@ fn run_admin_collections_command(
 
 fn run_admin_indices_command(
     flags: &HashMap<String, FlagValue>,
-    runtime: &tokio::runtime::Runtime,
-    client: &HttpClient,
+    client: &OperatorClient,
     json_mode: bool,
     args: &[&str],
 ) {
     if args.first().copied().unwrap_or("help") != "list" {
-        println!("Usage: red admin indices list [--collection <name>]");
+        admin_catalog_usage("indices", json_mode);
         return;
     }
     let mut sql = "SELECT * FROM red.indices".to_string();
@@ -4686,7 +4717,6 @@ fn run_admin_indices_command(
     push_limit(&mut sql, flags);
     emit_admin_query_result(
         "admin.indices.list",
-        runtime,
         client,
         &sql,
         admin_output_format(flags, json_mode),
@@ -4696,13 +4726,12 @@ fn run_admin_indices_command(
 
 fn run_admin_policies_command(
     flags: &HashMap<String, FlagValue>,
-    runtime: &tokio::runtime::Runtime,
-    client: &HttpClient,
+    client: &OperatorClient,
     json_mode: bool,
     args: &[&str],
 ) {
     if args.first().copied().unwrap_or("help") != "list" {
-        println!("Usage: red admin policies list [--collection <name>]");
+        admin_catalog_usage("policies", json_mode);
         return;
     }
     let mut sql = "SELECT * FROM red.policies".to_string();
@@ -4714,7 +4743,6 @@ fn run_admin_policies_command(
     push_limit(&mut sql, flags);
     emit_admin_query_result(
         "admin.policies.list",
-        runtime,
         client,
         &sql,
         admin_output_format(flags, json_mode),
@@ -4722,10 +4750,20 @@ fn run_admin_policies_command(
     );
 }
 
+/// Usage block for the single-subcommand catalog groups (`indices`,
+/// `policies`). `--json` gets the machine envelope, not the human text.
+fn admin_catalog_usage(group: &str, json_mode: bool) {
+    if json_mode {
+        json_ok(&format!("admin.{group}"), "{\"subcommands\":[\"list\"]}");
+        return;
+    }
+    println!("Usage: red admin {group} list [--collection <name>]");
+    println!("Flags: --json --csv --limit <n> --no-color --bind <addr> --token <tok>");
+}
+
 fn run_admin_query_command(
     flags: &HashMap<String, FlagValue>,
-    runtime: &tokio::runtime::Runtime,
-    client: &HttpClient,
+    client: &OperatorClient,
     json_mode: bool,
     args: &[&str],
 ) {
@@ -4741,7 +4779,6 @@ fn run_admin_query_command(
     push_limit(&mut sql, flags);
     emit_admin_query_result(
         "admin.query",
-        runtime,
         client,
         &sql,
         admin_output_format(flags, json_mode),
@@ -4787,13 +4824,13 @@ fn push_limit(sql: &mut String, flags: &HashMap<String, FlagValue>) {
 
 fn emit_admin_query_result(
     command: &str,
-    runtime: &tokio::runtime::Runtime,
-    client: &HttpClient,
+    client: &OperatorClient,
     sql: &str,
     format: RowFormat,
     json_mode: bool,
 ) {
-    match runtime.block_on(client.query(sql)) {
+    let (runtime, http) = client.get(command, json_mode);
+    match runtime.block_on(http.query(sql)) {
         Ok(result) => std::io::stdout()
             .write_all(&format_query_result(&result, format))
             .expect("write stdout"),
@@ -4808,12 +4845,12 @@ fn emit_admin_query_result(
 }
 
 fn emit_admin_collection_show(
-    runtime: &tokio::runtime::Runtime,
-    client: &HttpClient,
+    client: &OperatorClient,
     name: &str,
     format: RowFormat,
     json_mode: bool,
 ) {
+    let (runtime, http) = client.get("admin.collections.show", json_mode);
     let escaped = sql_string_literal(name);
     let queries = [
         (
@@ -4839,7 +4876,7 @@ fn emit_admin_collection_show(
     ];
     let mut sections = Vec::new();
     for (label, sql) in queries {
-        match runtime.block_on(client.query(&sql)) {
+        match runtime.block_on(http.query(&sql)) {
             Ok(result) => sections.push((label, result)),
             Err(err) => {
                 if json_mode {
@@ -4868,29 +4905,77 @@ fn emit_admin_collection_show(
         return;
     }
 
-    if format == RowFormat::Table {
-        println!("Collection: {name}");
-    }
-    for (label, result) in sections {
-        if format == RowFormat::Table {
-            println!("\n{label}");
+    if format == RowFormat::Csv {
+        // Five tables share one CSV stream, so each section carries a leading
+        // `section` column; without it the concatenated blocks are ambiguous.
+        for (label, result) in sections {
+            std::io::stdout()
+                .write_all(&format_query_result(
+                    &with_section_column(label, &result),
+                    RowFormat::Csv,
+                ))
+                .expect("write stdout");
         }
+        return;
+    }
+
+    println!("Collection: {name}");
+    for (label, result) in sections {
+        println!("\n{label}");
         std::io::stdout()
             .write_all(&format_query_result(&result, format))
             .expect("write stdout");
     }
 }
 
+/// Prepend a constant `section` column to every row of `result`.
+fn with_section_column(section: &str, result: &QueryResult) -> QueryResult {
+    // A non-empty column list suppresses the driver's own inference, so
+    // inherit the inferred names here when the response carried none.
+    let base: Vec<String> = if result.columns.is_empty() {
+        result
+            .rows
+            .first()
+            .map(|row| row.iter().map(|(key, _)| key.clone()).collect())
+            .unwrap_or_default()
+    } else {
+        result.columns.clone()
+    };
+    let mut columns = Vec::with_capacity(base.len() + 1);
+    columns.push("section".to_string());
+    columns.extend(base);
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            let mut out = Vec::with_capacity(row.len() + 1);
+            out.push((
+                "section".to_string(),
+                reddb_client::ValueOut::String(section.to_string()),
+            ));
+            out.extend(row.iter().cloned());
+            out
+        })
+        .collect();
+    QueryResult {
+        statement: result.statement.clone(),
+        affected: result.affected,
+        columns,
+        rows,
+        notice: result.notice.clone(),
+    }
+}
+
 fn admin_execute_ddl_command(
     command: &str,
-    runtime: &tokio::runtime::Runtime,
-    client: &HttpClient,
+    client: &OperatorClient,
     sql: &str,
     name: &str,
     verb: &str,
     json_mode: bool,
 ) {
-    match runtime.block_on(client.query(sql)) {
+    let (runtime, http) = client.get(command, json_mode);
+    match runtime.block_on(http.query(sql)) {
         Ok(result) => {
             if json_mode {
                 println!(
@@ -4914,16 +4999,17 @@ fn admin_execute_ddl_command(
         }
     }
 }
-fn run_admin_cache_command(
-    runtime: &tokio::runtime::Runtime,
-    client: &HttpClient,
-    json_mode: bool,
-    args: &[&str],
-) {
+fn run_admin_cache_command(client: &OperatorClient, json_mode: bool, args: &[&str]) {
     let subcommand = args.first().copied().unwrap_or("help");
     let sub_args = args.get(1..).unwrap_or_default();
+    let command = format!("admin.cache.{subcommand}");
+    // Text mode announces what happened before echoing the server body.
+    let mut prelude: Option<String> = None;
     let result = match subcommand {
-        "stats" => runtime.block_on(client.get_text("/admin/blob_cache/stats")),
+        "stats" => {
+            let (runtime, http) = client.get(&command, json_mode);
+            runtime.block_on(http.get_text("/admin/blob_cache/stats"))
+        }
         "flush-namespace" => {
             let namespace = sub_args.first().copied().unwrap_or("");
             if namespace.is_empty() {
@@ -4934,8 +5020,10 @@ fn run_admin_cache_command(
                     json_mode,
                 );
             }
+            prelude = Some(format!("flushed namespace: {namespace}"));
             let body = JsonValue::object([("namespace", JsonValue::string(namespace))]);
-            runtime.block_on(client.post_json("/admin/blob_cache/flush_namespace", &body))
+            let (runtime, http) = client.get(&command, json_mode);
+            runtime.block_on(http.post_json("/admin/blob_cache/flush_namespace", &body))
         }
         "sweep" => {
             let value = |name: &str| {
@@ -4951,8 +5039,9 @@ fn run_admin_cache_command(
             if let Some(limit) = value("--limit-millis") {
                 fields.push(("limit_millis", JsonValue::number(limit as f64)));
             }
-            runtime
-                .block_on(client.post_json("/admin/blob_cache/sweep", &JsonValue::object(fields)))
+            prelude = Some("sweep complete".to_string());
+            let (runtime, http) = client.get(&command, json_mode);
+            runtime.block_on(http.post_json("/admin/blob_cache/sweep", &JsonValue::object(fields)))
         }
         "compare-and-set" => {
             let value = |name: &str| {
@@ -5007,7 +5096,8 @@ fn run_admin_cache_command(
             });
             let expected_version =
                 value("--expected-version").and_then(|value| value.parse::<u64>().ok());
-            runtime.block_on(client.blob_cache_compare_and_set(
+            let (runtime, http) = client.get(&command, json_mode);
+            runtime.block_on(http.blob_cache_compare_and_set(
                 namespace,
                 key,
                 &bytes,
@@ -5022,22 +5112,83 @@ fn run_admin_cache_command(
                     "{\"subcommands\":[\"stats\",\"flush-namespace\",\"sweep\",\"compare-and-set\"]}",
                 );
             } else {
-                println!("Usage: red admin cache <stats|flush-namespace|sweep|compare-and-set>");
+                println!("Usage: red admin cache <subcommand>");
+                println!();
+                println!("Subcommands:");
+                println!("  stats                          GET /admin/blob_cache/stats");
+                println!("  flush-namespace <ns>           POST /admin/blob_cache/flush_namespace");
+                println!("  sweep [--limit-entries N]      POST /admin/blob_cache/sweep");
+                println!("        [--limit-millis N]");
+                println!("  compare-and-set                POST /admin/cache/compare-and-set");
+                println!("    --namespace ns --key k");
+                println!("    --new-version V --value <file>");
+                println!("    [--expected-version V]");
+                println!();
+                println!("Env vars:");
+                println!("  REDDB_BIND_ADDR   Server HTTP address (overrides --bind)");
+                println!("  RED_ADMIN_TOKEN   Admin bearer token (overrides --token)");
             }
             return;
         }
     };
 
-    match result {
-        Ok(body) => println!("{body}"),
-        Err(err) => {
-            let command = format!("admin.cache.{subcommand}");
-            if json_mode {
-                json_error(&command, &err.to_string());
-            }
-            eprintln!("error: {err}");
-            std::process::exit(1);
+    let body = result.unwrap_or_else(|err| {
+        if json_mode {
+            json_error(&command, &err.to_string());
         }
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    });
+
+    if json_mode {
+        print!("{body}");
+        return;
+    }
+    if let Some(prelude) = prelude {
+        println!("{prelude}");
+    }
+    if subcommand == "stats" {
+        print!("{}", format_cache_stats_pretty(&body));
+    } else {
+        println!("{body}");
+    }
+}
+
+/// Aligned `Metric / Value` view of the blob-cache stats body.
+///
+/// Falls back to the raw body when the response is not a JSON object, so an
+/// error page still reaches the operator verbatim.
+fn format_cache_stats_pretty(body: &str) -> String {
+    let fields: &[(&str, &str)] = &[
+        ("hits", "Hits"),
+        ("misses", "Misses"),
+        ("insertions", "Insertions"),
+        ("evictions", "Evictions"),
+        ("expirations", "Expirations"),
+        ("invalidations", "Invalidations"),
+        ("namespace_flushes", "Namespace flushes"),
+        ("version_mismatches", "Version mismatches"),
+        ("entries", "Entries"),
+        ("bytes_in_use", "L1 bytes in use"),
+        ("l1_bytes_max", "L1 bytes max"),
+        ("l2_bytes_in_use", "L2 bytes in use"),
+        ("l2_bytes_max", "L2 bytes max"),
+        ("namespaces", "Namespaces"),
+        ("max_namespaces", "Max namespaces"),
+        ("l2_compression_ratio_observed", "L2 compression ratio"),
+        ("l2_bytes_saved_total", "L2 bytes saved total"),
+    ];
+    let parsed: Option<reddb::json::Value> = reddb::json::from_str(body).ok();
+    if let Some(obj) = parsed.as_ref().and_then(|v| v.as_object()) {
+        let mut out = format!("{:<30} {}\n{}\n", "Metric", "Value", "-".repeat(50));
+        for (key, label) in fields {
+            if let Some(val) = obj.get(*key) {
+                out.push_str(&format!("{:<30} {}\n", label, val));
+            }
+        }
+        out
+    } else {
+        format!("{body}\n")
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -5193,15 +5344,26 @@ fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
     let driver = operator_http_client(&bind, token.as_deref());
 
     // 1) Server reachability via /metrics (also catches admin-token
-    // misconfiguration since /metrics is gated when token is set).
+    // misconfiguration since /metrics is gated when token is set), so the
+    // probe reports the HTTP status rather than a generic request failure.
     let metrics = match &driver {
-        Ok((runtime, client)) => match runtime.block_on(client.get_text("/metrics")) {
-            Ok(body) => Some(body),
+        Ok((runtime, client)) => match runtime.block_on(client.get_text_with_status("/metrics")) {
+            Ok((200, body)) => Some(body),
+            Ok((status, _)) => {
+                checks.push(DoctorCheck {
+                    name: "reachability",
+                    severity: DoctorSeverity::Crit,
+                    detail: format!(
+                        "GET /metrics returned HTTP {status} (token mismatch or service down)"
+                    ),
+                });
+                None
+            }
             Err(err) => {
                 checks.push(DoctorCheck {
                     name: "reachability",
                     severity: DoctorSeverity::Crit,
-                    detail: format!("GET /metrics failed: {err}"),
+                    detail: format!("connect to {bind} failed: {err}"),
                 });
                 None
             }
@@ -5219,9 +5381,12 @@ fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
     // 2) /admin/status JSON.
     let status_json = driver.as_ref().ok().and_then(|(runtime, client)| {
         runtime
-            .block_on(client.get_text("/admin/status"))
+            .block_on(client.get_text_with_status("/admin/status"))
             .ok()
-            .and_then(|body| reddb::serde_json::from_str::<reddb::serde_json::Value>(&body).ok())
+            .filter(|(status, _)| *status == 200)
+            .and_then(|(_, body)| {
+                reddb::serde_json::from_str::<reddb::serde_json::Value>(&body).ok()
+            })
     });
     if status_json.is_none() {
         checks.push(DoctorCheck {
@@ -6603,5 +6768,166 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     #[test]
     fn file_uri_empty_path_is_rejected() {
         assert!(canonicalize_file_uri("file://").is_err());
+    }
+
+    // --- admin cache stats text output ---
+
+    #[test]
+    fn format_cache_stats_pretty_renders_header_and_known_fields() {
+        let body = r#"{"ok":true,"hits":10,"misses":2,"entries":5,"bytes_in_use":1024}"#;
+        let out = format_cache_stats_pretty(body);
+        assert!(out.contains("Metric"), "missing header row");
+        assert!(out.contains("Value"), "missing header row");
+        assert!(out.contains("Hits"), "missing Hits row");
+        assert!(out.contains("10"), "missing hits value");
+        assert!(out.contains("Misses"), "missing Misses row");
+        assert!(out.contains("2"), "missing misses value");
+        assert!(out.contains("Entries"), "missing Entries row");
+        assert!(out.contains("L1 bytes in use"), "missing bytes_in_use row");
+        // fields absent from JSON are silently omitted
+        assert!(!out.contains("Evictions"), "unexpected Evictions row");
+    }
+
+    #[test]
+    fn format_cache_stats_pretty_falls_back_to_raw_on_invalid_json() {
+        let body = "not json at all";
+        let out = format_cache_stats_pretty(body);
+        assert_eq!(out.trim(), "not json at all");
+    }
+
+    #[test]
+    fn format_cache_stats_pretty_renders_separator_line() {
+        let body = r#"{"hits":0}"#;
+        let out = format_cache_stats_pretty(body);
+        assert!(out.contains("--------------------------------------------------"));
+    }
+
+    #[test]
+    fn format_cache_stats_pretty_aligns_metric_and_value_columns() {
+        let body = r#"{"hits":10,"misses":2}"#;
+        assert_eq!(
+            format_cache_stats_pretty(body),
+            format!(
+                "{:<30} {}\n{}\n{:<30} {}\n{:<30} {}\n",
+                "Metric",
+                "Value",
+                "-".repeat(50),
+                "Hits",
+                10,
+                "Misses",
+                2
+            )
+        );
+    }
+
+    // --- admin catalog output format (driver-rendered) ---
+
+    fn sample_admin_result() -> QueryResult {
+        QueryResult {
+            statement: "SELECT * FROM red.collections".to_string(),
+            affected: 0,
+            columns: vec![
+                "name".to_string(),
+                "model".to_string(),
+                "internal".to_string(),
+            ],
+            rows: vec![
+                admin_row("users", "table", false),
+                admin_row("red.collections", "table", true),
+            ],
+            notice: None,
+        }
+    }
+
+    fn admin_row(name: &str, model: &str, internal: bool) -> Vec<(String, reddb_client::ValueOut)> {
+        vec![
+            (
+                "name".to_string(),
+                reddb_client::ValueOut::String(name.to_string()),
+            ),
+            (
+                "model".to_string(),
+                reddb_client::ValueOut::String(model.to_string()),
+            ),
+            (
+                "internal".to_string(),
+                reddb_client::ValueOut::Bool(internal),
+            ),
+        ]
+    }
+
+    fn rendered(result: &QueryResult, format: RowFormat) -> String {
+        String::from_utf8(format_query_result(result, format)).expect("utf-8 output")
+    }
+
+    #[test]
+    fn admin_table_renders_aligned_plain_columns() {
+        let out = rendered(&sample_admin_result(), RowFormat::Table);
+        assert_eq!(
+            out,
+            concat!(
+                "name             model  internal\n",
+                "---------------  -----  --------\n",
+                "users            table  false\n",
+                "red.collections  table  true\n",
+            )
+        );
+        assert!(!out.contains('\u{1b}'), "admin table must not emit ANSI");
+    }
+
+    #[test]
+    fn admin_rows_json_outputs_bare_array_for_jq() {
+        let out = rendered(&sample_admin_result(), RowFormat::Json);
+        assert!(out.starts_with('['));
+        assert!(out.contains(r#""name":"users""#));
+        assert!(!out.contains(r#""ok""#));
+    }
+
+    #[test]
+    fn admin_csv_escapes_commas_and_quotes() {
+        let result = QueryResult {
+            statement: "SELECT * FROM red.collections".to_string(),
+            affected: 0,
+            columns: vec!["name".to_string(), "model".to_string()],
+            rows: vec![vec![
+                (
+                    "name".to_string(),
+                    reddb_client::ValueOut::String("weird,\"name\"".to_string()),
+                ),
+                (
+                    "model".to_string(),
+                    reddb_client::ValueOut::String("table".to_string()),
+                ),
+            ]],
+            notice: None,
+        };
+        assert_eq!(
+            rendered(&result, RowFormat::Csv),
+            "name,model\n\"weird,\"\"name\"\"\",table\n"
+        );
+    }
+
+    #[test]
+    fn admin_section_csv_carries_a_leading_section_column() {
+        let sectioned = with_section_column("schema", &sample_admin_result());
+        assert_eq!(
+            rendered(&sectioned, RowFormat::Csv),
+            concat!(
+                "section,name,model,internal\n",
+                "schema,users,table,false\n",
+                "schema,red.collections,table,true\n",
+            )
+        );
+    }
+
+    #[test]
+    fn admin_section_csv_infers_columns_when_the_response_omits_them() {
+        let mut result = sample_admin_result();
+        result.columns.clear();
+        let sectioned = with_section_column("stats", &result);
+        assert_eq!(
+            sectioned.columns,
+            vec!["section", "name", "model", "internal"]
+        );
     }
 }
