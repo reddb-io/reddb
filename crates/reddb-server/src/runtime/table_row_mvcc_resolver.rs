@@ -103,7 +103,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityId, UnifiedEntity};
 
