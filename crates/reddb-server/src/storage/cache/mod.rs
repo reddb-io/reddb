@@ -4,7 +4,6 @@
 //!
 //! # Components
 //!
-//! - **sieve**: SIEVE page cache for database pages (O(1) operations)
 //! - **blob**: Byte-oriented L1 cache for exact-key cached blobs
 //! - **result**: Query result cache with dependency-based invalidation
 //! - **aggregates**: Precomputed aggregations (COUNT, SUM, AVG, etc.)
@@ -20,7 +19,7 @@
 //! ├────────────────────────────────────────────────────────┤
 //! │           Aggregation Cache (COUNT/SUM/AVG)            │
 //! ├────────────────────────────────────────────────────────┤
-//! │   SIEVE Page Cache    │     Spill Manager              │
+//! │      Blob Cache       │     Spill Manager              │
 //! ├────────────────────────────────────────────────────────┤
 //! │                   Storage Engine                       │
 //! └────────────────────────────────────────────────────────┘
@@ -33,10 +32,7 @@ pub mod compressor;
 pub mod extended_ttl;
 pub mod promotion_pool;
 pub mod result;
-pub mod ring;
-pub mod sieve;
 pub mod spill;
-pub mod strategy;
 pub mod sweeper;
 
 pub use aggregates::{AggCacheStats, AggValue, AggregationCache, CardinalityEstimate, NumericAgg};
@@ -57,10 +53,7 @@ pub use result::{
     CacheKey, CachePolicy, MaterializedViewCache, MaterializedViewDef, RefreshPolicy, ResultCache,
     ResultCacheStats,
 };
-pub use ring::BufferRing;
-pub use sieve::{CacheConfig, CacheStats, PageCache, PageId};
 pub use spill::{SpillConfig, SpillError, SpillManager, SpillStats, SpillableGraph};
-pub use strategy::BufferAccessStrategy;
 
 // ---------------------------------------------------------------------------
 // L2 Blob Cache backup helpers (issue #148 follow-up)

@@ -49,6 +49,10 @@ fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
     crate::presentation::admin_json::analytics_job_json(job)
 }
 
+// Process-wide test guard for every RED_ADMIN_TOKEN mutation in server tests.
+#[cfg(test)]
+pub(crate) static RED_ADMIN_TOKEN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;

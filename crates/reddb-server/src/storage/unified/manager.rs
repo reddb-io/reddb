@@ -23,8 +23,8 @@ use super::segment::{
     GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats,
     UnifiedSegment, ZoneColPred, ZoneColPredKind,
 };
+use super::visibility_map::VisibilityMap;
 use crate::runtime::mvcc::{entity_visible_with_context, SnapshotContext};
-use crate::storage::btree::visibility_map::VisibilityMap;
 
 /// Fraction of a collection's sealed entities that must be tombstoned before
 /// consolidation is worth its cost.
