@@ -27,7 +27,7 @@ use crate::storage::query::sql_lowering::{
     projection_to_expr,
 };
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 use crate::RedDB;
 
 use super::TableQuery;
@@ -2110,7 +2110,7 @@ mod agg_spill_codec {
     use std::io::{Read, Write};
 
     use crate::storage::query::executors::agg_spill::{Mergeable, SpillCodec, SpillError};
-    use crate::storage::schema::{CanonicalKey, CanonicalKeyFamily, Value};
+    use reddb_types::{CanonicalKey, CanonicalKeyFamily, Value};
 
     use super::{AggregateGroup, AggregateGroupKey, GroupKeyPart, SlottedAggState};
 
@@ -3454,7 +3454,7 @@ fn single_group_key_rank(key: &SingleGroupKey) -> u8 {
 
 #[cfg(test)]
 mod parallel_group_by_tests {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use crate::{RedDBOptions, RedDBRuntime};
 
     fn mk_runtime() -> RedDBRuntime {
