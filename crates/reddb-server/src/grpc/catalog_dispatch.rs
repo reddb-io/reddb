@@ -2,211 +2,537 @@ use super::*;
 use crate::application::{OperationContextFactory, OperationContextInput};
 use crate::auth::enforcement_mode::{legacy_rbac_decision, PolicyEnforcementMode};
 use crate::auth::policies::{self, EvalContext, ResourceRef};
-use crate::server::route_catalog::{
-    CommandAuthRequirement, CommandPolicyEngine, CommandSpec, RouteMethod,
-};
+use crate::server::route_catalog::{CommandPolicyEngine, CommandSpec};
 use std::future::Future;
 use std::task::{Context, Poll};
 use tonic::codegen::{Body, Service, StdError};
 use tonic::server::NamedService;
 
+/// Replication capabilities (issue #820). Stream and ack stay separate so a
+/// replica that may read the WAL cannot also forge acks, and vice versa.
+const REPLICATION_STREAM_ACTION: &str = "cluster:replication:stream";
+const REPLICATION_ACK_ACTION: &str = "cluster:replication:ack";
+
+/// The authorization class a gRPC method is bound to.
+///
+/// This is the declarative transcription of the per-method guard each RPC
+/// used to call by hand. It lives on the binding rather than being derived
+/// from [`CommandSpec::method`] because a command's canonical HTTP method
+/// describes its HTTP shape, not the RPC's effect: `Query`, `Search` and
+/// `Scan` are POST commands that only read, and `AuthLogin` is a POST
+/// command on the authentication plane rather than a DML write. Deriving
+/// the required action from the method would deny read-role principals the
+/// query RPCs and would run the replica write gate on logins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GrpcAuthClass {
+    /// No dispatch-level principal requirement: the RPC is a probe, part of
+    /// the unauthenticated auth plane, or owns its check inside the handler
+    /// (`AuthChangePassword`). Explicit Deny policies still apply.
+    Open,
+    /// Legacy `authorize_read`.
+    Read,
+    /// Legacy `authorize_write`. Also runs the replica write gate.
+    Write,
+    /// Legacy `authorize_admin`: an admin role, denied with
+    /// `PERMISSION_DENIED` for everyone else.
+    Admin,
+    /// Legacy `authorize_replication_capability`: an explicit policy Allow on
+    /// the named capability for `cluster:replication`, with no legacy-RBAC
+    /// fallback, and mTLS peer identity accepted in place of metadata
+    /// credentials.
+    Replication(&'static str),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct GrpcCommandBinding {
     rpc: &'static str,
     command_id: &'static str,
+    auth: GrpcAuthClass,
 }
 
 macro_rules! binding {
-    ($rpc:literal, $command_id:literal) => {
+    ($rpc:literal, $command_id:literal, $auth:expr) => {
         GrpcCommandBinding {
             rpc: $rpc,
             command_id: $command_id,
+            auth: $auth,
         }
     };
 }
 
 const GRPC_COMMAND_BINDINGS: &[GrpcCommandBinding] = &[
-    binding!("Health", "ops.health.aggregate"),
-    binding!("Ready", "ops.ready.aggregate"),
-    binding!("Stats", "physical.stats"),
-    binding!("Collections", "collections.list"),
-    binding!("CatalogReadiness", "catalog.readiness"),
-    binding!("DeploymentProfiles", "ops.deployment.profiles"),
-    binding!("CollectionReadiness", "catalog.collections.readiness"),
+    binding!("Health", "ops.health.aggregate", GrpcAuthClass::Open),
+    binding!("Ready", "ops.ready.aggregate", GrpcAuthClass::Open),
+    binding!("Stats", "physical.stats", GrpcAuthClass::Read),
+    binding!("Collections", "collections.list", GrpcAuthClass::Read),
+    binding!("CatalogReadiness", "catalog.readiness", GrpcAuthClass::Read),
+    binding!(
+        "DeploymentProfiles",
+        "ops.deployment.profiles",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "CollectionReadiness",
+        "catalog.collections.readiness",
+        GrpcAuthClass::Read
+    ),
     binding!(
         "CollectionAttention",
-        "catalog.collections.readiness_attention"
+        "catalog.collections.readiness_attention",
+        GrpcAuthClass::Read
     ),
-    binding!("CatalogAttentionSummary", "catalog.attention"),
-    binding!("CatalogConsistency", "catalog.consistency"),
-    binding!("ServerlessAttach", "serverless.attach"),
-    binding!("ServerlessWarmup", "serverless.warmup"),
-    binding!("ServerlessReclaim", "serverless.reclaim"),
-    binding!("DeclaredIndexes", "catalog.indexes.declared"),
-    binding!("OperationalIndexes", "catalog.indexes.operational"),
-    binding!("IndexStatuses", "catalog.indexes.status"),
-    binding!("IndexAttention", "catalog.indexes.attention"),
+    binding!(
+        "CatalogAttentionSummary",
+        "catalog.attention",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "CatalogConsistency",
+        "catalog.consistency",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "ServerlessAttach",
+        "serverless.attach",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "ServerlessWarmup",
+        "serverless.warmup",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "ServerlessReclaim",
+        "serverless.reclaim",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "DeclaredIndexes",
+        "catalog.indexes.declared",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "OperationalIndexes",
+        "catalog.indexes.operational",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "IndexStatuses",
+        "catalog.indexes.status",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "IndexAttention",
+        "catalog.indexes.attention",
+        GrpcAuthClass::Read
+    ),
     binding!(
         "DeclaredGraphProjections",
-        "catalog.graph.projections.declared"
+        "catalog.graph.projections.declared",
+        GrpcAuthClass::Read
     ),
     binding!(
         "OperationalGraphProjections",
-        "catalog.graph.projections.operational"
+        "catalog.graph.projections.operational",
+        GrpcAuthClass::Read
     ),
     binding!(
         "GraphProjectionStatuses",
-        "catalog.graph.projections.status"
+        "catalog.graph.projections.status",
+        GrpcAuthClass::Read
     ),
     binding!(
         "GraphProjectionAttention",
-        "catalog.graph.projections.attention"
+        "catalog.graph.projections.attention",
+        GrpcAuthClass::Read
     ),
-    binding!("DeclaredAnalyticsJobs", "catalog.analytics_jobs.declared"),
+    binding!(
+        "DeclaredAnalyticsJobs",
+        "catalog.analytics_jobs.declared",
+        GrpcAuthClass::Read
+    ),
     binding!(
         "OperationalAnalyticsJobs",
-        "catalog.analytics_jobs.operational"
+        "catalog.analytics_jobs.operational",
+        GrpcAuthClass::Read
     ),
-    binding!("AnalyticsJobStatuses", "catalog.analytics_jobs.status"),
-    binding!("AnalyticsJobAttention", "catalog.analytics_jobs.attention"),
-    binding!("PhysicalMetadata", "physical.metadata"),
-    binding!("NativeHeader", "physical.native_header"),
-    binding!("NativeCollectionRoots", "physical.native_collection_roots"),
-    binding!("NativeManifestSummary", "physical.native_manifest"),
-    binding!("NativeRegistrySummary", "physical.native_registry"),
-    binding!("NativeRecoverySummary", "physical.native_recovery"),
-    binding!("NativeCatalogSummary", "physical.native_catalog"),
+    binding!(
+        "AnalyticsJobStatuses",
+        "catalog.analytics_jobs.status",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "AnalyticsJobAttention",
+        "catalog.analytics_jobs.attention",
+        GrpcAuthClass::Read
+    ),
+    binding!("PhysicalMetadata", "physical.metadata", GrpcAuthClass::Read),
+    binding!(
+        "NativeHeader",
+        "physical.native_header",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "NativeCollectionRoots",
+        "physical.native_collection_roots",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "NativeManifestSummary",
+        "physical.native_manifest",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "NativeRegistrySummary",
+        "physical.native_registry",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "NativeRecoverySummary",
+        "physical.native_recovery",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "NativeCatalogSummary",
+        "physical.native_catalog",
+        GrpcAuthClass::Read
+    ),
     binding!(
         "NativeMetadataStateSummary",
-        "physical.native_metadata_state"
+        "physical.native_metadata_state",
+        GrpcAuthClass::Read
     ),
-    binding!("PhysicalAuthority", "physical.authority"),
-    binding!("NativePhysicalState", "physical.native_state"),
-    binding!("NativeVectorArtifacts", "physical.native_vector_artifacts"),
+    binding!(
+        "PhysicalAuthority",
+        "physical.authority",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "NativePhysicalState",
+        "physical.native_state",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "NativeVectorArtifacts",
+        "physical.native_vector_artifacts",
+        GrpcAuthClass::Read
+    ),
     binding!(
         "InspectNativeVectorArtifacts",
-        "physical.native_vector_artifacts.inspect"
+        "physical.native_vector_artifacts.inspect",
+        GrpcAuthClass::Read
     ),
     binding!(
         "InspectNativeVectorArtifact",
-        "physical.collections.vector_artifacts.inspect"
+        "physical.collections.vector_artifacts.inspect",
+        GrpcAuthClass::Read
     ),
     binding!(
         "NativeHeaderRepairPolicy",
-        "physical.native_header.repair_policy"
+        "physical.native_header.repair_policy",
+        GrpcAuthClass::Read
     ),
-    binding!("RepairNativeHeader", "physical.native_header.repair"),
+    binding!(
+        "RepairNativeHeader",
+        "physical.native_header.repair",
+        GrpcAuthClass::Write
+    ),
     binding!(
         "WarmupNativeVectorArtifacts",
-        "physical.native_vector_artifacts.warmup"
+        "physical.native_vector_artifacts.warmup",
+        GrpcAuthClass::Write
     ),
     binding!(
         "WarmupNativeVectorArtifact",
-        "physical.collections.vector_artifacts.warmup"
+        "physical.collections.vector_artifacts.warmup",
+        GrpcAuthClass::Write
     ),
-    binding!("RepairNativePhysicalState", "physical.native_state.repair"),
-    binding!("RebuildPhysicalMetadata", "physical.metadata.rebuild"),
-    binding!("Manifest", "physical.manifest"),
-    binding!("Roots", "physical.roots"),
-    binding!("Snapshots", "physical.snapshots"),
-    binding!("Exports", "physical.exports"),
-    binding!("Indexes", "physical.indexes"),
-    binding!("SetIndexEnabled", "indexes.action"),
-    binding!("MarkIndexBuilding", "indexes.action"),
-    binding!("MarkIndexReady", "indexes.action"),
-    binding!("FailIndex", "indexes.action"),
-    binding!("MarkIndexStale", "indexes.action"),
-    binding!("WarmupIndex", "indexes.action"),
-    binding!("RebuildIndexes", "physical.indexes.rebuild"),
-    binding!("GraphProjections", "graph.projections.list"),
-    binding!("SaveGraphProjection", "graph.projections.upsert"),
-    binding!("SaveAnalyticsJob", "graph.jobs.upsert"),
-    binding!("QueueAnalyticsJob", "graph.jobs.queue"),
-    binding!("StartAnalyticsJob", "graph.jobs.start"),
-    binding!("CompleteAnalyticsJob", "graph.jobs.complete"),
-    binding!("MarkAnalyticsJobStale", "graph.jobs.stale"),
-    binding!("FailAnalyticsJob", "graph.jobs.fail"),
+    binding!(
+        "RepairNativePhysicalState",
+        "physical.native_state.repair",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "RebuildPhysicalMetadata",
+        "physical.metadata.rebuild",
+        GrpcAuthClass::Write
+    ),
+    binding!("Manifest", "physical.manifest", GrpcAuthClass::Read),
+    binding!("Roots", "physical.roots", GrpcAuthClass::Read),
+    binding!("Snapshots", "physical.snapshots", GrpcAuthClass::Read),
+    binding!("Exports", "physical.exports", GrpcAuthClass::Read),
+    binding!("Indexes", "physical.indexes", GrpcAuthClass::Read),
+    binding!("SetIndexEnabled", "indexes.action", GrpcAuthClass::Write),
+    binding!("MarkIndexBuilding", "indexes.action", GrpcAuthClass::Write),
+    binding!("MarkIndexReady", "indexes.action", GrpcAuthClass::Write),
+    binding!("FailIndex", "indexes.action", GrpcAuthClass::Write),
+    binding!("MarkIndexStale", "indexes.action", GrpcAuthClass::Write),
+    binding!("WarmupIndex", "indexes.action", GrpcAuthClass::Write),
+    binding!(
+        "RebuildIndexes",
+        "physical.indexes.rebuild",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "GraphProjections",
+        "graph.projections.list",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "SaveGraphProjection",
+        "graph.projections.upsert",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "SaveAnalyticsJob",
+        "graph.jobs.upsert",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "QueueAnalyticsJob",
+        "graph.jobs.queue",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "StartAnalyticsJob",
+        "graph.jobs.start",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "CompleteAnalyticsJob",
+        "graph.jobs.complete",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "MarkAnalyticsJobStale",
+        "graph.jobs.stale",
+        GrpcAuthClass::Write
+    ),
+    binding!("FailAnalyticsJob", "graph.jobs.fail", GrpcAuthClass::Write),
     binding!(
         "MaterializeGraphProjection",
-        "graph.projections.materialize"
+        "graph.projections.materialize",
+        GrpcAuthClass::Write
     ),
     binding!(
         "MarkGraphProjectionMaterializing",
-        "graph.projections.materializing"
+        "graph.projections.materializing",
+        GrpcAuthClass::Write
     ),
-    binding!("MarkGraphProjectionStale", "graph.projections.stale"),
-    binding!("FailGraphProjection", "graph.projections.fail"),
-    binding!("AnalyticsJobs", "graph.jobs.list"),
-    binding!("Scan", "collections.scan"),
-    binding!("ExplainQuery", "query.explain"),
-    binding!("Query", "query.execute"),
-    binding!("BatchQuery", "query.execute"),
-    binding!("PrepareQuery", "query.execute"),
-    binding!("ExecutePrepared", "query.execute"),
-    binding!("Search", "query.search"),
-    binding!("TextSearch", "query.text_search"),
-    binding!("MultimodalSearch", "query.multimodal_search"),
-    binding!("HybridSearch", "query.hybrid_search"),
-    binding!("ContextSearch", "query.context"),
-    binding!("Similar", "collections.similar"),
-    binding!("IvfSearch", "collections.ivf.search"),
-    binding!("GraphNeighborhood", "graph.neighborhood"),
-    binding!("GraphTraverse", "graph.traverse"),
-    binding!("GraphShortestPath", "graph.shortest_path"),
-    binding!("GraphComponents", "graph.analytics.components"),
-    binding!("GraphCentrality", "graph.analytics.centrality"),
-    binding!("GraphCommunity", "graph.analytics.community"),
-    binding!("GraphClustering", "graph.analytics.clustering"),
+    binding!(
+        "MarkGraphProjectionStale",
+        "graph.projections.stale",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "FailGraphProjection",
+        "graph.projections.fail",
+        GrpcAuthClass::Write
+    ),
+    binding!("AnalyticsJobs", "graph.jobs.list", GrpcAuthClass::Read),
+    binding!("Scan", "collections.scan", GrpcAuthClass::Read),
+    binding!("ExplainQuery", "query.explain", GrpcAuthClass::Read),
+    binding!("Query", "query.execute", GrpcAuthClass::Read),
+    binding!("BatchQuery", "query.execute", GrpcAuthClass::Read),
+    binding!("PrepareQuery", "query.execute", GrpcAuthClass::Read),
+    binding!("ExecutePrepared", "query.execute", GrpcAuthClass::Read),
+    binding!("Search", "query.search", GrpcAuthClass::Read),
+    binding!("TextSearch", "query.text_search", GrpcAuthClass::Read),
+    binding!(
+        "MultimodalSearch",
+        "query.multimodal_search",
+        GrpcAuthClass::Read
+    ),
+    binding!("HybridSearch", "query.hybrid_search", GrpcAuthClass::Read),
+    binding!("ContextSearch", "query.context", GrpcAuthClass::Read),
+    binding!("Similar", "collections.similar", GrpcAuthClass::Read),
+    binding!("IvfSearch", "collections.ivf.search", GrpcAuthClass::Read),
+    binding!(
+        "GraphNeighborhood",
+        "graph.neighborhood",
+        GrpcAuthClass::Read
+    ),
+    binding!("GraphTraverse", "graph.traverse", GrpcAuthClass::Read),
+    binding!(
+        "GraphShortestPath",
+        "graph.shortest_path",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "GraphComponents",
+        "graph.analytics.components",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "GraphCentrality",
+        "graph.analytics.centrality",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "GraphCommunity",
+        "graph.analytics.community",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "GraphClustering",
+        "graph.analytics.clustering",
+        GrpcAuthClass::Read
+    ),
     binding!(
         "GraphPersonalizedPagerank",
-        "graph.analytics.pagerank_personalized"
+        "graph.analytics.pagerank_personalized",
+        GrpcAuthClass::Read
     ),
-    binding!("GraphHits", "graph.analytics.hits"),
-    binding!("GraphCycles", "graph.analytics.cycles"),
-    binding!("GraphTopologicalSort", "graph.analytics.topological_sort"),
-    binding!("CreateRow", "collections.rows.create"),
-    binding!("CreateNode", "collections.nodes.create"),
-    binding!("CreateEdge", "collections.edges.create"),
-    binding!("CreateVector", "collections.vectors.create"),
-    binding!("CreateDocument", "collections.documents.create"),
-    binding!("CreateKv", "kv.dynamic.kv"),
-    binding!("KvWatch", "collections.entities.get"),
-    binding!("BulkCreateRows", "collections.bulk.rows"),
-    binding!("BulkInsertBinary", "collections.batch.insert"),
-    binding!("BatchInsert", "collections.batch.insert"),
-    binding!("BulkCreateNodes", "collections.bulk.nodes"),
-    binding!("BulkCreateEdges", "collections.bulk.edges"),
-    binding!("BulkCreateVectors", "collections.bulk.vectors"),
-    binding!("BulkCreateDocuments", "collections.bulk.documents"),
-    binding!("Ask", "ai.ask"),
-    binding!("AskStream", "ai.ask"),
-    binding!("Embeddings", "ai.embeddings"),
-    binding!("AiPrompt", "ai.prompt"),
-    binding!("AiCredentials", "ai.credentials"),
-    binding!("PatchEntity", "collections.entities.patch"),
-    binding!("CreateSnapshot", "physical.snapshot.create"),
-    binding!("CreateExport", "physical.export.create"),
-    binding!("ApplyRetention", "physical.retention.apply"),
-    binding!("DeleteEntity", "collections.entities.delete"),
-    binding!("Checkpoint", "physical.checkpoint"),
-    binding!("Topology", "ops.topology.graph"),
-    binding!("ReplicationStatus", "ops.replication.status"),
-    binding!("PullWalRecords", "ops.replication.snapshot"),
-    binding!("ReplicationSnapshot", "ops.replication.snapshot"),
-    binding!("SubmitAskSideEffects", "ai.ask"),
-    binding!("AckReplicaLsn", "ops.replication.snapshot"),
-    binding!("CreateCollection", "collections.create"),
-    binding!("DropCollection", "collections.drop"),
-    binding!("DescribeCollection", "collections.schema"),
-    binding!("AuthBootstrap", "auth.bootstrap"),
-    binding!("AuthLogin", "auth.login"),
-    binding!("AuthCreateUser", "auth.users.create"),
-    binding!("AuthDeleteUser", "auth.users.delete"),
-    binding!("AuthListUsers", "auth.users.list"),
-    binding!("AuthCreateApiKey", "auth.api_keys.create"),
-    binding!("AuthRevokeApiKey", "auth.api_keys.delete"),
-    binding!("AuthChangePassword", "auth.change_password"),
-    binding!("AuthWhoAmI", "auth.whoami"),
+    binding!("GraphHits", "graph.analytics.hits", GrpcAuthClass::Read),
+    binding!("GraphCycles", "graph.analytics.cycles", GrpcAuthClass::Read),
+    binding!(
+        "GraphTopologicalSort",
+        "graph.analytics.topological_sort",
+        GrpcAuthClass::Read
+    ),
+    binding!("CreateRow", "collections.rows.create", GrpcAuthClass::Write),
+    binding!(
+        "CreateNode",
+        "collections.nodes.create",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "CreateEdge",
+        "collections.edges.create",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "CreateVector",
+        "collections.vectors.create",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "CreateDocument",
+        "collections.documents.create",
+        GrpcAuthClass::Write
+    ),
+    binding!("CreateKv", "kv.dynamic.kv", GrpcAuthClass::Write),
+    binding!("KvWatch", "collections.entities.get", GrpcAuthClass::Read),
+    binding!(
+        "BulkCreateRows",
+        "collections.bulk.rows",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "BulkInsertBinary",
+        "collections.batch.insert",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "BatchInsert",
+        "collections.batch.insert",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "BulkCreateNodes",
+        "collections.bulk.nodes",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "BulkCreateEdges",
+        "collections.bulk.edges",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "BulkCreateVectors",
+        "collections.bulk.vectors",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "BulkCreateDocuments",
+        "collections.bulk.documents",
+        GrpcAuthClass::Write
+    ),
+    binding!("Ask", "ai.ask", GrpcAuthClass::Read),
+    binding!("AskStream", "ai.ask", GrpcAuthClass::Read),
+    binding!("Embeddings", "ai.embeddings", GrpcAuthClass::Write),
+    binding!("AiPrompt", "ai.prompt", GrpcAuthClass::Write),
+    binding!("AiCredentials", "ai.credentials", GrpcAuthClass::Write),
+    binding!(
+        "PatchEntity",
+        "collections.entities.patch",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "CreateSnapshot",
+        "physical.snapshot.create",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "CreateExport",
+        "physical.export.create",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "ApplyRetention",
+        "physical.retention.apply",
+        GrpcAuthClass::Write
+    ),
+    binding!(
+        "DeleteEntity",
+        "collections.entities.delete",
+        GrpcAuthClass::Write
+    ),
+    binding!("Checkpoint", "physical.checkpoint", GrpcAuthClass::Write),
+    binding!("Topology", "ops.topology.graph", GrpcAuthClass::Open),
+    binding!(
+        "ReplicationStatus",
+        "ops.replication.status",
+        GrpcAuthClass::Read
+    ),
+    binding!(
+        "PullWalRecords",
+        "ops.replication.snapshot",
+        GrpcAuthClass::Replication(REPLICATION_STREAM_ACTION)
+    ),
+    binding!(
+        "ReplicationSnapshot",
+        "ops.replication.snapshot",
+        GrpcAuthClass::Replication(REPLICATION_STREAM_ACTION)
+    ),
+    binding!("SubmitAskSideEffects", "ai.ask", GrpcAuthClass::Read),
+    binding!(
+        "AckReplicaLsn",
+        "ops.replication.snapshot",
+        GrpcAuthClass::Replication(REPLICATION_ACK_ACTION)
+    ),
+    binding!(
+        "CreateCollection",
+        "collections.create",
+        GrpcAuthClass::Write
+    ),
+    binding!("DropCollection", "collections.drop", GrpcAuthClass::Admin),
+    binding!(
+        "DescribeCollection",
+        "collections.schema",
+        GrpcAuthClass::Read
+    ),
+    binding!("AuthBootstrap", "auth.bootstrap", GrpcAuthClass::Open),
+    binding!("AuthLogin", "auth.login", GrpcAuthClass::Open),
+    binding!("AuthCreateUser", "auth.users.create", GrpcAuthClass::Admin),
+    binding!("AuthDeleteUser", "auth.users.delete", GrpcAuthClass::Admin),
+    binding!("AuthListUsers", "auth.users.list", GrpcAuthClass::Admin),
+    binding!(
+        "AuthCreateApiKey",
+        "auth.api_keys.create",
+        GrpcAuthClass::Admin
+    ),
+    binding!(
+        "AuthRevokeApiKey",
+        "auth.api_keys.delete",
+        GrpcAuthClass::Admin
+    ),
+    binding!(
+        "AuthChangePassword",
+        "auth.change_password",
+        GrpcAuthClass::Open
+    ),
+    binding!("AuthWhoAmI", "auth.whoami", GrpcAuthClass::Open),
 ];
 
 #[derive(Clone, Debug)]
@@ -246,10 +572,18 @@ where
     }
 
     fn call(&mut self, mut request: http::Request<B>) -> Self::Future {
-        let authorization = resolve_peer_auth(&request).and_then(|peer_auth| {
-            authorize_dispatch(
+        let authorization = binding_for_path(request.uri().path()).and_then(|binding| {
+            // Only the replication bindings accept an mTLS peer certificate as
+            // the principal; every other RPC authenticates from metadata, so a
+            // cert-bearing client neither gains access without an API key nor
+            // gets its metadata role downgraded.
+            let peer_auth = match binding.auth {
+                GrpcAuthClass::Replication(_) => resolve_peer_auth(&request)?,
+                _ => None,
+            };
+            authorize_binding(
                 &self.runtime,
-                request.uri().path(),
+                binding,
                 &MetadataMap::from_headers(request.headers().clone()),
                 peer_auth,
             )
@@ -264,33 +598,43 @@ where
     }
 }
 
-fn authorize_dispatch(
-    runtime: &GrpcRuntime,
-    path: &str,
-    metadata: &MetadataMap,
-    peer_auth: Option<AuthResult>,
-) -> Result<GrpcDispatchContext, Status> {
+fn binding_for_path(path: &str) -> Result<&'static GrpcCommandBinding, Status> {
     let rpc = path
         .strip_prefix("/reddb.v1.RedDb/")
         .ok_or_else(|| Status::unimplemented("unknown gRPC service"))?;
-    let binding = GRPC_COMMAND_BINDINGS
+    GRPC_COMMAND_BINDINGS
         .iter()
         .find(|binding| binding.rpc == rpc)
-        .ok_or_else(|| Status::unimplemented(format!("undeclared gRPC method {rpc}")))?;
-    authorize_command(runtime, metadata, binding.command_id, peer_auth)
+        .ok_or_else(|| Status::unimplemented(format!("undeclared gRPC method {rpc}")))
 }
 
-fn authorize_command(
+fn authorize_binding(
     runtime: &GrpcRuntime,
+    binding: &GrpcCommandBinding,
     metadata: &MetadataMap,
-    command_id: &str,
     peer_auth: Option<AuthResult>,
 ) -> Result<GrpcDispatchContext, Status> {
-    let auth = peer_auth.unwrap_or_else(|| runtime.resolve_auth(metadata));
+    if let GrpcAuthClass::Replication(action) = binding.auth {
+        let auth = peer_auth.unwrap_or_else(|| runtime.resolve_auth(metadata));
+        let username = authorize_replication_capability(runtime, &auth, action)?;
+        return Ok(GrpcDispatchContext {
+            principal: Some(username),
+        });
+    }
+
+    let auth = runtime.resolve_auth(metadata);
     let principal = match &auth {
         AuthResult::Authenticated { username, .. } => Some(username.clone()),
         AuthResult::Anonymous | AuthResult::Denied(_) => None,
     };
+
+    // The admin gate runs before the catalog so its denial code stays
+    // PERMISSION_DENIED for anonymous callers too, matching `authorize_admin`.
+    if binding.auth == GrpcAuthClass::Admin {
+        crate::auth::middleware::check_permission(&auth, false, true)
+            .map_err(Status::permission_denied)?;
+    }
+
     let (tenant, username) = principal
         .as_deref()
         .and_then(|principal| principal.split_once('/'))
@@ -309,22 +653,20 @@ fn authorize_command(
     let engine = GrpcCommandPolicyEngine {
         auth_store: &runtime.auth_store,
         auth: &auth,
+        class: binding.auth,
         tenant,
         username,
     };
+    // `authorize_read`/`authorize_write` both reported denials as
+    // UNAUTHENTICATED; keep that mapping so clients see no status change.
     crate::server::route_catalog::CommandAuthorizer::new(crate::server::command_catalog(), &engine)
-        .authorize(&operation_context, command_id)
-        .map_err(|error| match auth {
-            AuthResult::Authenticated { .. } => Status::permission_denied(error.to_string()),
-            AuthResult::Anonymous | AuthResult::Denied(_) => {
-                Status::unauthenticated(error.to_string())
-            }
-        })?;
+        .authorize(&operation_context, binding.command_id)
+        .map_err(|error| Status::unauthenticated(error.to_string()))?;
 
-    let command = crate::server::command_catalog()
-        .command(command_id)
-        .ok_or_else(|| Status::internal(format!("unknown command {command_id}")))?;
-    if command.auth == CommandAuthRequirement::UserRequired && command_is_write(command) {
+    // Replica write gate. Every RPC that used to call `authorize_write` is
+    // bound to `GrpcAuthClass::Write`, so the gate covers the same set
+    // regardless of the command's own auth requirement.
+    if binding.auth == GrpcAuthClass::Write {
         runtime
             .runtime
             .check_write(crate::runtime::write_gate::WriteKind::Dml)
@@ -332,6 +674,36 @@ fn authorize_command(
     }
 
     Ok(GrpcDispatchContext { principal })
+}
+
+/// Issue #820: replication capabilities are policy-only. A `DefaultDeny`
+/// never falls through to the legacy RBAC posture, so a read-role key cannot
+/// stream the WAL or ack an LSN without an explicit policy grant.
+fn authorize_replication_capability(
+    runtime: &GrpcRuntime,
+    auth: &AuthResult,
+    action: &str,
+) -> Result<String, Status> {
+    let username = match auth {
+        AuthResult::Authenticated { username, .. } => username.clone(),
+        AuthResult::Denied(reason) => return Err(Status::unauthenticated(reason.clone())),
+        AuthResult::Anonymous => return Err(Status::unauthenticated("authentication required")),
+    };
+
+    let principal = crate::auth::UserId::platform(username.clone());
+    let resource = ResourceRef::new("cluster", "replication");
+    let outcome = runtime.auth_store.simulate(
+        &principal,
+        action,
+        &resource,
+        crate::auth::store::SimCtx::default(),
+    );
+    match outcome.decision {
+        policies::Decision::Allow { .. } | policies::Decision::AdminBypass => Ok(username),
+        _ => Err(Status::permission_denied(format!(
+            "policy: principal '{username}' is not allowed to perform '{action}'"
+        ))),
+    }
 }
 
 fn resolve_peer_auth<B>(request: &http::Request<B>) -> Result<Option<AuthResult>, Status> {
@@ -359,27 +731,24 @@ fn resolve_peer_auth<B>(request: &http::Request<B>) -> Result<Option<AuthResult>
 struct GrpcCommandPolicyEngine<'a> {
     auth_store: &'a AuthStore,
     auth: &'a AuthResult,
+    class: GrpcAuthClass,
     tenant: Option<&'a str>,
     username: Option<&'a str>,
 }
 
 impl CommandPolicyEngine for GrpcCommandPolicyEngine<'_> {
     fn allows(&self, _ctx: &crate::application::OperationContext, command: &CommandSpec) -> bool {
-        let default_allow = matches!(
-            command.auth,
-            CommandAuthRequirement::Public | CommandAuthRequirement::OptionalUser
-        );
+        let (action, default_allow) = class_policy(self.class);
         let AuthResult::Authenticated { role, .. } = self.auth else {
-            return default_allow
-                || (matches!(self.auth, AuthResult::Anonymous)
-                    && command.auth == CommandAuthRequirement::UserRequired
-                    && !self.auth_store.config().require_auth);
+            // `check_permission` let anonymous callers through whenever the
+            // deployment did not require authentication; a `Denied` result
+            // (bad or missing token under `require_auth`) never passed.
+            return default_allow || matches!(self.auth, AuthResult::Anonymous);
         };
         let Some(username) = self.username else {
             return default_allow;
         };
 
-        let action = command_action(command);
         let principal = crate::auth::UserId::from_parts(self.tenant, username);
         let mut resource = ResourceRef::new(
             "command",
@@ -411,32 +780,18 @@ impl CommandPolicyEngine for GrpcCommandPolicyEngine<'_> {
     }
 }
 
-fn command_action(command: &CommandSpec) -> &'static str {
-    match command.auth {
-        CommandAuthRequirement::Public
-        | CommandAuthRequirement::OptionalUser
-        | CommandAuthRequirement::UserRequired => {
-            if command_is_write(command) {
-                "write"
-            } else {
-                "select"
-            }
-        }
-        CommandAuthRequirement::AdminToken => "admin:*",
-        CommandAuthRequirement::OpsCapability(action) => action,
-        CommandAuthRequirement::StreamLease => "stream",
+/// The IAM action a binding class evaluates, plus whether a principal with no
+/// matching policy statement is allowed through.
+fn class_policy(class: GrpcAuthClass) -> (&'static str, bool) {
+    match class {
+        GrpcAuthClass::Open => ("select", true),
+        GrpcAuthClass::Read => ("select", false),
+        GrpcAuthClass::Write => ("write", false),
+        GrpcAuthClass::Admin => ("admin:*", false),
+        // Handled by `authorize_replication_capability`, which never reaches
+        // this engine.
+        GrpcAuthClass::Replication(action) => (action, false),
     }
-}
-
-fn command_is_write(command: &CommandSpec) -> bool {
-    matches!(
-        command.method,
-        RouteMethod::Post
-            | RouteMethod::Put
-            | RouteMethod::Patch
-            | RouteMethod::Delete
-            | RouteMethod::Any
-    )
 }
 
 fn command_audience(command: &CommandSpec) -> &'static str {
@@ -461,6 +816,328 @@ pub(super) fn authorized_principal<T>(request: &Request<T>) -> Result<&str, Stat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The guard every gRPC method called by hand before dispatch consumed
+    /// the catalog, recovered from `origin/main`'s
+    /// `crates/reddb-server/src/grpc/service_impl.rs`. This table is the
+    /// independent record of the pre-catalog behaviour: the matrix test
+    /// below derives its expectations from here and its actuals from
+    /// [`GRPC_COMMAND_BINDINGS`], so a binding that downgrades a method
+    /// fails CI.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum PrePrGuard {
+        /// No inline guard, or the handler owns its own check.
+        NoGuard,
+        Read,
+        Write,
+        Admin,
+        ReplicationStream,
+        ReplicationAck,
+    }
+
+    macro_rules! guard {
+        ($rpc:literal, $guard:ident) => {
+            ($rpc, PrePrGuard::$guard)
+        };
+    }
+
+    const PRE_PR_GRPC_GUARDS: &[(&str, PrePrGuard)] = &[
+        guard!("Health", NoGuard),
+        guard!("Ready", NoGuard),
+        guard!("Stats", Read),
+        guard!("Collections", Read),
+        guard!("CatalogReadiness", Read),
+        guard!("DeploymentProfiles", Read),
+        guard!("CollectionReadiness", Read),
+        guard!("CollectionAttention", Read),
+        guard!("CatalogAttentionSummary", Read),
+        guard!("CatalogConsistency", Read),
+        guard!("ServerlessAttach", Write),
+        guard!("ServerlessWarmup", Write),
+        guard!("ServerlessReclaim", Write),
+        guard!("DeclaredIndexes", Read),
+        guard!("OperationalIndexes", Read),
+        guard!("IndexStatuses", Read),
+        guard!("IndexAttention", Read),
+        guard!("DeclaredGraphProjections", Read),
+        guard!("OperationalGraphProjections", Read),
+        guard!("GraphProjectionStatuses", Read),
+        guard!("GraphProjectionAttention", Read),
+        guard!("DeclaredAnalyticsJobs", Read),
+        guard!("OperationalAnalyticsJobs", Read),
+        guard!("AnalyticsJobStatuses", Read),
+        guard!("AnalyticsJobAttention", Read),
+        guard!("PhysicalMetadata", Read),
+        guard!("NativeHeader", Read),
+        guard!("NativeCollectionRoots", Read),
+        guard!("NativeManifestSummary", Read),
+        guard!("NativeRegistrySummary", Read),
+        guard!("NativeRecoverySummary", Read),
+        guard!("NativeCatalogSummary", Read),
+        guard!("NativeMetadataStateSummary", Read),
+        guard!("PhysicalAuthority", Read),
+        guard!("NativePhysicalState", Read),
+        guard!("NativeVectorArtifacts", Read),
+        guard!("InspectNativeVectorArtifacts", Read),
+        guard!("InspectNativeVectorArtifact", Read),
+        guard!("NativeHeaderRepairPolicy", Read),
+        guard!("RepairNativeHeader", Write),
+        guard!("WarmupNativeVectorArtifacts", Write),
+        guard!("WarmupNativeVectorArtifact", Write),
+        guard!("RepairNativePhysicalState", Write),
+        guard!("RebuildPhysicalMetadata", Write),
+        guard!("Manifest", Read),
+        guard!("Roots", Read),
+        guard!("Snapshots", Read),
+        guard!("Exports", Read),
+        guard!("Indexes", Read),
+        guard!("SetIndexEnabled", Write),
+        guard!("MarkIndexBuilding", Write),
+        guard!("MarkIndexReady", Write),
+        guard!("FailIndex", Write),
+        guard!("MarkIndexStale", Write),
+        guard!("WarmupIndex", Write),
+        guard!("RebuildIndexes", Write),
+        guard!("GraphProjections", Read),
+        guard!("SaveGraphProjection", Write),
+        guard!("SaveAnalyticsJob", Write),
+        guard!("QueueAnalyticsJob", Write),
+        guard!("StartAnalyticsJob", Write),
+        guard!("CompleteAnalyticsJob", Write),
+        guard!("MarkAnalyticsJobStale", Write),
+        guard!("FailAnalyticsJob", Write),
+        guard!("MaterializeGraphProjection", Write),
+        guard!("MarkGraphProjectionMaterializing", Write),
+        guard!("MarkGraphProjectionStale", Write),
+        guard!("FailGraphProjection", Write),
+        guard!("AnalyticsJobs", Read),
+        guard!("Scan", Read),
+        guard!("ExplainQuery", Read),
+        guard!("Query", Read),
+        guard!("BatchQuery", Read),
+        guard!("PrepareQuery", Read),
+        guard!("ExecutePrepared", Read),
+        guard!("Search", Read),
+        guard!("TextSearch", Read),
+        guard!("MultimodalSearch", Read),
+        guard!("HybridSearch", Read),
+        guard!("ContextSearch", Read),
+        guard!("Similar", Read),
+        guard!("IvfSearch", Read),
+        guard!("GraphNeighborhood", Read),
+        guard!("GraphTraverse", Read),
+        guard!("GraphShortestPath", Read),
+        guard!("GraphComponents", Read),
+        guard!("GraphCentrality", Read),
+        guard!("GraphCommunity", Read),
+        guard!("GraphClustering", Read),
+        guard!("GraphPersonalizedPagerank", Read),
+        guard!("GraphHits", Read),
+        guard!("GraphCycles", Read),
+        guard!("GraphTopologicalSort", Read),
+        guard!("CreateRow", Write),
+        guard!("CreateNode", Write),
+        guard!("CreateEdge", Write),
+        guard!("CreateVector", Write),
+        guard!("CreateDocument", Write),
+        guard!("CreateKv", Write),
+        guard!("KvWatch", Read),
+        guard!("BulkCreateRows", Write),
+        guard!("BulkInsertBinary", Write),
+        guard!("BatchInsert", Write),
+        guard!("BulkCreateNodes", Write),
+        guard!("BulkCreateEdges", Write),
+        guard!("BulkCreateVectors", Write),
+        guard!("BulkCreateDocuments", Write),
+        guard!("Ask", Read),
+        guard!("AskStream", Read),
+        guard!("Embeddings", Write),
+        guard!("AiPrompt", Write),
+        guard!("AiCredentials", Write),
+        guard!("PatchEntity", Write),
+        guard!("CreateSnapshot", Write),
+        guard!("CreateExport", Write),
+        guard!("ApplyRetention", Write),
+        guard!("DeleteEntity", Write),
+        guard!("Checkpoint", Write),
+        guard!("Topology", NoGuard),
+        guard!("ReplicationStatus", Read),
+        guard!("PullWalRecords", ReplicationStream),
+        guard!("ReplicationSnapshot", ReplicationStream),
+        guard!("SubmitAskSideEffects", Read),
+        guard!("AckReplicaLsn", ReplicationAck),
+        guard!("CreateCollection", Write),
+        guard!("DropCollection", Admin),
+        guard!("DescribeCollection", Read),
+        guard!("AuthBootstrap", NoGuard),
+        guard!("AuthLogin", NoGuard),
+        guard!("AuthCreateUser", Admin),
+        guard!("AuthDeleteUser", Admin),
+        guard!("AuthListUsers", Admin),
+        guard!("AuthCreateApiKey", Admin),
+        guard!("AuthRevokeApiKey", Admin),
+        guard!("AuthChangePassword", NoGuard),
+        guard!("AuthWhoAmI", NoGuard),
+    ];
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Principal {
+        Anonymous,
+        Read,
+        Write,
+        Admin,
+    }
+
+    const PRINCIPALS: &[Principal] = &[
+        Principal::Anonymous,
+        Principal::Read,
+        Principal::Write,
+        Principal::Admin,
+    ];
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Outcome {
+        Allow,
+        Unauthenticated,
+        PermissionDenied,
+        Other,
+    }
+
+    /// The decision the pre-catalog guard produced for `principal`, on a
+    /// deployment with auth enabled and `require_auth` on and no IAM policies
+    /// attached (the legacy-RBAC posture).
+    fn expected_outcome(guard: PrePrGuard, principal: Principal) -> Outcome {
+        match (guard, principal) {
+            (PrePrGuard::NoGuard, _) => Outcome::Allow,
+            // `check_permission` mapped every read/write denial to
+            // UNAUTHENTICATED, including an authenticated-but-insufficient
+            // role.
+            (PrePrGuard::Read, Principal::Anonymous) => Outcome::Unauthenticated,
+            (PrePrGuard::Read, _) => Outcome::Allow,
+            (PrePrGuard::Write, Principal::Anonymous | Principal::Read) => Outcome::Unauthenticated,
+            (PrePrGuard::Write, _) => Outcome::Allow,
+            // `authorize_admin` mapped every denial to PERMISSION_DENIED.
+            (PrePrGuard::Admin, Principal::Admin) => Outcome::Allow,
+            (PrePrGuard::Admin, _) => Outcome::PermissionDenied,
+            // Replication capabilities are policy-only: with no policy
+            // attached every authenticated role is denied, and there is no
+            // legacy-RBAC fallback that a read key could ride.
+            (PrePrGuard::ReplicationStream | PrePrGuard::ReplicationAck, Principal::Anonymous) => {
+                Outcome::Unauthenticated
+            }
+            (PrePrGuard::ReplicationStream | PrePrGuard::ReplicationAck, _) => {
+                Outcome::PermissionDenied
+            }
+        }
+    }
+
+    struct Harness {
+        grpc: GrpcRuntime,
+        read_key: String,
+        write_key: String,
+        admin_key: String,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let runtime =
+                RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+            let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig {
+                enabled: true,
+                require_auth: true,
+                ..crate::auth::AuthConfig::default()
+            }));
+            auth_store
+                .create_user("reader", "p", Role::Read)
+                .expect("reader");
+            auth_store
+                .create_user("writer", "p", Role::Write)
+                .expect("writer");
+            auth_store
+                .create_user("root", "p", Role::Admin)
+                .expect("root");
+            let read_key = auth_store
+                .create_api_key("reader", "read", Role::Read)
+                .expect("read key")
+                .key;
+            let write_key = auth_store
+                .create_api_key("writer", "write", Role::Write)
+                .expect("write key")
+                .key;
+            let admin_key = auth_store
+                .create_api_key("root", "admin", Role::Admin)
+                .expect("admin key")
+                .key;
+            Self {
+                grpc: GrpcRuntime {
+                    runtime,
+                    auth_store,
+                    prepared_registry: Arc::new(PreparedRegistry::new()),
+                    oauth_validator: None,
+                },
+                read_key,
+                write_key,
+                admin_key,
+            }
+        }
+
+        fn metadata(&self, principal: Principal) -> MetadataMap {
+            let mut metadata = MetadataMap::new();
+            let key = match principal {
+                Principal::Anonymous => return metadata,
+                Principal::Read => &self.read_key,
+                Principal::Write => &self.write_key,
+                Principal::Admin => &self.admin_key,
+            };
+            metadata.insert(
+                "authorization",
+                format!("Bearer {key}").parse().expect("metadata value"),
+            );
+            metadata
+        }
+
+        fn decide(&self, binding: &GrpcCommandBinding, principal: Principal) -> Outcome {
+            outcome(authorize_binding(
+                &self.grpc,
+                binding,
+                &self.metadata(principal),
+                None,
+            ))
+        }
+    }
+
+    fn outcome(result: Result<GrpcDispatchContext, Status>) -> Outcome {
+        match result {
+            Ok(_) => Outcome::Allow,
+            Err(status) => match status.code() {
+                tonic::Code::Unauthenticated => Outcome::Unauthenticated,
+                tonic::Code::PermissionDenied => Outcome::PermissionDenied,
+                _ => Outcome::Other,
+            },
+        }
+    }
+
+    fn binding(rpc: &str) -> &'static GrpcCommandBinding {
+        GRPC_COMMAND_BINDINGS
+            .iter()
+            .find(|binding| binding.rpc == rpc)
+            .unwrap_or_else(|| panic!("no binding for {rpc}"))
+    }
+
+    fn install_replication_policy(store: &AuthStore, username: &str, id: &str, action: &str) {
+        let policy_json = format!(
+            r#"{{"id":"{id}","version":1,"statements":[{{"effect":"allow","actions":["{action}"],"resources":["cluster:replication"]}}]}}"#
+        );
+        store
+            .put_policy(crate::auth::policies::Policy::from_json_str(&policy_json).expect("policy"))
+            .expect("put policy");
+        store
+            .attach_policy(
+                crate::auth::store::PrincipalRef::User(crate::auth::UserId::platform(username)),
+                id,
+            )
+            .expect("attach policy");
+    }
 
     fn exposed_rpc_names() -> Vec<&'static str> {
         include_str!("../../../reddb-grpc-proto/proto/reddb.proto")
@@ -492,40 +1169,110 @@ mod tests {
     }
 
     #[test]
-    fn every_protected_grpc_command_rejects_anonymous_dispatch() {
-        let runtime =
-            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
-        let grpc = GrpcRuntime {
-            runtime,
-            auth_store: Arc::new(AuthStore::new(crate::auth::AuthConfig {
-                enabled: true,
-                require_auth: true,
-                ..crate::auth::AuthConfig::default()
-            })),
-            prepared_registry: Arc::new(PreparedRegistry::new()),
-            oauth_validator: None,
-        };
-        let metadata = MetadataMap::new();
+    fn pre_pr_guard_table_covers_every_binding() {
+        let bound: Vec<&str> = GRPC_COMMAND_BINDINGS
+            .iter()
+            .map(|binding| binding.rpc)
+            .collect();
+        let recorded: Vec<&str> = PRE_PR_GRPC_GUARDS.iter().map(|(rpc, _)| *rpc).collect();
+        assert_eq!(recorded, bound);
+    }
 
-        for binding in GRPC_COMMAND_BINDINGS {
-            let command = crate::server::command_catalog()
-                .command(binding.command_id)
-                .expect("bound command");
-            if matches!(
-                command.auth,
-                CommandAuthRequirement::Public | CommandAuthRequirement::OptionalUser
-            ) {
-                continue;
+    /// Issue #2146: dispatch authorization must reach the same decision the
+    /// hand-written guards did, for every binding and every principal class.
+    #[test]
+    fn grpc_dispatch_matches_pre_pr_auth_matrix() {
+        let harness = Harness::new();
+        let mut checked = 0usize;
+        let mut mismatches = Vec::new();
+
+        for (rpc, guard) in PRE_PR_GRPC_GUARDS {
+            let binding = binding(rpc);
+            for principal in PRINCIPALS {
+                let expected = expected_outcome(*guard, *principal);
+                let actual = harness.decide(binding, *principal);
+                checked += 1;
+                if actual != expected {
+                    mismatches.push(format!(
+                        "{rpc} ({guard:?}) as {principal:?}: expected {expected:?}, got {actual:?}"
+                    ));
+                }
             }
+        }
 
-            let error = authorize_command(&grpc, &metadata, binding.command_id, None)
-                .expect_err(binding.rpc);
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+        assert_eq!(checked, GRPC_COMMAND_BINDINGS.len() * PRINCIPALS.len());
+    }
+
+    /// Issue #820: the stream and ack capabilities stay separate, and neither
+    /// falls through to the legacy RBAC posture.
+    #[test]
+    fn replication_capabilities_are_policy_only_and_split() {
+        let harness = Harness::new();
+        install_replication_policy(
+            &harness.grpc.auth_store,
+            "reader",
+            "p_stream_only",
+            REPLICATION_STREAM_ACTION,
+        );
+        install_replication_policy(
+            &harness.grpc.auth_store,
+            "writer",
+            "p_ack_only",
+            REPLICATION_ACK_ACTION,
+        );
+
+        for rpc in ["PullWalRecords", "ReplicationSnapshot"] {
             assert_eq!(
-                error.code(),
-                tonic::Code::Unauthenticated,
-                "{}",
-                binding.rpc
+                harness.decide(binding(rpc), Principal::Read),
+                Outcome::Allow,
+                "{rpc} with the stream capability"
+            );
+            assert_eq!(
+                harness.decide(binding(rpc), Principal::Write),
+                Outcome::PermissionDenied,
+                "{rpc} with only the ack capability"
             );
         }
+        assert_eq!(
+            harness.decide(binding("AckReplicaLsn"), Principal::Write),
+            Outcome::Allow,
+        );
+        assert_eq!(
+            harness.decide(binding("AckReplicaLsn"), Principal::Read),
+            Outcome::PermissionDenied,
+        );
+    }
+
+    /// Only the replication bindings accept an mTLS peer certificate as the
+    /// principal, so a cert-bearing client without an API key gains nothing
+    /// on the other 133 RPCs.
+    #[test]
+    fn mtls_peer_identity_is_scoped_to_replication_bindings() {
+        let peer_bound: Vec<&str> = GRPC_COMMAND_BINDINGS
+            .iter()
+            .filter(|binding| matches!(binding.auth, GrpcAuthClass::Replication(_)))
+            .map(|binding| binding.rpc)
+            .collect();
+        assert_eq!(
+            peer_bound,
+            vec!["PullWalRecords", "ReplicationSnapshot", "AckReplicaLsn"]
+        );
+
+        let harness = Harness::new();
+        let peer_auth = AuthResult::Authenticated {
+            username: "node-a".into(),
+            role: Role::Read,
+            source: AuthSource::ClientCert,
+        };
+        assert_eq!(
+            outcome(authorize_binding(
+                &harness.grpc,
+                binding("Scan"),
+                &MetadataMap::new(),
+                Some(peer_auth),
+            )),
+            Outcome::Unauthenticated,
+        );
     }
 }

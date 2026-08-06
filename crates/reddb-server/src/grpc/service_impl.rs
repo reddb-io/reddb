@@ -3390,8 +3390,9 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
+        // The admin gate runs at dispatch (`GrpcAuthClass::Admin`); this
+        // resolve is only for the per-target lifecycle authorization below.
         let auth = self.resolve_auth(request.metadata());
-        check_permission(&auth, false, true).map_err(Status::permission_denied)?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
@@ -3450,8 +3451,9 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
+        // The admin gate runs at dispatch (`GrpcAuthClass::Admin`); this
+        // resolve is only for the per-target lifecycle authorization below.
         let auth = self.resolve_auth(request.metadata());
-        check_permission(&auth, false, true).map_err(Status::permission_denied)?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
