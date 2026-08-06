@@ -5150,7 +5150,7 @@ mod render_prompt_tests {
     use crate::runtime::ask_pipeline::{
         AskContext, CandidateCollections, FilteredRow, StageTimings, TokenSet,
     };
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use crate::storage::unified::entity::{
         EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
     };
@@ -5449,7 +5449,7 @@ mod citation_wedge_tests {
             AskContext, CandidateCollections, FilteredRow, GraphHit, GraphHitKind, StageTimings,
             TextHit, TokenSet, VectorHit,
         };
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         use crate::storage::unified::entity::{
             EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
         };
