@@ -36,7 +36,7 @@
 //!   field rejected — strict mode),
 //! * for keys present in both, the type tag must match.
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::{EntityData, UnifiedStore};
 use crate::utils::json::{parse_json, JsonValue};
 
