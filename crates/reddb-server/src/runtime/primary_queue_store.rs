@@ -23,7 +23,7 @@ use crate::storage::queue::lifecycle::{
     QueueStoreError, QueueTxn, QueueTxnContext, Result, DEFAULT_READ_MAX_ATTEMPTS,
 };
 use crate::storage::queue::QueueMode;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::{EntityData, EntityId, EntityKind, UnifiedEntity, UnifiedStore};
 
