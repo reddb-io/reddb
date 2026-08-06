@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use crate::api::RedDBResult;
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PgCatalogView {
