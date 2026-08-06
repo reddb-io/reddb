@@ -287,7 +287,7 @@ pub(crate) fn bulk_insert_binary(
     runtime: &GrpcRuntime,
     request: super::proto::BinaryBulkInsertRequest,
 ) -> Result<super::proto::BulkInsertReply, Status> {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     let collection = request.collection;
     let n = request.rows.len();
