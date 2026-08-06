@@ -9,9 +9,7 @@ and is compiled by `tonic-prost-build` at build time.
 This crate is consumed by:
 
 - `reddb-server` — server-side dispatch handlers.
-- `reddb-client` — gRPC connector used by the `red` and
-  `red_client` binaries (via the workspace-internal
-  `reddb-client-connector` sibling).
+- `reddb-client` — higher-level Rust client and CLI presentation.
 
 You usually want one of those higher-level crates instead of
 depending on `reddb-grpc-proto` directly. The crate exists so the
@@ -24,6 +22,7 @@ other (which would form a dependency cycle).
   surface (RedDb service, all request/reply messages).
 - `src/lib.rs` — `tonic::include_proto!("reddb.v1")` re-exports
   every generated type at the crate root.
+- `RedDBClient` — authenticated thin client over the generated tonic stub.
 
 ## References
 

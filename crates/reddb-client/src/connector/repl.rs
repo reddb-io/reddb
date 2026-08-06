@@ -30,8 +30,8 @@ pub async fn run_repl(client: &mut RedDBClient) {
         match trimmed {
             ".quit" | ".exit" | "\\q" => break,
             ".help" | "\\?" => print_help(),
-            ".health" => match client.health().await {
-                Ok(s) => println!("{}", s),
+            ".health" => match client.health_status().await {
+                Ok(reply) => println!("state: {}, healthy: {}", reply.state, reply.healthy),
                 Err(e) => eprintln!("error: {}", e),
             },
             ".collections" | "\\l" => match client.collections().await {
@@ -47,7 +47,13 @@ pub async fn run_repl(client: &mut RedDBClient) {
                 Err(e) => eprintln!("error: {}", e),
             },
             ".stats" => match client.stats().await {
-                Ok(s) => println!("{}", s),
+                Ok(reply) => println!(
+                    "collections: {}, entities: {}, memory: {} bytes, started_at: {}",
+                    reply.collection_count,
+                    reply.total_entities,
+                    reply.total_memory_bytes,
+                    reply.started_at_unix_ms
+                ),
                 Err(e) => eprintln!("error: {}", e),
             },
             ".status" => match client.replication_status().await {
@@ -66,7 +72,15 @@ pub async fn run_repl(client: &mut RedDBClient) {
                 let collection = parts[0];
                 let limit = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10u64);
                 match client.scan(collection, limit).await {
-                    Ok(s) => println!("{}", s),
+                    Ok(reply) => {
+                        let items = reply
+                            .items
+                            .iter()
+                            .map(|entity| entity.json.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!("total: {}, items: [{}]", reply.total, items);
+                    }
                     Err(e) => eprintln!("error: {}", e),
                 }
             }

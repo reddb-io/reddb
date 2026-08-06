@@ -274,11 +274,10 @@ every PR to catch accidental engine re-linkage.
 - `crate::connect::{Target, parse}` — back-compat shim over
   [`reddb-wire`'s][rw] connection-string parser.
 - `crate::connector::{RedDBClient, repl, http, redwire}` —
-  workspace-internal connector consumed by the `red` REPL,
-  `red_client` bin, and `reddb-server`'s rpc_stdio mode. The
-  gRPC connector type itself lives in the
-  [`reddb-client-connector`](../reddb-client-connector) sibling
-  crate to break a path-dependency cycle.
+  compatibility re-exports and CLI helpers consumed by the `red`
+  REPL and `red_client` bin. The gRPC connector type itself lives
+  beside the generated replies in
+  [`reddb-grpc-proto`](../reddb-grpc-proto).
 
 ## References
 
