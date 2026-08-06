@@ -125,7 +125,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use crate::storage::unified::EntityData;
 
     struct TestPreprocessor;
