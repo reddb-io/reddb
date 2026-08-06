@@ -2699,7 +2699,7 @@ fn fields_match_any(fields: &[String], candidates: &[&str]) -> bool {
 mod tests {
     use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
     use crate::storage::query::ast::{CompareOp, FieldRef, Filter, QueryExpr};
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use crate::storage::unified::EntityId;
     use crate::{RedDBOptions, RedDBRuntime};
 
