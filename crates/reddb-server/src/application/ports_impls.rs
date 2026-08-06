@@ -6,16 +6,6 @@ pub(crate) use super::*;
 /// represent a best-effort observation, not a user commitment, so the model stays
 /// advisory until someone promotes the collection via explicit DDL or a stricter
 /// schema mode.
-pub(super) fn contract_enforces_model(contract: &crate::physical::CollectionContract) -> bool {
-    !matches!(
-        (&contract.origin, &contract.schema_mode),
-        (
-            crate::physical::ContractOrigin::Implicit,
-            crate::catalog::SchemaMode::Dynamic,
-        )
-    )
-}
-
 pub(super) fn collection_model_allows_shared(
     declared_model: crate::catalog::CollectionModel,
     requested_model: crate::catalog::CollectionModel,
@@ -55,7 +45,7 @@ pub(super) fn ensure_collection_model_read(
     let Some(contract) = db.collection_contract(collection) else {
         return Ok(());
     };
-    if !contract_enforces_model(&contract) {
+    if !crate::application::collection_contract_enforcer::contract_enforces_model(&contract) {
         return Ok(());
     }
     if collection_model_allows_shared(contract.declared_model, requested_model) {
@@ -75,10 +65,10 @@ mod admin;
 mod catalog;
 #[path = "ports_impls_entity.rs"]
 mod entity;
-pub(crate) use entity::build_row_update_contract_plan;
+pub(crate) use crate::application::collection_contract_enforcer::build_row_update_contract_plan;
+pub(crate) use crate::application::collection_contract_enforcer::normalize_row_update_assignment_with_plan;
+pub(crate) use crate::application::collection_contract_enforcer::normalize_row_update_value_for_rule;
 pub(crate) use entity::entity_row_fields_snapshot;
-pub(crate) use entity::normalize_row_update_assignment_with_plan;
-pub(crate) use entity::normalize_row_update_value_for_rule;
 #[path = "ports_impls_graph.rs"]
 mod graph;
 #[path = "ports_impls_native.rs"]
