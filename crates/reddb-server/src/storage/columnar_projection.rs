@@ -34,7 +34,7 @@
 //! follow-up slice; the equivalence/freshness/budget oracles here prove the
 //! loop is correct end to end first.
 
-use crate::storage::schema::types::{DataType, Value};
+use reddb_types::types::{DataType, Value};
 use crate::storage::unified::{
     read_column_block, write_column_block, ColumnBlockError, ColumnInput, ColumnSemantics,
 };
