@@ -598,6 +598,15 @@ where
     }
 }
 
+/// The catalog commands gRPC serves. `grpc_catalog_bindings_cover_every_exposed_rpc`
+/// pins this table against `service RedDb`, so the bindings are the gRPC surface
+/// and the command-coverage matrix reads them instead of re-parsing the proto.
+pub(crate) fn bound_command_ids() -> impl Iterator<Item = &'static str> {
+    GRPC_COMMAND_BINDINGS
+        .iter()
+        .map(|binding| binding.command_id)
+}
+
 fn binding_for_path(path: &str) -> Result<&'static GrpcCommandBinding, Status> {
     let rpc = path
         .strip_prefix("/reddb.v1.RedDb/")

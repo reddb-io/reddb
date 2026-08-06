@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::application::OperationContext;
 use crate::auth::policies::{self, EvalContext, Policy, ResourceRef};
 
-use super::{HttpResponse, RedDBServer};
+use super::{transport_surface, HttpResponse, RedDBServer};
 
 /// The buffered HTTP request handed to a route's handler, alongside the
 /// catalog match that selected it (so handlers read their path params from
@@ -101,6 +101,7 @@ pub(crate) type RouteAudience = CommandAudience;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandAuthRequirement {
+    Undeclared,
     Public,
     OptionalUser,
     UserRequired,
@@ -112,6 +113,7 @@ pub(crate) enum CommandAuthRequirement {
 impl CommandAuthRequirement {
     fn matrix_label(self) -> String {
         match self {
+            Self::Undeclared => "undeclared".to_string(),
             Self::Public => "public".to_string(),
             Self::OptionalUser => "optional-user".to_string(),
             Self::UserRequired => "user-required".to_string(),
@@ -363,6 +365,9 @@ impl CommandCatalog {
             if !seen_ids.insert(spec.id) {
                 return Err(RouteCatalogError::DuplicateRouteId { id: spec.id });
             }
+            if spec.auth == CommandAuthRequirement::Undeclared {
+                return Err(RouteCatalogError::UndeclaredCommandAuth { id: spec.id });
+            }
             if !spec.input_shape.is_declared() || !spec.output_shape.is_declared() {
                 return Err(RouteCatalogError::UndeclaredCommandShape { id: spec.id });
             }
@@ -543,37 +548,78 @@ impl CommandCatalog {
 
 /// Render the canonical command-by-transport review artifact.
 ///
+/// Regenerate with
+/// `cargo run --locked -p reddb-io-server --bin command-coverage > command-coverage.md`.
+///
 /// HTTP owns the declarations that seed this catalog, so every catalogued
-/// command is served there. Other adapters stay explicit coverage gaps until
-/// their migration supplies command ids. RedWire supplies its exhaustive
-/// frame mapping here instead of maintaining a second command vocabulary.
-pub(crate) fn render_command_coverage_matrix(
-    catalog: &CommandCatalog,
-    redwire_command_ids: impl IntoIterator<Item = &'static str>,
-) -> String {
-    let redwire_command_ids: BTreeSet<_> = redwire_command_ids.into_iter().collect();
+/// command is served there. Every other column is joined on command id against
+/// that transport's own binding table (see [`transport_surface`]), so a
+/// dispatcher change moves this artifact. `undeclared` is a coverage gap, not
+/// an explicit unsupported decision.
+pub(crate) fn render_command_coverage_matrix(catalog: &CommandCatalog) -> String {
+    let grpc_ids = transport_surface::grpc_command_ids();
+    let mcp_ids = transport_surface::mcp_command_ids();
+    let stdio_ids = transport_surface::stdio_command_ids();
+    let redwire_ids = transport_surface::redwire_command_ids();
+
     let mut commands: Vec<_> = catalog.commands().collect();
     commands.sort_by_key(|command| command.id);
 
     let mut matrix = String::from(
         "# Command coverage matrix\n\n\
-         `undeclared` is a coverage gap, not an explicit unsupported decision.\n\n\
-         | command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |\n\
+         `undeclared` is a coverage gap, not an explicit unsupported decision.\n\n",
+    );
+    matrix.push_str(&render_column_sources());
+    matrix.push_str(
+        "\n| command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |\n\
          | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     for command in commands {
-        let redwire = if redwire_command_ids.contains(command.id) {
-            "served"
-        } else {
-            "undeclared"
-        };
         matrix.push_str(&format!(
-            "| {} | {} | served | undeclared | undeclared | undeclared | {redwire} |\n",
+            "| {} | {} | served | {} | {} | {} | {} |\n",
             command.id,
-            command.auth.matrix_label()
+            command.auth.matrix_label(),
+            coverage(&grpc_ids, command.id),
+            coverage(&mcp_ids, command.id),
+            coverage(&stdio_ids, command.id),
+            coverage(&redwire_ids, command.id),
         ));
     }
     matrix
+}
+
+fn coverage(served: &BTreeSet<&'static str>, id: &str) -> &'static str {
+    if served.contains(id) {
+        "served"
+    } else {
+        "undeclared"
+    }
+}
+
+/// The provenance note above the table. stdio gets a sentence of its own
+/// because it is the one transport with a real dispatch surface and no catalog
+/// binding at all: without the method counts its all-`undeclared` column would
+/// read as "stdio serves nothing".
+fn render_column_sources() -> String {
+    let stdio_local = transport_surface::stdio_local_methods();
+    let stdio_remote = transport_surface::stdio_remote_methods();
+    let stdio_gap = transport_surface::stdio_remote_gap();
+
+    format!(
+        "Each column is read from that transport's own source of truth:\n\n\
+         - HTTP: the command catalog discovered from route declarations.\n\
+         - gRPC: the rpc-to-command bindings in `crates/reddb-server/src/grpc/catalog_dispatch.rs`.\n\
+         - MCP: the tool registry in `crates/reddb-server/src/mcp/tools.rs`.\n\
+         - stdio: `crates/reddb-server/src/rpc_stdio.rs` binds no command ids, so every stdio \
+         cell is a gap. Its dispatch tables serve {} local (embedded) and {} remote (gRPC proxy) \
+         JSON-RPC methods; {} locally served methods have no remote arm: {}.\n\
+         - RedWire: the `redwire_command_id` frame binding in \
+         `crates/reddb-server/src/wire/redwire/session.rs`.\n",
+        stdio_local.len(),
+        stdio_remote.len(),
+        stdio_gap.len(),
+        stdio_gap.join(", "),
+    )
 }
 
 pub(crate) type RouteCatalog = CommandCatalog;
@@ -650,6 +696,9 @@ fn command_policy(command: &CommandSpec) -> CommandPolicy {
         | RouteMethod::Any => "write",
     };
     match command.auth {
+        RouteAuth::Undeclared => {
+            unreachable!("command catalog rejects undeclared authorization requirements")
+        }
         RouteAuth::Public | RouteAuth::OptionalUser => CommandPolicy {
             action: method_action,
             default_allow: true,
@@ -729,6 +778,9 @@ pub(crate) struct RouteMatch<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RouteCatalogError {
+    UndeclaredCommandAuth {
+        id: &'static str,
+    },
     UndeclaredCommandShape {
         id: &'static str,
     },
@@ -758,6 +810,9 @@ pub(crate) enum RouteCatalogError {
 impl fmt::Display for RouteCatalogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UndeclaredCommandAuth { id } => {
+                write!(f, "command {id} has no authorization decision")
+            }
             Self::UndeclaredCommandShape { id } => {
                 write!(f, "command {id} has an undeclared input or output shape")
             }
@@ -1141,6 +1196,74 @@ mod tests {
             err,
             RouteCatalogError::AmbiguousDynamicRoutes { .. }
         ));
+    }
+
+    #[test]
+    fn catalog_rejects_commands_without_an_authorization_decision() {
+        let err = CommandCatalog::build(vec![RouteSpec {
+            auth: RouteAuth::Undeclared,
+            ..spec("missing.auth", RouteMethod::Get, "/missing-auth")
+        }])
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            RouteCatalogError::UndeclaredCommandAuth { id: "missing.auth" }
+        );
+    }
+
+    /// Two commands with deliberately opposite non-HTTP coverage, so the join
+    /// is pinned in both directions rather than only where it says `served`.
+    fn two_command_matrix() -> String {
+        let catalog = CommandCatalog::build(vec![
+            RouteSpec {
+                auth: RouteAuth::Public,
+                ..spec("health.live", RouteMethod::Get, "/health/live")
+            },
+            RouteSpec {
+                auth: RouteAuth::Public,
+                ..spec("ops.health.aggregate", RouteMethod::Get, "/health")
+            },
+        ])
+        .unwrap();
+        render_command_coverage_matrix(&catalog)
+    }
+
+    #[test]
+    fn coverage_matrix_joins_each_transport_onto_the_command_row() {
+        let matrix = two_command_matrix();
+
+        assert!(
+            matrix.contains("| command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |")
+        );
+        // `health.live` is an MCP tool and the RedWire Ping/Bye binding, but no
+        // gRPC rpc carries it.
+        assert!(matrix.contains(
+            "| health.live | public | served | undeclared | served | undeclared | served |\n"
+        ));
+        // `ops.health.aggregate` is the `Health` rpc and nothing else.
+        assert!(matrix.contains(
+            "| ops.health.aggregate | public | served | served | undeclared | undeclared | undeclared |\n"
+        ));
+    }
+
+    #[test]
+    fn coverage_matrix_names_each_column_source_and_the_stdio_gap() {
+        let matrix = two_command_matrix();
+        let gap = transport_surface::stdio_remote_gap();
+
+        assert!(matrix.contains("`crates/reddb-server/src/grpc/catalog_dispatch.rs`"));
+        assert!(matrix.contains("`crates/reddb-server/src/mcp/tools.rs`"));
+        assert!(matrix.contains("`crates/reddb-server/src/wire/redwire/session.rs`"));
+        assert_eq!(gap.len(), 8);
+        assert!(matrix.contains(&format!(
+            "serve {} local (embedded) and {} remote (gRPC proxy) JSON-RPC methods; \
+             {} locally served methods have no remote arm: {}.",
+            transport_surface::stdio_local_methods().len(),
+            transport_surface::stdio_remote_methods().len(),
+            gap.len(),
+            gap.join(", ")
+        )));
     }
 
     #[test]

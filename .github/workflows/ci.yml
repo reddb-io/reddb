@@ -278,6 +278,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --all
       - run: cargo clippy --locked --all -- -D warnings
+      - name: Generate command coverage matrix
+        run: cargo run --locked -p reddb-io-server --bin command-coverage > command-coverage.md
+      - name: Upload command coverage matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: command-coverage-matrix
+          path: command-coverage.md
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats
