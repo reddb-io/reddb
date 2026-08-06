@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::RedDB;
 
 thread_local! {
