@@ -1363,7 +1363,7 @@ impl RedDBRuntime {
                         insert_config_json_path(
                             &mut tree,
                             relative,
-                            crate::presentation::entity_json::storage_value_to_json(&val),
+                            val.to_json(),
                         );
                     }
                     return Ok(show_config_json_result(query, mode, prefix, tree));
