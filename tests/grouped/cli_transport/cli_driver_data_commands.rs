@@ -235,23 +235,38 @@ fn admin_query_output_matches_driver_row_format_golden() {
         columns: vec!["kind".to_string(), "value".to_string()],
         rows: vec![
             vec![
-                ("kind".to_string(), reddb_client::ValueOut::String("null".to_string())),
+                (
+                    "kind".to_string(),
+                    reddb_client::ValueOut::String("null".to_string()),
+                ),
                 ("value".to_string(), reddb_client::ValueOut::Null),
             ],
             vec![
-                ("kind".to_string(), reddb_client::ValueOut::String("bool".to_string())),
+                (
+                    "kind".to_string(),
+                    reddb_client::ValueOut::String("bool".to_string()),
+                ),
                 ("value".to_string(), reddb_client::ValueOut::Bool(true)),
             ],
             vec![
-                ("kind".to_string(), reddb_client::ValueOut::String("integer".to_string())),
+                (
+                    "kind".to_string(),
+                    reddb_client::ValueOut::String("integer".to_string()),
+                ),
                 ("value".to_string(), reddb_client::ValueOut::Integer(42)),
             ],
             vec![
-                ("kind".to_string(), reddb_client::ValueOut::String("float".to_string())),
+                (
+                    "kind".to_string(),
+                    reddb_client::ValueOut::String("float".to_string()),
+                ),
                 ("value".to_string(), reddb_client::ValueOut::Float(1.5)),
             ],
             vec![
-                ("kind".to_string(), reddb_client::ValueOut::String("text".to_string())),
+                (
+                    "kind".to_string(),
+                    reddb_client::ValueOut::String("text".to_string()),
+                ),
                 (
                     "value".to_string(),
                     reddb_client::ValueOut::String("line\nquote\"".to_string()),
@@ -260,6 +275,9 @@ fn admin_query_output_matches_driver_row_format_golden() {
         ],
         notice: None,
     };
-    assert_eq!(output.stdout, format_query_result(&driver_result, RowFormat::Json));
+    assert_eq!(
+        output.stdout,
+        format_query_result(&driver_result, RowFormat::Json)
+    );
     server.join().expect("mock HTTP server");
 }
