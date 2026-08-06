@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn schema_value_to_str_uses_display() {
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         assert_eq!(schema_value_to_str(&Value::Integer(-1)), "-1");
         assert_eq!(schema_value_to_str(&Value::UnsignedInteger(42)), "42");
         assert_eq!(schema_value_to_str(&Value::Boolean(true)), "true");
