@@ -18,7 +18,7 @@
 //! materialising execute path.
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::RedDB;
 
 /// Collection that backs `red.config` over the runtime KV store.
