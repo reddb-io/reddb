@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use super::column_batch::{ColumnBatch, ColumnKind, ColumnVector, Field, Schema};
-use crate::storage::schema::types::DataType;
+use reddb_types::types::DataType;
 use crate::storage::unified::column_block::{
     read_column_block_projected_typed, ColumnBlockError, ProjectedColumnData,
 };
