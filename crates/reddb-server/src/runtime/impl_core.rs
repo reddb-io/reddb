@@ -2389,11 +2389,9 @@ impl RedDBRuntime {
     ///
     /// Applies secret decryption on SELECT results, identical to `execute_query`.
     pub fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
-        let _config_snapshot_guard = ConfigSnapshotGuard::install(
-            Arc::clone(&self.inner.db),
-            self.inner.auth_store.read().clone(),
-        );
-        let _secret_store_guard = SecretStoreGuard::install(self.inner.auth_store.read().clone());
+        let statement = query_expr_name(&expr);
+        let frame = super::statement_frame::StatementExecutionFrame::build(self, statement)?;
+        let _frame_guards = Box::new(frame.install(self));
         // View rewrite (Phase 2.1): substitute any `QueryExpr::Table(tq)`
         // whose `tq.table` matches a registered view with the view's
         // underlying query. Safe to call even when no views are registered.
@@ -2407,7 +2405,6 @@ impl RedDBRuntime {
             return Err(RedDBError::Query(format!("permission denied: {err}")));
         }
 
-        let statement = query_expr_name(&expr);
         let mode = detect_mode(statement);
         let query_str = statement;
 
