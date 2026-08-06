@@ -777,16 +777,9 @@ impl<'a> KvAtomicOps<'a> {
         // version with the greatest xmin — mirroring the table-row
         // resolver's per-logical-id rule, keyed on the KV `key` field.
         if self.is_versioned_collection(model, collection) {
-            let resolver =
-                crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
+            let snapshot = crate::runtime::impl_core::capture_current_snapshot();
             let mut best: Option<crate::storage::UnifiedEntity> = None;
-            for entity in manager.query_all(|_| true) {
-                if !kv_entity_has_key(&entity, key) {
-                    continue;
-                }
-                if resolver.resolve_read_candidate(&entity).is_none() {
-                    continue;
-                }
+            for entity in manager.scan(snapshot.as_ref(), |entity| kv_entity_has_key(entity, key)) {
                 let better = match &best {
                     Some(current) => entity.xmin >= current.xmin,
                     None => true,
@@ -823,13 +816,16 @@ impl<'a> KvAtomicOps<'a> {
         // the per-key version-selection used by `get_entity`.
         let versioned =
             self.is_versioned_collection(crate::catalog::CollectionModel::Kv, collection);
-        let resolver = versioned.then(|| {
-            crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement()
-        });
+        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+        let entities = if versioned {
+            manager.scan(snapshot.as_ref(), |_| true)
+        } else {
+            manager.query_all(|_| true)
+        };
 
         let mut entries: std::collections::BTreeMap<String, crate::storage::UnifiedEntity> =
             std::collections::BTreeMap::new();
-        for entity in manager.query_all(|_| true) {
+        for entity in entities {
             let key = match &entity.data {
                 crate::storage::EntityData::Row(row) => row
                     .named
@@ -846,13 +842,6 @@ impl<'a> KvAtomicOps<'a> {
             };
             if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
                 continue;
-            }
-            if let Some(resolver) = resolver.as_ref() {
-                // Skip versions not visible to the current snapshot
-                // (tombstoned by a visible deleter, or not yet created).
-                if resolver.resolve_read_candidate(&entity).is_none() {
-                    continue;
-                }
             }
             let should_replace = match entries.get(&key) {
                 Some(existing) if versioned => entity.xmin >= existing.xmin,
