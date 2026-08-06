@@ -2959,6 +2959,7 @@ dependencies = [
 name = "reddb-io-wire"
 version = "1.23.2"
 dependencies = [
+ "hmac 0.13.0",
  "insta",
  "proptest",
  "prost",
@@ -2966,6 +2967,7 @@ dependencies = [
  "reddb-io-types",
  "regex",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "url",
  "zstd",
