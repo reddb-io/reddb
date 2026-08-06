@@ -7,7 +7,7 @@ use super::filter::Filter;
 use super::sort::QueryLimits;
 use crate::storage::engine::distance::DistanceMetric;
 use crate::storage::engine::vector_store::{SearchResult, VectorCollection, VectorId};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use std::collections::HashMap;
 
 /// Dense vector wrapper for similarity queries
