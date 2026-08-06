@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::entity::EntityId;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Reference target for metadata cross-links
 #[derive(Debug, Clone, PartialEq)]

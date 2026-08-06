@@ -69,7 +69,7 @@ fn session_clause_persists_across_restart() {
             .records
             .first()
             .expect("at least one row for events");
-        use reddb::storage::schema::Value;
+        use reddb_types::Value;
         match row.get("session_key").expect("session_key column") {
             Value::Text(s) => assert_eq!(&**s, "user_id"),
             other => panic!("expected Text, got {other:?}"),

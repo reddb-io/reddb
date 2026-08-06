@@ -619,7 +619,7 @@ impl RedDBRuntime {
         use crate::auth::UserId;
         use crate::storage::query::ast::PolicyPrincipalRef;
         use crate::storage::query::unified::UnifiedRecord;
-        use crate::storage::schema::Value as SchemaValue;
+        use reddb_types::Value as SchemaValue;
         use std::sync::Arc;
 
         let auth_store = self
@@ -700,7 +700,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::UserId;
         use crate::storage::query::unified::UnifiedRecord;
-        use crate::storage::schema::Value as SchemaValue;
+        use reddb_types::Value as SchemaValue;
         use std::sync::Arc;
 
         let auth_store = self
@@ -776,7 +776,7 @@ impl RedDBRuntime {
         use crate::auth::policy_linter::lint;
         use crate::storage::query::ast::LintPolicySource;
         use crate::storage::query::unified::UnifiedRecord;
-        use crate::storage::schema::Value as SchemaValue;
+        use reddb_types::Value as SchemaValue;
         use std::sync::Arc;
 
         // Resolve the policy text. `JSON` source lints the literal
@@ -882,7 +882,7 @@ impl RedDBRuntime {
         };
         use crate::auth::policies::ResourceRef;
         use crate::storage::query::unified::UnifiedRecord;
-        use crate::storage::schema::Value as SchemaValue;
+        use reddb_types::Value as SchemaValue;
         use std::sync::Arc;
 
         // Only `policy_only` is a meaningful destination for this
@@ -1049,7 +1049,7 @@ impl RedDBRuntime {
         use crate::auth::store::SimCtx;
         use crate::auth::UserId;
         use crate::storage::query::unified::UnifiedRecord;
-        use crate::storage::schema::Value as SchemaValue;
+        use reddb_types::Value as SchemaValue;
         use std::sync::Arc;
 
         let auth_store = self

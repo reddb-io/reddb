@@ -16,7 +16,7 @@ use crate::storage::query::engine::binding::Value as BindingValue;
 use crate::storage::query::filter::Filter as StorageFilter;
 use crate::storage::query::filter_compiled::CompiledFilter;
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 const MATRIX_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

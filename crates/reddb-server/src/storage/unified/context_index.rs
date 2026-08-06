@@ -25,7 +25,7 @@ use parking_lot::RwLock;
 
 use super::entity::{EntityData, EntityId, EntityKind, UnifiedEntity};
 use super::tokenization::{push_text_tokens, push_value_tokens, MAX_INDEX_TOKENS};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 const MAX_FIELD_INDEX_PAIRS: usize = 1024;
 

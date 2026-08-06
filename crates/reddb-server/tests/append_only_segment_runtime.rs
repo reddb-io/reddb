@@ -1,6 +1,6 @@
 use reddb_file::OperationalManifest;
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 #[test]
 fn append_only_flush_publishes_closed_segment_and_reopen_reads_rows() {

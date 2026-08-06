@@ -23,13 +23,13 @@ use crate::application::vcs::{
     ResetMode, Status, StatusInput,
 };
 use crate::application::vcs_collections as vc;
-use crate::json::Value as JsonValue;
+use crate::json::{Map, Value as JsonValue};
 use crate::runtime::RedDBRuntime;
-use crate::storage::schema::Value;
 use crate::storage::transaction::snapshot::{Xid, XID_NONE};
 use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use crate::storage::unified::UnifiedStore;
 use crate::{RedDBError, RedDBResult};
+use reddb_types::Value;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -1746,7 +1746,7 @@ fn materialize_merge_conflicts(
                 continue;
             }
             let eid = entity.id.raw();
-            let body = crate::presentation::entity_json::compact_entity_json(&entity);
+            let body = crate::entity_render::compact_entity_json(&entity);
             if base_snap.sees(xmin, xmax) {
                 at_base.insert(eid, body.clone());
             }

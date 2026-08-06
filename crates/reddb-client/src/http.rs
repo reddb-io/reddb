@@ -16,6 +16,7 @@
 //!   auth.login         → POST /auth/login
 //!   auth.whoami        → GET  /auth/whoami
 
+use reddb_types::encoding::base64_encode;
 use reddb_wire::auth::bearer_authorization_value;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, ClientBuilder, Method, StatusCode};
@@ -64,7 +65,11 @@ impl HttpOptions {
 }
 
 impl HttpClient {
-    pub async fn connect(opts: HttpOptions) -> Result<Self> {
+    /// Build a handle without touching the network.
+    ///
+    /// Callers that must not pay a round-trip up front (one-shot CLI
+    /// commands) use this and let the first real request report failure.
+    pub fn new(opts: HttpOptions) -> Result<Self> {
         let mut builder =
             ClientBuilder::new().user_agent(format!("reddb-rs/{}", env!("CARGO_PKG_VERSION")));
         if opts.dangerous_accept_invalid_certs {
@@ -73,11 +78,15 @@ impl HttpClient {
         let client = builder
             .build()
             .map_err(|e| ClientError::new(ErrorCode::Network, format!("reqwest: {e}")))?;
-        let handle = Self {
+        Ok(Self {
             base_url: opts.base_url,
             inner: client,
             token: opts.token,
-        };
+        })
+    }
+
+    pub async fn connect(opts: HttpOptions) -> Result<Self> {
+        let handle = Self::new(opts)?;
         // Sanity check before returning.
         handle.health().await?;
         Ok(handle)
@@ -114,6 +123,75 @@ impl HttpClient {
         let url = format!("{}/health", self.base_url);
         let resp = self.inner.get(&url).send().await.map_err(net_err)?;
         decode_envelope(resp).await
+    }
+
+    /// Send a JSON request to an HTTP endpoint and return its response body.
+    ///
+    /// This is the driver-owned escape hatch used by operator CLI commands
+    /// whose endpoints do not yet have a transport-neutral method. Request
+    /// construction and bearer-header validation stay inside the driver.
+    pub async fn post_json(&self, path: &str, body: &JsonValue) -> Result<String> {
+        self.post_json_value(path, &json_value_to_serde(body)).await
+    }
+
+    /// Fetch a non-streaming HTTP endpoint through the driver's authenticated
+    /// request path and return the response body unchanged.
+    pub async fn get_text(&self, path: &str) -> Result<String> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .inner
+            .get(&url)
+            .headers(self.headers())
+            .send()
+            .await
+            .map_err(net_err)?;
+        decode_text(response).await
+    }
+
+    /// Fetch a non-streaming HTTP endpoint and return the raw status code
+    /// alongside the body.
+    ///
+    /// Operator probes (`red doctor`) diagnose on the status itself — a gated
+    /// `/metrics` answers 401 rather than failing to connect — so they need
+    /// the code instead of a mapped [`ClientError`].
+    pub async fn get_text_with_status(&self, path: &str) -> Result<(u16, String)> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .inner
+            .get(&url)
+            .headers(self.headers())
+            .send()
+            .await
+            .map_err(net_err)?;
+        let status = response.status().as_u16();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::Network, format!("read body: {e}")))?;
+        Ok((status, text))
+    }
+
+    /// Compare-and-set a blob-cache value without exposing the wire-level
+    /// base64 representation to callers.
+    pub async fn blob_cache_compare_and_set(
+        &self,
+        namespace: &str,
+        key: &str,
+        new_value: &[u8],
+        new_version: u64,
+        expected_version: Option<u64>,
+    ) -> Result<String> {
+        let mut body = serde_json::json!({
+            "namespace": namespace,
+            "key": key,
+            "new_value_b64": base64_encode(new_value),
+            "new_version": new_version,
+        });
+        if let Some(version) = expected_version {
+            body["expected_version"] = Value::from(version);
+        }
+        self.post_json_value("/admin/cache/compare-and-set", &body)
+            .await
     }
 
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
@@ -291,6 +369,19 @@ impl HttpClient {
         decode_envelope(resp).await
     }
 
+    async fn post_json_value(&self, path: &str, body: &Value) -> Result<String> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .inner
+            .post(&url)
+            .headers(self.headers())
+            .json(body)
+            .send()
+            .await
+            .map_err(net_err)?;
+        decode_text(response).await
+    }
+
     fn headers(&self) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -336,6 +427,19 @@ async fn decode_envelope(response: reqwest::Response) -> Result<Value> {
         }
     }
     Ok(body.unwrap_or(Value::Null))
+}
+
+async fn decode_text(response: reqwest::Response) -> Result<String> {
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| ClientError::new(ErrorCode::Network, format!("read body: {e}")))?;
+    if status.is_success() {
+        return Ok(text);
+    }
+    let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
+    Err(http_err(status, Some(body)))
 }
 
 fn http_err(status: StatusCode, body: Option<Value>) -> ClientError {

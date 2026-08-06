@@ -6,7 +6,7 @@ use crate::storage::query::unified::{
     VectorSearchResult,
 };
 use crate::storage::query::{is_universal_entity_source as is_universal_query_source, QueryExpr};
-use crate::storage::schema::types::Value as StorageValue;
+use reddb_types::types::Value as StorageValue;
 
 pub(crate) fn query_mode_name(mode: QueryMode) -> &'static str {
     match mode {
@@ -848,7 +848,7 @@ mod descriptor_tests {
     use crate::storage::query::unified::{
         GraphPath, MatchedEdge, MatchedNode, UnifiedRecord, UnifiedResult, VectorSearchResult,
     };
-    use crate::storage::schema::types::Value as StorageValue;
+    use reddb_types::types::Value as StorageValue;
     use std::collections::HashMap;
     use std::sync::Arc;
 

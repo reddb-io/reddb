@@ -32,7 +32,7 @@
 #[path = "../../support/mod.rs"]
 mod support;
 
-use reddb::storage::schema::Value;
+use reddb_types::Value;
 use support::{checkpoint_and_reopen, PersistentDbPath};
 
 fn exec(rt: &reddb::RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {

@@ -518,9 +518,9 @@ impl GrpcClient {
             .await
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         let rids = reply
-            .ids
+            .items
             .into_iter()
-            .map(|id| id.to_string())
+            .map(|item| item.id.to_string())
             .collect::<Vec<_>>();
         Ok(BulkInsertResult {
             affected: reply.count,

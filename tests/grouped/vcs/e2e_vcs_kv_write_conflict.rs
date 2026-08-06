@@ -15,8 +15,8 @@
 
 use reddb::application::VcsUseCases;
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")

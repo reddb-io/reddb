@@ -8,8 +8,8 @@ use crate::storage::query::ast::{
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::planner::stats_provider::CatalogStatsProvider;
 use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
-use crate::storage::schema::Value;
 use crate::storage::RedDB;
+use reddb_types::Value;
 
 use super::{AccessPathDecision, CanonicalLogicalNode, CardinalityEstimate, CostEstimator};
 
@@ -1120,7 +1120,7 @@ mod tests {
         let f = Filter::CompareExpr {
             lhs: col("orders", "meta.region"),
             op: CompareOp::Eq,
-            rhs: Expr::lit(crate::storage::schema::Value::text("eu")),
+            rhs: Expr::lit(reddb_types::Value::text("eu")),
         };
         assert!(expr_uses_document_path(&col("orders", "meta.region"), &q));
         assert!(filter_uses_document_path(&f, &q));
@@ -1134,7 +1134,7 @@ mod tests {
         let f = Filter::CompareExpr {
             lhs: col("customers", "tier"),
             op: CompareOp::Eq,
-            rhs: Expr::lit(crate::storage::schema::Value::text("gold")),
+            rhs: Expr::lit(reddb_types::Value::text("gold")),
         };
         assert!(filter_uses_document_path(&f, &q));
     }

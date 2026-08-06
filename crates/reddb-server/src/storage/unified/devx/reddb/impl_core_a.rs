@@ -97,11 +97,11 @@ fn active_rebootstrap_matches_ready_marker(
     })?;
     Ok(matches!(
         store.get_config("red.replication.last_applied_lsn"),
-        Some(crate::storage::schema::Value::Integer(value))
+        Some(reddb_types::Value::Integer(value))
             if value >= 0 && value as u64 == ready.checkpoint_lsn
     ) || matches!(
         store.get_config("red.replication.last_applied_lsn"),
-        Some(crate::storage::schema::Value::UnsignedInteger(value))
+        Some(reddb_types::Value::UnsignedInteger(value))
             if value == ready.checkpoint_lsn
     ))
 }

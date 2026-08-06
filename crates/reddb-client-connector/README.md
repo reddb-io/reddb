@@ -1,23 +1,27 @@
 # reddb-client-connector
 
-Workspace-internal gRPC connector for [RedDB](https://github.com/reddb-io/reddb).
+Deprecated compatibility shim for the RedDB gRPC connector.
 
-This crate exists to break a path-dependency cycle between
-`reddb-client` (the published Rust driver, which pulls in
-`reddb-server` under the `embedded` feature) and `reddb-server`
-(which needs the gRPC connector for its `rpc_stdio` dispatch
-mode).
+Use `reddb_grpc_proto::RedDBClient` and the generated reply types from
+`reddb-grpc-proto` directly. The authenticated client now lives beside the
+generated tonic stubs, so client and server consumers share one reply shape.
 
-It exposes [`RedDBClient`] — a thin wrapper around the
-generated tonic `RedDbClient<Channel>` that adds bearer-token
-auth metadata and ergonomic typed responses. No engine
-dependencies: only `tonic` + `reddb-grpc-proto`.
+Deprecated but working: the full pre-fold surface still compiles and behaves
+exactly as before — `health()`, `create_row()`, the `String`-returning
+`scan()` / `stats()` display helpers, and `BulkCreateStatus { ids }`. Each
+public item carries its own `#[deprecated]` attribute (a crate-level
+`#![deprecated]` or a plain `pub use` would warn nobody downstream), so
+consumers get a per-call migration note and a compile that still succeeds.
+The crate is removed at the next major release.
 
-End users typically reach this crate transitively via
-`reddb-client::connector::RedDBClient` (re-exported for
-back-compat with the previous `reddb-client-internal` crate).
+| Deprecated here | Canonical replacement |
+| --- | --- |
+| `RedDBClient` | `reddb_grpc_proto::RedDBClient` |
+| `HealthStatus` | `reddb_grpc_proto::HealthReply` |
+| `QueryResponse` | `reddb_grpc_proto::QueryReply` |
+| `CreatedEntity` | `reddb_grpc_proto::EntityReply` |
+| `OperationStatus` | `reddb_grpc_proto::OperationReply` |
+| `BulkCreateStatus { ids }` | `reddb_grpc_proto::BulkEntityReply { items }` |
 
-See [`docs/migration/workspace-split.md`][migration] for the full
-crate map.
-
-[migration]: ../../docs/migration/workspace-split.md
+Most applications should continue to use the higher-level `reddb-client`
+crate.

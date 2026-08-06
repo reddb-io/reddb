@@ -350,6 +350,17 @@ jobs:
           cache-on-failure: "true"
           save-if: ${{ github.event_name != 'pull_request' }}
           workspaces: drivers/python -> target
+      # `drivers/python` intentionally owns a separate lockfile because it is
+      # a maturin cdylib outside the Rust workspace. Keep stale-lock failures
+      # concise instead of exposing Cargo's generic multi-line error.
+      # Regenerate the intentionally separate lockfile with: cd drivers/python && cargo check
+      - name: Verify drivers/python/Cargo.lock is current
+        working-directory: drivers/python
+        run: |
+          if ! cargo metadata --locked --format-version 1 > /dev/null 2>&1; then
+            echo "::error::drivers/python/Cargo.lock is stale; regenerate with: cd drivers/python && cargo check"
+            exit 1
+          fi
       - name: cargo check --no-default-features (slim grpc/wire client only)
         working-directory: drivers/python
         run: cargo check --locked --no-default-features
@@ -394,12 +405,21 @@ jobs:
       - name: cargo check
         run: cargo check --locked ${{ matrix.features.args }}
 
-  tests:
-    name: Test Suite
+  test-shards:
+    # Issue #2171 — the integration lane is split deterministically across four
+    # free public runners. Shards 1-4 respectively absorb the non-integration,
+    # doctest, persistent, and size-budget lanes. Individual durations are
+    # visible in the matrix; a shard above 2x the median is the signal to
+    # revisit the assignment.
+    name: Test Suite shard (${{ matrix.shard }}/4)
     needs: gate
     if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -429,13 +449,20 @@ jobs:
       - name: Build red_client (cross-binary smoke prereq)
         run: cargo build --locked --bin red_client -p reddb-io-client --no-default-features
       - name: red_client size budget
+        if: matrix.shard == 4
         run: ./scripts/check-red-client-size.sh
-      - name: Run default test layer (nextest — parallel across test binaries)
+      - name: Run non-integration test layer
+        if: matrix.shard == 1
+        env:
+          RUST_MIN_STACK: "8388608"
+        run: cargo nextest run --workspace --locked --profile ci -E 'not kind(test)'
+      - name: Run integration-test shard
         # cargo test runs the grouped integration binaries sequentially, so the
         # per-test sleeps (replication/timing tests) sum and blew past the 20m
         # cap. nextest runs every test in a global parallel process pool (sleeps
-        # overlap) and the `ci` profile enforces a hard per-test timeout
-        # (.config/nextest.toml) so a hung test is killed, not the whole run.
+        # overlap). The count partition assigns every integration test to one
+        # and only one runner, while the `ci` profile enforces a hard per-test
+        # timeout (.config/nextest.toml).
         #
         # RUST_MIN_STACK=8M: libtest spawns each #[test] fn in a new thread
         # with Rust's 2 MiB default stack.  Query-execution paths (view
@@ -444,10 +471,12 @@ jobs:
         # overflow without changing production behaviour.
         env:
           RUST_MIN_STACK: "8388608"
-        run: cargo nextest run --workspace --locked --profile ci
+        run: scripts/nextest-e2e-shard.sh "${{ matrix.shard }}" 4
       - name: Doctests (nextest does not execute doctests)
+        if: matrix.shard == 2
         run: cargo test --workspace --locked --doc
       - name: Run persistent multimodel layer
+        if: matrix.shard == 3
         env:
           CARGO_TARGET_DIR: target/persistent-tests
         run: >-
@@ -464,6 +493,19 @@ jobs:
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats
+
+  tests:
+    # Keep ADR 0059's single required context without changing branch
+    # protection. `always()` ensures a failed shard reaches this aggregate
+    # instead of turning it into a misleading skipped success.
+    name: Test Suite
+    needs: [gate, test-shards]
+    if: always() && needs.gate.outputs.run_heavy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every Test Suite shard
+        run: test "${{ needs.test-shards.result }}" = "success"
 
   driver-param-conformance:
     name: Driver Param Conformance
@@ -568,6 +610,16 @@ jobs:
           python-version: '3.x'
       - name: Build red (embedded engine for the JS SDK)
         run: cargo build --locked --bin red
+      - name: Rust client transport conformance over RedWire (red://)
+        # The `redwire` feature is not in the client's default set, so a plain
+        # `cargo test` exercises the embedded path only and the wire path goes
+        # silently untested. Spec #2112 requires wire-path cases to execute on
+        # every PR, so run them here against the `red` binary this job already
+        # built. Without RED_SMOKE=1 + RED_BIN the suite self-skips.
+        env:
+          RED_SMOKE: '1'
+          RED_BIN: ${{ github.workspace }}/target/debug/red
+        run: cargo test -p reddb-io-client --features redwire --test conformance client_transport
       - name: JS SDK runnable README examples
         working-directory: drivers/js
         env:

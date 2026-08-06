@@ -2,8 +2,8 @@
 mod support;
 
 use reddb::catalog::{CollectionModel, SchemaMode};
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use support::{checkpoint_and_reopen, PersistentDbPath};
 
 fn runtime() -> RedDBRuntime {

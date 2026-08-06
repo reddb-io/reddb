@@ -30,10 +30,6 @@ reddb-grpc-proto = { workspace = true }
 reddb-file = { workspace = true }
 # Canonical per-page encryption-at-rest envelope + params (#1053, ADR 0054).
 reddb-crypto = { workspace = true }
-# rpc_stdio's Remote backend wraps the same gRPC client that the
-# `red` binary uses for the `red rpc` subcommand. Single-direction
-# dep — the client crate does not depend on the server.
-reddb-client-connector = { workspace = true }
 aes-gcm = "0.11"
 blake3 = "1"
 # SIMD/PCLMULQDQ CRC32 (IEEE 802.3 polynomial) for WAL/page record
@@ -185,10 +181,6 @@ harness = false
 
 [[bench]]
 name = "row_id_intersection_bench"
-harness = false
-
-[[bench]]
-name = "cache_ring_contention_bench"
 harness = false
 
 [[bench]]

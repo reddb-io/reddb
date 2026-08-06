@@ -242,7 +242,7 @@ pub fn hash_bytes_u32(bytes: &[u8]) -> u32 {
 /// Hash a `Value` to a u32 for bloom filter use.
 /// Uses the standard Hash impl (which hashes discriminant + content).
 /// Folds the 64-bit DefaultHasher output to 32 bits via XOR.
-pub fn hash_value_u32(v: &crate::storage::schema::Value) -> u32 {
+pub fn hash_value_u32(v: &reddb_types::Value) -> u32 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     v.hash(&mut h);

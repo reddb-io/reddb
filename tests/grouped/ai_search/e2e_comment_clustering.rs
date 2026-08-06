@@ -1,8 +1,8 @@
 use reddb::application::{CreateRowInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
 use reddb::json::{from_str, to_string, Map, Value as JsonValue};
 use reddb::server::RedDBServer;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

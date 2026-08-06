@@ -26,10 +26,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use reddb::api::DurabilityMode;
-use reddb::storage::schema::Value;
 use reddb::storage::{
     EntityData, EntityId, EntityKind, RowData, UnifiedEntity, UnifiedStore, UnifiedStoreConfig,
 };
+use reddb_types::Value;
 
 fn tmp_path(name: &str) -> (support::TempDataDir, PathBuf) {
     let base = support::temp_data_dir("wal-crash");

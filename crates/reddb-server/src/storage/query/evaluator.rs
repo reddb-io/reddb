@@ -63,11 +63,11 @@
 use std::sync::Arc;
 
 use super::ast::{BinOp, Expr, FieldRef, UnaryOp};
-use crate::storage::schema::coerce::coerce_via_catalog;
-use crate::storage::schema::coercion_spine;
-use crate::storage::schema::function_catalog::FUNCTION_CATALOG;
-use crate::storage::schema::operator_catalog::OperatorEntry;
-use crate::storage::schema::{DataType, Value};
+use reddb_types::coerce::coerce_via_catalog;
+use reddb_types::coercion_spine;
+use reddb_types::function_catalog::FUNCTION_CATALOG;
+use reddb_types::operator_catalog::OperatorEntry;
+use reddb_types::{DataType, Value};
 
 /// Pluggable row-binding lookup. The evaluator stays agnostic of
 /// whether the caller has a slot vector indexed by planner-assigned
@@ -510,7 +510,7 @@ fn as_f64(v: &Value) -> f64 {
         Value::Integer(x) => *x as f64,
         Value::BigInt(x) => *x as f64,
         Value::UnsignedInteger(x) => *x as f64,
-        Value::Decimal(x) => crate::storage::schema::decimal_to_f64(*x),
+        Value::Decimal(x) => reddb_types::types::decimal_to_f64(*x),
         _ => 0.0,
     }
 }

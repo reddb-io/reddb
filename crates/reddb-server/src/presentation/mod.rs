@@ -10,6 +10,7 @@ pub(crate) mod native_state_json;
 pub(crate) mod ops_json;
 pub(crate) mod query_json;
 pub(crate) mod query_plan_json;
+pub(crate) mod query_result;
 pub(crate) mod query_result_json;
 pub(crate) mod query_view;
 pub(crate) mod serverless_json;

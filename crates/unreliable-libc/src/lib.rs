@@ -19,11 +19,11 @@
 //!   scenarios for FCW-before-WAL, WAL-append-before-finalize, savepoints, and
 //!   concurrent writers, layered on the same WAL oracle.
 //! * [`vfs`] — the in-process counterpart to the shim (DST Fatia, #1355): a
-//!   minimal `Vfs` / `VfsFile` durable-I/O trait pair with a production-default
-//!   [`StdVfs`](vfs::StdVfs) and a seed-driven, fault-injecting
-//!   [`SimVfs`](vfs::SimVfs) (torn writes, dropped / reordered `fsync`,
-//!   `ENOSPC`, partial rename). The workload routes every durable write through
-//!   it, so an in-process power-cut enumeration can reuse the same `oracle`.
+//!   seed-driven, fault-injecting [`SimVfs`](vfs::SimVfs) implementation of the
+//!   [`reddb_file::Vfs`] product seam (torn writes, dropped / reordered
+//!   `fsync`, `ENOSPC`, partial rename). The workload routes every durable write
+//!   through it, so an in-process power-cut enumeration can reuse the same
+//!   `oracle`.
 //!
 //! The shim makes the real libc durability path (`write`/`pwrite`/`fsync`/
 //! `fdatasync`/`rename`) fail with `EIO` and short writes, plus a seed-driven
@@ -53,7 +53,7 @@ pub use value_equivalence::{
     canonical_value_corpus, recover_committed_values, run_typed_workload, CommittedTx,
     EquivalenceError, RecoveredTx, TypedModel,
 };
-pub use vfs::{OpenMode, SimFaultConfig, SimVfs, StdVfs, Vfs, VfsFile};
+pub use vfs::{SimFaultConfig, SimVfs};
 pub use wal_workload::{
     decode_manifest, run_wal_workload, run_wal_workload_on, WorkloadOutcome, MANIFEST_FILE_NAME,
 };

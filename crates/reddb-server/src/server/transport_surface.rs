@@ -1,44 +1,71 @@
-//! Per-transport surface inventories for the command-coverage artifact.
+//! Per-transport inventories for the command-coverage artifact.
 //!
-//! An id-level join across transports is impossible until every adapter
-//! registers against the command catalog (Spec #2109 migration slices). Until
-//! then each transport contributes its own inventory, and every inventory is
-//! derived from that transport's real source so any dispatcher change moves the
-//! generated matrix:
+//! Every inventory is derived from that transport's own source of truth, so a
+//! dispatcher change moves the generated matrix instead of leaving it stale:
 //!
-//! - gRPC: the `service RedDb` block of
-//!   `crates/reddb-grpc-proto/proto/reddb.proto`.
-//! - MCP: the [`crate::mcp::tools::all_tools`] registry, cross-checked against
-//!   the `handle_tools_call` dispatch arms in `crates/reddb-server/src/mcp/server.rs`.
-//! - stdio: the `dispatch_method` and `dispatch_method_remote` method tables in
-//!   `crates/reddb-server/src/rpc_stdio.rs`.
-//! - RedWire: the `handle_session` frame-kind dispatch in
-//!   `crates/reddb-server/src/wire/redwire/session.rs`.
-//!
-//! The Rust sources are read with `include_str!` rather than reflection because
-//! the dispatchers are private free functions with no constructible handle.
+//! - gRPC: the rpc-to-command binding table in
+//!   [`crate::grpc::catalog_dispatch`], itself pinned against the `service
+//!   RedDb` block of `crates/reddb-grpc-proto/proto/reddb.proto`.
+//! - MCP: the [`crate::mcp::tools::all_tools`] registry plus the `reddb.ask`
+//!   binding that lives outside it.
+//! - RedWire: `redwire_command_id` in
+//!   `crates/reddb-server/src/wire/redwire/session.rs`, which is exhaustive
+//!   over [`MessageKind`].
+//! - stdio: `crates/reddb-server/src/rpc_stdio.rs` declares no command ids at
+//!   all, so its inventory is the empty set and the matrix reports its dispatch
+//!   tables as an unjoined surface. See [`stdio_command_ids`].
 
-const PROTO_SOURCE: &str = include_str!("../../../reddb-grpc-proto/proto/reddb.proto");
+use std::collections::BTreeSet;
+
+use reddb_wire::redwire::MessageKind;
+
+use crate::wire::redwire::session::redwire_command_id;
+
 const STDIO_SOURCE: &str = include_str!("../rpc_stdio.rs");
-const MCP_SERVER_SOURCE: &str = include_str!("../mcp/server.rs");
-const REDWIRE_SESSION_SOURCE: &str = include_str!("../wire/redwire/session.rs");
-
-/// Tokens that would appear in the MCP tool-call dispatcher if a tool call were
-/// gated on an authorization decision. None of them are present today: the MCP
-/// server executes every tool with the host process's privileges (the zero-auth
-/// defect tracked by Spec #2109), and the matrix must say so.
-const AUTHORIZATION_MARKERS: [&str; 5] = [
-    "authorize(",
-    "CommandAuthorizer",
-    "require_auth",
-    "AuthContext",
-    "auth_required",
-];
 
 /// The stdio method name prefix whose arms are declared locally only to reject
 /// the call: embedded stdio has no auth backend, so `auth.*` is excluded from
 /// the local-versus-remote comparison.
 pub(crate) const STDIO_AUTH_PREFIX: &str = "auth.";
+
+/// Tokens that would appear in `rpc_stdio.rs` if the stdio dispatcher were
+/// bound to the command catalog. [`stdio_command_ids`] is empty only while none
+/// of them is present.
+const STDIO_CATALOG_MARKERS: [&str; 3] = ["command_id", "CommandAuthorizer", "command_catalog"];
+
+/// Catalog commands reachable over gRPC.
+pub(crate) fn grpc_command_ids() -> BTreeSet<&'static str> {
+    crate::grpc::catalog_dispatch::bound_command_ids().collect()
+}
+
+/// Catalog commands reachable over MCP, from the advertised tool registry.
+pub(crate) fn mcp_command_ids() -> BTreeSet<&'static str> {
+    crate::mcp::tools::all_tools()
+        .into_iter()
+        .map(|tool| tool.command_id)
+        .chain(std::iter::once(crate::mcp::tools::ASK_TOOL_COMMAND_ID))
+        .collect()
+}
+
+/// Catalog commands reachable over RedWire, from the exhaustive frame-kind
+/// binding.
+pub(crate) fn redwire_command_ids() -> BTreeSet<&'static str> {
+    (u8::MIN..=u8::MAX)
+        .filter_map(MessageKind::from_u8)
+        .map(redwire_command_id)
+        .collect()
+}
+
+/// Catalog commands reachable over stdio: none.
+///
+/// `rpc_stdio.rs` dispatches on bare JSON-RPC method names and never names a
+/// catalog command, so there is nothing to join and every stdio cell is an
+/// honest coverage gap. `stdio_is_unbound_to_the_command_catalog` fails the
+/// moment that stops being true, which forces the real join to be written
+/// rather than letting this empty set quietly under-report the surface.
+pub(crate) fn stdio_command_ids() -> BTreeSet<&'static str> {
+    BTreeSet::new()
+}
 
 /// Slice `source` between the first `start` anchor and the first `end`
 /// terminator after it. Anchors are load-bearing: a miss means the transport
@@ -87,16 +114,6 @@ fn match_arm_literals(table: &'static str, indent: &str) -> Vec<&'static str> {
     names
 }
 
-/// gRPC rpc names declared on the canonical `service RedDb`.
-pub(crate) fn grpc_rpc_methods() -> Vec<&'static str> {
-    section(PROTO_SOURCE, "service RedDb {", "\n}")
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("rpc "))
-        .filter_map(|rest| rest.split('(').next())
-        .map(str::trim)
-        .collect()
-}
-
 fn stdio_methods(dispatcher: &str) -> Vec<&'static str> {
     let body = section(STDIO_SOURCE, dispatcher, "\n        other =>");
     let table = after(body, "match method {");
@@ -124,64 +141,9 @@ pub(crate) fn stdio_remote_gap() -> Vec<&'static str> {
         .collect()
 }
 
-/// The `reddb.ask` tool is dispatched through a constant rather than a literal
-/// arm and is appended to `tools/list` outside the registry.
-pub(crate) const MCP_ASK_TOOL: &str = crate::runtime::ai::mcp_ask_tool::TOOL_NAME;
-
-/// MCP tools advertised by `tools/list`: the static registry plus the ask tool.
-pub(crate) fn mcp_advertised_tools() -> Vec<&'static str> {
-    let mut tools: Vec<&'static str> = crate::mcp::tools::all_tools()
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-    tools.push(MCP_ASK_TOOL);
-    tools
-}
-
-/// MCP tool names with a literal arm in `handle_tools_call`.
-pub(crate) fn mcp_dispatch_tools() -> Vec<&'static str> {
-    let table = section(
-        MCP_SERVER_SOURCE,
-        "let result = match name {",
-        "\n            _ => Err(",
-    );
-    match_arm_literals(table, "            ")
-}
-
-/// Authorization markers found in the MCP tool-call dispatcher. Empty means
-/// every tool runs unauthenticated.
-pub(crate) fn mcp_authorization_markers() -> Vec<&'static str> {
-    let body = section(MCP_SERVER_SOURCE, "fn handle_tools_call(", "\n    }\n");
-    AUTHORIZATION_MARKERS
-        .into_iter()
-        .filter(|marker| body.contains(marker))
-        .collect()
-}
-
-/// RedWire `MessageKind`s with a dispatch arm in `handle_session`.
-pub(crate) fn redwire_frame_kinds() -> Vec<&'static str> {
-    section(
-        REDWIRE_SESSION_SOURCE,
-        "match frame.kind {",
-        "\n            other => {",
-    )
-    .lines()
-    .filter_map(|line| line.strip_prefix("            MessageKind::"))
-    .filter_map(|rest| rest.split_once(" => "))
-    .map(|(kind, _)| kind)
-    .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Pinned so adding or removing an rpc moves this number. Renames need no
-    /// pin: the proto is the compile-time service contract, so a renamed rpc
-    /// fails the build before this test runs.
-    const GRPC_RPC_COUNT: usize = 136;
-    /// Pinned so that registering or dropping an MCP tool moves this number.
-    const MCP_TOOL_COUNT: usize = 41;
 
     /// The full stdio local table. Pinned by name, not just by count, because
     /// renaming an arm keeps the count intact.
@@ -221,30 +183,6 @@ mod tests {
         "close",
     ];
 
-    /// The full RedWire client-to-server dispatch surface, pinned by name for
-    /// the same reason as the stdio tables.
-    const REDWIRE_KINDS: [&str; 19] = [
-        "Bye",
-        "Ping",
-        "Query",
-        "QueryWithParams",
-        "BulkInsert",
-        "BulkInsertBinary",
-        "BulkInsertPrevalidated",
-        "QueryBinary",
-        "BulkStreamStart",
-        "BulkStreamRows",
-        "BulkStreamCommit",
-        "Prepare",
-        "ExecutePrepared",
-        "Get",
-        "Delete",
-        "OpenStream",
-        "QueueWaitOpen",
-        "StreamChunk",
-        "StreamCancel",
-    ];
-
     /// The documented stdio remote gap: session-scoped transaction, cursor and
     /// prepared-statement methods have no place to park state across a gRPC
     /// hop, so 8 of the 16 non-auth local methods vanish in remote mode.
@@ -258,52 +196,6 @@ mod tests {
         "prepare",
         "execute_prepared",
     ];
-
-    #[test]
-    fn grpc_surface_comes_from_the_proto_service_definition() {
-        let methods = grpc_rpc_methods();
-
-        assert_eq!(methods.len(), GRPC_RPC_COUNT);
-        assert_eq!(methods.first(), Some(&"Health"));
-        assert!(methods.contains(&"Query"));
-        assert!(methods.contains(&"ExecutePrepared"));
-        assert!(
-            methods.iter().all(|m| !m.is_empty() && !m.contains(' ')),
-            "rpc extraction picked up a non-method line: {methods:?}"
-        );
-    }
-
-    #[test]
-    fn mcp_dispatch_matches_the_advertised_tool_registry() {
-        let advertised = mcp_advertised_tools();
-        let dispatched = mcp_dispatch_tools();
-
-        assert_eq!(advertised.len(), MCP_TOOL_COUNT);
-        // Every advertised tool but the ask tool has a literal dispatch arm.
-        let mut expected: Vec<&str> = advertised
-            .iter()
-            .copied()
-            .filter(|tool| *tool != MCP_ASK_TOOL)
-            .collect();
-        expected.sort_unstable();
-        let mut actual = dispatched.clone();
-        actual.sort_unstable();
-        assert_eq!(actual, expected);
-        assert!(
-            MCP_SERVER_SOURCE.contains("mcp_ask_tool::TOOL_NAME => self.tool_ask(args)"),
-            "the ask tool lost its dispatch arm"
-        );
-    }
-
-    #[test]
-    fn every_mcp_tool_runs_unauthenticated() {
-        assert_eq!(
-            mcp_authorization_markers(),
-            Vec::<&str>::new(),
-            "MCP tool dispatch gained an authorization gate; the matrix's \
-             auth=none rows are now wrong"
-        );
-    }
 
     #[test]
     fn stdio_remote_mode_drops_exactly_the_documented_eight_methods() {
@@ -320,9 +212,41 @@ mod tests {
     }
 
     #[test]
-    fn redwire_surface_comes_from_the_session_dispatch() {
-        let kinds = redwire_frame_kinds();
+    fn stdio_is_unbound_to_the_command_catalog() {
+        let found: Vec<&str> = STDIO_CATALOG_MARKERS
+            .into_iter()
+            .filter(|marker| STDIO_SOURCE.contains(marker))
+            .collect();
 
-        assert_eq!(kinds, REDWIRE_KINDS.to_vec());
+        assert_eq!(
+            found,
+            Vec::<&str>::new(),
+            "rpc_stdio.rs gained a command binding; stdio_command_ids must now \
+             report it instead of returning the empty set"
+        );
+        assert!(stdio_command_ids().is_empty());
+    }
+
+    /// Every id an adapter claims to serve must exist in the catalog, or the
+    /// matrix would silently drop that adapter's coverage: the join is keyed on
+    /// the catalog's rows.
+    #[test]
+    fn every_transport_inventory_names_catalogued_commands() {
+        let catalog = crate::server::command_catalog();
+        let inventories = [
+            ("gRPC", grpc_command_ids()),
+            ("MCP", mcp_command_ids()),
+            ("RedWire", redwire_command_ids()),
+        ];
+
+        for (transport, ids) in inventories {
+            assert!(!ids.is_empty(), "{transport} inventory is empty");
+            for id in ids {
+                assert!(
+                    catalog.command(id).is_some(),
+                    "{transport} binds unknown command {id}"
+                );
+            }
+        }
     }
 }

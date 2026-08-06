@@ -145,7 +145,7 @@ async fn grpc_batch_insert_happy_path_returns_count_and_preserves_order() {
         .records
         .iter()
         .filter_map(|record| match record.get("name") {
-            Some(reddb::storage::schema::Value::Text(s)) => Some(s.to_string()),
+            Some(reddb_types::Value::Text(s)) => Some(s.to_string()),
             _ => None,
         })
         .collect();
@@ -208,7 +208,7 @@ async fn grpc_batch_insert_idempotency_key_replays_cached_result() {
         .records
         .iter()
         .filter_map(|record| match record.get("name") {
-            Some(reddb::storage::schema::Value::Text(s)) => Some(s.to_string()),
+            Some(reddb_types::Value::Text(s)) => Some(s.to_string()),
             _ => None,
         })
         .collect();

@@ -127,22 +127,19 @@ fn external_primary_health_and_query_round_trip() {
             .await
             .expect("primary grpc connection should succeed");
 
-        let health = client.health().await.expect("health should succeed");
-        assert!(
-            health.contains("healthy: true"),
-            "unexpected health: {health}"
-        );
+        let health = client.health_status().await.expect("health should succeed");
+        assert!(health.healthy, "unexpected health: {health:?}");
 
         let created = client
-            .create_row(
+            .create_row_entity(
                 "external_smoke_users",
                 r#"{"fields":{"name":"external-alice","tier":"gold","age":31}}"#,
             )
             .await
             .expect("create_row should succeed");
         assert!(
-            created.contains("id:"),
-            "unexpected create_row response: {created}"
+            created.ok && created.id > 0,
+            "unexpected create_row response: {created:?}"
         );
 
         let query = client
@@ -170,13 +167,13 @@ fn external_replica_read_only_and_catches_up() {
             .await
             .expect("primary grpc connection should succeed");
         let seed = primary
-            .create_row(
+            .create_row_entity(
                 "external_replica_users",
                 r#"{"fields":{"name":"external-replica-user","role":"reader"}}"#,
             )
             .await
             .expect("primary write should succeed");
-        assert!(seed.contains("id:"), "unexpected seed response: {seed}");
+        assert!(seed.ok && seed.id > 0, "unexpected seed response: {seed:?}");
     });
 
     wait_for_replica_visibility(
@@ -201,7 +198,7 @@ fn external_replica_read_only_and_catches_up() {
         );
 
         let write_error = replica
-            .create_row(
+            .create_row_entity(
                 "external_replica_users",
                 r#"{"fields":{"name":"should-fail"}}"#,
             )

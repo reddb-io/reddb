@@ -16,16 +16,16 @@ use std::sync::Arc;
 
 use crate::runtime::mvcc::entity_visible_under_current_snapshot;
 use crate::runtime::query_exec::{
-    extract_entity_id_from_filter, try_hash_eq_lookup, try_sorted_index_lookup,
-    CompiledEntityFilter,
+    evaluate_entity_filter_with_db, extract_entity_id_from_filter, try_hash_eq_lookup,
+    try_sorted_index_lookup, CompiledEntityFilter,
 };
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::ast::{
     Expr, FieldRef, Filter, QueryExpr, SelectItem, TableQuery, TableSource,
 };
 use crate::storage::query::sql_lowering::effective_table_filter;
-use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
 use crate::storage::unified::{EntityData, EntityId, RowData, UnifiedEntity};
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 use super::protocol::encode_value;
 use reddb_wire::legacy::{
@@ -239,7 +239,15 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
             if (row_count as usize) >= hard_limit {
                 return;
             }
-            if !compiled_filter.evaluate(entity) {
+            if !compiled_filter.evaluate(entity).resolve_with_fallback(|| {
+                evaluate_entity_filter_with_db(
+                    Some(db.as_ref()),
+                    entity,
+                    filter,
+                    table_name,
+                    table_alias,
+                )
+            }) {
                 return;
             }
             emit_one!(entity);
@@ -1913,6 +1921,79 @@ mod tests {
     }
 
     #[test]
+    fn fallback_predicate_is_applied_across_scan_strategies() {
+        let rt = mk_runtime();
+        rt.execute_query("CREATE TABLE fallback_rows (id INT, role TEXT, age INT)")
+            .unwrap();
+        rt.execute_query("CREATE INDEX idx_fallback_age ON fallback_rows (age) USING BTREE")
+            .unwrap();
+        rt.execute_query("CREATE INDEX idx_fallback_id ON fallback_rows (id) USING HASH")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO fallback_rows (id, role, age) VALUES \
+             (1, 'admin', 20), (2, 'guest', 30), (3, 'admin', 40)",
+        )
+        .unwrap();
+
+        let predicate = "age BETWEEN 0 AND 100 AND role = CONFIG(app.missing.role, guest)";
+        let select_sql = format!("SELECT id FROM fallback_rows WHERE {predicate}");
+        let standard = rt
+            .execute_query(&select_sql)
+            .expect("standard scan succeeds");
+        assert_eq!(standard.result.records.len(), 1);
+        assert_eq!(
+            standard.result.records[0].get("id"),
+            Some(&Value::Integer(2))
+        );
+
+        let full_scan = rt
+            .execute_query(
+                "SELECT id FROM fallback_rows \
+                 WHERE role = CONFIG(app.missing.role, guest) ORDER BY id",
+            )
+            .expect("full scan succeeds");
+        assert_eq!(full_scan.result.records.len(), 1);
+        assert_eq!(
+            full_scan.result.records[0].get("id"),
+            Some(&Value::Integer(2))
+        );
+
+        let hash_scan = rt
+            .execute_query(
+                "SELECT id FROM fallback_rows \
+                 WHERE id = 1 AND role = CONFIG(app.missing.role, guest)",
+            )
+            .expect("hash-index scan succeeds");
+        assert!(
+            hash_scan.result.records.is_empty(),
+            "hash-index scan must reject a candidate that fails the fallback predicate"
+        );
+
+        let direct = try_handle_query_binary_direct(&rt, &select_sql)
+            .expect("direct indexed scan remains eligible");
+        let (_, direct_rows, _) = decode_wire_header(&direct);
+        assert_eq!(
+            direct_rows, 1,
+            "direct indexed scan must apply the runtime fallback predicate"
+        );
+
+        let aggregate = rt
+            .execute_query(&format!(
+                "SELECT role, COUNT(*) FROM fallback_rows WHERE {predicate} GROUP BY role"
+            ))
+            .expect("aggregate scan succeeds");
+        assert_eq!(
+            aggregate.result.records.len(),
+            1,
+            "aggregate pushdown must apply the same fallback predicate"
+        );
+        assert_eq!(
+            aggregate.result.records[0].get("role"),
+            Some(&Value::text("guest"))
+        );
+    }
+
+    #[test]
     fn shape_eligible_select_filtered_and() {
         // Mirrors bench_definitive_dual.py select_filtered: compound
         // AND where one leaf has a sorted index (age) and the other
@@ -1974,8 +2055,8 @@ mod tests {
 
     #[test]
     fn fast_path_resolves_projection_alias_from_source_column() {
-        use crate::storage::schema::Value;
         use crate::wire::protocol::decode_value;
+        use reddb_types::Value;
 
         let rt = mk_runtime();
         rt.execute_query("CREATE TABLE t (id INT, age INT)")

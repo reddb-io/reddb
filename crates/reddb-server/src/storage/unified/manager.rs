@@ -23,8 +23,8 @@ use super::segment::{
     GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats,
     UnifiedSegment, ZoneColPred, ZoneColPredKind,
 };
+use super::visibility_map::VisibilityMap;
 use crate::runtime::mvcc::{entity_visible_with_context, SnapshotContext};
-use crate::storage::btree::visibility_map::VisibilityMap;
 
 /// Fraction of a collection's sealed entities that must be tombstoned before
 /// consolidation is worth its cost.
@@ -249,7 +249,7 @@ impl SegmentManager {
     /// Get or create the shared column schema from first row's named fields.
     pub fn get_or_init_schema(
         &self,
-        named: &HashMap<String, crate::storage::schema::Value>,
+        named: &HashMap<String, reddb_types::Value>,
     ) -> Arc<Vec<String>> {
         {
             let schema = self.column_schema.read();
@@ -495,7 +495,7 @@ impl SegmentManager {
                                         named
                                             .get(col_name)
                                             .cloned()
-                                            .unwrap_or(crate::storage::schema::Value::Null),
+                                            .unwrap_or(reddb_types::Value::Null),
                                     );
                                 }
                                 row.columns = cols;
@@ -2205,9 +2205,9 @@ mod tests {
 
     use super::*;
     use crate::runtime::mvcc::SnapshotContext;
-    use crate::storage::schema::Value;
     use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityData, EntityKind, RowData};
+    use reddb_types::Value;
 
     #[test]
     fn test_manager_basic() {
@@ -2394,6 +2394,264 @@ mod tests {
         assert!(!record_search.contains("TableRowMvccReadResolver"));
         assert!(!search.contains("for entity in manager.query_all(|_| true)"));
         assert!(!vector.contains("manager.query_all("));
+    }
+
+    /// Strip `#[cfg(test)] mod … { … }` blocks so the raw-iteration gate
+    /// only sees production code. Blocks are matched at column zero and
+    /// closed by brace balance, which is why a file may carry a test
+    /// module in the middle and still keep production code after it.
+    fn production_source(src: &str) -> String {
+        let mut kept: Vec<&str> = Vec::new();
+        let lines: Vec<&str> = src.lines().collect();
+        let mut idx = 0;
+        while idx < lines.len() {
+            let starts_test_mod = lines[idx].starts_with("#[cfg(test)]")
+                && lines
+                    .get(idx + 1)
+                    .is_some_and(|next| next.starts_with("mod "));
+            if !starts_test_mod {
+                kept.push(lines[idx]);
+                idx += 1;
+                continue;
+            }
+            idx += 1;
+            let mut depth: isize = 0;
+            while idx < lines.len() {
+                depth += lines[idx].matches('{').count() as isize;
+                depth -= lines[idx].matches('}').count() as isize;
+                idx += 1;
+                if depth <= 0 {
+                    break;
+                }
+            }
+        }
+        kept.join("\n")
+    }
+
+    /// Count raw (visibility-bypassing) iteration entry points.
+    fn raw_iteration_sites(src: &str) -> usize {
+        src.matches("query_all(").count()
+            + src.matches(".for_each_entity").count()
+            + src.matches("fold_entities_parallel(").count()
+    }
+
+    #[test]
+    fn raw_iteration_confined_to_maintenance_allowlist() {
+        // The query paths migrated by Spec #2107 batches 1 and 2. Inside
+        // this perimeter raw iteration is maintenance-only: it bypasses
+        // MVCC visibility entirely, so every remaining site is either an
+        // internal catalog/bookkeeping read that must observe all physical
+        // versions, or one of the three exceptions the batch reviews
+        // documented. A new raw-iteration site changes the count and fails
+        // this gate — route it through `SegmentManager::scan*` instead.
+        let allowlist: &[(&str, &str, usize, &str)] = &[
+            (
+                "runtime/query_exec/table.rs",
+                include_str!("../../runtime/query_exec/table.rs"),
+                1,
+                "documented exception: schema inspection (does the collection ever \
+                 observe these fields?) is visibility-independent",
+            ),
+            (
+                "runtime/query_exec/aggregate.rs",
+                include_str!("../../runtime/query_exec/aggregate.rs"),
+                0,
+                "fully migrated by batch 1",
+            ),
+            (
+                "runtime/query_exec/aggregate_pushdown_dispatch.rs",
+                include_str!("../../runtime/query_exec/aggregate_pushdown_dispatch.rs"),
+                0,
+                "fully migrated by batch 1",
+            ),
+            (
+                "runtime/query_exec/vector.rs",
+                include_str!("../../runtime/query_exec/vector.rs"),
+                0,
+                "fully migrated by batch 2",
+            ),
+            (
+                "runtime/ask_pipeline.rs",
+                include_str!("../../runtime/ask_pipeline.rs"),
+                0,
+                "fully migrated by batch 2",
+            ),
+            (
+                "runtime/impl_dml.rs",
+                include_str!("../../runtime/impl_dml.rs"),
+                0,
+                "fully migrated by batch 2",
+            ),
+            (
+                "runtime/dml_target_scan.rs",
+                include_str!("../../runtime/dml_target_scan.rs"),
+                2,
+                "documented exception: kind-conditional visibility the uniform scan \
+                 API cannot express; both iterations gate on candidate_visible",
+            ),
+            (
+                "runtime/impl_events.rs",
+                include_str!("../../runtime/impl_events.rs"),
+                1,
+                "documented exception: backfill dedup must include consumed messages, \
+                 so it is deliberately visibility-free",
+            ),
+            (
+                "runtime/impl_graph_commands.rs",
+                include_str!("../../runtime/impl_graph_commands.rs"),
+                1,
+                "maintenance: resolves a node's declared type from the catalog, \
+                 not a user-visible row projection",
+            ),
+            (
+                "runtime/graph_dsl.rs",
+                include_str!("../../runtime/graph_dsl.rs"),
+                4,
+                "maintenance: materializes the node/edge property side tables that \
+                 back traversal; the traversal result itself is scanned. \
+                 TODO(#2138 follow-up): confirm property materialization may keep \
+                 pre-snapshot versions",
+            ),
+            (
+                "runtime/graph_tvf.rs",
+                include_str!("../../runtime/graph_tvf.rs"),
+                0,
+                "fully migrated by batch 2",
+            ),
+            (
+                "runtime/impl_kv.rs",
+                include_str!("../../runtime/impl_kv.rs"),
+                4,
+                "two non-versioned-collection fallbacks (the versioned arms scan under \
+                 the captured snapshot) plus the two vault-version readers, which exist \
+                 to expose every physical version. \
+                 TODO(#2138 follow-up): vault_versions/latest_vault_entries never \
+                 capture a snapshot",
+            ),
+            (
+                "runtime/impl_queue.rs",
+                include_str!("../../runtime/impl_queue.rs"),
+                10,
+                "maintenance: red_queue_meta bookkeeping (config, groups, acks, \
+                 pending, dedup TTL reaper, gauge counts) — queue message bodies are \
+                 read through scan. \
+                 TODO(#2138 follow-up): QUEUE PENDING projects meta rows to clients",
+            ),
+            (
+                "runtime/primary_queue_store.rs",
+                include_str!("../../runtime/primary_queue_store.rs"),
+                3,
+                "maintenance: generic red_queue_meta read/delete helpers and the \
+                 next-position allocator, which must not collide with rows invisible \
+                 to the writer's snapshot",
+            ),
+            (
+                "runtime/record_search.rs",
+                include_str!("../../runtime/record_search.rs"),
+                0,
+                "fully migrated by batch 2",
+            ),
+            (
+                "runtime/impl_search.rs",
+                include_str!("../../runtime/impl_search.rs"),
+                1,
+                "maintenance: ask-audit retention sweep must see every physical row",
+            ),
+        ];
+
+        for (path, src, allowed, reason) in allowlist {
+            let found = raw_iteration_sites(&production_source(src));
+            assert_eq!(
+                found, *allowed,
+                "{path}: {found} raw-iteration sites, allowlist permits {allowed} \
+                 ({reason}). Raw iteration bypasses MVCC visibility — use \
+                 SegmentManager::scan / scan_for_each / scan_fold_parallel / \
+                 scan_zoned_with_stats, or extend the allowlist with a maintenance \
+                 justification."
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_snapshot_scan_ignores_ambient_thread_local() {
+        let manager = Arc::new(SegmentManager::new("accounts"));
+        // (xmin, xmax) — mix of committed, in-progress and future writers.
+        let versions = [(0, 0), (3, 0), (11, 0), (4, 0), (3, 7), (3, 11), (3, 4)];
+        for (index, (xmin, xmax)) in versions.iter().enumerate() {
+            let row_id = index as u64 + 1;
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(row_id),
+                "accounts",
+                row_id,
+                vec![Value::Integer(row_id as i64)],
+            );
+            entity.set_xmin(*xmin);
+            entity.set_xmax(*xmax);
+            manager.insert(entity).unwrap();
+        }
+
+        let explicit = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 10,
+                in_progress: HashSet::from([4]),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+        // A decoy statement frame that would hide almost everything if the
+        // scan ever consulted ambient state instead of its argument.
+        let decoy = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 1,
+                in_progress: HashSet::new(),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+
+        let row_ids = |entities: Vec<UnifiedEntity>| -> HashSet<u64> {
+            entities
+                .into_iter()
+                .filter_map(|entity| match entity.kind {
+                    EntityKind::TableRow { row_id, .. } => Some(row_id),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let guard = crate::runtime::execution_context::CurrentSnapshotGuard::install(decoy);
+        let on_installing_thread = row_ids(manager.scan(Some(&explicit), |_| true));
+        drop(guard);
+
+        let spawned_manager = Arc::clone(&manager);
+        let spawned_snapshot = explicit.clone();
+        let on_fresh_thread = std::thread::spawn(move || {
+            row_ids(spawned_manager.scan(Some(&spawned_snapshot), |_| true))
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(
+            on_installing_thread, on_fresh_thread,
+            "an explicit snapshot must produce the same visible set on any thread"
+        );
+        assert_eq!(on_installing_thread, HashSet::from([1, 2, 6, 7]));
+
+        // The raw iterators are the maintenance contract: no visibility
+        // filtering at all, on any thread, regardless of installed frames.
+        let raw_manager = Arc::clone(&manager);
+        let raw_count = std::thread::spawn(move || raw_manager.query_all(|_| true).len())
+            .join()
+            .unwrap();
+        assert_eq!(
+            raw_count,
+            versions.len(),
+            "raw iteration must expose every physical version"
+        );
     }
 
     #[test]

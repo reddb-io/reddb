@@ -59,6 +59,9 @@ perf.data.old
 **/wal/
 !crates/reddb-server/src/storage/wal/
 !crates/reddb-server/src/storage/wal/*.rs
+# Tests that build a repo-relative scratch dir land here; the crate has no
+# legitimate committed `tmp/`.
+crates/*/tmp/
 .red/brain/
 
 # RedSkills wiki — local-only, never committed

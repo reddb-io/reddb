@@ -18,7 +18,6 @@ use crate::application::ports::{
     RuntimeEntityPort,
 };
 use crate::application::ttl_payload::has_internal_ttl_metadata;
-use crate::presentation::entity_json::storage_value_to_json;
 use crate::runtime::mvcc::current_connection_id;
 use crate::storage::query::ast::{BinOp, Expr, FieldRef, ReturningItem, UpdateTarget};
 use crate::storage::query::sql_lowering::{
@@ -2208,10 +2207,10 @@ impl RedDBRuntime {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::schema::Value;
     use crate::storage::wal::{WalReader, WalRecord};
     use crate::storage::{DeployProfile, StoragePackaging, StorageProfileSelection};
     use crate::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
     use std::path::Path;
 
     fn persistent_operational_options(path: &Path) -> RedDBOptions {

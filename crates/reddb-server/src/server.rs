@@ -39,15 +39,19 @@ use crate::runtime::{
     RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult,
     RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
 };
-use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::dsl::{MatchComponents, QueryResult as DslQueryResult};
 use crate::storage::unified::{MetadataValue, RefTarget, SparseVector};
 use crate::storage::{CrossRef, EntityData, EntityId, EntityKind, SimilarResult, UnifiedEntity};
+use reddb_types::Value;
 
 fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
     crate::presentation::admin_json::analytics_job_json(job)
 }
+
+// Process-wide test guard for every RED_ADMIN_TOKEN mutation in server tests.
+#[cfg(test)]
+pub(crate) static RED_ADMIN_TOKEN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -167,15 +171,16 @@ mod request_body;
 mod request_context;
 pub(crate) mod route_catalog;
 mod routes;
+pub(crate) use routes::discovered_route_catalog;
 mod routing;
 mod serverless_support;
 pub mod tls;
 mod transport;
 mod transport_surface;
 
-/// Generate the command-coverage artifact: the discovered HTTP command catalog
-/// plus one inventory per non-HTTP transport, each read from that transport's
-/// own source of truth. See [`route_catalog::render_command_coverage_matrix`].
+/// Generate the command-coverage artifact: every discovered command joined
+/// against each transport's own binding table. See
+/// [`route_catalog::render_command_coverage_matrix`].
 #[doc(hidden)]
 pub fn command_coverage_matrix() -> String {
     route_catalog::render_command_coverage_matrix(routes::discovered_route_catalog())
@@ -202,6 +207,10 @@ use self::request_body::*;
 use self::routing::*;
 use self::serverless_support::*;
 use self::transport::*;
+
+pub(crate) fn command_catalog() -> &'static route_catalog::CommandCatalog {
+    routes::discovered_route_catalog()
+}
 
 /// PLAN.md Phase 6.2 — endpoint segregation. A given HTTP listener
 /// can serve either every public surface (`Public`, default) or a

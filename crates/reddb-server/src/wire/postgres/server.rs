@@ -23,7 +23,7 @@ use crate::runtime::ai::ask_response_envelope::{
 };
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Startup-tuned configuration for the PG wire listener.
 #[derive(Debug, Clone)]

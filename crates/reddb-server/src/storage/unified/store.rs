@@ -41,7 +41,7 @@ use crate::physical::{ManifestEvent, ManifestEventKind};
 use crate::storage::engine::pager::PagerError;
 use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFileHeader};
 use crate::storage::primitives::encoding::{read_varu32, read_varu64, write_varu32, write_varu64};
-use crate::storage::schema::types::Value;
+use reddb_types::types::Value;
 
 pub use reddb_file::{
     is_supported_store_version, NativeCatalogCollectionSummary, NativeCatalogSummary,

@@ -17,6 +17,9 @@
 
 tonic::include_proto!("reddb.v1");
 
+mod client;
+pub use client::RedDBClient;
+
 // Re-export the canonical Topology Rust type from reddb-wire so
 // gRPC consumers reach for one place when they need the schema.
 // The on-wire bytes carried in `TopologyReply.topology_bytes` are

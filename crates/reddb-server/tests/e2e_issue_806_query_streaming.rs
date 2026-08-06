@@ -8,8 +8,8 @@
 //! aggregate — must preserve its ordering and snapshot guarantees after
 //! the executor was rerouted through the streaming channel.
 
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime, RuntimeQueryResult};
+use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots")

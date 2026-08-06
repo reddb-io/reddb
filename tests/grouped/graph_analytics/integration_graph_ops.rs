@@ -14,11 +14,11 @@ use reddb::runtime::{
     RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm, RuntimeGraphComponentsMode,
     RuntimeGraphDirection, RuntimeGraphPathAlgorithm, RuntimeGraphTraversalStrategy,
 };
-use reddb::storage::schema::Value;
 use reddb::{
     ArtifactState, CatalogUseCases, EntityId, EntityUseCases, GraphUseCases, HealthState,
     NativeUseCases, QueryUseCases, RedDBRuntime,
 };
+use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")

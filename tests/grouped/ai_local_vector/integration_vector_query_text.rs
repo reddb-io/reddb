@@ -5,8 +5,8 @@ use reddb::runtime::ai::local_embedding::{
     LocalEmbeddingBackend, LocalEmbeddingRequest,
 };
 use reddb::storage::query::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::{RedDBResult, RedDBRuntime};
+use reddb_types::Value;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;

@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::crypto::uuid::Uuid;
-use crate::storage::schema::types::Value;
 use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use crate::storage::UnifiedStore;
 use crate::utils::now_unix_millis;
+use reddb_types::types::Value;
 
 pub const QUERY_AUDIT_COLLECTION: &str = "red.query_audit";
 

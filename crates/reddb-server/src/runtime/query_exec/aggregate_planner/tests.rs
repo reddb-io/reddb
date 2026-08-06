@@ -10,7 +10,7 @@ use super::accumulator::MATERIALIZED_COUNT;
 use super::ast::{AggregateExpr, AggregateOp, AggregateQueryAst, PlanError};
 use super::planner::AggregateQueryPlanner;
 use super::scan::{ScanIterator, ScanRow};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Minimal `ScanIterator` over a `Vec`. The fixture builders below
 /// shove their rows into one of these and pass it to the planner.

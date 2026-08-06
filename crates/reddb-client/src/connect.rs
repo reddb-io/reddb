@@ -1,55 +1,13 @@
-//! Connection-string parser. Thin shim that delegates to
-//! [`reddb_wire::conn_string`] (the canonical, workspace-shared
-//! parser) and projects its richer [`ConnectionTarget`] vocabulary
-//! onto the legacy [`Target`] enum exposed by this crate.
-//!
-//! Why the shim: the previously-published `reddb-client` driver
-//! had its own copy of the parser that mapped `red://host:port` to
-//! a gRPC endpoint. The shared parser exposes a separate
-//! [`reddb_wire::ConnectionTarget::RedWire`] variant; keeping the
-//! shim preserves the existing public API surface so downstream
-//! `reddb_client::connect::Target` users keep compiling without
-//! changes. Direct callers can opt into the richer vocabulary by
-//! depending on `reddb-wire` and using `reddb_wire::parse` instead.
-
-use std::path::PathBuf;
+//! Connection-string parser. Delegates to [`reddb_wire`], the
+//! canonical workspace parser, and maps its errors onto the driver's
+//! public error vocabulary.
 
 use reddb_wire::{parse as wire_parse, ConnectionTarget, ParseErrorKind};
 
 use crate::error::{ClientError, ErrorCode, Result};
 
-/// What kind of backend the user asked for.
-///
-/// Note: `red://` and `reds://` URIs are folded onto
-/// [`Target::Grpc`] / [`Target::GrpcCluster`] for backwards
-/// compatibility with the previous driver release. New code that
-/// wants the RedWire variant explicitly should depend on
-/// `reddb-wire` directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    /// `memory://` — ephemeral, in-memory backend.
-    Memory,
-    /// `file:///abs/path` — embedded engine on disk.
-    File { path: PathBuf },
-    /// `grpc://host:port` — single-host remote tonic client.
-    /// Also produced by `red://host:port` and `reds://host:port`
-    /// for back-compat with the previous driver behaviour.
-    Grpc { endpoint: String },
-    /// `grpc://primary:port,replica1:port,replica2:port` — primary +
-    /// read-replica fleet. Writes always go to `primary`; reads
-    /// round-robin across `replicas` (or to `primary` when the
-    /// replica set is empty / a `?route=primary` query param is set).
-    GrpcCluster {
-        primary: String,
-        replicas: Vec<String>,
-        force_primary: bool,
-    },
-    /// `http://host:port` / `https://host:port` — REST client.
-    Http { base_url: String },
-}
-
 /// Parse a connection URI. Pure function, no side effects.
-pub fn parse(uri: &str) -> Result<Target> {
+pub fn parse(uri: &str) -> Result<ConnectionTarget> {
     let target = wire_parse(uri).map_err(|e| match e.kind {
         ParseErrorKind::Empty => ClientError::new(ErrorCode::InvalidUri, e.message),
         ParseErrorKind::InvalidUri => ClientError::new(ErrorCode::InvalidUri, e.message),
@@ -69,61 +27,87 @@ pub fn parse(uri: &str) -> Result<Target> {
             ClientError::new(ErrorCode::InvalidUri, e.message)
         }
     })?;
-    Ok(map_target(target))
+    reject_unusable_redwire_userinfo(uri, &target)?;
+    Ok(target)
 }
 
-fn map_target(t: ConnectionTarget) -> Target {
-    match t {
-        ConnectionTarget::Memory => Target::Memory,
-        ConnectionTarget::File { path } => Target::File { path },
-        ConnectionTarget::Grpc { endpoint } => Target::Grpc { endpoint },
-        ConnectionTarget::GrpcCluster {
-            primary,
-            replicas,
-            force_primary,
-        } => Target::GrpcCluster {
-            primary,
-            replicas,
-            force_primary,
-        },
-        ConnectionTarget::Http { base_url } => Target::Http { base_url },
-        // Back-compat: previous driver routed `red://` / `reds://`
-        // through the gRPC endpoint, not a separate RedWire path.
-        // Preserve that mapping until downstream code migrates.
-        ConnectionTarget::RedWire { host, port, tls } => {
-            let _ = tls;
-            Target::Grpc {
-                endpoint: format!("http://{host}:{port}"),
-            }
-        }
-        // `red+wss://` / `red+ws://` is a browser-native WS transport
-        // (ADR 0047). The legacy client has no WS transport, so fold onto
-        // the HTTP base URL — callers that need the WS path should use
-        // `reddb_wire::parse` and the `WsNative` variant directly.
-        ConnectionTarget::WsNative { host, port, tls } => {
-            let scheme = if tls { "https" } else { "http" };
-            Target::Http {
-                base_url: format!("{scheme}://{host}:{port}"),
-            }
-        }
+/// `ConnectionTarget::RedWire` carries no auth, and the transport connects
+/// with [`Auth::Anonymous`]. Credentials in the URI would therefore be
+/// dropped on the floor and the connection would proceed as an anonymous
+/// principal — a silent privilege downgrade. Refuse instead. RedWire SCRAM
+/// auth is sequenced separately in Spec #2112; when it lands, this guard is
+/// what has to be replaced with real credential plumbing.
+fn reject_unusable_redwire_userinfo(uri: &str, target: &ConnectionTarget) -> Result<()> {
+    if !matches!(target, ConnectionTarget::RedWire { .. }) {
+        return Ok(());
     }
+    let carries_userinfo = reddb_wire::parse_with_auth(uri)
+        .map(|spec| !matches!(spec.auth, reddb_wire::ConnectionAuth::Anonymous))
+        .unwrap_or(false);
+    if carries_userinfo {
+        // The message must not echo the URI — it holds the secret.
+        return Err(ClientError::new(
+            ErrorCode::InvalidUri,
+            "red:// and reds:// do not carry credentials yet; the userinfo in \
+             this URI would be silently ignored and the connection made \
+             anonymously. Use grpc:// or http:// for an authenticated \
+             connection.",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
+    fn redwire_uri_with_credentials_is_refused_rather_than_downgraded() {
+        for uri in [
+            "red://alice:secret-token@primary.svc",
+            "reds://alice:secret-token@primary.svc:5051",
+            "red://sk-abc@primary.svc",
+        ] {
+            let err = parse(uri).expect_err(uri);
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("anonymously"),
+                "{uri} did not name the downgrade: {rendered}"
+            );
+            assert!(
+                !rendered.contains("secret-token") && !rendered.contains("sk-abc"),
+                "{uri} leaked the credential: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn redwire_uri_without_credentials_still_parses() {
+        assert!(parse("red://primary.svc").is_ok());
+        assert!(parse("reds://primary.svc:5051").is_ok());
+    }
+
+    #[test]
+    fn credentials_are_still_accepted_on_transports_that_carry_them() {
+        assert!(parse("grpc://alice:secret-token@primary.svc").is_ok());
+        assert!(parse("http://alice:secret-token@primary.svc").is_ok());
+    }
+
+    #[test]
     fn parses_memory() {
-        assert_eq!(parse("memory://").unwrap(), Target::Memory);
-        assert_eq!(parse("memory:").unwrap(), Target::Memory);
+        assert_eq!(parse("memory://").unwrap(), ConnectionTarget::Memory);
+        assert_eq!(parse("memory:").unwrap(), ConnectionTarget::Memory);
     }
 
     #[test]
     fn parses_file_with_absolute_path() {
         let target = parse("file:///var/lib/reddb/data.rdb").unwrap();
         match target {
-            Target::File { path } => assert_eq!(path, PathBuf::from("/var/lib/reddb/data.rdb")),
+            ConnectionTarget::File { path } => {
+                assert_eq!(path, PathBuf::from("/var/lib/reddb/data.rdb"))
+            }
             _ => panic!("expected File"),
         }
     }
@@ -132,7 +116,7 @@ mod tests {
     fn parses_grpc_with_default_port() {
         let target = parse("grpc://primary.svc.cluster.local").unwrap();
         match target {
-            Target::Grpc { endpoint } => {
+            ConnectionTarget::Grpc { endpoint } => {
                 assert_eq!(endpoint, "http://primary.svc.cluster.local:55055")
             }
             _ => panic!("expected Grpc"),
@@ -143,7 +127,7 @@ mod tests {
     fn parses_grpcs_with_default_tls_port() {
         let target = parse("grpcs://primary.svc.cluster.local").unwrap();
         match target {
-            Target::Grpc { endpoint } => {
+            ConnectionTarget::Grpc { endpoint } => {
                 assert_eq!(endpoint, "http://primary.svc.cluster.local:55555")
             }
             _ => panic!("expected Grpc"),
@@ -154,18 +138,32 @@ mod tests {
     fn parses_red_with_default_port() {
         let target = parse("red://primary.svc.cluster.local").unwrap();
         match target {
-            Target::Grpc { endpoint } => {
-                assert_eq!(endpoint, "http://primary.svc.cluster.local:5050")
+            ConnectionTarget::RedWire { host, port, tls } => {
+                assert_eq!(host, "primary.svc.cluster.local");
+                assert_eq!(port, 5050);
+                assert!(!tls);
             }
-            _ => panic!("expected Grpc (back-compat for red://)"),
+            other => panic!("expected RedWire, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_reds_as_tls_redwire() {
+        assert_eq!(
+            parse("reds://primary:5051").unwrap(),
+            ConnectionTarget::RedWire {
+                host: "primary".into(),
+                port: 5051,
+                tls: true,
+            }
+        );
     }
 
     #[test]
     fn parses_grpc_with_explicit_port() {
         let target = parse("grpc://primary:6000").unwrap();
         match target {
-            Target::Grpc { endpoint } => assert_eq!(endpoint, "http://primary:6000"),
+            ConnectionTarget::Grpc { endpoint } => assert_eq!(endpoint, "http://primary:6000"),
             _ => panic!("expected Grpc"),
         }
     }
@@ -190,7 +188,7 @@ mod tests {
     fn parses_grpc_cluster_with_explicit_ports() {
         let target = parse("grpc://primary:55055,replica1:55055,replica2:55055").unwrap();
         match target {
-            Target::GrpcCluster {
+            ConnectionTarget::GrpcCluster {
                 primary,
                 replicas,
                 force_primary,
@@ -207,9 +205,9 @@ mod tests {
     }
 
     #[test]
-    fn cluster_inherits_default_port_per_scheme() {
+    fn grpc_cluster_inherits_default_port() {
         match parse("grpc://a,b").unwrap() {
-            Target::GrpcCluster {
+            ConnectionTarget::GrpcCluster {
                 primary, replicas, ..
             } => {
                 assert_eq!(primary, "http://a:55055");
@@ -217,21 +215,17 @@ mod tests {
             }
             other => panic!("expected GrpcCluster, got {other:?}"),
         }
-        match parse("red://a,b").unwrap() {
-            Target::GrpcCluster {
-                primary, replicas, ..
-            } => {
-                assert_eq!(primary, "http://a:5050");
-                assert_eq!(replicas, vec!["http://b:5050"]);
-            }
-            other => panic!("expected GrpcCluster, got {other:?}"),
-        }
+    }
+
+    #[test]
+    fn red_cluster_does_not_fold_to_grpc() {
+        assert_eq!(parse("red://a,b").unwrap_err().code, ErrorCode::InvalidUri);
     }
 
     #[test]
     fn cluster_per_host_port_overrides_default() {
         match parse("grpc://a:7000,b:7001,c").unwrap() {
-            Target::GrpcCluster {
+            ConnectionTarget::GrpcCluster {
                 primary, replicas, ..
             } => {
                 assert_eq!(primary, "http://a:7000");
@@ -244,7 +238,7 @@ mod tests {
     #[test]
     fn cluster_route_primary_query_param_forces_primary() {
         match parse("grpc://primary,replica?route=primary").unwrap() {
-            Target::GrpcCluster {
+            ConnectionTarget::GrpcCluster {
                 primary,
                 replicas,
                 force_primary,
@@ -277,7 +271,7 @@ mod tests {
     #[test]
     fn single_host_grpc_still_routes_to_grpc_target_not_cluster() {
         match parse("grpc://primary:55055").unwrap() {
-            Target::Grpc { endpoint } => assert_eq!(endpoint, "http://primary:55055"),
+            ConnectionTarget::Grpc { endpoint } => assert_eq!(endpoint, "http://primary:55055"),
             other => panic!("expected Grpc (single host), got {other:?}"),
         }
     }

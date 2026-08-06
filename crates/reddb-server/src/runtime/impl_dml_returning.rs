@@ -13,7 +13,6 @@ use crate::application::entity::{
     CreateEntityOutput, PatchEntityOperation, PatchEntityOperationType,
 };
 use crate::application::ports::entity_row_fields_snapshot;
-use crate::presentation::entity_json::storage_value_to_json;
 use crate::storage::query::ast::ReturningItem;
 use crate::storage::query::unified::{
     sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_rid, sys_key_tenant,
@@ -36,7 +35,7 @@ pub(super) fn build_patch_operations_from_materialized_assignments(
         operations.push(PatchEntityOperation {
             op: PatchEntityOperationType::Set,
             path: update_patch_path_for_entity(entity, column),
-            value: Some(storage_value_to_json(value)),
+            value: Some(value.to_json()),
         });
     }
 
@@ -44,7 +43,7 @@ pub(super) fn build_patch_operations_from_materialized_assignments(
         operations.push(PatchEntityOperation {
             op: PatchEntityOperationType::Set,
             path: update_patch_path_for_entity(entity, &column),
-            value: Some(storage_value_to_json(&value)),
+            value: Some(value.to_json()),
         });
     }
 

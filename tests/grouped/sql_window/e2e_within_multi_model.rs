@@ -46,7 +46,7 @@ fn within_filters_queue_messages() {
         .unwrap();
     assert_eq!(
         n,
-        reddb::storage::schema::Value::UnsignedInteger(2),
+        reddb_types::Value::UnsignedInteger(2),
         "acme should see 2 messages"
     );
 
@@ -62,7 +62,7 @@ fn within_filters_queue_messages() {
         .unwrap();
     assert_eq!(
         n,
-        reddb::storage::schema::Value::UnsignedInteger(1),
+        reddb_types::Value::UnsignedInteger(1),
         "globex should see 1 message"
     );
 
@@ -75,7 +75,7 @@ fn within_filters_queue_messages() {
         .and_then(|r| r.get("len"))
         .cloned()
         .unwrap();
-    assert_eq!(n, reddb::storage::schema::Value::UnsignedInteger(0));
+    assert_eq!(n, reddb_types::Value::UnsignedInteger(0));
 
     clear_current_connection_id();
 }
@@ -219,7 +219,7 @@ fn within_typed_api_works_with_queue() {
         .and_then(|r| r.get("len"))
         .cloned()
         .unwrap();
-    assert_eq!(n, reddb::storage::schema::Value::UnsignedInteger(1));
+    assert_eq!(n, reddb_types::Value::UnsignedInteger(1));
 
     clear_current_connection_id();
 }

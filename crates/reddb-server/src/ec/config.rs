@@ -170,7 +170,7 @@ impl EcRegistry {
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let key = row.get_field("key").and_then(|v| match v {
-                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
+                    reddb_types::Value::Text(s) => Some(s.as_ref()),
                     _ => None,
                 });
                 if let Some(k) = key {
@@ -178,7 +178,7 @@ impl EcRegistry {
                         if let Some(val) = row.get_field("value") {
                             if rest.ends_with(".fields") {
                                 let collection = rest.trim_end_matches(".fields");
-                                if let crate::storage::schema::Value::Text(fields_str) = val {
+                                if let reddb_types::Value::Text(fields_str) = val {
                                     let fields: Vec<String> = fields_str
                                         .trim_matches(|c| c == '[' || c == ']')
                                         .split(',')
@@ -209,21 +209,21 @@ impl EcRegistry {
                 manager.for_each_entity(|entity| {
                     if let Some(row) = entity.data.as_row() {
                         let key = row.get_field("key").and_then(|v| match v {
-                            crate::storage::schema::Value::Text(s) => Some(s.clone()),
+                            reddb_types::Value::Text(s) => Some(s.clone()),
                             _ => None,
                         });
                         let val = row.get_field("value");
                         if let (Some(k), Some(v)) = (key, val) {
                             if &*k == format!("{}.reducer", prefix).as_str() {
-                                if let crate::storage::schema::Value::Text(s) = v {
+                                if let reddb_types::Value::Text(s) = v {
                                     config.reducer = EcReducer::from_str(s);
                                 }
                             } else if &*k == format!("{}.mode", prefix).as_str() {
-                                if let crate::storage::schema::Value::Text(s) = v {
+                                if let reddb_types::Value::Text(s) = v {
                                     config.mode = EcMode::from_str(s);
                                 }
                             } else if &*k == format!("{}.interval_secs", prefix).as_str() {
-                                if let crate::storage::schema::Value::Integer(n) = v {
+                                if let reddb_types::Value::Integer(n) = v {
                                     config.consolidation_interval_secs = *n as u64;
                                 }
                             }

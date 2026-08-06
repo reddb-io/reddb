@@ -245,7 +245,11 @@ impl RedDb {
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let out = PyDict::new(py);
                 out.set_item("affected", reply.count)?;
-                let ids: Vec<String> = reply.ids.into_iter().map(|id| id.to_string()).collect();
+                let ids: Vec<String> = reply
+                    .items
+                    .into_iter()
+                    .map(|item| item.id.to_string())
+                    .collect();
                 out.set_item("rids", &ids)?;
                 out.set_item("ids", ids)?;
                 Ok(out)
@@ -1369,7 +1373,7 @@ fn collect_args<'py>(args: &Bound<'py, PyTuple>) -> PyResult<Vec<Bound<'py, PyAn
 #[cfg(feature = "embedded")]
 fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
     use pyo3::types::{PyByteArray, PyDict as PyDictT, PyFloat, PyList as PyListT};
-    use reddb::storage::schema::Value as SV;
+    use reddb_types::Value as SV;
 
     if value.is_none() {
         return Ok(SV::Null);

@@ -36,8 +36,8 @@
 use reddb::api::RedDBOptions;
 use reddb::application::{CreateRowInput, CreateRowsBatchInput, EntityUseCases};
 use reddb::storage::backend::LocalBackend;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;

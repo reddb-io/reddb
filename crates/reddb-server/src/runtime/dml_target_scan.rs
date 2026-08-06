@@ -15,9 +15,9 @@ use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::ast::{Filter, UpdateTarget};
-use crate::storage::schema::Value;
 use crate::storage::unified::entity::EntityKind;
 use crate::storage::{EntityData, EntityId};
+use reddb_types::Value;
 
 pub(super) struct DmlTargetScan<'a> {
     runtime: &'a RedDBRuntime,
@@ -376,7 +376,9 @@ impl<'a> DmlTargetScan<'a> {
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
     ) -> bool {
         match (self.filter, compiled_filter) {
-            (_, Some(compiled)) => compiled.evaluate(entity),
+            (_, Some(compiled)) => {
+                compiled.evaluate(entity) == query_exec::CompiledEntityFilterDecision::Match
+            }
             (Some(filter), None) => query_exec::evaluate_entity_filter_with_db(
                 Some(self.runtime.db().as_ref()),
                 entity,

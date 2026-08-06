@@ -14,8 +14,8 @@
 #[path = "../../support/mod.rs"]
 mod support;
 
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use std::collections::BTreeMap;
 use support::PersistentDbPath;
 

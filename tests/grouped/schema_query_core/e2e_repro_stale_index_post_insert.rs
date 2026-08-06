@@ -14,8 +14,8 @@
 mod support;
 
 use reddb::application::{CreateRowInput, CreateRowsBatchInput, RuntimeEntityPort};
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 use std::sync::Arc;
 
 /// Insert one row through the same `create_rows_batch` entry that the

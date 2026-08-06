@@ -491,7 +491,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<crate::storage::query::unified::UnifiedResult> {
         use crate::application::vcs::{DiffChange, DiffInput};
         use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
 
         if !named_args.is_empty() {
             return Err(RedDBError::Query(

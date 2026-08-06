@@ -40,7 +40,7 @@ use crate::storage::engine::graph_table_index::GraphTableIndex;
 use crate::storage::engine::unified_index::UnifiedIndex;
 use crate::storage::engine::vector_store::VectorStore;
 use crate::storage::query::unified::ExecutionError;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 pub use context::{ChunkSource, ContextChunk, RetrievalContext};
 pub use fusion::{ContextFusion, FusionConfig, ResultReranker};

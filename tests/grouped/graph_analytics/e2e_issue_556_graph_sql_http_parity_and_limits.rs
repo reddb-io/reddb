@@ -36,7 +36,7 @@ use std::time::Duration;
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::server::RedDBServer;
 use reddb::storage::query::UnifiedRecord;
-use reddb::storage::schema::Value;
+use reddb_types::Value;
 use serde_json::{json, Value as JsonValue};
 
 fn runtime() -> RedDBRuntime {

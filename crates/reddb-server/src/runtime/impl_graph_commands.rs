@@ -1537,9 +1537,7 @@ impl RedDBRuntime {
         }
         let keys: Vec<_> = cells
             .iter()
-            .filter_map(|c| {
-                crate::storage::schema::value_to_canonical_key(&Value::UnsignedInteger(*c))
-            })
+            .filter_map(|c| reddb_types::value_to_canonical_key(&Value::UnsignedInteger(*c)))
             .collect();
         let ids = self.inner.index_store.sorted.in_lookup_limited(
             collection,

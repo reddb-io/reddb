@@ -12,8 +12,8 @@
 //!    no rows for the dropped view.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBRuntime};
+use reddb_types::Value;
 
 fn wait_for<F: Fn() -> bool>(timeout: std::time::Duration, check: F) -> bool {
     let deadline = std::time::Instant::now() + timeout;

@@ -13,31 +13,31 @@ use super::*;
 const RUNTIME_INDEX_REGISTRY_COLLECTION: &str = "red_index_registry";
 
 fn named_text(
-    named: &std::collections::HashMap<String, crate::storage::schema::Value>,
+    named: &std::collections::HashMap<String, reddb_types::Value>,
     key: &str,
 ) -> Option<String> {
     match named.get(key) {
-        Some(crate::storage::schema::Value::Text(value)) => Some(value.to_string()),
+        Some(reddb_types::Value::Text(value)) => Some(value.to_string()),
         _ => None,
     }
 }
 
 fn named_bool(
-    named: &std::collections::HashMap<String, crate::storage::schema::Value>,
+    named: &std::collections::HashMap<String, reddb_types::Value>,
     key: &str,
 ) -> Option<bool> {
     match named.get(key) {
-        Some(crate::storage::schema::Value::Boolean(value)) => Some(*value),
+        Some(reddb_types::Value::Boolean(value)) => Some(*value),
         _ => None,
     }
 }
 
 fn named_i64(
-    named: &std::collections::HashMap<String, crate::storage::schema::Value>,
+    named: &std::collections::HashMap<String, reddb_types::Value>,
     key: &str,
 ) -> Option<i64> {
     match named.get(key) {
-        Some(crate::storage::schema::Value::Integer(value)) => Some(*value),
+        Some(reddb_types::Value::Integer(value)) => Some(*value),
         _ => None,
     }
 }
@@ -128,36 +128,31 @@ impl RedDBRuntime {
                     [
                         (
                             "collection".to_string(),
-                            crate::storage::schema::Value::text(index.collection.clone()),
+                            reddb_types::Value::text(index.collection.clone()),
                         ),
                         (
                             "name".to_string(),
-                            crate::storage::schema::Value::text(index.name.clone()),
+                            reddb_types::Value::text(index.name.clone()),
                         ),
                         (
                             "columns".to_string(),
-                            crate::storage::schema::Value::text(index.columns.join("\u{1f}")),
+                            reddb_types::Value::text(index.columns.join("\u{1f}")),
                         ),
                         (
                             "method".to_string(),
-                            crate::storage::schema::Value::text(index_method_kind_as_str(
-                                index.method,
-                            )),
+                            reddb_types::Value::text(index_method_kind_as_str(index.method)),
                         ),
                         (
                             "resolution".to_string(),
-                            crate::storage::schema::Value::Integer(i64::from(
-                                index_method_kind_resolution(index.method),
-                            )),
+                            reddb_types::Value::Integer(i64::from(index_method_kind_resolution(
+                                index.method,
+                            ))),
                         ),
                         (
                             "unique".to_string(),
-                            crate::storage::schema::Value::Boolean(index.unique),
+                            reddb_types::Value::Boolean(index.unique),
                         ),
-                        (
-                            "dropped".to_string(),
-                            crate::storage::schema::Value::Boolean(false),
-                        ),
+                        ("dropped".to_string(), reddb_types::Value::Boolean(false)),
                     ]
                     .into_iter()
                     .collect(),
@@ -190,16 +185,13 @@ impl RedDBRuntime {
                     [
                         (
                             "collection".to_string(),
-                            crate::storage::schema::Value::text(collection.to_string()),
+                            reddb_types::Value::text(collection.to_string()),
                         ),
                         (
                             "name".to_string(),
-                            crate::storage::schema::Value::text(name.to_string()),
+                            reddb_types::Value::text(name.to_string()),
                         ),
-                        (
-                            "dropped".to_string(),
-                            crate::storage::schema::Value::Boolean(true),
-                        ),
+                        ("dropped".to_string(), reddb_types::Value::Boolean(true)),
                     ]
                     .into_iter()
                     .collect(),

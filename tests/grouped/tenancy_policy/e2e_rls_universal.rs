@@ -51,7 +51,7 @@ fn policy_on_messages_of_queue_gates_consumers() {
         .cloned();
     assert_eq!(
         len_value,
-        Some(reddb::storage::schema::Value::UnsignedInteger(1)),
+        Some(reddb_types::Value::UnsignedInteger(1)),
         "acme should see 1 message (its own)"
     );
 
@@ -68,7 +68,7 @@ fn policy_on_messages_of_queue_gates_consumers() {
         .cloned();
     assert_eq!(
         len_value,
-        Some(reddb::storage::schema::Value::UnsignedInteger(1)),
+        Some(reddb_types::Value::UnsignedInteger(1)),
         "globex should see 1 message (its own)"
     );
 
@@ -85,7 +85,7 @@ fn policy_on_messages_of_queue_gates_consumers() {
         .cloned();
     assert_eq!(
         len_value,
-        Some(reddb::storage::schema::Value::UnsignedInteger(0)),
+        Some(reddb_types::Value::UnsignedInteger(0)),
         "unbound tenant should see zero messages"
     );
 

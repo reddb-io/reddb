@@ -154,11 +154,11 @@ use reddb::application::{
 use reddb::json::{from_slice as json_from_slice, json, Value as JsonValue};
 use reddb::replication::cdc::{change_record_from_entity, ChangeOperation, ChangeRecord};
 use reddb::storage::query::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::storage::{
     EntityData, EntityId, EntityKind, RowData, StorageDeployPreset, UnifiedEntity,
 };
 use reddb::{CatalogUseCases, HealthState, RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 const ACCOUNTS_TTL_MS: u64 = 86_400_000;
 const METRICS_RETENTION_MS: u64 = 7 * 86_400_000;

@@ -1,8 +1,8 @@
 #[path = "../../support/mod.rs"]
 mod support;
 
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use serde_json::Value as JsonValue;
 use support::prometheus::{
     encode_query_value, get, label, post_remote_write, sample, TimeSeries, WriteRequest,

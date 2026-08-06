@@ -79,7 +79,7 @@ fn persistent_reopen_restores_indexed_query_results() {
         .records
         .iter()
         .filter_map(|r| match r.get("op") {
-            Some(reddb::storage::schema::Value::Text(t)) => Some(t.to_string()),
+            Some(reddb_types::Value::Text(t)) => Some(t.to_string()),
             _ => None,
         })
         .collect::<Vec<_>>()

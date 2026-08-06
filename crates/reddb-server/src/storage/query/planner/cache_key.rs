@@ -51,7 +51,7 @@
 //! classes, not strict correctness.
 
 use crate::storage::query::lexer::{Lexer, Token};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Normalise a raw SQL query into a cache-friendly canonical
 /// form. Stable across whitespace, case, and literal values;

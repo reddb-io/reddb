@@ -27,8 +27,8 @@ use crate::storage::query::sql_lowering::{
     projection_to_expr,
 };
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
 use crate::RedDB;
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 use super::TableQuery;
 
@@ -340,24 +340,22 @@ pub(crate) fn execute_aggregate_query(
         }
 
         if let Some(c) = compiled_filter.as_ref() {
-            if !c.evaluate(entity) {
-                return true;
-            }
-            if c.has_fallback() {
+            let matches = c.evaluate(entity).resolve_with_fallback(|| {
                 let Some(record) = get_or_make_record!() else {
-                    return true;
+                    return false;
                 };
-                if let Some(filter) = effective_filter.as_ref() {
-                    if !evaluate_runtime_filter_with_db(
+                effective_filter.as_ref().is_some_and(|filter| {
+                    evaluate_runtime_filter_with_db(
                         Some(db),
                         record,
                         filter,
                         Some(table_name),
                         Some(table_alias),
-                    ) {
-                        return true;
-                    }
-                }
+                    )
+                })
+            });
+            if !matches {
+                return true;
             }
         }
 
@@ -2083,7 +2081,7 @@ pub(crate) fn value_to_f64(val: &Value) -> Option<f64> {
         Value::UnsignedInteger(n) => Some(*n as f64),
         Value::BigInt(n) => Some(*n as f64),
         Value::Float(f) => Some(*f),
-        Value::Decimal(d) => Some(crate::storage::schema::decimal_to_f64(*d)),
+        Value::Decimal(d) => Some(reddb_types::types::decimal_to_f64(*d)),
         _ => None,
     }
 }
@@ -2110,7 +2108,7 @@ mod agg_spill_codec {
     use std::io::{Read, Write};
 
     use crate::storage::query::executors::agg_spill::{Mergeable, SpillCodec, SpillError};
-    use crate::storage::schema::{CanonicalKey, CanonicalKeyFamily, Value};
+    use reddb_types::{CanonicalKey, CanonicalKeyFamily, Value};
 
     use super::{AggregateGroup, AggregateGroupKey, GroupKeyPart, SlottedAggState};
 
@@ -3454,8 +3452,8 @@ fn single_group_key_rank(key: &SingleGroupKey) -> u8 {
 
 #[cfg(test)]
 mod parallel_group_by_tests {
-    use crate::storage::schema::Value;
     use crate::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
 
     fn mk_runtime() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory())
@@ -3485,7 +3483,7 @@ mod parallel_group_by_tests {
             .iter()
             .filter_map(|rec| {
                 let city = match rec.get("city")? {
-                    crate::storage::schema::Value::Text(s) => s.to_string(),
+                    reddb_types::Value::Text(s) => s.to_string(),
                     _ => return None,
                 };
                 let count = match rec
@@ -3493,8 +3491,8 @@ mod parallel_group_by_tests {
                     .or_else(|| rec.get("COUNT(*)"))
                     .or_else(|| rec.get("count"))?
                 {
-                    crate::storage::schema::Value::UnsignedInteger(n) => *n,
-                    crate::storage::schema::Value::Integer(n) => *n as u64,
+                    reddb_types::Value::UnsignedInteger(n) => *n,
+                    reddb_types::Value::Integer(n) => *n as u64,
                     _ => return None,
                 };
                 Some((city, count))
@@ -3616,8 +3614,8 @@ mod parallel_group_by_tests {
                         continue;
                     }
                     match v {
-                        crate::storage::schema::Value::UnsignedInteger(n) => return Some(*n),
-                        crate::storage::schema::Value::Integer(n) => return Some(*n as u64),
+                        reddb_types::Value::UnsignedInteger(n) => return Some(*n),
+                        reddb_types::Value::Integer(n) => return Some(*n as u64),
                         _ => {}
                     }
                 }

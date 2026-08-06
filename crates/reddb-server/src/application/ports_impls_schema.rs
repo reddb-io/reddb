@@ -4,7 +4,7 @@ use crate::storage::query::ast::{PartitionKind, PartitionSpec};
 use crate::storage::query::{
     CreateColumnDef, CreateTableQuery, CreateTimeSeriesQuery, DropTableQuery, DropTimeSeriesQuery,
 };
-use crate::storage::schema::SqlTypeName;
+use reddb_types::SqlTypeName;
 
 fn api_query(label: &str, name: &str) -> String {
     format!("api.{label}({name})")

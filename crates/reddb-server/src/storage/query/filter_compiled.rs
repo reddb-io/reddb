@@ -72,7 +72,7 @@
 use std::collections::HashMap;
 
 use super::filter::{Filter, FilterOp, Predicate};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Error returned by [`CompiledFilter::compile`] when the filter
 /// references a column that is not in the provided schema.

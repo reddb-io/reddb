@@ -62,7 +62,7 @@ callers wanting savepoints issue them directly via `db.query`.
 
 Every case ID below is wired in `tests/conformance.rs` and runs against
 **both** transports the helper surface targets — embedded (`memory://`,
-always) and a live client (`red://` gRPC, gated):
+always) and a live client (`red://` RedWire, gated):
 
 | Case ID                              | Status |
 |--------------------------------------|--------|
@@ -257,8 +257,8 @@ engine, no embedded backend, just transports:
 
 | Scheme              | Status     |
 |---------------------|------------|
-| `red://host[:port]` | gRPC, default port 5050 |
-| `reds://host[:port]`| TODO (TLS not yet wired in the bin) |
+| `red://host[:port]` | RedWire, default port 5050 |
+| `reds://host[:port]`| Parsed as RedWire-over-TLS; the bin rejects it (the library supports TLS behind `redwire-tls`) |
 | `grpc://host[:port]`| gRPC, default port 55055 |
 | `http://host[:port]`| REST |
 | `memory:` / `file://` | rejected (exit 2, points to `red`) |
@@ -274,11 +274,10 @@ every PR to catch accidental engine re-linkage.
 - `crate::connect::{Target, parse}` — back-compat shim over
   [`reddb-wire`'s][rw] connection-string parser.
 - `crate::connector::{RedDBClient, repl, http, redwire}` —
-  workspace-internal connector consumed by the `red` REPL,
-  `red_client` bin, and `reddb-server`'s rpc_stdio mode. The
-  gRPC connector type itself lives in the
-  [`reddb-client-connector`](../reddb-client-connector) sibling
-  crate to break a path-dependency cycle.
+  compatibility re-exports and CLI helpers consumed by the `red`
+  REPL and `red_client` bin. The gRPC connector type itself lives
+  beside the generated replies in
+  [`reddb-grpc-proto`](../reddb-grpc-proto).
 
 ## References
 

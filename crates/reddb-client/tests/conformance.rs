@@ -11,7 +11,7 @@
 //! - **Embedded** (`memory://`) — always on. One `#[tokio::test]` per case,
 //!   named after the case ID (dots → underscores) so cross-driver CI dashboards
 //!   line up.
-//! - **Client** (`red://`, gRPC) — gated behind `RED_SMOKE=1` + `RED_BIN` and
+//! - **Client** (`red://`, RedWire) — gated behind `RED_SMOKE=1` + `RED_BIN` and
 //!   the `grpc` feature (see the `client_transport` module). The harness spawns
 //!   one `red server` process and replays every case body over the wire,
 //!   proving the helper surface is transport-agnostic rather than asserting it
@@ -618,13 +618,13 @@ mod embedded {
 }
 
 // ============================================================================
-// Client transport — `red://` over gRPC. Replays every case body against a
-// live `red server`. Gated behind the `grpc` feature + `RED_SMOKE=1` +
+// Client transport — `red://` over RedWire. Replays every case body against a
+// live `red server`. Gated behind the `redwire` feature + `RED_SMOKE=1` +
 // `RED_BIN`, mirroring the `redwire_query_with_live` smoke contract so the
 // default `cargo test` run (embedded only) is unaffected.
 // ============================================================================
 
-#[cfg(feature = "grpc")]
+#[cfg(feature = "redwire")]
 mod client_transport {
     use super::*;
     use std::net::TcpListener;
@@ -658,8 +658,7 @@ mod client_transport {
 
         let mut server = Command::new(&bin)
             .arg("server")
-            .arg("--grpc")
-            .arg("--grpc-bind")
+            .arg("--wire-bind")
             .arg(format!("127.0.0.1:{port}"))
             .arg("--path")
             .arg(data_dir.join("data.db"))
@@ -728,7 +727,7 @@ mod client_transport {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         Err(format!(
-            "server did not accept gRPC connections on {uri}: {}",
+            "server did not accept RedWire connections on {uri}: {}",
             last_error.unwrap_or_else(|| "timed out".into())
         )
         .into())

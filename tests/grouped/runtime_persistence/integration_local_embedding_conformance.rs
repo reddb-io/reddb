@@ -31,8 +31,8 @@ use reddb::runtime::ai::local_embedding::{
     LocalEmbeddingBackend, LocalEmbeddingRequest,
 };
 use reddb::server::RedDBServer;
-use reddb::storage::schema::Value;
 use reddb::{RedDBResult, RedDBRuntime};
+use reddb_types::Value;
 
 /// Shared serial lock for the process-global backend slot — every test
 /// that installs a backend must take this before swapping the slot.

@@ -26,8 +26,8 @@ use std::collections::HashSet;
 
 use reddb::runtime::RedDBRuntime;
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::RedDBOptions;
+use reddb_types::Value;
 
 // Issue #748 extends the #747 column set with four maintenance
 // indicators (downsample_policies, continuous_aggregate_count,

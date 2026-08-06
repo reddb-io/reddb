@@ -1,6 +1,6 @@
 use crate::json::{Map, Value as JsonValue};
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 pub(crate) fn search_selection_json(
     entity_types: &Option<Vec<String>>,

@@ -176,7 +176,7 @@ impl RedDBRuntime {
     /// (`REDDB_<UP_DOTTED>`) take highest precedence.
     pub(crate) fn config_bool(&self, key: &str, default: bool) -> bool {
         if let Some(raw) = self.inner.env_config_overrides.get(key) {
-            if let Some(crate::storage::schema::Value::Boolean(b)) =
+            if let Some(reddb_types::Value::Boolean(b)) =
                 crate::runtime::config_overlay::coerce_env_value(key, raw)
             {
                 return b;
@@ -191,7 +191,7 @@ impl RedDBRuntime {
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let entry_key = row.get_field("key").and_then(|v| match v {
-                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
+                    reddb_types::Value::Text(s) => Some(s.as_ref()),
                     _ => None,
                 });
                 if entry_key == Some(key) {
@@ -199,11 +199,11 @@ impl RedDBRuntime {
                     if id >= latest_id {
                         latest_id = id;
                         result = match row.get_field("value") {
-                            Some(crate::storage::schema::Value::Boolean(b)) => *b,
-                            Some(crate::storage::schema::Value::Text(s)) => {
+                            Some(reddb_types::Value::Boolean(b)) => *b,
+                            Some(reddb_types::Value::Text(s)) => {
                                 matches!(s.as_ref(), "true" | "TRUE" | "True" | "1")
                             }
-                            Some(crate::storage::schema::Value::Integer(n)) => *n != 0,
+                            Some(reddb_types::Value::Integer(n)) => *n != 0,
                             _ => default,
                         };
                     }
@@ -224,7 +224,7 @@ impl RedDBRuntime {
 
     pub(crate) fn config_u64(&self, key: &str, default: u64) -> u64 {
         if let Some(raw) = self.inner.env_config_overrides.get(key) {
-            if let Some(crate::storage::schema::Value::UnsignedInteger(n)) =
+            if let Some(reddb_types::Value::UnsignedInteger(n)) =
                 crate::runtime::config_overlay::coerce_env_value(key, raw)
             {
                 return n;
@@ -239,7 +239,7 @@ impl RedDBRuntime {
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let entry_key = row.get_field("key").and_then(|v| match v {
-                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
+                    reddb_types::Value::Text(s) => Some(s.as_ref()),
                     _ => None,
                 });
                 if entry_key == Some(key) {
@@ -247,9 +247,9 @@ impl RedDBRuntime {
                     if id >= latest_id {
                         latest_id = id;
                         result = match row.get_field("value") {
-                            Some(crate::storage::schema::Value::Integer(n)) => *n as u64,
-                            Some(crate::storage::schema::Value::UnsignedInteger(n)) => *n,
-                            Some(crate::storage::schema::Value::Text(s)) => {
+                            Some(reddb_types::Value::Integer(n)) => *n as u64,
+                            Some(reddb_types::Value::UnsignedInteger(n)) => *n,
+                            Some(reddb_types::Value::Text(s)) => {
                                 s.parse::<u64>().unwrap_or(default)
                             }
                             _ => default,
@@ -277,7 +277,7 @@ impl RedDBRuntime {
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let entry_key = row.get_field("key").and_then(|v| match v {
-                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
+                    reddb_types::Value::Text(s) => Some(s.as_ref()),
                     _ => None,
                 });
                 if entry_key == Some(key) {
@@ -285,10 +285,10 @@ impl RedDBRuntime {
                     if id >= latest_id {
                         latest_id = id;
                         result = match row.get_field("value") {
-                            Some(crate::storage::schema::Value::Float(n)) => *n,
-                            Some(crate::storage::schema::Value::Integer(n)) => *n as f64,
-                            Some(crate::storage::schema::Value::UnsignedInteger(n)) => *n as f64,
-                            Some(crate::storage::schema::Value::Text(s)) => {
+                            Some(reddb_types::Value::Float(n)) => *n,
+                            Some(reddb_types::Value::Integer(n)) => *n as f64,
+                            Some(reddb_types::Value::UnsignedInteger(n)) => *n as f64,
+                            Some(reddb_types::Value::Text(s)) => {
                                 s.parse::<f64>().unwrap_or(default)
                             }
                             _ => default,
@@ -314,16 +314,14 @@ impl RedDBRuntime {
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let entry_key = row.get_field("key").and_then(|v| match v {
-                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
+                    reddb_types::Value::Text(s) => Some(s.as_ref()),
                     _ => None,
                 });
                 if entry_key == Some(key) {
                     let id = entity.id.raw();
                     if id >= latest_id {
                         latest_id = id;
-                        if let Some(crate::storage::schema::Value::Text(value)) =
-                            row.get_field("value")
-                        {
+                        if let Some(reddb_types::Value::Text(value)) = row.get_field("value") {
                             result = value.to_string();
                         }
                     }

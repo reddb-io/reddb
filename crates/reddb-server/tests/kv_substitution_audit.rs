@@ -12,7 +12,7 @@
 
 use reddb_server::storage::query::ast::{Expr, Filter, QueryExpr};
 use reddb_server::storage::query::parser;
-use reddb_server::storage::schema::Value;
+use reddb_types::Value;
 
 /// F1 — the reporter's exact `$my.special.key` reference fails at parse
 /// time. The whitelist in `parse_dollar_ref_path` only accepts

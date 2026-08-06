@@ -3266,10 +3266,7 @@ fn delivered_message_json(
         "message_id".to_string(),
         JsonValue::String(message_id_string(EntityId::new(message.message_id))),
     );
-    obj.insert(
-        "payload".to_string(),
-        crate::presentation::entity_json::storage_value_to_json(&message.payload),
-    );
+    obj.insert("payload".to_string(), message.payload.to_json());
     obj.insert("consumer".to_string(), JsonValue::String(message.consumer));
     obj.insert(
         "delivery_count".to_string(),

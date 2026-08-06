@@ -99,7 +99,7 @@ fn attach_tenant_policy(store: &AuthStore, tenant: &str, policy_json: &str) {
 
 fn text_field(result: &reddb::runtime::RuntimeQueryResult, column: &str) -> String {
     match result.result.records[0].get(column).unwrap() {
-        reddb::storage::schema::Value::Text(value) => value.to_string(),
+        reddb_types::Value::Text(value) => value.to_string(),
         other => panic!("expected text field {column}, got {other:?}"),
     }
 }
@@ -145,7 +145,7 @@ fn sql_create_attach_and_show_iam_policy_applies_at_runtime() {
         show.result.records.iter().any(|record| {
             matches!(
                 record.get("id"),
-                Some(reddb::storage::schema::Value::Text(id)) if id.as_ref() == "sql-read-orders"
+                Some(reddb_types::Value::Text(id)) if id.as_ref() == "sql-read-orders"
             )
         }),
         "SHOW POLICIES should expose the SQL-created policy: {:?}",
@@ -954,12 +954,12 @@ fn group_policy_applies_through_alter_user_membership() {
     // policies follow — one in this case.
     assert_eq!(show.result.records.len(), 2);
     let header_id = match show.result.records[0].get("id").unwrap() {
-        reddb::storage::schema::Value::Text(text) => text.to_string(),
+        reddb_types::Value::Text(text) => text.to_string(),
         other => panic!("expected text id, got {other:?}"),
     };
     assert_eq!(header_id, "<enforcement_mode>");
     let header_json = match show.result.records[0].get("json").unwrap() {
-        reddb::storage::schema::Value::Text(text) => text.to_string(),
+        reddb_types::Value::Text(text) => text.to_string(),
         other => panic!("expected text json, got {other:?}"),
     };
     assert!(

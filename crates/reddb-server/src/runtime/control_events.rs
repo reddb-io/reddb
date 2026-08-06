@@ -18,11 +18,11 @@ use std::sync::Arc;
 
 use crate::auth::UserId;
 use crate::crypto::uuid::Uuid;
-use crate::storage::schema::types::Value;
 use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use crate::storage::UnifiedStore;
 use crate::utils::now_unix_millis;
 use reddb_types::encoding::json_escape;
+use reddb_types::types::Value;
 
 /// Canonical name of the managed control-event collection.
 pub const CONTROL_EVENTS_COLLECTION: &str = "red.control_events";

@@ -29,7 +29,7 @@ fn keyed_model_name(model: crate::catalog::CollectionModel) -> &'static str {
 struct VaultEntry {
     id: crate::storage::EntityId,
     key: String,
-    value: crate::storage::schema::Value,
+    value: reddb_types::Value,
     metadata: Metadata,
     created_at: u64,
     updated_at: u64,
@@ -93,7 +93,7 @@ impl<'a> KvAtomicOps<'a> {
         model: crate::catalog::CollectionModel,
         collection: &str,
         key: &str,
-        value: crate::storage::schema::Value,
+        value: reddb_types::Value,
         ttl_ms: Option<u64>,
         if_not_exists: bool,
     ) -> RedDBResult<(bool, crate::storage::EntityId)> {
@@ -104,7 +104,7 @@ impl<'a> KvAtomicOps<'a> {
         &self,
         collection: &str,
         key: &str,
-        value: crate::storage::schema::Value,
+        value: reddb_types::Value,
         ttl_ms: Option<u64>,
         tags: &[String],
         if_not_exists: bool,
@@ -125,7 +125,7 @@ impl<'a> KvAtomicOps<'a> {
         model: crate::catalog::CollectionModel,
         collection: &str,
         key: &str,
-        value: crate::storage::schema::Value,
+        value: reddb_types::Value,
         ttl_ms: Option<u64>,
         tags: &[String],
         if_not_exists: bool,
@@ -146,7 +146,7 @@ impl<'a> KvAtomicOps<'a> {
         &self,
         collection: &str,
         key: &str,
-        value: crate::storage::schema::Value,
+        value: reddb_types::Value,
         ttl_ms: Option<u64>,
         tags: &[String],
         if_not_exists: bool,
@@ -169,7 +169,7 @@ impl<'a> KvAtomicOps<'a> {
         model: crate::catalog::CollectionModel,
         collection: &str,
         key: &str,
-        value: crate::storage::schema::Value,
+        value: reddb_types::Value,
         ttl_ms: Option<u64>,
         tags: &[String],
         if_not_exists: bool,
@@ -210,15 +210,13 @@ impl<'a> KvAtomicOps<'a> {
 
         let before = existing
             .as_ref()
-            .map(|(value, _)| crate::presentation::entity_json::storage_value_to_json(value));
+            .map(|(value, _)| reddb_types::Value::to_json(value));
         let op = if was_present {
             crate::replication::cdc::ChangeOperation::Update
         } else {
             crate::replication::cdc::ChangeOperation::Insert
         };
-        let after = Some(crate::presentation::entity_json::storage_value_to_json(
-            &value,
-        ));
+        let after = Some(reddb_types::Value::to_json(&value));
 
         // Versioned KV retains MVCC history: the prior visible version is
         // tombstoned (set_xmax) *after* the new version is created, so both
@@ -327,7 +325,7 @@ impl<'a> KvAtomicOps<'a> {
         model: crate::catalog::CollectionModel,
         collection: &str,
         key: &str,
-    ) -> RedDBResult<Option<crate::storage::schema::Value>> {
+    ) -> RedDBResult<Option<reddb_types::Value>> {
         let result = self.get_entry(model, collection, key)?;
         if model == crate::catalog::CollectionModel::Kv {
             self.runtime.inner.kv_stats.incr_gets();
@@ -384,9 +382,7 @@ impl<'a> KvAtomicOps<'a> {
                 collection,
                 key,
                 id.raw(),
-                value
-                    .as_ref()
-                    .map(crate::presentation::entity_json::storage_value_to_json),
+                value.as_ref().map(reddb_types::Value::to_json),
                 None,
             );
             self.runtime.inner.kv_stats.incr_deletes();
@@ -408,9 +404,7 @@ impl<'a> KvAtomicOps<'a> {
                         collection,
                         key,
                         id.raw(),
-                        Some(crate::presentation::entity_json::storage_value_to_json(
-                            &value,
-                        )),
+                        Some(reddb_types::Value::to_json(&value)),
                         None,
                     );
                     self.runtime.inner.kv_stats.incr_deletes();
@@ -499,8 +493,8 @@ impl<'a> KvAtomicOps<'a> {
         let existing = self.runtime.get_kv(collection, key)?;
         let current: i64 = match existing.as_ref() {
             None => 0,
-            Some((crate::storage::schema::Value::Integer(n), _)) => *n,
-            Some((crate::storage::schema::Value::Float(f), _)) => *f as i64,
+            Some((reddb_types::Value::Integer(n), _)) => *n,
+            Some((reddb_types::Value::Float(f), _)) => *f as i64,
             Some((other, _)) => {
                 return Err(RedDBError::Internal(format!(
                     "INCR on non-integer value: {:?}",
@@ -527,7 +521,7 @@ impl<'a> KvAtomicOps<'a> {
             .create_kv(crate::application::entity::CreateKvInput {
                 collection: collection.to_string(),
                 key: key.to_string(),
-                value: crate::storage::schema::Value::Integer(next),
+                value: reddb_types::Value::Integer(next),
                 metadata: meta_vec,
             })?;
         self.runtime
@@ -546,10 +540,10 @@ impl<'a> KvAtomicOps<'a> {
             output.id.raw(),
             existing
                 .as_ref()
-                .map(|(value, _)| crate::presentation::entity_json::storage_value_to_json(value)),
-            Some(crate::presentation::entity_json::storage_value_to_json(
-                &crate::storage::schema::Value::Integer(next),
-            )),
+                .map(|(value, _)| reddb_types::Value::to_json(value)),
+            Some(reddb_types::Value::to_json(&reddb_types::Value::Integer(
+                next,
+            ))),
         );
 
         self.runtime.inner.kv_stats.incr_incrs();
@@ -568,10 +562,10 @@ impl<'a> KvAtomicOps<'a> {
         model: crate::catalog::CollectionModel,
         collection: &str,
         key: &str,
-        expected: Option<&crate::storage::schema::Value>,
-        new_value: crate::storage::schema::Value,
+        expected: Option<&reddb_types::Value>,
+        new_value: reddb_types::Value,
         ttl_ms: Option<u64>,
-    ) -> RedDBResult<(bool, Option<crate::storage::schema::Value>)> {
+    ) -> RedDBResult<(bool, Option<reddb_types::Value>)> {
         if model == crate::catalog::CollectionModel::Vault {
             return Err(RedDBError::InvalidOperation(
                 "VAULT CAS is not supported for sealed secrets".to_string(),
@@ -624,12 +618,8 @@ impl<'a> KvAtomicOps<'a> {
             collection,
             key,
             output.id.raw(),
-            current
-                .as_ref()
-                .map(crate::presentation::entity_json::storage_value_to_json),
-            Some(crate::presentation::entity_json::storage_value_to_json(
-                &new_value,
-            )),
+            current.as_ref().map(reddb_types::Value::to_json),
+            Some(reddb_types::Value::to_json(&new_value)),
         );
 
         self.runtime.inner.kv_stats.incr_cas_success();
@@ -667,9 +657,7 @@ impl<'a> KvAtomicOps<'a> {
                     collection,
                     &key,
                     id.raw(),
-                    before
-                        .as_ref()
-                        .map(crate::presentation::entity_json::storage_value_to_json),
+                    before.as_ref().map(reddb_types::Value::to_json),
                     None,
                 );
                 removed += 1;
@@ -734,7 +722,7 @@ impl<'a> KvAtomicOps<'a> {
         model: crate::catalog::CollectionModel,
         collection: &str,
         key: &str,
-    ) -> RedDBResult<Option<(crate::storage::schema::Value, crate::storage::EntityId)>> {
+    ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
         let Some(entity) = self.get_entity(model, collection, key)? else {
             return Ok(None);
         };
@@ -832,7 +820,7 @@ impl<'a> KvAtomicOps<'a> {
                     .as_ref()
                     .and_then(|named| named.get("key"))
                     .and_then(|value| match value {
-                        crate::storage::schema::Value::Text(key) => Some(key.to_string()),
+                        reddb_types::Value::Text(key) => Some(key.to_string()),
                         _ => None,
                     }),
                 _ => None,
@@ -941,7 +929,7 @@ impl<'a> KvAtomicOps<'a> {
         &self,
         collection: &str,
         key: &str,
-        value: crate::storage::schema::Value,
+        value: reddb_types::Value,
         op: &str,
         tombstone: bool,
         tags: &[String],
@@ -953,32 +941,23 @@ impl<'a> KvAtomicOps<'a> {
             .unwrap_or(0)
             + 1;
         let stored_value = if tombstone {
-            crate::storage::schema::Value::Null
+            reddb_types::Value::Null
         } else {
             self.runtime.seal_vault_value(collection, value)?
         };
         let now = current_unix_ms() as i64;
         let fields = vec![
-            (
-                "key".to_string(),
-                crate::storage::schema::Value::text(key.to_string()),
-            ),
+            ("key".to_string(), reddb_types::Value::text(key.to_string())),
             ("value".to_string(), stored_value),
-            (
-                "version".to_string(),
-                crate::storage::schema::Value::Integer(version),
-            ),
+            ("version".to_string(), reddb_types::Value::Integer(version)),
             (
                 "tombstone".to_string(),
-                crate::storage::schema::Value::Boolean(tombstone),
+                reddb_types::Value::Boolean(tombstone),
             ),
-            (
-                "op".to_string(),
-                crate::storage::schema::Value::text(op.to_string()),
-            ),
+            ("op".to_string(), reddb_types::Value::text(op.to_string())),
             (
                 "created_at_ms".to_string(),
-                crate::storage::schema::Value::Integer(now),
+                reddb_types::Value::Integer(now),
             ),
         ];
         let mut row = crate::storage::RowData::new(Vec::new());
@@ -1061,8 +1040,8 @@ impl RedDBRuntime {
     pub(crate) fn seal_vault_value(
         &self,
         collection: &str,
-        value: crate::storage::schema::Value,
-    ) -> RedDBResult<crate::storage::schema::Value> {
+        value: reddb_types::Value,
+    ) -> RedDBResult<reddb_types::Value> {
         let key = self.vault_encryption_key(collection)?;
         let plaintext = value.to_bytes();
         let nonce_bytes = crate::auth::store::random_bytes(12);
@@ -1074,7 +1053,7 @@ impl RedDBRuntime {
         let mut payload = Vec::with_capacity(12 + ciphertext.len());
         payload.extend_from_slice(&nonce);
         payload.extend_from_slice(&ciphertext);
-        Ok(crate::storage::schema::Value::Secret(payload))
+        Ok(reddb_types::Value::Secret(payload))
     }
 
     fn vault_key_available(&self, collection: &str) -> bool {
@@ -1102,9 +1081,9 @@ impl RedDBRuntime {
     fn unseal_vault_value(
         &self,
         collection: &str,
-        sealed: &crate::storage::schema::Value,
-    ) -> RedDBResult<crate::storage::schema::Value> {
-        let crate::storage::schema::Value::Secret(payload) = sealed else {
+        sealed: &reddb_types::Value,
+    ) -> RedDBResult<reddb_types::Value> {
+        let reddb_types::Value::Secret(payload) = sealed else {
             return Err(RedDBError::Query(
                 "vault unseal failed: stored value is not sealed".to_string(),
             ));
@@ -1125,10 +1104,9 @@ impl RedDBRuntime {
             &payload[12..],
         )
         .map_err(|_| RedDBError::Query("vault unseal failed: decryption failed".to_string()))?;
-        let (value, consumed) =
-            crate::storage::schema::Value::from_bytes(&plaintext).map_err(|err| {
-                RedDBError::Query(format!("vault unseal failed: bad plaintext value: {err}"))
-            })?;
+        let (value, consumed) = reddb_types::Value::from_bytes(&plaintext).map_err(|err| {
+            RedDBError::Query(format!("vault unseal failed: bad plaintext value: {err}"))
+        })?;
         if consumed != plaintext.len() {
             return Err(RedDBError::Query(
                 "vault unseal failed: trailing plaintext bytes".to_string(),
@@ -1146,7 +1124,7 @@ impl RedDBRuntime {
         &self,
         collection: &str,
         key: &str,
-    ) -> RedDBResult<Option<crate::storage::schema::Value>> {
+    ) -> RedDBResult<Option<reddb_types::Value>> {
         let ops = KvAtomicOps::new(self);
         let Some(entry) = ops.get_vault_entry(collection, key)? else {
             return Ok(None);
@@ -1824,7 +1802,7 @@ impl RedDBRuntime {
                             insert_kv_json_path(
                                 &mut tree,
                                 relative,
-                                crate::presentation::entity_json::storage_value_to_json(&value),
+                                reddb_types::Value::to_json(&value),
                             );
                         }
                         Ok(kv_list_json_result(raw_query, collection, prefix, tree))
@@ -1844,8 +1822,7 @@ impl RedDBRuntime {
                             record.set("key", Value::text(key.clone()));
                             record.set(
                                 "value",
-                                kv_value_from_entity(&entity)
-                                    .unwrap_or(crate::storage::schema::Value::Null),
+                                kv_value_from_entity(&entity).unwrap_or(reddb_types::Value::Null),
                             );
                             record.set("tags", kv_tags_value(&ops.tags_for_key(collection, &key)));
                             result.push(record);
@@ -2057,10 +2034,7 @@ impl RedDBRuntime {
                 record.set("kind", Value::text(keyed_model_name(*model).to_string()));
                 record.set("tenant", Value::Null);
                 record.set("key", Value::text(key.clone()));
-                record.set(
-                    "value",
-                    value.unwrap_or(crate::storage::schema::Value::Null),
-                );
+                record.set("value", value.unwrap_or(reddb_types::Value::Null));
                 record.set("tags", kv_tags_value(&ops.tags_for_key(collection, key)));
                 result.push(record);
 
@@ -2114,7 +2088,7 @@ impl RedDBRuntime {
                     "from_lsn",
                     from_lsn
                         .map(Value::UnsignedInteger)
-                        .unwrap_or(crate::storage::schema::Value::Null),
+                        .unwrap_or(reddb_types::Value::Null),
                 );
                 record.set("watch_url", Value::text(endpoint));
                 record.set("streaming", Value::Boolean(true));
@@ -2350,10 +2324,7 @@ impl RedDBRuntime {
                 record.set("ok", Value::Boolean(ok));
                 record.set("collection", Value::text(collection.clone()));
                 record.set("key", Value::text(key.clone()));
-                record.set(
-                    "current",
-                    current.unwrap_or(crate::storage::schema::Value::Null),
-                );
+                record.set("current", current.unwrap_or(reddb_types::Value::Null));
                 result.push(record);
 
                 Ok(RuntimeQueryResult {
@@ -2857,7 +2828,7 @@ fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value>
 fn kv_entity_has_key(entity: &crate::storage::UnifiedEntity, key: &str) -> bool {
     if let crate::storage::EntityData::Row(ref row) = entity.data {
         if let Some(ref named) = row.named {
-            if let Some(crate::storage::schema::Value::Text(ref k)) = named.get("key") {
+            if let Some(reddb_types::Value::Text(ref k)) = named.get("key") {
                 return &**k == key;
             }
         }
@@ -3002,7 +2973,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "profile",
-            crate::storage::schema::Value::text("alice"),
+            reddb_types::Value::text("alice"),
             None,
             false,
         )
@@ -3018,7 +2989,7 @@ mod tests {
             "kv_default",
             "profile",
             None,
-            crate::storage::schema::Value::text("created"),
+            reddb_types::Value::text("created"),
             None,
         )
         .unwrap();
@@ -3026,8 +2997,8 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "profile",
-            Some(&crate::storage::schema::Value::text("different")),
-            crate::storage::schema::Value::text("ignored"),
+            Some(&reddb_types::Value::text("different")),
+            reddb_types::Value::text("ignored"),
             None,
         )
         .unwrap();
@@ -3058,7 +3029,7 @@ mod tests {
                 .result
                 .records[0]
                 .get("value"),
-            Some(crate::storage::schema::Value::Text(value)) if &**value == "payload"
+            Some(reddb_types::Value::Text(value)) if &**value == "payload"
         ));
 
         let hit = r
@@ -3071,7 +3042,7 @@ mod tests {
                 .result
                 .records[0]
                 .get("value"),
-            Some(crate::storage::schema::Value::Null)
+            Some(reddb_types::Value::Null)
         ));
     }
 
@@ -3089,7 +3060,7 @@ mod tests {
                 CollectionModel::Kv,
                 "kv_default",
                 "watched",
-                crate::storage::schema::Value::Integer(1),
+                reddb_types::Value::Integer(1),
                 None,
                 false,
             )
@@ -3161,9 +3132,7 @@ mod tests {
         assert_eq!(
             ops.get(CollectionModel::Kv, "kv_default", "counter")
                 .unwrap(),
-            Some(crate::storage::schema::Value::Integer(
-                (THREADS * ITERS) as i64
-            ))
+            Some(reddb_types::Value::Integer((THREADS * ITERS) as i64))
         );
     }
 
@@ -3175,7 +3144,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "name",
-            crate::storage::schema::Value::text("alice"),
+            reddb_types::Value::text("alice"),
             None,
             false,
         )
@@ -3196,7 +3165,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "lock",
-            crate::storage::schema::Value::text("free"),
+            reddb_types::Value::text("free"),
             None,
             false,
         )
@@ -3206,17 +3175,17 @@ mod tests {
                 CollectionModel::Kv,
                 "kv_default",
                 "lock",
-                Some(&crate::storage::schema::Value::text("free")),
-                crate::storage::schema::Value::text("held"),
+                Some(&reddb_types::Value::text("free")),
+                reddb_types::Value::text("held"),
                 None,
             )
             .unwrap();
         assert!(ok);
-        assert_eq!(prev, Some(crate::storage::schema::Value::text("free")));
+        assert_eq!(prev, Some(reddb_types::Value::text("free")));
         // Value actually changed.
         assert_eq!(
             ops.get(CollectionModel::Kv, "kv_default", "lock").unwrap(),
-            Some(crate::storage::schema::Value::text("held"))
+            Some(reddb_types::Value::text("held"))
         );
     }
 
@@ -3231,7 +3200,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "cas_counter",
-            crate::storage::schema::Value::Integer(0),
+            reddb_types::Value::Integer(0),
             None,
             false,
         )
@@ -3256,8 +3225,8 @@ mod tests {
                             CollectionModel::Kv,
                             "kv_default",
                             "cas_counter",
-                            Some(&crate::storage::schema::Value::Integer(round as i64)),
-                            crate::storage::schema::Value::Integer((round + 1) as i64),
+                            Some(&reddb_types::Value::Integer(round as i64)),
+                            reddb_types::Value::Integer((round + 1) as i64),
                             None,
                         )
                         .unwrap();
@@ -3277,7 +3246,7 @@ mod tests {
         assert_eq!(
             ops.get(CollectionModel::Kv, "kv_default", "cas_counter")
                 .unwrap(),
-            Some(crate::storage::schema::Value::Integer(ROUNDS as i64))
+            Some(reddb_types::Value::Integer(ROUNDS as i64))
         );
     }
 
@@ -3289,7 +3258,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "lock",
-            crate::storage::schema::Value::text("free"),
+            reddb_types::Value::text("free"),
             None,
             false,
         )
@@ -3299,17 +3268,17 @@ mod tests {
                 CollectionModel::Kv,
                 "kv_default",
                 "lock",
-                Some(&crate::storage::schema::Value::text("held")),
-                crate::storage::schema::Value::text("worker-7"),
+                Some(&reddb_types::Value::text("held")),
+                reddb_types::Value::text("worker-7"),
                 None,
             )
             .unwrap();
         assert!(!ok);
-        assert_eq!(current, Some(crate::storage::schema::Value::text("free")));
+        assert_eq!(current, Some(reddb_types::Value::text("free")));
         // Value unchanged.
         assert_eq!(
             ops.get(CollectionModel::Kv, "kv_default", "lock").unwrap(),
-            Some(crate::storage::schema::Value::text("free"))
+            Some(reddb_types::Value::text("free"))
         );
     }
 
@@ -3323,7 +3292,7 @@ mod tests {
                 "kv_default",
                 "new_key",
                 None,
-                crate::storage::schema::Value::text("created"),
+                reddb_types::Value::text("created"),
                 None,
             )
             .unwrap();
@@ -3332,7 +3301,7 @@ mod tests {
         assert_eq!(
             ops.get(CollectionModel::Kv, "kv_default", "new_key")
                 .unwrap(),
-            Some(crate::storage::schema::Value::text("created"))
+            Some(reddb_types::Value::text("created"))
         );
     }
 
@@ -3344,7 +3313,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "taken",
-            crate::storage::schema::Value::text("worker-1"),
+            reddb_types::Value::text("worker-1"),
             None,
             false,
         )
@@ -3355,15 +3324,12 @@ mod tests {
                 "kv_default",
                 "taken",
                 None,
-                crate::storage::schema::Value::text("worker-2"),
+                reddb_types::Value::text("worker-2"),
                 None,
             )
             .unwrap();
         assert!(!ok);
-        assert_eq!(
-            current,
-            Some(crate::storage::schema::Value::text("worker-1"))
-        );
+        assert_eq!(current, Some(reddb_types::Value::text("worker-1")));
     }
 
     #[test]
@@ -3376,19 +3342,13 @@ mod tests {
             .execute_query("KV CAS lock EXPECT 'free' SET 'held'")
             .unwrap();
         let row = &res.result.records[0];
-        assert_eq!(
-            row.get("ok"),
-            Some(&crate::storage::schema::Value::Boolean(true))
-        );
+        assert_eq!(row.get("ok"), Some(&reddb_types::Value::Boolean(true)));
         // CAS: free → held again — should fail (value is now 'held').
         let res2 = r
             .execute_query("KV CAS lock EXPECT 'free' SET 'held'")
             .unwrap();
         let row2 = &res2.result.records[0];
-        assert_eq!(
-            row2.get("ok"),
-            Some(&crate::storage::schema::Value::Boolean(false))
-        );
+        assert_eq!(row2.get("ok"), Some(&reddb_types::Value::Boolean(false)));
     }
 
     #[test]
@@ -3398,19 +3358,13 @@ mod tests {
             .execute_query("KV CAS singleton EXPECT NULL SET 'first'")
             .unwrap();
         let row = &res.result.records[0];
-        assert_eq!(
-            row.get("ok"),
-            Some(&crate::storage::schema::Value::Boolean(true))
-        );
+        assert_eq!(row.get("ok"), Some(&reddb_types::Value::Boolean(true)));
         // Second call must fail.
         let res2 = r
             .execute_query("KV CAS singleton EXPECT NULL SET 'second'")
             .unwrap();
         let row2 = &res2.result.records[0];
-        assert_eq!(
-            row2.get("ok"),
-            Some(&crate::storage::schema::Value::Boolean(false))
-        );
+        assert_eq!(row2.get("ok"), Some(&reddb_types::Value::Boolean(false)));
     }
 
     #[test]
@@ -3418,16 +3372,10 @@ mod tests {
         let r = rt();
         let res = r.execute_query("KV INCR hits").unwrap();
         let row = &res.result.records[0];
-        assert_eq!(
-            row.get("value"),
-            Some(&crate::storage::schema::Value::Integer(1))
-        );
+        assert_eq!(row.get("value"), Some(&reddb_types::Value::Integer(1)));
         let res2 = r.execute_query("KV INCR hits BY 4").unwrap();
         let row2 = &res2.result.records[0];
-        assert_eq!(
-            row2.get("value"),
-            Some(&crate::storage::schema::Value::Integer(5))
-        );
+        assert_eq!(row2.get("value"), Some(&reddb_types::Value::Integer(5)));
     }
 
     #[test]
@@ -3467,9 +3415,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             selected.result.records[0].get("n"),
-            Some(&crate::storage::schema::Value::Integer(
-                (THREADS * ITERS) as i64
-            ))
+            Some(&reddb_types::Value::Integer((THREADS * ITERS) as i64))
         );
     }
 
@@ -3483,7 +3429,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "seq",
-            crate::storage::schema::Value::Integer(1),
+            reddb_types::Value::Integer(1),
             None,
             false,
         )
@@ -3496,7 +3442,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "seq",
-            crate::storage::schema::Value::Integer(9),
+            reddb_types::Value::Integer(9),
             None,
             false,
         )
@@ -3540,7 +3486,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "acct:1",
-            crate::storage::schema::Value::Integer(1),
+            reddb_types::Value::Integer(1),
             None,
             false,
         )
@@ -3549,7 +3495,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "session:1",
-            crate::storage::schema::Value::Integer(2),
+            reddb_types::Value::Integer(2),
             None,
             false,
         )
@@ -3558,7 +3504,7 @@ mod tests {
             CollectionModel::Kv,
             "kv_default",
             "acct:2",
-            crate::storage::schema::Value::Integer(3),
+            reddb_types::Value::Integer(3),
             None,
             false,
         )
@@ -3583,7 +3529,7 @@ mod tests {
                 CollectionModel::Kv,
                 "kv_default",
                 "resume",
-                crate::storage::schema::Value::Integer(value),
+                reddb_types::Value::Integer(value),
                 None,
                 false,
             )
@@ -3597,7 +3543,7 @@ mod tests {
                 CollectionModel::Kv,
                 "kv_default",
                 "resume",
-                crate::storage::schema::Value::Integer(value),
+                reddb_types::Value::Integer(value),
                 None,
                 false,
             )
@@ -3637,7 +3583,7 @@ mod tests {
                 CollectionModel::Kv,
                 "kv_default",
                 "slow",
-                crate::storage::schema::Value::Integer(value),
+                reddb_types::Value::Integer(value),
                 None,
                 false,
             )

@@ -1752,7 +1752,7 @@ fn cursor_reject_response(reject: &crate::server::output_stream::CursorReject) -
 /// treats these as ineligible — the resumable assessor refuses queries
 /// where this would happen).
 pub(crate) fn record_rid(record: &crate::storage::query::unified::UnifiedRecord) -> Option<u64> {
-    use crate::storage::schema::types::Value;
+    use reddb_types::types::Value;
     match record.get("rid")? {
         Value::Integer(v) if *v >= 0 => Some(*v as u64),
         Value::UnsignedInteger(v) => Some(*v),

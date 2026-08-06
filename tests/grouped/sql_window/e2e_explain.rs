@@ -8,8 +8,8 @@
 //! `EXPLAIN ALTER FOR CREATE TABLE ...` is a separate schema-diff
 //! command and stays on the regular SQL path.
 
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 const EXPLAIN_PLAN_COLUMNS: &[&str] =
     &["op", "source", "estimated_rows", "estimated_cost", "depth"];

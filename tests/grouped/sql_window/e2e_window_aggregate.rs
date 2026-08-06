@@ -5,8 +5,8 @@
 //! the default ordered range frame.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBRuntime};
+use reddb_types::Value;
 
 fn setup_purchases() -> RedDBRuntime {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");

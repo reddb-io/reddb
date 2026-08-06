@@ -1,17 +1,9 @@
 //! A minimal durable-I/O abstraction (DST Fatia, #1355).
 //!
-//! [`Vfs`] / [`VfsFile`] are the in-process counterpart to the `LD_PRELOAD`
-//! shim: where the shim gives real-syscall fidelity, this trait pair lets the
-//! durable writers run against an in-memory, seed-driven, fault-injecting
-//! backend that is fast and OS-portable for exhaustive fault enumeration.
-//!
-//! The shape mirrors the existing `RemoteBackend` two-trait precedent in
-//! `reddb-server`: one trait for the namespace operations (`open` / `rename` /
-//! `sync_dir`) and one for the per-file operations (`read` / `write_all` /
-//! `seek` / `sync_all`). [`StdVfs`] is the production default — it is exactly
-//! today's `std::fs` behavior, so routing a durable writer through `&StdVfs`
-//! leaves the on-disk bytes unchanged. [`SimVfs`] is the fault-injecting
-//! backend used only by tests.
+//! [`SimVfs`] implements [`reddb_file::Vfs`] with an in-memory, seed-driven,
+//! fault-injecting backend that is fast and OS-portable for exhaustive fault
+//! enumeration. The durable-I/O contract and its production [`reddb_file::StdVfs`]
+//! implementation live with the product write paths in `reddb-file`.
 //!
 //! # Fault model ([`SimVfs`])
 //!
@@ -56,120 +48,14 @@
 
 use crate::prng::SplitMix64;
 use reddb_file::dst::{self, FaultClass, FaultDecision, FaultRecord};
+use reddb_file::{OpenMode, Vfs, VfsFile};
 use std::collections::HashMap;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const TURBO_CRASH_INJECT_ENV: &str = "REDDB_TURBO_CRASH_AT";
 const PPM_DENOMINATOR: u64 = 1_000_000;
-
-/// How a file is opened. Mirrors the subset of `OpenOptions` the durable
-/// writers actually use.
-#[derive(Debug, Clone, Copy)]
-pub struct OpenMode {
-    pub read: bool,
-    pub write: bool,
-    pub create: bool,
-    pub truncate: bool,
-}
-
-impl OpenMode {
-    /// Create-or-truncate for writing (the WAL log's open mode).
-    pub fn create_truncate() -> Self {
-        Self {
-            read: false,
-            write: true,
-            create: true,
-            truncate: true,
-        }
-    }
-
-    /// Create-if-absent for writing without truncating (the dual-superblock
-    /// open mode: each checkpoint overwrites only its own slot).
-    pub fn create_keep() -> Self {
-        Self {
-            read: true,
-            write: true,
-            create: true,
-            truncate: false,
-        }
-    }
-}
-
-/// A handle to one open file. The durable writers only need to append, seek to a
-/// fixed offset, read back, and force durability.
-pub trait VfsFile {
-    /// Write the entire buffer, looping over short writes like `Write::write_all`.
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()>;
-    /// Read up to `buf.len()` bytes at the current position.
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-    /// Reposition the cursor.
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64>;
-    /// Force the file's contents durable (the moment a write can survive a crash).
-    fn sync_all(&mut self) -> io::Result<()>;
-}
-
-/// A durable-I/O namespace: open files, rename, and force directory durability.
-pub trait Vfs {
-    /// The per-file handle this backend produces.
-    type File: VfsFile;
-
-    /// Open (or create) a file at `path`.
-    fn open(&self, path: &Path, mode: OpenMode) -> io::Result<Self::File>;
-    /// Atomically rename `from` to `to` (subject to fault injection).
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
-    /// Force a directory's entries durable (makes a prior `rename` survive a crash).
-    fn sync_dir(&self, dir: &Path) -> io::Result<()>;
-}
-
-// --------------------------------------------------------------------------
-// StdVfs — the production default (today's `std::fs` behavior, unchanged).
-// --------------------------------------------------------------------------
-
-/// The real filesystem backend. Routing a durable writer through `&StdVfs`
-/// produces byte-for-byte the same artifacts as direct `std::fs` calls.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StdVfs;
-
-/// A real `std::fs::File`.
-#[derive(Debug)]
-pub struct StdFile(std::fs::File);
-
-impl VfsFile for StdFile {
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.0.write_all(buf)
-    }
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        io::Read::read(&mut self.0, buf)
-    }
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.0.seek(pos)
-    }
-    fn sync_all(&mut self) -> io::Result<()> {
-        self.0.sync_all()
-    }
-}
-
-impl Vfs for StdVfs {
-    type File = StdFile;
-
-    fn open(&self, path: &Path, mode: OpenMode) -> io::Result<StdFile> {
-        std::fs::OpenOptions::new()
-            .read(mode.read)
-            .write(mode.write)
-            .create(mode.create)
-            .truncate(mode.truncate)
-            .open(path)
-            .map(StdFile)
-    }
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        std::fs::rename(from, to)
-    }
-    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-        std::fs::File::open(dir).and_then(|d| d.sync_all())
-    }
-}
 
 // --------------------------------------------------------------------------
 // SimVfs — in-memory, seed-driven, fault-injecting backend (test only).
@@ -212,7 +98,7 @@ pub struct SimFaultConfig {
 }
 
 impl SimFaultConfig {
-    /// No faults: a faithful in-memory mirror of `StdVfs`.
+    /// No faults: a faithful in-memory mirror of [`reddb_file::StdVfs`].
     pub fn none() -> Self {
         Self {
             enospc_ppm: 0,
@@ -777,17 +663,6 @@ mod tests {
             out.extend_from_slice(&buf[..n]);
         }
         out
-    }
-
-    #[test]
-    fn std_vfs_roundtrips() {
-        let dir = tempfile::tempdir().unwrap();
-        let vfs = StdVfs;
-        let path = dir.path().join("a.bin");
-        let mut f = vfs.open(&path, OpenMode::create_truncate()).unwrap();
-        f.write_all(b"hello").unwrap();
-        f.sync_all().unwrap();
-        assert_eq!(read_back(&vfs, &path), b"hello");
     }
 
     #[test]

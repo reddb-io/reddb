@@ -294,7 +294,7 @@ pub(crate) fn returning_row_item_kind(
     }
     let is_document = row
         .iter_fields()
-        .any(|(_, value)| matches!(value, crate::storage::schema::Value::Json(_)));
+        .any(|(_, value)| matches!(value, reddb_types::Value::Json(_)));
     if is_document {
         Some(ReturningRowKind::Document)
     } else {
