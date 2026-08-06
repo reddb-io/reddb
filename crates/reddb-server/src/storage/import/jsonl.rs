@@ -22,7 +22,7 @@
 //! let stats = importer.import_file("data.jsonl", &mut store)?;
 //! ```
 
-use crate::storage::schema::types::Value;
+use reddb_types::types::Value;
 use crate::storage::Store;
 use crate::storage::{EntityData, EntityKind, RowData, UnifiedEntity, VectorData};
 use std::collections::HashMap;
