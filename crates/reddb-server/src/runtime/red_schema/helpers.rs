@@ -17,7 +17,7 @@ pub(super) fn timestamp_ms_value(value: u128) -> Value {
 }
 
 pub(super) fn value_as_ms(value: &crate::storage::schema::Value) -> Option<i64> {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     match value {
         Value::TimestampMs(v) => Some(*v),
         Value::Timestamp(v) => Some(v.saturating_mul(1_000)),
