@@ -281,7 +281,7 @@ pub(crate) fn patch_dry_run_response(operations: usize) -> HttpResponse {
 pub(crate) fn kv_value_to_json_value(
     value: &crate::storage::schema::Value,
 ) -> Result<JsonValue, PatchValidationError> {
-    use crate::storage::schema::Value as V;
+    use reddb_types::Value as V;
     let parse = |text: &str| -> Result<JsonValue, PatchValidationError> {
         let raw = crate::utils::json::parse_json(text).map_err(|err| {
             PatchValidationError::new(
