@@ -559,20 +559,8 @@ mod tests {
             backend.clone(),
         );
         let id = q.submit(MlJobKind::Train, "spam", "{}");
-        assert!(wait_until(
-            || q.get(id).map(|j| j.is_terminal()).unwrap_or(false),
-            Duration::from_secs(2),
-        ));
-        assert!(wait_until(
-            || backend
-                .get(super::ns::JOBS, &super::key::job(id))
-                .ok()
-                .flatten()
-                .and_then(|raw| MlJob::from_json(&raw))
-                .map(|job| job.status == MlJobStatus::Completed)
-                .unwrap_or(false),
-            Duration::from_secs(2),
-        ));
+        q.shutdown();
+
         // Raw record must exist and must reflect the completed status.
         let raw = backend
             .get(super::ns::JOBS, &super::key::job(id))
@@ -581,7 +569,6 @@ mod tests {
         let decoded = MlJob::from_json(&raw).unwrap();
         assert_eq!(decoded.status, MlJobStatus::Completed);
         assert_eq!(decoded.metrics_json.as_deref(), Some("{\"f1\":0.9}"));
-        q.shutdown();
     }
 
     #[test]
