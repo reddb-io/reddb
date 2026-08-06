@@ -5,7 +5,7 @@ use crate::application::entity::{
 };
 use crate::application::ttl_payload::parse_top_level_ttl_metadata_entries;
 use crate::json::{Map, Value as JsonValue};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::MetadataValue;
 use crate::storage::EntityId;
