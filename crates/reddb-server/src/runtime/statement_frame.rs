@@ -1483,7 +1483,7 @@ mod tests {
             ("src/rpc_stdio.rs", "execute_query_with_params"),
             ("src/wire/redwire/session.rs", "QueryRequestExecutor"),
             ("src/wire/postgres/server.rs", "execute_query_with_params"),
-            ("src/grpc.rs", "execute_query_with_params"),
+            ("src/grpc.rs", "QueryRequestExecutor"),
         ];
 
         for (relative, delegation) in adapters {
