@@ -291,9 +291,7 @@ fn json_value_to_schema_value(v: &JsonValue) -> SchemaValue {
 /// Convert an engine query result through the same value mapping used by the
 /// embedded driver. Kept public for in-process tools that already own a
 /// runtime, such as the CLI's ephemeral data-file query path.
-pub fn query_result_from_runtime(
-    qr: &reddb_server::runtime::RuntimeQueryResult,
-) -> QueryResult {
+pub fn query_result_from_runtime(qr: &reddb_server::runtime::RuntimeQueryResult) -> QueryResult {
     let columns = if qr.result.columns.is_empty() {
         qr.result
             .records
