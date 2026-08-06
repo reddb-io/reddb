@@ -43,12 +43,12 @@
 
 use crate::storage::query::ast::{BinOp, CompareOp, Expr, FieldRef, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::cast_catalog::{find_cast, CastContext, CastEntry};
-use crate::storage::schema::coercion_spine;
-use crate::storage::schema::function_catalog::{self, FunctionEntry};
-use crate::storage::schema::operator_catalog::{self, OperatorEntry, OperatorKind};
-use crate::storage::schema::types::DataType;
-use crate::storage::schema::Value;
+use reddb_types::cast_catalog::{find_cast, CastContext, CastEntry};
+use reddb_types::coercion_spine;
+use reddb_types::function_catalog::{self, FunctionEntry};
+use reddb_types::operator_catalog::{self, OperatorEntry, OperatorKind};
+use reddb_types::types::DataType;
+use reddb_types::Value;
 
 use super::join_filter::{compare_runtime_values, resolve_runtime_field};
 
@@ -757,9 +757,9 @@ fn apply_cast(src: &Value, target: DataType) -> Value {
         (Value::Boolean(b), DT::Integer) => Value::Integer(if *b { 1 } else { 0 }),
         (Value::Integer(n), DT::Boolean) => Value::Boolean(*n != 0),
         (Value::Text(s), t) => {
-            crate::storage::schema::coerce::coerce(s, t, None).unwrap_or(Value::Null)
+            reddb_types::coerce::coerce(s, t, None).unwrap_or(Value::Null)
         }
-        (v, t) => crate::storage::schema::coerce::coerce(&v.display_string(), t, None)
+        (v, t) => reddb_types::coerce::coerce(&v.display_string(), t, None)
             .unwrap_or(Value::Null),
     }
 }
