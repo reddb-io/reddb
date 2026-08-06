@@ -205,7 +205,7 @@ fn encode_result_cache_payload(entry: &RuntimeResultCacheEntry) -> Option<Vec<u8
         for (name, value) in fields {
             write_string(&mut out, name)?;
             let mut encoded = Vec::new();
-            crate::storage::schema::value_codec::encode(value, &mut encoded);
+            reddb_types::value_codec::encode(value, &mut encoded);
             write_bytes(&mut out, &encoded)?;
         }
     }
@@ -252,7 +252,7 @@ fn decode_result_cache_payload(mut input: &[u8]) -> Option<(RuntimeQueryResult, 
         for _ in 0..read_u32(&mut input)? {
             let name = read_string(&mut input)?;
             let bytes = read_bytes(&mut input)?;
-            let (value, used) = crate::storage::schema::value_codec::decode(bytes).ok()?;
+            let (value, used) = reddb_types::value_codec::decode(bytes).ok()?;
             if used != bytes.len() {
                 return None;
             }
