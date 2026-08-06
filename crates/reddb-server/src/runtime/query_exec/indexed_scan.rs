@@ -187,7 +187,7 @@ fn try_composite_and_lookup(
     limit: Option<usize>,
 ) -> Option<Vec<EntityId>> {
     use crate::storage::query::ast::FieldRef;
-    use crate::storage::schema::CanonicalKey;
+    use reddb_types::CanonicalKey;
 
     // Extract equality side (col, value) and range side (col, low, high).
     let extract_eq = |f: &Filter| -> Option<(String, CanonicalKey)> {
@@ -226,7 +226,7 @@ fn try_composite_and_lookup(
                 // Saturating bounds for the pivot's numeric family so we
                 // can express `age > N` as `range(N-exclusive ..= MAX)`
                 // against the composite BTreeMap.
-                use crate::storage::schema::{CanonicalKey, CanonicalKeyFamily};
+                use reddb_types::{CanonicalKey, CanonicalKeyFamily};
                 let (family, is_signed) = match &pivot {
                     CanonicalKey::Signed(f, _) => (*f, true),
                     CanonicalKey::Unsigned(f, _) => (*f, false),
