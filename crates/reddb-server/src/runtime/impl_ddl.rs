@@ -2907,7 +2907,7 @@ mod tests {
     use crate::auth::UserId;
     use crate::auth::{AuthConfig, Role};
     use crate::runtime::impl_core::{clear_current_auth_identity, set_current_auth_identity};
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use crate::{RedDBOptions, RedDBRuntime};
     use std::sync::Arc;
 
