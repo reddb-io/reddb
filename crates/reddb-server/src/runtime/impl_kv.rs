@@ -216,9 +216,7 @@ impl<'a> KvAtomicOps<'a> {
         } else {
             crate::replication::cdc::ChangeOperation::Insert
         };
-        let after = Some(crate::storage::schema::Value::to_json(
-            &value,
-        ));
+        let after = Some(crate::storage::schema::Value::to_json(&value));
 
         // Versioned KV retains MVCC history: the prior visible version is
         // tombstoned (set_xmax) *after* the new version is created, so both
@@ -384,9 +382,7 @@ impl<'a> KvAtomicOps<'a> {
                 collection,
                 key,
                 id.raw(),
-                value
-                    .as_ref()
-                    .map(crate::storage::schema::Value::to_json),
+                value.as_ref().map(crate::storage::schema::Value::to_json),
                 None,
             );
             self.runtime.inner.kv_stats.incr_deletes();
@@ -408,9 +404,7 @@ impl<'a> KvAtomicOps<'a> {
                         collection,
                         key,
                         id.raw(),
-                        Some(crate::storage::schema::Value::to_json(
-                            &value,
-                        )),
+                        Some(crate::storage::schema::Value::to_json(&value)),
                         None,
                     );
                     self.runtime.inner.kv_stats.incr_deletes();
@@ -624,12 +618,8 @@ impl<'a> KvAtomicOps<'a> {
             collection,
             key,
             output.id.raw(),
-            current
-                .as_ref()
-                .map(crate::storage::schema::Value::to_json),
-            Some(crate::storage::schema::Value::to_json(
-                &new_value,
-            )),
+            current.as_ref().map(crate::storage::schema::Value::to_json),
+            Some(crate::storage::schema::Value::to_json(&new_value)),
         );
 
         self.runtime.inner.kv_stats.incr_cas_success();
@@ -667,9 +657,7 @@ impl<'a> KvAtomicOps<'a> {
                     collection,
                     &key,
                     id.raw(),
-                    before
-                        .as_ref()
-                        .map(crate::storage::schema::Value::to_json),
+                    before.as_ref().map(crate::storage::schema::Value::to_json),
                     None,
                 );
                 removed += 1;

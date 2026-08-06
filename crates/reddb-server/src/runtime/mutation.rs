@@ -1039,9 +1039,7 @@ fn build_update_after_json(
                 if let Some(Value::Json(bytes)) = named.get("body") {
                     if let Some(body_fields) = crate::document_body::body_fields(bytes) {
                         for (name, value) in body_fields {
-                            object
-                                .entry(name)
-                                .or_insert_with(|| value.to_json());
+                            object.entry(name).or_insert_with(|| value.to_json());
                         }
                     }
                 }

@@ -425,14 +425,10 @@ impl RedDBRuntime {
             if version.tombstone {
                 None
             } else {
-                Some(crate::storage::schema::Value::to_json(
-                    &version.value,
-                ))
+                Some(crate::storage::schema::Value::to_json(&version.value))
             }
         });
-        let after = Some(crate::storage::schema::Value::to_json(
-            &value,
-        ));
+        let after = Some(crate::storage::schema::Value::to_json(&value));
         let change_op = if latest.is_some() {
             crate::replication::cdc::ChangeOperation::Update
         } else {
@@ -616,9 +612,7 @@ impl RedDBRuntime {
             if version.tombstone {
                 None
             } else {
-                Some(crate::storage::schema::Value::to_json(
-                    &version.value,
-                ))
+                Some(crate::storage::schema::Value::to_json(&version.value))
             }
         }) {
             self.record_kv_watch_event(
