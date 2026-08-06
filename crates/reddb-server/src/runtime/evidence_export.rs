@@ -5,7 +5,7 @@ use crate::auth::policies::{EvalContext, ResourceRef};
 use crate::auth::UserId;
 use crate::runtime::control_events::{EventKind, Outcome, Sensitivity, CONTROL_EVENTS_COLLECTION};
 use crate::runtime::impl_core::{current_auth_identity, current_tenant};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::EntityData;
 use crate::RedDBRuntime;
 use reddb_types::encoding::json_escape;
