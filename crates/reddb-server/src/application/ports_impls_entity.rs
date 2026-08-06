@@ -1371,9 +1371,7 @@ fn document_body_set_operation(column: &str, value: Value) -> PatchEntityOperati
     PatchEntityOperation {
         op: PatchEntityOperationType::Set,
         path: column.split('.').map(str::to_string).collect(),
-        value: Some(crate::presentation::entity_json::storage_value_to_json(
-            &value,
-        )),
+        value: Some(value.to_json()),
     }
 }
 
