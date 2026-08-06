@@ -8,10 +8,10 @@ use std::sync::Arc;
 use reddb::api::RedDBOptions;
 use reddb::runtime::RedDBRuntime;
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value as SchemaValue;
+use reddb_types::Value as SchemaValue;
 use reddb::RuntimeEntityPort;
 
-pub use reddb::storage::schema::Value as ParamValue;
+pub use reddb_types::Value as ParamValue;
 
 #[derive(Clone)]
 pub struct EmbeddedRuntime {

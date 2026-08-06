@@ -647,7 +647,7 @@ fn json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::schema::SqlTypeName;
+    use reddb_types::SqlTypeName;
 
     fn declared(name: &str, sql_type: &str, not_null: bool) -> DeclaredColumnContract {
         DeclaredColumnContract {

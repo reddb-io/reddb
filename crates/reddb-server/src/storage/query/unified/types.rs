@@ -7,7 +7,7 @@ use crate::storage::query::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, JoinQuery,
     JoinType, NodePattern, NodeSelector, PathQuery, Projection, QueryExpr, TableQuery,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Execution error
 #[derive(Debug, Clone)]
@@ -672,9 +672,9 @@ mod record_layout_tests {
     //! to drive empty-schema generators alongside the schemaful path.
 
     use super::*;
-    use crate::storage::schema::Value;
     use proptest::collection::vec;
     use proptest::prelude::*;
+    use reddb_types::Value;
 
     fn arb_value() -> impl Strategy<Value = Value> {
         prop_oneof![

@@ -1,5 +1,5 @@
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 #[derive(Clone, Copy)]
 enum TestLocation {

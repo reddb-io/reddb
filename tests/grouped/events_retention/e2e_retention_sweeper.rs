@@ -9,8 +9,8 @@
 mod support;
 
 use reddb::application::ExecuteQueryInput;
-use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn unique_dir(prefix: &str) -> support::TempDataDir {
     support::temp_data_dir(prefix)

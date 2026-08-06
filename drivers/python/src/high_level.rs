@@ -1373,7 +1373,7 @@ fn collect_args<'py>(args: &Bound<'py, PyTuple>) -> PyResult<Vec<Bound<'py, PyAn
 #[cfg(feature = "embedded")]
 fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
     use pyo3::types::{PyByteArray, PyDict as PyDictT, PyFloat, PyList as PyListT};
-    use reddb::storage::schema::Value as SV;
+    use reddb_types::Value as SV;
 
     if value.is_none() {
         return Ok(SV::Null);

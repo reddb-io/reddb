@@ -1651,9 +1651,9 @@ mod tests {
 
     #[test]
     fn cas_missing_bearer_returns_401_via_route() {
-        use std::sync::Mutex;
-        static GUARD: Mutex<()> = Mutex::new(());
-        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::server::RED_ADMIN_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let prev = std::env::var("RED_ADMIN_TOKEN").ok();
         unsafe {
@@ -1681,9 +1681,9 @@ mod tests {
 
     #[test]
     fn cas_wrong_bearer_returns_401_via_route() {
-        use std::sync::Mutex;
-        static GUARD: Mutex<()> = Mutex::new(());
-        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::server::RED_ADMIN_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let prev = std::env::var("RED_ADMIN_TOKEN").ok();
         unsafe {
@@ -1766,16 +1766,13 @@ mod tests {
 
     #[test]
     fn admin_blob_cache_routes_reject_unauth_when_admin_token_set() {
-        // Serialize on a per-process mutex because RED_ADMIN_TOKEN is a
-        // process-wide env var; running other admin-auth tests in
-        // parallel would race the unset/set sequence.
-        use std::sync::Mutex;
-        static GUARD: Mutex<()> = Mutex::new(());
-        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::server::RED_ADMIN_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let prev = std::env::var("RED_ADMIN_TOKEN").ok();
         // SAFETY: env mutation is unsafe in 2024; we serialize via
-        // GUARD above and restore the previous value at the end.
+        // RED_ADMIN_TOKEN_ENV_LOCK and restore the previous value at the end.
         unsafe {
             std::env::set_var("RED_ADMIN_TOKEN", "test-token-148");
         }

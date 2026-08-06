@@ -30,8 +30,8 @@ fn selected_u64(rt: &RedDBRuntime, sql: &str, column: &str) -> u64 {
     let result = rt.execute_query(sql).expect("select");
     let row = result.result.records.first().expect("one row");
     match row.get(column) {
-        Some(reddb_server::storage::schema::Value::UnsignedInteger(value)) => *value,
-        Some(reddb_server::storage::schema::Value::Integer(value)) => *value as u64,
+        Some(reddb_types::Value::UnsignedInteger(value)) => *value,
+        Some(reddb_types::Value::Integer(value)) => *value as u64,
         other => panic!("expected integer column {column}, got {other:?}"),
     }
 }

@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use super::accumulator::GroupAccumulator;
 use super::ast::{AggregateOp, AggregateQueryAst, PlanError};
 use super::scan::{AggregateRow, AggregateRowStream, ScanIterator};
-use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 /// Push-down GROUP BY planner — see module header.
 pub struct AggregateQueryPlanner;

@@ -101,7 +101,7 @@ fn list_hypertables_surfaces_registered_entries() {
         })
         .expect("list ok");
     let names = r.result.records[0].get("names").expect("names");
-    use reddb::storage::schema::Value;
+    use reddb_types::Value;
     let arr = match names {
         Value::Array(v) => v,
         other => panic!("expected Array, got {other:?}"),

@@ -12,9 +12,10 @@
 ///
 /// Parses argv using the schema-driven CLI parser, routes to the
 /// appropriate command, and dispatches execution.
-use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::cell::OnceCell;
+use std::collections::HashMap;
+use std::io::Write;
+use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -24,8 +25,9 @@ use reddb::service_cli::{
     install_systemd_service, probe_listener, render_systemd_unit, run_server, BootstrapConfig,
     ServerCommandConfig, ServerTransport, SystemdServiceConfig,
 };
-use reddb_client::{format_query_result, QueryResult, RowFormat, ValueOut};
-use reddb_types::encoding::{base64_encode, json_escape};
+use reddb_client::http::{HttpClient, HttpOptions};
+use reddb_client::{format_query_result, JsonValue, QueryResult, RowFormat};
+use reddb_types::encoding::json_escape;
 
 // ---------------------------------------------------------------------------
 // JSON output helpers
@@ -206,19 +208,14 @@ fn run_ephemeral_query(
                     std::process::exit(1);
                 }
             }
-            if json_mode {
-                if let Some(preview_sql) = preview_sql.as_deref() {
-                    json_ok("query", &format_dry_run_result_json(sql, preview_sql, &qr));
-                } else {
-                    json_ok("query", &format_result_json(&qr));
-                }
-            } else {
-                if let Some(preview_sql) = preview_sql.as_deref() {
-                    println!("dry-run: {sql}");
-                    println!("preview: {preview_sql}");
-                }
-                print_row_result(&qr, row_format);
-            }
+            let result = reddb_client::embedded::query_result_from_runtime(&qr);
+            emit_data_result(
+                "query",
+                &result,
+                row_format,
+                json_mode,
+                preview_sql.map(|preview| (sql, preview)),
+            );
             std::process::exit(0);
         }
         Err(err) => {
@@ -240,86 +237,6 @@ fn parse_row_format(flags: &HashMap<String, FlagValue>) -> Result<RowFormat, Str
             )
         }),
         None => Ok(RowFormat::Table),
-    }
-}
-
-fn print_row_result(result: &reddb::runtime::RuntimeQueryResult, format: RowFormat) {
-    let result = runtime_query_result_to_client(result);
-    let bytes = format_query_result(&result, format);
-    std::io::stdout().write_all(&bytes).expect("write stdout");
-}
-
-fn runtime_query_result_to_client(result: &reddb::runtime::RuntimeQueryResult) -> QueryResult {
-    let columns = if !result.result.columns.is_empty() {
-        result.result.columns.clone()
-    } else {
-        result
-            .result
-            .records
-            .first()
-            .map(|record| {
-                let mut keys: Vec<String> = record
-                    .column_names()
-                    .iter()
-                    .map(|key| key.to_string())
-                    .collect();
-                keys.sort();
-                keys
-            })
-            .unwrap_or_default()
-    };
-    let rows = result
-        .result
-        .records
-        .iter()
-        .map(|record| {
-            let mut entries: Vec<(&str, &reddb::storage::schema::Value)> = record
-                .iter_fields()
-                .map(|(key, value)| (key.as_ref(), value))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            entries
-                .into_iter()
-                .map(|(key, value)| (key.to_string(), schema_value_to_value_out(value)))
-                .collect()
-        })
-        .collect();
-    QueryResult {
-        statement: result.statement_type.to_string(),
-        affected: result.affected_rows,
-        columns,
-        rows,
-        notice: result.notice.clone(),
-    }
-}
-
-fn schema_value_to_value_out(value: &reddb::storage::schema::Value) -> ValueOut {
-    use reddb::storage::schema::Value;
-    match value {
-        Value::Null => ValueOut::Null,
-        Value::Boolean(value) => ValueOut::Bool(*value),
-        Value::Integer(value) => ValueOut::Integer(*value),
-        Value::UnsignedInteger(value) => i64::try_from(*value)
-            .map(ValueOut::Integer)
-            .unwrap_or_else(|_| ValueOut::String(value.to_string())),
-        Value::Float(value) => ValueOut::Float(*value),
-        Value::DecimalText(value) => ValueOut::String(value.clone()),
-        Value::BigInt(value) => ValueOut::Integer(*value),
-        Value::TimestampMs(value)
-        | Value::Timestamp(value)
-        | Value::Duration(value)
-        | Value::Decimal(value) => ValueOut::Integer(*value),
-        Value::Password(_) | Value::Secret(_) => ValueOut::String("***".to_string()),
-        Value::Json(bytes) => reddb::json::from_slice::<reddb::json::Value>(bytes)
-            .ok()
-            .and_then(|json| reddb::json::to_string(&json).ok())
-            .map(ValueOut::String)
-            .unwrap_or(ValueOut::Null),
-        Value::Text(value) => ValueOut::String(value.to_string()),
-        Value::Email(value) | Value::Url(value) | Value::NodeRef(value) | Value::EdgeRef(value) => {
-            ValueOut::String(value.clone())
-        }
-        other => ValueOut::String(format!("{other}")),
     }
 }
 
@@ -1081,91 +998,6 @@ fn json_value_to_client(value: reddb::json::Value) -> reddb_client::JsonValue {
     }
 }
 
-/// Convert a RedDB `Value` to a minimal JSON fragment. Numbers and
-/// booleans come out unquoted; everything else is a JSON string.
-/// `Value::Password` / `Value::Secret` are intentionally rendered as
-/// the masked `"***"` placeholder.
-fn value_to_json_fragment(value: &reddb::storage::schema::Value) -> String {
-    use reddb::storage::schema::Value;
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Boolean(b) => b.to_string(),
-        Value::Integer(n) => n.to_string(),
-        Value::UnsignedInteger(n) => n.to_string(),
-        Value::Float(n) => n.to_string(),
-        Value::DecimalText(n) => n.clone(),
-        Value::BigInt(n) => n.to_string(),
-        Value::TimestampMs(n) | Value::Timestamp(n) | Value::Duration(n) | Value::Decimal(n) => {
-            n.to_string()
-        }
-        Value::Password(_) | Value::Secret(_) => "\"***\"".to_string(),
-        Value::Json(bytes) => reddb::json::from_slice::<reddb::json::Value>(bytes)
-            .ok()
-            .and_then(|json| reddb::json::to_string(&json).ok())
-            .unwrap_or_else(|| "null".to_string()),
-        Value::Text(s) => format!("\"{}\"", json_escape(s.as_ref())),
-        Value::Email(s) | Value::Url(s) | Value::NodeRef(s) | Value::EdgeRef(s) => {
-            format!("\"{}\"", json_escape(s))
-        }
-        other => format!("\"{}\"", json_escape(&format!("{other}"))),
-    }
-}
-
-/// Render a `RuntimeQueryResult` as a JSON object with a `rows`
-/// array. Values are emitted as proper JSON scalars via
-/// [`value_to_json_fragment`], which masks Password and Secret
-/// columns as `"***"`.
-fn format_result_json(result: &reddb::runtime::RuntimeQueryResult) -> String {
-    use std::fmt::Write;
-    let mut out = String::from("{\"statement\":\"");
-    out.push_str(result.statement_type);
-    out.push_str("\",\"affected\":");
-    let _ = write!(out, "{}", result.affected_rows);
-    out.push_str(",\"rows\":[");
-    for (i, record) in result.result.records.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push('{');
-        let mut entries: Vec<(&str, &reddb::storage::schema::Value)> =
-            record.iter_fields().map(|(k, v)| (k.as_ref(), v)).collect();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
-        for (j, (key, value)) in entries.iter().enumerate() {
-            if j > 0 {
-                out.push(',');
-            }
-            let _ = write!(
-                out,
-                "\"{}\":{}",
-                json_escape(key),
-                value_to_json_fragment(value)
-            );
-        }
-        out.push('}');
-    }
-    out.push(']');
-    if let Some(notice) = result.notice.as_deref() {
-        out.push_str(",\"notice\":\"");
-        out.push_str(&json_escape(notice));
-        out.push('"');
-    }
-    out.push('}');
-    out
-}
-
-fn format_dry_run_result_json(
-    statement: &str,
-    preview_statement: &str,
-    result: &reddb::runtime::RuntimeQueryResult,
-) -> String {
-    format!(
-        "{{\"statement\":\"explain\",\"dry_run\":true,\"would_run\":\"{}\",\"preview_statement\":\"{}\",\"preview\":{}}}",
-        json_escape(statement),
-        json_escape(preview_statement),
-        format_result_json(result),
-    )
-}
-
 // DATA COMMANDS BEGIN (issue #2124)
 
 fn run_data_command(
@@ -1527,7 +1359,7 @@ fn main() {
     let command = identify_command(&args);
 
     // Build the appropriate flag schema based on the identified command.
-    let flags = build_flags_for_command(command.as_deref());
+    let flags = cli::commands::flags_for_command(command.as_deref());
 
     // Tokenize and parse with the full schema.
     let tokens = cli::token::tokenize(&args);
@@ -1833,14 +1665,23 @@ fn main() {
             let operations = flag_string(&result.flags, "operations");
             let dry_run = flag_bool(&result.flags, "dry-run");
 
-            let payload = build_tick_payload(operations.as_deref(), dry_run);
-            let body = post_json_to_http(&bind_addr, "/tick", &payload).unwrap_or_else(|err| {
+            let (runtime, client) = operator_http_client(&bind_addr, None).unwrap_or_else(|err| {
                 if json_mode {
-                    json_error("tick", &err.to_string());
+                    json_error("tick", &err);
                 }
                 eprintln!("error: {err}");
                 std::process::exit(1);
             });
+            let payload = build_tick_payload(operations.as_deref(), dry_run);
+            let body = runtime
+                .block_on(client.post_json("/tick", &payload))
+                .unwrap_or_else(|err| {
+                    if json_mode {
+                        json_error("tick", &err.to_string());
+                    }
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                });
 
             if json_mode {
                 // The body from /tick is already JSON; wrap it in the envelope.
@@ -3258,7 +3099,7 @@ fn validate_redis_tcp_connectivity(redis_url: &str) -> Result<(), String> {
     let Some(sockaddr) = addrs.next() else {
         return Err(format!("resolve {addr}: no addresses"));
     };
-    TcpStream::connect_timeout(&sockaddr, Duration::from_secs(1))
+    std::net::TcpStream::connect_timeout(&sockaddr, Duration::from_secs(1))
         .map(|_| ())
         .map_err(|err| format!("connect {addr}: {err}"))
 }
@@ -3772,544 +3613,6 @@ fn identify_command(args: &[String]) -> Option<String> {
         }
     }
     None
-}
-
-/// Build the flag schema for a given command, merging global + command-specific flags.
-fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema> {
-    let mut flags = cli::types::global_flags();
-    if matches!(command, Some("dump")) {
-        flags.retain(|flag| flag.long != "output" && flag.short != Some('o'));
-    }
-
-    match command {
-        Some("server") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("path")
-                    .with_short('d')
-                    .with_description("Persistent database file path (omit for in-memory)")
-                    .with_default("./data/reddb.rdb"),
-                cli::types::FlagSchema::new("bind")
-                    .with_short('b')
-                    .with_description("Bind address (host:port) for the default routed front-door or legacy single-transport mode"),
-                cli::types::FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
-                cli::types::FlagSchema::boolean("http").with_description("Serve the HTTP API"),
-                cli::types::FlagSchema::new("grpc-bind")
-                    .with_description("Explicit gRPC bind address (host:port)"),
-                cli::types::FlagSchema::new("http-bind")
-                    .with_description("Explicit HTTP bind address (host:port)"),
-                cli::types::FlagSchema::new("http-tls-bind")
-                    .with_description("HTTPS bind address (host:port). Runs alongside --http-bind"),
-                cli::types::FlagSchema::new("http-tls-cert")
-                    .with_description("Path to HTTPS server certificate PEM"),
-                cli::types::FlagSchema::new("http-tls-key")
-                    .with_description("Path to HTTPS server private key PEM"),
-                cli::types::FlagSchema::new("http-tls-client-ca")
-                    .with_description("Path to PEM CA bundle for client cert verification (mTLS)"),
-                cli::types::FlagSchema::new("wire-bind")
-                    .with_description("Wire protocol TCP bind address (host:port)"),
-                cli::types::FlagSchema::new("wire-tls-bind")
-                    .with_description("Wire protocol TLS bind address (host:port)"),
-                cli::types::FlagSchema::new("wire-tls-cert")
-                    .with_description("Path to TLS certificate PEM (auto-generated if omitted)"),
-                cli::types::FlagSchema::new("wire-tls-key")
-                    .with_description("Path to TLS private key PEM"),
-                cli::types::FlagSchema::new("pg-bind").with_description(
-                    "PostgreSQL wire protocol bind address (enables psql / JDBC / DBeaver clients)",
-                ),
-                cli::types::FlagSchema::new("role")
-                    .with_short('r')
-                    .with_description("Server role")
-                    .with_choices(&["standalone", "primary", "replica"])
-                    .with_default("standalone"),
-                cli::types::FlagSchema::new("storage-profile")
-                    .with_description("Storage deploy profile")
-                    .with_choices(&["embedded", "serverless", "primary-replica", "cluster"]),
-                cli::types::FlagSchema::new("storage-packaging")
-                    .with_description("Storage packaging contract")
-                    .with_choices(&["single-file", "operational-directory"]),
-                cli::types::FlagSchema::new("storage-preset")
-                    .with_description("Storage/deploy preset")
-                    .with_choices(&[
-                        "embedded",
-                        "serverless",
-                        "primary-replica-dev",
-                        "primary-replica-small",
-                        "primary-replica-production-ha",
-                        "primary-replica-backup",
-                        "primary-replica-wal-retention",
-                        "cluster",
-                    ]),
-                cli::types::FlagSchema::new("replica-count")
-                    .with_description("Expected replica count for storage profile validation"),
-                cli::types::FlagSchema::boolean("managed-backup")
-                    .with_description("Declare managed backup for storage profile validation"),
-                cli::types::FlagSchema::boolean("wal-retention")
-                    .with_description("Declare WAL retention for storage profile validation"),
-                cli::types::FlagSchema::new("primary-addr")
-                    .with_description("Primary gRPC address for replica mode"),
-                cli::types::FlagSchema::boolean("read-only")
-                    .with_description("Open the database in read-only mode"),
-                cli::types::FlagSchema::boolean("no-create-if-missing")
-                    .with_description("Fail instead of creating the database file"),
-                cli::types::FlagSchema::boolean("auth")
-                    .with_description("Enable authentication for this boot"),
-                cli::types::FlagSchema::boolean("require-auth")
-                    .with_description("Reject anonymous requests; implies --auth"),
-                cli::types::FlagSchema::boolean("vault")
-                    .with_description("Enable the encrypted auth vault"),
-                cli::types::FlagSchema::boolean("no-auth").with_description(
-                    "Hard-disable auth: anonymous access, ignores REDDB_USERNAME/PASSWORD/vault, \
-                     prints a startup warning. Local-dev shortcut — NEVER use in production.",
-                ),
-                cli::types::FlagSchema::boolean("dev")
-                    .with_description("Alias for --no-auth (local development convenience)."),
-                cli::types::FlagSchema::new("bootstrap-preset")
-                    .with_description(
-                        "First-boot preset. With --vault on a fresh --path, red server \
-                         self-bootstraps the paged vault in place (no separate `red bootstrap`) \
-                         then applies the preset and serves; a re-boot against the existing \
-                         vault just serves (idempotent — no re-bootstrap, no new certificate).",
-                    )
-                    .with_choices(&["simple", "production", "regulated", "cloud"]),
-                cli::types::FlagSchema::new("bootstrap-manifest")
-                    .with_description(
-                        "Path to manifest-driven first boot JSON. Applied once on a fresh \
-                         database before serving; later boots observe bootstrap state and \
-                         skip re-applying the manifest (idempotent).",
-                    ),
-                cli::types::FlagSchema::new("bootstrap-admin")
-                    .with_description("First admin username for production/cloud bootstrap"),
-                cli::types::FlagSchema::new("bootstrap-admin-password").with_description(
-                    "First admin password (DEV ONLY — prefer --bootstrap-admin-password-file)",
-                ),
-                cli::types::FlagSchema::new("bootstrap-admin-password-file")
-                    .with_description("File containing first admin password"),
-                cli::types::FlagSchema::new("cloud-head-admin")
-                    .with_description("Cloud preset head/platform admin username"),
-                cli::types::FlagSchema::new("cloud-head-admin-password").with_description(
-                    "Cloud preset head/platform admin password (DEV ONLY — prefer file flag)",
-                ),
-                cli::types::FlagSchema::new("cloud-head-admin-password-file")
-                    .with_description("File containing cloud head admin password"),
-                cli::types::FlagSchema::new("customer-admin")
-                    .with_description("Cloud preset customer admin username"),
-                cli::types::FlagSchema::new("customer-admin-password").with_description(
-                    "Cloud preset customer admin password (DEV ONLY — prefer file flag)",
-                ),
-                cli::types::FlagSchema::new("customer-admin-password-file")
-                    .with_description("File containing cloud customer admin password"),
-                cli::types::FlagSchema::new("bootstrap-cert-out").with_description(
-                    "Write the first-boot unseal certificate to this file (e.g. \
-                     /run/reddb/cert.pem) in addition to stderr, so a distroless init \
-                     can read it back for the next boot's REDDB_CERTIFICATE_FILE unseal. \
-                     Written only on the bootstrap-creating boot; a re-boot against the \
-                     existing vault does not rewrite it.",
-                ),
-                cli::types::FlagSchema::boolean("ui").with_description(
-                    "Serve the pinned red-ui bundle as static assets on the HTTP surface \
-                     (reach is governed by the bind address; default localhost)",
-                ),
-                cli::types::FlagSchema::new("ui-dir").with_description(
-                    "Directory to serve the red-ui bundle from (overrides the resolved/cached pinned bundle)",
-                ),
-                cli::types::FlagSchema::new("workers")
-                    .with_short('w')
-                    .with_description("Worker thread count (default: auto-detect from CPUs)"),
-                cli::types::FlagSchema::new("log-dir").with_description(
-                    "Directory for rotating log files (defaults to the parent of --path / ./logs)",
-                ),
-                cli::types::FlagSchema::new("log-level")
-                    .with_description(
-                        "Log level filter - trace / debug / info / warn / error, or a RUST_LOG expression",
-                    )
-                    .with_default("info"),
-                cli::types::FlagSchema::new("log-format")
-                    .with_description("Log output format")
-                    .with_choices(&["pretty", "json"])
-                    .with_default("pretty"),
-                cli::types::FlagSchema::new("log-keep-days")
-                    .with_description("Number of rotated log files to keep")
-                    .with_default("14"),
-                cli::types::FlagSchema::boolean("no-log-file")
-                    .with_description("Disable rotating file logs (stderr only)"),
-            ]);
-        }
-        Some("replica") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("path")
-                    .with_short('d')
-                    .with_description("Persistent database file path for the replica")
-                    .with_default("./data/reddb.rdb"),
-                cli::types::FlagSchema::new("bind")
-                    .with_short('b')
-                    .with_description("Bind address (host:port) for the default routed front-door or legacy single-transport mode"),
-                cli::types::FlagSchema::new("primary-addr")
-                    .with_short('p')
-                    .with_description("Primary gRPC address for replication"),
-                cli::types::FlagSchema::new("storage-profile")
-                    .with_description("Storage deploy profile")
-                    .with_choices(&["embedded", "serverless", "primary-replica", "cluster"]),
-                cli::types::FlagSchema::new("storage-packaging")
-                    .with_description("Storage packaging contract")
-                    .with_choices(&["single-file", "operational-directory"]),
-                cli::types::FlagSchema::new("storage-preset")
-                    .with_description("Storage/deploy preset")
-                    .with_choices(&[
-                        "embedded",
-                        "serverless",
-                        "primary-replica-dev",
-                        "primary-replica-small",
-                        "primary-replica-production-ha",
-                        "primary-replica-backup",
-                        "primary-replica-wal-retention",
-                        "cluster",
-                    ]),
-                cli::types::FlagSchema::new("replica-count")
-                    .with_description("Expected replica count for storage profile validation"),
-                cli::types::FlagSchema::boolean("managed-backup")
-                    .with_description("Declare managed backup for storage profile validation"),
-                cli::types::FlagSchema::boolean("wal-retention")
-                    .with_description("Declare WAL retention for storage profile validation"),
-                cli::types::FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
-                cli::types::FlagSchema::boolean("http").with_description("Serve the HTTP API"),
-                cli::types::FlagSchema::new("grpc-bind")
-                    .with_description("Explicit gRPC bind address (host:port)"),
-                cli::types::FlagSchema::new("http-bind")
-                    .with_description("Explicit HTTP bind address (host:port)"),
-                cli::types::FlagSchema::new("wire-bind")
-                    .with_description("Wire protocol TCP bind address (host:port)"),
-                cli::types::FlagSchema::boolean("auth")
-                    .with_description("Enable authentication for this boot"),
-                cli::types::FlagSchema::boolean("require-auth")
-                    .with_description("Reject anonymous requests; implies --auth"),
-                cli::types::FlagSchema::boolean("vault")
-                    .with_description("Enable the encrypted auth vault"),
-                cli::types::FlagSchema::boolean("no-auth").with_description(
-                    "Hard-disable auth: anonymous access, ignores REDDB_USERNAME/PASSWORD/vault",
-                ),
-            ]);
-        }
-        Some("service") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("binary")
-                    .with_description("Path to the red binary")
-                    .with_default("/usr/local/bin/red"),
-                cli::types::FlagSchema::new("service-name")
-                    .with_description("systemd unit name")
-                    .with_default("reddb"),
-                cli::types::FlagSchema::new("user")
-                    .with_description("Service user")
-                    .with_default("reddb"),
-                cli::types::FlagSchema::new("group")
-                    .with_description("Service group")
-                    .with_default("reddb"),
-                cli::types::FlagSchema::new("path")
-                    .with_short('d')
-                    .with_description("Persistent database file path")
-                    .with_default("/var/lib/reddb/data.rdb"),
-                cli::types::FlagSchema::new("bind")
-                    .with_short('b')
-                    .with_description("Bind address (host:port) for the default routed front-door or legacy single-transport mode"),
-                cli::types::FlagSchema::boolean("grpc")
-                    .with_description("Enable the gRPC API in the service"),
-                cli::types::FlagSchema::boolean("http").with_description("Install an HTTP service"),
-                cli::types::FlagSchema::new("grpc-bind")
-                    .with_description("Explicit gRPC bind address (host:port)"),
-                cli::types::FlagSchema::new("http-bind")
-                    .with_description("Explicit HTTP bind address (host:port)"),
-            ]);
-        }
-        Some("mcp") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("uri")
-                    .with_description("Connection URI (overrides --url and REDDB_MCP_URI)"),
-                cli::types::FlagSchema::new("url")
-                    .with_description("Remote connection URL alias for --uri"),
-                cli::types::FlagSchema::new("token")
-                    .with_description("Bearer token for a remote MCP connection"),
-                cli::types::FlagSchema::new("path")
-                    .with_short('d')
-                    .with_description("Data directory path (omit for in-memory)")
-                    .with_default(""),
-            ]);
-        }
-        Some("query") | Some("insert") | Some("get") | Some("delete") | Some("status") => {
-            flags.push(
-                cli::types::FlagSchema::new("bind")
-                    .with_short('b')
-                    .with_description("Server address")
-                    .with_default("0.0.0.0:6380"),
-            );
-            let path_flag = cli::types::FlagSchema::new("path")
-                .with_description("Open a local .rdb file in embedded mode");
-            let path_flag = if command == Some("query") {
-                path_flag
-            } else {
-                path_flag.with_short('p')
-            };
-            flags.push(path_flag);
-            if command == Some("query") {
-                // Repeatable. The schema parser keeps only the last value
-                // in flags; the query handler walks argv directly via
-                // `collect_query_params` to gather every occurrence.
-                flags.push(
-                    cli::types::FlagSchema::new("param")
-                        .with_short('p')
-                        .with_description(
-                            "Positional parameter for $1, $2, … (repeatable). \
-                             Prefix with `@` to load JSON from a file.",
-                        ),
-                );
-                flags.push(cli::types::FlagSchema::new("param-type").with_description(
-                    "Type override for the preceding --param \
-                             (text|int|float|bool|null|vec|json).",
-                ));
-                flags.push(cli::types::FlagSchema::new("format").with_description(
-                    "Row output format for query results (table|json|ndjson|csv|tsv|toon).",
-                ));
-                flags.push(cli::types::FlagSchema::new("save").with_description(
-                    "Persist an ephemeral data-file query session as a new embedded .rdb file",
-                ));
-                flags
-                    .push(cli::types::FlagSchema::boolean("dry-run").with_description(
-                        "Preview the statement via EXPLAIN without executing it",
-                    ));
-            }
-        }
-        Some("admin") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("bind")
-                    .with_short('b')
-                    .with_description("Server HTTP address")
-                    .with_default("127.0.0.1:5000"),
-                cli::types::FlagSchema::new("token")
-                    .with_short('t')
-                    .with_description("Admin bearer token (env: RED_ADMIN_TOKEN)"),
-                cli::types::FlagSchema::boolean("csv")
-                    .with_description("Emit CSV for tabular admin catalog commands"),
-                cli::types::FlagSchema::new("limit")
-                    .with_description("Max rows for list/stats/query commands"),
-                cli::types::FlagSchema::new("type")
-                    .with_description("Filter red.admin collections list by model"),
-                cli::types::FlagSchema::boolean("include-internal")
-                    .with_description("Include internal collections in admin collections list"),
-                cli::types::FlagSchema::new("collection")
-                    .with_description("Filter red.admin indices/policies by collection"),
-                cli::types::FlagSchema::boolean("yes")
-                    .with_short('y')
-                    .with_description("Skip interactive confirmation for destructive commands"),
-                cli::types::FlagSchema::boolean("if-exists")
-                    .with_description("Suppress error when collection does not exist"),
-            ]);
-        }
-        Some("dump") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("path")
-                    .with_description("Local database file to dump from")
-                    .with_default("./data/reddb.rdb"),
-                cli::types::FlagSchema::new("storage-profile")
-                    .with_description("Storage profile for local --path (embedded|serverless|primary-replica|cluster)"),
-                cli::types::FlagSchema::new("storage-packaging")
-                    .with_description("Storage packaging for local --path (single-file|operational-directory)"),
-                cli::types::FlagSchema::new("storage-preset")
-                    .with_description("Storage preset for local --path (embedded|serverless|primary-replica-dev|primary-replica-small|primary-replica-production-ha|primary-replica-backup|primary-replica-wal-retention|cluster)"),
-                cli::types::FlagSchema::new("collection")
-                    .with_short('c')
-                    .with_description("Single collection to dump"),
-                cli::types::FlagSchema::new("output")
-                    .with_short('o')
-                    .with_description("Destination file"),
-            ]);
-        }
-        Some("restore") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("path")
-                    .with_description("Local database file to restore into")
-                    .with_default("./data/reddb.rdb"),
-                cli::types::FlagSchema::new("storage-profile")
-                    .with_description("Storage profile for local --path (embedded|serverless|primary-replica|cluster)"),
-                cli::types::FlagSchema::new("storage-packaging")
-                    .with_description("Storage packaging for local --path (single-file|operational-directory)"),
-                cli::types::FlagSchema::new("storage-preset")
-                    .with_description("Storage preset for local --path (embedded|serverless|primary-replica-dev|primary-replica-small|primary-replica-production-ha|primary-replica-backup|primary-replica-wal-retention|cluster)"),
-                cli::types::FlagSchema::new("input")
-                    .with_short('i')
-                    .with_description("Dump file to read"),
-                cli::types::FlagSchema::new("collection")
-                    .with_short('c')
-                    .with_description("Override target collection name"),
-            ]);
-        }
-        Some("vcs") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("path")
-                    .with_short('d')
-                    .with_description("Persistent database file path (omit for in-memory)"),
-                cli::types::FlagSchema::new("connection")
-                    .with_short('c')
-                    .with_description("Connection id for workset scoping")
-                    .with_default("1"),
-                cli::types::FlagSchema::new("branch")
-                    .with_description("Branch name (log/checkout/merge)"),
-                cli::types::FlagSchema::new("from")
-                    .with_description("Source ref or commit (branch create / merge)"),
-                cli::types::FlagSchema::new("to").with_description("Upper bound for log range"),
-                cli::types::FlagSchema::new("author")
-                    .with_description("Commit author name")
-                    .with_default("reddb"),
-                cli::types::FlagSchema::new("email")
-                    .with_description("Commit author email")
-                    .with_default("reddb@localhost"),
-                cli::types::FlagSchema::new("message")
-                    .with_short('m')
-                    .with_description("Commit message"),
-                cli::types::FlagSchema::new("limit")
-                    .with_description("Max log entries")
-                    .with_default("20"),
-                cli::types::FlagSchema::new("mode")
-                    .with_description("Reset mode: soft | mixed | hard")
-                    .with_default("mixed"),
-                cli::types::FlagSchema::boolean("ff-only")
-                    .with_description("Merge only if fast-forward"),
-                cli::types::FlagSchema::boolean("no-ff")
-                    .with_description("Always create a merge commit"),
-            ]);
-        }
-        Some("health") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("bind")
-                    .with_short('b')
-                    .with_description("Server bind address; defaults to the router on 127.0.0.1:5050 when no transport is selected"),
-                cli::types::FlagSchema::boolean("grpc")
-                    .with_description("Probe a gRPC listener (default transport)"),
-                cli::types::FlagSchema::boolean("http").with_description("Probe an HTTP listener"),
-            ]);
-        }
-        Some("tick") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("bind")
-                    .with_short('b')
-                    .with_description("Server HTTP bind address")
-                    .with_default("127.0.0.1:5000"),
-                cli::types::FlagSchema::new("operations").with_description(
-                    "Comma-separated operations: maintenance,retention,checkpoint",
-                ),
-                cli::types::FlagSchema::boolean("dry-run")
-                    .with_description("Validate operations without applying"),
-            ]);
-        }
-        Some("migrate-from-redis") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::boolean("dry-run")
-                    .with_description("Validate Redis and RedDB connectivity without cache writes"),
-                cli::types::FlagSchema::new("redis-url").with_description(
-                    "Redis URL to validate, for example redis://127.0.0.1:6379/0",
-                ),
-                cli::types::FlagSchema::new("path")
-                    .with_short('d')
-                    .with_description("Local RedDB .rdb file to open for connectivity validation"),
-                cli::types::FlagSchema::new("phase")
-                    .with_description("Migration phase: dry-run | dual-write")
-                    .with_default("dry-run"),
-                cli::types::FlagSchema::new("namespace")
-                    .with_description("Blob Cache namespace recorded in dry-run output")
-                    .with_default("redis-migration"),
-            ]);
-        }
-        Some("migrate-pager-zone") => {
-            flags.push(
-                cli::types::FlagSchema::new("path")
-                    .with_short('d')
-                    .with_description("Closed legacy sidecar-backed .rdb file to convert"),
-            );
-        }
-        Some("salvage") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("source")
-                    .with_description("Damaged source .rdb file to read"),
-                cli::types::FlagSchema::new("destination")
-                    .with_description("Fresh destination .rdb file to create"),
-            ]);
-        }
-        Some("rpc") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::boolean("stdio")
-                    .with_description("Speak JSON-RPC 2.0 line-delimited over stdin/stdout"),
-                cli::types::FlagSchema::new("path")
-                    .with_short('d')
-                    .with_description("Persistent database file path (omit for in-memory)"),
-                cli::types::FlagSchema::new("connect")
-                    .with_short('c')
-                    .with_description("Proxy to a remote gRPC server (e.g. grpc://host:55055)"),
-                cli::types::FlagSchema::new("token")
-                    .with_short('t')
-                    .with_description("Auth token forwarded to the remote server"),
-            ]);
-        }
-        Some("connect") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("token")
-                    .with_short('t')
-                    .with_description("Auth token (session or API key)"),
-                cli::types::FlagSchema::new("query")
-                    .with_short('q')
-                    .with_description("Execute a single query and exit"),
-                cli::types::FlagSchema::new("user")
-                    .with_short('u')
-                    .with_description("Username for login"),
-                cli::types::FlagSchema::new("password")
-                    .with_short('p')
-                    .with_description("Password for login"),
-            ]);
-        }
-        Some("bootstrap") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::new("path")
-                    .with_short('d')
-                    .with_description("Persistent database file path"),
-                cli::types::FlagSchema::boolean("vault")
-                    .with_description("Required: seal credentials in the encrypted vault"),
-                cli::types::FlagSchema::new("username")
-                    .with_short('u')
-                    .with_description("Admin username (defaults to REDDB_USERNAME)"),
-                cli::types::FlagSchema::new("password").with_description(
-                    "Admin password (DEV ONLY — leaks to ps; prefer --password-stdin)",
-                ),
-                cli::types::FlagSchema::boolean("password-stdin")
-                    .with_description("Read the admin password from stdin (one line)"),
-                cli::types::FlagSchema::boolean("print-certificate")
-                    .with_description("Print only the issued certificate to stdout"),
-            ]);
-        }
-        Some("ui") => {
-            flags.extend(vec![
-                cli::types::FlagSchema::boolean("server").with_description(
-                    "Force the browser-served bridge path (skip the desktop deep link)",
-                ),
-                cli::types::FlagSchema::boolean("desktop").with_description(
-                    "Force the desktop app via the redui:// deep link (no browser fallback)",
-                ),
-                cli::types::FlagSchema::new("ui-dir").with_description(
-                    "Directory to serve the UI bundle from (defaults to the built-in fixture)",
-                ),
-                cli::types::FlagSchema::new("port").with_description(
-                    "Loopback port for the bridge (0 / omit picks an ephemeral port)",
-                ),
-                cli::types::FlagSchema::new("tls-ca").with_description(
-                    "PEM CA bundle to trust for a reds:// target (on top of system roots)",
-                ),
-                cli::types::FlagSchema::new("token")
-                    .with_short('t')
-                    .with_description("Bearer token for UI auth handoff (env: RED_UI_TOKEN)"),
-                cli::types::FlagSchema::boolean("no-browser").with_description(
-                    "Do not open the default browser (also honoured via RED_UI_NO_BROWSER)",
-                ),
-            ]);
-        }
-        _ => {}
-    }
-
-    flags
 }
 
 /// Build the completion tree for runtime tab-completion.
@@ -5058,31 +4361,21 @@ fn server_command_json(command: &str, config: &ServerCommandConfig) -> String {
     )
 }
 
-fn build_tick_payload(operations: Option<&str>, dry_run: bool) -> String {
-    match operations {
-        None => {
-            format!("{{\"dry_run\":{}}}", if dry_run { "true" } else { "false" })
-        }
-        Some(raw) => {
-            let normalized: Vec<String> = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(json_escape)
-                .map(|value| format!("\"{value}\""))
-                .collect();
-
-            if normalized.is_empty() {
-                return format!("{{\"dry_run\":{}}}", if dry_run { "true" } else { "false" });
-            }
-
-            format!(
-                "{{\"operations\":[{}],\"dry_run\":{}}}",
-                normalized.join(","),
-                if dry_run { "true" } else { "false" }
-            )
+fn build_tick_payload(operations: Option<&str>, dry_run: bool) -> JsonValue {
+    let mut fields = Vec::new();
+    if let Some(operations) = operations {
+        let operations = operations
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(JsonValue::string)
+            .collect::<Vec<_>>();
+        if !operations.is_empty() {
+            fields.push(("operations", JsonValue::array(operations)));
         }
     }
+    fields.push(("dry_run", JsonValue::bool(dry_run)));
+    JsonValue::object(fields)
 }
 
 // ---------------------------------------------------------------------------
@@ -5190,22 +4483,76 @@ fn run_inspect_command(flags: &HashMap<String, FlagValue>, remaining: &[String])
 // Admin command implementation
 // ---------------------------------------------------------------------------
 
+fn operator_http_client(
+    bind: &str,
+    token: Option<&str>,
+) -> Result<(tokio::runtime::Runtime, HttpClient), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to build async runtime: {err}"))?;
+    let base_url = if bind.contains("://") {
+        bind.trim_end_matches('/').to_string()
+    } else {
+        format!("http://{}", bind.trim_end_matches('/'))
+    };
+    let mut options = HttpOptions::new(base_url);
+    if let Some(token) = token {
+        options = options.with_token(token);
+    }
+    let client = HttpClient::new(options).map_err(|err| err.to_string())?;
+    Ok((runtime, client))
+}
+
+/// Operator HTTP handle that materialises on first request.
+///
+/// Usage errors, help text, and argument validation must all work with no
+/// server reachable, so nothing is built at dispatch time; the runtime and
+/// the driver handle appear when a command actually issues a request.
+struct OperatorClient {
+    bind: String,
+    token: Option<String>,
+    handle: OnceCell<(tokio::runtime::Runtime, HttpClient)>,
+}
+
+impl OperatorClient {
+    fn new(bind: &str, token: Option<&str>) -> Self {
+        Self {
+            bind: bind.to_string(),
+            token: token.map(ToString::to_string),
+            handle: OnceCell::new(),
+        }
+    }
+
+    /// Runtime + driver handle for `command`, built on first call.
+    /// Terminates the process when the handle cannot be built at all.
+    fn get(&self, command: &str, json_mode: bool) -> &(tokio::runtime::Runtime, HttpClient) {
+        self.handle.get_or_init(|| {
+            operator_http_client(&self.bind, self.token.as_deref()).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error(command, &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            })
+        })
+    }
+}
+
 fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
     let json_mode = wants_json(flags);
     let bind = flag_string(flags, "bind").unwrap_or_else(|| "127.0.0.1:5000".to_string());
     let token = admin_token_from_flags_or_env(flags);
-
-    let subcommand = remaining.first().map(|s| s.as_str()).unwrap_or("help");
-    let args: Vec<&str> = remaining.iter().skip(1).map(|s| s.as_str()).collect();
+    let subcommand = remaining.first().map(String::as_str).unwrap_or("help");
+    let args: Vec<&str> = remaining.iter().skip(1).map(String::as_str).collect();
+    let client = OperatorClient::new(&bind, token.as_deref());
 
     match subcommand {
-        "cache" => run_admin_cache_command(flags, &bind, token.as_deref(), json_mode, &args),
-        "collections" => {
-            run_admin_collections_command(flags, &bind, token.as_deref(), json_mode, &args)
-        }
-        "indices" => run_admin_indices_command(flags, &bind, token.as_deref(), json_mode, &args),
-        "policies" => run_admin_policies_command(flags, &bind, token.as_deref(), json_mode, &args),
-        "query" => run_admin_query_command(flags, &bind, token.as_deref(), json_mode, &args),
+        "cache" => run_admin_cache_command(&client, json_mode, &args),
+        "collections" => run_admin_collections_command(flags, &client, json_mode, &args),
+        "indices" => run_admin_indices_command(flags, &client, json_mode, &args),
+        "policies" => run_admin_policies_command(flags, &client, json_mode, &args),
+        "query" => run_admin_query_command(flags, &client, json_mode, &args),
         _ => {
             if json_mode {
                 json_ok(
@@ -5228,7 +4575,9 @@ fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
                 println!("  --json          JSON output");
                 println!("  --csv           CSV output for tabular commands");
                 println!("  --limit <n>     Limit rows for list/stats/query commands");
-                println!("  --no-color      Disable ANSI colors");
+                println!(
+                    "  --no-color      Accepted for compatibility; admin output is never colored"
+                );
             }
         }
     }
@@ -5236,15 +4585,13 @@ fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
 
 fn run_admin_collections_command(
     flags: &HashMap<String, FlagValue>,
-    bind: &str,
-    token: Option<&str>,
+    client: &OperatorClient,
     json_mode: bool,
     args: &[&str],
 ) {
     let subcommand = args.first().copied().unwrap_or("help");
-    let sub_args: &[&str] = if args.is_empty() { &[] } else { &args[1..] };
+    let sub_args = args.get(1..).unwrap_or_default();
     let format = admin_output_format(flags, json_mode);
-    let use_color = !flag_bool(flags, "no-color");
 
     match subcommand {
         "list" => {
@@ -5252,7 +4599,7 @@ fn run_admin_collections_command(
             if !flag_bool(flags, "include-internal") {
                 filters.push("internal = false".to_string());
             }
-            if let Some(model) = flag_string(flags, "type").filter(|s| !s.is_empty()) {
+            if let Some(model) = flag_string(flags, "type").filter(|value| !value.is_empty()) {
                 filters.push(format!("model = '{}'", sql_string_literal(&model)));
             }
             let mut sql = "SELECT * FROM red.collections".to_string();
@@ -5261,17 +4608,10 @@ fn run_admin_collections_command(
                 sql.push_str(&filters.join(" AND "));
             }
             push_limit(&mut sql, flags);
-            emit_admin_query_result(
-                "admin.collections.list",
-                bind,
-                token,
-                &sql,
-                format,
-                use_color,
-            );
+            emit_admin_query_result("admin.collections.list", client, &sql, format, json_mode);
         }
         "show" => {
-            let Some(name) = sub_args.first().copied().filter(|s| !s.is_empty()) else {
+            let Some(name) = sub_args.first().copied().filter(|name| !name.is_empty()) else {
                 admin_usage_error(
                     "admin.collections.show",
                     "collection name is required",
@@ -5279,37 +4619,30 @@ fn run_admin_collections_command(
                     json_mode,
                 );
             };
-            emit_admin_collection_show(bind, token, name, format, use_color);
+            emit_admin_collection_show(client, name, format, json_mode);
         }
         "stats" => {
             let mut sql = "SELECT * FROM red.stats".to_string();
-            if let Some(name) = sub_args.first().copied().filter(|s| !s.is_empty()) {
+            if let Some(name) = sub_args.first().copied().filter(|name| !name.is_empty()) {
                 sql.push_str(" WHERE collection = '");
                 sql.push_str(&sql_string_literal(name));
                 sql.push('\'');
             }
             push_limit(&mut sql, flags);
-            emit_admin_query_result(
-                "admin.collections.stats",
-                bind,
-                token,
-                &sql,
-                format,
-                use_color,
-            );
+            emit_admin_query_result("admin.collections.stats", client, &sql, format, json_mode);
         }
-        "drop" => {
-            let Some(name) = sub_args.first().copied().filter(|s| !s.is_empty()) else {
-                admin_usage_error(
-                    "admin.collections.drop",
-                    "collection name is required",
-                    "usage: red admin collections drop <name> [--if-exists] [--yes] [--json]",
-                    json_mode,
-                );
+        "drop" | "truncate" => {
+            let command = format!("admin.collections.{subcommand}");
+            // `drop` confirms interactively, so only it advertises --yes.
+            let usage = if subcommand == "drop" {
+                "usage: red admin collections drop <name> [--if-exists] [--yes] [--json]"
+            } else {
+                "usage: red admin collections truncate <name> [--if-exists] [--json]"
             };
-            let if_exists = flag_bool(flags, "if-exists");
-            let skip_confirm = flag_bool(flags, "yes");
-            if !skip_confirm && !json_mode {
+            let Some(name) = sub_args.first().copied().filter(|name| !name.is_empty()) else {
+                admin_usage_error(&command, "collection name is required", usage, json_mode);
+            };
+            if subcommand == "drop" && !flag_bool(flags, "yes") && !json_mode {
                 eprint!("Drop collection '{name}'? This is irreversible. Type 'yes' to confirm: ");
                 let mut answer = String::new();
                 std::io::stdin().read_line(&mut answer).unwrap_or_default();
@@ -5318,43 +4651,25 @@ fn run_admin_collections_command(
                     std::process::exit(1);
                 }
             }
-            let sql = if if_exists {
-                format!("DROP COLLECTION IF EXISTS {name}")
+            let if_exists = if flag_bool(flags, "if-exists") {
+                " IF EXISTS"
             } else {
-                format!("DROP COLLECTION {name}")
+                ""
             };
-            admin_execute_ddl_command(
-                "admin.collections.drop",
-                bind,
-                token,
-                &sql,
-                name,
-                "dropped",
-                json_mode,
+            let sql = format!(
+                "{} COLLECTION{if_exists} {name}",
+                subcommand.to_ascii_uppercase()
             );
-        }
-        "truncate" => {
-            let Some(name) = sub_args.first().copied().filter(|s| !s.is_empty()) else {
-                admin_usage_error(
-                    "admin.collections.truncate",
-                    "collection name is required",
-                    "usage: red admin collections truncate <name> [--if-exists] [--json]",
-                    json_mode,
-                );
-            };
-            let if_exists = flag_bool(flags, "if-exists");
-            let sql = if if_exists {
-                format!("TRUNCATE COLLECTION IF EXISTS {name}")
-            } else {
-                format!("TRUNCATE COLLECTION {name}")
-            };
             admin_execute_ddl_command(
-                "admin.collections.truncate",
-                bind,
-                token,
+                &command,
+                client,
                 &sql,
                 name,
-                "truncated",
+                if subcommand == "drop" {
+                    "dropped"
+                } else {
+                    "truncated"
+                },
                 json_mode,
             );
         }
@@ -5382,76 +4697,74 @@ fn run_admin_collections_command(
 
 fn run_admin_indices_command(
     flags: &HashMap<String, FlagValue>,
-    bind: &str,
-    token: Option<&str>,
+    client: &OperatorClient,
     json_mode: bool,
     args: &[&str],
 ) {
-    let subcommand = args.first().copied().unwrap_or("help");
-    let format = admin_output_format(flags, json_mode);
-    let use_color = !flag_bool(flags, "no-color");
-    match subcommand {
-        "list" => {
-            let mut sql = "SELECT * FROM red.indices".to_string();
-            if let Some(collection) = flag_string(flags, "collection").filter(|s| !s.is_empty()) {
-                sql.push_str(" WHERE collection = '");
-                sql.push_str(&sql_string_literal(&collection));
-                sql.push('\'');
-            }
-            push_limit(&mut sql, flags);
-            emit_admin_query_result("admin.indices.list", bind, token, &sql, format, use_color);
-        }
-        _ => {
-            if json_mode {
-                json_ok("admin.indices", "{\"subcommands\":[\"list\"]}");
-            } else {
-                println!("Usage: red admin indices list [--collection <name>]");
-                println!("Flags: --json --csv --limit <n> --no-color --bind <addr> --token <tok>");
-            }
-        }
+    if args.first().copied().unwrap_or("help") != "list" {
+        admin_catalog_usage("indices", json_mode);
+        return;
     }
+    let mut sql = "SELECT * FROM red.indices".to_string();
+    if let Some(collection) = flag_string(flags, "collection").filter(|value| !value.is_empty()) {
+        sql.push_str(" WHERE collection = '");
+        sql.push_str(&sql_string_literal(&collection));
+        sql.push('\'');
+    }
+    push_limit(&mut sql, flags);
+    emit_admin_query_result(
+        "admin.indices.list",
+        client,
+        &sql,
+        admin_output_format(flags, json_mode),
+        json_mode,
+    );
 }
 
 fn run_admin_policies_command(
     flags: &HashMap<String, FlagValue>,
-    bind: &str,
-    token: Option<&str>,
+    client: &OperatorClient,
     json_mode: bool,
     args: &[&str],
 ) {
-    let subcommand = args.first().copied().unwrap_or("help");
-    let format = admin_output_format(flags, json_mode);
-    let use_color = !flag_bool(flags, "no-color");
-    match subcommand {
-        "list" => {
-            let mut sql = "SELECT * FROM red.policies".to_string();
-            if let Some(collection) = flag_string(flags, "collection").filter(|s| !s.is_empty()) {
-                sql.push_str(" WHERE collection = '");
-                sql.push_str(&sql_string_literal(&collection));
-                sql.push('\'');
-            }
-            push_limit(&mut sql, flags);
-            emit_admin_query_result("admin.policies.list", bind, token, &sql, format, use_color);
-        }
-        _ => {
-            if json_mode {
-                json_ok("admin.policies", "{\"subcommands\":[\"list\"]}");
-            } else {
-                println!("Usage: red admin policies list [--collection <name>]");
-                println!("Flags: --json --csv --limit <n> --no-color --bind <addr> --token <tok>");
-            }
-        }
+    if args.first().copied().unwrap_or("help") != "list" {
+        admin_catalog_usage("policies", json_mode);
+        return;
     }
+    let mut sql = "SELECT * FROM red.policies".to_string();
+    if let Some(collection) = flag_string(flags, "collection").filter(|value| !value.is_empty()) {
+        sql.push_str(" WHERE collection = '");
+        sql.push_str(&sql_string_literal(&collection));
+        sql.push('\'');
+    }
+    push_limit(&mut sql, flags);
+    emit_admin_query_result(
+        "admin.policies.list",
+        client,
+        &sql,
+        admin_output_format(flags, json_mode),
+        json_mode,
+    );
+}
+
+/// Usage block for the single-subcommand catalog groups (`indices`,
+/// `policies`). `--json` gets the machine envelope, not the human text.
+fn admin_catalog_usage(group: &str, json_mode: bool) {
+    if json_mode {
+        json_ok(&format!("admin.{group}"), "{\"subcommands\":[\"list\"]}");
+        return;
+    }
+    println!("Usage: red admin {group} list [--collection <name>]");
+    println!("Flags: --json --csv --limit <n> --no-color --bind <addr> --token <tok>");
 }
 
 fn run_admin_query_command(
     flags: &HashMap<String, FlagValue>,
-    bind: &str,
-    token: Option<&str>,
+    client: &OperatorClient,
     json_mode: bool,
     args: &[&str],
 ) {
-    let Some(sql) = args.first().copied().filter(|s| !s.is_empty()) else {
+    let Some(sql) = args.first().copied().filter(|sql| !sql.is_empty()) else {
         admin_usage_error(
             "admin.query",
             "SQL argument is required",
@@ -5463,34 +4776,20 @@ fn run_admin_query_command(
     push_limit(&mut sql, flags);
     emit_admin_query_result(
         "admin.query",
-        bind,
-        token,
+        client,
         &sql,
         admin_output_format(flags, json_mode),
-        !flag_bool(flags, "no-color"),
+        json_mode,
     );
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AdminOutputFormat {
-    Text,
-    Json,
-    Csv,
-}
-
-#[derive(Debug, Clone)]
-struct AdminQueryTable {
-    columns: Vec<String>,
-    rows: Vec<BTreeMap<String, reddb::json::Value>>,
-}
-
-fn admin_output_format(flags: &HashMap<String, FlagValue>, json_mode: bool) -> AdminOutputFormat {
+fn admin_output_format(flags: &HashMap<String, FlagValue>, json_mode: bool) -> RowFormat {
     if json_mode {
-        AdminOutputFormat::Json
+        RowFormat::Json
     } else if flag_bool(flags, "csv") || flag_string(flags, "output").as_deref() == Some("csv") {
-        AdminOutputFormat::Csv
+        RowFormat::Csv
     } else {
-        AdminOutputFormat::Text
+        RowFormat::Table
     }
 }
 
@@ -5509,8 +4808,8 @@ fn sql_string_literal(value: &str) -> String {
 
 fn push_limit(sql: &mut String, flags: &HashMap<String, FlagValue>) {
     let Some(limit) = flag_string(flags, "limit")
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
     else {
         return;
     };
@@ -5522,21 +4821,19 @@ fn push_limit(sql: &mut String, flags: &HashMap<String, FlagValue>) {
 
 fn emit_admin_query_result(
     command: &str,
-    bind: &str,
-    token: Option<&str>,
+    client: &OperatorClient,
     sql: &str,
-    format: AdminOutputFormat,
-    use_color: bool,
+    format: RowFormat,
+    json_mode: bool,
 ) {
-    match admin_query_table(bind, token, sql) {
-        Ok(table) => match format {
-            AdminOutputFormat::Json => println!("{}", admin_rows_json(&table.rows)),
-            AdminOutputFormat::Csv => print!("{}", format_admin_csv(&table)),
-            AdminOutputFormat::Text => print!("{}", format_admin_table(&table, use_color)),
-        },
+    let (runtime, http) = client.get(command, json_mode);
+    match runtime.block_on(http.query(sql)) {
+        Ok(result) => std::io::stdout()
+            .write_all(&format_query_result(&result, format))
+            .expect("write stdout"),
         Err(err) => {
-            if format == AdminOutputFormat::Json {
-                json_error(command, &err);
+            if json_mode {
+                json_error(command, &err.to_string());
             }
             eprintln!("error: {err}");
             std::process::exit(1);
@@ -5545,12 +4842,12 @@ fn emit_admin_query_result(
 }
 
 fn emit_admin_collection_show(
-    bind: &str,
-    token: Option<&str>,
+    client: &OperatorClient,
     name: &str,
-    format: AdminOutputFormat,
-    use_color: bool,
+    format: RowFormat,
+    json_mode: bool,
 ) {
+    let (runtime, http) = client.get("admin.collections.show", json_mode);
     let escaped = sql_string_literal(name);
     let queries = [
         (
@@ -5574,14 +4871,13 @@ fn emit_admin_collection_show(
             format!("SELECT * FROM red.stats WHERE collection = '{escaped}'"),
         ),
     ];
-
     let mut sections = Vec::new();
     for (label, sql) in queries {
-        match admin_query_table(bind, token, &sql) {
-            Ok(table) => sections.push((label.to_string(), table)),
+        match runtime.block_on(http.query(&sql)) {
+            Ok(result) => sections.push((label, result)),
             Err(err) => {
-                if format == AdminOutputFormat::Json {
-                    json_error("admin.collections.show", &err);
+                if json_mode {
+                    json_error("admin.collections.show", &err.to_string());
                 }
                 eprintln!("error: {err}");
                 std::process::exit(1);
@@ -5589,513 +4885,223 @@ fn emit_admin_collection_show(
         }
     }
 
-    match format {
-        AdminOutputFormat::Json => println!("{}", admin_sections_json(&sections)),
-        AdminOutputFormat::Csv => print!("{}", format_admin_sections_csv(&sections)),
-        AdminOutputFormat::Text => {
-            print!("{}", format_admin_sections_text(name, &sections, use_color))
+    if format == RowFormat::Json {
+        print!("{{");
+        for (index, (label, result)) in sections.iter().enumerate() {
+            if index > 0 {
+                print!(",");
+            }
+            let rows = format_query_result(result, RowFormat::Json);
+            print!(
+                "{}:{}",
+                JsonValue::string(*label).to_json_string(),
+                String::from_utf8_lossy(&rows).trim_end()
+            );
         }
+        println!("}}");
+        return;
+    }
+
+    if format == RowFormat::Csv {
+        // Five tables share one CSV stream, so each section carries a leading
+        // `section` column; without it the concatenated blocks are ambiguous.
+        for (label, result) in sections {
+            std::io::stdout()
+                .write_all(&format_query_result(
+                    &with_section_column(label, &result),
+                    RowFormat::Csv,
+                ))
+                .expect("write stdout");
+        }
+        return;
+    }
+
+    println!("Collection: {name}");
+    for (label, result) in sections {
+        println!("\n{label}");
+        std::io::stdout()
+            .write_all(&format_query_result(&result, format))
+            .expect("write stdout");
     }
 }
 
-fn admin_query_table(
-    bind: &str,
-    token: Option<&str>,
-    sql: &str,
-) -> Result<AdminQueryTable, String> {
-    let payload = format!("{{\"query\":\"{}\"}}", json_escape(sql));
-    let body = post_json_to_http_authed(bind, "/query", &payload, token)?;
-    admin_table_from_query_response(&body)
+/// Prepend a constant `section` column to every row of `result`.
+fn with_section_column(section: &str, result: &QueryResult) -> QueryResult {
+    // A non-empty column list suppresses the driver's own inference, so
+    // inherit the inferred names here when the response carried none.
+    let base: Vec<String> = if result.columns.is_empty() {
+        result
+            .rows
+            .first()
+            .map(|row| row.iter().map(|(key, _)| key.clone()).collect())
+            .unwrap_or_default()
+    } else {
+        result.columns.clone()
+    };
+    let mut columns = Vec::with_capacity(base.len() + 1);
+    columns.push("section".to_string());
+    columns.extend(base);
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            let mut out = Vec::with_capacity(row.len() + 1);
+            out.push((
+                "section".to_string(),
+                reddb_client::ValueOut::String(section.to_string()),
+            ));
+            out.extend(row.iter().cloned());
+            out
+        })
+        .collect();
+    QueryResult {
+        statement: result.statement.clone(),
+        affected: result.affected,
+        columns,
+        rows,
+        notice: result.notice.clone(),
+    }
 }
 
 fn admin_execute_ddl_command(
     command: &str,
-    bind: &str,
-    token: Option<&str>,
+    client: &OperatorClient,
     sql: &str,
     name: &str,
     verb: &str,
     json_mode: bool,
 ) {
-    let payload = format!("{{\"query\":\"{}\"}}", json_escape(sql));
-    match post_json_to_http_authed(bind, "/query", &payload, token) {
-        Ok(body) => {
-            let affected = parse_affected_rows_from_body(&body);
+    let (runtime, http) = client.get(command, json_mode);
+    match runtime.block_on(http.query(sql)) {
+        Ok(result) => {
             if json_mode {
                 println!(
-                    "{{\"ok\":true,\"command\":\"{command}\",\"collection\":\"{name}\",\"affected_rows\":{affected}}}"
+                    "{{\"ok\":true,\"command\":\"{command}\",\"collection\":\"{}\",\"affected_rows\":{}}}",
+                    json_escape(name),
+                    result.affected,
                 );
             } else {
-                println!("Collection '{name}' {verb}. ({affected} rows affected)");
+                println!(
+                    "Collection '{name}' {verb}. ({} rows affected)",
+                    result.affected
+                );
             }
         }
         Err(err) => {
             if json_mode {
-                json_error(command, &err);
+                json_error(command, &err.to_string());
             }
             eprintln!("error: {err}");
             std::process::exit(1);
         }
     }
 }
-
-fn parse_affected_rows_from_body(body: &str) -> u64 {
-    reddb::json::from_str::<reddb::json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            v.get("affected_rows")
-                .and_then(|n| n.as_f64())
-                .map(|f| f as u64)
-        })
-        .unwrap_or(0)
-}
-
-fn admin_table_from_query_response(body: &str) -> Result<AdminQueryTable, String> {
-    let parsed: reddb::json::Value =
-        reddb::json::from_str(body).map_err(|err| format!("invalid query JSON response: {err}"))?;
-    let result = parsed
-        .get("result")
-        .ok_or_else(|| "query response missing result".to_string())?;
-    let columns = result
-        .get("columns")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "query response missing result.columns".to_string())?
-        .iter()
-        .filter_map(|value| value.as_str().map(ToString::to_string))
-        .collect::<Vec<_>>();
-    let records = result
-        .get("records")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "query response missing result.records".to_string())?;
-    let rows = records
-        .iter()
-        .map(|record| {
-            record
-                .get("values")
-                .and_then(|values| values.as_object())
-                .cloned()
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>();
-    Ok(AdminQueryTable { columns, rows })
-}
-
-fn admin_rows_json(rows: &[BTreeMap<String, reddb::json::Value>]) -> String {
-    let values = rows
-        .iter()
-        .cloned()
-        .map(reddb::json::Value::Object)
-        .collect::<Vec<_>>();
-    reddb::json::Value::Array(values).to_string_compact()
-}
-
-fn admin_sections_json(sections: &[(String, AdminQueryTable)]) -> String {
-    let mut object = BTreeMap::new();
-    for (name, table) in sections {
-        let rows = table
-            .rows
-            .iter()
-            .cloned()
-            .map(reddb::json::Value::Object)
-            .collect::<Vec<_>>();
-        object.insert(name.clone(), reddb::json::Value::Array(rows));
-    }
-    reddb::json::Value::Object(object).to_string_compact()
-}
-
-fn format_admin_table(table: &AdminQueryTable, use_color: bool) -> String {
-    if table.rows.is_empty() {
-        return "(no rows)\n".to_string();
-    }
-    let columns = if table.columns.is_empty() {
-        infer_admin_columns(&table.rows)
-    } else {
-        table.columns.clone()
-    };
-    let widths = admin_column_widths(&columns, &table.rows);
-    let mut out = String::new();
-    for (i, column) in columns.iter().enumerate() {
-        if i > 0 {
-            out.push_str("  ");
-        }
-        let label = if use_color {
-            format!("\x1b[36;1m{column}\x1b[0m")
-        } else {
-            column.clone()
-        };
-        out.push_str(&format!("{label:<width$}", width = widths[i]));
-    }
-    out.push('\n');
-    out.push_str(
-        &widths
-            .iter()
-            .map(|width| "-".repeat(*width))
-            .collect::<Vec<_>>()
-            .join("  "),
-    );
-    out.push('\n');
-    for row in &table.rows {
-        for (i, column) in columns.iter().enumerate() {
-            if i > 0 {
-                out.push_str("  ");
-            }
-            let value = row
-                .get(column)
-                .map(admin_json_value_display)
-                .unwrap_or_default();
-            out.push_str(&format!("{value:<width$}", width = widths[i]));
-        }
-        out.push('\n');
-    }
-    out
-}
-
-fn format_admin_sections_text(
-    collection: &str,
-    sections: &[(String, AdminQueryTable)],
-    use_color: bool,
-) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("Collection: {collection}\n"));
-    for (name, table) in sections {
-        out.push('\n');
-        let title = if use_color {
-            format!("\x1b[35;1m{name}\x1b[0m")
-        } else {
-            name.clone()
-        };
-        out.push_str(&title);
-        out.push('\n');
-        out.push_str(&format_admin_table(table, use_color));
-    }
-    out
-}
-
-fn format_admin_csv(table: &AdminQueryTable) -> String {
-    let columns = if table.columns.is_empty() {
-        infer_admin_columns(&table.rows)
-    } else {
-        table.columns.clone()
-    };
-    let mut out = String::new();
-    out.push_str(
-        &columns
-            .iter()
-            .map(|value| csv_escape(value))
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    out.push('\n');
-    for row in &table.rows {
-        out.push_str(
-            &columns
-                .iter()
-                .map(|column| {
-                    row.get(column)
-                        .map(admin_json_value_display)
-                        .map(|value| csv_escape(&value))
-                        .unwrap_or_default()
-                })
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        out.push('\n');
-    }
-    out
-}
-
-fn format_admin_sections_csv(sections: &[(String, AdminQueryTable)]) -> String {
-    let mut out = String::new();
-    for (section, table) in sections {
-        let columns = if table.columns.is_empty() {
-            infer_admin_columns(&table.rows)
-        } else {
-            table.columns.clone()
-        };
-        out.push_str("section,");
-        out.push_str(
-            &columns
-                .iter()
-                .map(|value| csv_escape(value))
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        out.push('\n');
-        for row in &table.rows {
-            out.push_str(&csv_escape(section));
-            out.push(',');
-            out.push_str(
-                &columns
-                    .iter()
-                    .map(|column| {
-                        row.get(column)
-                            .map(admin_json_value_display)
-                            .map(|value| csv_escape(&value))
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-            out.push('\n');
-        }
-    }
-    out
-}
-
-fn infer_admin_columns(rows: &[BTreeMap<String, reddb::json::Value>]) -> Vec<String> {
-    let mut columns = Vec::new();
-    for row in rows {
-        for key in row.keys() {
-            if !columns.contains(key) {
-                columns.push(key.clone());
-            }
-        }
-    }
-    columns
-}
-
-fn admin_column_widths(
-    columns: &[String],
-    rows: &[BTreeMap<String, reddb::json::Value>],
-) -> Vec<usize> {
-    columns
-        .iter()
-        .map(|column| {
-            let value_width = rows
-                .iter()
-                .filter_map(|row| row.get(column))
-                .map(|value| admin_json_value_display(value).len())
-                .max()
-                .unwrap_or(0);
-            column.len().max(value_width)
-        })
-        .collect()
-}
-
-fn admin_json_value_display(value: &reddb::json::Value) -> String {
-    match value {
-        reddb::json::Value::Null => "".to_string(),
-        reddb::json::Value::String(s) => s.clone(),
-        reddb::json::Value::Bool(b) => b.to_string(),
-        reddb::json::Value::Integer(n) => n.to_string(),
-        reddb::json::Value::Number(n) if n.fract() == 0.0 => (*n as i64).to_string(),
-        reddb::json::Value::Number(n) => n.to_string(),
-        reddb::json::Value::Decimal(n) => n.clone(),
-        reddb::json::Value::Array(_) | reddb::json::Value::Object(_) => value.to_string_compact(),
-    }
-}
-
-fn csv_escape(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
-    }
-}
-
-fn run_admin_cache_command(
-    _flags: &HashMap<String, FlagValue>,
-    bind: &str,
-    token: Option<&str>,
-    json_mode: bool,
-    args: &[&str],
-) {
+fn run_admin_cache_command(client: &OperatorClient, json_mode: bool, args: &[&str]) {
     let subcommand = args.first().copied().unwrap_or("help");
-    let sub_args: &[&str] = if args.is_empty() { &[] } else { &args[1..] };
-
-    match subcommand {
+    let sub_args = args.get(1..).unwrap_or_default();
+    let command = format!("admin.cache.{subcommand}");
+    // Text mode announces what happened before echoing the server body.
+    let mut prelude: Option<String> = None;
+    let result = match subcommand {
         "stats" => {
-            let path = "/admin/blob_cache/stats";
-            match get_from_http(bind, path, token) {
-                Ok((status, body)) if status < 400 => {
-                    if json_mode {
-                        print!("{body}");
-                    } else {
-                        print_cache_stats_pretty(&body);
-                    }
-                }
-                Ok((status, body)) => {
-                    if json_mode {
-                        json_error(
-                            "admin.cache.stats",
-                            &format!("server returned {status}: {body}"),
-                        );
-                    }
-                    eprintln!("error: server returned {status}: {body}");
-                    std::process::exit(1);
-                }
-                Err(err) => {
-                    if json_mode {
-                        json_error("admin.cache.stats", &err);
-                    }
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            }
+            let (runtime, http) = client.get(&command, json_mode);
+            runtime.block_on(http.get_text("/admin/blob_cache/stats"))
         }
-
         "flush-namespace" => {
-            let ns = sub_args.first().copied().unwrap_or("");
-            if ns.is_empty() {
+            let namespace = sub_args.first().copied().unwrap_or("");
+            if namespace.is_empty() {
+                admin_usage_error(
+                    "admin.cache.flush-namespace",
+                    "namespace argument is required",
+                    "usage: red admin cache flush-namespace <namespace>",
+                    json_mode,
+                );
+            }
+            prelude = Some(format!("flushed namespace: {namespace}"));
+            let body = JsonValue::object([("namespace", JsonValue::string(namespace))]);
+            let (runtime, http) = client.get(&command, json_mode);
+            runtime.block_on(http.post_json("/admin/blob_cache/flush_namespace", &body))
+        }
+        "sweep" => {
+            let value = |name: &str| {
+                sub_args
+                    .windows(2)
+                    .find(|pair| pair[0] == name)
+                    .and_then(|pair| pair[1].parse::<u64>().ok())
+            };
+            let mut fields = Vec::new();
+            if let Some(limit) = value("--limit-entries") {
+                fields.push(("limit_entries", JsonValue::number(limit as f64)));
+            }
+            if let Some(limit) = value("--limit-millis") {
+                fields.push(("limit_millis", JsonValue::number(limit as f64)));
+            }
+            prelude = Some("sweep complete".to_string());
+            let (runtime, http) = client.get(&command, json_mode);
+            runtime.block_on(http.post_json("/admin/blob_cache/sweep", &JsonValue::object(fields)))
+        }
+        "compare-and-set" => {
+            let value = |name: &str| {
+                sub_args
+                    .windows(2)
+                    .find(|pair| pair[0] == name)
+                    .map(|pair| pair[1])
+            };
+            let namespace = value("--namespace").unwrap_or_else(|| {
+                admin_usage_error(
+                    "admin.cache.compare-and-set",
+                    "--namespace is required",
+                    "usage: red admin cache compare-and-set --namespace NS --key KEY --new-version N --value FILE",
+                    json_mode,
+                )
+            });
+            let key = value("--key").unwrap_or_else(|| {
+                admin_usage_error(
+                    "admin.cache.compare-and-set",
+                    "--key is required",
+                    "usage: red admin cache compare-and-set --namespace NS --key KEY --new-version N --value FILE",
+                    json_mode,
+                )
+            });
+            let new_version = value("--new-version")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_else(|| {
+                    admin_usage_error(
+                        "admin.cache.compare-and-set",
+                        "--new-version (u64) is required",
+                        "usage: red admin cache compare-and-set --namespace NS --key KEY --new-version N --value FILE",
+                        json_mode,
+                    )
+                });
+            let value_path = value("--value").unwrap_or_else(|| {
+                admin_usage_error(
+                    "admin.cache.compare-and-set",
+                    "--value FILE is required",
+                    "usage: red admin cache compare-and-set --namespace NS --key KEY --new-version N --value FILE",
+                    json_mode,
+                )
+            });
+            let bytes = std::fs::read(value_path).unwrap_or_else(|err| {
                 if json_mode {
                     json_error(
-                        "admin.cache.flush-namespace",
-                        "namespace argument is required",
+                        "admin.cache.compare-and-set",
+                        &format!("failed to read {value_path}: {err}"),
                     );
                 }
-                eprintln!("error: namespace argument is required");
-                eprintln!("usage: red admin cache flush-namespace <namespace>");
+                eprintln!("error: failed to read {value_path}: {err}");
                 std::process::exit(1);
-            }
-            let payload = format!("{{\"namespace\":\"{}\"}}", json_escape(ns));
-            match post_json_to_http_authed(
-                bind,
-                "/admin/blob_cache/flush_namespace",
-                &payload,
-                token,
-            ) {
-                Ok(body) => {
-                    if json_mode {
-                        print!("{body}");
-                    } else {
-                        println!("flushed namespace: {ns}");
-                        println!("{body}");
-                    }
-                }
-                Err(err) => {
-                    if json_mode {
-                        json_error("admin.cache.flush-namespace", &err);
-                    }
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            }
+            });
+            let expected_version =
+                value("--expected-version").and_then(|value| value.parse::<u64>().ok());
+            let (runtime, http) = client.get(&command, json_mode);
+            runtime.block_on(http.blob_cache_compare_and_set(
+                namespace,
+                key,
+                &bytes,
+                new_version,
+                expected_version,
+            ))
         }
-
-        "sweep" => {
-            let limit_entries: Option<u64> = sub_args
-                .windows(2)
-                .find(|w| w[0] == "--limit-entries")
-                .and_then(|w| w[1].parse().ok());
-            let limit_millis: Option<u64> = sub_args
-                .windows(2)
-                .find(|w| w[0] == "--limit-millis")
-                .and_then(|w| w[1].parse().ok());
-            let payload = match (limit_entries, limit_millis) {
-                (None, None) => "{}".to_string(),
-                (Some(e), None) => format!("{{\"limit_entries\":{e}}}"),
-                (None, Some(m)) => format!("{{\"limit_millis\":{m}}}"),
-                (Some(e), Some(m)) => format!("{{\"limit_entries\":{e},\"limit_millis\":{m}}}"),
-            };
-            match post_json_to_http_authed(bind, "/admin/blob_cache/sweep", &payload, token) {
-                Ok(body) => {
-                    if json_mode {
-                        print!("{body}");
-                    } else {
-                        println!("sweep complete");
-                        println!("{body}");
-                    }
-                }
-                Err(err) => {
-                    if json_mode {
-                        json_error("admin.cache.sweep", &err);
-                    }
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        "compare-and-set" => {
-            // Parse --namespace, --key, --expected-version, --value, --new-version from sub_args
-            let get_flag = |name: &str| -> Option<&str> {
-                sub_args.windows(2).find(|w| w[0] == name).map(|w| w[1])
-            };
-            let ns = match get_flag("--namespace") {
-                Some(v) => v,
-                None => {
-                    if json_mode {
-                        json_error("admin.cache.compare-and-set", "--namespace is required");
-                    }
-                    eprintln!("error: --namespace is required");
-                    std::process::exit(1);
-                }
-            };
-            let key = match get_flag("--key") {
-                Some(v) => v,
-                None => {
-                    if json_mode {
-                        json_error("admin.cache.compare-and-set", "--key is required");
-                    }
-                    eprintln!("error: --key is required");
-                    std::process::exit(1);
-                }
-            };
-            let new_version: u64 = match get_flag("--new-version").and_then(|v| v.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    if json_mode {
-                        json_error(
-                            "admin.cache.compare-and-set",
-                            "--new-version (u64) is required",
-                        );
-                    }
-                    eprintln!("error: --new-version (u64) is required");
-                    std::process::exit(1);
-                }
-            };
-            let value_path = match get_flag("--value") {
-                Some(v) => v,
-                None => {
-                    if json_mode {
-                        json_error("admin.cache.compare-and-set", "--value <file> is required");
-                    }
-                    eprintln!("error: --value <file> is required");
-                    std::process::exit(1);
-                }
-            };
-            let raw_bytes = match std::fs::read(value_path) {
-                Ok(b) => b,
-                Err(err) => {
-                    if json_mode {
-                        json_error(
-                            "admin.cache.compare-and-set",
-                            &format!("failed to read {value_path}: {err}"),
-                        );
-                    }
-                    eprintln!("error: failed to read {value_path}: {err}");
-                    std::process::exit(1);
-                }
-            };
-            let b64 = base64_encode(&raw_bytes);
-
-            let expected_version_field = get_flag("--expected-version")
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(|v| format!(",\"expected_version\":{v}"))
-                .unwrap_or_default();
-            let payload = format!(
-                "{{\"namespace\":\"{ns}\",\"key\":\"{key}\",\"new_value_b64\":\"{b64}\",\"new_version\":{new_version}{expected_version_field}}}",
-                ns = json_escape(ns),
-                key = json_escape(key),
-            );
-            match post_json_to_http_authed(bind, "/admin/cache/compare-and-set", &payload, token) {
-                Ok(body) => {
-                    if json_mode {
-                        print!("{body}");
-                    } else {
-                        println!("{body}");
-                    }
-                }
-                Err(err) => {
-                    if json_mode {
-                        json_error("admin.cache.compare-and-set", &err);
-                    }
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            }
-        }
-
         _ => {
             if json_mode {
                 json_ok(
@@ -6119,10 +5125,36 @@ fn run_admin_cache_command(
                 println!("  REDDB_BIND_ADDR   Server HTTP address (overrides --bind)");
                 println!("  RED_ADMIN_TOKEN   Admin bearer token (overrides --token)");
             }
+            return;
         }
+    };
+
+    let body = result.unwrap_or_else(|err| {
+        if json_mode {
+            json_error(&command, &err.to_string());
+        }
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    });
+
+    if json_mode {
+        print!("{body}");
+        return;
+    }
+    if let Some(prelude) = prelude {
+        println!("{prelude}");
+    }
+    if subcommand == "stats" {
+        print!("{}", format_cache_stats_pretty(&body));
+    } else {
+        println!("{body}");
     }
 }
 
+/// Aligned `Metric / Value` view of the blob-cache stats body.
+///
+/// Falls back to the raw body when the response is not a JSON object, so an
+/// error page still reaches the operator verbatim.
 fn format_cache_stats_pretty(body: &str) -> String {
     let fields: &[(&str, &str)] = &[
         ("hits", "Hits"),
@@ -6156,176 +5188,6 @@ fn format_cache_stats_pretty(body: &str) -> String {
         format!("{body}\n")
     }
 }
-
-fn print_cache_stats_pretty(body: &str) {
-    print!("{}", format_cache_stats_pretty(body));
-}
-
-fn post_json_to_http_authed(
-    bind_addr: &str,
-    path: &str,
-    payload: &str,
-    token: Option<&str>,
-) -> Result<String, String> {
-    let bind_addr = bind_addr
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let mut stream = TcpStream::connect(bind_addr)
-        .map_err(|err| format!("failed to connect to {bind_addr}: {err}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|err| format!("failed to set read timeout: {err}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .map_err(|err| format!("failed to set write timeout: {err}"))?;
-    let auth_line = token
-        .map(|t| format!("Authorization: Bearer {t}\r\n"))
-        .unwrap_or_default();
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\n{auth_line}Content-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{payload}",
-        path = path,
-        host = bind_addr,
-        len = payload.len(),
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|err| format!("failed to write request: {err}"))?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|err| format!("failed to read response: {err}"))?;
-    let status_line = response
-        .lines()
-        .next()
-        .ok_or_else(|| "empty response from server".to_string())?;
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.parse::<u16>().ok())
-        .ok_or_else(|| format!("invalid response status line: {status_line}"))?;
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_string())
-        .unwrap_or_default();
-    if status >= 400 {
-        Err(format!("server responded with {status}: {body}"))
-    } else {
-        Ok(body)
-    }
-}
-
-fn post_json_to_http(bind_addr: &str, path: &str, payload: &str) -> Result<String, String> {
-    let bind_addr = bind_addr
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let mut stream = TcpStream::connect(bind_addr)
-        .map_err(|err| format!("failed to connect to {bind_addr}: {err}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|err| format!("failed to set read timeout: {err}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .map_err(|err| format!("failed to set write timeout: {err}"))?;
-
-    let request = format!(
-        "POST {path} HTTP/1.1\r\n\
-         Host: {host}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {content_length}\r\n\
-         Connection: close\r\n\
-         \r\n\
-         {payload}",
-        path = path,
-        host = bind_addr,
-        content_length = payload.len(),
-        payload = payload
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|err| format!("failed to write request: {err}"))?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|err| format!("failed to read response: {err}"))?;
-
-    let mut lines = response.lines();
-    let status_line = lines
-        .next()
-        .ok_or_else(|| "empty response from server".to_string())?;
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse::<u16>().ok())
-        .ok_or_else(|| format!("invalid response status line: {status_line}"))?;
-
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_headers, body)| body.to_string())
-        .unwrap_or_default();
-    if status >= 400 {
-        Err(format!("server responded with {status}: {body}"))
-    } else {
-        Ok(body)
-    }
-}
-
-/// PLAN.md Phase 5.5 — barebones GET against the server's HTTP port,
-/// returning the response body. Mirrors `post_json_to_http`'s
-/// hand-rolled approach so the CLI stays free of HTTP-client deps.
-/// Caller passes the `Authorization` header value when present
-/// (post Phase 6.1, /admin/* may require a bearer token).
-fn get_from_http(
-    bind_addr: &str,
-    path: &str,
-    token: Option<&str>,
-) -> Result<(u16, String), String> {
-    let bind_addr = bind_addr
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let mut stream = TcpStream::connect(bind_addr)
-        .map_err(|err| format!("failed to connect to {bind_addr}: {err}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|err| format!("failed to set read timeout: {err}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|err| format!("failed to set write timeout: {err}"))?;
-
-    let auth_line = token
-        .map(|t| format!("Authorization: Bearer {t}\r\n"))
-        .unwrap_or_default();
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {bind_addr}\r\n{auth_line}Connection: close\r\n\r\n",
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|err| format!("failed to write request: {err}"))?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|err| format!("failed to read response: {err}"))?;
-
-    let status_line = response
-        .lines()
-        .next()
-        .ok_or_else(|| "empty response from server".to_string())?;
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.parse::<u16>().ok())
-        .ok_or_else(|| format!("invalid response status line: {status_line}"))?;
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_h, b)| b.to_string())
-        .unwrap_or_default();
-    Ok((status, body))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DoctorSeverity {
     Ok,
@@ -6476,21 +5338,33 @@ fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
         .unwrap_or(10000.0);
 
     let mut checks: Vec<DoctorCheck> = Vec::new();
+    let driver = operator_http_client(&bind, token.as_deref());
 
     // 1) Server reachability via /metrics (also catches admin-token
-    // misconfiguration since /metrics is gated when token is set).
-    let metrics = match get_from_http(&bind, "/metrics", token.as_deref()) {
-        Ok((200, body)) => Some(body),
-        Ok((status, _)) => {
-            checks.push(DoctorCheck {
-                name: "reachability",
-                severity: DoctorSeverity::Crit,
-                detail: format!(
-                    "GET /metrics returned HTTP {status} (token mismatch or service down)"
-                ),
-            });
-            None
-        }
+    // misconfiguration since /metrics is gated when token is set), so the
+    // probe reports the HTTP status rather than a generic request failure.
+    let metrics = match &driver {
+        Ok((runtime, client)) => match runtime.block_on(client.get_text_with_status("/metrics")) {
+            Ok((200, body)) => Some(body),
+            Ok((status, _)) => {
+                checks.push(DoctorCheck {
+                    name: "reachability",
+                    severity: DoctorSeverity::Crit,
+                    detail: format!(
+                        "GET /metrics returned HTTP {status} (token mismatch or service down)"
+                    ),
+                });
+                None
+            }
+            Err(err) => {
+                checks.push(DoctorCheck {
+                    name: "reachability",
+                    severity: DoctorSeverity::Crit,
+                    detail: format!("connect to {bind} failed: {err}"),
+                });
+                None
+            }
+        },
         Err(err) => {
             checks.push(DoctorCheck {
                 name: "reachability",
@@ -6502,11 +5376,15 @@ fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
     };
 
     // 2) /admin/status JSON.
-    let status_body = get_from_http(&bind, "/admin/status", token.as_deref()).ok();
-    let status_json = status_body
-        .as_ref()
-        .filter(|(s, _)| *s == 200)
-        .and_then(|(_, body)| reddb::serde_json::from_str::<reddb::serde_json::Value>(body).ok());
+    let status_json = driver.as_ref().ok().and_then(|(runtime, client)| {
+        runtime
+            .block_on(client.get_text_with_status("/admin/status"))
+            .ok()
+            .filter(|(status, _)| *status == 200)
+            .and_then(|(_, body)| {
+                reddb::serde_json::from_str::<reddb::serde_json::Value>(&body).ok()
+            })
+    });
     if status_json.is_none() {
         checks.push(DoctorCheck {
             name: "admin_status",
@@ -6810,7 +5688,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "/tmp/data.rdb".to_string(),
         ];
         let tokens = cli::token::tokenize(&args);
-        let parser = cli::schema::SchemaParser::new(build_flags_for_command(Some("query")));
+        let parser =
+            cli::schema::SchemaParser::new(cli::commands::flags_for_command(Some("query")));
         let result = parser.parse(&tokens);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(
@@ -7794,7 +6673,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
 
         let args = vec!["server".to_string()];
         let tokens = cli::token::tokenize(&args);
-        let parser = cli::schema::SchemaParser::new(build_flags_for_command(Some("server")));
+        let parser =
+            cli::schema::SchemaParser::new(cli::commands::flags_for_command(Some("server")));
         let result = parser.parse(&tokens);
         assert!(result.errors.is_empty());
 
@@ -7825,7 +6705,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "--no-log-file".to_string(),
         ];
         let tokens = cli::token::tokenize(&args);
-        let parser = cli::schema::SchemaParser::new(build_flags_for_command(Some("server")));
+        let parser =
+            cli::schema::SchemaParser::new(cli::commands::flags_for_command(Some("server")));
         let result = parser.parse(&tokens);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
 
@@ -7871,7 +6752,8 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             "customer-pass".to_string(),
         ];
         let tokens = cli::token::tokenize(&args);
-        let parser = cli::schema::SchemaParser::new(build_flags_for_command(Some("server")));
+        let parser =
+            cli::schema::SchemaParser::new(cli::commands::flags_for_command(Some("server")));
         let result = parser.parse(&tokens);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
 
@@ -7923,171 +6805,6 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:5000"));
     }
 
-    #[test]
-    fn format_result_json_emits_json_values_as_json() {
-        let mut result =
-            reddb::storage::query::UnifiedResult::with_columns(vec!["value".to_string()]);
-        let mut record = reddb::storage::query::UnifiedRecord::new();
-        record.set(
-            "value",
-            reddb::storage::schema::Value::Json(br#"{"alpha":"A","nested":{"leaf":12}}"#.to_vec()),
-        );
-        result.push(record);
-        let query = reddb::runtime::RuntimeQueryResult {
-            query: "KV LIST settings PREFIX 'feature.' AS JSON".to_string(),
-            mode: reddb::storage::query::modes::QueryMode::Sql,
-            statement: "kv_list_json",
-            engine: "kv",
-            result,
-            affected_rows: 0,
-            statement_type: "select",
-            bookmark: None,
-            notice: None,
-        };
-
-        let out = format_result_json(&query);
-        let parsed: reddb::json::Value = reddb::json::from_str(&out).expect("valid json output");
-        let row = parsed["rows"]
-            .as_array()
-            .and_then(|rows| rows.first())
-            .expect("one output row");
-        let value = &row["value"];
-        assert_eq!(value["alpha"].as_str(), Some("A"));
-        assert_eq!(value["nested"]["leaf"].as_f64(), Some(12.0));
-    }
-
-    // --- admin cache output format ---
-
-    #[test]
-    fn format_cache_stats_pretty_renders_header_and_known_fields() {
-        let body = r#"{"ok":true,"hits":10,"misses":2,"entries":5,"bytes_in_use":1024}"#;
-        let out = format_cache_stats_pretty(body);
-        assert!(out.contains("Metric"), "missing header row");
-        assert!(out.contains("Value"), "missing header row");
-        assert!(out.contains("Hits"), "missing Hits row");
-        assert!(out.contains("10"), "missing hits value");
-        assert!(out.contains("Misses"), "missing Misses row");
-        assert!(out.contains("2"), "missing misses value");
-        assert!(out.contains("Entries"), "missing Entries row");
-        assert!(out.contains("L1 bytes in use"), "missing bytes_in_use row");
-        // fields absent from JSON are silently omitted
-        assert!(!out.contains("Evictions"), "unexpected Evictions row");
-    }
-
-    #[test]
-    fn format_cache_stats_pretty_falls_back_to_raw_on_invalid_json() {
-        let body = "not json at all";
-        let out = format_cache_stats_pretty(body);
-        assert_eq!(out.trim(), "not json at all");
-    }
-
-    #[test]
-    fn format_cache_stats_pretty_renders_separator_line() {
-        let body = r#"{"hits":0}"#;
-        let out = format_cache_stats_pretty(body);
-        assert!(out.contains("--------------------------------------------------"));
-    }
-
-    // --- admin catalog output format ---
-
-    fn sample_admin_query_body() -> &'static str {
-        r#"{"ok":true,"result":{"columns":["name","model","internal"],"records":[{"values":{"name":"users","model":"table","internal":false},"nodes":{},"edges":{},"paths":[],"vector_results":[]},{"values":{"name":"red.collections","model":"table","internal":true},"nodes":{},"edges":{},"paths":[],"vector_results":[]}],"stats":{"rows_scanned":2}}}"#
-    }
-
-    #[test]
-    fn admin_table_from_query_response_extracts_columns_and_rows() {
-        let table = admin_table_from_query_response(sample_admin_query_body()).unwrap();
-        assert_eq!(table.columns, vec!["name", "model", "internal"]);
-        assert_eq!(table.rows.len(), 2);
-        assert_eq!(
-            table.rows[0].get("name").and_then(|v| v.as_str()),
-            Some("users")
-        );
-    }
-
-    #[test]
-    fn format_admin_table_renders_plain_table_when_color_disabled() {
-        let table = admin_table_from_query_response(sample_admin_query_body()).unwrap();
-        let out = format_admin_table(&table, false);
-        assert!(out.contains("name"));
-        assert!(out.contains("users"));
-        assert!(out.contains("red.collections"));
-        assert!(!out.contains("\x1b["));
-    }
-
-    #[test]
-    fn format_admin_table_renders_ansi_header_when_color_enabled() {
-        let table = admin_table_from_query_response(sample_admin_query_body()).unwrap();
-        let out = format_admin_table(&table, true);
-        assert!(out.contains("\x1b[36;1mname\x1b[0m"));
-    }
-
-    #[test]
-    fn admin_rows_json_outputs_bare_array_for_jq() {
-        let table = admin_table_from_query_response(sample_admin_query_body()).unwrap();
-        let out = admin_rows_json(&table.rows);
-        assert!(out.starts_with('['));
-        assert!(out.contains(r#""name":"users""#));
-        assert!(!out.contains(r#""ok""#));
-    }
-
-    #[test]
-    fn format_admin_csv_escapes_commas_and_quotes() {
-        let table = AdminQueryTable {
-            columns: vec!["name".to_string(), "model".to_string()],
-            rows: vec![BTreeMap::from([
-                (
-                    "name".to_string(),
-                    reddb::json::Value::String("weird,\"name\"".to_string()),
-                ),
-                (
-                    "model".to_string(),
-                    reddb::json::Value::String("table".to_string()),
-                ),
-            ])],
-        };
-        let out = format_admin_csv(&table);
-        assert_eq!(out, "name,model\n\"weird,\"\"name\"\"\",table\n");
-    }
-
-    // --- bytes_to_base64 (RFC 4648 §10 test vectors) ---
-
-    #[test]
-    fn bytes_to_base64_empty_input() {
-        assert_eq!(base64_encode(b""), "");
-    }
-
-    #[test]
-    fn bytes_to_base64_one_byte() {
-        // b"f" → "Zg=="
-        assert_eq!(base64_encode(b"f"), "Zg==");
-    }
-
-    #[test]
-    fn bytes_to_base64_two_bytes() {
-        // b"fo" → "Zm8="
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-    }
-
-    #[test]
-    fn bytes_to_base64_three_bytes_no_padding() {
-        // b"foo" → "Zm9v"
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-    }
-
-    #[test]
-    fn bytes_to_base64_rfc_test_vector_foobar() {
-        // b"foobar" → "Zm9vYmFy"
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
-    }
-
-    #[test]
-    fn bytes_to_base64_binary_zeros() {
-        assert_eq!(base64_encode(&[0u8, 0, 0]), "AAAA");
-    }
-
-    // ----------------------------------------------------------------
-    // `red ui` file:// canonicalization (issue #1042 / PRD #1041).
     // Prior art: the client URI parser test module.
     // ----------------------------------------------------------------
 
@@ -8131,5 +6848,166 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     #[test]
     fn file_uri_empty_path_is_rejected() {
         assert!(canonicalize_file_uri("file://").is_err());
+    }
+
+    // --- admin cache stats text output ---
+
+    #[test]
+    fn format_cache_stats_pretty_renders_header_and_known_fields() {
+        let body = r#"{"ok":true,"hits":10,"misses":2,"entries":5,"bytes_in_use":1024}"#;
+        let out = format_cache_stats_pretty(body);
+        assert!(out.contains("Metric"), "missing header row");
+        assert!(out.contains("Value"), "missing header row");
+        assert!(out.contains("Hits"), "missing Hits row");
+        assert!(out.contains("10"), "missing hits value");
+        assert!(out.contains("Misses"), "missing Misses row");
+        assert!(out.contains("2"), "missing misses value");
+        assert!(out.contains("Entries"), "missing Entries row");
+        assert!(out.contains("L1 bytes in use"), "missing bytes_in_use row");
+        // fields absent from JSON are silently omitted
+        assert!(!out.contains("Evictions"), "unexpected Evictions row");
+    }
+
+    #[test]
+    fn format_cache_stats_pretty_falls_back_to_raw_on_invalid_json() {
+        let body = "not json at all";
+        let out = format_cache_stats_pretty(body);
+        assert_eq!(out.trim(), "not json at all");
+    }
+
+    #[test]
+    fn format_cache_stats_pretty_renders_separator_line() {
+        let body = r#"{"hits":0}"#;
+        let out = format_cache_stats_pretty(body);
+        assert!(out.contains("--------------------------------------------------"));
+    }
+
+    #[test]
+    fn format_cache_stats_pretty_aligns_metric_and_value_columns() {
+        let body = r#"{"hits":10,"misses":2}"#;
+        assert_eq!(
+            format_cache_stats_pretty(body),
+            format!(
+                "{:<30} {}\n{}\n{:<30} {}\n{:<30} {}\n",
+                "Metric",
+                "Value",
+                "-".repeat(50),
+                "Hits",
+                10,
+                "Misses",
+                2
+            )
+        );
+    }
+
+    // --- admin catalog output format (driver-rendered) ---
+
+    fn sample_admin_result() -> QueryResult {
+        QueryResult {
+            statement: "SELECT * FROM red.collections".to_string(),
+            affected: 0,
+            columns: vec![
+                "name".to_string(),
+                "model".to_string(),
+                "internal".to_string(),
+            ],
+            rows: vec![
+                admin_row("users", "table", false),
+                admin_row("red.collections", "table", true),
+            ],
+            notice: None,
+        }
+    }
+
+    fn admin_row(name: &str, model: &str, internal: bool) -> Vec<(String, reddb_client::ValueOut)> {
+        vec![
+            (
+                "name".to_string(),
+                reddb_client::ValueOut::String(name.to_string()),
+            ),
+            (
+                "model".to_string(),
+                reddb_client::ValueOut::String(model.to_string()),
+            ),
+            (
+                "internal".to_string(),
+                reddb_client::ValueOut::Bool(internal),
+            ),
+        ]
+    }
+
+    fn rendered(result: &QueryResult, format: RowFormat) -> String {
+        String::from_utf8(format_query_result(result, format)).expect("utf-8 output")
+    }
+
+    #[test]
+    fn admin_table_renders_aligned_plain_columns() {
+        let out = rendered(&sample_admin_result(), RowFormat::Table);
+        assert_eq!(
+            out,
+            concat!(
+                "name             model  internal\n",
+                "---------------  -----  --------\n",
+                "users            table  false\n",
+                "red.collections  table  true\n",
+            )
+        );
+        assert!(!out.contains('\u{1b}'), "admin table must not emit ANSI");
+    }
+
+    #[test]
+    fn admin_rows_json_outputs_bare_array_for_jq() {
+        let out = rendered(&sample_admin_result(), RowFormat::Json);
+        assert!(out.starts_with('['));
+        assert!(out.contains(r#""name":"users""#));
+        assert!(!out.contains(r#""ok""#));
+    }
+
+    #[test]
+    fn admin_csv_escapes_commas_and_quotes() {
+        let result = QueryResult {
+            statement: "SELECT * FROM red.collections".to_string(),
+            affected: 0,
+            columns: vec!["name".to_string(), "model".to_string()],
+            rows: vec![vec![
+                (
+                    "name".to_string(),
+                    reddb_client::ValueOut::String("weird,\"name\"".to_string()),
+                ),
+                (
+                    "model".to_string(),
+                    reddb_client::ValueOut::String("table".to_string()),
+                ),
+            ]],
+            notice: None,
+        };
+        assert_eq!(
+            rendered(&result, RowFormat::Csv),
+            "name,model\n\"weird,\"\"name\"\"\",table\n"
+        );
+    }
+
+    #[test]
+    fn admin_section_csv_carries_a_leading_section_column() {
+        let sectioned = with_section_column("schema", &sample_admin_result());
+        assert_eq!(
+            rendered(&sectioned, RowFormat::Csv),
+            concat!(
+                "section,name,model,internal\n",
+                "schema,users,table,false\n",
+                "schema,red.collections,table,true\n",
+            )
+        );
+    }
+
+    #[test]
+    fn admin_section_csv_infers_columns_when_the_response_omits_them() {
+        let mut result = sample_admin_result();
+        result.columns.clear();
+        let sectioned = with_section_column("stats", &result);
+        assert_eq!(
+            sectioned.columns,
+            vec!["section", "name", "model", "internal"]
+        );
     }
 }

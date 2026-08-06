@@ -3,7 +3,7 @@ use std::path::Path;
 use reddb::regress::{discover_cases, format_result, run_case};
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
+use reddb_types::Value;
 
 #[test]
 fn regression_sql_snapshots_match() {

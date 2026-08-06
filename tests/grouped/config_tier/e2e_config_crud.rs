@@ -1,5 +1,5 @@
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
     crate::config_tier_shared::open_in_memory("in-memory runtime")

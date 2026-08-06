@@ -8,8 +8,8 @@ use reddb::application::vcs::{
     Author, CheckoutInput, CheckoutTarget, CreateBranchInput, CreateCommitInput,
 };
 use reddb::application::VcsUseCases;
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")

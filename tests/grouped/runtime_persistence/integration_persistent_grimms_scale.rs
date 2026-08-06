@@ -5,8 +5,8 @@ use support::{checkpoint_and_reopen, PersistentDbPath};
 
 use reddb::application::{ExecuteQueryInput, QueryUseCases};
 use reddb::runtime::RuntimeQueryResult;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 
 const NODE_COUNT: usize = 14_256;
 const EDGE_COUNT: usize = 46_202;

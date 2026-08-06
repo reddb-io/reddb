@@ -144,7 +144,7 @@ fn turbo_collection_recovers_partial_block_tail_after_restart() {
         .records
         .iter()
         .map(|r| match r.get("content") {
-            Some(reddb_server::storage::schema::Value::Text(s)) => s.to_string(),
+            Some(reddb_types::Value::Text(s)) => s.to_string(),
             other => panic!("expected text content, got {other:?}"),
         })
         .collect();
@@ -196,7 +196,7 @@ fn turbo_recovery_is_deterministic_across_restarts() {
             .records
             .iter()
             .map(|r| match r.get("content") {
-                Some(reddb_server::storage::schema::Value::Text(s)) => s.to_string(),
+                Some(reddb_types::Value::Text(s)) => s.to_string(),
                 other => panic!("expected text content, got {other:?}"),
             })
             .collect()

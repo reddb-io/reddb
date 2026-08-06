@@ -9,7 +9,7 @@
 //!
 //! Reference: PostgreSQL source `src/include/catalog/pg_type_d.h`.
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// A subset of PG type OIDs that cover every case we need to encode.
 #[allow(dead_code)]

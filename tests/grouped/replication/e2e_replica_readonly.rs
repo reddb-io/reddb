@@ -110,7 +110,7 @@ fn replica_rejects_sql_ddl_and_dml_on_every_surface() {
     assert_read_only_err(
         entity.create_row(CreateRowInput {
             collection: "accounts".into(),
-            fields: vec![("id".into(), reddb::storage::schema::Value::Integer(99))],
+            fields: vec![("id".into(), reddb_types::Value::Integer(99))],
             metadata: Vec::new(),
             node_links: Vec::new(),
             vector_links: Vec::new(),
@@ -213,10 +213,10 @@ fn replica_internal_apply_path_remains_privileged() {
     let mut row = RowData::new(Vec::new());
     row.named = Some(
         vec![
-            ("id".to_string(), reddb::storage::schema::Value::Integer(7)),
+            ("id".to_string(), reddb_types::Value::Integer(7)),
             (
                 "payload".to_string(),
-                reddb::storage::schema::Value::text("from-primary"),
+                reddb_types::Value::text("from-primary"),
             ),
         ]
         .into_iter()

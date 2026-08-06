@@ -580,11 +580,7 @@ fn declared_column_contract_from_persisted(
     let sql_type = column
         .sql_type
         .map(sql_type_name_from_persisted)
-        .or_else(|| {
-            Some(crate::storage::schema::SqlTypeName::parse_declared(
-                &column.data_type,
-            ))
-        });
+        .or_else(|| Some(reddb_types::SqlTypeName::parse_declared(&column.data_type)));
     DeclaredColumnContract {
         name: column.name,
         data_type: column.data_type,
@@ -610,7 +606,7 @@ fn declared_column_contract_from_json(value: &JsonValue) -> io::Result<DeclaredC
 }
 
 fn sql_type_name_to_persisted(
-    sql_type: &crate::storage::schema::SqlTypeName,
+    sql_type: &reddb_types::SqlTypeName,
 ) -> reddb_file::PhysicalSqlTypeName {
     reddb_file::PhysicalSqlTypeName {
         name: sql_type.name.clone(),
@@ -624,8 +620,8 @@ fn sql_type_name_to_persisted(
 
 fn sql_type_name_from_persisted(
     sql_type: reddb_file::PhysicalSqlTypeName,
-) -> crate::storage::schema::SqlTypeName {
-    crate::storage::schema::SqlTypeName {
+) -> reddb_types::SqlTypeName {
+    reddb_types::SqlTypeName {
         name: sql_type.name,
         modifiers: sql_type
             .modifiers
@@ -636,19 +632,19 @@ fn sql_type_name_from_persisted(
 }
 
 fn type_modifier_to_persisted(
-    modifier: &crate::storage::schema::TypeModifier,
+    modifier: &reddb_types::TypeModifier,
 ) -> reddb_file::PhysicalTypeModifier {
     match modifier {
-        crate::storage::schema::TypeModifier::Number(value) => {
+        reddb_types::TypeModifier::Number(value) => {
             reddb_file::PhysicalTypeModifier::Number(*value)
         }
-        crate::storage::schema::TypeModifier::Ident(value) => {
+        reddb_types::TypeModifier::Ident(value) => {
             reddb_file::PhysicalTypeModifier::Ident(value.clone())
         }
-        crate::storage::schema::TypeModifier::StringLiteral(value) => {
+        reddb_types::TypeModifier::StringLiteral(value) => {
             reddb_file::PhysicalTypeModifier::StringLiteral(value.clone())
         }
-        crate::storage::schema::TypeModifier::Type(value) => {
+        reddb_types::TypeModifier::Type(value) => {
             reddb_file::PhysicalTypeModifier::Type(Box::new(sql_type_name_to_persisted(value)))
         }
     }
@@ -656,21 +652,15 @@ fn type_modifier_to_persisted(
 
 fn type_modifier_from_persisted(
     modifier: reddb_file::PhysicalTypeModifier,
-) -> crate::storage::schema::TypeModifier {
+) -> reddb_types::TypeModifier {
     match modifier {
-        reddb_file::PhysicalTypeModifier::Number(value) => {
-            crate::storage::schema::TypeModifier::Number(value)
-        }
-        reddb_file::PhysicalTypeModifier::Ident(value) => {
-            crate::storage::schema::TypeModifier::Ident(value)
-        }
+        reddb_file::PhysicalTypeModifier::Number(value) => reddb_types::TypeModifier::Number(value),
+        reddb_file::PhysicalTypeModifier::Ident(value) => reddb_types::TypeModifier::Ident(value),
         reddb_file::PhysicalTypeModifier::StringLiteral(value) => {
-            crate::storage::schema::TypeModifier::StringLiteral(value)
+            reddb_types::TypeModifier::StringLiteral(value)
         }
         reddb_file::PhysicalTypeModifier::Type(value) => {
-            crate::storage::schema::TypeModifier::Type(Box::new(sql_type_name_from_persisted(
-                *value,
-            )))
+            reddb_types::TypeModifier::Type(Box::new(sql_type_name_from_persisted(*value)))
         }
     }
 }

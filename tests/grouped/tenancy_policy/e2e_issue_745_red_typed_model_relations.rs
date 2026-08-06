@@ -24,8 +24,8 @@ use std::collections::HashSet;
 
 use reddb::runtime::RedDBRuntime;
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::RedDBOptions;
+use reddb_types::Value;
 
 const TABLE_COLUMNS: [&str; 10] = [
     "name",

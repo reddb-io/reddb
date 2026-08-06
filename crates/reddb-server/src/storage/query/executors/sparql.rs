@@ -24,7 +24,7 @@ use crate::storage::query::modes::sparql::{
 use crate::storage::query::unified::{
     ExecutionError, MatchedEdge, MatchedNode, QueryStats, UnifiedRecord, UnifiedResult,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// A variable binding represents a mapping from variable names to values
 #[derive(Debug, Clone, Default)]

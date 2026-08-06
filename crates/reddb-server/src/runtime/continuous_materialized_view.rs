@@ -12,8 +12,8 @@
 //! the API opens.
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::schema::Value;
 use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+use reddb_types::Value;
 
 /// Name of the system collection that stores one row per
 /// materialized-view definition. Bootstrapped alongside the other

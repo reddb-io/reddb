@@ -2,8 +2,8 @@ use reddb::api::RedDBOptions;
 use reddb::application::{
     CreateRowInput, CreateRowsBatchInput, EntityUseCases, ExecuteQueryInput, QueryUseCases,
 };
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 
 fn main() {
     let opts = RedDBOptions::in_memory();

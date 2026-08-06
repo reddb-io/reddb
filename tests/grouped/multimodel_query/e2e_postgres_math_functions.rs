@@ -1,6 +1,6 @@
 use reddb::runtime::{RedDBRuntime, RuntimeQueryResult};
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
+use reddb_types::Value;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")

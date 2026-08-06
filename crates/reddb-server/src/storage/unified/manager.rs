@@ -23,8 +23,8 @@ use super::segment::{
     GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats,
     UnifiedSegment, ZoneColPred, ZoneColPredKind,
 };
+use super::visibility_map::VisibilityMap;
 use crate::runtime::mvcc::{entity_visible_with_context, SnapshotContext};
-use crate::storage::btree::visibility_map::VisibilityMap;
 
 /// Fraction of a collection's sealed entities that must be tombstoned before
 /// consolidation is worth its cost.
@@ -249,7 +249,7 @@ impl SegmentManager {
     /// Get or create the shared column schema from first row's named fields.
     pub fn get_or_init_schema(
         &self,
-        named: &HashMap<String, crate::storage::schema::Value>,
+        named: &HashMap<String, reddb_types::Value>,
     ) -> Arc<Vec<String>> {
         {
             let schema = self.column_schema.read();
@@ -495,7 +495,7 @@ impl SegmentManager {
                                         named
                                             .get(col_name)
                                             .cloned()
-                                            .unwrap_or(crate::storage::schema::Value::Null),
+                                            .unwrap_or(reddb_types::Value::Null),
                                     );
                                 }
                                 row.columns = cols;
@@ -2204,9 +2204,9 @@ mod tests {
 
     use super::*;
     use crate::runtime::mvcc::SnapshotContext;
-    use crate::storage::schema::Value;
     use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityData, EntityKind, RowData};
+    use reddb_types::Value;
 
     #[test]
     fn test_manager_basic() {

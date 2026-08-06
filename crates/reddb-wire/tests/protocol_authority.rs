@@ -1302,7 +1302,14 @@ fn legacy_result_and_error_envelopes_live_in_reddb_wire() {
 fn redwire_json_operation_payloads_live_in_reddb_wire() {
     let root = repo_root();
     let client = read(root.join("crates/reddb-client/src/redwire/mod.rs"));
-    let server = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
+    // The RedWire reply renderers live in presentation (issue #2156); the
+    // session dispatches to them. Both files are held to the same rule:
+    // payload bytes come from reddb-wire, never hand-rolled server-side.
+    let server = format!(
+        "{}{}",
+        read(root.join("crates/reddb-server/src/wire/redwire/session.rs")),
+        read(root.join("crates/reddb-server/src/presentation/query_result.rs")),
+    );
 
     for forbidden in [
         "obj.insert(\n            \"collection\"",
@@ -1879,8 +1886,10 @@ fn redwire_generic_reply_frame_builders_live_in_reddb_wire() {
 fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
     let root = repo_root();
     let auth = read(root.join("crates/reddb-server/src/wire/redwire/auth.rs"));
+    let server_scram = read(root.join("crates/reddb-server/src/auth/scram.rs"));
     let session = read(root.join("crates/reddb-server/src/wire/redwire/session.rs"));
     let wire = read(root.join("crates/reddb-wire/src/redwire/handshake.rs"));
+    let wire_scram = read(root.join("crates/reddb-wire/src/redwire/scram.rs"));
 
     for forbidden in [
         "fn parse_bearer_response",
@@ -1948,18 +1957,44 @@ fn redwire_auth_payload_and_scram_messages_live_in_reddb_wire() {
         "reddb-wire should own OAuth AuthResponse payload parsing"
     );
 
-    for required in [
+    for forbidden in [
         "parse_scram_client_first",
         "build_scram_server_first",
         "parse_scram_client_final",
+        "crate::auth::scram::",
     ] {
         assert!(
-            session.contains(&format!("reddb_wire::redwire::handshake::{required}")),
-            "server RedWire session should call reddb-wire SCRAM message helper {required}"
+            !session.contains(forbidden),
+            "server RedWire session must delegate SCRAM state and crypto, found {forbidden:?}"
         );
+    }
+    for required in [
+        "ScramServerHandshake",
+        "ScramServerInput",
+        "ScramServerOutput",
+    ] {
         assert!(
-            wire.contains(&format!("pub fn {required}")),
-            "reddb-wire should own SCRAM message helper {required}"
+            session.contains(required),
+            "server RedWire session should adapt the reddb-wire {required}"
+        );
+        let declaration = if required == "ScramServerHandshake" {
+            format!("pub struct {required}")
+        } else {
+            format!("pub enum {required}")
+        };
+        assert!(
+            wire_scram.contains(&declaration),
+            "reddb-wire should own SCRAM handshake type {required}"
+        );
+    }
+    assert!(
+        server_scram.contains("pub use reddb_wire::redwire::scram"),
+        "server SCRAM module should only preserve compatibility through wire re-exports"
+    );
+    for forbidden in ["use sha2", "pbkdf2_sha256", "fn verify_client_proof"] {
+        assert!(
+            !server_scram.contains(forbidden),
+            "server SCRAM module must not retain cryptographic implementation {forbidden:?}"
         );
     }
 }

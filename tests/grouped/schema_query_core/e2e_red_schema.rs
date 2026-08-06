@@ -12,9 +12,9 @@ use reddb::runtime::mvcc::{
     clear_current_auth_identity, clear_current_connection_id, clear_current_tenant,
     set_current_auth_identity, set_current_connection_id, set_current_tenant,
 };
-use reddb::storage::schema::Value;
 use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 const INDEX_COLUMNS: [&str; 10] = [
     "collection",

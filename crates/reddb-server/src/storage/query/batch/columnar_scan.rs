@@ -28,10 +28,10 @@
 use std::sync::Arc;
 
 use super::column_batch::{ColumnBatch, ColumnKind, ColumnVector, Field, Schema};
-use crate::storage::schema::types::DataType;
 use crate::storage::unified::column_block::{
     read_column_block_projected_typed, ColumnBlockError, ProjectedColumnData,
 };
+use reddb_types::types::DataType;
 
 /// Failures decoding a columnar chunk into a [`ColumnBatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -8,9 +8,9 @@ use std::sync::Arc;
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::control_events::CONTROL_EVENTS_COLLECTION;
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
-use reddb::storage::schema::Value;
 use reddb::storage::{EntityData, StorageDeployPreset};
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 

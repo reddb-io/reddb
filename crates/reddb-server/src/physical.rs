@@ -127,7 +127,7 @@ impl ContractOrigin {
 pub struct DeclaredColumnContract {
     pub name: String,
     pub data_type: String,
-    pub sql_type: Option<crate::storage::schema::SqlTypeName>,
+    pub sql_type: Option<reddb_types::SqlTypeName>,
     pub not_null: bool,
     pub default: Option<String>,
     pub compress: Option<u8>,
@@ -152,7 +152,7 @@ pub struct CollectionContract {
     pub vector_metric: Option<crate::storage::engine::distance::DistanceMetric>,
     pub context_index_fields: Vec<String>,
     pub declared_columns: Vec<DeclaredColumnContract>,
-    pub table_def: Option<crate::storage::schema::TableDef>,
+    pub table_def: Option<reddb_types::TableDef>,
     /// Enabled by `CREATE TABLE ... WITH timestamps = true`. When true,
     /// the runtime auto-populates two user-visible columns
     /// `created_at` + `updated_at` (BIGINT unix-ms) sourced from the

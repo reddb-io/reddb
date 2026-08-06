@@ -44,8 +44,10 @@
 //!
 //! Independence from internal storage modules is the load-bearing
 //! property here. The registry stores `String` enum tags for index
-//! type / metric / param family rather than re-exporting the engine
-//! enums, precisely so a future internal rename in
+//! type / param family rather than re-exporting the engine enums
+//! (the metric names the keystone `reddb_types::DistanceMetric`, which
+//! is an authority type, not an engine internal), precisely so a
+//! future internal rename in
 //! `engine::turboquant` does not force a Red UI release. The follow-up
 //! slice that wires concrete publish points from the engine into this
 //! registry is tracked in PRD #735; the public Rust surface here is
@@ -141,22 +143,16 @@ impl VectorIndexType {
     }
 }
 
-/// Distance metric, as a stable string contract independent of
-/// `engine::DistanceMetric`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DistanceMetric {
-    Cosine,
-    InnerProduct,
-    L2,
-}
+pub use reddb_types::distance::DistanceMetric;
 
-impl DistanceMetric {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            DistanceMetric::Cosine => "cosine",
-            DistanceMetric::InnerProduct => "inner_product",
-            DistanceMetric::L2 => "l2",
-        }
+/// The stable string contract Red UI reads. Lives here rather than on the
+/// keystone enum so the wire spelling stays owned by the introspection
+/// surface that publishes it.
+pub fn distance_metric_as_str(metric: DistanceMetric) -> &'static str {
+    match metric {
+        DistanceMetric::Cosine => "cosine",
+        DistanceMetric::InnerProduct => "inner_product",
+        DistanceMetric::L2 => "l2",
     }
 }
 

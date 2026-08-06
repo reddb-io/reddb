@@ -99,7 +99,7 @@ fn server_does_not_redeclare_native_artifact_payload_formats() {
     let ivf = read(root.join("crates/reddb-server/src/storage/engine/ivf.rs"));
     let impl_access =
         read(root.join("crates/reddb-server/src/storage/unified/devx/reddb/impl_access.rs"));
-    let table = read(root.join("crates/reddb-server/src/storage/schema/table.rs"));
+    let table = read(root.join("crates/reddb-types/src/table.rs"));
     let physical = read(root.join("crates/reddb-server/src/physical/json_codec.rs"));
 
     let hnsw_src = non_test_source(&hnsw);
@@ -130,8 +130,12 @@ fn server_does_not_redeclare_native_artifact_payload_formats() {
         ("impl_access.rs", impl_access_src, "!= b\"RDGA\""),
         ("impl_access.rs", impl_access_src, "!= b\"RDFT\""),
         ("impl_access.rs", impl_access_src, "!= b\"RDDP\""),
-        ("table.rs", table_src, "extend_from_slice(b\"RTBL\")"),
-        ("table.rs", table_src, "!= b\"RTBL\""),
+        (
+            "reddb-types table.rs",
+            table_src,
+            "extend_from_slice(b\"RTBL\")",
+        ),
+        ("reddb-types table.rs", table_src, "!= b\"RTBL\""),
     ] {
         assert!(
             !src.contains(forbidden),
@@ -159,9 +163,14 @@ fn server_does_not_redeclare_native_artifact_payload_formats() {
             && impl_access_src.contains("reddb_file::decode_native_doc_pathvalue_frame"),
         "impl_access.rs must call the reddb-file native artifact codecs"
     );
+    // The server's `storage/schema/table.rs` shim was retired in #2164; the
+    // keystone owns the table vocabulary outright and must not carry the RTBL
+    // framing, which belongs to reddb-file's `table_def` codec.
     assert!(
-        table_src.contains("pub use reddb_types::table::*"),
-        "table.rs must re-export the keystone table vocabulary"
+        !root
+            .join("crates/reddb-server/src/storage/schema/table.rs")
+            .exists(),
+        "the retired storage/schema/table.rs shim must not come back"
     );
     assert!(
         physical.contains("reddb_file::encode_table_def")

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Opaque queue identifier (user-facing queue name).
 pub(crate) type QueueId = String;

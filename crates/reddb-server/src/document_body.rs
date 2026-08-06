@@ -16,8 +16,8 @@ use reddb_types::document_body_codec;
 
 use crate::application::entity::json_to_storage_value;
 use crate::json::{to_vec as json_to_vec, Map, Value as JsonValue};
-use crate::storage::schema::Value;
 use crate::{RedDBError, RedDBResult};
+use reddb_types::Value;
 
 /// True when `bytes` begin with the document-body container magic.
 ///

@@ -13,9 +13,9 @@ use reddb_server::runtime::blockchain_kind::{
     is_integrity_broken_persisted, persist_integrity_flag, VerifyChainOutcome,
 };
 use reddb_server::storage::blockchain::{compute_block_hash, GENESIS_PREV_HASH};
-use reddb_server::storage::schema::Value;
 use reddb_server::storage::{EntityData, RowData, UnifiedEntity};
 use reddb_server::{RedDBError, RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots")

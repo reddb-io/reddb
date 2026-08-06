@@ -87,7 +87,7 @@ async fn query_with_vector_param_serializes_to_engine_value() {
     let v = Value::Vector(vec![0.1, 0.2, 0.3]);
     let schema = v.into_schema_value();
     match schema {
-        reddb_server::storage::schema::Value::Vector(v) => {
+        reddb_types::Value::Vector(v) => {
             assert_eq!(v, vec![0.1f32, 0.2, 0.3]);
         }
         other => panic!("expected SV::Vector, got {other:?}"),

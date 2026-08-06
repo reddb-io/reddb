@@ -16,7 +16,7 @@ use crate::storage::query::sql_lowering::effective_vector_filter;
 use crate::storage::query::unified::{
     ExecutionError, QueryStats, UnifiedRecord, UnifiedResult, VectorSearchResult,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Vector query executor using HNSW index
 pub struct VectorExecutor {

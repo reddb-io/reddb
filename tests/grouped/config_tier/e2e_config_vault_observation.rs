@@ -4,8 +4,8 @@ use std::sync::Arc;
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::replication::cdc::ChangeOperation;
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+use reddb_types::Value;
 
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]

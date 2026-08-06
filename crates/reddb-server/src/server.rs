@@ -39,15 +39,19 @@ use crate::runtime::{
     RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult,
     RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
 };
-use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::dsl::{MatchComponents, QueryResult as DslQueryResult};
 use crate::storage::unified::{MetadataValue, RefTarget, SparseVector};
 use crate::storage::{CrossRef, EntityData, EntityId, EntityKind, SimilarResult, UnifiedEntity};
+use reddb_types::Value;
 
 fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
     crate::presentation::admin_json::analytics_job_json(job)
 }
+
+// Process-wide test guard for every RED_ADMIN_TOKEN mutation in server tests.
+#[cfg(test)]
+pub(crate) static RED_ADMIN_TOKEN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -167,6 +171,7 @@ mod request_body;
 mod request_context;
 pub(crate) mod route_catalog;
 mod routes;
+pub(crate) use routes::discovered_route_catalog;
 mod routing;
 mod serverless_support;
 pub mod tls;

@@ -1401,7 +1401,7 @@ impl RedDB {
             entity.data.as_row().is_some_and(|row| {
                 matches!(
                     row.get_field("kind"),
-                    Some(crate::storage::schema::Value::Text(kind))
+                    Some(reddb_types::Value::Text(kind))
                         if matches!(&**kind, "queue_pending" | "queue_pending_lc")
                 )
             })

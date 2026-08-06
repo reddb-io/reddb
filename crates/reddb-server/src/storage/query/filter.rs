@@ -4,7 +4,7 @@
 //! logical, and pattern matching operations.
 
 use super::value_compare::partial_compare_values;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use std::fmt;
 
 /// Filter operation type

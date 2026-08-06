@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use super::EntityType;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use std::cmp::Ordering;
 
 /// Complete context retrieved for a query

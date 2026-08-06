@@ -1,6 +1,6 @@
 use reddb::api::RedDBOptions;
-use reddb::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use std::env;
 
 fn main() {

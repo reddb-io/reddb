@@ -23,8 +23,8 @@ use std::collections::HashSet;
 
 use reddb::runtime::RedDBRuntime;
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::RedDBOptions;
+use reddb_types::Value;
 
 const HYPERTABLE_CHUNK_COLUMNS: [&str; 12] = [
     "hypertable",

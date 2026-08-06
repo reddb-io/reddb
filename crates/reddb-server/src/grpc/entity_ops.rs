@@ -103,16 +103,16 @@ pub(crate) fn create_kv_reply(
         .ok_or_else(|| Status::invalid_argument("field 'key' must be a string"))?
         .to_string();
     let value = match payload.get("value") {
-        Some(crate::serde_json::Value::String(s)) => crate::storage::schema::Value::text(s.clone()),
+        Some(crate::serde_json::Value::String(s)) => reddb_types::Value::text(s.clone()),
         Some(crate::serde_json::Value::Number(n)) => {
             if n.fract().abs() < f64::EPSILON {
-                crate::storage::schema::Value::Integer(*n as i64)
+                reddb_types::Value::Integer(*n as i64)
             } else {
-                crate::storage::schema::Value::Float(*n)
+                reddb_types::Value::Float(*n)
             }
         }
-        Some(crate::serde_json::Value::Bool(b)) => crate::storage::schema::Value::Boolean(*b),
-        _ => crate::storage::schema::Value::Null,
+        Some(crate::serde_json::Value::Bool(b)) => reddb_types::Value::Boolean(*b),
+        _ => reddb_types::Value::Null,
     };
     let tags = payload
         .get("tags")
@@ -287,7 +287,7 @@ pub(crate) fn bulk_insert_binary(
     runtime: &GrpcRuntime,
     request: super::proto::BinaryBulkInsertRequest,
 ) -> Result<super::proto::BulkInsertReply, Status> {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     let collection = request.collection;
     let n = request.rows.len();

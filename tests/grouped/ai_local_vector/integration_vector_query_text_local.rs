@@ -15,8 +15,8 @@ use reddb::runtime::ai::local_embedding::{
     LocalEmbeddingBackend, LocalEmbeddingRequest,
 };
 use reddb::storage::query::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::{RedDBError, RedDBResult, RedDBRuntime};
+use reddb_types::Value;
 
 use super::support::{backend_lock, env_lock};
 

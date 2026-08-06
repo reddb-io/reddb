@@ -17,7 +17,7 @@ use crate::storage::queue::lifecycle::{
     QueueTxn, Result,
 };
 use crate::storage::queue::mode::QueueMode;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Monotonic clock abstraction. The Module reads "now" through this so
 /// unit tests can drive lock-expiry transitions without `std::thread::sleep`.

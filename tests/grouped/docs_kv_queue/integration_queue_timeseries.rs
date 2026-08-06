@@ -8,11 +8,11 @@ use reddb::application::{CatalogUseCases, ExecuteQueryInput, QueryUseCases};
 use reddb::catalog::CollectionModel;
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::queue::QueueMode;
-use reddb::storage::schema::Value;
 use reddb::storage::{
     EntityData, EntityId, EntityKind, TimeSeriesData, TimeSeriesPointKind, UnifiedEntity,
 };
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use std::collections::{HashMap, HashSet};
 
 use support::{checkpoint_and_reopen, PersistentDbPath};

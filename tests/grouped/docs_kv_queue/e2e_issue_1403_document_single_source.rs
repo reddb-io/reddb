@@ -16,9 +16,9 @@ use std::collections::BTreeSet;
 
 use reddb::application::{Author, CreateCommitInput, VcsUseCases};
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
-use reddb::storage::schema::Value;
 use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 /// In-memory runtime with the single-source binary body enabled.
 fn binary_runtime() -> RedDBRuntime {

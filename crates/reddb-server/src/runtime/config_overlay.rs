@@ -138,7 +138,7 @@ fn key_already_present(store: &UnifiedStore, key: &str) -> bool {
     let mut found = false;
     manager.for_each_entity(|entity| {
         if let Some(row) = entity.data.as_row() {
-            if let Some(crate::storage::schema::Value::Text(s)) = row.get_field("key") {
+            if let Some(reddb_types::Value::Text(s)) = row.get_field("key") {
                 if s.as_ref() == key {
                     found = true;
                     return false;
@@ -177,8 +177,8 @@ fn flatten_json(prefix: &str, value: &JsonValue, out: &mut Vec<(String, JsonValu
 /// Coerce a raw env-var string into the matrix-declared default's
 /// type. Returns `None` when the key is unknown to the matrix or the
 /// coercion fails; the caller falls back to the persisted value.
-pub fn coerce_env_value(key: &str, raw: &str) -> Option<crate::storage::schema::Value> {
-    use crate::storage::schema::Value;
+pub fn coerce_env_value(key: &str, raw: &str) -> Option<reddb_types::Value> {
+    use reddb_types::Value;
 
     let default = default_for(key)?;
     match default {
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn coerce_bool_accepts_common_forms() {
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         assert_eq!(
             coerce_env_value("concurrency.locking.enabled", "true"),
             Some(Value::Boolean(true))
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn coerce_number_rejects_garbage() {
-        use crate::storage::schema::Value;
+        use reddb_types::Value;
         assert_eq!(
             coerce_env_value("storage.wal.max_interval_ms", "25"),
             Some(Value::UnsignedInteger(25))

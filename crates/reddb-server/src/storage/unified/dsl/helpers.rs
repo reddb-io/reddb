@@ -2,7 +2,7 @@
 //!
 //! Utility functions for filtering, similarity calculation, and text extraction.
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 use super::super::entity::{EntityData, EntityKind, UnifiedEntity};
 use super::filters::{Filter, FilterOp, FilterValue};

@@ -26,7 +26,7 @@ mod vector;
 // `pub(crate)` is needed for the two helpers because wire/listener.rs
 // reaches them via `crate::runtime::query_exec::X` (cross-module path,
 // not just super-path).
-pub(crate) use filter_compiled::CompiledEntityFilter;
+pub(crate) use filter_compiled::{CompiledEntityFilter, CompiledEntityFilterDecision};
 pub(crate) use helpers::{
     evaluate_entity_filter, evaluate_entity_filter_with_db, extract_entity_id_from_filter,
     extract_select_column_names, extract_zone_predicates, try_hash_eq_lookup,
@@ -297,7 +297,7 @@ pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> 
     let has_capability = record
         .get("red_capabilities")
         .and_then(|value| match value {
-            crate::storage::schema::Value::Text(value) => Some(value),
+            reddb_types::Value::Text(value) => Some(value),
             _ => None,
         })
         .map(|capabilities| {
@@ -318,7 +318,7 @@ pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> 
     record
         .get("kind")
         .and_then(|value| match value {
-            crate::storage::schema::Value::Text(value) => Some(value),
+            reddb_types::Value::Text(value) => Some(value),
             _ => None,
         })
         .map(|kind| kind.as_ref() == "document")

@@ -29,7 +29,7 @@ use crate::storage::query::ast::{
 use crate::storage::query::evaluator;
 use crate::storage::query::sql_lowering::projection_to_expr;
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 use super::join_filter::projection_name;
 
@@ -615,7 +615,7 @@ fn compare_with_nulls(a: &CanonicalKey, b: &CanonicalKey, nulls_first: bool) -> 
 mod tests {
     use super::*;
     use crate::storage::query::ast::{Expr, FieldRef, Span, WindowOrderItem};
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     fn rec(id: i64, user: &str, ts: i64) -> UnifiedRecord {
         let mut r = UnifiedRecord::new();

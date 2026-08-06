@@ -32,10 +32,10 @@ use reddb::auth::AuthConfig;
 use reddb::grpc::proto::red_db_client::RedDbClient;
 use reddb::grpc::proto::QueryRequest;
 use reddb::server::RedDBServer;
-use reddb::storage::schema::Value as StorageValue;
 use reddb::wire::postgres::{start_pg_wire_listener, PgWireConfig};
 use reddb::wire::redwire::start_redwire_listener_on;
 use reddb::{GrpcServerOptions, RedDBGrpcServer, RedDBOptions, RedDBRuntime};
+use reddb_types::Value as StorageValue;
 
 use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
 use reddb_client::{QueryResult, Value as ClientValue, ValueOut};

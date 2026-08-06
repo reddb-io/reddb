@@ -109,6 +109,19 @@ pub(crate) enum CommandAuthRequirement {
     StreamLease,
 }
 
+impl CommandAuthRequirement {
+    fn matrix_label(self) -> String {
+        match self {
+            Self::Public => "public".to_string(),
+            Self::OptionalUser => "optional-user".to_string(),
+            Self::UserRequired => "user-required".to_string(),
+            Self::AdminToken => "admin-token".to_string(),
+            Self::OpsCapability(action) => format!("ops-capability:{action}"),
+            Self::StreamLease => "stream-lease".to_string(),
+        }
+    }
+}
+
 pub(crate) type RouteAuth = CommandAuthRequirement;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -526,6 +539,41 @@ impl CommandCatalog {
 
         None
     }
+}
+
+/// Render the canonical command-by-transport review artifact.
+///
+/// HTTP owns the declarations that seed this catalog, so every catalogued
+/// command is served there. Other adapters stay explicit coverage gaps until
+/// their migration supplies command ids. RedWire supplies its exhaustive
+/// frame mapping here instead of maintaining a second command vocabulary.
+pub(crate) fn render_command_coverage_matrix(
+    catalog: &CommandCatalog,
+    redwire_command_ids: impl IntoIterator<Item = &'static str>,
+) -> String {
+    let redwire_command_ids: BTreeSet<_> = redwire_command_ids.into_iter().collect();
+    let mut commands: Vec<_> = catalog.commands().collect();
+    commands.sort_by_key(|command| command.id);
+
+    let mut matrix = String::from(
+        "# Command coverage matrix\n\n\
+         `undeclared` is a coverage gap, not an explicit unsupported decision.\n\n\
+         | command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |\n\
+         | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+    for command in commands {
+        let redwire = if redwire_command_ids.contains(command.id) {
+            "served"
+        } else {
+            "undeclared"
+        };
+        matrix.push_str(&format!(
+            "| {} | {} | served | undeclared | undeclared | undeclared | {redwire} |\n",
+            command.id,
+            command.auth.matrix_label()
+        ));
+    }
+    matrix
 }
 
 pub(crate) type RouteCatalog = CommandCatalog;

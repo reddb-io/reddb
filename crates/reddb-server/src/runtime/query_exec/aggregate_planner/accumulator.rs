@@ -9,7 +9,7 @@
 //! the life of the group.
 
 use super::ast::{AggregateExpr, AggregateOp};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -191,7 +191,7 @@ fn numeric_value(v: &Value) -> Option<f64> {
         Value::Integer(i) => Some(*i as f64),
         Value::UnsignedInteger(u) => Some(*u as f64),
         Value::Float(f) if f.is_finite() => Some(*f),
-        Value::Decimal(d) => Some(crate::storage::schema::decimal_to_f64(*d)),
+        Value::Decimal(d) => Some(reddb_types::types::decimal_to_f64(*d)),
         Value::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
         _ => None,
     }
@@ -210,7 +210,7 @@ fn update_extreme(current: &mut Option<Value>, candidate: &Value, target: std::c
     if matches!(candidate, Value::Null) {
         return;
     }
-    let Some(cand_key) = crate::storage::schema::value_to_canonical_key(candidate) else {
+    let Some(cand_key) = reddb_types::value_to_canonical_key(candidate) else {
         return;
     };
     match current {
@@ -218,7 +218,7 @@ fn update_extreme(current: &mut Option<Value>, candidate: &Value, target: std::c
             *current = Some(candidate.clone());
         }
         Some(cur) => {
-            let Some(cur_key) = crate::storage::schema::value_to_canonical_key(cur) else {
+            let Some(cur_key) = reddb_types::value_to_canonical_key(cur) else {
                 *current = Some(candidate.clone());
                 return;
             };
@@ -238,7 +238,7 @@ fn update_extreme(current: &mut Option<Value>, candidate: &Value, target: std::c
 mod tests {
     use super::numeric_value;
     use crate::runtime::query_exec::aggregate::value_to_f64;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     /// The planner's `SUM`/`AVG` cast and the legacy path's must agree on
     /// every value they both accept.

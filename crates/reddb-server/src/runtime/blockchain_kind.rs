@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::storage::blockchain::{
     compute_block_hash, verify_chain, Block, VerifyReport, GENESIS_PREV_HASH,
 };
-use crate::storage::schema::Value;
 use crate::storage::unified::UnifiedStore;
+use reddb_types::Value;
 
 /// Value stored under `red.collection.{name}.kind` for blockchain collections.
 pub const CHAIN_KIND_TAG: &str = "chain";

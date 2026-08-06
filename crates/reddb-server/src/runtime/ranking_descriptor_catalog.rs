@@ -18,9 +18,9 @@
 //! it walks the sorted index through the existing read pipeline.
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, UnifiedStore};
 use crate::utils::json::{parse_json, JsonValue};
+use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

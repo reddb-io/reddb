@@ -7,7 +7,7 @@
 //! Tests live in `tests.rs` and use a trivial `Vec<ScanRow>` adapter
 //! to exercise the planner deterministically.
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// One row delivered by [`ScanIterator::next_row`].
 ///

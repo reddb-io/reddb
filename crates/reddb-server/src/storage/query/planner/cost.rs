@@ -16,7 +16,7 @@ use crate::storage::query::ast::{
     CompareOp, FieldRef, Filter as AstFilter, GraphQuery, HybridQuery, JoinQuery, JoinType,
     PathQuery, QueryExpr, TableQuery, VectorQuery,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Cardinality estimate for a query result
 #[derive(Debug, Clone, Default)]
@@ -979,9 +979,9 @@ impl Default for CostEstimator {
 /// [`super::histogram::ColumnValue`]. Returns `None` for value types
 /// that histograms don't support (Bool, Null, Bytes, etc.) — callers
 /// fall through to the heuristic path.
-fn column_value_from(v: &crate::storage::schema::Value) -> Option<super::histogram::ColumnValue> {
+fn column_value_from(v: &reddb_types::Value) -> Option<super::histogram::ColumnValue> {
     use super::histogram::ColumnValue;
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     match v {
         Value::Integer(i) | Value::BigInt(i) => Some(ColumnValue::Int(*i)),
         Value::UnsignedInteger(u) => Some(ColumnValue::Int(*u as i64)),
@@ -1046,7 +1046,7 @@ mod tests {
     use super::*;
     use crate::storage::index::{IndexKind, IndexStats};
     use crate::storage::query::ast::{FieldRef, Projection};
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
 
     fn eq_filter(table: &str, column: &str, value: i64) -> AstFilter {
         AstFilter::Compare {
