@@ -174,6 +174,13 @@ mod serverless_support;
 pub mod tls;
 mod transport;
 
+/// Generate the command-by-transport authorization coverage artifact from the
+/// same discovered catalog used by HTTP dispatch.
+#[doc(hidden)]
+pub fn command_coverage_matrix() -> String {
+    route_catalog::render_command_coverage_matrix(routes::discovered_route_catalog())
+}
+
 use self::handlers_ai::*;
 use self::handlers_entity::*;
 use self::handlers_graph::*;
