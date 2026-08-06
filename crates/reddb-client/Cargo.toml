@@ -54,6 +54,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-t
 # RedWire handshake payloads + HTTP request/response shapes are
 # JSON-encoded.
 serde_json = "1"
+async-trait = "0.1"
 # Lightweight sync HTTP client for the `red_client` bin's
 # http(s) transport. Skips the platform native TLS in favour of
 # rustls, matching the rest of the workspace's TLS stack.
@@ -104,7 +105,6 @@ serde_json = "1"
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "server", "router"] }
 reddb-grpc-proto = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
-async-trait = "0.1"
 # Proptest exercises HealthAwareRouter (issue #171): random RTT
 # distributions + injected timeouts, asserts circuit-breaker
 # convergence and inverse-RTT weighted distribution.
