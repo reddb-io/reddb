@@ -16,11 +16,11 @@
 //!   auth.login         → POST /auth/login
 //!   auth.whoami        → GET  /auth/whoami
 
+use reddb_types::encoding::base64_encode;
 use reddb_wire::auth::bearer_authorization_value;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, ClientBuilder, Method, StatusCode};
 use serde_json::Value;
-use reddb_types::encoding::base64_encode;
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::{BulkInsertResult, InsertResult, JsonValue, KvWatchEvent, QueryResult};
@@ -407,8 +407,7 @@ async fn decode_text(response: reqwest::Response) -> Result<String> {
     if status.is_success() {
         return Ok(text);
     }
-    let body = serde_json::from_str::<Value>(&text)
-        .unwrap_or_else(|_| Value::String(text));
+    let body = serde_json::from_str::<Value>(&text).unwrap_or_else(|_| Value::String(text));
     Err(http_err(status, Some(body)))
 }
 
