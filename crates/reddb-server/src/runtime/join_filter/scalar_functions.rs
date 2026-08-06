@@ -271,7 +271,7 @@ fn evaluate_scalar_function_legacy(
             let Some(type_name) = col.strip_prefix("TYPE:") else {
                 return Some(Value::Null);
             };
-            let Some(target) = crate::storage::schema::types::DataType::from_sql_name(type_name)
+            let Some(target) = reddb_types::DataType::from_sql_name(type_name)
             else {
                 return Some(Value::Null);
             };
@@ -664,7 +664,7 @@ fn money_from_scalar_args(args: &[Projection], source: &UnifiedRecord) -> Option
         }
         _ => return Some(Value::Null),
     };
-    match crate::storage::schema::coerce::coerce(
+    match reddb_types::coerce::coerce(
         &input,
         crate::storage::schema::DataType::Money,
         None,
@@ -673,7 +673,7 @@ fn money_from_scalar_args(args: &[Projection], source: &UnifiedRecord) -> Option
         Err(_) if args.len() == 2 => {
             let lhs = money_arg_text(resolve_scalar_arg(args, 1, source)?)?;
             let rhs = money_arg_text(resolve_scalar_arg(args, 0, source)?)?;
-            crate::storage::schema::coerce::coerce(
+            reddb_types::coerce::coerce(
                 &format!("{} {}", lhs, rhs),
                 crate::storage::schema::DataType::Money,
                 None,
@@ -828,8 +828,8 @@ pub(super) fn value_as_number(v: &Value) -> Option<NumOperand> {
 /// schema coercion layer) and falls back to `schema::coerce::coerce`
 /// on the value's `display_string()` for everything else — that reuses
 /// the battle-tested input validators we already have for INSERT.
-fn cast_value_to(src: &Value, target: crate::storage::schema::types::DataType) -> Value {
-    use crate::storage::schema::types::DataType as DT;
+fn cast_value_to(src: &Value, target: reddb_types::DataType) -> Value {
+    use reddb_types::types::DataType as DT;
     match (src, target) {
         (v, DT::Text) => Value::text(v.display_string()),
         (Value::Integer(n), DT::Float) => Value::Float(*n as f64),
@@ -843,12 +843,12 @@ fn cast_value_to(src: &Value, target: crate::storage::schema::types::DataType) -
         (Value::Float(f), DT::UnsignedInteger) if *f >= 0.0 => Value::UnsignedInteger(*f as u64),
         (Value::Boolean(b), DT::Integer) => Value::Integer(if *b { 1 } else { 0 }),
         (Value::Integer(n), DT::Boolean) => Value::Boolean(*n != 0),
-        (Value::Text(s), target) => match crate::storage::schema::coerce::coerce(s, target, None) {
+        (Value::Text(s), target) => match reddb_types::coerce::coerce(s, target, None) {
             Ok(v) => v,
             Err(_) => Value::Null,
         },
         (v, target) => {
-            match crate::storage::schema::coerce::coerce(&v.display_string(), target, None) {
+            match reddb_types::coerce::coerce(&v.display_string(), target, None) {
                 Ok(v) => v,
                 Err(_) => Value::Null,
             }
