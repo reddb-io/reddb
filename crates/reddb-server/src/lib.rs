@@ -35,6 +35,7 @@ pub mod document_body;
 pub mod document_migration;
 pub mod ec;
 pub mod engine;
+pub(crate) mod entity_render;
 pub mod geo;
 pub mod grpc;
 pub mod health;

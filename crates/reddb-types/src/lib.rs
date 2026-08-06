@@ -57,7 +57,7 @@ pub mod types;
 pub mod utils;
 pub mod value_codec;
 pub mod value_compare;
-mod value_json;
+pub mod value_json;
 pub mod vector_metadata;
 
 pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};

@@ -18,7 +18,6 @@ use crate::application::ports::{
     RuntimeEntityPort,
 };
 use crate::application::ttl_payload::has_internal_ttl_metadata;
-use crate::presentation::entity_json::storage_value_to_json;
 use crate::runtime::mvcc::current_connection_id;
 use crate::storage::query::ast::{BinOp, Expr, FieldRef, ReturningItem, UpdateTarget};
 use crate::storage::query::sql_lowering::{
