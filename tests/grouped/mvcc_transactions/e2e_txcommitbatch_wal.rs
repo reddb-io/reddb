@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use reddb::api::DurabilityMode;
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
-use reddb::storage::schema::Value;
 use reddb::storage::wal::{WalReader, WalRecord};
 use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+use reddb_types::Value;
 
 fn db_open(db: &support::TempDbFile) -> RedDBRuntime {
     RedDBRuntime::with_options(

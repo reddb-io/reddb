@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::super::{EntityData, EntityId, EntityKind, MetadataValue, UnifiedEntity, UnifiedStore};
 use super::error::DevXError;
 use super::helpers::cosine_similarity;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 // ============================================================================
 // Query Builder

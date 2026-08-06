@@ -39,8 +39,8 @@ use std::time::Duration;
 use super::support::env_lock;
 
 use reddb::application::SearchContextInput;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 
 use super::support::PersistentRuntime;
 

@@ -7,8 +7,8 @@ use reddb::runtime::mvcc::{
     clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
     set_current_tenant,
 };
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn cleanup_scope() {
     clear_current_auth_identity();

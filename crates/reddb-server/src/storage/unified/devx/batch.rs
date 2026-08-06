@@ -11,8 +11,8 @@ use super::super::{
 };
 use super::error::DevXError;
 use super::{run_preprocessors, SharedPreprocessors};
-use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, VectorRef};
+use reddb_types::Value;
 
 /// Batch operations for high-performance bulk inserts
 pub struct BatchBuilder {

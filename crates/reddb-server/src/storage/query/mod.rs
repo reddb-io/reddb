@@ -74,7 +74,6 @@ pub mod user_params;
 pub(crate) mod value_compare;
 
 // Re-export common types
-pub use crate::storage::schema::{SqlTypeName, TypeModifier};
 pub use analyzer::{
     analyze_create_table, resolve_declared_data_type, resolve_sql_type_name, AnalysisError,
     AnalyzedColumnDef, AnalyzedCreateTableQuery,
@@ -121,6 +120,7 @@ pub use rag::{
     ChunkSource, ContextChunk, EntityType, MultiSourceRetriever, QueryAnalysis, QueryIntent,
     RagConfig, RagEngine, RetrievalContext, RetrievalStrategy, SimilarEntity,
 };
+pub use reddb_types::{SqlTypeName, TypeModifier};
 pub use similarity::{SimilarityQuery, SimilarityResult};
 pub use sort::{Direction, NullsOrder, OrderBy, QueryLimits, SortKey};
 pub use sql::{parse_frontend, FrontendStatement, SqlCommand, SqlStatement};

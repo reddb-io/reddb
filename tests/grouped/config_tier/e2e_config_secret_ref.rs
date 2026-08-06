@@ -4,9 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
-use reddb::storage::schema::Value;
 use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]

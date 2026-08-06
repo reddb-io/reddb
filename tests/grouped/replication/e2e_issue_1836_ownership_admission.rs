@@ -13,8 +13,8 @@ use reddb::cluster::{
 use reddb::replication::{
     CatalogVersionHint, SignalPlane, SignalPlaneMessage, SimulatedSignalPlane,
 };
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime, ReplicationConfig};
+use reddb_types::Value;
 
 #[test]
 fn deposed_primary_write_is_rejected_below_routing() {

@@ -40,9 +40,9 @@ fn read_one_message_id(rt: &RedDBRuntime, sql: &str) -> Option<String> {
 
 fn text_value(record: &reddb_server::storage::query::UnifiedRecord, column: &str) -> String {
     match record.get(column) {
-        Some(reddb_server::storage::schema::Value::Text(value)) => value.to_string(),
-        Some(reddb_server::storage::schema::Value::UnsignedInteger(value)) => value.to_string(),
-        Some(reddb_server::storage::schema::Value::Integer(value)) => value.to_string(),
+        Some(reddb_types::Value::Text(value)) => value.to_string(),
+        Some(reddb_types::Value::UnsignedInteger(value)) => value.to_string(),
+        Some(reddb_types::Value::Integer(value)) => value.to_string(),
         other => panic!("expected text-like value for {column}, got {other:?}"),
     }
 }
@@ -64,9 +64,9 @@ fn delivered_message_id(rt: &RedDBRuntime, queue: &str, group: &str) -> String {
         .get("message_id")
         .unwrap_or_else(|| panic!("delivered record missing 'message_id': {record:?}"));
     match value {
-        reddb_server::storage::schema::Value::Text(s) => s.to_string(),
-        reddb_server::storage::schema::Value::UnsignedInteger(v) => v.to_string(),
-        reddb_server::storage::schema::Value::Integer(v) => v.to_string(),
+        reddb_types::Value::Text(s) => s.to_string(),
+        reddb_types::Value::UnsignedInteger(v) => v.to_string(),
+        reddb_types::Value::Integer(v) => v.to_string(),
         other => panic!("unexpected message_id value: {other:?}"),
     }
 }

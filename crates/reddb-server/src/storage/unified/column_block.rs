@@ -403,7 +403,7 @@ enum NumKind {
 }
 
 impl NumKind {
-    /// Map a [`DataType::to_byte`](crate::storage::schema::types::DataType::to_byte)
+    /// Map a [`DataType::to_byte`](reddb_types::DataType::to_byte)
     /// tag to a fixed-width numeric kind, or `None` for variable-width /
     /// non-numeric columns (which get no granule index in v1).
     fn from_logical(logical_type: u8) -> Option<NumKind> {

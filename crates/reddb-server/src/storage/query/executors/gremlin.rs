@@ -828,16 +828,14 @@ impl GremlinExecutor {
                 }
                 TraverserElement::Value(v) => match v {
                     GremlinValue::String(s) => {
-                        record.set("_value", crate::storage::schema::Value::text(s.clone()))
+                        record.set("_value", reddb_types::Value::text(s.clone()))
                     }
                     GremlinValue::Integer(i) => {
-                        record.set("_value", crate::storage::schema::Value::Integer(*i))
+                        record.set("_value", reddb_types::Value::Integer(*i))
                     }
-                    GremlinValue::Float(f) => {
-                        record.set("_value", crate::storage::schema::Value::Float(*f))
-                    }
+                    GremlinValue::Float(f) => record.set("_value", reddb_types::Value::Float(*f)),
                     GremlinValue::Boolean(b) => {
-                        record.set("_value", crate::storage::schema::Value::Boolean(*b))
+                        record.set("_value", reddb_types::Value::Boolean(*b))
                     }
                     GremlinValue::Predicate(_) => {}
                 },

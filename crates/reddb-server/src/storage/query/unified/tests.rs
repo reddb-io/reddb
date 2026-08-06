@@ -2,7 +2,7 @@ use super::*;
 use crate::storage::engine::{GraphStore, GraphTableIndex, StoredNode};
 use crate::storage::query::ast::*;
 use crate::storage::query::test_support::{add_node_or_panic, unified_query_graph};
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 

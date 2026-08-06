@@ -183,7 +183,7 @@ fn replica_hypertable_expiry_sweep_is_read_only_noop() {
         .expect("replica sweep scalar");
     assert_eq!(
         sweep.result.records[0].get("dropped"),
-        Some(&reddb::storage::schema::Value::Integer(0)),
+        Some(&reddb_types::Value::Integer(0)),
         "replica sweep scalar must report no local drops"
     );
 
@@ -191,7 +191,7 @@ fn replica_hypertable_expiry_sweep_is_read_only_noop() {
         .execute_query("SELECT HYPERTABLE_SHOW_CHUNKS('metrics') AS chunks")
         .expect("show chunks");
     let chunk_count = match chunks.result.records[0].get("chunks") {
-        Some(reddb::storage::schema::Value::Array(items)) => items.len(),
+        Some(reddb_types::Value::Array(items)) => items.len(),
         other => panic!("expected chunks array, got {other:?}"),
     };
     assert_eq!(

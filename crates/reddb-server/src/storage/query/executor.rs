@@ -6,7 +6,7 @@
 use super::filter::Filter;
 use super::filter_compiled::CompiledFilter;
 use super::sort::{OrderBy, QueryLimits};
-use crate::storage::schema::{Row, Value};
+use reddb_types::{Row, Value};
 use std::collections::HashMap;
 
 /// Build a `column name → slot index` map from the executor's

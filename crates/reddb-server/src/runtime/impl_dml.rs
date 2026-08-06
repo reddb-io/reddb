@@ -2207,10 +2207,10 @@ impl RedDBRuntime {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::schema::Value;
     use crate::storage::wal::{WalReader, WalRecord};
     use crate::storage::{DeployProfile, StoragePackaging, StorageProfileSelection};
     use crate::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
     use std::path::Path;
 
     fn persistent_operational_options(path: &Path) -> RedDBOptions {

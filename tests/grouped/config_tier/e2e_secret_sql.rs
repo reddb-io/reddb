@@ -7,9 +7,9 @@ use reddb::auth::enforcement_mode::PolicyEnforcementMode;
 use reddb::auth::vault::Vault;
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
-use reddb::storage::schema::Value;
 use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 use support::TempDbFile;
 

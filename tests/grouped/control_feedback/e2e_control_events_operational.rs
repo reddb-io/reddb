@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::runtime::control_events::CONTROL_EVENTS_COLLECTION;
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
-use reddb::storage::schema::Value;
 use reddb::storage::EntityData;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]

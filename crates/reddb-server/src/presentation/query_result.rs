@@ -25,8 +25,8 @@ use crate::grpc::proto::QueryReply;
 use crate::json::{Map, Value as JsonValue};
 use crate::runtime::RuntimeQueryResult;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::Value;
 use reddb_types::encoding::base64_encode;
+use reddb_types::Value;
 use reddb_wire::redwire::operations::encode_query_result_summary_payload;
 use reddb_wire::redwire::{
     build_dispatch_reply_frame, build_error_frame_lossy, Frame, MessageKind,
@@ -630,7 +630,7 @@ mod tests {
     use crate::runtime::RuntimeQueryResult;
     use crate::storage::query::modes::QueryMode;
     use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use reddb_wire::redwire::MessageKind;
 
     const UUID_BYTES: [u8; 16] = [

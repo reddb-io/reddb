@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::hnsw::NodeId;
-use crate::storage::schema::{CanonicalKey, CanonicalKeyFamily};
+use reddb_types::{CanonicalKey, CanonicalKeyFamily};
 
 // `MetadataValue` / `MetadataEntry` / `MetadataFilter` re-homed to the neutral
 // keystone crate (ADR 0053, RQL Phase 2 S4b) so the canonical SQL AST

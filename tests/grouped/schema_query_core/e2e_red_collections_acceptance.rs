@@ -12,9 +12,9 @@ use std::time::Duration;
 use reddb::runtime::within_clause::{FieldOverride, ScopeOverride};
 use reddb::server::RedDBServer;
 use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value;
 use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 const COLLECTION_COLUMNS: [&str; 15] = [
     "name",

@@ -8,8 +8,8 @@
 //! first event per actor always starts a session.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBRuntime};
+use reddb_types::Value;
 use std::collections::HashSet;
 
 fn session_id(row: &reddb::storage::query::unified::UnifiedRecord) -> String {

@@ -19,13 +19,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::json::{Map as JsonMap, Value as JsonValue};
-use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, VectorRef};
 use crate::storage::unified::{
     entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, RowData, UnifiedEntity},
     Metadata, MetadataValue, UnifiedStore,
 };
 use crate::{RedDBError, RedDBResult};
+use reddb_types::Value;
 
 /// One row queued for insertion, already schema-normalised and
 /// validated by the application layer.

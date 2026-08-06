@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use prost::Message;
 use reddb::server::RedDBServer;
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use support::{checkpoint_and_reopen, PersistentDbPath};
 
 #[derive(Clone, PartialEq, Message)]

@@ -20,8 +20,8 @@ use crate::auth::{Role, User, UserId};
 use crate::runtime::RedDBRuntime;
 use crate::serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::service_cli::BootstrapConfig;
-use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+use reddb_types::Value;
 
 pub const MANIFEST_ENV: &str = "REDDB_BOOTSTRAP_MANIFEST";
 const REGISTRY_STATE_KEY: &str = "system.bootstrap.manifest.registry_entries";
@@ -1048,8 +1048,8 @@ mod tests {
     use super::{apply_manifest_file, BootstrapManifest};
     use crate::auth::store::AuthStore;
     use crate::auth::AuthConfig;
-    use crate::storage::schema::Value;
     use crate::RedDBRuntime;
+    use reddb_types::Value;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 

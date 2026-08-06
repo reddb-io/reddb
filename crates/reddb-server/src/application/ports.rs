@@ -143,7 +143,7 @@ pub trait RuntimeEntityPort {
         &self,
         collection: String,
         column_names: std::sync::Arc<Vec<String>>,
-        rows: Vec<Vec<crate::storage::schema::Value>>,
+        rows: Vec<Vec<reddb_types::Value>>,
     ) -> RedDBResult<usize>;
     /// Columnar bulk insert with full contract validation — wire
     /// handler shape (one `Arc<Vec<String>>` schema shared across
@@ -158,7 +158,7 @@ pub trait RuntimeEntityPort {
         &self,
         collection: String,
         column_names: std::sync::Arc<Vec<String>>,
-        rows: Vec<Vec<crate::storage::schema::Value>>,
+        rows: Vec<Vec<reddb_types::Value>>,
     ) -> RedDBResult<usize>;
     /// Columnar bulk insert that also returns assigned entity ids.
     /// Kept separate from [`Self::create_rows_batch_columnar`] so bulk wire
@@ -167,7 +167,7 @@ pub trait RuntimeEntityPort {
         &self,
         collection: String,
         column_names: std::sync::Arc<Vec<String>>,
-        rows: Vec<Vec<crate::storage::schema::Value>>,
+        rows: Vec<Vec<reddb_types::Value>>,
     ) -> RedDBResult<Vec<CreateEntityOutput>>;
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput>;
@@ -182,7 +182,7 @@ pub trait RuntimeEntityPort {
         &self,
         collection: &str,
         key: &str,
-    ) -> RedDBResult<Option<(crate::storage::schema::Value, crate::storage::EntityId)>>;
+    ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>>;
     fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool>;
     fn patch_entity(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput>;
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput>;
@@ -603,7 +603,7 @@ pub trait RuntimeEntityPortCtx: RuntimeEntityPort {
         ctx: &crate::application::OperationContext,
         collection: &str,
         key: &str,
-    ) -> RedDBResult<Option<(crate::storage::schema::Value, crate::storage::EntityId)>> {
+    ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
         let _ = ctx;
         self.get_kv(collection, key)
     }

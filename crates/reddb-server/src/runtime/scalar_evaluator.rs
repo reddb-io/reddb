@@ -43,12 +43,12 @@
 
 use crate::storage::query::ast::{BinOp, CompareOp, Expr, FieldRef, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::cast_catalog::{find_cast, CastContext, CastEntry};
-use crate::storage::schema::coercion_spine;
-use crate::storage::schema::function_catalog::{self, FunctionEntry};
-use crate::storage::schema::operator_catalog::{self, OperatorEntry, OperatorKind};
-use crate::storage::schema::types::DataType;
-use crate::storage::schema::Value;
+use reddb_types::cast_catalog::{find_cast, CastContext, CastEntry};
+use reddb_types::coercion_spine;
+use reddb_types::function_catalog::{self, FunctionEntry};
+use reddb_types::operator_catalog::{self, OperatorEntry, OperatorKind};
+use reddb_types::types::DataType;
+use reddb_types::Value;
 
 use super::join_filter::{compare_runtime_values, resolve_runtime_field};
 
@@ -731,7 +731,7 @@ fn value_as_number(v: &Value) -> Option<(f64, bool)> {
         Value::Integer(n) | Value::BigInt(n) => Some((*n as f64, false)),
         Value::UnsignedInteger(n) => Some((*n as f64, false)),
         Value::Float(f) => Some((*f, true)),
-        Value::Decimal(d) => Some((crate::storage::schema::decimal_to_f64(*d), true)),
+        Value::Decimal(d) => Some((reddb_types::types::decimal_to_f64(*d), true)),
         Value::Text(s) => s
             .parse::<i64>()
             .map(|n| (n as f64, false))
@@ -756,11 +756,8 @@ fn apply_cast(src: &Value, target: DataType) -> Value {
         (Value::Float(f), DT::UnsignedInteger) if *f >= 0.0 => Value::UnsignedInteger(*f as u64),
         (Value::Boolean(b), DT::Integer) => Value::Integer(if *b { 1 } else { 0 }),
         (Value::Integer(n), DT::Boolean) => Value::Boolean(*n != 0),
-        (Value::Text(s), t) => {
-            crate::storage::schema::coerce::coerce(s, t, None).unwrap_or(Value::Null)
-        }
-        (v, t) => crate::storage::schema::coerce::coerce(&v.display_string(), t, None)
-            .unwrap_or(Value::Null),
+        (Value::Text(s), t) => reddb_types::coerce::coerce(s, t, None).unwrap_or(Value::Null),
+        (v, t) => reddb_types::coerce::coerce(&v.display_string(), t, None).unwrap_or(Value::Null),
     }
 }
 

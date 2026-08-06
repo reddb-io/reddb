@@ -1907,7 +1907,7 @@ mod tests {
             .records
             .iter()
             .filter_map(|record| match record.get("name") {
-                Some(crate::storage::schema::Value::Text(s)) => Some(s.to_string()),
+                Some(reddb_types::Value::Text(s)) => Some(s.to_string()),
                 _ => None,
             })
             .collect();

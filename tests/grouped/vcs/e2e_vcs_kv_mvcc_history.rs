@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use reddb::application::{Author, CreateCommitInput, VcsUseCases};
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn rt() -> Arc<RedDBRuntime> {
     Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"))

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use reddb_server::api::RedDBOptions;
 use reddb_server::runtime::RedDBRuntime;
 use reddb_server::storage::query::unified::UnifiedRecord;
-use reddb_server::storage::schema::Value as SchemaValue;
+use reddb_types::Value as SchemaValue;
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::params::IntoParams;

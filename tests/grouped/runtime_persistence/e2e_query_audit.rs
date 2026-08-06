@@ -7,9 +7,9 @@ use reddb::runtime::mvcc::{
     set_current_tenant,
 };
 use reddb::runtime::query_audit::{QueryAuditConfig, QueryAuditRule, QUERY_AUDIT_COLLECTION};
-use reddb::storage::schema::Value;
 use reddb::storage::EntityData;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn rows(rt: &RedDBRuntime, collection: &str) -> Vec<HashMap<String, Value>> {
     let Some(manager) = rt.db().store().get_collection(collection) else {

@@ -1,7 +1,7 @@
 //! Runtime contract for nested query composition across SQL, graph TVFs,
 //! joins, and JSON literals.
 
-use reddb::storage::schema::Value;
+use reddb_types::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn runtime() -> RedDBRuntime {

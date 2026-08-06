@@ -7,11 +7,11 @@ use reddb::application::{
     CreateVectorInput, ExecuteQueryInput, ExplainQueryInput, SearchSimilarInput,
 };
 use reddb::json::Value as JsonValue;
-use reddb::storage::schema::Value;
 use reddb::{
     shm_path_for, ArtifactState, EntityUseCases, NativeUseCases, QueryUseCases, RedDBOptions,
     RedDBRuntime, StorageDeployPreset,
 };
+use reddb_types::Value;
 use std::fs;
 
 use super::support::PersistentRuntime;

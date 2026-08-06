@@ -337,7 +337,7 @@ impl UnifiedStore {
                     columns: Vec::new(),
                     named: Some(
                         [
-                            ("key".to_string(), crate::storage::schema::Value::text(key)),
+                            ("key".to_string(), reddb_types::Value::text(key)),
                             ("value".to_string(), value),
                         ]
                         .into_iter()
@@ -354,7 +354,7 @@ impl UnifiedStore {
     }
 
     /// Read a single config value from `red_config` by dot-notation key.
-    pub fn get_config(&self, key: &str) -> Option<crate::storage::schema::Value> {
+    pub fn get_config(&self, key: &str) -> Option<reddb_types::Value> {
         let manager = self.get_collection("red_config")?;
         for entity in manager.query_all(|_| true) {
             if let EntityData::Row(row) = &entity.data {
@@ -362,7 +362,7 @@ impl UnifiedStore {
                     let key_matches = named
                         .get("key")
                         .and_then(|v| match v {
-                            crate::storage::schema::Value::Text(s) => Some(s.as_ref() == key),
+                            reddb_types::Value::Text(s) => Some(s.as_ref() == key),
                             _ => None,
                         })
                         .unwrap_or(false);
@@ -1720,9 +1720,9 @@ impl UnifiedStore {
 fn flatten_config_json(
     prefix: &str,
     value: &crate::serde_json::Value,
-    out: &mut Vec<(String, crate::storage::schema::Value)>,
+    out: &mut Vec<(String, reddb_types::Value)>,
 ) {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     match value {
         crate::serde_json::Value::Object(map) => {
             for (k, v) in map {

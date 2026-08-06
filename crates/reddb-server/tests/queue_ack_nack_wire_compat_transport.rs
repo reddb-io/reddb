@@ -32,8 +32,8 @@
 
 use reddb_server::runtime::impl_queue::TUPLE_DEPRECATION_EMITS;
 use reddb_server::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Hand out a unique connection id per test so each test owns its

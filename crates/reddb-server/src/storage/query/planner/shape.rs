@@ -7,7 +7,7 @@ use crate::storage::query::ast::{
 use crate::storage::query::sql_lowering::{
     expr_to_filter, filter_to_expr, projection_from_literal, PARAMETER_PROJECTION_PREFIX,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 const PROJECTION_PARAM_PREFIX: &str = "__shape_projection_param__:";
 const STRING_PARAM_PREFIX: &str = "__shape_string_param__:";

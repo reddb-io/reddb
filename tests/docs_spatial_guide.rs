@@ -18,8 +18,8 @@
 //! readers but not executed.
 
 use reddb::runtime::RuntimeQueryResult;
-use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 use std::fs;
 use std::path::PathBuf;
 

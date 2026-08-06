@@ -39,11 +39,11 @@ use crate::runtime::{
     RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult,
     RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
 };
-use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::dsl::{MatchComponents, QueryResult as DslQueryResult};
 use crate::storage::unified::{MetadataValue, RefTarget, SparseVector};
 use crate::storage::{CrossRef, EntityData, EntityId, EntityKind, SimilarResult, UnifiedEntity};
+use reddb_types::Value;
 
 fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
     crate::presentation::admin_json::analytics_job_json(job)

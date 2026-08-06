@@ -25,7 +25,7 @@
 
 use crate::physical::CollectionContract;
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// Drop expired rows from `records` in-place based on the
 /// collection contract's retention policy.

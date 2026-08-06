@@ -31,9 +31,9 @@ use std::path::{Path, PathBuf};
 
 use crate::application::{CreateDocumentInput, EntityUseCases};
 use crate::catalog::CollectionModel;
-use crate::storage::schema::Value;
 use crate::storage::EntityData;
 use crate::{RedDBError, RedDBOptions, RedDBResult, RedDBRuntime};
+use reddb_types::Value;
 
 /// The data file name inside a store directory. Matches the convention used by
 /// [`RedDBOptions::in_memory`], whose siblings (WAL, audit, snapshots) derive

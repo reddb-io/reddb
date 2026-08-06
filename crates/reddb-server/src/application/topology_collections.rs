@@ -36,9 +36,9 @@ use crate::api::{RedDBError, RedDBResult};
 use crate::catalog::AnalyticsOutput;
 use crate::replication::topology_advertiser::DEFAULT_REPLICA_TIMEOUT_MS;
 use crate::storage::engine::graph_algorithms::{self, Weight};
-use crate::storage::schema::Value;
 use crate::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use crate::RedDBRuntime;
+use reddb_types::Value;
 
 /// Built-in graph collection name. Dotted on purpose so it reads as a
 /// namespaced system object; the `red.` prefix routes creation through

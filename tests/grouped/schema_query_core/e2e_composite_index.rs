@@ -73,7 +73,7 @@ fn composite_index_matches_and_eq_gt() {
         let city = rec
             .get("city")
             .and_then(|v| {
-                if let reddb::storage::schema::Value::Text(s) = v {
+                if let reddb_types::Value::Text(s) = v {
                     Some(s.to_string())
                 } else {
                     None
@@ -83,7 +83,7 @@ fn composite_index_matches_and_eq_gt() {
         let age = rec
             .get("age")
             .and_then(|v| match v {
-                reddb::storage::schema::Value::Integer(n) => Some(*n),
+                reddb_types::Value::Integer(n) => Some(*n),
                 _ => None,
             })
             .unwrap_or(0);

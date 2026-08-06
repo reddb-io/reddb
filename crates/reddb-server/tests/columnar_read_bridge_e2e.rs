@@ -15,8 +15,8 @@
 //!   3. No data is lost or stranded across the upgrade.
 
 use reddb_server::catalog::AnalyticalStorageConfig;
-use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+use reddb_types::Value;
 
 /// 1-hour chunk interval, in nanoseconds — matches `CHUNK_INTERVAL '1h'`.
 const HOUR_NS: u64 = 3_600 * 1_000_000_000;

@@ -17,7 +17,7 @@ use reddb_server::storage::query::parser;
 use reddb_server::storage::query::planner::shape::{
     bind_parameterized_query, parameterize_query_expr,
 };
-use reddb_server::storage::schema::Value;
+use reddb_types::Value;
 
 /// Walk a `TableQuery` to find the WHERE expression, regardless of
 /// whether the parser emitted the legacy `filter` slot or the new

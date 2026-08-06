@@ -13,7 +13,7 @@ use crate::storage::query::ast::{
 use crate::storage::query::sql_lowering::{
     effective_graph_filter, effective_graph_projections, effective_path_filter,
 };
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 pub type EdgeProperties = HashMap<(String, String, String), HashMap<String, Value>>;
 

@@ -17,9 +17,9 @@
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use reddb_server::runtime::blockchain_kind::canonical_payload;
-use reddb_server::storage::schema::Value;
 use reddb_server::storage::signed_writes::{reverify_row, SIGNATURE_LEN, SIGNER_PUBKEY_LEN};
 use reddb_server::{RedDBError, RedDBOptions, RedDBRuntime, RuntimeQueryResult};
+use reddb_types::Value;
 use std::sync::Arc;
 
 fn rt() -> RedDBRuntime {

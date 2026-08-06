@@ -33,9 +33,9 @@ use super::chunk::{
 };
 use super::retention::parse_duration_ns;
 use crate::storage::engine::PageLocation;
-use crate::storage::schema::types::DataType;
 use crate::storage::unified::column_block::{write_column_block, ColumnBlockError, ColumnInput};
 use crate::storage::unified::segment_codec::ColumnSemantics;
+use reddb_types::types::DataType;
 
 /// Spec declared by `CREATE HYPERTABLE`.
 #[derive(Debug, Clone)]

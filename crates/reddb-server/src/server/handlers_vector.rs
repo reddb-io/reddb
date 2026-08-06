@@ -2,8 +2,8 @@ use super::transport::{json_response, HttpResponse};
 use crate::json::{from_slice as json_from_slice, Map, Value as JsonValue};
 use crate::runtime::RedDBRuntime;
 use crate::storage::engine::clustering;
-use crate::storage::schema::Value;
 use crate::storage::unified::{MetadataValue, RefType};
+use reddb_types::Value;
 
 struct ClusterVectorItem {
     entity_id: u64,

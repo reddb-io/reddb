@@ -17,8 +17,8 @@
 #[path = "../../support/mod.rs"]
 mod support;
 
-use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb_types::Value;
 use support::PersistentDbPath;
 
 /// One projected path row: (hop, node_id, cumulative_weight).

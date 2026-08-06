@@ -19,9 +19,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use reddb::document_migration::migrate_store_to_binary_body;
-use reddb::storage::schema::Value;
 use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 const DATA_FILE: &str = "db.rdb";
 

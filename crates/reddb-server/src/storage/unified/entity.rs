@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 
 /// The first entity-id handed to user-inserted data. Ids `1..FIRST_USER_ENTITY_ID`
 /// are reserved for the internal collection-descriptor and config-default entities

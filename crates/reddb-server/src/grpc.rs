@@ -38,10 +38,10 @@ use crate::runtime::{
     RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult,
     RuntimeQueryResult, RuntimeQueryWeights, RuntimeStats, ScanPage,
 };
-use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef};
 use crate::storage::unified::{Metadata, MetadataValue};
 use crate::storage::{EntityData, EntityId, UnifiedEntity};
+use reddb_types::Value;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
@@ -961,7 +961,7 @@ mod grpc_ask_query_reply_tests {
     use super::*;
     use crate::storage::query::modes::QueryMode;
     use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-    use crate::storage::schema::Value as SchemaValue;
+    use reddb_types::Value as SchemaValue;
 
     fn ask_runtime_result() -> RuntimeQueryResult {
         let mut result = UnifiedResult::with_columns(vec![

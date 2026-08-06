@@ -25,8 +25,8 @@ use crate::application::ports::RuntimeEntityPort;
 use crate::json::{self as json, Value};
 use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::unified::UnifiedRecord;
-use crate::storage::schema::Value as SchemaValue;
 use reddb_grpc_proto::RedDBClient;
+use reddb_types::Value as SchemaValue;
 
 /// Which backend the stdio loop is wrapping.
 ///
@@ -774,7 +774,7 @@ fn dispatch_method(
 
         "execute_prepared" => {
             use crate::storage::query::planner::shape::bind_parameterized_query;
-            use crate::storage::schema::Value as SV;
+            use reddb_types::Value as SV;
 
             let id = params
                 .get("prepared_id")
