@@ -338,7 +338,7 @@ pub(crate) fn unified_result_json_string_with_records(
     capabilities: &Option<Vec<String>>,
 ) -> String {
     // Fast path: write JSON directly to string buffer (no intermediate JsonValue tree)
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     use std::fmt::Write;
 
     let selection_scope = if entity_types.is_none() && capabilities.is_none() {
@@ -422,7 +422,7 @@ pub fn write_json_string(buf: &mut String, s: &str) {
 /// Write a storage Value as JSON to a buffer (no intermediate JsonValue).
 #[inline]
 pub fn write_value_json(buf: &mut String, value: &crate::storage::schema::Value) {
-    use crate::storage::schema::Value;
+    use reddb_types::Value;
     match value {
         Value::Null => buf.push_str("null"),
         Value::Boolean(b) => buf.push_str(if *b { "true" } else { "false" }),
