@@ -3,7 +3,7 @@ use crate::json::{from_slice as json_from_slice, Map, Value as JsonValue};
 use crate::log::id::LogId;
 use crate::log::store::{LogCollection, LogCollectionConfig, LogRetention};
 use crate::runtime::RedDBRuntime;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
