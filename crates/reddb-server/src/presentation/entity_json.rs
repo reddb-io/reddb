@@ -5,7 +5,7 @@ use crate::json::{
     from_slice as json_from_slice, to_string as json_to_string, Map, Value as JsonValue,
 };
 use crate::runtime::ScanPage;
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::{CrossRef, EntityData, EntityKind, UnifiedEntity};
 
 const MAX_JSON_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
