@@ -2,7 +2,7 @@
 //!
 //! Compiled only when the `embedded` Cargo feature is enabled (default).
 //! When `embedded` is off, this module does not exist and the
-//! [`crate::Reddb`] enum will refuse to construct an embedded variant
+//! [`crate::Reddb`] facade will refuse to construct an embedded adapter
 //! at runtime with a clear `FEATURE_DISABLED` error.
 
 use std::path::PathBuf;
