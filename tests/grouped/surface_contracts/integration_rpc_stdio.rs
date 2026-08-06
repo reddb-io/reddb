@@ -242,6 +242,34 @@ fn question_params_cover_select_insert_update_delete_over_stdio() {
 }
 
 #[test]
+fn ddl_invalidates_stdio_prepared_statements() {
+    let mut s = StdioSession::spawn();
+    let prepared = s.send(
+        r#"{"jsonrpc":"2.0","id":1,"method":"prepare","params":{"sql":"SELECT 1 AS value"}}"#,
+    );
+    let prepared_id = serde_json::from_str::<Value>(&prepared)
+        .expect("prepare response json")
+        .get("result")
+        .and_then(|result| result.get("prepared_id"))
+        .and_then(Value::as_u64)
+        .expect("prepared response includes id");
+
+    let ddl = s.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"CREATE TABLE stdio_epoch_guard (id INTEGER)"}}"#,
+    );
+    assert!(!ddl.contains("\"error\""), "got: {ddl}");
+
+    let execute = s.send(&format!(
+        r#"{{"jsonrpc":"2.0","id":3,"method":"execute_prepared","params":{{"prepared_id":{prepared_id},"binds":[1]}}}}"#
+    ));
+    assert!(
+        execute.contains("prepared_needs_replan"),
+        "DDL must invalidate the prepared statement: {execute}"
+    );
+    s.close();
+}
+
+#[test]
 fn bulk_insert_returns_ordered_ids_that_round_trip_with_get() {
     let mut s = StdioSession::spawn();
     let r1 = s.send(
