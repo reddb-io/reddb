@@ -1587,7 +1587,7 @@ impl UnifiedStore {
     /// Scan every collection under an explicit MVCC snapshot.
     pub fn scan<F>(
         &self,
-        snapshot: &crate::runtime::impl_core::SnapshotContext,
+        snapshot: Option<&crate::runtime::impl_core::SnapshotContext>,
         filter: F,
     ) -> Vec<(String, UnifiedEntity)>
     where

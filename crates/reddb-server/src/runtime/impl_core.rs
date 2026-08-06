@@ -72,8 +72,8 @@ pub use super::execution_context::{
 pub(crate) use super::execution_context::{
     config_read_permitted, current_auth_identity, current_config_value, current_kv_value,
     current_role_projected, current_scope_override, current_secret_value,
-    current_snapshot, current_snapshot_requires_index_fallback, current_user_projected,
-    has_scope_override_active, kv_read_permitted, parse_set_local_tenant, update_current_config_value,
+    current_snapshot_requires_index_fallback, current_user_projected, has_scope_override_active,
+    kv_read_permitted, parse_set_local_tenant, update_current_config_value,
     update_current_kv_value, update_current_secret_value, xids_visible_under_current_snapshot,
     ConfigSnapshotGuard, CurrentSnapshotGuard, KvStoreGuard, ScopeOverrideGuard, SecretStoreGuard,
     TxLocalTenantGuard,
