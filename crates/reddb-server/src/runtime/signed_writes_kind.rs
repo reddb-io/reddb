@@ -16,7 +16,7 @@
 //!    signed-writes reserved columns stripped — same encoding the
 //!    blockchain hash binds, so no new on-the-wire spec is introduced.
 
-use crate::storage::schema::Value;
+use reddb_types::Value;
 use crate::storage::signed_writes::{
     verify_insert, InsertSignatureFields, SignedWriteError, SignerHistoryAction,
     SignerHistoryEntry, SignerRegistry, RESERVED_SIGNATURE_COL, RESERVED_SIGNER_PUBKEY_COL,
