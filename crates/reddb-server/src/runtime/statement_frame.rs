@@ -1590,21 +1590,22 @@ mod tests {
     /// Transport adapters may decode their wire-specific parameter value
     /// shapes, but SQL parsing/binding must stay behind the runtime's
     /// statement entrypoint. This pins the deeper seam introduced for
-    /// parameterized query execution: HTTP, JSON-RPC, PG wire, and gRPC all
-    /// call `RedDBRuntime::execute_query_with_params`, which installs a real
-    /// `StatementExecutionFrame` before dispatch.
+    /// parameterized query execution. HTTP, JSON-RPC, RedWire, and gRPC hand
+    /// a `QueryRequest` to the Request module; PG wire calls
+    /// `RedDBRuntime::execute_query_with_params` directly. Both paths install
+    /// a real `StatementExecutionFrame` before dispatch.
     ///
-    /// RedWire (issue #2139) reaches the same entrypoint one layer deeper:
-    /// it hands a `QueryRequest` to the Request module, and
-    /// `QueryRequestExecutor` calls `execute_query_with_params` on its
-    /// behalf. Its delegation target is the seam, so that is what is pinned
-    /// here — the "no binding in the adapter" half is unchanged for all.
+    /// The Request transports reach the runtime entrypoint one layer deeper:
+    /// `QueryRequestExecutor` calls `execute_query_with_params` on their
+    /// behalf. Their delegation target is the Request seam, so that is what
+    /// is pinned here — the "no binding in the adapter" half is unchanged
+    /// for all.
     #[test]
     fn parameterized_transport_adapters_delegate_binding_to_runtime() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let adapters = [
-            ("src/server/handlers_query.rs", "execute_query_with_params"),
-            ("src/rpc_stdio.rs", "execute_query_with_params"),
+            ("src/server/handlers_query.rs", "QueryRequestExecutor"),
+            ("src/rpc_stdio.rs", "QueryRequestExecutor"),
             ("src/wire/redwire/session.rs", "QueryRequestExecutor"),
             ("src/wire/postgres/server.rs", "execute_query_with_params"),
             ("src/grpc.rs", "QueryRequestExecutor"),
