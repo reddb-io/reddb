@@ -131,7 +131,7 @@ jobs:
             echo "FAIL: lint exited 0 against the fixture (it should catch every category)"
             exit 1
           fi
-          for cat in tracing+format header+format audit+format json+format tainted-unwrap header-from-str; do
+          for cat in tracing+format header+format audit+format json+format tainted-unwrap header-from-str transport-codec-import; do
             if ! printf '%s' "$out" | grep -qF "[$cat]"; then
               echo "FAIL: fixture is missing a violation for category [$cat]"
               exit 1

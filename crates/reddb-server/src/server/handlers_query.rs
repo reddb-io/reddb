@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::query_request::{PreparedRegistry, QueryRequest, QueryRequestExecutor};
 
 impl RedDBServer {
     pub(crate) fn handle_query(&self, body: Vec<u8>) -> HttpResponse {
@@ -15,55 +16,18 @@ impl RedDBServer {
         } = request;
         let stream_ask = is_stream_ask_query(&query);
 
-        let exec_result = match params {
-            Some(binds) => self.runtime.execute_query_with_params(&query, &binds),
-            None => self.query_use_cases().execute(ExecuteQueryInput { query }),
-        };
+        let prepared = PreparedRegistry::new();
+        let mut query_request = QueryRequest::sql(query, params.unwrap_or_default());
+        if let Some(commit_policy) = commit_policy {
+            query_request = query_request.with_commit_policy(commit_policy);
+        }
+        let exec_result =
+            QueryRequestExecutor::new(&self.runtime, &prepared).execute(query_request);
 
         match exec_result {
             Ok(result) => {
                 if stream_ask {
                     return ask_sse_response(&result);
-                }
-                // PLAN.md Phase 11.4 — when the operator picked a
-                // commit policy that requires replica acks (`ack_n`),
-                // block until the configured count of replicas have
-                // ack'd the write's LSN. Reads short-circuit
-                // (statement_type=="select"), so SELECT latency is
-                // unaffected. The helper itself is a no-op when
-                // policy is `Local` (the default) or when the
-                // statement isn't a mutation.
-                let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
-                if is_mutation {
-                    let post_lsn = self.runtime.cdc_current_lsn();
-                    if let Err(err) = self
-                        .runtime
-                        .enforce_commit_policy_for_request(post_lsn, commit_policy)
-                    {
-                        match err {
-                            crate::api::RedDBError::Validation {
-                                message,
-                                validation,
-                            } => {
-                                let mut object = crate::json::Map::new();
-                                object.insert("ok".to_string(), crate::json::Value::Bool(false));
-                                object.insert(
-                                    "error".to_string(),
-                                    crate::json_field::SerializedJsonField::tainted(&message),
-                                );
-                                object.insert("validation".to_string(), validation);
-                                return json_response(422, crate::json::Value::Object(object));
-                            }
-                            other => {
-                                // Only fired when RED_COMMIT_FAIL_ON_TIMEOUT=true
-                                // — operator opted into hard-blocking. 504
-                                // is the right code: the local write
-                                // succeeded, but the configured durability
-                                // contract didn't.
-                                return json_error(504, other.to_string());
-                            }
-                        }
-                    }
                 }
                 json_response(
                     200,
@@ -104,6 +68,9 @@ impl RedDBServer {
                     );
                     object.insert("validation".to_string(), validation.clone());
                     return json_response(422, crate::json::Value::Object(object));
+                }
+                if err.to_string().contains("commit policy timed out") {
+                    return json_error(504, err.to_string());
                 }
                 // Issue #769 — an aggregating executor blew its
                 // materialization ceiling. Emit a structured envelope so

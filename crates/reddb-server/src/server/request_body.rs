@@ -72,17 +72,19 @@ fn parse_commit_policy_field(
 }
 
 /// Parse the optional `params` JSON array on a query request body.
-/// Reuses the same JSON→`Value` mapping as the embedded stdio binder
-/// so HTTP and stdio share one type-coercion contract.
-fn parse_params_field(json: &JsonValue) -> Result<Option<Vec<Value>>, HttpResponse> {
+/// JSON transports decode into the Request module's transport-neutral
+/// parameter vocabulary before execution.
+fn parse_params_field(
+    json: &JsonValue,
+) -> Result<Option<Vec<crate::runtime::query_request::ParamValue>>, HttpResponse> {
     match json.get("params") {
         None => Ok(None),
-        Some(JsonValue::Array(items)) => Ok(Some(
-            items
-                .iter()
-                .map(crate::rpc_stdio::json_value_to_schema_value)
-                .collect(),
-        )),
+        Some(JsonValue::Array(items)) => items
+            .iter()
+            .map(crate::runtime::query_request::ParamValue::decode_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+            .map_err(|message| json_error_code(400, "INVALID_PARAMS", message)),
         Some(_) => Err(json_error_code(
             400,
             "INVALID_PARAMS",

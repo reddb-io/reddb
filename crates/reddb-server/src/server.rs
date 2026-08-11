@@ -420,10 +420,9 @@ struct ParsedQueryRequest {
     entity_types: Option<Vec<String>>,
     capabilities: Option<Vec<String>>,
     commit_policy: Option<crate::replication::CommitPolicy>,
-    /// Optional positional `$N` bind parameters (#358). When `Some`, the
-    /// query handler runs the user_params binder before executing.
-    /// Absence preserves the legacy `query`-only behavior.
-    params: Option<Vec<Value>>,
+    /// Optional positional `$N` bind parameters (#358), decoded into the
+    /// Request module's transport-neutral vocabulary.
+    params: Option<Vec<crate::runtime::query_request::ParamValue>>,
 }
 
 #[derive(Debug, Clone, Copy)]

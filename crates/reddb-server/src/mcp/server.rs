@@ -20,9 +20,9 @@ use crate::presentation::entity_json::created_entity_output_json;
 use crate::presentation::entity_json::storage_value_to_json;
 use crate::presentation::query_result_json::{runtime_query_json, runtime_stats_json};
 use crate::runtime::{
-    RedDBRuntime, RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm,
-    RuntimeGraphComponentsMode, RuntimeGraphDirection, RuntimeGraphPathAlgorithm,
-    RuntimeGraphTraversalStrategy,
+    query_request::ParamValue, RedDBRuntime, RuntimeGraphCentralityAlgorithm,
+    RuntimeGraphCommunityAlgorithm, RuntimeGraphComponentsMode, RuntimeGraphDirection,
+    RuntimeGraphPathAlgorithm, RuntimeGraphTraversalStrategy,
 };
 use crate::storage::EntityId;
 use reddb_types::Value;
@@ -365,16 +365,18 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .ok_or("missing required field 'sql'")?;
 
-        // Optional positional `$N` bind parameters. Decoded via the same
-        // helper the JSON-RPC stdio path uses (#358), so MCP, embedded
-        // stdio, and HTTP all bind via one codec.
+        // Optional positional `$N` bind parameters. MCP, stdio, and HTTP
+        // all decode through the Request module's transport-neutral codec.
         if let Some(raw_params) = args.get("params") {
             let arr = raw_params
                 .as_array()
                 .ok_or_else(|| "'params' must be an array".to_string())?;
             let binds: Vec<Value> = arr
                 .iter()
-                .map(crate::rpc_stdio::json_value_to_schema_value)
+                .map(ParamValue::decode_json)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(Value::from)
                 .collect();
 
             // Bind inside the runtime's statement frame (#2183) so a
@@ -430,7 +432,7 @@ impl McpServer {
             .runtime
             .execute_ask("ASK <mcp>", &ask)
             .map_err(|e| format!("{}", e))?;
-        let json = crate::rpc_stdio::query_result_to_json(&result);
+        let json = crate::presentation::query_result::tagged_summary(&result);
         json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
     }
 

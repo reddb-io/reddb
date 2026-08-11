@@ -13,12 +13,11 @@ const DEFAULT_PREPARED_CAPACITY: usize = 1_024;
 
 /// Transport-neutral parameter value vocabulary from ADR 0015.
 ///
-/// `UInt64` extends the ADR's ten-variant enumeration with the wire
-/// taxonomy's unsigned type (`WireValue::U64`, tag `VAL_U64`). The legacy
-/// binary protocol binds unsigned parameters over the full u64 range and
-/// as a distinct engine type; folding them into `Int64` would reject every
-/// value above `i64::MAX` and change the bound value's type, so the seam
-/// has to be able to say what the wire already says.
+/// `UInt64` and `DecimalText` extend the ADR's ten-variant enumeration with
+/// the lossless wire/body number vocabulary. The legacy binary protocol
+/// binds unsigned parameters over the full u64 range, while JSON transports
+/// carry beyond-native precision in `$decimal` envelopes; the seam preserves
+/// both instead of narrowing them before execution.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParamValue {
     Null,
@@ -26,6 +25,7 @@ pub enum ParamValue {
     Int64(i64),
     UInt64(u64),
     Float64(f64),
+    DecimalText(String),
     Text(String),
     Bytes(Vec<u8>),
     Vector(Vec<f32>),
@@ -42,6 +42,7 @@ impl From<ParamValue> for Value {
             ParamValue::Int64(value) => Self::Integer(value),
             ParamValue::UInt64(value) => Self::UnsignedInteger(value),
             ParamValue::Float64(value) => Self::Float(value),
+            ParamValue::DecimalText(value) => Self::DecimalText(value),
             ParamValue::Text(value) => Self::text(value),
             ParamValue::Bytes(value) => Self::Blob(value),
             ParamValue::Vector(value) => Self::Vector(value),
@@ -49,6 +50,170 @@ impl From<ParamValue> for Value {
             ParamValue::Timestamp(value) => Self::Timestamp(value),
             ParamValue::Uuid(value) => Self::Uuid(value),
         }
+    }
+}
+
+impl ParamValue {
+    /// Decode the shared JSON parameter vocabulary used by HTTP, MCP, and
+    /// stdio JSON-RPC. Typed single-key envelopes preserve values ordinary
+    /// JSON cannot represent losslessly.
+    pub fn decode_json(value: &crate::json::Value) -> Result<Self, String> {
+        use crate::json::Value as JsonValue;
+
+        match value {
+            JsonValue::Null => Ok(Self::Null),
+            JsonValue::Bool(value) => Ok(Self::Bool(*value)),
+            JsonValue::Integer(value) => Ok(Self::Int64(*value)),
+            JsonValue::Number(value) => {
+                if value.is_finite()
+                    && value.fract() == 0.0
+                    && *value >= i64::MIN as f64
+                    && *value <= i64::MAX as f64
+                {
+                    Ok(Self::Int64(*value as i64))
+                } else {
+                    Ok(Self::Float64(*value))
+                }
+            }
+            JsonValue::Decimal(value) => Ok(Self::DecimalText(value.clone())),
+            JsonValue::String(value) => Ok(Self::Text(value.clone())),
+            JsonValue::Array(items) => {
+                if items
+                    .iter()
+                    .all(|value| matches!(value, JsonValue::Integer(_) | JsonValue::Number(_)))
+                {
+                    Ok(Self::Vector(
+                        items
+                            .iter()
+                            .map(|value| value.as_f64().unwrap_or(0.0) as f32)
+                            .collect(),
+                    ))
+                } else {
+                    Ok(Self::Json(crate::json::to_vec(value).unwrap_or_default()))
+                }
+            }
+            JsonValue::Object(map) => {
+                if map.len() == 1 {
+                    if let Some(JsonValue::String(encoded)) = map.get("$bytes") {
+                        if let Ok(bytes) = decode_base64(encoded) {
+                            return Ok(Self::Bytes(bytes));
+                        }
+                    }
+                    if let Some(value) = map.get("$ts") {
+                        if let Some(timestamp) = json_i64(value) {
+                            return Ok(Self::Timestamp(timestamp));
+                        }
+                    }
+                    if let Some(JsonValue::String(value)) = map.get("$uuid") {
+                        if let Ok(uuid) = crate::crypto::Uuid::parse_str(value) {
+                            return Ok(Self::Uuid(*uuid.as_bytes()));
+                        }
+                    }
+                    if let Some(JsonValue::String(encoded)) = map.get("$float") {
+                        return Ok(match encoded.as_str() {
+                            "NaN" => Self::Float64(f64::NAN),
+                            "Infinity" | "+Infinity" | "inf" | "+inf" => {
+                                Self::Float64(f64::INFINITY)
+                            }
+                            "-Infinity" | "-inf" => Self::Float64(f64::NEG_INFINITY),
+                            _ => Self::Json(crate::json::to_vec(value).unwrap_or_default()),
+                        });
+                    }
+                    if map.contains_key("$number") || map.contains_key("$decimalText") {
+                        return Err("superseded exact-number envelope".to_string());
+                    }
+                    if let Some(value) = map.get("$int") {
+                        return json_i64(value)
+                            .map(Self::Int64)
+                            .ok_or_else(|| "invalid $int exact-number envelope".to_string());
+                    }
+                    if let Some(value) = map.get("$uint") {
+                        if let JsonValue::String(value) = value {
+                            return value
+                                .parse::<u64>()
+                                .map(Self::UInt64)
+                                .map_err(|_| "invalid $uint exact-number envelope".to_string());
+                        }
+                        return Err("invalid $uint exact-number envelope".to_string());
+                    }
+                    if let Some(JsonValue::String(value)) = map.get("$decimal") {
+                        return Ok(Self::DecimalText(value.clone()));
+                    }
+                }
+                Ok(Self::Json(crate::json::to_vec(value).unwrap_or_default()))
+            }
+        }
+    }
+
+    /// Decode a general JSON payload while preserving unrecognized typed
+    /// envelopes as JSON. Row insertion historically accepts those objects
+    /// as document values rather than rejecting the request as a bind error.
+    pub fn decode_json_lossy(value: &crate::json::Value) -> Self {
+        Self::decode_json(value)
+            .unwrap_or_else(|_| Self::Json(crate::json::to_vec(value).unwrap_or_default()))
+    }
+}
+
+fn json_i64(value: &crate::json::Value) -> Option<i64> {
+    match value {
+        crate::json::Value::Integer(value) => Some(*value),
+        crate::json::Value::Number(value) => {
+            if value.is_finite()
+                && value.fract() == 0.0
+                && *value >= i64::MIN as f64
+                && *value <= i64::MAX as f64
+            {
+                Some(*value as i64)
+            } else {
+                None
+            }
+        }
+        crate::json::Value::String(value) => value.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let bytes = input.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return Err("base64 length must be a multiple of 4".to_string());
+    }
+    let mut output = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks_exact(4) {
+        let padding = chunk.iter().rev().take_while(|&&byte| byte == b'=').count();
+        let a = base64_value(chunk[0])?;
+        let b = base64_value(chunk[1])?;
+        let c = if chunk[2] == b'=' {
+            0
+        } else {
+            base64_value(chunk[2])?
+        };
+        let d = if chunk[3] == b'=' {
+            0
+        } else {
+            base64_value(chunk[3])?
+        };
+        let decoded = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | d as u32;
+        output.push(((decoded >> 16) & 0xff) as u8);
+        if padding < 2 {
+            output.push(((decoded >> 8) & 0xff) as u8);
+        }
+        if padding < 1 {
+            output.push((decoded & 0xff) as u8);
+        }
+    }
+    Ok(output)
+}
+
+fn base64_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        b'=' => Ok(0),
+        _ => Err(format!("invalid base64 character: {}", byte as char)),
     }
 }
 

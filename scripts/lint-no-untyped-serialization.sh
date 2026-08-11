@@ -18,6 +18,8 @@
 #      blessed exit is `escape_for(boundary)` per #179).
 #   6. `http::HeaderValue::from_str(...)` outside the
 #      `header_escape_guard` module — the typed guard owns this call.
+#   7. JSON-to-schema conversion exported outside `query_request`, or
+#      one transport importing stdio's JSON codec helpers.
 #
 # Usage:
 #   scripts/lint-no-untyped-serialization.sh [PATH ...]
@@ -339,6 +341,29 @@ while IFS=$'\t' read -r file ln body; do
   esac
   emit_violation "header-from-str" "$file" "$ln" "$body"
 done < <(scan_pattern '(http::)?HeaderValue::from_str[[:space:]]*[(]')
+
+# ----------------------------------------------------------------------
+# Category 7a: the Request module owns the shared JSON parameter decode
+# boundary. Exporting the legacy JSON-to-schema helper anywhere else
+# recreates a transport-local codec that HTTP or MCP can depend on.
+# ----------------------------------------------------------------------
+while IFS=$'\t' read -r file ln body; do
+  [ -z "$file" ] && continue
+  case "$file" in
+    *runtime/query_request.rs) continue ;;
+  esac
+  emit_violation "transport-codec-import" "$file" "$ln" "$body"
+done < <(scan_pattern 'pub([[:space:]]*[(][^)]*[)])?[[:space:]]+fn[[:space:]]+(try_)?json_value_to_schema_value')
+
+# ----------------------------------------------------------------------
+# Category 7b: transports may share the Request decode layer and the
+# presentation layer, but must never import serialization helpers from
+# another transport.
+# ----------------------------------------------------------------------
+while IFS=$'\t' read -r file ln body; do
+  [ -z "$file" ] && continue
+  emit_violation "transport-codec-import" "$file" "$ln" "$body"
+done < <(scan_pattern 'crate::rpc_stdio::((try_)?json_value_to_schema_value|query_result_to_json)')
 
 # ----------------------------------------------------------------------
 # Report.

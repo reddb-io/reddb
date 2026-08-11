@@ -1,7 +1,7 @@
 use reddb_server::runtime::query_request::{
     ParamValue, PreparedRegistry, QueryRequest, QueryRequestExecutor,
 };
-use reddb_server::{replication::CommitPolicy, RedDBRuntime};
+use reddb_server::{json, replication::CommitPolicy, RedDBRuntime};
 use reddb_types::Value;
 use std::sync::{Mutex, OnceLock};
 
@@ -84,6 +84,62 @@ fn request_decodes_every_adr_0015_parameter_variant() {
             .expect("parameterized request");
         assert_eq!(result.result.records[0].get("value"), Some(&expected));
     }
+}
+
+#[test]
+fn json_param_decode_preserves_typed_envelopes() {
+    let cases = [
+        ("null", ParamValue::Null),
+        ("true", ParamValue::Bool(true)),
+        ("-42", ParamValue::Int64(-42)),
+        ("1.5", ParamValue::Float64(1.5)),
+        (r#""hello""#, ParamValue::Text("hello".to_string())),
+        (
+            r#"{"$bytes":"AAECAw=="}"#,
+            ParamValue::Bytes(vec![0, 1, 2, 3]),
+        ),
+        (
+            r#"{"$ts":"9223372036854775807"}"#,
+            ParamValue::Timestamp(i64::MAX),
+        ),
+        (
+            r#"{"$uuid":"00112233-4455-6677-8899-aabbccddeeff"}"#,
+            ParamValue::Uuid([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ]),
+        ),
+        (
+            r#"{"$int":"9007199254740993"}"#,
+            ParamValue::Int64(9_007_199_254_740_993),
+        ),
+        (
+            r#"{"$uint":"9223372036854775808"}"#,
+            ParamValue::UInt64(i64::MAX as u64 + 1),
+        ),
+        (
+            r#"{"$decimal":"3.14159265358979323846"}"#,
+            ParamValue::DecimalText("3.14159265358979323846".to_string()),
+        ),
+        ("[1,2.5]", ParamValue::Vector(vec![1.0, 2.5])),
+        (
+            r#"{"nested":[true,null]}"#,
+            ParamValue::Json(br#"{"nested":[true,null]}"#.to_vec()),
+        ),
+    ];
+
+    for (encoded, expected) in cases {
+        let value = json::from_str(encoded).expect("JSON fixture");
+        assert_eq!(
+            ParamValue::decode_json(&value).expect("decode param"),
+            expected
+        );
+    }
+
+    let superseded = json::from_str(r#"{"$number":"1"}"#).expect("JSON fixture");
+    assert!(ParamValue::decode_json(&superseded)
+        .expect_err("superseded envelope must be rejected")
+        .contains("superseded"));
 }
 
 #[test]
