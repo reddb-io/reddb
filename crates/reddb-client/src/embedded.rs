@@ -72,20 +72,17 @@ impl EmbeddedClient {
         if params.is_empty() {
             return self.query(sql);
         }
-        use reddb_server::storage::query::modes::parse_multi;
-        use reddb_server::storage::query::user_params;
         let binds: Vec<SchemaValue> = params
             .iter()
             .cloned()
             .map(crate::params::Value::into_schema_value)
             .collect();
-        let parsed =
-            parse_multi(sql).map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
-        let bound = user_params::bind(&parsed, &binds)
-            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+        // Bind inside the runtime's statement frame (#2183) so the
+        // parameterized statement keeps the same snapshot isolation,
+        // `AS OF` resolution, and intent locks as textual SQL.
         let qr = self
             .runtime
-            .execute_query_expr(bound)
+            .execute_query_with_params(sql, &binds)
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(query_result_from_runtime(&qr))
     }
