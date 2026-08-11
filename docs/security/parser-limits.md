@@ -39,6 +39,14 @@ Source: `crates/reddb-rql/src/limits.rs`.
   long token streams and large expression/projection trees. Capping
   consumed tokens keeps parser work bounded for those cases.
 
+## Expression Tree Invariants
+
+Expression parsing must not duplicate an accumulated left-hand subtree
+when it attaches another operator node. Infix and postfix forms consume
+the existing left expression into the new parent, so chains such as
+`x IN () IN ()` grow linearly with the number of parsed operators instead
+of cloning prior tree state on every suffix.
+
 ## Error surface
 
 Limit violations return a `ParseError` whose `kind` field is one
