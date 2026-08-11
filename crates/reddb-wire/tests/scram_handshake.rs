@@ -1,6 +1,7 @@
 use reddb_wire::redwire::handshake::base64_std;
 use reddb_wire::redwire::scram::{
-    ScramServerHandshake, ScramServerInput, ScramServerOutput, ScramVerifier,
+    ScramClientError, ScramClientHandshake, ScramClientOutput, ScramServerHandshake,
+    ScramServerInput, ScramServerOutput, ScramVerifier,
 };
 use reddb_wire::redwire::MessageKind;
 
@@ -116,6 +117,89 @@ fn malformed_exchange_is_rejected_without_io() {
             correlation_id: 22,
             reason: "scram client-final: missing p=<proof>".to_string(),
         }
+    );
+}
+
+#[test]
+fn rfc_7677_client_exchange_authenticates_without_io() {
+    let mut handshake = ScramClientHandshake::new("user", "pencil", CLIENT_NONCE)
+        .expect("RFC credentials are valid");
+
+    assert_eq!(
+        handshake.start().expect("client-first"),
+        ScramClientOutput::Response(format!("n,,n=user,r={CLIENT_NONCE}").into_bytes())
+    );
+    assert_eq!(
+        handshake
+            .step(MessageKind::AuthRequest, SERVER_FIRST.as_bytes())
+            .expect("client-final"),
+        ScramClientOutput::Response(
+            format!("c=biws,r={COMBINED_NONCE},p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=")
+                .into_bytes()
+        )
+    );
+
+    let auth_ok = br#"{"session_id":"fixture","username":"user","role":"read","features":0,"v":"6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="}"#;
+    let output = handshake
+        .step(MessageKind::AuthOk, auth_ok)
+        .expect("server signature is valid");
+    let ScramClientOutput::Authenticated(auth_ok) = output else {
+        panic!("RFC exchange should authenticate, got {output:?}");
+    };
+    assert_eq!(auth_ok.session_id, "fixture");
+    assert_eq!(auth_ok.username.as_deref(), Some("user"));
+}
+
+#[test]
+fn client_rejects_server_nonce_that_does_not_extend_its_nonce() {
+    let mut handshake = ScramClientHandshake::new("user", "pencil", CLIENT_NONCE)
+        .expect("RFC credentials are valid");
+    handshake.start().expect("client-first");
+
+    let error = handshake
+        .step(
+            MessageKind::AuthRequest,
+            b"r=attacker,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096",
+        )
+        .expect_err("unrelated nonce must be rejected");
+    assert_eq!(
+        error,
+        ScramClientError::Protocol("server nonce does not extend client nonce".to_string())
+    );
+}
+
+#[test]
+fn client_rejects_weak_iteration_count() {
+    let mut handshake = ScramClientHandshake::new("user", "pencil", CLIENT_NONCE)
+        .expect("RFC credentials are valid");
+    handshake.start().expect("client-first");
+
+    let weak = format!("r={COMBINED_NONCE},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1024");
+    let error = handshake
+        .step(MessageKind::AuthRequest, weak.as_bytes())
+        .expect_err("weak iteration count must be rejected");
+    assert_eq!(
+        error,
+        ScramClientError::Protocol("SCRAM iteration count 1024 is below minimum 4096".to_string())
+    );
+}
+
+#[test]
+fn client_rejects_forged_server_signature() {
+    let mut handshake = ScramClientHandshake::new("user", "pencil", CLIENT_NONCE)
+        .expect("RFC credentials are valid");
+    handshake.start().expect("client-first");
+    handshake
+        .step(MessageKind::AuthRequest, SERVER_FIRST.as_bytes())
+        .expect("client-final");
+
+    let forged = br#"{"session_id":"fixture","username":"user","role":"read","features":0,"v":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#;
+    let error = handshake
+        .step(MessageKind::AuthOk, forged)
+        .expect_err("forged signature must be rejected");
+    assert_eq!(
+        error,
+        ScramClientError::Protocol("SCRAM server signature did not verify".to_string())
     );
 }
 
