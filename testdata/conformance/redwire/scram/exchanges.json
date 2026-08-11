@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "layout": "redwire-scram-sha-256-exchanges-v1",
+  "exchanges": [
+    {
+      "name": "rfc-7677-success",
+      "credentials": {
+        "username": "user",
+        "password": "pencil"
+      },
+      "client_nonce": "rOprNGfwEbeRWgbNEkqO",
+      "messages": [
+        {
+          "direction": "client_to_server",
+          "kind": "AuthResponse(client-first)",
+          "correlation_id": 2,
+          "payload": "n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+        },
+        {
+          "direction": "server_to_client",
+          "kind": "AuthRequest",
+          "correlation_id": 2,
+          "payload": "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+        },
+        {
+          "direction": "client_to_server",
+          "kind": "AuthResponse(client-final)",
+          "correlation_id": 3,
+          "payload": "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+        },
+        {
+          "direction": "server_to_client",
+          "kind": "AuthOk",
+          "correlation_id": 3,
+          "payload": "{\"session_id\":\"fixture\",\"username\":\"user\",\"role\":\"read\",\"features\":0,\"v\":\"6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=\"}"
+        }
+      ],
+      "expected": {
+        "authenticated": true
+      }
+    },
+    {
+      "name": "server-nonce-does-not-extend-client",
+      "credentials": {
+        "username": "user",
+        "password": "pencil"
+      },
+      "client_nonce": "rOprNGfwEbeRWgbNEkqO",
+      "messages": [
+        {
+          "direction": "client_to_server",
+          "kind": "AuthResponse(client-first)",
+          "correlation_id": 2,
+          "payload": "n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+        },
+        {
+          "direction": "server_to_client",
+          "kind": "AuthRequest",
+          "correlation_id": 2,
+          "payload": "r=attacker,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+        }
+      ],
+      "expected": {
+        "error": "server nonce does not extend client nonce"
+      }
+    },
+    {
+      "name": "iteration-count-below-minimum",
+      "credentials": {
+        "username": "user",
+        "password": "pencil"
+      },
+      "client_nonce": "rOprNGfwEbeRWgbNEkqO",
+      "messages": [
+        {
+          "direction": "client_to_server",
+          "kind": "AuthResponse(client-first)",
+          "correlation_id": 2,
+          "payload": "n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+        },
+        {
+          "direction": "server_to_client",
+          "kind": "AuthRequest",
+          "correlation_id": 2,
+          "payload": "r=rOprNGfwEbeRWgbNEkqOserver,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1024"
+        }
+      ],
+      "expected": {
+        "error": "SCRAM iteration count 1024 is below minimum 4096"
+      }
+    },
+    {
+      "name": "salt-is-not-base64",
+      "credentials": {
+        "username": "user",
+        "password": "pencil"
+      },
+      "client_nonce": "rOprNGfwEbeRWgbNEkqO",
+      "messages": [
+        {
+          "direction": "client_to_server",
+          "kind": "AuthResponse(client-first)",
+          "correlation_id": 2,
+          "payload": "n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+        },
+        {
+          "direction": "server_to_client",
+          "kind": "AuthRequest",
+          "correlation_id": 2,
+          "payload": "r=rOprNGfwEbeRWgbNEkqOserver,s=***,i=4096"
+        }
+      ],
+      "expected": {
+        "error": "server salt is not valid base64"
+      }
+    },
+    {
+      "name": "forged-server-signature",
+      "credentials": {
+        "username": "user",
+        "password": "pencil"
+      },
+      "client_nonce": "rOprNGfwEbeRWgbNEkqO",
+      "messages": [
+        {
+          "direction": "client_to_server",
+          "kind": "AuthResponse(client-first)",
+          "correlation_id": 2,
+          "payload": "n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+        },
+        {
+          "direction": "server_to_client",
+          "kind": "AuthRequest",
+          "correlation_id": 2,
+          "payload": "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+        },
+        {
+          "direction": "client_to_server",
+          "kind": "AuthResponse(client-final)",
+          "correlation_id": 3,
+          "payload": "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+        },
+        {
+          "direction": "server_to_client",
+          "kind": "AuthOk",
+          "correlation_id": 3,
+          "payload": "{\"session_id\":\"fixture\",\"username\":\"user\",\"role\":\"read\",\"features\":0,\"v\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}"
+        }
+      ],
+      "expected": {
+        "error": "SCRAM server signature did not verify"
+      }
+    }
+  ]
+}
