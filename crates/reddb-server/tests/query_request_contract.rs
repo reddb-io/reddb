@@ -94,7 +94,10 @@ fn json_param_decode_preserves_typed_envelopes() {
         ("-42", ParamValue::Int64(-42)),
         ("1.5", ParamValue::Float64(1.5)),
         (r#""hello""#, ParamValue::Text("hello".to_string())),
-        (r#"{"$bytes":"AAECAw=="}"#, ParamValue::Bytes(vec![0, 1, 2, 3])),
+        (
+            r#"{"$bytes":"AAECAw=="}"#,
+            ParamValue::Bytes(vec![0, 1, 2, 3]),
+        ),
         (
             r#"{"$ts":"9223372036854775807"}"#,
             ParamValue::Timestamp(i64::MAX),
@@ -102,8 +105,8 @@ fn json_param_decode_preserves_typed_envelopes() {
         (
             r#"{"$uuid":"00112233-4455-6677-8899-aabbccddeeff"}"#,
             ParamValue::Uuid([
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
-                0xcc, 0xdd, 0xee, 0xff,
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
             ]),
         ),
         (
@@ -127,7 +130,10 @@ fn json_param_decode_preserves_typed_envelopes() {
 
     for (encoded, expected) in cases {
         let value = json::from_str(encoded).expect("JSON fixture");
-        assert_eq!(ParamValue::decode_json(&value).expect("decode param"), expected);
+        assert_eq!(
+            ParamValue::decode_json(&value).expect("decode param"),
+            expected
+        );
     }
 
     let superseded = json::from_str(r#"{"$number":"1"}"#).expect("JSON fixture");
