@@ -522,6 +522,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
       - uses: actions/setup-go@v7
         with:
           go-version: '1.25'
@@ -548,6 +551,9 @@ jobs:
         run: cargo test -p reddb-io-wire --test params_fixtures
       - name: Rust gRPC parameter fixtures
         run: cargo test -p reddb-io-client --features grpc --lib grpc_params_match_shared_fixtures
+      - name: Python RedWire SCRAM fixtures
+        working-directory: drivers/python
+        run: python tests/test_scram_conformance.py
       - name: Go RedWire/gRPC parameter fixtures
         working-directory: drivers/go
         run: go test ./redwire ./grpcx
