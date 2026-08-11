@@ -68,6 +68,14 @@ fn category_header_from_str(user: &str) {
     let _ = HeaderValue::from_str(user).unwrap();
 }
 
+fn category_transport_codec_import(value: &JsonValue) {
+    // [transport-codec-import] JSON-to-value conversion exported outside the decode layer
+    pub(crate) fn json_value_to_schema_value(value: &JsonValue) -> SchemaValue;
+
+    // [transport-codec-import] one transport importing another transport's codec
+    let _ = crate::rpc_stdio::query_result_to_json(value);
+}
+
 // Stub types so the file at least parses if anyone copies it elsewhere.
 struct ResponseBuilder;
 impl ResponseBuilder {
