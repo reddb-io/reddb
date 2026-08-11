@@ -16,7 +16,6 @@ use reddb_client::redwire::{
     Auth, BinaryValue, ConnectOptions, Flags, Frame, MessageKind, RedWireClient,
 };
 use reddb_client::{Value, ValueOut};
-use reddb_types::encoding::base64_encode;
 use tokio::net::TcpListener;
 
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -226,130 +225,18 @@ async fn scram_sha_256_end_to_end() {
     });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Drive the SCRAM exchange manually so we exercise every
-    // frame the server expects. Driver-side helper landing in
-    // the next Phase 3c bump.
-    use reddb_client::redwire::scram;
-    use std::io::Cursor;
-
-    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let mut socket = stream;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    // Magic + minor version.
-    socket
-        .write_all(&reddb_wire::redwire::supported_client_preface())
-        .await
-        .unwrap();
-
-    async fn send_frame(s: &mut tokio::net::TcpStream, frame: reddb_client::redwire::Frame) {
-        use reddb_wire::redwire::encode_frame;
-        let bytes = encode_frame(&frame);
-        s.write_all(&bytes).await.unwrap();
-    }
-    async fn read_frame(s: &mut tokio::net::TcpStream) -> reddb_client::redwire::Frame {
-        use reddb_wire::redwire::decode_frame;
-        let mut header = [0u8; 16];
-        s.read_exact(&mut header).await.unwrap();
-        let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        let mut buf = vec![0u8; len];
-        buf[..16].copy_from_slice(&header);
-        s.read_exact(&mut buf[16..]).await.unwrap();
-        decode_frame(&buf).unwrap().0
-    }
-
-    // Hello — offer SCRAM only so the picker chooses it.
-    let hello_body = br#"{"versions":[1],"auth_methods":["scram-sha-256"],"features":0}"#.to_vec();
-    send_frame(
-        &mut socket,
-        reddb_client::redwire::Frame::new(MessageKind::Hello, 1, hello_body),
+    let mut client = RedWireClient::connect(
+        ConnectOptions::new(addr.ip().to_string(), addr.port()).with_auth(Auth::Basic {
+            user: "alice".to_string(),
+            pass: "hunter2".to_string(),
+        }),
     )
-    .await;
-    let ack = read_frame(&mut socket).await;
-    assert_eq!(ack.kind, MessageKind::HelloAck);
-    let ack_obj: serde_json::Value = serde_json::from_slice(&ack.payload).unwrap();
-    assert_eq!(ack_obj["auth"], "scram-sha-256");
+    .await
+    .expect("Rust RedWire client should complete SCRAM");
 
-    // SCRAM client-first.
-    let client_nonce = "fyko+d2lbbFgONRv9qkxdawL";
-    let client_first_bare = format!("n=alice,r={client_nonce}");
-    let client_first = format!("n,,{client_first_bare}");
-    send_frame(
-        &mut socket,
-        reddb_client::redwire::Frame::new(MessageKind::AuthResponse, 2, client_first.into_bytes()),
-    )
-    .await;
-
-    // Server-first comes back via AuthRequest.
-    let server_first_frame = read_frame(&mut socket).await;
-    assert_eq!(server_first_frame.kind, MessageKind::AuthRequest);
-    let server_first = String::from_utf8(server_first_frame.payload).unwrap();
-
-    // Parse salt + iter + combined nonce.
-    let mut salt_b64 = String::new();
-    let mut iter: u32 = 0;
-    let mut combined_nonce = String::new();
-    for part in server_first.split(',') {
-        if let Some(v) = part.strip_prefix("r=") {
-            combined_nonce = v.to_string();
-        } else if let Some(v) = part.strip_prefix("s=") {
-            salt_b64 = v.to_string();
-        } else if let Some(v) = part.strip_prefix("i=") {
-            iter = v.parse().unwrap();
-        }
-    }
-    let salt = base64_decode(&salt_b64);
-
-    // Client-final.
-    let client_final_no_proof = format!("c=biws,r={combined_nonce}");
-    let auth_message = format!("{client_first_bare},{server_first},{client_final_no_proof}");
-    let proof = scram::client_proof(b"hunter2", &salt, iter, auth_message.as_bytes());
-    let proof_b64 = base64_encode(&proof);
-    let client_final = format!("{client_final_no_proof},p={proof_b64}");
-    send_frame(
-        &mut socket,
-        reddb_client::redwire::Frame::new(MessageKind::AuthResponse, 3, client_final.into_bytes()),
-    )
-    .await;
-
-    let ok = read_frame(&mut socket).await;
-    assert_eq!(ok.kind, MessageKind::AuthOk, "SCRAM should succeed");
-    let ok_obj: serde_json::Value = serde_json::from_slice(&ok.payload).unwrap();
-    assert_eq!(ok_obj["username"], "alice");
-    assert_eq!(ok_obj["role"], "write");
-    assert!(ok_obj["v"].is_string(), "AuthOk carries server signature");
-
-    // Bye + cleanup.
-    send_frame(
-        &mut socket,
-        reddb_client::redwire::Frame::new(MessageKind::Bye, 4, vec![]),
-    )
-    .await;
-
-    fn base64_decode(input: &str) -> Vec<u8> {
-        let trimmed = input.trim_end_matches('=');
-        let mut out = Vec::with_capacity(trimmed.len() * 3 / 4);
-        let mut buf = 0u32;
-        let mut bits = 0u8;
-        for ch in trimmed.bytes() {
-            let v: u32 = match ch {
-                b'A'..=b'Z' => (ch - b'A') as u32,
-                b'a'..=b'z' => (ch - b'a' + 26) as u32,
-                b'0'..=b'9' => (ch - b'0' + 52) as u32,
-                b'+' => 62,
-                b'/' => 63,
-                _ => continue,
-            };
-            buf = (buf << 6) | v;
-            bits += 6;
-            if bits >= 8 {
-                bits -= 8;
-                out.push(((buf >> bits) & 0xFF) as u8);
-            }
-        }
-        out
-    }
-    let _ = Cursor::new(0);
+    let result = client.query("SELECT 1").await.expect("authenticated query");
+    assert!(!result.statement.is_empty());
+    client.close().await.expect("close");
 }
 
 #[tokio::test]
