@@ -27,7 +27,7 @@ embedded = ["dep:reddb-server"]
 grpc = []
 # RedWire native TCP client. No engine dep — speaks the wire
 # protocol directly. See ADR 0001.
-redwire = ["dep:zstd", "dep:sha2"]
+redwire = ["dep:getrandom", "dep:zstd"]
 # HTTP / HTTPS transport using reqwest. Parity with the JS
 # driver's HttpRpcClient — talks REST endpoints directly.
 http = ["dep:reqwest"]
@@ -75,9 +75,9 @@ reddb-server = { workspace = true, optional = true }
 # the `redwire` feature so embedded-only callers don't pay it.
 zstd = { version = "0.13", default-features = false, optional = true }
 
-# SHA-256 for SCRAM client primitives (Phase 3a/3c). Pulled in
-# only by the `redwire` feature.
-sha2 = { version = "0.11", optional = true }
+# The RedWire adapter supplies a CSPRNG nonce to reddb-wire's sans-I/O
+# SCRAM client driver.
+getrandom = { version = "0.4", optional = true }
 
 # TLS / mTLS for the RedWire client. Pulled in only by the
 # `redwire-tls` feature.
