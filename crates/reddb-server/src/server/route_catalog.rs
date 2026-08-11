@@ -559,7 +559,6 @@ impl CommandCatalog {
 pub(crate) fn render_command_coverage_matrix(catalog: &CommandCatalog) -> String {
     let grpc_ids = transport_surface::grpc_command_ids();
     let mcp_ids = transport_surface::mcp_command_ids();
-    let stdio_ids = transport_surface::stdio_command_ids();
     let redwire_ids = transport_surface::redwire_command_ids();
 
     let mut commands: Vec<_> = catalog.commands().collect();
@@ -581,7 +580,7 @@ pub(crate) fn render_command_coverage_matrix(catalog: &CommandCatalog) -> String
             command.auth.matrix_label(),
             coverage(&grpc_ids, command.id),
             coverage(&mcp_ids, command.id),
-            coverage(&stdio_ids, command.id),
+            stdio_coverage(command.id),
             coverage(&redwire_ids, command.id),
         ));
     }
@@ -596,29 +595,48 @@ fn coverage(served: &BTreeSet<&'static str>, id: &str) -> &'static str {
     }
 }
 
-/// The provenance note above the table. stdio gets a sentence of its own
-/// because it is the one transport with a real dispatch surface and no catalog
-/// binding at all: without the method counts its all-`undeclared` column would
-/// read as "stdio serves nothing".
+fn stdio_coverage(command_id: &str) -> String {
+    let dispositions: Vec<String> = crate::rpc_stdio::stdio_method_catalog()
+        .iter()
+        .filter(|entry| entry.command_id == command_id)
+        .map(|entry| match entry.remote {
+            crate::rpc_stdio::StdioRemoteDisposition::Served => {
+                format!("{}: local+remote", entry.method)
+            }
+            crate::rpc_stdio::StdioRemoteDisposition::Unsupported { error_code } => {
+                format!("{}: local; remote unsupported ({error_code})", entry.method)
+            }
+        })
+        .collect();
+    if dispositions.is_empty() {
+        "undeclared".to_string()
+    } else {
+        dispositions.join("<br>")
+    }
+}
+
+/// The provenance note above the table. stdio names both implemented and
+/// explicitly unsupported remote dispositions so neither reads as a gap.
 fn render_column_sources() -> String {
     let stdio_local = transport_surface::stdio_local_methods();
     let stdio_remote = transport_surface::stdio_remote_methods();
-    let stdio_gap = transport_surface::stdio_remote_gap();
+    let stdio_remote_served = transport_surface::stdio_remote_served_methods();
+    let stdio_remote_unsupported = transport_surface::stdio_remote_unsupported_methods();
 
     format!(
         "Each column is read from that transport's own source of truth:\n\n\
          - HTTP: the command catalog discovered from route declarations.\n\
          - gRPC: the rpc-to-command bindings in `crates/reddb-server/src/grpc/catalog_dispatch.rs`.\n\
          - MCP: the tool registry in `crates/reddb-server/src/mcp/tools.rs`.\n\
-         - stdio: `crates/reddb-server/src/rpc_stdio.rs` binds no command ids, so every stdio \
-         cell is a gap. Its dispatch tables serve {} local (embedded) and {} remote (gRPC proxy) \
-         JSON-RPC methods; {} locally served methods have no remote arm: {}.\n\
+         - stdio: the catalog-backed method table in \
+         `crates/reddb-server/src/rpc_stdio.rs` declares {} local methods and all {} remote \
+         dispositions: {} served and {} explicitly unsupported.\n\
          - RedWire: the `redwire_command_id` frame binding in \
          `crates/reddb-server/src/wire/redwire/session.rs`.\n",
         stdio_local.len(),
         stdio_remote.len(),
-        stdio_gap.len(),
-        stdio_gap.join(", "),
+        stdio_remote_served.len(),
+        stdio_remote_unsupported.len(),
     )
 }
 
@@ -1236,33 +1254,31 @@ mod tests {
         assert!(
             matrix.contains("| command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |")
         );
-        // `health.live` is an MCP tool and the RedWire Ping/Bye binding, but no
-        // gRPC rpc carries it.
+        // `health.live` is an MCP tool, two stdio methods and the RedWire
+        // Ping/Bye binding, but no gRPC rpc carries it.
         assert!(matrix.contains(
-            "| health.live | public | served | undeclared | served | undeclared | served |\n"
+            "| health.live | public | served | undeclared | served | version: local+remote<br>close: local+remote | served |\n"
         ));
-        // `ops.health.aggregate` is the `Health` rpc and nothing else.
+        // `ops.health.aggregate` is the gRPC and stdio health operation.
         assert!(matrix.contains(
-            "| ops.health.aggregate | public | served | served | undeclared | undeclared | undeclared |\n"
+            "| ops.health.aggregate | public | served | served | undeclared | health: local+remote | undeclared |\n"
         ));
     }
 
     #[test]
-    fn coverage_matrix_names_each_column_source_and_the_stdio_gap() {
+    fn coverage_matrix_names_each_column_source_and_stdio_dispositions() {
         let matrix = two_command_matrix();
-        let gap = transport_surface::stdio_remote_gap();
 
         assert!(matrix.contains("`crates/reddb-server/src/grpc/catalog_dispatch.rs`"));
         assert!(matrix.contains("`crates/reddb-server/src/mcp/tools.rs`"));
         assert!(matrix.contains("`crates/reddb-server/src/wire/redwire/session.rs`"));
-        assert_eq!(gap.len(), 8);
         assert!(matrix.contains(&format!(
-            "serve {} local (embedded) and {} remote (gRPC proxy) JSON-RPC methods; \
-             {} locally served methods have no remote arm: {}.",
+            "declares {} local methods and all {} remote dispositions: {} served and {} \
+             explicitly unsupported.",
             transport_surface::stdio_local_methods().len(),
             transport_surface::stdio_remote_methods().len(),
-            gap.len(),
-            gap.join(", ")
+            transport_surface::stdio_remote_served_methods().len(),
+            transport_surface::stdio_remote_unsupported_methods().len(),
         )));
     }
 
