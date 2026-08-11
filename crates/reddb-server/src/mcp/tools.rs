@@ -9,6 +9,11 @@ use crate::server::route_catalog::{
     CommandAuthorizer, CommandPolicyEngine, CommandSpec, RouteAuth,
 };
 
+/// Canonical command behind the `reddb.ask` tool. That tool is built from the
+/// AI runtime's descriptor rather than from [`all_tools`], so its command id
+/// lives here instead of on a [`ToolDef`].
+pub const ASK_TOOL_COMMAND_ID: &str = "ai.ask";
+
 /// Definition of an MCP tool exposed by the RedDB server.
 pub struct ToolDef {
     pub name: &'static str,
@@ -32,7 +37,7 @@ pub fn ask_descriptor() -> JsonValue {
     let decorated = descriptor_description(
         crate::runtime::ai::mcp_ask_tool::TOOL_NAME,
         description,
-        "ai.ask",
+        ASK_TOOL_COMMAND_ID,
     );
     let JsonValue::Object(object) = &mut descriptor else {
         panic!("reddb.ask descriptor is an object");
@@ -83,7 +88,7 @@ pub fn authorize_tool(
     posture: McpIdentityPosture,
 ) -> Result<&'static str, String> {
     let command_id = if tool_name == crate::runtime::ai::mcp_ask_tool::TOOL_NAME {
-        "ai.ask"
+        ASK_TOOL_COMMAND_ID
     } else {
         all_tools()
             .into_iter()
@@ -116,6 +121,7 @@ pub fn authorize_tool(
 
 fn command_auth_label(auth: RouteAuth) -> &'static str {
     match auth {
+        RouteAuth::Undeclared => "undeclared",
         RouteAuth::Public => "public",
         RouteAuth::OptionalUser => "optional user",
         RouteAuth::UserRequired => "user required",

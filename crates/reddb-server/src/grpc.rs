@@ -66,7 +66,7 @@ use proto::{
     UpdateEntityRequest, Validation, ValidationItem,
 };
 
-mod catalog_dispatch;
+pub(crate) mod catalog_dispatch;
 mod control_support;
 mod entity_ops;
 mod input_support;

@@ -176,6 +176,15 @@ mod routing;
 mod serverless_support;
 pub mod tls;
 mod transport;
+mod transport_surface;
+
+/// Generate the command-coverage artifact: every discovered command joined
+/// against each transport's own binding table. See
+/// [`route_catalog::render_command_coverage_matrix`].
+#[doc(hidden)]
+pub fn command_coverage_matrix() -> String {
+    route_catalog::render_command_coverage_matrix(routes::discovered_route_catalog())
+}
 
 use self::handlers_ai::*;
 use self::handlers_entity::*;

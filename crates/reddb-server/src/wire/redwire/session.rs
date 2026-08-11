@@ -1616,17 +1616,21 @@ mod tests {
     fn command_coverage_matrix_reports_redwire_bindings() {
         let matrix = crate::server::route_catalog::render_command_coverage_matrix(
             crate::server::discovered_route_catalog(),
-            all_message_kinds().into_iter().map(redwire_command_id),
         );
 
         assert!(
             matrix.contains("| command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |")
         );
+        // RedWire binds Query/Prepare/ExecutePrepared here; gRPC binds four rpcs
+        // to it in `grpc/catalog_dispatch.rs`; MCP exposes it as `reddb_query`;
+        // `rpc_stdio.rs` names no command ids at all.
         assert!(matrix.contains(
-            "| query.execute | user-required | served | undeclared | undeclared | undeclared | served |"
+            "| query.execute | user-required | served | served | served | undeclared | served |"
         ));
+        // No frame kind and no rpc carry `catalog.snapshot`; MCP reaches it
+        // through the `reddb_type_of` tool.
         assert!(matrix.contains(
-            "| catalog.snapshot | user-required | served | undeclared | undeclared | undeclared | undeclared |"
+            "| catalog.snapshot | user-required | served | undeclared | served | undeclared | undeclared |"
         ));
     }
 
