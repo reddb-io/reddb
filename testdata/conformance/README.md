@@ -17,6 +17,9 @@ Current shared fixtures:
   encoding fixtures. `reddb-wire` validates the canonical RedWire bytes,
   `reddb-grpc-proto` consumers validate the gRPC bytes, and language drivers
   validate their adapters against the same manifest.
+- `redwire/scram/exchanges.json` — recorded SCRAM-SHA-256 exchanges covering
+  successful authentication, nonce replay protection, iteration floors,
+  malformed salt, and server-signature verification.
 
 Rules:
 
@@ -37,6 +40,7 @@ Current authorities:
 | RedDB-only RQL corpus | `crates/reddb-rql/tests/reddb_corpus` |
 | RQL result rendering | `crates/reddb-rql/src/conformance.rs` |
 | RedWire param/value fixtures | `testdata/conformance/redwire/params/manifest.json` |
+| RedWire SCRAM fixtures | `testdata/conformance/redwire/scram/exchanges.json` |
 | RedWire protocol fence | `crates/reddb-wire/tests/protocol_authority.rs` |
 | File layout fence | `crates/reddb-file/tests/layout_authority.rs` |
 | File layout fence modules | `crates/reddb-file/tests/layout_authority` |
