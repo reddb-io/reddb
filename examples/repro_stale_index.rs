@@ -1,7 +1,5 @@
 use reddb::api::RedDBOptions;
-use reddb::application::{
-    CreateRowInput, CreateRowsBatchInput, EntityUseCases, ExecuteQueryInput, QueryUseCases,
-};
+use reddb::application::{CreateRowInput, CreateRowsBatchInput, EntityUseCases, ExecuteQueryInput};
 use reddb::RedDBRuntime;
 use reddb_types::Value;
 
@@ -9,7 +7,7 @@ fn main() {
     let opts = RedDBOptions::in_memory();
     let rt = RedDBRuntime::with_options(opts).expect("rt");
     let uc_e = EntityUseCases::new(&rt);
-    let uc_q = QueryUseCases::new(&rt);
+    let uc_q = &rt;
 
     uc_q.execute(ExecuteQueryInput {
         query: "CREATE TABLE t (id INT, name TEXT)".into(),
