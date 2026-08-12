@@ -13,10 +13,8 @@ mod support {
 
 use std::path::{Path, PathBuf};
 
-use reddb_server::storage::query::{
-    ast::{QueryExpr, QueryWithCte},
-    parser::{self, ParseError, ParseErrorKind, Parser, ParserLimits},
-};
+use reddb_rql::ast::{QueryExpr, QueryWithCte};
+use reddb_rql::parser::{self, ParseError, ParseErrorKind, Parser, ParserLimits};
 use serde::Deserialize;
 use support::parser_hardening::secret_redactor::{find_unmasked_secrets, UnmaskedHit};
 
