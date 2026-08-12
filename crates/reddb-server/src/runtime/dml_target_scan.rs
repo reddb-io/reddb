@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
-use crate::storage::query::ast::{Filter, UpdateTarget};
 use crate::storage::unified::entity::EntityKind;
 use crate::storage::{EntityData, EntityId};
+use reddb_rql::ast::{Filter, UpdateTarget};
 use reddb_types::Value;
 
 pub(super) struct DmlTargetScan<'a> {
@@ -424,7 +424,7 @@ fn row_value_is_documentish(value: &Value) -> bool {
 }
 
 fn extract_document_entity_id_from_filter(filter: Option<&Filter>) -> Option<u64> {
-    use crate::storage::query::ast::{CompareOp, FieldRef};
+    use reddb_rql::ast::{CompareOp, FieldRef};
 
     let filter = filter?;
     match filter {
