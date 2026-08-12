@@ -31,5 +31,8 @@ zstd = { version = "0.13", default-features = false }
 toml = "1.1"
 tempfile = "3"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true

@@ -2843,6 +2843,7 @@ dependencies = [
  "crc32fast",
  "fs2",
  "hex",
+ "libc",
  "lz4_flex",
  "reddb-io-types",
  "serde",

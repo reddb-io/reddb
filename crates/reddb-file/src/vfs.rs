@@ -42,7 +42,13 @@ impl OpenMode {
 }
 
 /// A handle to one open file.
-pub trait VfsFile {
+pub trait VfsFile: Sized {
+    /// Duplicate this handle while retaining access to the same file.
+    fn try_clone(&self) -> io::Result<Self>;
+    /// Return the file's logical length.
+    fn file_len(&self) -> io::Result<u64>;
+    /// Change the file's logical length.
+    fn set_len(&self, len: u64) -> io::Result<()>;
     /// Write the entire buffer, looping over short writes like `Write::write_all`.
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()>;
     /// Read up to `buf.len()` bytes at the current position.
@@ -50,7 +56,18 @@ pub trait VfsFile {
     /// Reposition the cursor.
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64>;
     /// Force the file's contents durable.
-    fn sync_all(&mut self) -> io::Result<()>;
+    fn sync_all(&self) -> io::Result<()>;
+    /// Force file contents durable without requiring metadata when supported.
+    fn sync_data(&self) -> io::Result<()> {
+        self.sync_all()
+    }
+    /// Best-effort block reservation that does not grow logical length.
+    fn reserve(&self, _offset: u64, _len: u64) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "file preallocation is not supported by this VFS",
+        ))
+    }
 }
 
 /// A durable-I/O namespace for files and directory entries.
@@ -75,6 +92,18 @@ pub struct StdVfs;
 pub struct StdFile(std::fs::File);
 
 impl VfsFile for StdFile {
+    fn try_clone(&self) -> io::Result<Self> {
+        self.0.try_clone().map(Self)
+    }
+
+    fn file_len(&self) -> io::Result<u64> {
+        self.0.metadata().map(|metadata| metadata.len())
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.0.set_len(len)
+    }
+
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.0.write_all(buf)
     }
@@ -87,8 +116,36 @@ impl VfsFile for StdFile {
         self.0.seek(pos)
     }
 
-    fn sync_all(&mut self) -> io::Result<()> {
+    fn sync_all(&self) -> io::Result<()> {
         self.0.sync_all()
+    }
+
+    fn sync_data(&self) -> io::Result<()> {
+        self.0.sync_data()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reserve(&self, offset: u64, len: u64) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+
+        if len == 0 {
+            return Ok(());
+        }
+        // SAFETY: `self.0` owns a valid fd for this call; fallocate only
+        // changes block reservations for that fd, never process memory.
+        let result = unsafe {
+            libc::fallocate(
+                self.0.as_raw_fd(),
+                libc::FALLOC_FL_KEEP_SIZE,
+                offset as libc::off_t,
+                len as libc::off_t,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 }
 
