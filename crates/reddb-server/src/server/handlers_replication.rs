@@ -423,6 +423,7 @@ mod tests {
     fn replica_waiting_for_rejoin_rewind() -> RedDBRuntime {
         let runtime = RedDBRuntime::with_options(
             RedDBOptions::in_memory()
+                .with_replica_loop_enabled(false)
                 .with_replication(ReplicationConfig::replica("http://primary:5050")),
         )
         .expect("runtime");
@@ -438,6 +439,18 @@ mod tests {
             }),
         );
         runtime
+    }
+
+    #[test]
+    fn replica_runtime_without_loop_preserves_seeded_rejoin_rewind_state() {
+        let runtime = replica_waiting_for_rejoin_rewind();
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        assert_eq!(
+            runtime.config_string("red.replication.state", ""),
+            "rejoin_rewind_required"
+        );
     }
 
     #[test]
