@@ -7,7 +7,7 @@ use super::super::*;
 use super::policy_columns::*;
 use crate::auth::column_policy_gate::ColumnAccessRequest;
 use crate::auth::UserId;
-use crate::storage::query::ast::TableSource;
+use reddb_rql::ast::TableSource;
 
 impl RedDBRuntime {
     /// Apply table-level read authorization and RLS rewriting for a
@@ -135,7 +135,7 @@ impl RedDBRuntime {
         frame: &dyn super::super::statement_frame::ReadFrame,
     ) -> RedDBResult<()> {
         let mut by_table: HashMap<String, BTreeSet<String>> = HashMap::new();
-        let projections = crate::storage::query::sql_lowering::effective_join_projections(join);
+        let projections = reddb_rql::sql_lowering::effective_join_projections(join);
         self.collect_join_projection_columns(join, &projections, &mut by_table)?;
 
         for (table, columns) in by_table {
@@ -202,7 +202,7 @@ impl RedDBRuntime {
         &self,
         table: &TableQuery,
     ) -> RedDBResult<Vec<String>> {
-        let projections = crate::storage::query::sql_lowering::effective_table_projections(table);
+        let projections = reddb_rql::sql_lowering::effective_table_projections(table);
         if projections
             .iter()
             .any(|projection| matches!(projection, Projection::All))
