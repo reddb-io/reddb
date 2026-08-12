@@ -1,9 +1,9 @@
 use super::*;
 use crate::application::schema::{CreateTablePartitionKind, CreateTablePartitionSpec};
-use crate::storage::query::ast::{PartitionKind, PartitionSpec};
-use crate::storage::query::{
+use reddb_rql::ast::{
     CreateColumnDef, CreateTableQuery, CreateTimeSeriesQuery, DropTableQuery, DropTimeSeriesQuery,
 };
+use reddb_rql::ast::{PartitionKind, PartitionSpec};
 use reddb_types::SqlTypeName;
 
 fn api_query(label: &str, name: &str) -> String {
