@@ -628,8 +628,8 @@ mod tests {
     use super::{envelope_frame, json, proto_reply, summary_frame, tagged_summary};
     use crate::json::Value as JsonValue;
     use crate::runtime::RuntimeQueryResult;
-    use crate::storage::query::modes::QueryMode;
     use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
+    use reddb_rql::modes::QueryMode;
     use reddb_types::Value;
     use reddb_wire::redwire::MessageKind;
 
