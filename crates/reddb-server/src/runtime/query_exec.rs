@@ -45,6 +45,22 @@ use table::{
     take_last_segment_scan_stats, RuntimeTableExecutionContext,
 };
 
+/// Convert values accepted by `SUM` and `AVG` into their accumulator form.
+///
+/// Both aggregate execution routes use this function so their accepted types
+/// and IEEE 754 behavior cannot drift apart.
+fn aggregate_value_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Integer(value) => Some(*value as f64),
+        Value::UnsignedInteger(value) => Some(*value as f64),
+        Value::BigInt(value) => Some(*value as f64),
+        Value::Float(value) => Some(*value),
+        Value::Decimal(value) => Some(reddb_types::types::decimal_to_f64(*value)),
+        Value::Boolean(value) => Some(if *value { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
 pub(crate) use row_stream::{RowBufferArena, RowStream, DEFAULT_HIGH_WATER_MARK};
 
 /// Public table-query entry. Produces its result through the #806
