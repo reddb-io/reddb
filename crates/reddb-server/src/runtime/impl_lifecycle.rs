@@ -949,9 +949,10 @@ impl RedDBRuntime {
             }
         }
 
-        if let crate::replication::ReplicationRole::Replica { primary_addr } =
-            runtime.inner.db.options().replication.role.clone()
-        {
+        if let (true, crate::replication::ReplicationRole::Replica { primary_addr }) = (
+            runtime.inner.db.options().replica_loop_enabled,
+            runtime.inner.db.options().replication.role.clone(),
+        ) {
             let rt = runtime.clone();
             std::thread::Builder::new()
                 .name("reddb-replica".into())
