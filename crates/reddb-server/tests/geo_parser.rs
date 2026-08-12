@@ -7,7 +7,7 @@
 //! (`GEO_DISTANCE`, `HAVERSINE`, `VINCENTY`, …).
 //!
 //! The geo grammar is reached through the standard
-//! `reddb_server::storage::query::parser::parse` entry point, so
+//! `reddb_rql::parser::parse` entry point, so
 //! `ParserLimits` cascade automatically — this file pins the
 //! contract.
 //!
@@ -20,7 +20,7 @@ mod support {
 }
 
 use proptest::prelude::*;
-use reddb_server::storage::query::parser::{self, ParseError, ParserLimits};
+use reddb_rql::parser::{self, ParseError, ParserLimits};
 use support::parser_hardening::{
     self as harness, assert_no_panic_on, corpus::geo_adversarial_inputs, geo_grammar,
     HardenedParser,
@@ -165,7 +165,7 @@ proptest! {
 // surfaces as a precise failure rather than a fuzzy proptest
 // shrink.
 
-use reddb_server::storage::query::ast::{QueryExpr, SearchCommand};
+use reddb_rql::ast::{QueryExpr, SearchCommand};
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)
