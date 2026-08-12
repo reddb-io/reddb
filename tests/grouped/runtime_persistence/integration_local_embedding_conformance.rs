@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reddb::ai::grpc_embeddings;
-use reddb::application::{CreateKvInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
+use reddb::application::{CreateKvInput, EntityUseCases, ExecuteQueryInput};
 use reddb::json::{Map, Value as JsonValue};
 use reddb::runtime::ai::local_embedding::{
     clear_local_embedding_backend_for_tests, install_local_embedding_backend,
@@ -241,7 +241,7 @@ fn local_provider_conformance_all_surfaces_offline() {
     // to the seeded record.
     let search_rt = rt();
     register_installed_local_model(&search_rt, "mini-en", 2);
-    let q = QueryUseCases::new(&search_rt);
+    let q = &search_rt;
     q.execute(ExecuteQueryInput {
         query: "INSERT INTO embeddings VECTOR (dense, content) VALUES \
                 ([1.0, 0.0], 'seeded by conformance test')"
@@ -261,7 +261,7 @@ fn local_provider_conformance_all_surfaces_offline() {
     // -- (4) WITH AUTO EMBED through the local provider -----------
     let ae_rt = rt();
     register_installed_local_model(&ae_rt, "mini-en", 2);
-    let ae_q = QueryUseCases::new(&ae_rt);
+    let ae_q = &ae_rt;
     ae_q.execute(ExecuteQueryInput {
         query: "INSERT INTO autodocs (id, body) VALUES (1, 'auto-embed via local') \
                 WITH AUTO EMBED (body) USING local MODEL 'mini-en'"
