@@ -1,6 +1,6 @@
 //! cargo-fuzz target for the SQL parser (issue #87).
 //!
-//! Feeds arbitrary bytes into `reddb_server::storage::query::parser::parse`
+//! Feeds arbitrary bytes into `reddb_rql::parser::parse`
 //! and asserts the parser never panics. `Err` is the expected
 //! outcome for the vast majority of random inputs; the only
 //! observable failure is an unwind panic.
@@ -17,7 +17,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use reddb_server::storage::query::parser;
+use reddb_rql::parser;
 
 fuzz_target!(|data: &[u8]| {
     // The parser only accepts UTF-8 strings. Anything else is
