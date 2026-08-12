@@ -10,7 +10,7 @@
 use super::*;
 use crate::runtime::vector_index::{BruteForceVectorIndex, VectorIndexEntry};
 use crate::storage::engine::distance::DistanceMetric;
-use crate::storage::query::sql_lowering::effective_vector_filter;
+use reddb_rql::sql_lowering::effective_vector_filter;
 
 pub(crate) fn execute_runtime_vector_query(
     db: &RedDB,
