@@ -11,18 +11,18 @@
 //! mutator is the only moving piece.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
 }
 
-fn exec(q: &QueryUseCases<'_, RedDBRuntime>, sql: &str) {
+fn exec(q: &RedDBRuntime, sql: &str) {
     q.execute(ExecuteQueryInput { query: sql.into() })
         .unwrap_or_else(|err| panic!("{sql}: {err}"));
 }
 
-fn exec_err(q: &QueryUseCases<'_, RedDBRuntime>, sql: &str) -> String {
+fn exec_err(q: &RedDBRuntime, sql: &str) -> String {
     match q.execute(ExecuteQueryInput { query: sql.into() }) {
         Ok(_) => panic!("expected error for: {sql}"),
         Err(err) => err.to_string(),
@@ -32,7 +32,7 @@ fn exec_err(q: &QueryUseCases<'_, RedDBRuntime>, sql: &str) -> String {
 #[test]
 fn append_only_table_accepts_inserts() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     exec(&q, "CREATE TABLE audit_log (id INT, msg TEXT) APPEND ONLY");
     exec(&q, "INSERT INTO audit_log (id, msg) VALUES (1, 'hello')");
     exec(&q, "INSERT INTO audit_log (id, msg) VALUES (2, 'world')");
@@ -47,7 +47,7 @@ fn append_only_table_accepts_inserts() {
 #[test]
 fn append_only_table_rejects_update_with_clear_message() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     exec(&q, "CREATE TABLE events (id INT, v TEXT) APPEND ONLY");
     exec(&q, "INSERT INTO events (id, v) VALUES (1, 'x')");
     let err = exec_err(&q, "UPDATE events SET v = 'y' WHERE id = 1");
@@ -70,7 +70,7 @@ fn append_only_table_rejects_update_with_clear_message() {
 #[test]
 fn append_only_table_rejects_delete_with_clear_message() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     exec(&q, "CREATE TABLE ledger (id INT, amt INT) APPEND ONLY");
     exec(&q, "INSERT INTO ledger (id, amt) VALUES (1, 100)");
     let err = exec_err(&q, "DELETE FROM ledger WHERE id = 1");
@@ -89,7 +89,7 @@ fn append_only_table_rejects_delete_with_clear_message() {
 #[test]
 fn with_append_only_true_is_equivalent_to_trailing_keyword() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     exec(
         &q,
         "CREATE TABLE metrics (id INT, val INT) WITH (append_only = true)",
@@ -102,7 +102,7 @@ fn with_append_only_true_is_equivalent_to_trailing_keyword() {
 #[test]
 fn non_append_only_table_keeps_mutable_semantics() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     exec(&q, "CREATE TABLE users (id INT, name TEXT)");
     exec(&q, "INSERT INTO users (id, name) VALUES (1, 'alice')");
     // UPDATE must succeed — default is mutable.
@@ -120,7 +120,7 @@ fn non_append_only_table_keeps_mutable_semantics() {
 fn alter_table_set_append_only_flips_on() {
     // Start mutable. UPDATE works. Flip to append-only. UPDATE fails.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     exec(&q, "CREATE TABLE flips (id INT, v TEXT)");
     exec(&q, "INSERT INTO flips (id, v) VALUES (1, 'a')");
     exec(&q, "UPDATE flips SET v = 'b' WHERE id = 1");
@@ -142,7 +142,7 @@ fn alter_table_set_append_only_flips_on() {
 #[test]
 fn alter_table_unset_append_only_re_enables_mutations() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     exec(&q, "CREATE TABLE switch (id INT, v TEXT) APPEND ONLY");
     exec(&q, "INSERT INTO switch (id, v) VALUES (1, 'x')");
     // Append-only rejects UPDATE.
@@ -163,7 +163,7 @@ fn alter_table_unset_append_only_re_enables_mutations() {
 #[test]
 fn append_only_still_allows_select_and_insert_returning() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     exec(&q, "CREATE TABLE trace (id INT, span TEXT) APPEND ONLY");
     let result = q
         .execute(ExecuteQueryInput {
