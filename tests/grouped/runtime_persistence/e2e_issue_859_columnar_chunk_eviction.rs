@@ -14,7 +14,7 @@
 use reddb::application::ExecuteQueryInput;
 use reddb::storage::engine::PageLocation;
 use reddb::storage::timeseries::{ChunkId, ChunkMeta};
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 const HOUR_NS: u64 = 3_600_000_000_000;
@@ -44,7 +44,7 @@ fn columnar_chunk(hypertable: &str, start_ns: u64, max_ts_ns: u64) -> ChunkMeta 
 #[test]
 fn columnar_chunk_evicts_via_sweep_expired_over_sql() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     // 1-hour chunks, 1-hour TTL — a chunk with max_ts=0 expires at 1h.
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h' TTL '1h'".into(),
@@ -84,7 +84,7 @@ fn columnar_chunk_evicts_via_sweep_expired_over_sql() {
 #[test]
 fn columnar_chunk_drops_via_drop_chunks_before_over_sql() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -111,7 +111,7 @@ fn columnar_chunk_is_pruned_outside_time_range_over_sql() {
     // Acceptance #2: partition pruning (Phase 0 #902) holds for columnar
     // chunks — the pruner selects on chunk bounds, never on columnar_page.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
