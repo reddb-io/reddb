@@ -19,16 +19,16 @@ use crate::application::ports::{
 };
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::runtime::mvcc::current_connection_id;
-use crate::storage::query::ast::{BinOp, Expr, FieldRef, ReturningItem, UpdateTarget};
-use crate::storage::query::sql_lowering::{
-    effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
-};
 use crate::storage::query::unified::{
     sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_rid, sys_key_tenant,
     sys_key_updated_at, UnifiedRecord, UnifiedResult,
 };
 use crate::storage::unified::MetadataValue;
 use crate::storage::Metadata;
+use reddb_rql::ast::{BinOp, Expr, FieldRef, ReturningItem, UpdateTarget};
+use reddb_rql::sql_lowering::{
+    effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -1394,7 +1394,7 @@ impl RedDBRuntime {
             let update_filter = crate::runtime::impl_core::rls_policy_filter(
                 self,
                 &query.table,
-                crate::storage::query::ast::PolicyAction::Update,
+                reddb_rql::ast::PolicyAction::Update,
             );
             let Some(mut policy) = update_filter else {
                 // No admitting policy: zero rows affected, empty
@@ -1414,7 +1414,7 @@ impl RedDBRuntime {
                 let read_filter = crate::runtime::impl_core::rls_policy_filter(
                     self,
                     &query.table,
-                    crate::storage::query::ast::PolicyAction::Select,
+                    reddb_rql::ast::PolicyAction::Select,
                 );
                 let Some(read_policy) = read_filter else {
                     let mut response = RuntimeQueryResult::dml_result(
@@ -1428,16 +1428,11 @@ impl RedDBRuntime {
                     }
                     return Ok(response);
                 };
-                policy = crate::storage::query::ast::Filter::And(
-                    Box::new(read_policy),
-                    Box::new(policy),
-                );
+                policy = reddb_rql::ast::Filter::And(Box::new(read_policy), Box::new(policy));
             }
             let mut augmented = query.clone();
             augmented.filter = Some(match augmented.filter.take() {
-                Some(existing) => {
-                    crate::storage::query::ast::Filter::And(Box::new(existing), Box::new(policy))
-                }
+                Some(existing) => reddb_rql::ast::Filter::And(Box::new(existing), Box::new(policy)),
                 None => policy,
             });
             augmented_query = augmented;
@@ -2119,7 +2114,7 @@ impl RedDBRuntime {
             let rls_filter = crate::runtime::impl_core::rls_policy_filter(
                 self,
                 &query.table,
-                crate::storage::query::ast::PolicyAction::Delete,
+                reddb_rql::ast::PolicyAction::Delete,
             );
             let Some(policy) = rls_filter else {
                 return Ok(RuntimeQueryResult::dml_result(
@@ -2135,9 +2130,7 @@ impl RedDBRuntime {
             // respects the updated value.
             let mut augmented = query.clone();
             augmented.filter = Some(match augmented.filter.take() {
-                Some(existing) => {
-                    crate::storage::query::ast::Filter::And(Box::new(existing), Box::new(policy))
-                }
+                Some(existing) => reddb_rql::ast::Filter::And(Box::new(existing), Box::new(policy)),
                 None => policy,
             });
             return self.execute_delete_inner(raw_query, &augmented);
