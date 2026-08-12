@@ -19,8 +19,8 @@
 
 use crate::api::RedDBError;
 use crate::physical::CollectionContract;
-use crate::storage::query::ast::SessionizeClause;
 use crate::storage::query::unified::UnifiedRecord;
+use reddb_rql::ast::SessionizeClause;
 use reddb_types::Value;
 
 pub(crate) const SESSION_ID_COLUMN: &str = "session_id";
