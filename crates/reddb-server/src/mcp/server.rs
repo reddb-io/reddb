@@ -392,7 +392,7 @@ impl McpServer {
 
         let uc = &self.runtime;
         let result = uc
-            .execute_query(&(sql.to_string()))
+            .execute_query(sql)
             .map_err(|e| format!("{}", e))?;
 
         let json = runtime_query_json(&result, &None, &None);
