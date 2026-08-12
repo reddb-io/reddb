@@ -9,11 +9,11 @@ use crate::application::migration_collections as mc;
 use crate::application::migration_graph;
 use crate::application::migration_inference;
 use crate::application::vcs::{Author, CreateCommitInput};
-use crate::storage::query::ast::{
+use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+use reddb_rql::ast::{
     ApplyMigrationQuery, ApplyMigrationTarget, CreateMigrationQuery, ExplainMigrationQuery,
     RollbackMigrationQuery,
 };
-use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 
 fn now_ms() -> i64 {
     SystemTime::now()
