@@ -1,7 +1,7 @@
 use super::*;
 use crate::application::SearchContextInput;
-use crate::storage::query::ast::Expr;
 use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_query};
+use reddb_rql::ast::Expr;
 
 const ASK_AUDIT_COLLECTION: &str = "red_ask_audit";
 
@@ -127,8 +127,8 @@ impl RedDBRuntime {
             .find(|c: char| c.is_whitespace() || c == '(')
             .unwrap_or(trimmed.len());
         let (expr, cte_names) = if trimmed[..head_end].eq_ignore_ascii_case("WITH") {
-            let parsed = crate::storage::query::parser::parse(query)
-                .map_err(|e| RedDBError::Query(e.to_string()))?;
+            let parsed =
+                reddb_rql::parser::parse(query).map_err(|e| RedDBError::Query(e.to_string()))?;
             let names = parsed
                 .with_clause
                 .as_ref()
@@ -214,7 +214,7 @@ impl RedDBRuntime {
         if chunks.is_empty() {
             return None;
         }
-        let filter = crate::storage::query::sql_lowering::effective_table_filter(table);
+        let filter = reddb_rql::sql_lowering::effective_table_filter(table);
         let kept = crate::storage::query::planner::hypertable_pruning::prune_hypertable_chunks(
             &spec,
             &chunks,
@@ -224,8 +224,7 @@ impl RedDBRuntime {
     }
 
     fn table_filter_has_geo_h3_route(&self, table: &TableQuery) -> bool {
-        let Some(filter) = crate::storage::query::sql_lowering::effective_table_filter(table)
-        else {
+        let Some(filter) = reddb_rql::sql_lowering::effective_table_filter(table) else {
             return false;
         };
         self.filter_has_geo_h3_route(table.table.as_str(), &filter)
@@ -274,8 +273,7 @@ impl RedDBRuntime {
     /// the same polyfill cover, so a polygon the executor would find too
     /// large to enumerate is reported as a scan here too.
     fn geo_within_has_h3_route(&self, table: &str, lhs: &Expr, op: CompareOp, rhs: &Expr) -> bool {
-        let Some(predicate) =
-            crate::storage::query::ast::geo_predicate::geo_within_truth_test(lhs, op, rhs)
+        let Some(predicate) = reddb_rql::ast::geo_predicate::geo_within_truth_test(lhs, op, rhs)
         else {
             return false;
         };
@@ -916,7 +914,7 @@ impl RedDBRuntime {
         collection: &str,
         entity: &UnifiedEntity,
         snap_ctx: Option<&crate::runtime::impl_core::SnapshotContext>,
-        rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
+        rls_cache: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
     ) -> bool {
         use crate::runtime::impl_core::entity_visible_with_context;
 
@@ -930,11 +928,11 @@ impl RedDBRuntime {
         &self,
         collection: &str,
         entity: &UnifiedEntity,
-        rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
+        rls_cache: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
     ) -> bool {
         use crate::runtime::impl_core::{rls_policy_filter, rls_policy_filter_for_kind};
-        use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
         use crate::storage::unified::entity::EntityKind;
+        use reddb_rql::ast::{PolicyAction, PolicyTargetKind};
 
         // RLS gate — only evaluate when the table has it enabled.
         if !self.is_rls_enabled(collection) {
@@ -997,8 +995,7 @@ impl RedDBRuntime {
         // Per-collection filter is cached so we only compute once per
         // collection even if the scan touches thousands of entities.
         let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-        let mut rls_cache: HashMap<String, Option<crate::storage::query::ast::Filter>> =
-            HashMap::new();
+        let mut rls_cache: HashMap<String, Option<reddb_rql::ast::Filter>> = HashMap::new();
 
         let store = self.inner.db.store();
         let collection_scope = runtime_search_collections(&self.inner.db, input.collections);
@@ -1428,7 +1425,7 @@ impl RedDBRuntime {
     pub fn execute_ask(
         &self,
         raw_query: &str,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.execute_ask_with_stream_frames(raw_query, ask, None)
     }
@@ -1436,7 +1433,7 @@ impl RedDBRuntime {
     pub(crate) fn execute_ask_streaming_frames(
         &self,
         raw_query: &str,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
         emit: &mut dyn FnMut(crate::runtime::ai::sse_frame_encoder::Frame) -> RedDBResult<()>,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.execute_ask_with_stream_frames(raw_query, ask, Some(emit))
@@ -1445,7 +1442,7 @@ impl RedDBRuntime {
     fn execute_ask_with_stream_frames(
         &self,
         raw_query: &str,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
         mut stream_emit: Option<
             &mut dyn FnMut(crate::runtime::ai::sse_frame_encoder::Frame) -> RedDBResult<()>,
         >,
@@ -1976,7 +1973,7 @@ impl RedDBRuntime {
     fn execute_ask_planner_prepass(
         &self,
         raw_query: &str,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
         plan_only: bool,
     ) -> RedDBResult<PlannerPrepass> {
         use crate::ai::{parse_provider, resolve_api_key_from_runtime};
@@ -2155,7 +2152,7 @@ impl RedDBRuntime {
     fn execute_planner_candidate_and_synthesize(
         &self,
         raw_query: &str,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
         scope: &crate::runtime::statement_frame::EffectiveScope,
         plan: &crate::runtime::ai::ask_planner::AskPlan,
         candidate_rql: &str,
@@ -2358,7 +2355,7 @@ impl RedDBRuntime {
         sources_bytes: usize,
         requested_mode: crate::runtime::ai::strict_validator::Mode,
         sources_fingerprint: &str,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
         settings: &crate::runtime::ai::cost_guard::Settings,
         transport: &crate::runtime::ai::transport::AiTransport,
         tenant_key: &str,
@@ -2760,7 +2757,7 @@ impl RedDBRuntime {
         &self,
         raw_query: &str,
         scope: &crate::runtime::statement_frame::EffectiveScope,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let answer = "No matching sources were found for this question, even after expanding \
                       retrieval. ASK does not answer without grounding, so no answer was \
@@ -2826,7 +2823,7 @@ impl RedDBRuntime {
         &self,
         raw_query: &str,
         scope: &crate::runtime::statement_frame::EffectiveScope,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
         budget: &crate::runtime::ai::ask_planner::PlanBudget,
         exhausted: &crate::runtime::ai::ask_planner::BudgetExhausted,
     ) -> RedDBResult<RuntimeQueryResult> {
@@ -2908,7 +2905,7 @@ impl RedDBRuntime {
     /// model (ADR 0068 §3) and always runs deterministic (temperature 0).
     fn plan_route_over_slice(
         &self,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
         slice: &crate::runtime::ai::ask_planner::NarrowedSlice,
     ) -> RedDBResult<crate::runtime::ai::ask_planner::PlannedRoute> {
         use crate::ai::{parse_provider, resolve_api_key_from_runtime};
@@ -2953,7 +2950,7 @@ impl RedDBRuntime {
     fn execute_explain_ask(
         &self,
         raw_query: &str,
-        ask: &crate::storage::query::ast::AskQuery,
+        ask: &reddb_rql::ast::AskQuery,
         ask_context: &crate::runtime::ask_pipeline::AskContext,
         full_prompt: &str,
         source_urns: &[String],
@@ -3872,16 +3869,16 @@ impl<'a> AskAuditInput<'a> {
 }
 
 fn ask_cache_mode(
-    clause: &crate::storage::query::ast::AskCacheClause,
+    clause: &reddb_rql::ast::AskCacheClause,
 ) -> RedDBResult<crate::runtime::ai::answer_cache_key::Mode> {
     match clause {
-        crate::storage::query::ast::AskCacheClause::Default => {
+        reddb_rql::ast::AskCacheClause::Default => {
             Ok(crate::runtime::ai::answer_cache_key::Mode::Default)
         }
-        crate::storage::query::ast::AskCacheClause::NoCache => {
+        reddb_rql::ast::AskCacheClause::NoCache => {
             Ok(crate::runtime::ai::answer_cache_key::Mode::NoCache)
         }
-        crate::storage::query::ast::AskCacheClause::CacheTtl(ttl) => {
+        reddb_rql::ast::AskCacheClause::CacheTtl(ttl) => {
             let duration = crate::runtime::ai::answer_cache_key::parse_ttl(ttl).map_err(|err| {
                 RedDBError::Query(format!(
                     "invalid ASK CACHE TTL '{}': {}",
