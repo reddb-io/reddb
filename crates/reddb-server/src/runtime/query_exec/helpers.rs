@@ -18,7 +18,7 @@ use super::*;
 /// For `WHERE city = 'NYC' AND age > 30`, returns Some(("city", Value::text("NYC"))).
 /// This lets us do a direct HashMap lookup before the full filter evaluation.
 pub(crate) fn extract_equality_prefilter(filter: &Filter) -> Option<(String, Value)> {
-    use crate::storage::query::ast::{CompareOp, FieldRef};
+    use reddb_rql::ast::{CompareOp, FieldRef};
     match filter {
         Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
             let col = match field {
@@ -40,9 +40,9 @@ pub(crate) fn extract_equality_prefilter(filter: &Filter) -> Option<(String, Val
 
 /// Extract entity_id from `WHERE rid = N` for O(1) direct lookup.
 pub(crate) fn extract_entity_id_from_filter(
-    filter: &Option<crate::storage::query::ast::Filter>,
+    filter: &Option<reddb_rql::ast::Filter>,
 ) -> Option<u64> {
-    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter};
     let filter = filter.as_ref()?;
     match filter {
         Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
@@ -85,10 +85,8 @@ pub(crate) fn extract_entity_id_from_filter(
 /// Restricted to `rid` so the bloom probe is always sound.
 /// User-PK pruning belongs in a separate code path tied to actual
 /// PRIMARY KEY metadata or registered index hints.
-pub(crate) fn extract_bloom_key_for_pk(
-    filter: &crate::storage::query::ast::Filter,
-) -> Option<Vec<u8>> {
-    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+pub(crate) fn extract_bloom_key_for_pk(filter: &reddb_rql::ast::Filter) -> Option<Vec<u8>> {
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter};
     match filter {
         Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
             let field_name = match field {
@@ -115,9 +113,9 @@ pub(crate) fn extract_bloom_key_for_pk(
 
 /// Extract a (column_name, value_bytes) from a simple equality filter for index lookup.
 pub(crate) fn extract_index_candidate(
-    filter: &crate::storage::query::ast::Filter,
+    filter: &reddb_rql::ast::Filter,
 ) -> Option<(String, Vec<u8>)> {
-    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter};
     match filter {
         Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
             let column = match field {
@@ -145,10 +143,10 @@ pub(crate) fn extract_index_candidate(
 /// `original_Value` lets callers build covered-query records without decoding bytes.
 /// Stops at OR / NOT — not AND-combinable.
 pub(crate) fn extract_all_eq_candidates(
-    filter: &crate::storage::query::ast::Filter,
+    filter: &reddb_rql::ast::Filter,
     out: &mut Vec<(String, Vec<u8>, reddb_types::Value)>,
 ) {
-    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter};
     match filter {
         Filter::Compare {
             field,
@@ -185,15 +183,15 @@ pub(crate) fn extract_all_eq_candidates(
 /// outlive the filter borrow; `ZoneColPred` is reconstructed from refs at
 /// the call site.
 pub(crate) fn extract_zone_predicates(
-    filter: &crate::storage::query::ast::Filter,
+    filter: &reddb_rql::ast::Filter,
     out: &mut Vec<(
         String,
         reddb_types::Value,
         crate::storage::unified::segment::ZoneColPredKind,
     )>,
 ) {
-    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
     use crate::storage::unified::segment::ZoneColPredKind;
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter};
     match filter {
         Filter::Compare { field, op, value } => {
             let col = match field {
@@ -503,11 +501,11 @@ pub(crate) fn resolve_entity_document_path(
 /// Only extracts the first equality predicate; compound filters with extra
 /// predicates still need post-fetch filtering.
 pub(crate) fn try_hash_eq_lookup(
-    filter: &crate::storage::query::ast::Filter,
+    filter: &reddb_rql::ast::Filter,
     table: &str,
     idx_store: &super::super::index_store::IndexStore,
 ) -> Option<Vec<crate::storage::unified::entity::EntityId>> {
-    use crate::storage::query::ast::{FieldRef, Filter};
+    use reddb_rql::ast::{FieldRef, Filter};
 
     // `WHERE col IN (v1, v2, ...)` — one hash lookup per value, union the
     // id sets. Cheap per-value because each lookup is O(1) in the HashMap
