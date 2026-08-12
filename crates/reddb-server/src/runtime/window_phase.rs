@@ -23,12 +23,10 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::api::RedDBError;
-use crate::storage::query::ast::{
-    Projection, WindowFrame, WindowFrameBound, WindowFrameUnit, WindowSpec,
-};
 use crate::storage::query::evaluator;
-use crate::storage::query::sql_lowering::projection_to_expr;
 use crate::storage::query::unified::UnifiedRecord;
+use reddb_rql::ast::{Projection, WindowFrame, WindowFrameBound, WindowFrameUnit, WindowSpec};
+use reddb_rql::sql_lowering::projection_to_expr;
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 use super::join_filter::projection_name;
@@ -120,7 +118,7 @@ fn eval_projection_constant(
         }
     }
     let (expr, _) = projection_to_expr(proj)?;
-    let row_closure = |field: &crate::storage::query::ast::FieldRef| -> Option<Value> {
+    let row_closure = |field: &reddb_rql::ast::FieldRef| -> Option<Value> {
         super::join_filter::resolve_runtime_field(record, field, table_name, table_alias)
     };
     evaluator::evaluate(&expr, &row_closure).ok()
@@ -136,12 +134,12 @@ fn value_as_f64(value: &Value) -> Option<f64> {
 }
 
 fn eval_expr_on_record(
-    expr: &crate::storage::query::ast::Expr,
+    expr: &reddb_rql::ast::Expr,
     record: &UnifiedRecord,
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) -> Value {
-    let row_closure = |field: &crate::storage::query::ast::FieldRef| -> Option<Value> {
+    let row_closure = |field: &reddb_rql::ast::FieldRef| -> Option<Value> {
         super::join_filter::resolve_runtime_field(record, field, table_name, table_alias)
     };
     evaluator::evaluate(expr, &row_closure).unwrap_or(Value::Null)
@@ -492,8 +490,8 @@ fn range_current_row_end(
 }
 
 /// `ROWS N PRECEDING` — N must be a non-negative integer literal.
-fn preceding_offset_value(expr: &crate::storage::query::ast::Expr) -> Result<usize, RedDBError> {
-    use crate::storage::query::ast::Expr;
+fn preceding_offset_value(expr: &reddb_rql::ast::Expr) -> Result<usize, RedDBError> {
+    use reddb_rql::ast::Expr;
     match expr {
         Expr::Literal { value, .. } => match value {
             Value::Integer(v) | Value::BigInt(v) if *v >= 0 => Ok(*v as usize),
@@ -614,7 +612,7 @@ fn compare_with_nulls(a: &CanonicalKey, b: &CanonicalKey, nulls_first: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::{Expr, FieldRef, Span, WindowOrderItem};
+    use reddb_rql::ast::{Expr, FieldRef, Span, WindowOrderItem};
     use reddb_types::Value;
 
     fn rec(id: i64, user: &str, ts: i64) -> UnifiedRecord {
