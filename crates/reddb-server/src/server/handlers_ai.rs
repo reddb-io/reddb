@@ -1331,7 +1331,7 @@ impl RedDBServer {
     ) -> Result<Vec<AiEmbeddingInputItem>, String> {
         let result = self
             .runtime
-            .execute_query(&(query.to_string()))
+            .execute_query(query)
             .map_err(|err| format!("source_query failed: {err}"))?;
 
         match source_mode {
@@ -1444,7 +1444,7 @@ impl RedDBServer {
     ) -> Result<Vec<String>, String> {
         let result = self
             .runtime
-            .execute_query(&(query.to_string()))
+            .execute_query(query)
             .map_err(|err| format!("source_query failed: {err}"))?;
 
         match source_mode {
