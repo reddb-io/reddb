@@ -2,7 +2,7 @@
 //! the runtime's shared registry + creates the backing collection.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
@@ -11,7 +11,7 @@ fn rt() -> RedDBRuntime {
 #[test]
 fn create_hypertable_registers_spec() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'".into(),
     })
@@ -28,7 +28,7 @@ fn create_hypertable_registers_spec() {
 #[test]
 fn create_hypertable_with_ttl() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE events TIME_COLUMN ts CHUNK_INTERVAL '1h' TTL '7d'".into(),
     })
@@ -43,7 +43,7 @@ fn create_hypertable_with_ttl() {
 #[test]
 fn create_hypertable_requires_time_column() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let err = q
         .execute(ExecuteQueryInput {
             query: "CREATE HYPERTABLE bad CHUNK_INTERVAL '1d'".into(),
@@ -56,7 +56,7 @@ fn create_hypertable_requires_time_column() {
 #[test]
 fn create_hypertable_requires_chunk_interval() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let err = q
         .execute(ExecuteQueryInput {
             query: "CREATE HYPERTABLE bad TIME_COLUMN ts".into(),
@@ -69,7 +69,7 @@ fn create_hypertable_requires_chunk_interval() {
 #[test]
 fn create_hypertable_backing_collection_exists() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '5m'".into(),
     })
@@ -86,7 +86,7 @@ fn create_hypertable_backing_collection_exists() {
 #[test]
 fn list_hypertables_surfaces_registered_entries() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'".into(),
     })
@@ -124,7 +124,7 @@ fn list_hypertables_surfaces_registered_entries() {
 #[test]
 fn drop_hypertable_removes_registry_entry() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'".into(),
     })
@@ -150,7 +150,7 @@ fn drop_hypertable_removes_registry_entry() {
 #[test]
 fn plain_create_timeseries_registers_default_chunk_spec_and_routes_points() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TIMESERIES legacy RETENTION 30 DAYS".into(),
     })
@@ -177,7 +177,7 @@ fn plain_create_timeseries_registers_default_chunk_spec_and_routes_points() {
 #[test]
 fn plain_create_timeseries_batch_insert_seals_columnar_and_keeps_sql_reads() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TIMESERIES cpu RETENTION 7 DAYS".into(),
     })
