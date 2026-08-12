@@ -702,6 +702,21 @@ mod tests {
         )
     }
 
+    fn non_finite_fixture() -> RuntimeQueryResult {
+        runtime_result(
+            "select",
+            0,
+            result_with(
+                &["nan", "positive_infinity", "negative_infinity"],
+                vec![
+                    Value::Float(f64::NAN),
+                    Value::Float(f64::INFINITY),
+                    Value::Float(f64::NEG_INFINITY),
+                ],
+            ),
+        )
+    }
+
     fn ask_fixture() -> RuntimeQueryResult {
         let result = result_with(
             &["answer", "provider", "model", "citations"],
@@ -771,6 +786,54 @@ mod tests {
             !rendered.contains(r#""rows""#),
             "ASK must not be row-wrapped, got {rendered}"
         );
+    }
+
+    /// HTTP and RedWire QueryWithParams share this canonical envelope.
+    /// Non-finite floats use the drivers' lossless tagged representation,
+    /// keeping the emitted bytes valid JSON and parseable by our own parser.
+    #[test]
+    fn canonical_envelope_non_finite_float_golden_round_trips() {
+        let result = non_finite_fixture();
+        let envelope = json(&result, &None, &None);
+        let records = envelope["result"]["records"]
+            .as_array()
+            .expect("canonical query envelope records must be an array");
+        let values = &records[0]["values"];
+        assert_eq!(
+            values.to_string_compact(),
+            concat!(
+                r#"{"nan":{"$float":"NaN"},"negative_infinity":{"$float":"-Infinity"},"#,
+                r#""positive_infinity":{"$float":"Infinity"}}"#
+            )
+        );
+
+        let rendered = envelope.to_string_compact();
+        let parsed: JsonValue = crate::json::from_slice(rendered.as_bytes())
+            .expect("canonical query envelope must parse after encoding");
+        assert_eq!(parsed, envelope);
+
+        let frame = envelope_frame(29, Ok(&result));
+        assert_eq!(frame.payload, rendered.as_bytes());
+        let parsed_frame: JsonValue = crate::json::from_slice(&frame.payload)
+            .expect("RedWire canonical query envelope must parse after encoding");
+        assert_eq!(parsed_frame, envelope);
+    }
+
+    /// gRPC has a distinct plain-JSON contract, which represents all
+    /// non-finite floats as null rather than adopting canonical tags.
+    #[test]
+    fn grpc_non_finite_float_golden_uses_null() {
+        let reply = proto_reply(non_finite_fixture(), &None, &None);
+        assert_eq!(
+            reply.result_json,
+            concat!(
+                r#"{"columns":["nan","positive_infinity","negative_infinity"],"#,
+                r#""record_count":1,"selection":{"scope":"any"},"records":[{"#,
+                r#""nan":null,"positive_infinity":null,"negative_infinity":null}]}"#
+            )
+        );
+        let _: JsonValue = crate::json::from_slice(reply.result_json.as_bytes())
+            .expect("gRPC result_json must remain parseable JSON");
     }
 
     /// Byte golden for the gRPC target: top-level key order stays
