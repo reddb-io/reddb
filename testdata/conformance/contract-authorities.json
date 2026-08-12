@@ -45,6 +45,12 @@
       "owns": "RedWire parameter/value golden fixtures"
     },
     {
+      "id": "redwire-scram-fixtures",
+      "type": "file",
+      "path": "testdata/conformance/redwire/scram/exchanges.json",
+      "owns": "RedWire SCRAM-SHA-256 recorded exchanges and rejection vectors"
+    },
+    {
       "id": "redwire-protocol-authority",
       "type": "file",
       "path": "crates/reddb-wire/tests/protocol_authority.rs",
