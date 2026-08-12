@@ -1,13 +1,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::storage::query::ast::QueryExpr;
 use crate::storage::RedDB;
+use reddb_rql::ast::QueryExpr;
+use reddb_rql::planner::{QueryOptimizer, QueryRewriter};
 
 use super::logical::logical_plan_node_with_catalog;
-use super::{
-    CachedPlan, CostEstimator, PlanCache, PlanCost, QueryOptimizer, QueryRewriter, StatsProvider,
-};
+use super::{CachedPlan, CostEstimator, PlanCache, PlanCost, StatsProvider};
 
 /// Query plan ready for execution
 #[derive(Debug, Clone)]
