@@ -37,14 +37,14 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use reddb::application::{ExecuteQueryInput, QueryUseCases};
+use reddb::application::ExecuteQueryInput;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn temp_path(prefix: &str) -> support::TempDbFile {
     support::temp_db_file(prefix)
 }
 
-fn exec(query: &QueryUseCases<'_, RedDBRuntime>, sql: &str) {
+fn exec(query: &RedDBRuntime, sql: &str) {
     query
         .execute(ExecuteQueryInput {
             query: sql.to_string(),
@@ -61,7 +61,7 @@ fn catalog_and_readiness_stay_responsive_during_large_reapply() {
     // Seed several collections with rows so a catalog/health scan does
     // real work — a no-op snapshot could pass the budget trivially.
     {
-        let query = QueryUseCases::new(&rt);
+        let query = &rt;
         for c in 0..8 {
             exec(&query, &format!("CREATE TABLE seed_{c} (id INT, val TEXT)"));
             for r in 0..200 {
@@ -84,7 +84,7 @@ fn catalog_and_readiness_stay_responsive_during_large_reapply() {
         let stop = stop.clone();
         let writes = writes.clone();
         thread::spawn(move || {
-            let query = QueryUseCases::new(&rt);
+            let query = &rt;
             let mut n = 0u64;
             while !stop.load(Ordering::Relaxed) {
                 let _ = query.execute(ExecuteQueryInput {
