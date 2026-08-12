@@ -6,7 +6,7 @@
 //! alternate implementations without introducing a product-to-test dependency.
 
 use std::io::{self, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How a file is opened. Mirrors the subset of `OpenOptions` used by durable
 /// writers.
@@ -16,6 +16,7 @@ pub struct OpenMode {
     pub write: bool,
     pub create: bool,
     pub truncate: bool,
+    pub create_new: bool,
 }
 
 impl OpenMode {
@@ -26,6 +27,7 @@ impl OpenMode {
             write: true,
             create: true,
             truncate: true,
+            create_new: false,
         }
     }
 
@@ -37,8 +39,51 @@ impl OpenMode {
             write: true,
             create: true,
             truncate: false,
+            create_new: false,
         }
     }
+
+    /// Open an existing file for reading.
+    pub fn read_only() -> Self {
+        Self {
+            read: true,
+            write: false,
+            create: false,
+            truncate: false,
+            create_new: false,
+        }
+    }
+
+    /// Create a new file for writing, failing when it already exists.
+    pub fn create_new() -> Self {
+        Self {
+            read: false,
+            write: true,
+            create: false,
+            truncate: false,
+            create_new: true,
+        }
+    }
+
+    /// Create a file if absent and open it for writing without truncation.
+    pub fn create_keep_write() -> Self {
+        Self {
+            read: false,
+            write: true,
+            create: true,
+            truncate: false,
+            create_new: false,
+        }
+    }
+}
+
+/// One directory entry returned by [`Vfs::read_dir`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VfsDirEntry {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub is_file: bool,
+    pub is_dir: bool,
 }
 
 /// A handle to one open file.
@@ -54,7 +99,7 @@ pub trait VfsFile {
 }
 
 /// A durable-I/O namespace for files and directory entries.
-pub trait Vfs {
+pub trait Vfs: Clone {
     /// The per-file handle this backend produces.
     type File: VfsFile;
 
@@ -64,6 +109,18 @@ pub trait Vfs {
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     /// Force a directory's entries durable.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
+    /// Create a directory and all missing parents.
+    fn create_dir_all(&self, dir: &Path) -> io::Result<()>;
+    /// List the immediate children of a directory.
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<VfsDirEntry>>;
+    /// Remove one file.
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
+    /// Remove a directory tree.
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
+    /// Return whether a path exists.
+    fn exists(&self, path: &Path) -> bool;
+    /// Return whether a path names a regular file.
+    fn is_file(&self, path: &Path) -> bool;
 }
 
 /// The production filesystem backend.
@@ -100,6 +157,7 @@ impl Vfs for StdVfs {
             .read(mode.read)
             .write(mode.write)
             .create(mode.create)
+            .create_new(mode.create_new)
             .truncate(mode.truncate)
             .open(path)
             .map(StdFile)
@@ -111,5 +169,40 @@ impl Vfs for StdVfs {
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         std::fs::File::open(dir).and_then(|directory| directory.sync_all())
+    }
+
+    fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(dir)
+    }
+
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<VfsDirEntry>> {
+        std::fs::read_dir(dir)?
+            .map(|entry| {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                Ok(VfsDirEntry {
+                    path: entry.path(),
+                    file_name: entry.file_name().to_string_lossy().into_owned(),
+                    is_file: file_type.is_file(),
+                    is_dir: file_type.is_dir(),
+                })
+            })
+            .collect()
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_dir_all(path)
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
     }
 }
