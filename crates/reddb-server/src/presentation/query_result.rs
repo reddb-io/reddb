@@ -810,13 +810,17 @@ mod tests {
         let rendered = envelope.to_string_compact();
         let parsed: JsonValue = crate::json::from_slice(rendered.as_bytes())
             .expect("canonical query envelope must parse after encoding");
-        assert_eq!(parsed, envelope);
+        assert_eq!(parsed.to_string_compact(), rendered);
+        let parsed_records = parsed["result"]["records"]
+            .as_array()
+            .expect("parsed canonical query envelope records must be an array");
+        assert_eq!(&parsed_records[0]["values"], values);
 
         let frame = envelope_frame(29, Ok(&result));
         assert_eq!(frame.payload, rendered.as_bytes());
         let parsed_frame: JsonValue = crate::json::from_slice(&frame.payload)
             .expect("RedWire canonical query envelope must parse after encoding");
-        assert_eq!(parsed_frame, envelope);
+        assert_eq!(parsed_frame, parsed);
     }
 
     /// gRPC has a distinct plain-JSON contract, which represents all
