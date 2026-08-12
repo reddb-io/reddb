@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use crate::application::entity::{RowUpdateColumnRule, RowUpdateContractPlan};
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::physical::CollectionContract;
-use crate::storage::query::resolve_declared_data_type;
 use crate::storage::unified::MetadataValue;
 use crate::RedDBResult;
+use reddb_rql::analyzer::resolve_declared_data_type;
 use reddb_types::coerce::coerce as coerce_schema_value;
 use reddb_types::{DataType, Value};
 
@@ -1101,7 +1101,7 @@ fn resolved_contract_columns(
             let data_type = column
                 .sql_type
                 .as_ref()
-                .map(crate::storage::query::resolve_sql_type_name)
+                .map(reddb_rql::analyzer::resolve_sql_type_name)
                 .transpose()
                 .map_err(|err| crate::RedDBError::Query(err.to_string()))?
                 .unwrap_or(parse_declared_data_type(&column.data_type)?);
