@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use super::helpers::evaluate_entity_filter;
 use super::*;
-use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
 use crate::storage::unified::entity::{field_name_bloom, EntityData, EntityKind, UnifiedEntity};
+use reddb_rql::ast::{CompareOp, FieldRef, Filter};
 use reddb_types::Value;
 
 /// Pre-classified field reference. The classifier in
@@ -181,7 +181,7 @@ impl EntityColumnResolver {
         let kinds = column_names
             .iter()
             .map(|col| {
-                let field = crate::storage::query::ast::FieldRef::TableColumn {
+                let field = reddb_rql::ast::FieldRef::TableColumn {
                     table: String::new(),
                     column: col.clone(),
                 };
@@ -1068,7 +1068,7 @@ fn compile_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter};
     use reddb_types::Value;
 
     #[test]
