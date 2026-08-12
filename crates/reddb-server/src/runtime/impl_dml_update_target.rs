@@ -6,7 +6,7 @@
 use super::impl_dml::{CompiledUpdatePlan, MaterializedUpdateAssignments};
 use super::impl_dml_update_analysis::expr_references_update_column;
 use super::*;
-use crate::storage::query::ast::UpdateTarget;
+use reddb_rql::ast::UpdateTarget;
 
 /// Reject UPDATE … NODES/EDGES that assign to graph identity/topology
 /// columns regardless of whether any row matches the WHERE clause. The
