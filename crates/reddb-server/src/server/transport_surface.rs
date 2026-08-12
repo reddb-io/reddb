@@ -8,9 +8,9 @@
 //!   RedDb` block of `crates/reddb-grpc-proto/proto/reddb.proto`.
 //! - MCP: the [`crate::mcp::tools::all_tools`] registry plus the `reddb.ask`
 //!   binding that lives outside it.
-//! - RedWire: `redwire_command_id` in
-//!   `crates/reddb-server/src/wire/redwire/session.rs`, which is exhaustive
-//!   over [`MessageKind`].
+//! - RedWire: the real `handle_session` dispatch arms, mapped through
+//!   `redwire_command_id` in
+//!   `crates/reddb-server/src/wire/redwire/session.rs`.
 //! - stdio: `crates/reddb-server/src/rpc_stdio.rs` declares no command ids at
 //!   all, so its inventory is the empty set and the matrix reports its dispatch
 //!   tables as an unjoined surface. See [`stdio_command_ids`].
@@ -22,6 +22,29 @@ use reddb_wire::redwire::MessageKind;
 use crate::wire::redwire::session::redwire_command_id;
 
 const STDIO_SOURCE: &str = include_str!("../rpc_stdio.rs");
+const REDWIRE_SESSION_SOURCE: &str = include_str!("../wire/redwire/session.rs");
+
+const REDWIRE_DISPATCH_KINDS: [MessageKind; 19] = [
+    MessageKind::Bye,
+    MessageKind::Ping,
+    MessageKind::Query,
+    MessageKind::QueryWithParams,
+    MessageKind::BulkInsert,
+    MessageKind::BulkInsertBinary,
+    MessageKind::BulkInsertPrevalidated,
+    MessageKind::QueryBinary,
+    MessageKind::BulkStreamStart,
+    MessageKind::BulkStreamRows,
+    MessageKind::BulkStreamCommit,
+    MessageKind::Prepare,
+    MessageKind::ExecutePrepared,
+    MessageKind::Get,
+    MessageKind::Delete,
+    MessageKind::OpenStream,
+    MessageKind::QueueWaitOpen,
+    MessageKind::StreamChunk,
+    MessageKind::StreamCancel,
+];
 
 /// The stdio method name prefix whose arms are declared locally only to reject
 /// the call: embedded stdio has no auth backend, so `auth.*` is excluded from
@@ -47,13 +70,31 @@ pub(crate) fn mcp_command_ids() -> BTreeSet<&'static str> {
         .collect()
 }
 
-/// Catalog commands reachable over RedWire, from the exhaustive frame-kind
-/// binding.
+/// Catalog commands reachable over RedWire, from the real frame dispatch plus
+/// the handshake-only `auth.login` command.
 pub(crate) fn redwire_command_ids() -> BTreeSet<&'static str> {
-    (u8::MIN..=u8::MAX)
-        .filter_map(MessageKind::from_u8)
-        .map(redwire_command_id)
+    REDWIRE_DISPATCH_KINDS
+        .iter()
+        .copied()
+        .filter_map(redwire_command_id)
+        // `auth.login` is handled by `perform_handshake`, before the frame
+        // dispatch loop.
+        .chain(std::iter::once("auth.login"))
         .collect()
+}
+
+/// RedWire `MessageKind`s with a real dispatch arm in `handle_session`.
+fn redwire_frame_kinds() -> Vec<&'static str> {
+    section(
+        REDWIRE_SESSION_SOURCE,
+        "match frame.kind {",
+        "\n            other => {",
+    )
+    .lines()
+    .filter_map(|line| line.strip_prefix("            MessageKind::"))
+    .filter_map(|rest| rest.split_once(" => "))
+    .map(|(kind, _)| kind)
+    .collect()
 }
 
 /// Catalog commands reachable over stdio: none.
@@ -144,6 +185,32 @@ pub(crate) fn stdio_remote_gap() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redwire_catalog_bindings_have_real_dispatch() {
+        let dispatched = redwire_frame_kinds();
+        let expected: Vec<String> = REDWIRE_DISPATCH_KINDS
+            .iter()
+            .map(|kind| format!("{kind:?}"))
+            .collect();
+        assert_eq!(dispatched, expected);
+
+        let reachable_ids: BTreeSet<&str> = REDWIRE_DISPATCH_KINDS
+            .into_iter()
+            .filter_map(redwire_command_id)
+            .chain(std::iter::once("auth.login"))
+            .collect();
+        assert_eq!(redwire_command_ids(), reachable_ids);
+
+        let missing: Vec<MessageKind> = (u8::MIN..=u8::MAX)
+            .filter_map(MessageKind::from_u8)
+            .filter(|kind| redwire_command_id(*kind).is_some_and(|id| !reachable_ids.contains(id)))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "redwire_command_id binds commands without a real dispatch arm: {missing:?}"
+        );
+    }
 
     /// The full stdio local table. Pinned by name, not just by count, because
     /// renaming an arm keeps the count intact.

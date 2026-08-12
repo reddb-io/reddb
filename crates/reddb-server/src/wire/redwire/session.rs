@@ -84,27 +84,30 @@ fn authorize_redwire_frame<P: crate::server::route_catalog::CommandPolicyEngine 
     kind: MessageKind,
     policy: &P,
 ) -> Result<(), crate::server::route_catalog::CommandAuthorizationError> {
+    let Some(command_id) = redwire_command_id(kind) else {
+        return Ok(());
+    };
     crate::server::route_catalog::CommandAuthorizer::new(
         crate::server::discovered_route_catalog(),
         policy,
     )
-    .authorize(ctx, redwire_command_id(kind))
+    .authorize(ctx, command_id)
 }
 
-/// Canonical command id for every RedWire frame kind. Reply and push kinds map
-/// to the command that owns their request/reply exchange; only client-originated
-/// kinds reach execution, but keeping this match exhaustive makes additions to
-/// the wire vocabulary fail compilation until their catalog decision is made.
-pub(crate) const fn redwire_command_id(kind: MessageKind) -> &'static str {
+/// Canonical command id for every RedWire frame kind this server dispatches.
+/// `Hello` and `AuthResponse` are handled by the handshake; the other bound
+/// kinds have real arms in `handle_session`. `None` means the wire vocabulary
+/// declares the kind but this server does not dispatch it.
+pub(crate) const fn redwire_command_id(kind: MessageKind) -> Option<&'static str> {
     match kind {
         MessageKind::Hello
         | MessageKind::HelloAck
         | MessageKind::AuthRequest
         | MessageKind::AuthResponse
         | MessageKind::AuthOk
-        | MessageKind::AuthFail => "auth.login",
+        | MessageKind::AuthFail => Some("auth.login"),
 
-        MessageKind::Bye | MessageKind::Ping | MessageKind::Pong => "health.live",
+        MessageKind::Bye | MessageKind::Ping | MessageKind::Pong => Some("health.live"),
 
         MessageKind::Query
         | MessageKind::Result
@@ -118,7 +121,7 @@ pub(crate) const fn redwire_command_id(kind: MessageKind) -> &'static str {
         | MessageKind::QueueEventPush
         | MessageKind::QueueWaitTimeout
         | MessageKind::MovedRedirect
-        | MessageKind::Compress => "query.execute",
+        | MessageKind::Compress => Some("query.execute"),
 
         MessageKind::BulkInsert
         | MessageKind::BulkOk
@@ -127,22 +130,24 @@ pub(crate) const fn redwire_command_id(kind: MessageKind) -> &'static str {
         | MessageKind::BulkStreamStart
         | MessageKind::BulkStreamRows
         | MessageKind::BulkStreamCommit
-        | MessageKind::BulkStreamAck => "collections.batch.insert",
+        | MessageKind::BulkStreamAck => Some("collections.batch.insert"),
 
-        MessageKind::Get => "collections.entities.get",
-        MessageKind::Delete | MessageKind::DeleteOk => "collections.entities.delete",
-        MessageKind::VectorSearch => "collections.ivf.search",
-        MessageKind::GraphTraverse => "graph.traverse",
+        MessageKind::Get => Some("collections.entities.get"),
+        MessageKind::Delete | MessageKind::DeleteOk => Some("collections.entities.delete"),
 
         MessageKind::OpenStream
         | MessageKind::OpenAck
         | MessageKind::RowDescription
-        | MessageKind::StreamEnd => "streams.query.output",
-        MessageKind::StreamChunk => "streams.input",
+        | MessageKind::StreamEnd => Some("streams.query.output"),
+        MessageKind::StreamChunk => Some("streams.input"),
         MessageKind::Cancel | MessageKind::StreamCancel | MessageKind::StreamError => {
-            "streams.query.cancel"
+            Some("streams.query.cancel")
         }
-        MessageKind::SetSession | MessageKind::Notice => "query.context",
+
+        MessageKind::SetSession
+        | MessageKind::Notice
+        | MessageKind::VectorSearch
+        | MessageKind::GraphTraverse => None,
     }
 }
 
@@ -1604,7 +1609,9 @@ mod tests {
         let catalog = crate::server::discovered_route_catalog();
 
         for kind in all_message_kinds() {
-            let command_id = redwire_command_id(kind);
+            let Some(command_id) = redwire_command_id(kind) else {
+                continue;
+            };
             assert!(
                 catalog.command(command_id).is_some(),
                 "{kind:?} maps to missing catalog command {command_id}"
