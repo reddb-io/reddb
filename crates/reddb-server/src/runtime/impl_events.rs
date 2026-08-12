@@ -49,7 +49,7 @@ impl RedDBRuntime {
             match crate::runtime::impl_core::rls_policy_filter(
                 self,
                 &query.collection,
-                crate::storage::query::ast::PolicyAction::Select,
+                reddb_rql::ast::PolicyAction::Select,
             ) {
                 Some(filter) => Some(filter),
                 None => return Ok(backfill_result(raw_query, 0, 0, 0, &query.target_queue)),
@@ -128,13 +128,13 @@ impl RedDBRuntime {
 }
 
 fn parse_backfill_filter(sql: &str) -> RedDBResult<Filter> {
-    crate::storage::query::Parser::new(sql)
+    reddb_rql::Parser::new(sql)
         .and_then(|mut parser| parser.parse_filter())
         .map_err(|err| RedDBError::Query(format!("invalid EVENTS BACKFILL WHERE predicate: {err}")))
 }
 
 fn parse_subscription_filter(sql: &str) -> Option<Filter> {
-    crate::storage::query::Parser::new(sql)
+    reddb_rql::Parser::new(sql)
         .ok()
         .and_then(|mut parser| parser.parse_filter().ok())
 }
