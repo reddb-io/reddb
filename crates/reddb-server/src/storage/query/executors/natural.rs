@@ -13,11 +13,11 @@
 use std::sync::Arc;
 
 use crate::storage::engine::graph_store::GraphStore;
-use crate::storage::query::modes::natural::{
-    EntityType, ExtractedEntity, NaturalParser, NaturalQuery, QueryIntent,
-};
 use crate::storage::query::unified::{
     ExecutionError, MatchedNode, QueryStats, UnifiedRecord, UnifiedResult,
+};
+use reddb_rql::modes::natural::{
+    EntityType, ExtractedEntity, NaturalParser, NaturalQuery, QueryIntent,
 };
 
 /// Natural language executor with translation explanation
@@ -518,8 +518,8 @@ impl NaturalExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::EdgeDirection;
     use crate::storage::query::test_support::service_graph_with_user;
+    use reddb_rql::ast::EdgeDirection;
 
     fn create_test_graph() -> Arc<GraphStore> {
         service_graph_with_user()
