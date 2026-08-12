@@ -1,10 +1,10 @@
 use crate::storage::engine::vector_metadata::{MetadataFilter, MetadataValue};
-use crate::storage::query::ast::{
+use reddb_rql::ast::{
     Expr, FusionStrategy, GraphPattern, GraphQuery, HybridQuery, JoinQuery, NodePattern,
     NodeSelector, OrderByClause, PathQuery, Projection, PropertyFilter, QueryExpr, SelectItem,
     TableQuery, TableSource, VectorQuery, VectorSource,
 };
-use crate::storage::query::sql_lowering::{
+use reddb_rql::sql_lowering::{
     expr_to_filter, filter_to_expr, projection_from_literal, PARAMETER_PROJECTION_PREFIX,
 };
 use reddb_types::Value;
@@ -790,16 +790,13 @@ fn bind_path_query(query: &PathQuery, binds: &[Value]) -> Option<PathQuery> {
 }
 
 fn parameterize_filter(
-    filter: &crate::storage::query::ast::Filter,
+    filter: &reddb_rql::ast::Filter,
     next_index: &mut usize,
-) -> crate::storage::query::ast::Filter {
+) -> reddb_rql::ast::Filter {
     expr_to_filter(&parameterize_expr(&filter_to_expr(filter), next_index))
 }
 
-fn bind_filter(
-    filter: &crate::storage::query::ast::Filter,
-    binds: &[Value],
-) -> Option<crate::storage::query::ast::Filter> {
+fn bind_filter(filter: &reddb_rql::ast::Filter, binds: &[Value]) -> Option<reddb_rql::ast::Filter> {
     Some(expr_to_filter(&bind_expr(&filter_to_expr(filter), binds)?))
 }
 
@@ -1383,8 +1380,8 @@ fn bind_expr(expr: &Expr, binds: &[Value]) -> Option<Expr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::{BinOp, FieldRef, SelectItem, TableQuery};
-    use crate::storage::query::modes::parse_multi;
+    use reddb_rql::ast::{BinOp, FieldRef, SelectItem, TableQuery};
+    use reddb_rql::modes::parse_multi;
 
     #[test]
     fn table_shape_round_trips_with_new_binds() {
@@ -1398,7 +1395,7 @@ mod tests {
                         table: String::new(),
                         column: "name".to_string(),
                     },
-                    span: crate::storage::query::ast::Span::synthetic(),
+                    span: reddb_rql::ast::Span::synthetic(),
                 },
                 alias: None,
             }],
@@ -1410,13 +1407,13 @@ mod tests {
                         table: String::new(),
                         column: "age".to_string(),
                     },
-                    span: crate::storage::query::ast::Span::synthetic(),
+                    span: reddb_rql::ast::Span::synthetic(),
                 }),
                 rhs: Box::new(Expr::Literal {
                     value: Value::Integer(18),
-                    span: crate::storage::query::ast::Span::synthetic(),
+                    span: reddb_rql::ast::Span::synthetic(),
                 }),
-                span: crate::storage::query::ast::Span::synthetic(),
+                span: reddb_rql::ast::Span::synthetic(),
             }),
             filter: None,
             group_by_exprs: Vec::new(),
