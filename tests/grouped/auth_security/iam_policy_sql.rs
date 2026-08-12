@@ -4,7 +4,8 @@
 //! tokens land in the right `QueryExpr` variants and that arguments
 //! survive the lexer + parser pipeline.
 
-use reddb::storage::query::{Parser, PolicyPrincipalRef, QueryExpr};
+use reddb_rql::ast::{PolicyPrincipalRef, QueryExpr};
+use reddb_rql::Parser;
 
 fn parse(sql: &str) -> QueryExpr {
     let mut p = Parser::new(sql).expect("parser construct");
