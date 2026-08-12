@@ -239,7 +239,7 @@ fn create_queue_with_lock_deadline_and_in_flight_cap_parses() {
 
 #[test]
 fn create_queue_defaults_for_policy_clauses() {
-    use reddb_server::storage::query::{
+    use reddb_rql::ast::{
         DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP, DEFAULT_QUEUE_LOCK_DEADLINE_MS,
         DEFAULT_QUEUE_MAX_ATTEMPTS,
     };
