@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
-use crate::storage::query::ast::IsolationLevel;
+use reddb_rql::ast::IsolationLevel;
 
 /// Transaction ID
 pub type TxnId = u64;
