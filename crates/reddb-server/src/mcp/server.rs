@@ -391,9 +391,7 @@ impl McpServer {
         }
 
         let uc = &self.runtime;
-        let result = uc
-            .execute_query(sql)
-            .map_err(|e| format!("{}", e))?;
+        let result = uc.execute_query(sql).map_err(|e| format!("{}", e))?;
 
         let json = runtime_query_json(&result, &None, &None);
         json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
