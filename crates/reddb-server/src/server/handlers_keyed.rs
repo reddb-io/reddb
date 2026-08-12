@@ -291,10 +291,7 @@ impl RedDBServer {
     }
 
     fn execute_keyed_sql(&self, sql: String) -> HttpResponse {
-        match self
-            .query_use_cases()
-            .execute(ExecuteQueryInput { query: sql })
-        {
+        match self.runtime.execute_query(&(sql)) {
             Ok(result) => json_response(
                 200,
                 crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
