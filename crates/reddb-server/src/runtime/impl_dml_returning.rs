@@ -13,11 +13,11 @@ use crate::application::entity::{
     CreateEntityOutput, PatchEntityOperation, PatchEntityOperationType,
 };
 use crate::application::ports::entity_row_fields_snapshot;
-use crate::storage::query::ast::ReturningItem;
 use crate::storage::query::unified::{
     sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_rid, sys_key_tenant,
     sys_key_updated_at,
 };
+use reddb_rql::ast::ReturningItem;
 
 pub(super) fn build_patch_operations_from_materialized_assignments(
     entity: &UnifiedEntity,
