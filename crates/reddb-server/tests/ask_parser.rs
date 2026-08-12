@@ -5,7 +5,7 @@
 //! cover the `ASK '<question>' [USING …] [MODEL …] [DEPTH n]
 //! [LIMIT n] [COLLECTION col]` and the `SEARCH CONTEXT '<query>' …`
 //! shapes. Both reach the production parser through the standard
-//! `reddb_server::storage::query::parser::parse` entry point so
+//! `reddb_rql::parser::parse` entry point so
 //! `ParserLimits` cascade automatically.
 //!
 //! Phase A — tests-only. Bugs uncovered here are pinned with
@@ -17,8 +17,8 @@ mod support {
 }
 
 use proptest::prelude::*;
-use reddb_server::storage::query::ast::{QueryExpr, SearchCommand};
-use reddb_server::storage::query::parser::{self, ParseError, ParserLimits};
+use reddb_rql::ast::{QueryExpr, SearchCommand};
+use reddb_rql::parser::{self, ParseError, ParserLimits};
 use support::parser_hardening::{
     self as harness, ask_grammar, assert_no_panic_on, corpus::ask_adversarial_inputs,
     HardenedParser,
