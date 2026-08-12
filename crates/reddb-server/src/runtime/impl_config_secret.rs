@@ -112,7 +112,7 @@ fn insert_config_json_segments(
 
 pub(crate) fn show_config_json_result(
     query: &str,
-    mode: crate::storage::query::modes::QueryMode,
+    mode: reddb_rql::modes::QueryMode,
     prefix: &Option<String>,
     value: crate::serde_json::Value,
 ) -> RuntimeQueryResult {
