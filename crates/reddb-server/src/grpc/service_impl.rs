@@ -197,14 +197,14 @@ fn ask_reply_from_runtime_result(result: &RuntimeQueryResult) -> Result<AskReply
 fn ask_query_from_request(
     request: AskRequest,
     stream: bool,
-) -> Result<crate::storage::query::ast::AskQuery, Status> {
+) -> Result<reddb_rql::ast::AskQuery, Status> {
     if request.question.trim().is_empty() {
         return Err(Status::invalid_argument(
             "field 'question' must be a non-empty string",
         ));
     }
 
-    Ok(crate::storage::query::ast::AskQuery {
+    Ok(reddb_rql::ast::AskQuery {
         explain: false,
         question: request.question,
         question_param: None,
@@ -218,7 +218,7 @@ fn ask_query_from_request(
         seed: request.seed,
         strict: request.strict.unwrap_or(true),
         stream,
-        cache: crate::storage::query::ast::AskCacheClause::Default,
+        cache: reddb_rql::ast::AskCacheClause::Default,
         plan_only: false,
         steps: None,
     })
@@ -3854,7 +3854,7 @@ mod tests {
 
         RuntimeQueryResult {
             query: "ASK STREAM via gRPC".to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "ask",
             engine: "runtime-ai",
             result,
