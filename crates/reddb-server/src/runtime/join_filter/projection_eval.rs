@@ -34,34 +34,30 @@ pub(in crate::runtime) fn eval_projection_value(
             eval_projection_value(&Projection::Column(col.clone()), source)
         }
         Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
-        Projection::Function(name, inner_args) => {
-            crate::storage::query::sql_lowering::projection_to_expr(proj)
-                .and_then(|(expr, _)| {
-                    let row = RecordRow {
-                        record: source,
-                        table_name: None,
-                        table_alias: None,
-                    };
-                    crate::storage::query::evaluator::evaluate(&expr, &row).ok()
-                })
-                .or_else(|| evaluate_scalar_function(name, inner_args, source))
-        }
-        Projection::Expression(filter, _) => {
-            crate::storage::query::sql_lowering::projection_to_expr(proj)
-                .and_then(|(expr, _)| {
-                    let row = RecordRow {
-                        record: source,
-                        table_name: None,
-                        table_alias: None,
-                    };
-                    crate::storage::query::evaluator::evaluate(&expr, &row).ok()
-                })
-                .or_else(|| {
-                    Some(Value::Boolean(evaluate_runtime_filter(
-                        source, filter, None, None,
-                    )))
-                })
-        }
+        Projection::Function(name, inner_args) => reddb_rql::sql_lowering::projection_to_expr(proj)
+            .and_then(|(expr, _)| {
+                let row = RecordRow {
+                    record: source,
+                    table_name: None,
+                    table_alias: None,
+                };
+                crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+            })
+            .or_else(|| evaluate_scalar_function(name, inner_args, source)),
+        Projection::Expression(filter, _) => reddb_rql::sql_lowering::projection_to_expr(proj)
+            .and_then(|(expr, _)| {
+                let row = RecordRow {
+                    record: source,
+                    table_name: None,
+                    table_alias: None,
+                };
+                crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+            })
+            .or_else(|| {
+                Some(Value::Boolean(evaluate_runtime_filter(
+                    source, filter, None, None,
+                )))
+            }),
         Projection::All => None,
         // Slice 7b (#590): window output is pre-materialised on the
         // record under the alias by `runtime::window_phase::apply`.
