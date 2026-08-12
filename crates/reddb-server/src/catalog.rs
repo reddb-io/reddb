@@ -375,7 +375,7 @@ pub fn snapshot_store_with_declarations(
                     queue_policies
                         .get(&collection_name)
                         .map(|p| p.max_attempts)
-                        .unwrap_or(crate::storage::query::DEFAULT_QUEUE_MAX_ATTEMPTS),
+                        .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_MAX_ATTEMPTS),
                 )
             } else {
                 None
@@ -385,7 +385,7 @@ pub fn snapshot_store_with_declarations(
                     queue_policies
                         .get(&collection_name)
                         .map(|p| p.lock_deadline_ms)
-                        .unwrap_or(crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS),
+                        .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS),
                 )
             } else {
                 None
@@ -395,7 +395,7 @@ pub fn snapshot_store_with_declarations(
                     queue_policies
                         .get(&collection_name)
                         .map(|p| p.in_flight_cap_per_group)
-                        .unwrap_or(crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
+                        .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
                 )
             } else {
                 None
@@ -546,12 +546,12 @@ fn queue_policies_from_grouped(
             .unwrap_or_default();
         let max_attempts = row_u64(row, "max_attempts")
             .map(|v| v as u32)
-            .unwrap_or(crate::storage::query::DEFAULT_QUEUE_MAX_ATTEMPTS);
+            .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_MAX_ATTEMPTS);
         let lock_deadline_ms = row_u64(row, "lock_deadline_ms")
-            .unwrap_or(crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS);
+            .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS);
         let in_flight_cap_per_group = row_u64(row, "in_flight_cap_per_group")
             .map(|v| v as u32)
-            .unwrap_or(crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP);
+            .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP);
         let dlq_target = row_text(row, "dlq");
         policies.insert(
             queue,
