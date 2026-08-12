@@ -8,8 +8,8 @@ use reddb::application::{
 };
 use reddb::json::Value as JsonValue;
 use reddb::{
-    shm_path_for, ArtifactState, EntityUseCases, NativeUseCases, QueryUseCases, RedDBOptions,
-    RedDBRuntime, StorageDeployPreset,
+    shm_path_for, ArtifactState, EntityUseCases, NativeUseCases, RedDBOptions, RedDBRuntime,
+    StorageDeployPreset,
 };
 use reddb_types::Value;
 use std::fs;
@@ -133,7 +133,7 @@ fn smoke_row_crud() {
 fn smoke_vector_insert_and_search() {
     let rt = rt();
     let entity = EntityUseCases::new(rt.runtime());
-    let query = QueryUseCases::new(rt.runtime());
+    let query = rt.runtime();
 
     for v in [
         vec![1.0f32, 0.0, 0.0],
@@ -152,7 +152,7 @@ fn smoke_vector_insert_and_search() {
             .unwrap();
     }
 
-    let results = query.search_similar(SearchSimilarInput {
+    let results = query.search_similar_input(SearchSimilarInput {
         collection: "embeddings".into(),
         vector: vec![1.0, 0.0, 0.0],
         k: 3,
@@ -222,7 +222,7 @@ fn smoke_graph_crud() {
 fn smoke_query_select() {
     let rt = rt();
     let entity = EntityUseCases::new(rt.runtime());
-    let query = QueryUseCases::new(rt.runtime());
+    let query = rt.runtime();
 
     entity
         .create_row(CreateRowInput {
@@ -246,7 +246,7 @@ fn smoke_query_select() {
 #[test]
 fn smoke_query_explain_universal() {
     let rt = rt();
-    let query = QueryUseCases::new(rt.runtime());
+    let query = rt.runtime();
 
     let explain = query.explain(ExplainQueryInput {
         query: "SELECT * FROM any".into(),
@@ -369,7 +369,7 @@ fn smoke_document_crud() {
     );
 
     // Query via table (documents are enriched rows)
-    let result = QueryUseCases::new(rt.runtime()).execute(ExecuteQueryInput {
+    let result = rt.runtime().execute(ExecuteQueryInput {
         query: "SELECT * FROM profiles".into(),
     });
     assert!(
@@ -387,7 +387,7 @@ fn smoke_document_crud() {
 fn smoke_vector_hnsw_search() {
     let rt = rt();
     let entity = EntityUseCases::new(rt.runtime());
-    let query = QueryUseCases::new(rt.runtime());
+    let query = rt.runtime();
 
     // Insert enough vectors to trigger HNSW (>=100 for index build)
     for i in 0..120 {
@@ -405,7 +405,7 @@ fn smoke_vector_hnsw_search() {
     }
 
     // Search should use HNSW index (>100 vectors)
-    let results = query.search_similar(SearchSimilarInput {
+    let results = query.search_similar_input(SearchSimilarInput {
         collection: "hnsw_test".into(),
         vector: vec![1.0, 0.0, 0.0],
         k: 5,
