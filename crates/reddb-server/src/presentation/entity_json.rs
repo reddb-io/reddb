@@ -67,7 +67,20 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         Value::Null => JsonValue::Null,
         Value::Integer(value) => exact_i64_to_json(*value),
         Value::UnsignedInteger(value) => exact_u64_to_json(*value),
-        Value::Float(value) => JsonValue::Number(*value),
+        Value::Float(value) if value.is_finite() => JsonValue::Number(*value),
+        // Canonical query envelopes use the same lossless non-finite tags
+        // understood by RedDB drivers. Bare NaN/Infinity are not RFC 8259
+        // JSON and cannot be read back by `crate::json::from_slice`.
+        Value::Float(value) => {
+            let token = if value.is_nan() {
+                "NaN"
+            } else if value.is_sign_positive() {
+                "Infinity"
+            } else {
+                "-Infinity"
+            };
+            single_key_object("$float", JsonValue::String(token.to_string()))
+        }
         Value::Text(value) => JsonValue::String(value.to_string()),
         Value::Blob(value) => JsonValue::String(hex::encode(value)),
         Value::Boolean(value) => JsonValue::Bool(*value),
