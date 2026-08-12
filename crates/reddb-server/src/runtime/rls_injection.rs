@@ -29,13 +29,13 @@ use super::*;
 pub(crate) fn rls_policy_filter(
     runtime: &RedDBRuntime,
     table: &str,
-    action: crate::storage::query::ast::PolicyAction,
-) -> Option<crate::storage::query::ast::Filter> {
+    action: reddb_rql::ast::PolicyAction,
+) -> Option<reddb_rql::ast::Filter> {
     rls_policy_filter_for_kind(
         runtime,
         table,
         action,
-        crate::storage::query::ast::PolicyTargetKind::Table,
+        reddb_rql::ast::PolicyTargetKind::Table,
     )
 }
 
@@ -47,10 +47,10 @@ pub(crate) fn rls_policy_filter(
 pub(crate) fn rls_policy_filter_for_kind(
     runtime: &RedDBRuntime,
     table: &str,
-    action: crate::storage::query::ast::PolicyAction,
-    kind: crate::storage::query::ast::PolicyTargetKind,
-) -> Option<crate::storage::query::ast::Filter> {
-    use crate::storage::query::ast::Filter;
+    action: reddb_rql::ast::PolicyAction,
+    kind: reddb_rql::ast::PolicyTargetKind,
+) -> Option<reddb_rql::ast::Filter> {
+    use reddb_rql::ast::Filter;
 
     if !runtime.inner.rls_enabled_tables.read().contains(table) {
         return None;
@@ -83,10 +83,10 @@ pub(crate) fn node_passes_rls(
     runtime: &RedDBRuntime,
     collection: &str,
     role: Option<&str>,
-    cache: &mut std::collections::HashMap<String, Option<crate::storage::query::ast::Filter>>,
+    cache: &mut std::collections::HashMap<String, Option<reddb_rql::ast::Filter>>,
     entity: &crate::storage::unified::entity::UnifiedEntity,
 ) -> bool {
-    use crate::storage::query::ast::{Filter, PolicyAction, PolicyTargetKind};
+    use reddb_rql::ast::{Filter, PolicyAction, PolicyTargetKind};
 
     if !runtime.inner.rls_enabled_tables.read().contains(collection) {
         return true;
@@ -124,10 +124,10 @@ pub(crate) fn edge_passes_rls(
     runtime: &RedDBRuntime,
     collection: &str,
     role: Option<&str>,
-    cache: &mut std::collections::HashMap<String, Option<crate::storage::query::ast::Filter>>,
+    cache: &mut std::collections::HashMap<String, Option<reddb_rql::ast::Filter>>,
     entity: &crate::storage::unified::entity::UnifiedEntity,
 ) -> bool {
-    use crate::storage::query::ast::{Filter, PolicyAction, PolicyTargetKind};
+    use reddb_rql::ast::{Filter, PolicyAction, PolicyTargetKind};
 
     if !runtime.inner.rls_enabled_tables.read().contains(collection) {
         return true;
@@ -182,9 +182,9 @@ pub(crate) fn edge_passes_rls(
 pub(crate) fn inject_rls_filters(
     runtime: &RedDBRuntime,
     frame: &dyn super::statement_frame::ReadFrame,
-    mut table: crate::storage::query::ast::TableQuery,
-) -> Option<crate::storage::query::ast::TableQuery> {
-    use crate::storage::query::ast::{Filter, PolicyAction};
+    mut table: reddb_rql::ast::TableQuery,
+) -> Option<reddb_rql::ast::TableQuery> {
+    use reddb_rql::ast::{Filter, PolicyAction};
 
     // `None` role falls through to policies with no `TO role` clause.
     let role = frame.identity().map(|(_, role)| role);
@@ -212,7 +212,7 @@ pub(crate) fn inject_rls_filters(
     // eval time because `effective_table_filter` prefers `filter` —
     // e.g. `WITHIN TENANT … SELECT * FROM <view>` would apply the
     // tenant policy but lose the view's own WHERE (#635).
-    use crate::storage::query::sql_lowering::{expr_to_filter, filter_to_expr};
+    use reddb_rql::sql_lowering::{expr_to_filter, filter_to_expr};
     let had_where_expr = table.where_expr.is_some();
     let existing = table
         .filter
@@ -243,9 +243,9 @@ pub(crate) fn inject_rls_filters(
 pub(crate) fn inject_rls_into_join(
     runtime: &RedDBRuntime,
     frame: &dyn super::statement_frame::ReadFrame,
-    mut join: crate::storage::query::ast::JoinQuery,
-) -> Option<crate::storage::query::ast::JoinQuery> {
-    use crate::storage::query::ast::Filter;
+    mut join: reddb_rql::ast::JoinQuery,
+) -> Option<reddb_rql::ast::JoinQuery> {
+    use reddb_rql::ast::Filter;
 
     let mut policy_filters: Vec<Filter> = Vec::new();
     if !collect_join_side_policy(runtime, frame, join.left.as_ref(), &mut policy_filters) {
@@ -279,10 +279,10 @@ pub(crate) fn inject_rls_into_join(
 fn collect_join_side_policy(
     runtime: &RedDBRuntime,
     frame: &dyn super::statement_frame::ReadFrame,
-    expr: &crate::storage::query::ast::QueryExpr,
-    out: &mut Vec<crate::storage::query::ast::Filter>,
+    expr: &reddb_rql::ast::QueryExpr,
+    out: &mut Vec<reddb_rql::ast::Filter>,
 ) -> bool {
-    use crate::storage::query::ast::{Filter, PolicyAction, QueryExpr};
+    use reddb_rql::ast::{Filter, PolicyAction, QueryExpr};
     match expr {
         QueryExpr::Table(t) => {
             if !runtime.inner.rls_enabled_tables.read().contains(&t.table) {
@@ -322,12 +322,10 @@ fn collect_join_side_policy(
 /// the runtime will pass the compiled filter down instead of post-filtering.
 pub(crate) fn apply_foreign_table_filters(
     records: Vec<crate::storage::query::unified::UnifiedRecord>,
-    query: &crate::storage::query::ast::TableQuery,
+    query: &reddb_rql::ast::TableQuery,
 ) -> crate::storage::query::unified::UnifiedResult {
-    use crate::storage::query::sql_lowering::{
-        effective_table_filter, effective_table_projections,
-    };
     use crate::storage::query::unified::UnifiedResult;
+    use reddb_rql::sql_lowering::{effective_table_filter, effective_table_projections};
 
     let filter = effective_table_filter(query);
     let projections = effective_table_projections(query);
@@ -403,8 +401,8 @@ impl RedDBRuntime {
         &self,
         table: &str,
         role: Option<&str>,
-        action: crate::storage::query::ast::PolicyAction,
-    ) -> Vec<crate::storage::query::ast::Filter> {
+        action: reddb_rql::ast::PolicyAction,
+    ) -> Vec<reddb_rql::ast::Filter> {
         // Default kind = Table preserves the pre-Phase-2.5.5 behaviour:
         // callers that don't name a kind only see Table-scoped
         // policies (which is what execute SELECT / UPDATE / DELETE
@@ -413,7 +411,7 @@ impl RedDBRuntime {
             table,
             role,
             action,
-            crate::storage::query::ast::PolicyTargetKind::Table,
+            reddb_rql::ast::PolicyTargetKind::Table,
         )
     }
 
@@ -428,9 +426,9 @@ impl RedDBRuntime {
         &self,
         table: &str,
         role: Option<&str>,
-        action: crate::storage::query::ast::PolicyAction,
-        kind: crate::storage::query::ast::PolicyTargetKind,
-    ) -> Vec<crate::storage::query::ast::Filter> {
+        action: reddb_rql::ast::PolicyAction,
+        kind: reddb_rql::ast::PolicyTargetKind,
+    ) -> Vec<reddb_rql::ast::Filter> {
         if !self.is_rls_enabled(table) {
             return Vec::new();
         }
@@ -449,8 +447,7 @@ impl RedDBRuntime {
                 // Table and the caller passes the concrete kind —
                 // we allow Table policies to apply cross-kind for
                 // backwards compat.
-                if p.target_kind != kind
-                    && p.target_kind != crate::storage::query::ast::PolicyTargetKind::Table
+                if p.target_kind != kind && p.target_kind != reddb_rql::ast::PolicyTargetKind::Table
                 {
                     return None;
                 }
