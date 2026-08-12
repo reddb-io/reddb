@@ -6,7 +6,7 @@
 //! through the scalar dispatcher.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
@@ -18,7 +18,7 @@ const HOUR_NS: u64 = 3_600_000_000_000;
 #[test]
 fn show_chunks_lists_every_allocated_chunk() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -48,7 +48,7 @@ fn show_chunks_lists_every_allocated_chunk() {
 #[test]
 fn drop_chunks_before_cutoff_removes_stale() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -84,7 +84,7 @@ fn drop_chunks_before_cutoff_removes_stale() {
 #[test]
 fn sweep_expired_respects_ttl() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     // 1-hour chunks, 1-hour TTL. A chunk with max_ts=0 expires at 1h;
     // sweeping at 3h should reclaim it.
     q.execute(ExecuteQueryInput {
@@ -114,7 +114,7 @@ fn sweep_all_expired_crosses_every_hypertable() {
     // Two hypertables, both TTL '1h'; sweep_all should reclaim
     // expired chunks across both in one call.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE ht_a TIME_COLUMN ts CHUNK_INTERVAL '1h' TTL '1h'".into(),
     })
@@ -152,7 +152,7 @@ fn set_and_get_ttl_roundtrip() {
     // the post-mutation state through the registry API directly —
     // what production clients on a fresh session would also see.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -181,7 +181,7 @@ fn set_and_get_ttl_roundtrip() {
 #[test]
 fn chunks_expiring_within_horizon_previews_without_drop() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h' TTL '1h'".into(),
     })
@@ -217,7 +217,7 @@ fn chunks_expiring_within_horizon_previews_without_drop() {
 #[test]
 fn sweep_without_ttl_is_noop() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     // No TTL — even old chunks stay.
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
