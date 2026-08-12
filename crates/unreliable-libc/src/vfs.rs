@@ -450,7 +450,7 @@ impl VfsFile for SimFileHandle {
         })
     }
 
-    fn len(&self) -> io::Result<u64> {
+    fn file_len(&self) -> io::Result<u64> {
         let state = self.lock();
         state
             .files
