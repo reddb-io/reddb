@@ -2,7 +2,7 @@ use super::*;
 use crate::auth::column_policy_gate::ColumnAccessRequest;
 use crate::auth::UserId;
 use crate::replication::cdc::ChangeRecord;
-use crate::storage::query::ast::TableSource;
+use reddb_rql::ast::TableSource;
 // Authorization surface moved to `super::authz` (issue #1622). Re-export the
 // free IAM/policy-column helpers so this module's remaining dispatch code
 // (and the `impl_core::decision_to_strings` path used by
@@ -105,8 +105,8 @@ pub(super) fn peek_top_level_as_of_with_table(
     {
         return None;
     }
-    let parsed = crate::storage::query::parser::parse(sql).ok()?;
-    let crate::storage::query::ast::QueryExpr::Table(table) = parsed.query else {
+    let parsed = reddb_rql::parser::parse(sql).ok()?;
+    let reddb_rql::ast::QueryExpr::Table(table) = parsed.query else {
         return None;
     };
     let clause = table.as_of?;
@@ -116,19 +116,13 @@ pub(super) fn peek_top_level_as_of_with_table(
         Some(table.table.clone())
     };
     let spec = match clause {
-        crate::storage::query::ast::AsOfClause::Commit(h) => {
-            crate::application::vcs::AsOfSpec::Commit(h)
-        }
-        crate::storage::query::ast::AsOfClause::Branch(b) => {
-            crate::application::vcs::AsOfSpec::Branch(b)
-        }
-        crate::storage::query::ast::AsOfClause::Tag(t) => crate::application::vcs::AsOfSpec::Tag(t),
-        crate::storage::query::ast::AsOfClause::TimestampMs(ts) => {
+        reddb_rql::ast::AsOfClause::Commit(h) => crate::application::vcs::AsOfSpec::Commit(h),
+        reddb_rql::ast::AsOfClause::Branch(b) => crate::application::vcs::AsOfSpec::Branch(b),
+        reddb_rql::ast::AsOfClause::Tag(t) => crate::application::vcs::AsOfSpec::Tag(t),
+        reddb_rql::ast::AsOfClause::TimestampMs(ts) => {
             crate::application::vcs::AsOfSpec::TimestampMs(ts)
         }
-        crate::storage::query::ast::AsOfClause::Snapshot(x) => {
-            crate::application::vcs::AsOfSpec::Snapshot(x)
-        }
+        reddb_rql::ast::AsOfClause::Snapshot(x) => crate::application::vcs::AsOfSpec::Snapshot(x),
     };
     Some((spec, table_name))
 }
@@ -1450,8 +1444,8 @@ impl RedDBRuntime {
             // registry. Statements running outside a TxnContext still behave
             // as autocommit (xid=0 → visible to every snapshot).
             QueryExpr::TransactionControl(ref ctl) => {
-                use crate::storage::query::ast::TxnControl;
                 use crate::storage::transaction::IsolationLevel;
+                use reddb_rql::ast::TxnControl;
 
                 // Phase 2.3 keys transactions by a thread-local connection id.
                 // The stdio/gRPC paths wire a real per-connection id later;
@@ -2210,7 +2204,7 @@ impl RedDBRuntime {
             // Both commands accept an optional target; omitting the target
             // iterates every collection in the store.
             QueryExpr::MaintenanceCommand(ref cmd) => {
-                use crate::storage::query::ast::MaintenanceCommand as Mc;
+                use reddb_rql::ast::MaintenanceCommand as Mc;
                 let store = self.inner.db.store();
                 let (kind, msg) = match cmd {
                     Mc::Analyze { target } => {
@@ -2451,7 +2445,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<()> {
         use crate::catalog::CollectionModel;
         use crate::runtime::ddl::polymorphic_resolver;
-        use crate::storage::query::ast::KvCommand;
+        use reddb_rql::ast::KvCommand;
 
         let system_schema_target = match expr {
             QueryExpr::DropTable(q) => Some(q.name.as_str()),
@@ -2547,7 +2541,7 @@ impl RedDBRuntime {
     }
 
     fn rewrite_view_refs_inner(&self, expr: QueryExpr) -> QueryExpr {
-        use crate::storage::query::ast::{Filter, TableSource};
+        use reddb_rql::ast::{Filter, TableSource};
         match expr {
             QueryExpr::Table(mut tq) => {
                 // 1. If the TableSource is a subquery, recurse into it so
@@ -2613,7 +2607,7 @@ impl RedDBRuntime {
                             inner_tq.where_expr = inner_tq
                                 .filter
                                 .as_ref()
-                                .map(crate::storage::query::sql_lowering::filter_to_expr);
+                                .map(reddb_rql::sql_lowering::filter_to_expr);
                         }
                         if let Some(outer_limit) = tq.limit {
                             inner_tq.limit = Some(match inner_tq.limit {
@@ -2664,7 +2658,7 @@ impl RedDBRuntime {
 
         let outer_scopes = relation_scopes_for_query(&QueryExpr::Table(table.clone()));
         for item in &mut table.select_items {
-            if let crate::storage::query::ast::SelectItem::Expr { expr, .. } = item {
+            if let reddb_rql::ast::SelectItem::Expr { expr, .. } = item {
                 *expr = self.resolve_expr_subqueries(expr.clone(), &outer_scopes, frame)?;
             }
         }
@@ -2709,11 +2703,11 @@ impl RedDBRuntime {
 
     fn resolve_expr_subqueries(
         &self,
-        expr: crate::storage::query::ast::Expr,
+        expr: reddb_rql::ast::Expr,
         outer_scopes: &[String],
         frame: &dyn super::statement_frame::ReadFrame,
-    ) -> RedDBResult<crate::storage::query::ast::Expr> {
-        use crate::storage::query::ast::Expr;
+    ) -> RedDBResult<reddb_rql::ast::Expr> {
+        use reddb_rql::ast::Expr;
 
         match expr {
             Expr::Subquery { query, span } => {
@@ -2834,7 +2828,7 @@ impl RedDBRuntime {
 
     fn execute_expr_subquery_values(
         &self,
-        subquery: crate::storage::query::ast::ExprSubquery,
+        subquery: reddb_rql::ast::ExprSubquery,
         outer_scopes: &[String],
         frame: &dyn super::statement_frame::ReadFrame,
     ) -> RedDBResult<Vec<Value>> {
@@ -3385,9 +3379,7 @@ mod inline_graph_tvf_tests {
     use super::*;
 
     fn scopes_for(sql: &str) -> HashSet<String> {
-        let expr = crate::storage::query::parser::parse(sql)
-            .expect("parse")
-            .query;
+        let expr = reddb_rql::parser::parse(sql).expect("parse").query;
         query_expr_result_cache_scopes(&expr)
     }
 
