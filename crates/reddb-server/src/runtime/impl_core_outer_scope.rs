@@ -39,8 +39,8 @@ fn query_expr_references_outer_scope(
     match query {
         QueryExpr::Table(table) => {
             table.select_items.iter().any(|item| match item {
-                crate::storage::query::ast::SelectItem::Wildcard => false,
-                crate::storage::query::ast::SelectItem::Expr { expr, .. } => {
+                reddb_rql::ast::SelectItem::Wildcard => false,
+                reddb_rql::ast::SelectItem::Expr { expr, .. } => {
                     expr_references_outer_scope(expr, outer_scopes, inner_scopes)
                 }
             }) || table
@@ -73,8 +73,8 @@ fn query_expr_references_outer_scope(
                     filter_references_outer_scope(filter, outer_scopes, inner_scopes)
                 })
                 || join.return_items.iter().any(|item| match item {
-                    crate::storage::query::ast::SelectItem::Wildcard => false,
-                    crate::storage::query::ast::SelectItem::Expr { expr, .. } => {
+                    reddb_rql::ast::SelectItem::Wildcard => false,
+                    reddb_rql::ast::SelectItem::Expr { expr, .. } => {
                         expr_references_outer_scope(expr, outer_scopes, inner_scopes)
                     }
                 })
@@ -84,11 +84,11 @@ fn query_expr_references_outer_scope(
 }
 
 fn filter_references_outer_scope(
-    filter: &crate::storage::query::ast::Filter,
+    filter: &reddb_rql::ast::Filter,
     outer_scopes: &[String],
     inner_scopes: &[String],
 ) -> bool {
-    use crate::storage::query::ast::Filter;
+    use reddb_rql::ast::Filter;
     match filter {
         Filter::Compare { field, .. }
         | Filter::IsNull(field)
@@ -118,11 +118,11 @@ fn filter_references_outer_scope(
 }
 
 fn expr_references_outer_scope(
-    expr: &crate::storage::query::ast::Expr,
+    expr: &reddb_rql::ast::Expr,
     outer_scopes: &[String],
     inner_scopes: &[String],
 ) -> bool {
-    use crate::storage::query::ast::Expr;
+    use reddb_rql::ast::Expr;
     match expr {
         Expr::Column { field, .. } => {
             field_ref_references_outer_scope(field, outer_scopes, inner_scopes)
@@ -180,12 +180,12 @@ fn expr_references_outer_scope(
 }
 
 fn field_ref_references_outer_scope(
-    field: &crate::storage::query::ast::FieldRef,
+    field: &reddb_rql::ast::FieldRef,
     outer_scopes: &[String],
     inner_scopes: &[String],
 ) -> bool {
     match field {
-        crate::storage::query::ast::FieldRef::TableColumn { table, .. } if !table.is_empty() => {
+        reddb_rql::ast::FieldRef::TableColumn { table, .. } if !table.is_empty() => {
             outer_scopes.iter().any(|scope| scope == table)
                 && !inner_scopes.iter().any(|scope| scope == table)
         }
