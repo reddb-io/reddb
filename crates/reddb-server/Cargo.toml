@@ -21,8 +21,8 @@ path = "src/lib.rs"
 # from storage::schema (#1061, ADR 0052). storage::schema keeps a re-export shim.
 reddb-types = { workspace = true }
 # RQL language front-end authority (#1102, ADR 0053): the lexer and front-end
-# DoS limits live here now; storage::query keeps re-export shims so every
-# existing call-site path resolves unchanged. (rql dev-depends back on the
+# DoS limits live here now; server call-sites import it directly. (rql
+# dev-depends back on the
 # server for its conformance harness — a dev-only edge, so no build cycle.)
 reddb-rql = { workspace = true }
 reddb-wire = { workspace = true }
