@@ -50,7 +50,7 @@
 //! formal parse — we only care about stable equivalence
 //! classes, not strict correctness.
 
-use crate::storage::query::lexer::{Lexer, Token};
+use reddb_rql::lexer::{Lexer, Token};
 use reddb_types::Value;
 
 /// Normalise a raw SQL query into a cache-friendly canonical
