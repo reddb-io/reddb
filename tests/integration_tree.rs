@@ -1,6 +1,6 @@
 mod support;
 
-use reddb::application::{ExecuteQueryInput, QueryUseCases};
+use reddb::application::ExecuteQueryInput;
 use reddb::storage::EntityKind;
 use reddb::RedDBRuntime;
 use reddb_types::Value;
@@ -12,11 +12,10 @@ fn rt() -> RedDBRuntime {
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
 }
 
 fn uint(result: &reddb::runtime::RuntimeQueryResult, column: &str) -> u64 {
@@ -162,7 +161,7 @@ fn test_generic_edge_insert_rejects_reserved_tree_label() {
 
     assert_eq!(ids.len(), 2, "expected two generic graph nodes");
 
-    let err = QueryUseCases::new(&rt)
+    let err = &rt
         .execute(ExecuteQueryInput {
             query: format!(
                 "INSERT INTO forest EDGE (label, from, to, weight) VALUES ('TREE_CHILD', {}, {}, 1.0)",
