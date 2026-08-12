@@ -46,7 +46,7 @@ pub trait VfsFile: Sized {
     /// Duplicate this handle while retaining access to the same file.
     fn try_clone(&self) -> io::Result<Self>;
     /// Return the file's logical length.
-    fn len(&self) -> io::Result<u64>;
+    fn file_len(&self) -> io::Result<u64>;
     /// Change the file's logical length.
     fn set_len(&self, len: u64) -> io::Result<()>;
     /// Write the entire buffer, looping over short writes like `Write::write_all`.
@@ -96,7 +96,7 @@ impl VfsFile for StdFile {
         self.0.try_clone().map(Self)
     }
 
-    fn len(&self) -> io::Result<u64> {
+    fn file_len(&self) -> io::Result<u64> {
         self.0.metadata().map(|metadata| metadata.len())
     }
 
