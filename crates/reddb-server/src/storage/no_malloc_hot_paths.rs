@@ -4,7 +4,6 @@ use std::cell::{Cell, RefCell};
 use super::cache::blob::{BlobCache, BlobCacheConfig, BlobCachePolicy, BlobCachePut, L1Admission};
 use super::engine::page::{Page, PageType};
 use super::engine::page_cache::PageCacheShard;
-use super::query::ast::{Projection, QueryExpr, TableQuery};
 use super::query::engine::binding::{Binding, Value as BindingValue, Var};
 use super::query::executors::aggregation::write_group_key;
 use super::query::executors::join::{
@@ -17,6 +16,7 @@ use super::unified::hash_index::HashIndex;
 use super::unified::segment::{GrowingSegment, UnifiedSegment};
 use super::unified::{EntityId, UnifiedEntity};
 use super::wal::WalRecord;
+use reddb_rql::ast::{Projection, QueryExpr, TableQuery};
 
 thread_local! {
     static COUNTER: RefCell<AllocationCounter> = const { RefCell::new(AllocationCounter::new()) };
