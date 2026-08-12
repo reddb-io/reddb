@@ -26,20 +26,7 @@ use crate::storage::engine::{
     MetadataValue as VectorMetadataValue, PageRank, PersonalizedPageRank, PhysicalFileHeader,
     StoredNode, StronglyConnectedComponents, WeaklyConnectedComponents, HITS,
 };
-use crate::storage::query::ast::{
-    AlterOperation, AlterQueueQuery, AlterTableQuery, CompareOp, CreateCollectionQuery,
-    CreateIndexQuery, CreateQueueQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery,
-    CreateVectorQuery, DeleteQuery, DropCollectionQuery, DropDocumentQuery, DropForkQuery,
-    DropGraphQuery, DropIndexQuery, DropKvQuery, DropQueueQuery, DropTableQuery,
-    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, EventsBackfillQuery, ExplainAlterQuery,
-    ExplainFormat, FieldRef, Filter, ForkStoreQuery, FusionStrategy, GraphCommand, HybridQuery,
-    IndexMethod, InsertEntityType, InsertQuery, JoinQuery, JoinType, OrderByClause,
-    ProbabilisticCommand, Projection, PromoteForkQuery, QueryExpr, QueueCommand, QueueSelectQuery,
-    QueueSide, SearchCommand, TableQuery, TreeCommand, TruncateQuery, UpdateQuery, VectorQuery,
-    VectorSource,
-};
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
-use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};
 use crate::storage::query::planner::{
     CanonicalLogicalPlan, CanonicalPlanner, CostEstimator, QueryPlanner,
 };
@@ -60,6 +47,19 @@ use crate::storage::{
     EntityData, EntityId, EntityKind, RedDB, RefType, SimilarResult, StoreStats, UnifiedEntity,
     UnifiedStore,
 };
+use reddb_rql::ast::{
+    AlterOperation, AlterQueueQuery, AlterTableQuery, CompareOp, CreateCollectionQuery,
+    CreateIndexQuery, CreateQueueQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery,
+    CreateVectorQuery, DeleteQuery, DropCollectionQuery, DropDocumentQuery, DropForkQuery,
+    DropGraphQuery, DropIndexQuery, DropKvQuery, DropQueueQuery, DropTableQuery,
+    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, EventsBackfillQuery, ExplainAlterQuery,
+    ExplainFormat, FieldRef, Filter, ForkStoreQuery, FusionStrategy, GraphCommand, HybridQuery,
+    IndexMethod, InsertEntityType, InsertQuery, JoinQuery, JoinType, OrderByClause,
+    ProbabilisticCommand, Projection, PromoteForkQuery, QueryExpr, QueueCommand, QueueSelectQuery,
+    QueueSide, SearchCommand, TableQuery, TreeCommand, TruncateQuery, UpdateQuery, VectorQuery,
+    VectorSource,
+};
+use reddb_rql::modes::{detect_mode, parse_multi, QueryMode};
 use reddb_types::Value;
 
 static TIMESERIES_TAG_INDEX_OBSERVED_POINTS: AtomicU64 = AtomicU64::new(0);
@@ -1140,7 +1140,7 @@ struct RuntimeInner {
     ///
     /// This is in-memory only in Phase 2.1 — view definitions do not
     /// survive a restart. Persistence is a Phase 3 follow-up.
-    views: parking_lot::RwLock<HashMap<String, Arc<crate::storage::query::ast::CreateViewQuery>>>,
+    views: parking_lot::RwLock<HashMap<String, Arc<reddb_rql::ast::CreateViewQuery>>>,
     materialized_views: parking_lot::RwLock<crate::storage::cache::result::MaterializedViewCache>,
     /// Per-collection retention sweeper state (issue #584 slice 12).
     /// Tracks `last_sweep_at_ms`, row/segment retirement totals, and
@@ -1170,9 +1170,8 @@ struct RuntimeInner {
     /// enforcement toggled on lives in `rls_enabled_tables`. Filter
     /// enforcement hooks into the read path via `collect_rls_filters()`
     /// — see `runtime::impl_core`.
-    rls_policies: parking_lot::RwLock<
-        HashMap<(String, String), Arc<crate::storage::query::ast::CreatePolicyQuery>>,
-    >,
+    rls_policies:
+        parking_lot::RwLock<HashMap<(String, String), Arc<reddb_rql::ast::CreatePolicyQuery>>>,
     rls_enabled_tables: parking_lot::RwLock<HashSet<String>>,
     /// Foreign Data Wrapper registry (Phase 3.2 PG parity).
     ///
