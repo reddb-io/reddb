@@ -502,7 +502,7 @@ fn physical_exports(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<Htt
 fn physical_indexes(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
     Some(json_response(
         200,
-        crate::presentation::admin_json::indexes_json(&server.catalog_use_cases().indexes()),
+        crate::presentation::admin_json::indexes_json(&server.runtime.indexes()),
     ))
 }
 
@@ -510,7 +510,7 @@ fn physical_stats(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpR
     Some(json_response(
         200,
         crate::presentation::query_result_json::runtime_stats_json(
-            &server.catalog_use_cases().stats(),
+            &server.runtime.stats(),
         ),
     ))
 }
@@ -674,8 +674,7 @@ fn physical_collections_indexes(
     Some(json_response(
         200,
         crate::presentation::admin_json::indexes_json(
-            &server
-                .catalog_use_cases()
+            &server.runtime
                 .indexes_for_collection(collection),
         ),
     ))
