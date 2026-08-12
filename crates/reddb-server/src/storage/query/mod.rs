@@ -16,7 +16,7 @@
 //! The query engine supports multiple query languages with automatic mode detection:
 //!
 //! ```ignore
-//! use reddb::storage::query::modes::{parse_multi, detect_mode, QueryMode};
+//! use reddb_rql::modes::{parse_multi, detect_mode, QueryMode};
 //!
 //! // Gremlin
 //! let gremlin = parse_multi("g.V().hasLabel('host').out('connects')").unwrap();
@@ -43,29 +43,18 @@
 //! ```
 
 pub mod analyze_cmd;
-pub mod analyzer;
-pub mod ast;
 pub mod batch;
 pub mod binary;
 pub mod engine;
 pub mod evaluator;
 pub mod executor;
 pub mod executors;
-pub mod expr_typing;
 pub mod filter;
 pub mod filter_compiled;
-pub mod filter_optimizer;
-pub mod lexer;
-pub mod modes;
-pub mod optimizer;
-pub mod parser;
 pub mod planner;
 pub mod rag;
-pub mod renderer;
 pub mod similarity;
 pub mod sort;
-pub mod sql;
-pub mod sql_lowering;
 pub mod step;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -74,24 +63,6 @@ pub mod user_params;
 pub(crate) mod value_compare;
 
 // Re-export common types
-pub use analyzer::{
-    analyze_create_table, resolve_declared_data_type, resolve_sql_type_name, AnalysisError,
-    AnalyzedColumnDef, AnalyzedCreateTableQuery,
-};
-pub use ast::{
-    AlterOperation, AlterQueueQuery, AlterTableQuery, AlterUserAttribute, AlterUserStmt, CompareOp,
-    CreateColumnDef, CreateQueueQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery,
-    CreateVectorQuery, CteDefinition, CteQueryBuilder, DeleteQuery, DropCollectionQuery,
-    DropDocumentQuery, DropGraphQuery, DropKvQuery, DropQueueQuery, DropTableQuery,
-    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, EdgeDirection, EdgePattern, FieldRef,
-    Filter as AstFilter, GrantObject, GrantObjectKind, GrantPrincipalRef, GrantStmt, GraphCommand,
-    GraphPattern, GraphQuery, InsertEntityType, InsertQuery, JoinCondition, JoinQuery, JoinType,
-    NodePattern, NodeSelector, OrderByClause, PathQuery, PolicyPrincipalRef, PolicyResourceRef,
-    PolicyUserRef, Projection, QueryExpr, QueryWithCte, RevokeStmt, SearchCommand, SelectItem,
-    TableQuery, TreeCommand, TreeNodeSpec, TreePosition, UpdateQuery, WithClause,
-    DEFAULT_QUEUE_DEDUP_WINDOW_MS, DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP,
-    DEFAULT_QUEUE_LOCK_DEADLINE_MS, DEFAULT_QUEUE_MAX_ATTEMPTS,
-};
 pub use engine::{
     Binding, BindingBuilder, BindingIterator, Op, OpBGP, OpDisjunction, OpDistinct, OpExtend,
     OpFilter, OpGroup, OpJoin, OpLeftJoin, OpMinus, OpNull, OpOrder, OpProject, OpReduced,
@@ -106,15 +77,9 @@ pub use executors::{
     NaturalExecutor, SparqlExecutor,
 };
 pub use filter::{Filter, FilterOp, Predicate};
-pub use lexer::{Lexer, LexerError, Position, Spanned, Token};
-pub use optimizer::{
-    ColumnStats, FilterRanker, RankedFilter, RankingConfig, StatsCollector, TableStats,
-};
-pub use parser::{parse, ParseError, Parser};
 pub use planner::{
-    CacheStats, CachedPlan, CardinalityEstimate, CostEstimator, OptimizationPass, PlanCache,
-    PlanCost, QueryOptimizer, QueryPlan as PlannerQueryPlan, QueryPlanner, QueryRewriter,
-    RewriteContext, RewriteRule,
+    CacheStats, CachedPlan, CardinalityEstimate, CostEstimator, PlanCache, PlanCost,
+    QueryPlan as PlannerQueryPlan, QueryPlanner,
 };
 pub use rag::{
     ChunkSource, ContextChunk, EntityType, MultiSourceRetriever, QueryAnalysis, QueryIntent,
@@ -123,7 +88,6 @@ pub use rag::{
 pub use reddb_types::{SqlTypeName, TypeModifier};
 pub use similarity::{SimilarityQuery, SimilarityResult};
 pub use sort::{Direction, NullsOrder, OrderBy, QueryLimits, SortKey};
-pub use sql::{parse_frontend, FrontendStatement, SqlCommand, SqlStatement};
 pub use step::{
     AggregateStep, BarrierStep, BasicTraversal, BranchStep, ChooseStep, CollectingBarrierStep,
     DedupStep, Direction as TraversalDirection, EdgeSourceStep, EdgeStep, ExecutionMode,
