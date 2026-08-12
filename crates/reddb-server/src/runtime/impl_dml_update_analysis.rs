@@ -6,7 +6,7 @@
 
 use super::record_search::runtime_any_record_from_entity_ref;
 use super::*;
-use crate::storage::query::ast::Expr;
+use reddb_rql::ast::Expr;
 
 pub(super) fn expr_references_update_column(
     expr: &Expr,
