@@ -19,8 +19,8 @@ use crate::runtime::query_request::{
     ParamValue, PreparedId, PreparedRegistry, QueryRequest, QueryRequestExecutor,
 };
 use crate::runtime::RedDBRuntime;
-use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::unified::{EntityData, EntityId};
+use reddb_rql::sql_lowering::effective_table_filter;
 use reddb_types::Value;
 use reddb_wire::legacy::{
     build_legacy_bulk_ok_frame, build_legacy_bulk_stream_ack_frame,
@@ -698,7 +698,7 @@ pub(crate) fn handle_execute_prepared(
     // emit the wire frame without ever materialising `UnifiedRecord`.
     // Same kill switch as MSG_QUERY_BINARY (`REDDB_DISABLE_DIRECT_SCAN`).
     if !direct_scan_disabled() {
-        if let Some(crate::storage::query::ast::QueryExpr::Table(tq)) = bound.prepared_expr() {
+        if let Some(reddb_rql::ast::QueryExpr::Table(tq)) = bound.prepared_expr() {
             if super::query_direct::is_shape_direct_eligible(tq) {
                 if let Some(resp) = super::query_direct::execute_direct_scan(runtime, tq) {
                     return resp;
