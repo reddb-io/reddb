@@ -402,7 +402,7 @@ impl RedDb for GrpcRuntime {
     }
 
     async fn stats(&self, _request: Request<Empty>) -> Result<Response<StatsReply>, Status> {
-        let stats = self.catalog_use_cases().stats();
+        let stats = self.runtime.stats();
         Ok(Response::new(StatsReply {
             collection_count: stats.store.collection_count as u64,
             total_entities: stats.store.total_entities as u64,
@@ -421,7 +421,7 @@ impl RedDb for GrpcRuntime {
         _request: Request<Empty>,
     ) -> Result<Response<CollectionsReply>, Status> {
         Ok(Response::new(CollectionsReply {
-            collections: self.catalog_use_cases().collections(),
+            collections: self.runtime.db().collections(),
         }))
     }
 
@@ -429,7 +429,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let catalog = self.catalog_use_cases().snapshot();
+        let catalog = self.runtime.catalog();
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_collection_readiness_json(
                 &catalog.collections,
@@ -443,7 +443,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_collection_attention_json(
-                &self.catalog_use_cases().collection_attention(),
+                &self.runtime.collection_attention(),
             ),
         )))
     }
@@ -454,7 +454,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_attention_summary_json(
-                &self.catalog_use_cases().attention_summary(),
+                &self.runtime.catalog_attention_summary(),
             ),
         )))
     }
@@ -532,9 +532,9 @@ impl RedDb for GrpcRuntime {
             .validate_current_serverless_generation()
             .map_err(to_status)?;
         let plan = self.admin_use_cases().build_serverless_warmup_plan(
-            &self.catalog_use_cases().index_statuses(),
-            &self.catalog_use_cases().graph_projection_statuses(),
-            &self.catalog_use_cases().analytics_job_statuses(),
+            &self.runtime.index_statuses(),
+            &self.runtime.graph_projection_statuses(),
+            &self.runtime.analytics_job_statuses(),
             force,
             scopes.contains(&GrpcServerlessWarmupScope::Indexes),
             scopes.contains(&GrpcServerlessWarmupScope::GraphProjections),
@@ -870,7 +870,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_consistency_json(
-                &self.catalog_use_cases().consistency_report(),
+                &self.runtime.catalog_consistency_report(),
             ),
         )))
     }
@@ -1201,8 +1201,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         let request = request.into_inner();
         let indexes = match none_if_empty(&request.collection) {
-            Some(collection) => self.catalog_use_cases().indexes_for_collection(collection),
-            None => self.catalog_use_cases().indexes(),
+            Some(collection) => self.runtime.indexes_for_collection(collection),
+            None => self.runtime.indexes(),
         };
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::indexes_json(&indexes),
@@ -1215,10 +1215,9 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         let request = request.into_inner();
         let indexes = match none_if_empty(&request.collection) {
-            Some(collection) => self
-                .catalog_use_cases()
+            Some(collection) => self.runtime
                 .declared_indexes_for_collection(collection),
-            None => self.catalog_use_cases().declared_indexes(),
+            None => self.runtime.declared_indexes(),
         };
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::indexes_json(&indexes),
@@ -1231,8 +1230,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         let request = request.into_inner();
         let indexes = match none_if_empty(&request.collection) {
-            Some(collection) => self.catalog_use_cases().indexes_for_collection(collection),
-            None => self.catalog_use_cases().indexes(),
+            Some(collection) => self.runtime.indexes_for_collection(collection),
+            None => self.runtime.indexes(),
         };
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::indexes_json(&indexes),
@@ -1245,7 +1244,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_index_statuses_json(
-                &self.catalog_use_cases().index_statuses(),
+                &self.runtime.index_statuses(),
             ),
         )))
     }
@@ -1256,7 +1255,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_index_attention_json(
-                &self.catalog_use_cases().index_attention(),
+                &self.runtime.index_attention(),
             ),
         )))
     }
@@ -1380,8 +1379,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let projections = self
-            .catalog_use_cases()
+        let projections = self.runtime
             .graph_projections()
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
@@ -1402,7 +1400,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::graph_projections_json(
-                &self.catalog_use_cases().operational_graph_projections(),
+                &self.runtime.operational_graph_projections(),
             ),
         )))
     }
@@ -1413,7 +1411,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_graph_projection_statuses_json(
-                &self.catalog_use_cases().graph_projection_statuses(),
+                &self.runtime.graph_projection_statuses(),
             ),
         )))
     }
@@ -1424,7 +1422,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_graph_projection_attention_json(
-                &self.catalog_use_cases().graph_projection_attention(),
+                &self.runtime.graph_projection_attention(),
             ),
         )))
     }
@@ -1629,8 +1627,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let jobs = self
-            .catalog_use_cases()
+        let jobs = self.runtime
             .analytics_jobs()
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
@@ -1651,7 +1648,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::analytics_jobs_json(
-                &self.catalog_use_cases().operational_analytics_jobs(),
+                &self.runtime.operational_analytics_jobs(),
             ),
         )))
     }
@@ -1662,7 +1659,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
-                &self.catalog_use_cases().analytics_job_statuses(),
+                &self.runtime.analytics_job_statuses(),
             ),
         )))
     }
@@ -1673,15 +1670,14 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_analytics_job_attention_json(
-                &self.catalog_use_cases().analytics_job_attention(),
+                &self.runtime.analytics_job_attention(),
             ),
         )))
     }
 
     async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanReply>, Status> {
         let request = request.into_inner();
-        let page = self
-            .query_use_cases()
+        let page = self.runtime
             .scan(crate::application::ScanCollectionInput {
                 collection: request.collection,
                 offset: request.offset as usize,
@@ -1772,11 +1768,8 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<QueryRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let result = self
-            .query_use_cases()
-            .explain(ExplainQueryInput {
-                query: request.into_inner().query,
-            })
+        let result = self.runtime
+            .explain_query(&(request.into_inner().query))
             .map_err(to_status)?;
         let universal_mode = crate::presentation::query_plan_json::logical_plan_uses_universal_mode(
             &result.logical_plan.root,
@@ -1805,9 +1798,8 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self
-                    .query_use_cases()
-                    .search_hybrid(input)
+                let result = self.runtime
+                    .search_hybrid_input(input)
                     .map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
@@ -1821,9 +1813,8 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self
-                    .query_use_cases()
-                    .search_multimodal(input)
+                let result = self.runtime
+                    .search_multimodal_input(input)
                     .map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
@@ -1837,9 +1828,8 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self
-                    .query_use_cases()
-                    .search_index(input)
+                let result = self.runtime
+                    .search_index_input(input)
                     .map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
@@ -1864,9 +1854,8 @@ impl RedDb for GrpcRuntime {
             &input.capabilities,
         );
 
-        let result = self
-            .query_use_cases()
-            .search_text(input)
+        let result = self.runtime
+            .search_text_input(input)
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
@@ -1890,9 +1879,8 @@ impl RedDb for GrpcRuntime {
             &input.capabilities,
         );
 
-        let result = self
-            .query_use_cases()
-            .search_multimodal(input)
+        let result = self.runtime
+            .search_multimodal_input(input)
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
@@ -1917,9 +1905,8 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self
-                    .query_use_cases()
-                    .search_hybrid(input)
+                let result = self.runtime
+                    .search_hybrid_input(input)
                     .map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
@@ -1933,9 +1920,8 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self
-                    .query_use_cases()
-                    .search_multimodal(input)
+                let result = self.runtime
+                    .search_multimodal_input(input)
                     .map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
@@ -1949,9 +1935,8 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self
-                    .query_use_cases()
-                    .search_index(input)
+                let result = self.runtime
+                    .search_index_input(input)
                     .map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
@@ -1978,9 +1963,8 @@ impl RedDb for GrpcRuntime {
         let response_collection = input.collection.clone();
         let k = input.k;
         let min_score = input.min_score;
-        let result = self
-            .query_use_cases()
-            .search_similar(input)
+        let result = self.runtime
+            .search_similar_input(input)
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::query_json::similar_results_json(
@@ -2002,9 +1986,8 @@ impl RedDb for GrpcRuntime {
         let input =
             crate::application::query_payload::parse_ivf_search_input(request.collection, &payload)
                 .map_err(to_status)?;
-        let result = self
-            .query_use_cases()
-            .search_ivf(input)
+        let result = self.runtime
+            .search_ivf_input(input)
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::query_json::runtime_ivf_json(
@@ -2583,9 +2566,8 @@ impl RedDb for GrpcRuntime {
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::query_payload::parse_context_search_input(&payload)
             .map_err(to_status)?;
-        let result = self
-            .query_use_cases()
-            .search_context(input)
+        let result = self.runtime
+            .search_context_input(input)
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::query_json::context_search_result_json(&result),
