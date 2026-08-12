@@ -12,7 +12,7 @@
 //!    no rows for the dropped view.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 fn wait_for<F: Fn() -> bool>(timeout: std::time::Duration, check: F) -> bool {
@@ -29,7 +29,7 @@ fn wait_for<F: Fn() -> bool>(timeout: std::time::Duration, check: F) -> bool {
 #[test]
 fn scheduled_refresh_ticks_view_and_updates_red_materialized_views() {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE signups (id INTEGER, name TEXT)".into(),
@@ -91,7 +91,7 @@ fn scheduled_refresh_ticks_view_and_updates_red_materialized_views() {
 #[test]
 fn refresh_failure_preserves_prior_content_and_records_error() {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE t (id INTEGER)".into(),
@@ -155,7 +155,7 @@ fn refresh_failure_preserves_prior_content_and_records_error() {
 #[test]
 fn drop_materialized_view_cleans_up_scheduled_task() {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE t (id INTEGER)".into(),
