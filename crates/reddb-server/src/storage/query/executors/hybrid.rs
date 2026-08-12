@@ -20,10 +20,10 @@ use crate::storage::engine::graph_store::GraphStore;
 use crate::storage::engine::graph_table_index::GraphTableIndex;
 use crate::storage::engine::unified_index::UnifiedIndex;
 use crate::storage::engine::vector_store::VectorStore;
-use crate::storage::query::ast::{FusionStrategy, HybridQuery, VectorQuery};
 use crate::storage::query::unified::{
     ExecutionError, QueryStats, UnifiedExecutor, UnifiedRecord, UnifiedResult,
 };
+use reddb_rql::ast::{FusionStrategy, HybridQuery, VectorQuery};
 use reddb_types::Value;
 
 use super::vector::VectorExecutor;
@@ -774,7 +774,7 @@ impl Default for InMemoryHybridExecutor {
 mod tests {
     use super::*;
     use crate::storage::engine::distance::DistanceMetric;
-    use crate::storage::query::ast::VectorSource;
+    use reddb_rql::ast::VectorSource;
 
     #[test]
     fn test_in_memory_hybrid_rerank() {
