@@ -4,16 +4,15 @@ pub(crate) use crate::application::json_input::{
     json_bool_field, json_f32_field, json_string_field, json_usize_field,
 };
 pub(crate) use crate::application::{
-    AdminUseCases, CatalogUseCases, CreateDocumentInput, CreateEdgeInput, CreateEntityOutput,
-    CreateKvInput, CreateNodeEmbeddingInput, CreateNodeGraphLinkInput, CreateNodeInput,
-    CreateNodeTableLinkInput, CreateRowInput, CreateVectorInput, DeleteEntityInput, EntityUseCases,
-    ExecuteQueryInput, ExplainQueryInput, GraphCentralityInput, GraphClusteringInput,
-    GraphCommunitiesInput, GraphComponentsInput, GraphCyclesInput, GraphHitsInput,
-    GraphNeighborhoodInput, GraphPersonalizedPageRankInput, GraphShortestPathInput,
-    GraphTopologicalSortInput, GraphTraversalInput, GraphUseCases, InspectNativeArtifactInput,
-    NativeUseCases, PatchEntityInput, PatchEntityOperation, PatchEntityOperationType,
-    QueryUseCases, SearchHybridInput, SearchIvfInput, SearchMultimodalInput, SearchSimilarInput,
-    SearchTextInput, TreeUseCases,
+    AdminUseCases, CreateDocumentInput, CreateEdgeInput, CreateEntityOutput, CreateKvInput,
+    CreateNodeEmbeddingInput, CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput,
+    CreateRowInput, CreateVectorInput, DeleteEntityInput, EntityUseCases, ExecuteQueryInput,
+    ExplainQueryInput, GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput,
+    GraphComponentsInput, GraphCyclesInput, GraphHitsInput, GraphNeighborhoodInput,
+    GraphPersonalizedPageRankInput, GraphShortestPathInput, GraphTopologicalSortInput,
+    GraphTraversalInput, GraphUseCases, InspectNativeArtifactInput, NativeUseCases,
+    PatchEntityInput, PatchEntityOperation, PatchEntityOperationType, SearchHybridInput,
+    SearchIvfInput, SearchMultimodalInput, SearchSimilarInput, SearchTextInput, TreeUseCases,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Write};
@@ -648,20 +647,12 @@ impl RedDBServer {
         &self.options
     }
 
-    fn query_use_cases(&self) -> QueryUseCases<'_, RedDBRuntime> {
-        QueryUseCases::new(&self.runtime)
-    }
-
     fn admin_use_cases(&self) -> AdminUseCases<'_, RedDBRuntime> {
         AdminUseCases::new(&self.runtime)
     }
 
     fn entity_use_cases(&self) -> EntityUseCases<'_, RedDBRuntime> {
         EntityUseCases::new(&self.runtime)
-    }
-
-    fn catalog_use_cases(&self) -> CatalogUseCases<'_, RedDBRuntime> {
-        CatalogUseCases::new(&self.runtime)
     }
 
     fn graph_use_cases(&self) -> GraphUseCases<'_, RedDBRuntime> {

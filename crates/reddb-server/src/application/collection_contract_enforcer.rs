@@ -9,6 +9,28 @@ use crate::RedDBResult;
 use reddb_types::coerce::coerce as coerce_schema_value;
 use reddb_types::{DataType, Value};
 
+/// Enforces a declared collection model on a read without creating a contract.
+pub(crate) fn ensure_collection_model_read(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+    requested_model: crate::catalog::CollectionModel,
+) -> RedDBResult<()> {
+    let Some(contract) = db.collection_contract(collection) else {
+        return Ok(());
+    };
+    if !contract_enforces_model(&contract)
+        || collection_model_allows(contract.declared_model, requested_model)
+    {
+        return Ok(());
+    }
+    Err(crate::RedDBError::InvalidOperation(format!(
+        "collection '{}' is declared as '{}' and does not allow '{}' reads",
+        collection,
+        collection_model_name(contract.declared_model),
+        collection_model_name(requested_model)
+    )))
+}
+
 /// Pure collection-contract evaluator used by unit tests and non-runtime callers.
 pub(crate) struct CollectionContractEnforcer<'a> {
     contract: &'a crate::physical::CollectionContract,

@@ -9,7 +9,7 @@
 mod support;
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
+use reddb::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 
 fn unique_dir(prefix: &str) -> support::TempDataDir {
@@ -23,7 +23,7 @@ fn unique_dir(prefix: &str) -> support::TempDataDir {
 #[test]
 fn sweeper_drains_expired_rows_in_batches_and_leaves_fresh_rows() {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE events (id INTEGER, msg TEXT) WITH timestamps = true".into(),
@@ -96,7 +96,7 @@ fn sweeper_drains_expired_rows_in_batches_and_leaves_fresh_rows() {
 #[test]
 fn red_retention_exposes_sweeper_state_columns() {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE events (id INTEGER, msg TEXT) WITH timestamps = true".into(),
@@ -179,7 +179,7 @@ fn sweeper_after_restart_continues_to_reclaim_via_wal() {
     {
         let rt =
             RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("open primary");
-        let q = QueryUseCases::new(&rt);
+        let q = &rt;
         q.execute(ExecuteQueryInput {
             query: "CREATE TABLE events (id INTEGER, msg TEXT) WITH timestamps = true".into(),
         })
@@ -219,7 +219,7 @@ fn sweeper_after_restart_continues_to_reclaim_via_wal() {
     // gone on the replica as well.
     {
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("reopen");
-        let q = QueryUseCases::new(&rt);
+        let q = &rt;
         let after = q
             .execute(ExecuteQueryInput {
                 query: "SELECT id FROM events".into(),
@@ -241,7 +241,7 @@ fn sweeper_after_restart_continues_to_reclaim_via_wal() {
 #[test]
 fn create_materialized_view_with_retention_is_accepted() {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE base (id INTEGER, msg TEXT)".into(),
     })

@@ -1,6 +1,5 @@
 pub mod admin;
 pub(crate) mod admin_payload;
-pub mod catalog;
 pub(crate) mod collection_contract_enforcer;
 pub mod entity;
 pub(crate) mod entity_payload;
@@ -25,7 +24,6 @@ pub mod vcs;
 pub mod vcs_collections;
 
 pub use admin::{AdminUseCases, ServerlessAnalyticsWarmupTarget, ServerlessWarmupPlan};
-pub use catalog::CatalogUseCases;
 pub use entity::{
     CreateDocumentInput, CreateEdgeInput, CreateEntityOutput, CreateKvInput,
     CreateNodeEmbeddingInput, CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput,
@@ -45,13 +43,12 @@ pub use operation_context::{
     WriteConsentSeal, Xid,
 };
 pub use ports::{
-    RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeEntityPortCtx,
-    RuntimeGraphPort, RuntimeNativePort, RuntimeNativePortCtx, RuntimeQueryPort,
-    RuntimeQueryPortCtx, RuntimeSchemaPort, RuntimeSchemaPortCtx, RuntimeTreePort,
+    RuntimeAdminPort, RuntimeEntityPort, RuntimeEntityPortCtx, RuntimeGraphPort, RuntimeNativePort,
+    RuntimeNativePortCtx, RuntimeSchemaPort, RuntimeSchemaPortCtx, RuntimeTreePort,
     RuntimeTreePortCtx, RuntimeVcsPort, RuntimeVcsPortCtx,
 };
 pub use query::{
-    ExecuteQueryInput, ExplainQueryInput, QueryUseCases, ScanCollectionInput, SearchContextInput,
+    ExecuteQueryInput, ExplainQueryInput, ScanCollectionInput, SearchContextInput,
     SearchHybridInput, SearchIndexInput, SearchIvfInput, SearchMultimodalInput, SearchSimilarInput,
     SearchTextInput,
 };
@@ -69,3 +66,31 @@ pub use vcs::{
     LogInput, LogRange, MergeInput, MergeOpts, MergeOutcome, MergeStrategy, Ref, RefKind, RefName,
     ResetInput, ResetMode, Status, StatusInput, VcsUseCases,
 };
+
+#[cfg(test)]
+mod architecture_tests {
+    const MODULE: &str = include_str!("mod.rs");
+    const PORTS: &str = include_str!("ports.rs");
+    const PORT_IMPLS: &str = include_str!("ports_impls.rs");
+    const QUERY: &str = include_str!("query.rs");
+
+    #[test]
+    fn query_and_catalog_pass_through_ports_stay_deleted() {
+        for retired_name in [
+            concat!("Runtime", "Query", "Port"),
+            concat!("Runtime", "Catalog", "Port"),
+            concat!("Query", "UseCases"),
+            concat!("Catalog", "UseCases"),
+            concat!("ports_impls_", "query.rs"),
+            concat!("ports_impls_", "catalog.rs"),
+        ] {
+            assert!(
+                !MODULE.contains(retired_name)
+                    && !PORTS.contains(retired_name)
+                    && !PORT_IMPLS.contains(retired_name)
+                    && !QUERY.contains(retired_name),
+                "retired pass-through surface reappeared: {retired_name}"
+            );
+        }
+    }
+}

@@ -154,9 +154,9 @@ impl RedDBServer {
         }
 
         let plan = self.admin_use_cases().build_serverless_warmup_plan(
-            &self.catalog_use_cases().index_statuses(),
-            &self.catalog_use_cases().graph_projection_statuses(),
-            &self.catalog_use_cases().analytics_job_statuses(),
+            &self.runtime.index_statuses(),
+            &self.runtime.graph_projection_statuses(),
+            &self.runtime.analytics_job_statuses(),
             force,
             scopes.contains(&ServerlessWarmupScope::Indexes),
             scopes.contains(&ServerlessWarmupScope::GraphProjections),
@@ -664,7 +664,7 @@ impl RedDBServer {
         if name.trim().is_empty() {
             return json_error(400, "collection name cannot be empty");
         }
-        let snapshot = self.catalog_use_cases().snapshot();
+        let snapshot = self.runtime.catalog();
         let descriptor = match snapshot.collections.iter().find(|c| c.name == name) {
             Some(d) => d,
             None => {

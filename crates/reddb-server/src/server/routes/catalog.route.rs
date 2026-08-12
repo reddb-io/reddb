@@ -197,7 +197,7 @@ fn catalog_readiness(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<Ht
 }
 
 fn catalog_snapshot(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
-    let snapshot = server.catalog_use_cases().snapshot();
+    let snapshot = server.runtime.catalog();
     let native = server.native_use_cases();
     let readiness = native.readiness();
     let health = native.health();
@@ -221,7 +221,7 @@ fn catalog_attention(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<Ht
     Some(json_response(
         200,
         crate::presentation::catalog_json::catalog_attention_summary_json(
-            &server.catalog_use_cases().attention_summary(),
+            &server.runtime.catalog_attention_summary(),
         ),
     ))
 }
@@ -230,7 +230,7 @@ fn catalog_consistency(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<
     Some(json_response(
         200,
         crate::presentation::catalog_json::catalog_consistency_json(
-            &server.catalog_use_cases().consistency_report(),
+            &server.runtime.catalog_consistency_report(),
         ),
     ))
 }
@@ -250,7 +250,7 @@ fn catalog_collections_readiness(
     server: &RedDBServer,
     _req: &RouteRequest<'_>,
 ) -> Option<HttpResponse> {
-    let catalog = server.catalog_use_cases().snapshot();
+    let catalog = server.runtime.catalog();
     Some(deprecated_catalog_response(
         "/catalog/collections/readiness",
         json_response(
@@ -271,7 +271,7 @@ fn catalog_collections_readiness_attention(
         json_response(
             200,
             crate::presentation::catalog_json::catalog_collection_attention_json(
-                &server.catalog_use_cases().collection_attention(),
+                &server.runtime.collection_attention(),
             ),
         ),
     ))
@@ -283,7 +283,7 @@ fn catalog_indexes_declared(server: &RedDBServer, _req: &RouteRequest<'_>) -> Op
         json_response(
             200,
             crate::presentation::admin_json::indexes_json(
-                &server.catalog_use_cases().declared_indexes(),
+                &server.runtime.declared_indexes(),
             ),
         ),
     ))
@@ -297,7 +297,7 @@ fn catalog_indexes_operational(
         "/catalog/indexes/operational",
         json_response(
             200,
-            crate::presentation::admin_json::indexes_json(&server.catalog_use_cases().indexes()),
+            crate::presentation::admin_json::indexes_json(&server.runtime.indexes()),
         ),
     ))
 }
@@ -308,7 +308,7 @@ fn catalog_indexes_status(server: &RedDBServer, _req: &RouteRequest<'_>) -> Opti
         json_response(
             200,
             crate::presentation::catalog_json::catalog_index_statuses_json(
-                &server.catalog_use_cases().index_statuses(),
+                &server.runtime.index_statuses(),
             ),
         ),
     ))
@@ -323,7 +323,7 @@ fn catalog_indexes_attention(
         json_response(
             200,
             crate::presentation::catalog_json::catalog_index_attention_json(
-                &server.catalog_use_cases().index_attention(),
+                &server.runtime.index_attention(),
             ),
         ),
     ))
@@ -335,7 +335,7 @@ fn catalog_graph_projections_declared(
 ) -> Option<HttpResponse> {
     Some(deprecated_catalog_response(
         "/catalog/graph/projections/declared",
-        match server.catalog_use_cases().graph_projections() {
+        match server.runtime.graph_projections() {
             Ok(projections) => json_response(
                 200,
                 crate::presentation::admin_json::graph_projections_json(&projections),
@@ -354,7 +354,7 @@ fn catalog_graph_projections_operational(
         json_response(
             200,
             crate::presentation::admin_json::graph_projections_json(
-                &server.catalog_use_cases().operational_graph_projections(),
+                &server.runtime.operational_graph_projections(),
             ),
         ),
     ))
@@ -369,7 +369,7 @@ fn catalog_graph_projections_status(
         json_response(
             200,
             crate::presentation::catalog_json::catalog_graph_projection_statuses_json(
-                &server.catalog_use_cases().graph_projection_statuses(),
+                &server.runtime.graph_projection_statuses(),
             ),
         ),
     ))
@@ -384,7 +384,7 @@ fn catalog_graph_projections_attention(
         json_response(
             200,
             crate::presentation::catalog_json::catalog_graph_projection_attention_json(
-                &server.catalog_use_cases().graph_projection_attention(),
+                &server.runtime.graph_projection_attention(),
             ),
         ),
     ))
@@ -396,7 +396,7 @@ fn catalog_analytics_jobs_declared(
 ) -> Option<HttpResponse> {
     Some(deprecated_catalog_response(
         "/catalog/analytics-jobs/declared",
-        match server.catalog_use_cases().analytics_jobs() {
+        match server.runtime.analytics_jobs() {
             Ok(jobs) => json_response(
                 200,
                 crate::presentation::admin_json::analytics_jobs_json(&jobs),
@@ -415,7 +415,7 @@ fn catalog_analytics_jobs_operational(
         json_response(
             200,
             crate::presentation::admin_json::analytics_jobs_json(
-                &server.catalog_use_cases().operational_analytics_jobs(),
+                &server.runtime.operational_analytics_jobs(),
             ),
         ),
     ))
@@ -430,7 +430,7 @@ fn catalog_analytics_jobs_status(
         json_response(
             200,
             crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
-                &server.catalog_use_cases().analytics_job_statuses(),
+                &server.runtime.analytics_job_statuses(),
             ),
         ),
     ))
@@ -445,7 +445,7 @@ fn catalog_analytics_jobs_attention(
         json_response(
             200,
             crate::presentation::catalog_json::catalog_analytics_job_attention_json(
-                &server.catalog_use_cases().analytics_job_attention(),
+                &server.runtime.analytics_job_attention(),
             ),
         ),
     ))

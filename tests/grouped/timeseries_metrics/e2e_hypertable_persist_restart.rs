@@ -17,7 +17,6 @@ use support::{checkpoint_and_reopen, PersistentDbPath};
 
 use reddb::application::ExecuteQueryInput;
 use reddb::storage::timeseries::ChunkMeta;
-use reddb::QueryUseCases;
 
 const DAY_NS: u64 = 86_400_000_000_000;
 const HOUR_NS: u64 = 3_600_000_000_000;
@@ -39,7 +38,7 @@ fn chunk_fingerprint(m: &ChunkMeta) -> (u64, u64, u64, u64, u64, bool, Option<u6
 fn hypertable_chunk_metadata_survives_restart() {
     let path = PersistentDbPath::new("hypertable_persist_restart");
     let rt = path.open_runtime();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '7d'".into(),
@@ -142,7 +141,7 @@ fn non_hypertable_database_persists_no_hypertables() {
     // empty hypertable spine — the persist step is a no-op for it.
     let path = PersistentDbPath::new("no_hypertable_persist");
     let rt = path.open_runtime();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE plain (id INTEGER, name TEXT)".into(),
     })

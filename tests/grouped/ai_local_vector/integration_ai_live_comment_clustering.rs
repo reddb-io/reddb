@@ -1,4 +1,4 @@
-use reddb::application::{CreateRowInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
+use reddb::application::{CreateRowInput, EntityUseCases, ExecuteQueryInput};
 use reddb::json::{from_str, to_string, Map, Value as JsonValue};
 use reddb::server::RedDBServer;
 use reddb::RedDBRuntime;
@@ -227,7 +227,7 @@ fn live_comment_clustering_calls_real_models() {
     let rt = rt();
     seed_comments(&rt);
     let http_base = spawn_reddb_http(rt.clone());
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let mut embedding_entries = vec![
         ("provider", JsonValue::String("openai".to_string())),

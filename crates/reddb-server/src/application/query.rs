@@ -1,6 +1,5 @@
-use crate::application::ports::RuntimeQueryPort;
 use crate::runtime::{
-    ContextSearchResult, RuntimeFilter, RuntimeGraphPattern, RuntimeIvfSearchResult,
+    ContextSearchResult, RedDBRuntime, RuntimeFilter, RuntimeGraphPattern, RuntimeIvfSearchResult,
     RuntimeQueryExplain, RuntimeQueryResult, RuntimeQueryWeights, ScanCursor, ScanPage,
 };
 use crate::storage::unified::devx::SimilarResult;
@@ -108,27 +107,17 @@ pub struct SearchContextInput {
     pub min_score: Option<f32>,
 }
 
-pub struct QueryUseCases<'a, P: ?Sized> {
-    runtime: &'a P,
-}
-
-impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?Sized>
-    QueryUseCases<'a, P>
-{
-    pub fn new(runtime: &'a P) -> Self {
-        Self { runtime }
-    }
-
+impl RedDBRuntime {
     pub fn execute(&self, input: ExecuteQueryInput) -> RedDBResult<RuntimeQueryResult> {
-        self.runtime.execute_query(&input.query)
+        self.execute_query(&input.query)
     }
 
     pub fn explain(&self, input: ExplainQueryInput) -> RedDBResult<RuntimeQueryExplain> {
-        self.runtime.explain_query(&input.query)
+        self.explain_query(&input.query)
     }
 
     pub fn scan(&self, input: ScanCollectionInput) -> RedDBResult<ScanPage> {
-        self.runtime.scan_collection(
+        self.scan_collection(
             &input.collection,
             Some(ScanCursor {
                 offset: input.offset,
@@ -137,7 +126,10 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
         )
     }
 
-    pub fn search_similar(&self, mut input: SearchSimilarInput) -> RedDBResult<Vec<SimilarResult>> {
+    pub fn search_similar_input(
+        &self,
+        mut input: SearchSimilarInput,
+    ) -> RedDBResult<Vec<SimilarResult>> {
         // Semantic search: if text provided, generate embedding on-the-fly
         if let Some(text) = input.text.take() {
             if input.vector.is_empty() {
@@ -153,7 +145,7 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
                 // S3 / #711: planner-level provider gate runs before the
                 // compatibility check + key resolver so neither emits
                 // side-effects for a policy-denied query.
-                self.runtime.enforce_ai_provider_policy(&provider)?;
+                crate::runtime::ai::provider_gate::enforce(self, &provider)?;
                 // Gate non-OpenAI-compatible providers before we spend
                 // cycles resolving a key — Anthropic has no embeddings
                 // endpoint, HuggingFace uses a different wire shape,
@@ -169,7 +161,7 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
                         provider.token()
                     )));
                 }
-                let api_key = self.runtime.resolve_semantic_api_key(&provider)?;
+                let api_key = crate::ai::resolve_api_key_from_runtime(&provider, None, self)?;
                 let model = std::env::var(format!(
                     "REDDB_{}_EMBEDDING_MODEL",
                     provider.token().to_ascii_uppercase()
@@ -197,12 +189,12 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
                 })?;
             }
         }
-        self.runtime
-            .search_similar(&input.collection, &input.vector, input.k, input.min_score)
+        self.search_similar(&input.collection, &input.vector, input.k, input.min_score)
     }
 
-    pub fn search_ivf(&self, input: SearchIvfInput) -> RedDBResult<RuntimeIvfSearchResult> {
-        self.runtime.search_ivf(
+    pub fn search_ivf_input(&self, input: SearchIvfInput) -> RedDBResult<RuntimeIvfSearchResult> {
+        RedDBRuntime::search_ivf(
+            self,
             &input.collection,
             &input.vector,
             input.k,
@@ -211,8 +203,9 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
         )
     }
 
-    pub fn search_text(&self, input: SearchTextInput) -> RedDBResult<DslQueryResult> {
-        self.runtime.search_text(
+    pub fn search_text_input(&self, input: SearchTextInput) -> RedDBResult<DslQueryResult> {
+        RedDBRuntime::search_text(
+            self,
             input.query,
             input.collections,
             input.entity_types,
@@ -223,8 +216,12 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
         )
     }
 
-    pub fn search_multimodal(&self, input: SearchMultimodalInput) -> RedDBResult<DslQueryResult> {
-        self.runtime.search_multimodal(
+    pub fn search_multimodal_input(
+        &self,
+        input: SearchMultimodalInput,
+    ) -> RedDBResult<DslQueryResult> {
+        RedDBRuntime::search_multimodal(
+            self,
             input.query,
             input.collections,
             input.entity_types,
@@ -233,8 +230,9 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
         )
     }
 
-    pub fn search_index(&self, input: SearchIndexInput) -> RedDBResult<DslQueryResult> {
-        self.runtime.search_index(
+    pub fn search_index_input(&self, input: SearchIndexInput) -> RedDBResult<DslQueryResult> {
+        RedDBRuntime::search_index(
+            self,
             input.index,
             input.value,
             input.exact,
@@ -245,8 +243,9 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
         )
     }
 
-    pub fn search_hybrid(&self, input: SearchHybridInput) -> RedDBResult<DslQueryResult> {
-        self.runtime.search_hybrid(
+    pub fn search_hybrid_input(&self, input: SearchHybridInput) -> RedDBResult<DslQueryResult> {
+        RedDBRuntime::search_hybrid(
+            self,
             input.vector,
             input.query,
             input.k,
@@ -261,7 +260,10 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
         )
     }
 
-    pub fn search_context(&self, input: SearchContextInput) -> RedDBResult<ContextSearchResult> {
-        self.runtime.search_context(input)
+    pub fn search_context_input(
+        &self,
+        input: SearchContextInput,
+    ) -> RedDBResult<ContextSearchResult> {
+        RedDBRuntime::search_context(self, input)
     }
 }

@@ -1,6 +1,6 @@
 use reddb::application::ExecuteQueryInput;
 use reddb::runtime::mvcc::{clear_current_tenant, set_current_tenant};
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
@@ -8,11 +8,10 @@ fn rt() -> RedDBRuntime {
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .unwrap_or_else(|err| panic!("{sql}: {err}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .unwrap_or_else(|err| panic!("{sql}: {err}"))
 }
 
 fn read_event_payloads(rt: &RedDBRuntime, queue: &str, count: u64) -> Vec<serde_json::Value> {

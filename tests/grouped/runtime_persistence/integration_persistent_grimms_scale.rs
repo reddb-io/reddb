@@ -3,7 +3,7 @@ mod support;
 
 use support::{checkpoint_and_reopen, PersistentDbPath};
 
-use reddb::application::{ExecuteQueryInput, QueryUseCases};
+use reddb::application::ExecuteQueryInput;
 use reddb::runtime::RuntimeQueryResult;
 use reddb::RedDBRuntime;
 use reddb_types::Value;
@@ -139,11 +139,10 @@ fn insert_word_rows(rt: &RedDBRuntime, table: &str, count: usize, batch_size: us
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> RuntimeQueryResult {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
 }
 
 fn text_at(result: &RuntimeQueryResult, row: usize, column: &str) -> String {

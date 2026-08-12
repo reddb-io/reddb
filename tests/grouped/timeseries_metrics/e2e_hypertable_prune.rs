@@ -2,7 +2,7 @@
 //! exposed over SQL for hypertable chunks.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
@@ -29,7 +29,7 @@ fn explain_ops(rt: &RedDBRuntime, query: &str) -> Vec<String> {
 #[test]
 fn prune_chunks_returns_overlapping_window() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -68,7 +68,7 @@ fn prune_chunks_returns_overlapping_window() {
 #[test]
 fn prune_wide_window_keeps_everything() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -96,7 +96,7 @@ fn prune_wide_window_keeps_everything() {
 #[test]
 fn prune_narrow_window_keeps_nothing() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -128,7 +128,7 @@ fn prune_after_real_inserts_returns_expected_chunk() {
     // happens automatically in execute_insert), then consult the
     // pruner over SQL and verify only the overlapping chunk lands.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -167,7 +167,7 @@ fn insert_routes_rows_into_chunks_automatically() {
     // rows at three different hours, verify three chunks exist
     // without touching HypertableRegistry::route directly.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -218,7 +218,7 @@ fn select_temporal_predicate_matches_unpruned_full_scan() {
     // exactly the same rows the full scan would. The chunk-pruning hook
     // must not drop a single matching row.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -268,7 +268,7 @@ fn select_temporal_predicate_matches_unpruned_full_scan() {
 #[test]
 fn geo_within_time_range_matches_unindexed_timeseries_scan() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE vehicle_positions TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -332,7 +332,7 @@ fn geo_within_time_range_matches_unindexed_timeseries_scan() {
 #[test]
 fn geo_within_time_range_explain_shows_spatial_and_chunk_pruning() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE vehicle_positions TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -381,7 +381,7 @@ fn select_window_outside_all_chunks_returns_empty() {
     // Acceptance #1: a temporal predicate whose window overlaps no chunk
     // prunes every chunk at plan time and returns no rows.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -412,7 +412,7 @@ fn select_without_temporal_predicate_is_unaffected() {
     // Acceptance #4: a query with no temporal predicate sees every row —
     // pruning must not engage when the WHERE doesn't constrain time.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
     })
@@ -441,7 +441,7 @@ fn select_on_non_hypertable_collection_is_unaffected() {
     // Acceptance #4: a plain (non-hypertable) collection never enters the
     // pruning branch.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE events (id INT, ts INT, label TEXT)".into(),
     })
@@ -475,7 +475,7 @@ fn select_on_non_hypertable_collection_is_unaffected() {
 #[test]
 fn prune_unknown_hypertable_returns_null() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let r = q
         .execute(ExecuteQueryInput {
             query: "SELECT HYPERTABLE_PRUNE_CHUNKS('nope', 0, 1) AS kept".into(),

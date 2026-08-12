@@ -4,12 +4,12 @@
 //! fixtures.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 fn setup_events() -> RedDBRuntime {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE events (id INTEGER, user_id TEXT, ts BIGINT)".into(),
     })
@@ -18,11 +18,10 @@ fn setup_events() -> RedDBRuntime {
 }
 
 fn insert(rt: &RedDBRuntime, id: i64, user: &str, ts: i64) {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: format!("INSERT INTO events (id, user_id, ts) VALUES ({id}, '{user}', {ts})"),
-        })
-        .expect("insert event");
+    rt.execute(ExecuteQueryInput {
+        query: format!("INSERT INTO events (id, user_id, ts) VALUES ({id}, '{user}', {ts})"),
+    })
+    .expect("insert event");
 }
 
 fn id_int(row: &reddb::storage::query::unified::UnifiedRecord) -> i64 {
@@ -65,7 +64,7 @@ fn row_number_partitioned_per_user() {
     insert(&rt, 4, "u1", 150);
     insert(&rt, 5, "u2", 75);
 
-    let res = QueryUseCases::new(&rt)
+    let res = &rt
         .execute(ExecuteQueryInput {
             query: "SELECT id, user_id, ts, \
                     ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY ts) AS rn \
@@ -93,7 +92,7 @@ fn rank_and_dense_rank_show_tie_gap_difference() {
     insert(&rt, 2, "u1", 100); // tied with id 1
     insert(&rt, 3, "u1", 300);
 
-    let res = QueryUseCases::new(&rt)
+    let res = &rt
         .execute(ExecuteQueryInput {
             query: "SELECT id, \
                     RANK() OVER (PARTITION BY user_id ORDER BY ts) AS rk, \
@@ -122,7 +121,7 @@ fn lag_returns_prior_ts_per_user_and_null_on_first_row() {
     insert(&rt, 3, "u1", 300);
     insert(&rt, 4, "u2", 50);
 
-    let res = QueryUseCases::new(&rt)
+    let res = &rt
         .execute(ExecuteQueryInput {
             query: "SELECT id, \
                     LAG(ts) OVER (PARTITION BY user_id ORDER BY ts) AS prev_ts \
@@ -149,7 +148,7 @@ fn lead_returns_next_ts_or_null_on_last_row() {
     insert(&rt, 2, "u1", 200);
     insert(&rt, 3, "u1", 300);
 
-    let res = QueryUseCases::new(&rt)
+    let res = &rt
         .execute(ExecuteQueryInput {
             query: "SELECT id, \
                     LEAD(ts) OVER (PARTITION BY user_id ORDER BY ts) AS next_ts \
@@ -176,7 +175,7 @@ fn lag_with_offset_and_default_value() {
     insert(&rt, 3, "u1", 300);
     insert(&rt, 4, "u1", 400);
 
-    let res = QueryUseCases::new(&rt)
+    let res = &rt
         .execute(ExecuteQueryInput {
             query: "SELECT id, \
                     LAG(ts, 2, -1) OVER (PARTITION BY user_id ORDER BY ts) AS lag2 \
@@ -209,7 +208,7 @@ fn mixed_select_window_alongside_columns_does_not_promote_to_aggregate() {
     insert(&rt, 2, "u1", 200);
     insert(&rt, 3, "u2", 50);
 
-    let res = QueryUseCases::new(&rt)
+    let res = &rt
         .execute(ExecuteQueryInput {
             query: "SELECT id, user_id, ts, \
                     ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY ts) AS rn \

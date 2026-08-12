@@ -16,7 +16,7 @@ use reddb::application::{
 };
 use reddb::json::Value as JsonValue;
 use reddb::MetadataValue;
-use reddb::{EntityUseCases, NativeUseCases, QueryUseCases, RedDBRuntime};
+use reddb::{EntityUseCases, NativeUseCases, RedDBRuntime};
 use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
@@ -32,7 +32,7 @@ fn rt() -> RedDBRuntime {
 fn test_row_create_and_query() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let names = ["Alice", "Bob", "Charlie", "Diana", "Eve"];
     let ages = [30, 25, 35, 28, 40];
@@ -98,7 +98,7 @@ fn test_row_create_and_query() {
 fn test_row_patch_set() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let out = entity
         .create_row(CreateRowInput {
@@ -153,7 +153,7 @@ fn test_row_patch_set() {
 fn test_row_patch_unset() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let out = entity
         .create_row(CreateRowInput {
@@ -212,7 +212,7 @@ fn test_row_patch_unset() {
 fn test_select_by_entity_id_sees_latest_updated_row_image() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let created = entity
         .create_row(CreateRowInput {
@@ -264,7 +264,7 @@ fn test_table_row_logical_identity_compatibility() {
     use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     query
         .execute(ExecuteQueryInput {
@@ -380,7 +380,7 @@ fn test_table_row_logical_identity_compatibility() {
 fn test_row_patch_top_level_ttl_payload_expires_entity() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let native = NativeUseCases::new(&rt);
 
     let out = entity
@@ -426,7 +426,7 @@ fn test_row_patch_top_level_ttl_payload_expires_entity() {
 fn test_row_patch_public_ttl_operation_expires_entity() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let native = NativeUseCases::new(&rt);
 
     let out = entity
@@ -473,7 +473,7 @@ fn test_row_patch_public_ttl_operation_expires_entity() {
 fn test_row_delete() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let out = entity
         .create_row(CreateRowInput {
@@ -530,7 +530,7 @@ fn test_row_delete() {
 fn test_document_create_and_flatten() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let mut body = reddb::json::Map::new();
     body.insert("name".into(), JsonValue::String("Alice".into()));
@@ -584,7 +584,7 @@ fn test_document_create_and_flatten() {
 fn test_document_multiple() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     for i in 0..5 {
         let mut body = reddb::json::Map::new();
@@ -704,7 +704,7 @@ fn test_kv_set_get_delete() {
 fn test_kv_list_all() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     // Create 10 KV pairs
     for i in 0..10 {
@@ -735,7 +735,7 @@ fn test_kv_list_all() {
 fn test_node_create_with_properties() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let out = entity.create_node(CreateNodeInput {
         collection: "node_props".into(),
@@ -837,7 +837,7 @@ fn test_edge_create_bidirectional() {
     );
 
     // Scan — should contain 2 nodes + 2 edges = 4 entities
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let page = query
         .scan(ScanCollectionInput {
             collection: "edge_net".into(),
@@ -864,7 +864,7 @@ fn test_edge_create_bidirectional() {
 fn test_vector_create_with_metadata() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let out = entity.create_vector(CreateVectorInput {
         collection: "vec_meta".into(),
@@ -911,7 +911,7 @@ fn test_vector_create_with_metadata() {
 fn test_vector_create_and_search() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     // Create 50 vectors spread across directions
     for i in 0..50 {
@@ -929,7 +929,7 @@ fn test_vector_create_and_search() {
     }
 
     // Search for vectors similar to [1, 0, 0]
-    let results = query.search_similar(SearchSimilarInput {
+    let results = query.search_similar_input(SearchSimilarInput {
         collection: "vec_search".into(),
         vector: vec![1.0, 0.0, 0.0],
         k: 5,
@@ -974,7 +974,7 @@ fn test_vector_create_and_search() {
 fn test_select_with_filter() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let entries = vec![
         ("Alice", "engineering", 30),
@@ -1030,7 +1030,7 @@ fn test_select_with_filter() {
 fn test_select_with_order_by() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let ages = [30, 25, 35, 28, 40];
     for (i, age) in ages.iter().enumerate() {
@@ -1085,7 +1085,7 @@ fn test_select_with_order_by() {
 fn test_select_with_limit_offset() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     for i in 0..20 {
         entity
@@ -1136,7 +1136,7 @@ fn test_select_with_limit_offset() {
 fn test_select_universal_from_any() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     // Create a mix of rows, nodes, and vectors
     entity
@@ -1192,7 +1192,7 @@ fn test_select_universal_from_any() {
 #[test]
 fn test_scalar_length_without_from_returns_single_row() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let result = query
         .execute(ExecuteQueryInput {
@@ -1213,7 +1213,7 @@ fn test_scalar_length_without_from_returns_single_row() {
 fn test_select_universal_with_filter() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     for i in 0..3 {
         entity
@@ -1260,7 +1260,7 @@ fn test_select_universal_with_filter() {
 #[test]
 fn test_explain_query() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let explain = query.explain(ExplainQueryInput {
         query: "SELECT * FROM any".into(),
@@ -1305,7 +1305,7 @@ fn test_explain_query() {
 fn test_scan_collection() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     for i in 0..15 {
         entity
@@ -1371,7 +1371,7 @@ fn test_scan_collection() {
 fn test_search_similar() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let vectors: Vec<Vec<f32>> = vec![
         vec![1.0, 0.0, 0.0],
@@ -1397,7 +1397,7 @@ fn test_search_similar() {
     }
 
     let results = query
-        .search_similar(SearchSimilarInput {
+        .search_similar_input(SearchSimilarInput {
             collection: "sim_search".into(),
             vector: vec![1.0, 0.0, 0.0],
             k: 3,
@@ -1417,7 +1417,7 @@ fn test_search_similar() {
 
     // Test with min_score filtering
     let results_filtered = query
-        .search_similar(SearchSimilarInput {
+        .search_similar_input(SearchSimilarInput {
             collection: "sim_search".into(),
             vector: vec![1.0, 0.0, 0.0],
             k: 10,
@@ -1441,7 +1441,7 @@ fn test_search_similar() {
 fn test_search_text() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let texts = [
         (
@@ -1478,7 +1478,7 @@ fn test_search_text() {
             .expect("create_row should succeed");
     }
 
-    let result = query.search_text(SearchTextInput {
+    let result = query.search_text_input(SearchTextInput {
         query: "database".into(),
         collections: Some(vec!["text_search".into()]),
         entity_types: None,
@@ -1504,7 +1504,7 @@ fn test_search_text() {
     );
 
     // Fuzzy search should also work
-    let fuzzy_result = query.search_text(SearchTextInput {
+    let fuzzy_result = query.search_text_input(SearchTextInput {
         query: "databse".into(),
         collections: Some(vec!["text_search".into()]),
         entity_types: None,
@@ -1529,7 +1529,7 @@ fn test_search_text() {
 fn test_node_with_embedding() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     use reddb::application::CreateNodeEmbeddingInput;
 
@@ -1579,7 +1579,7 @@ fn test_node_with_embedding() {
 fn test_row_linked_to_node() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let node_out = entity
         .create_node(CreateNodeInput {
@@ -1641,7 +1641,7 @@ fn test_row_linked_to_node() {
 #[test]
 fn test_sql_insert_row_ttl_ms_expiration() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let native = NativeUseCases::new(&rt);
 
     let inserted = query.execute(ExecuteQueryInput {
@@ -1687,7 +1687,7 @@ fn test_sql_insert_row_ttl_ms_expiration() {
 #[test]
 fn test_sql_insert_node_ttl_expiration() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let native = NativeUseCases::new(&rt);
 
     let inserted = query.execute(ExecuteQueryInput {
@@ -1747,7 +1747,7 @@ fn test_sql_insert_node_ttl_expiration() {
 fn test_sql_insert_edge_ttl_expiration() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let native = NativeUseCases::new(&rt);
 
     let from = entity.create_node(CreateNodeInput {
@@ -1838,7 +1838,7 @@ fn test_sql_insert_edge_ttl_expiration() {
 #[test]
 fn test_sql_update_ttl_after_insert() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let native = NativeUseCases::new(&rt);
 
     let inserted = query.execute(ExecuteQueryInput {
@@ -1893,7 +1893,7 @@ fn test_sql_update_ttl_after_insert() {
 #[test]
 fn test_sql_update_ttl_on_node_after_insert() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let native = NativeUseCases::new(&rt);
 
     let inserted = query.execute(ExecuteQueryInput {
@@ -1962,7 +1962,7 @@ fn test_sql_update_ttl_on_node_after_insert() {
 #[test]
 fn test_sql_delete_node_with_where_clause() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let inserted = query.execute(ExecuteQueryInput {
         query: "INSERT INTO delete_nodes NODE (label, node_type, ip) VALUES ('delete-me', 'Host', '10.0.0.9')"
@@ -2014,7 +2014,7 @@ fn test_sql_delete_node_with_where_clause() {
 fn test_create_table_with_ttl_applies_default_to_api_insert() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let native = NativeUseCases::new(&rt);
 
     let created = query.execute(ExecuteQueryInput {
@@ -2072,7 +2072,7 @@ fn test_create_table_with_ttl_applies_default_to_api_insert() {
 #[test]
 fn test_password_hash_and_verify() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     // INSERT with PASSWORD('plaintext') literal should store an
     // argon2id hash, not the plaintext.
@@ -2203,7 +2203,7 @@ fn test_secret_encrypt_and_decrypt() {
     // Without an AuthStore wired into the runtime, `SECRET('...')`
     // in INSERT must fail with a clear error — the AES key lives in
     // the vault and is inaccessible here.
-    let without_vault = QueryUseCases::new(&rt).execute(ExecuteQueryInput {
+    let without_vault = &rt.execute(ExecuteQueryInput {
         query: "INSERT INTO creds (name, token) VALUES ('stripe', SECRET('sk_live_abc'))".into(),
     });
     assert!(without_vault.is_err(), "SECRET() without a vault must fail");
@@ -2215,7 +2215,7 @@ fn test_secret_encrypt_and_decrypt() {
     auth.ensure_vault_secret_key();
     rt.set_auth_store(Arc::clone(&auth));
 
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     // Happy path: INSERT encrypts, SELECT decrypts (auto_decrypt=true default).
     query
@@ -2318,7 +2318,7 @@ fn test_fast_entity_id_lookup_persistent() {
 
     let rt = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path_str))
         .expect("open persistent runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "INSERT INTO fastid (name) VALUES ('alice')".into(),
@@ -2356,7 +2356,7 @@ fn test_fast_entity_id_lookup_persistent() {
 #[test]
 fn test_rid_filter_with_bloom_probe_keeps_row_sets() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     query
         .execute(ExecuteQueryInput {
@@ -2419,7 +2419,7 @@ fn test_rid_filter_with_bloom_probe_keeps_row_sets() {
 #[test]
 fn test_drop_table_cleans_contract_and_indices() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let entity = EntityUseCases::new(&rt);
 
     query
@@ -2494,7 +2494,7 @@ fn test_drop_table_cleans_contract_and_indices() {
 fn test_primary_key_enforcement_rejects_duplicates() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     query
         .execute(ExecuteQueryInput {
@@ -2537,7 +2537,7 @@ fn test_primary_key_enforcement_rejects_duplicates() {
 fn test_unique_constraint_rejects_duplicates_allows_null() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     query
         .execute(ExecuteQueryInput {
@@ -2605,7 +2605,7 @@ fn test_unique_constraint_rejects_duplicates_allows_null() {
 fn test_patch_respects_unique_but_allows_self_update() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     query
         .execute(ExecuteQueryInput {
@@ -2712,7 +2712,7 @@ fn read_ts_fields(entity: &reddb::storage::UnifiedEntity) -> (u64, u64) {
 #[test]
 fn test_with_timestamps_auto_populates_on_insert_and_update() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let entity = EntityUseCases::new(&rt);
 
     query
@@ -2789,7 +2789,7 @@ fn test_with_timestamps_auto_populates_on_insert_and_update() {
 #[test]
 fn test_with_timestamps_rejects_user_set_created_at_on_insert() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let entity = EntityUseCases::new(&rt);
 
     query
@@ -2835,7 +2835,7 @@ fn test_with_timestamps_rejects_user_set_created_at_on_insert() {
 #[test]
 fn finding_1_select_after_bulk_insert_same_process_in_memory() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let entity = EntityUseCases::new(&rt);
 
     query
@@ -2902,7 +2902,7 @@ fn finding_1_select_after_bulk_insert_persistent_reopen() {
         let rt = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path_str))
             .expect("open persistent runtime");
         {
-            let query = QueryUseCases::new(&rt);
+            let query = &rt;
             let entity = EntityUseCases::new(&rt);
             query
                 .execute(ExecuteQueryInput {
@@ -2934,7 +2934,7 @@ fn finding_1_select_after_bulk_insert_persistent_reopen() {
 
     let rt2 = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path_str))
         .expect("reopen persistent runtime");
-    let query2 = QueryUseCases::new(&rt2);
+    let query2 = &rt2;
     let all = query2
         .execute(ExecuteQueryInput {
             query: "SELECT * FROM f1_disk".into(),
@@ -3109,7 +3109,7 @@ fn test_direct_patch_rejects_reserved_tree_metadata() {
 #[test]
 fn test_select_config_function_accepts_bare_path_and_default() {
     let rt = rt();
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     query
         .execute(ExecuteQueryInput {
@@ -3146,7 +3146,7 @@ fn test_select_config_function_accepts_bare_path_and_default() {
 fn test_kv_function_filters_rows_and_uses_bare_default() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     entity
         .create_kv(CreateKvInput {
@@ -3212,7 +3212,7 @@ fn test_kv_function_filters_rows_and_uses_bare_default() {
 fn test_update_accepts_config_assignment_and_kv_filter() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     entity
         .create_kv(CreateKvInput {

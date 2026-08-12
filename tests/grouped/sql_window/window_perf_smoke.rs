@@ -20,7 +20,7 @@
 use std::time::{Duration, Instant};
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 
 const N_ROWS: usize = 1_000_000;
 const WINDOW_QUERY_BUDGET_SECS: u64 = 60;
@@ -29,7 +29,7 @@ const WINDOW_QUERY_BUDGET_SECS: u64 = 60;
 #[ignore = "perf smoke — run explicitly with --ignored --nocapture"]
 fn window_running_total_1m_rows_single_partition_completes_within_budget() {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE purchases (id INTEGER, user_id TEXT, ts BIGINT, amount BIGINT)".into(),

@@ -9,7 +9,7 @@ use reddb::physical::{CollectionContract, ContractOrigin};
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::{
     storage::{DeployProfile, StoragePackaging, StorageProfileSelection},
-    QueryUseCases, RedDBOptions, RedDBRuntime,
+    RedDBOptions, RedDBRuntime,
 };
 use reddb_types::Value;
 
@@ -68,15 +68,14 @@ fn text_field(row: &UnifiedRecord, field: &str) -> String {
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .unwrap_or_else(|err| panic!("{sql}: {err}"));
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .unwrap_or_else(|err| panic!("{sql}: {err}"));
 }
 
 fn exec_err(rt: &RedDBRuntime, sql: &str) -> String {
-    match QueryUseCases::new(rt).execute(ExecuteQueryInput {
+    match rt.execute(ExecuteQueryInput {
         query: sql.to_string(),
     }) {
         Ok(_) => panic!("expected error for {sql}"),

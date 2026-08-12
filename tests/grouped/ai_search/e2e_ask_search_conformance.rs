@@ -120,7 +120,7 @@ fn seed_multi_model(rt: &RedDBRuntime) {
 }
 
 fn search(rt: &RedDBRuntime, query: &str) -> reddb::runtime::ContextSearchResult {
-    rt.search_context(SearchContextInput {
+    rt.search_context_input(SearchContextInput {
         query: query.to_string(),
         field: None,
         vector: None,

@@ -1,4 +1,4 @@
-use reddb::application::{CreateVectorInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
+use reddb::application::{CreateVectorInput, EntityUseCases, ExecuteQueryInput};
 use reddb::runtime::ai::cdc_enrichment::CdcEnrichmentConsumer;
 use reddb::runtime::ai::local_embedding::{
     clear_local_embedding_backend_for_tests, install_local_embedding_backend,
@@ -20,11 +20,10 @@ fn rt() -> RedDBRuntime {
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
 }
 
 fn text(record: &UnifiedRecord, column: &str) -> String {
@@ -228,7 +227,7 @@ fn vector_search_excludes_pending_until_cdc_enrichment_attaches() {
     exec(&rt, "INSERT INTO notes (id, body) VALUES (1, 'alpha')");
 
     // Pending: no vector yet, so the row is not surfaced.
-    let pending = QueryUseCases::new(&rt)
+    let pending = rt
         .execute(ExecuteQueryInput {
             query: "VECTOR SEARCH notes SIMILAR TO [1.0, 0.0] LIMIT 5".to_string(),
         })

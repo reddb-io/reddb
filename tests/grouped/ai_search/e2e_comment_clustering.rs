@@ -1,4 +1,4 @@
-use reddb::application::{CreateRowInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
+use reddb::application::{CreateRowInput, EntityUseCases, ExecuteQueryInput};
 use reddb::json::{from_str, to_string, Map, Value as JsonValue};
 use reddb::server::RedDBServer;
 use reddb::RedDBRuntime;
@@ -448,7 +448,7 @@ fn e2e_comments_embedding_cluster_label_and_writeback() {
     let rt = rt();
     seed_comments(rt.runtime());
     let http_base = spawn_reddb_http(rt.clone_runtime());
-    let query = QueryUseCases::new(rt.runtime());
+    let query = rt.runtime();
 
     let embedding_payload: JsonValue = from_str(
         r#"{

@@ -328,6 +328,11 @@ impl RedDBRuntime {
         k: usize,
         min_score: f32,
     ) -> RedDBResult<Vec<SimilarResult>> {
+        crate::application::collection_contract_enforcer::ensure_collection_model_read(
+            &self.db(),
+            collection,
+            crate::catalog::CollectionModel::Vector,
+        )?;
         let mut results = self.inner.db.similar(collection, vector, k.max(1));
         if results.is_empty() && self.inner.db.store().get_collection(collection).is_none() {
             return Err(RedDBError::NotFound(collection.to_string()));
@@ -351,6 +356,11 @@ impl RedDBRuntime {
         n_lists: usize,
         n_probes: Option<usize>,
     ) -> RedDBResult<RuntimeIvfSearchResult> {
+        crate::application::collection_contract_enforcer::ensure_collection_model_read(
+            &self.db(),
+            collection,
+            crate::catalog::CollectionModel::Vector,
+        )?;
         let store = self.inner.db.store();
         let manager = store
             .get_collection(collection)

@@ -148,8 +148,7 @@ use reddb::api::REDDB_FORMAT_VERSION;
 use reddb::application::{
     CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput, CreateRowInput,
     CreateTableColumnInput, CreateTableInput, CreateTimeSeriesInput, CreateTimeSeriesPointInput,
-    CreateVectorInput, EntityUseCases, ExecuteQueryInput, NativeUseCases, QueryUseCases,
-    SchemaUseCases,
+    CreateVectorInput, EntityUseCases, ExecuteQueryInput, NativeUseCases, SchemaUseCases,
 };
 use reddb::json::{from_slice as json_from_slice, json, Value as JsonValue};
 use reddb::replication::cdc::{change_record_from_entity, ChangeOperation, ChangeRecord};
@@ -157,7 +156,7 @@ use reddb::storage::query::UnifiedRecord;
 use reddb::storage::{
     EntityData, EntityId, EntityKind, RowData, StorageDeployPreset, UnifiedEntity,
 };
-use reddb::{CatalogUseCases, HealthState, RedDBOptions, RedDBRuntime};
+use reddb::{HealthState, RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 
 const ACCOUNTS_TTL_MS: u64 = 86_400_000;
@@ -303,7 +302,7 @@ pub struct QueueMessageSnapshot {
 }
 
 pub fn build_sql_fixture(rt: &RedDBRuntime) {
-    let query = QueryUseCases::new(rt);
+    let query = rt;
 
     exec(
         &query,
@@ -459,7 +458,7 @@ pub fn logical_insert_record(
 pub fn build_api_fixture(rt: &RedDBRuntime) {
     let schema = SchemaUseCases::new(rt);
     let entity = EntityUseCases::new(rt);
-    let query = QueryUseCases::new(rt);
+    let query = rt;
 
     schema
         .create_table(CreateTableInput {
@@ -828,7 +827,7 @@ pub fn logical_snapshot(rt: &RedDBRuntime) -> LogicalSnapshot {
 }
 
 pub fn assert_shared_query_behavior(rt: &RedDBRuntime) {
-    let query = QueryUseCases::new(rt);
+    let query = rt;
 
     let accounts = exec(
         &query,
@@ -957,7 +956,7 @@ pub fn assert_shared_query_behavior(rt: &RedDBRuntime) {
 }
 
 pub fn apply_end_to_end_mutations(rt: &RedDBRuntime) {
-    let query = QueryUseCases::new(rt);
+    let query = rt;
 
     exec(
         &query,
@@ -1062,7 +1061,7 @@ pub fn apply_end_to_end_mutations(rt: &RedDBRuntime) {
 }
 
 pub fn assert_end_to_end_query_behavior(rt: &RedDBRuntime) {
-    let query = QueryUseCases::new(rt);
+    let query = rt;
 
     let active_high_score = exec(
         &query,
@@ -1278,7 +1277,7 @@ pub fn assert_end_to_end_query_behavior(rt: &RedDBRuntime) {
 }
 
 pub fn assert_sql_function_queries(rt: &RedDBRuntime) {
-    let query = QueryUseCases::new(rt);
+    let query = rt;
 
     let ok = exec(
         &query,
@@ -1295,7 +1294,7 @@ pub fn assert_sql_function_queries(rt: &RedDBRuntime) {
 
 pub fn assert_native_consistency(rt: &RedDBRuntime) {
     let native = NativeUseCases::new(rt);
-    let catalog = CatalogUseCases::new(rt);
+    let catalog = rt;
 
     let health = native.health();
     assert!(
@@ -1352,7 +1351,7 @@ pub fn assert_native_consistency(rt: &RedDBRuntime) {
         "runtime should remain repairable after reopen"
     );
 
-    let report = catalog.consistency_report();
+    let report = catalog.catalog_consistency_report();
     assert!(report.missing_operational_indexes.is_empty());
     assert!(report.undeclared_operational_indexes.is_empty());
     assert!(report.missing_operational_graph_projections.is_empty());
@@ -1415,7 +1414,7 @@ pub fn assert_native_consistency(rt: &RedDBRuntime) {
     );
 }
 
-fn exec(query: &QueryUseCases<'_, RedDBRuntime>, sql: &str) -> reddb::runtime::RuntimeQueryResult {
+fn exec(query: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
     query
         .execute(ExecuteQueryInput {
             query: sql.to_string(),

@@ -1,7 +1,7 @@
 //! Multi-provider AI wiring tests.
 //!
 //! Covers the three surfaces the README promises (HTTP handler,
-//! gRPC `grpc_embeddings`, SEARCH SIMILAR via `QueryUseCases`):
+//! gRPC `grpc_embeddings`, SEARCH SIMILAR via the runtime):
 //!
 //! * OpenAI-compatible providers pass the pre-flight provider
 //!   gate (no "only 'openai' is currently supported" regression).
@@ -15,7 +15,7 @@
 mod support;
 
 use reddb::ai::{grpc_embeddings, parse_provider, AiProvider};
-use reddb::application::{ExecuteQueryInput, QueryUseCases, SearchSimilarInput};
+use reddb::application::{ExecuteQueryInput, SearchSimilarInput};
 use reddb::json::{Map, Value as JsonValue};
 use reddb::runtime::ai::local_embedding::clear_local_embedding_backend_for_tests;
 use reddb::runtime::ai::provider_capabilities::{Modality, Registry};
@@ -368,9 +368,9 @@ fn grpc_embeddings_rejects_source_query_with_unknown_mode() {
 fn search_similar_rejects_incompatible_provider() {
     // Anthropic: no embeddings endpoint.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let err = q
-        .search_similar(SearchSimilarInput {
+        .search_similar_input(SearchSimilarInput {
             collection: "docs".to_string(),
             vector: Vec::new(),
             k: 5,
@@ -391,9 +391,9 @@ fn search_similar_rejects_incompatible_provider() {
 #[cfg(not(feature = "local-models"))]
 fn search_similar_rejects_local_when_local_models_feature_is_disabled() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let err = q
-        .search_similar(SearchSimilarInput {
+        .search_similar_input(SearchSimilarInput {
             collection: "docs".to_string(),
             vector: Vec::new(),
             k: 5,
@@ -410,7 +410,7 @@ fn search_similar_rejects_local_when_local_models_feature_is_disabled() {
 #[cfg(not(feature = "local-models"))]
 fn auto_embed_insert_rejects_local_when_local_models_feature_is_disabled() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let err = q
         .execute(ExecuteQueryInput {
             query: "INSERT INTO docs (body) VALUES ('hello') WITH AUTO EMBED (body) USING local"

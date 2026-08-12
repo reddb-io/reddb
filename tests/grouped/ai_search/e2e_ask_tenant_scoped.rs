@@ -46,7 +46,7 @@ fn ask_corpus_scoped_to_current_tenant() {
     // Acme session: search for 'revenue' (only globex has it) — must be empty.
     set_current_tenant("acme".to_string());
     let result = rt
-        .search_context(SearchContextInput {
+        .search_context_input(SearchContextInput {
             query: "revenue".to_string(),
             field: None,
             vector: None,
@@ -70,7 +70,7 @@ fn ask_corpus_scoped_to_current_tenant() {
 
     // Acme session: search for 'launch' — must surface its own row.
     let result = rt
-        .search_context(SearchContextInput {
+        .search_context_input(SearchContextInput {
             query: "launch".to_string(),
             field: None,
             vector: None,
@@ -94,7 +94,7 @@ fn ask_corpus_scoped_to_current_tenant() {
     // Globex session: search for 'launch' — zero (acme only).
     set_current_tenant("globex".to_string());
     let result = rt
-        .search_context(SearchContextInput {
+        .search_context_input(SearchContextInput {
             query: "launch".to_string(),
             field: None,
             vector: None,
@@ -118,7 +118,7 @@ fn ask_corpus_scoped_to_current_tenant() {
 
     // Globex session: search for 'revenue' — surfaces its own row.
     let result = rt
-        .search_context(SearchContextInput {
+        .search_context_input(SearchContextInput {
             query: "revenue".to_string(),
             field: None,
             vector: None,
