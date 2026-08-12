@@ -27,10 +27,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::super::ast::{
+use super::super::unified::{ExecutionError, UnifiedRecord, UnifiedResult};
+use reddb_rql::ast::{
     CteDefinition, Expr, Filter, Projection, QueryExpr, QueryWithCte, SelectItem, TableSource,
 };
-use super::super::unified::{ExecutionError, UnifiedRecord, UnifiedResult};
 use reddb_types::Value;
 
 /// Maximum recursion depth to prevent infinite loops
@@ -696,7 +696,7 @@ fn rewrite(expr: &mut QueryExpr, ctes: &HashMap<String, QueryExpr>) {
 }
 
 fn rewrite_table_query_parts(
-    tq: &mut super::super::ast::TableQuery,
+    tq: &mut reddb_rql::ast::TableQuery,
     ctes: &HashMap<String, QueryExpr>,
 ) {
     for item in &mut tq.select_items {
@@ -844,8 +844,8 @@ fn rewrite_expr(expr: &mut Expr, ctes: &HashMap<String, QueryExpr>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::CteQueryBuilder;
-    use crate::storage::query::WithClause;
+    use reddb_rql::ast::CteQueryBuilder;
+    use reddb_rql::ast::WithClause;
 
     fn mock_execute(
         _query: &QueryExpr,
