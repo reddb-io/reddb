@@ -2,8 +2,7 @@
 //!
 //! [`IndexHint`] is referenced by the canonical SQL AST
 //! (`ExpandOptions.index_hint`). Only the hint *data* lives here; the optimizer
-//! passes that build it stay in the server planner
-//! (`storage::query::planner::optimizer`), which keeps a re-export shim.
+//! passes that build it live in `reddb-rql`'s storage-agnostic optimizer.
 
 /// Hint about which index method to prefer for a query
 #[derive(Debug, Clone)]
