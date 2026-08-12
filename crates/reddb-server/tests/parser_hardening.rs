@@ -10,7 +10,7 @@ mod support {
 }
 
 use proptest::prelude::*;
-use reddb_server::storage::query::parser::{self, ParseError, ParserLimits};
+use reddb_rql::parser::{self, ParseError, ParserLimits};
 use std::time::{Duration, Instant};
 use support::parser_hardening::{
     self as harness, assert_no_panic_on, corpus::adversarial_inputs, sql_grammar, HardenedParser,
