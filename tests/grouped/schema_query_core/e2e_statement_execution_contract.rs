@@ -12,7 +12,7 @@ use reddb::runtime::mvcc::{
     clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
     set_current_tenant,
 };
-use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
+use reddb::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 
 fn runtime() -> RedDBRuntime {
@@ -562,7 +562,7 @@ fn blob_result_cache_write_after_restart_invalidates_unrehydrated_l2_entries() {
 #[test]
 fn collection_contract_enforces_insert_and_mutation_paths_through_application_api() {
     let rt = runtime();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE audit_log (id INT, body TEXT) APPEND ONLY".into(),

@@ -2312,6 +2312,7 @@ name = "reddb-io-client"
 version = "1.23.2"
 dependencies = [
  "async-trait",
+ "getrandom 0.4.3",
  "reddb-io-grpc-proto",
  "reddb-io-server",
  "reddb-io-types",
@@ -2337,6 +2338,7 @@ dependencies = [
  "crc32fast",
  "fs2",
  "hex",
+ "libc",
  "lz4_flex",
  "reddb-io-types",
  "serde",

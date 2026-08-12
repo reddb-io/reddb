@@ -15,8 +15,8 @@ use reddb::runtime::{
     RuntimeGraphDirection, RuntimeGraphPathAlgorithm, RuntimeGraphTraversalStrategy,
 };
 use reddb::{
-    ArtifactState, CatalogUseCases, EntityId, EntityUseCases, GraphUseCases, HealthState,
-    NativeUseCases, QueryUseCases, RedDBRuntime,
+    ArtifactState, EntityId, EntityUseCases, GraphUseCases, HealthState, NativeUseCases,
+    RedDBRuntime,
 };
 use reddb_types::Value;
 
@@ -587,7 +587,7 @@ fn test_graph_clustering_coefficient() {
 fn test_catalog_collections() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let catalog = CatalogUseCases::new(&rt);
+    let catalog = &rt;
 
     // Create entities in three different collections
     for name in &["cat_alpha", "cat_beta", "cat_gamma"] {
@@ -602,7 +602,7 @@ fn test_catalog_collections() {
             .unwrap();
     }
 
-    let collections = catalog.collections();
+    let collections = catalog.db().collections();
     for name in &["cat_alpha", "cat_beta", "cat_gamma"] {
         assert!(
             collections.contains(&name.to_string()),
@@ -619,7 +619,7 @@ fn test_catalog_collections() {
 fn test_catalog_stats() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let catalog = CatalogUseCases::new(&rt);
+    let catalog = &rt;
 
     // Insert a few entities
     for i in 0..5 {
@@ -780,7 +780,7 @@ fn test_checkpoint() {
 fn test_multiple_collections() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     // Create entities in 5 isolated collections
     let collections: Vec<String> = (0..5).map(|i| format!("isolation_col_{i}")).collect();
@@ -825,7 +825,7 @@ fn test_multiple_collections() {
 fn test_large_batch_insert() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let catalog = CatalogUseCases::new(&rt);
+    let catalog = &rt;
 
     let col = "batch_500";
     for i in 0..500 {
@@ -851,7 +851,7 @@ fn test_large_batch_insert() {
     );
 
     // Verify queryable
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
     let result = query
         .execute(ExecuteQueryInput {
             query: format!("SELECT * FROM {col}"),
@@ -873,7 +873,7 @@ fn test_large_batch_insert() {
 fn test_concurrent_read_after_write() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
-    let query = QueryUseCases::new(&rt);
+    let query = &rt;
 
     let col = "raw_consistency";
 

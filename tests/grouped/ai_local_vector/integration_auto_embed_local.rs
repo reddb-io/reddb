@@ -19,7 +19,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use reddb::application::{CreateKvInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
+use reddb::application::{CreateKvInput, EntityUseCases, ExecuteQueryInput};
 use reddb::runtime::ai::cdc_enrichment::{CdcEnrichmentConsumer, EnrichmentConfig};
 use reddb::runtime::ai::local_embedding::{
     clear_local_embedding_backend_for_tests, install_local_embedding_backend,
@@ -35,20 +35,18 @@ fn rt() -> RedDBRuntime {
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
 }
 
 fn exec_err(rt: &RedDBRuntime, sql: &str) -> RedDBError {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .err()
-        .unwrap_or_else(|| panic!("query should fail: {sql}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .err()
+    .unwrap_or_else(|| panic!("query should fail: {sql}"))
 }
 
 fn register_installed_local_model(rt: &RedDBRuntime, name: &str, dimensions: u32) {
@@ -106,12 +104,11 @@ impl LocalEmbeddingBackend for FailingBackend {
 /// (e.g. a collection with no attached vectors yet) as zero hits — a
 /// pending row is simply not returned by `VECTOR SEARCH`.
 fn search_hits(rt: &RedDBRuntime, sql: &str) -> usize {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .map(|result| result.result.records.len())
-        .unwrap_or(0)
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .map(|result| result.result.records.len())
+    .unwrap_or(0)
 }
 
 /// `CREATE TABLE docs ... WITH (EMBED (...))` declaring a per-collection

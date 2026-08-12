@@ -19,7 +19,7 @@
 mod support;
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 #[test]
@@ -33,7 +33,7 @@ fn lazy_filter_drops_expired_then_unset_reveals_them_again() {
     //   2. After the sweeper has had a chance to tick (slice 12), the
     //      rows are physically gone and UNSET cannot resurrect them.
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE events (id INTEGER, msg TEXT) WITH timestamps = true".into(),
@@ -91,7 +91,7 @@ fn lazy_filter_drops_expired_then_unset_reveals_them_again() {
 #[test]
 fn alter_set_retention_without_timestamp_column_is_rejected() {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE plain (id INTEGER, name TEXT)".into(),
     })
@@ -114,7 +114,7 @@ fn retention_policy_persists_across_restart() {
 
     let rt = {
         let rt = path.open_runtime();
-        let q = QueryUseCases::new(&rt);
+        let q = &rt;
         q.execute(ExecuteQueryInput {
             query: "CREATE TABLE events (id INTEGER, msg TEXT) WITH timestamps = true".into(),
         })
@@ -148,7 +148,7 @@ fn retention_policy_persists_across_restart() {
         );
 
         // `red.retention` exposes the four contract columns.
-        let q = QueryUseCases::new(&rt);
+        let q = &rt;
         let result = q
             .execute(ExecuteQueryInput {
                 query: "SELECT name, retention_duration, oldest_row_ts, \

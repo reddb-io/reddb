@@ -36,7 +36,7 @@ mod support;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use reddb::application::{ExecuteQueryInput, QueryUseCases};
+use reddb::application::ExecuteQueryInput;
 use reddb::replication::cdc::ChangeRecord;
 use reddb::replication::logical::{ApplyMode, LogicalChangeApplier};
 use reddb::replication::primary::LogicalWalSpool;
@@ -48,7 +48,7 @@ fn temp_path(prefix: &str) -> support::TempDbFile {
     support::temp_db_file(prefix)
 }
 
-fn exec(query: &QueryUseCases<'_, RedDBRuntime>, sql: &str) {
+fn exec(query: &RedDBRuntime, sql: &str) {
     query
         .execute(ExecuteQueryInput {
             query: sql.to_string(),
@@ -120,7 +120,7 @@ fn drive_primary(
         RedDBRuntime::with_options(opts).expect("open primary")
     };
     {
-        let query = QueryUseCases::new(&primary_rt);
+        let query = &primary_rt;
         for sql in setup {
             exec(&query, sql);
         }

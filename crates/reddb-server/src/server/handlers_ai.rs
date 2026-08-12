@@ -356,7 +356,7 @@ impl RedDBServer {
             min_score: None,
         };
 
-        let context_result = match self.query_use_cases().search_context(context_input) {
+        let context_result = match self.runtime.search_context(context_input) {
             Ok(r) => r,
             Err(err) => return json_error(400, err.to_string()),
         };
@@ -1330,10 +1330,8 @@ impl RedDBServer {
         max_inputs: usize,
     ) -> Result<Vec<AiEmbeddingInputItem>, String> {
         let result = self
-            .query_use_cases()
-            .execute(ExecuteQueryInput {
-                query: query.to_string(),
-            })
+            .runtime
+            .execute_query(query)
             .map_err(|err| format!("source_query failed: {err}"))?;
 
         match source_mode {
@@ -1445,10 +1443,8 @@ impl RedDBServer {
         max_prompts: usize,
     ) -> Result<Vec<String>, String> {
         let result = self
-            .query_use_cases()
-            .execute(ExecuteQueryInput {
-                query: query.to_string(),
-            })
+            .runtime
+            .execute_query(query)
             .map_err(|err| format!("source_query failed: {err}"))?;
 
         match source_mode {

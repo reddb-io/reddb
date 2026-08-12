@@ -122,7 +122,7 @@ impl RedDBServer {
             Err(response) => return response,
         };
 
-        match self.query_use_cases().explain(ExplainQueryInput { query }) {
+        match self.runtime.explain(ExplainQueryInput { query }) {
             Ok(result) => {
                 let universal_mode =
                     crate::presentation::query_plan_json::logical_plan_uses_universal_mode(
@@ -164,7 +164,7 @@ impl RedDBServer {
         let k = input.k;
         let min_score = input.min_score;
 
-        match self.query_use_cases().search_similar(input) {
+        match self.runtime.search_similar_input(input) {
             Ok(results) => json_response(
                 200,
                 crate::presentation::query_json::similar_results_json(
@@ -192,7 +192,7 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
-        match self.query_use_cases().search_ivf(input) {
+        match self.runtime.search_ivf_input(input) {
             Ok(result) => json_response(
                 200,
                 crate::presentation::query_json::runtime_ivf_json(
@@ -221,7 +221,7 @@ impl RedDBServer {
             &input.capabilities,
         );
 
-        match self.query_use_cases().search_hybrid(input) {
+        match self.runtime.search_hybrid_input(input) {
             Ok(result) => json_response(
                 200,
                 crate::presentation::query_json::dsl_query_result_json(
@@ -255,7 +255,7 @@ impl RedDBServer {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                match self.query_use_cases().search_hybrid(input) {
+                match self.runtime.search_hybrid_input(input) {
                     Ok(result) => json_response(
                         200,
                         crate::presentation::query_json::dsl_query_result_json(
@@ -277,7 +277,7 @@ impl RedDBServer {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                match self.query_use_cases().search_multimodal(input) {
+                match self.runtime.search_multimodal_input(input) {
                     Ok(result) => json_response(
                         200,
                         crate::presentation::query_json::dsl_query_result_json(
@@ -299,7 +299,7 @@ impl RedDBServer {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                match self.query_use_cases().search_index(input) {
+                match self.runtime.search_index_input(input) {
                     Ok(result) => json_response(
                         200,
                         crate::presentation::query_json::dsl_query_result_json(
@@ -333,7 +333,7 @@ impl RedDBServer {
             &input.capabilities,
         );
 
-        match self.query_use_cases().search_text(input) {
+        match self.runtime.search_text_input(input) {
             Ok(result) => json_response(
                 200,
                 crate::presentation::query_json::dsl_query_result_json(
@@ -361,7 +361,7 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
-        match self.query_use_cases().search_context(input) {
+        match self.runtime.search_context_input(input) {
             Ok(result) => json_response(
                 200,
                 crate::presentation::query_json::context_search_result_json(&result),
@@ -385,7 +385,7 @@ impl RedDBServer {
             &input.capabilities,
         );
 
-        match self.query_use_cases().search_multimodal(input) {
+        match self.runtime.search_multimodal_input(input) {
             Ok(result) => json_response(
                 200,
                 crate::presentation::query_json::dsl_query_result_json(
@@ -575,9 +575,7 @@ impl RedDBServer {
             let mut prefix_hash_emit = PrefixHasher::new();
 
             if stream_error.is_none() {
-                let exec = self.query_use_cases().execute(ExecuteQueryInput {
-                    query: query.clone(),
-                });
+                let exec = self.runtime.execute_query(&(query.clone()));
                 match exec {
                     Ok(result) => {
                         let mut records = crate::presentation::query_view::filter_query_records(
@@ -1363,7 +1361,7 @@ impl RedDBServer {
 
         // Execute before sending headers so an execution failure surfaces
         // as a non-streaming error (client can tell "never accepted").
-        let result = match self.query_use_cases().execute(ExecuteQueryInput { query }) {
+        let result = match self.runtime.execute(ExecuteQueryInput { query }) {
             Ok(result) => result,
             Err(err) => {
                 if let crate::api::RedDBError::Validation {

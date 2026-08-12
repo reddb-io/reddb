@@ -4,7 +4,7 @@ mod support;
 use std::thread::sleep;
 use std::time::Duration;
 
-use reddb::application::{CatalogUseCases, ExecuteQueryInput, QueryUseCases};
+use reddb::application::ExecuteQueryInput;
 use reddb::catalog::CollectionModel;
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::queue::QueueMode;
@@ -22,20 +22,18 @@ fn rt() -> RedDBRuntime {
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
 }
 
 fn exec_err(rt: &RedDBRuntime, sql: &str) -> String {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .expect_err("query should fail")
-        .to_string()
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .expect_err("query should fail")
+    .to_string()
 }
 
 fn text(record: &UnifiedRecord, column: &str) -> String {
@@ -757,7 +755,7 @@ fn test_queue_mode_persists_and_defaults_to_work() {
     exec(&rt, "ALTER QUEUE default_tasks SET MODE FANOUT");
 
     let rt = checkpoint_and_reopen(&path, rt);
-    let catalog = CatalogUseCases::new(&rt).snapshot();
+    let catalog = rt.catalog();
 
     let mode = |name: &str| {
         catalog

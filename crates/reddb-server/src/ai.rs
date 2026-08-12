@@ -2395,7 +2395,7 @@ pub fn resolve_ask_planner_model_from_runtime(
     resolve_ask_planner_model(&kv_getter, fallback_model)
 }
 
-/// Resolve default provider + model via RuntimeEntityPort trait (for use in QueryUseCases).
+/// Resolve the default provider and model for runtime semantic search.
 pub fn resolve_defaults_from_runtime_port<
     P: crate::application::ports::RuntimeEntityPort + ?Sized,
 >(

@@ -62,7 +62,7 @@ pub enum Auth {
     Anonymous,
     /// Bearer token (login-derived session token or API key).
     Bearer(String),
-    /// Username/password credentials. AuthResponse codec is follow-up work.
+    /// Username/password credentials negotiated through SCRAM-SHA-256.
     Basic { user: String, pass: String },
     /// API key credentials. AuthResponse codec is follow-up work.
     ApiKey(String),

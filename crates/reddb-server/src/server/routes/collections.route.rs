@@ -316,9 +316,7 @@ pub(crate) fn register(registry: &mut RouteRegistry) {
 // declared route always has a live handler behind it.
 
 fn collections_list(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
-    let values = server
-        .catalog_use_cases()
-        .collections()
+    let values = server.runtime.db().collections()
         .into_iter()
         .map(JsonValue::String)
         .collect();

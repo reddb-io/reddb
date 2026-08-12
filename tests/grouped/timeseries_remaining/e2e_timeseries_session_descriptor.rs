@@ -8,7 +8,7 @@
 mod support;
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 
 #[test]
 fn session_clause_persists_across_restart() {
@@ -19,7 +19,7 @@ fn session_clause_persists_across_restart() {
     // the collection contract available to the reopened runtime.
     let rt = {
         let rt = path.open_runtime();
-        let q = QueryUseCases::new(&rt);
+        let q = &rt;
         q.execute(ExecuteQueryInput {
             query: "CREATE TIMESERIES events WITH SESSION_KEY user_id SESSION_GAP 30 m".into(),
         })
@@ -56,7 +56,7 @@ fn session_clause_persists_across_restart() {
         // The runtime view materialised through `red.collections`
         // exposes the same values — proves the surface that the
         // demoable SELECT targets is wired end-to-end.
-        let q = QueryUseCases::new(&rt);
+        let q = &rt;
         let result = q
             .execute(ExecuteQueryInput {
                 query: "SELECT model, session_key, session_gap_ms \
@@ -85,7 +85,7 @@ fn session_clause_persists_across_restart() {
 #[test]
 fn timeseries_without_clause_keeps_session_fields_null() {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TIMESERIES bare RETENTION 1 d".into(),
     })

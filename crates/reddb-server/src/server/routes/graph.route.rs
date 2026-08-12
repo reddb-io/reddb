@@ -290,7 +290,7 @@ fn graph_analytics_properties(
 }
 
 fn graph_projections_list(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
-    Some(match server.catalog_use_cases().graph_projections() {
+    Some(match server.runtime.graph_projections() {
         Ok(projections) => json_response(
             200,
             crate::presentation::admin_json::graph_projections_json(&projections),
@@ -346,7 +346,7 @@ fn graph_projections_stale(server: &RedDBServer, req: &RouteRequest<'_>) -> Opti
 }
 
 fn graph_jobs_list(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
-    Some(match server.catalog_use_cases().analytics_jobs() {
+    Some(match server.runtime.analytics_jobs() {
         Ok(jobs) => json_response(
             200,
             crate::presentation::admin_json::analytics_jobs_json(&jobs),

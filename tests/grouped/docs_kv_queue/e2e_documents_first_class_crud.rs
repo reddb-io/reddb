@@ -11,8 +11,8 @@ use reddb::application::{
 };
 use reddb::json::Value as RedJsonValue;
 use reddb::server::RedDBServer;
+use reddb::EntityUseCases;
 use reddb::RedDBRuntime;
-use reddb::{EntityUseCases, QueryUseCases};
 use reddb_types::Value;
 use serde_json::{json, Value as JsonValue};
 use support::{checkpoint_and_reopen, PersistentDbPath};
@@ -513,7 +513,7 @@ fn runtime_document_patch_updates_nested_body_and_survives_reopen() {
     assert!(patched_body["contact"].get("phone").is_none());
 
     let reopened = checkpoint_and_reopen(&path, rt);
-    let query = QueryUseCases::new(&reopened);
+    let query = &reopened;
     let after = query
         .execute(ExecuteQueryInput {
             query: "SELECT name, body FROM profiles WHERE name = 'Ada'".into(),

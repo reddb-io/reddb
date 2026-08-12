@@ -442,6 +442,36 @@ impl SimFileHandle {
 }
 
 impl VfsFile for SimFileHandle {
+    fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            state: Arc::clone(&self.state),
+            path: self.path.clone(),
+            pos: self.pos,
+        })
+    }
+
+    fn file_len(&self) -> io::Result<u64> {
+        let state = self.lock();
+        state
+            .files
+            .get(&self.path)
+            .map(|file| file.live.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "file not open"))
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        let len = usize::try_from(len)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "file length too large"))?;
+        let mut state = self.lock();
+        let file = state
+            .files
+            .get_mut(&self.path)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "file not open"))?;
+        file.live.resize(len, 0);
+        file.dirty.clear();
+        Ok(())
+    }
+
     /// Apply one write, subject to `ENOSPC` and the three write-side named fault
     /// classes.
     ///
@@ -543,7 +573,7 @@ impl VfsFile for SimFileHandle {
         Ok(next)
     }
 
-    fn sync_all(&mut self) -> io::Result<()> {
+    fn sync_all(&self) -> io::Result<()> {
         let mut state = self.lock();
         state.charge()?;
         // A dropped or unsafely-reordered fsync surfaces as a *loud* durability

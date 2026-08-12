@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use reddb::application::{CreateKvInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
+use reddb::application::{CreateKvInput, EntityUseCases, ExecuteQueryInput};
 use reddb::runtime::ai::local_embedding::{
     clear_local_embedding_backend_for_tests, install_local_embedding_backend,
     LocalEmbeddingBackend, LocalEmbeddingRequest,
@@ -61,20 +61,18 @@ fn rt() -> RedDBRuntime {
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
 }
 
 fn exec_err(rt: &RedDBRuntime, sql: &str) -> RedDBError {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .err()
-        .unwrap_or_else(|| panic!("query should fail: {sql}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .err()
+    .unwrap_or_else(|| panic!("query should fail: {sql}"))
 }
 
 fn text(record: &UnifiedRecord, column: &str) -> String {

@@ -1,6 +1,6 @@
 use super::record::WalRecord;
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufWriter, Seek, SeekFrom, Write};
+use reddb_file::{OpenMode, StdVfs, Vfs, VfsFile};
+use std::io::{self, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,13 +19,13 @@ enum WalSyncMethod {
     All,
 }
 
-pub(crate) struct WalGroupSync {
+pub(crate) struct WalGroupSync<F: VfsFile> {
     target_lsn: u64,
-    sync_handle: Arc<File>,
+    sync_handle: Arc<F>,
     method: WalSyncMethod,
 }
 
-impl WalGroupSync {
+impl<F: VfsFile> WalGroupSync<F> {
     pub(crate) fn target_lsn(&self) -> u64 {
         self.target_lsn
     }
@@ -38,47 +38,52 @@ impl WalGroupSync {
     }
 }
 
-/// Reserve disk blocks for `[offset, offset + len)` **without** growing the
-/// file's logical length (`FALLOC_FL_KEEP_SIZE`).
-///
-/// Pinning `i_size` is the whole trick that makes preallocation invisible to
-/// crash recovery: the WAL's logical end stays equal to its real data length,
-/// so [`WalReader`](super::reader::WalReader)'s EOF scan never walks into a
-/// zero-filled reserved tail (a `0x00` type byte would otherwise decode to an
-/// "Invalid record type" error and abort recovery). This is why we cannot use
-/// `fs2::allocate` here — it calls `posix_fallocate`, which *extends* `i_size`.
-///
-/// Linux-only; other targets return [`io::ErrorKind::Unsupported`] so the
-/// caller disables the optimization silently.
-#[cfg(target_os = "linux")]
-fn reserve_wal_blocks(file: &File, offset: u64, len: u64) -> io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-    if len == 0 {
-        return Ok(());
+struct VfsBufWriter<F: VfsFile> {
+    file: F,
+    buffer: Vec<u8>,
+}
+
+impl<F: VfsFile> VfsBufWriter<F> {
+    fn with_capacity(capacity: usize, file: F) -> Self {
+        Self {
+            file,
+            buffer: Vec::with_capacity(capacity),
+        }
     }
-    // SAFETY: `file` owns a valid fd for the duration of the call; fallocate
-    // only mutates block reservations for that fd, never process memory.
-    let ret = unsafe {
-        libc::fallocate(
-            file.as_raw_fd(),
-            libc::FALLOC_FL_KEEP_SIZE,
-            offset as libc::off_t,
-            len as libc::off_t,
-        )
-    };
-    if ret == 0 {
+
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.buffer.len() + bytes.len() > self.buffer.capacity() {
+            self.flush()?;
+        }
+        if bytes.len() >= self.buffer.capacity() {
+            self.file.write_all(bytes)
+        } else {
+            self.buffer.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            self.file.write_all(&self.buffer)?;
+            self.buffer.clear();
+        }
         Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+    }
+
+    fn get_ref(&self) -> &F {
+        &self.file
+    }
+
+    fn get_mut(&mut self) -> &mut F {
+        &mut self.file
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn reserve_wal_blocks(_file: &File, _offset: u64, _len: u64) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "WAL preallocation is only implemented on linux",
-    ))
+impl<F: VfsFile> Drop for VfsBufWriter<F> {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
 }
 
 /// Whether a `fallocate` failure means "this filesystem can't preallocate"
@@ -104,7 +109,7 @@ fn fallocate_unsupported(err: &io::Error) -> bool {
 
 /// Writer for the Write-Ahead Log
 ///
-/// Wraps the underlying file in a [`BufWriter`] so each `append` does
+/// Wraps the underlying file in a [`VfsBufWriter`] so each `append` does
 /// not pay a write syscall — bytes accumulate in a 64 KiB user-space
 /// buffer until `sync()` (or `flush_until()`) drains them and then
 /// calls `sync_data()`/`sync_all()` on the raw file. This is how postgres turns
@@ -113,11 +118,11 @@ fn fallocate_unsupported(err: &io::Error) -> bool {
 /// every record.
 ///
 /// **Critical contract:** every code path that syncs the underlying
-/// file *must* drain the [`BufWriter`] first via
-/// `BufWriter::flush()`. Otherwise the bytes in user-space never reach
+/// file *must* drain the [`VfsBufWriter`] first via
+/// `VfsBufWriter::flush()`. Otherwise the bytes in user-space never reach
 /// the kernel before fsync, and durability is silently broken.
-pub struct WalWriter {
-    file: BufWriter<File>,
+pub struct WalWriter<V: Vfs = StdVfs> {
+    file: VfsBufWriter<V::File>,
     /// Cloned file descriptor for `sync_all()` outside the writer
     /// mutex. Both this and `file`'s inner `File` point at the same
     /// kernel inode; calling `sync_all()` on either flushes ALL
@@ -128,7 +133,7 @@ pub struct WalWriter {
     /// Without this clone, a leader holding the writer mutex during
     /// `sync_all()` blocks every other writer from appending,
     /// defeating the entire purpose of group commit.
-    sync_handle: Arc<File>,
+    sync_handle: Arc<V::File>,
     /// Log Sequence Number — byte offset of the next record. Advances
     /// every `append`; survives across restarts via `seek(End)`.
     current_lsn: u64,
@@ -163,21 +168,23 @@ pub struct WalWriter {
     last_sync_method: Option<WalSyncMethod>,
 }
 
-impl WalWriter {
+impl WalWriter<StdVfs> {
     /// Open a WAL file for writing. Creates it if it doesn't exist.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let exists = path.as_ref().exists();
+        Self::open_with_vfs(StdVfs, path)
+    }
+}
 
+impl<V: Vfs> WalWriter<V> {
+    /// Open a WAL file through `vfs`. Creates it if it doesn't exist.
+    pub fn open_with_vfs<P: AsRef<Path>>(vfs: V, path: P) -> io::Result<Self> {
         // We do all initial bookkeeping (write header, seek to EOF) on
-        // the raw `File` BEFORE wrapping in a BufWriter so we don't
+        // the raw VFS file BEFORE wrapping in a VfsBufWriter so we don't
         // have to worry about flush ordering during construction.
-        let mut raw = OpenOptions::new()
-            .read(true)
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut raw = vfs.open(path.as_ref(), OpenMode::create_keep())?;
+        let existing_len = raw.file_len()?;
 
-        let current_lsn = if !exists || raw.metadata()?.len() == 0 {
+        let current_lsn = if existing_len == 0 {
             raw.write_all(&reddb_file::encode_wal_file_header())?;
             raw.sync_all()?;
             reddb_file::WAL_FILE_HEADER_BYTES as u64
@@ -191,10 +198,10 @@ impl WalWriter {
         // Clone the file handle BEFORE wrapping in BufWriter. The
         // clone shares the same kernel file description, so
         // sync_all() on either descriptor flushes the whole inode.
-        // The BufWriter owns the original; the Arc<File> is shared
+        // The VfsBufWriter owns the original; the Arc handle is shared
         // with the group-commit leader.
         let sync_handle = Arc::new(raw.try_clone()?);
-        let file = BufWriter::with_capacity(WAL_BUFFER_BYTES, raw);
+        let file = VfsBufWriter::with_capacity(WAL_BUFFER_BYTES, raw);
 
         // On open, every byte already on disk is by definition durable
         // (any pre-crash unflushed tail was lost when the OS dropped
@@ -236,7 +243,7 @@ impl WalWriter {
             return Ok(());
         }
         let from = self.preallocated_to;
-        match reserve_wal_blocks(self.file.get_ref(), from, target - from) {
+        match self.file.get_ref().reserve(from, target - from) {
             Ok(()) => {
                 self.preallocated_to = target;
                 self.prealloc_metadata_dirty = true;
@@ -392,7 +399,7 @@ impl WalWriter {
     /// the writer's `file`, so syncing the clone flushes bytes that
     /// have reached the kernel for that file.
     /// This is the coalescing window that makes group commit win.
-    pub(crate) fn drain_for_group_sync(&mut self) -> io::Result<WalGroupSync> {
+    pub(crate) fn drain_for_group_sync(&mut self) -> io::Result<WalGroupSync<V::File>> {
         // Drain user-space buffer into the kernel.
         self.file.flush()?;
         Ok(WalGroupSync {
@@ -407,7 +414,7 @@ impl WalWriter {
     ///
     /// Monotonic — never lowers `durable_lsn`. Safe to call with a
     /// stale `lsn`; just becomes a no-op.
-    pub(crate) fn mark_durable(&mut self, sync: &WalGroupSync) {
+    pub(crate) fn mark_durable(&mut self, sync: &WalGroupSync<V::File>) {
         let lsn = sync.target_lsn;
         if lsn > self.durable_lsn {
             self.durable_lsn = lsn;

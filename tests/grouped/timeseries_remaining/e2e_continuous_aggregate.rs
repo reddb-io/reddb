@@ -5,7 +5,7 @@
 //! refresh over a hypertable source is tracked as a follow-up.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
@@ -15,7 +15,7 @@ fn rt() -> RedDBRuntime {
 #[test]
 fn register_then_list_surfaces_aggregate() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "SELECT CA_REGISTER('five_min_load', 'metrics', '5m', \
                 'avg_load', 'avg', 'load') AS ok"
@@ -41,7 +41,7 @@ fn register_then_list_surfaces_aggregate() {
 #[test]
 fn state_returns_initial_watermark() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "SELECT CA_REGISTER('ca1', 'metrics', '1h', 'c', 'count', 'v') AS ok".into(),
     })
@@ -67,7 +67,7 @@ fn state_returns_initial_watermark() {
 #[test]
 fn drop_removes_aggregate_from_list() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "SELECT CA_REGISTER('ca2', 'metrics', '1m', 'c', 'sum', 'v') AS ok".into(),
     })
@@ -91,7 +91,7 @@ fn drop_removes_aggregate_from_list() {
 #[test]
 fn refresh_absorbs_rows_and_query_returns_aggregate() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
 
     // Source collection with a `ts` (ns) column and a `load` float.
     q.execute(ExecuteQueryInput {
@@ -147,7 +147,7 @@ fn refresh_absorbs_rows_and_query_returns_aggregate() {
 #[test]
 fn state_returns_null_for_unknown() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let r = q
         .execute(ExecuteQueryInput {
             query: "SELECT CA_STATE('no_such_aggregate') AS st".into(),

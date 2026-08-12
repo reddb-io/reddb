@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 
-use crate::application::{RuntimeEntityPortCtx, RuntimeQueryPortCtx};
+use crate::application::RuntimeEntityPortCtx;
 use crate::runtime::write_gate::WriteKind;
 
 impl RedDBServer {
@@ -21,12 +21,11 @@ impl RedDBServer {
             .max(1)
             .min(self.options.max_scan_limit);
 
-        let ctx = self.build_read_context(None, None);
         let collection = collection.to_string();
         crate::server::transport::run_use_case(
             move || {
                 self.runtime
-                    .scan_collection_ctx(&ctx, &collection, None, limit + offset)
+                    .scan_collection(&collection, None, limit + offset)
                     .map(|page| {
                         // The legacy scan use-case applied offset client-side
                         // before this migration; preserve that semantic by

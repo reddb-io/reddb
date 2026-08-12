@@ -2345,7 +2345,11 @@ impl RuntimeEntityPort for RedDBRuntime {
         key: &str,
     ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
         let db = self.db();
-        ensure_collection_model_read(&db, collection, crate::catalog::CollectionModel::Kv)?;
+        crate::application::collection_contract_enforcer::ensure_collection_model_read(
+            &db,
+            collection,
+            crate::catalog::CollectionModel::Kv,
+        )?;
         let store = db.store();
         let Some(manager) = store.get_collection(collection) else {
             return Ok(None);

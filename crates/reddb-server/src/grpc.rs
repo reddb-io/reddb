@@ -2,14 +2,13 @@ pub(crate) use crate::application::json_input::{
     json_bool_field, json_f32_field, json_string_field, json_usize_field,
 };
 pub(crate) use crate::application::{
-    AdminUseCases, CatalogUseCases, CreateEdgeInput, CreateEntityOutput, CreateNodeGraphLinkInput,
-    CreateNodeInput, CreateNodeTableLinkInput, CreateRowInput, CreateVectorInput,
-    DeleteEntityInput, EntityUseCases, ExplainQueryInput, GraphCentralityInput,
-    GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput, GraphCyclesInput,
-    GraphHitsInput, GraphNeighborhoodInput, GraphPersonalizedPageRankInput, GraphShortestPathInput,
-    GraphTopologicalSortInput, GraphTraversalInput, GraphUseCases, InspectNativeArtifactInput,
-    NativeUseCases, PatchEntityInput, QueryUseCases, SearchHybridInput, SearchIvfInput,
-    SearchSimilarInput, SearchTextInput,
+    AdminUseCases, CreateEdgeInput, CreateEntityOutput, CreateNodeGraphLinkInput, CreateNodeInput,
+    CreateNodeTableLinkInput, CreateRowInput, CreateVectorInput, DeleteEntityInput, EntityUseCases,
+    ExplainQueryInput, GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput,
+    GraphComponentsInput, GraphCyclesInput, GraphHitsInput, GraphNeighborhoodInput,
+    GraphPersonalizedPageRankInput, GraphShortestPathInput, GraphTopologicalSortInput,
+    GraphTraversalInput, GraphUseCases, InspectNativeArtifactInput, NativeUseCases,
+    PatchEntityInput, SearchHybridInput, SearchIvfInput, SearchSimilarInput, SearchTextInput,
 };
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -324,14 +323,6 @@ struct GrpcRuntime {
 impl GrpcRuntime {
     fn admin_use_cases(&self) -> AdminUseCases<'_, RedDBRuntime> {
         AdminUseCases::new(&self.runtime)
-    }
-
-    fn catalog_use_cases(&self) -> CatalogUseCases<'_, RedDBRuntime> {
-        CatalogUseCases::new(&self.runtime)
-    }
-
-    fn query_use_cases(&self) -> QueryUseCases<'_, RedDBRuntime> {
-        QueryUseCases::new(&self.runtime)
     }
 
     fn entity_use_cases(&self) -> EntityUseCases<'_, RedDBRuntime> {

@@ -4,10 +4,10 @@
 //! Model Context Protocol JSON-RPC transport over stdio.
 
 use crate::application::{
-    CatalogUseCases, CreateDocumentInput, CreateEdgeInput, CreateNodeInput, CreateRowInput,
-    CreateVectorInput, DeleteEntityInput, EntityUseCases, ExecuteQueryInput, GraphCentralityInput,
+    CreateDocumentInput, CreateEdgeInput, CreateNodeInput, CreateRowInput, CreateVectorInput,
+    DeleteEntityInput, EntityUseCases, ExecuteQueryInput, GraphCentralityInput,
     GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput, GraphCyclesInput,
-    GraphShortestPathInput, GraphTraversalInput, GraphUseCases, QueryUseCases, ScanCollectionInput,
+    GraphShortestPathInput, GraphTraversalInput, GraphUseCases, ScanCollectionInput,
     SearchSimilarInput, SearchTextInput,
 };
 use crate::auth::store::AuthStore;
@@ -390,12 +390,8 @@ impl McpServer {
             return json_to_string(&json).map_err(|e| format!("serialization error: {}", e));
         }
 
-        let uc = QueryUseCases::new(&self.runtime);
-        let result = uc
-            .execute(ExecuteQueryInput {
-                query: sql.to_string(),
-            })
-            .map_err(|e| format!("{}", e))?;
+        let uc = &self.runtime;
+        let result = uc.execute_query(sql).map_err(|e| format!("{}", e))?;
 
         let json = runtime_query_json(&result, &None, &None);
         json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
@@ -437,8 +433,8 @@ impl McpServer {
     }
 
     fn tool_collections(&self) -> Result<String, String> {
-        let uc = CatalogUseCases::new(&self.runtime);
-        let collections = uc.collections();
+        let uc = &self.runtime;
+        let collections = uc.db().collections();
         let json = JsonValue::Array(collections.into_iter().map(JsonValue::String).collect());
         json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
     }
@@ -790,10 +786,8 @@ impl McpServer {
     }
 
     fn tool_keyed_query(&self, sql: String) -> Result<String, String> {
-        let uc = QueryUseCases::new(&self.runtime);
-        let result = uc
-            .execute(ExecuteQueryInput { query: sql })
-            .map_err(|e| format!("{}", e))?;
+        let uc = &self.runtime;
+        let result = uc.execute_query(&(sql)).map_err(|e| format!("{}", e))?;
         let json = runtime_query_json(&result, &None, &None);
         json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
     }
@@ -850,9 +844,9 @@ impl McpServer {
             .map(|v| v as f32)
             .unwrap_or(0.0);
 
-        let uc = QueryUseCases::new(&self.runtime);
+        let uc = &self.runtime;
         let results = uc
-            .search_similar(SearchSimilarInput {
+            .search_similar_input(SearchSimilarInput {
                 collection: collection.to_string(),
                 vector,
                 k,
@@ -903,9 +897,9 @@ impl McpServer {
             .map(|v| v as usize);
         let fuzzy = args.get("fuzzy").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let uc = QueryUseCases::new(&self.runtime);
+        let uc = &self.runtime;
         let result = uc
-            .search_text(SearchTextInput {
+            .search_text_input(SearchTextInput {
                 query: query.to_string(),
                 collections,
                 entity_types: None,
@@ -941,7 +935,7 @@ impl McpServer {
     }
 
     fn tool_health(&self) -> Result<String, String> {
-        let uc = CatalogUseCases::new(&self.runtime);
+        let uc = &self.runtime;
         let stats = uc.stats();
         let json = runtime_stats_json(&stats);
         json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
@@ -1127,10 +1121,8 @@ impl McpServer {
             sql.push_str(&format!(" WHERE {}", where_clause));
         }
 
-        let uc = QueryUseCases::new(&self.runtime);
-        let result = uc
-            .execute(ExecuteQueryInput { query: sql })
-            .map_err(|e| format!("{}", e))?;
+        let uc = &self.runtime;
+        let result = uc.execute_query(&(sql)).map_err(|e| format!("{}", e))?;
 
         let mut resp = Map::new();
         resp.insert("ok".into(), JsonValue::Bool(true));
@@ -1154,7 +1146,7 @@ impl McpServer {
             .map(|v| v as usize)
             .unwrap_or(0);
 
-        let uc = QueryUseCases::new(&self.runtime);
+        let uc = &self.runtime;
         let page = uc
             .scan(ScanCollectionInput {
                 collection: collection.to_string(),

@@ -1,7 +1,7 @@
 use reddb::application::ExecuteQueryInput;
 use reddb::catalog::{CollectionModel, SubscriptionOperation};
 use reddb::runtime::mvcc::{clear_current_tenant, set_current_tenant};
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
@@ -9,15 +9,14 @@ fn rt() -> RedDBRuntime {
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: sql.to_string(),
-        })
-        .unwrap_or_else(|err| panic!("{sql}: {err}"))
+    rt.execute(ExecuteQueryInput {
+        query: sql.to_string(),
+    })
+    .unwrap_or_else(|err| panic!("{sql}: {err}"))
 }
 
 fn exec_err(rt: &RedDBRuntime, sql: &str) -> String {
-    match QueryUseCases::new(rt).execute(ExecuteQueryInput {
+    match rt.execute(ExecuteQueryInput {
         query: sql.to_string(),
     }) {
         Ok(_) => panic!("expected error for {sql}"),
@@ -578,7 +577,7 @@ fn drop_subscription_stops_events_to_that_queue() {
 
     // e3_q1 must be empty: create a group then verify no records come out
     exec(&rt, "QUEUE GROUP CREATE e3_q1 evt_readers");
-    let result = QueryUseCases::new(&rt)
+    let result = &rt
         .execute(ExecuteQueryInput {
             query: "QUEUE READ e3_q1 GROUP evt_readers CONSUMER c1 COUNT 1".to_string(),
         })
