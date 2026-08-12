@@ -78,9 +78,7 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
             Projection::Expression(filter, _) => {
                 // Route through typed evaluator; fall back to filter-boolean path for
                 // shapes the evaluator doesn't cover (CONFIG / KV / ML_* references).
-                if let Some((expr, _)) =
-                    crate::storage::query::sql_lowering::projection_to_expr(projection)
-                {
+                if let Some((expr, _)) = reddb_rql::sql_lowering::projection_to_expr(projection) {
                     let row = RecordRow {
                         record: source,
                         table_name,
@@ -121,9 +119,7 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
                 // Route catalog-resolvable functions through the typed evaluator.
                 // Falls back to the legacy dispatcher for CONFIG/KV/ML_*/geo/time
                 // and any shape where argument resolution fails via evaluator.
-                if let Some((expr, _)) =
-                    crate::storage::query::sql_lowering::projection_to_expr(projection)
-                {
+                if let Some((expr, _)) = reddb_rql::sql_lowering::projection_to_expr(projection) {
                     let row = RecordRow {
                         record: source,
                         table_name,
