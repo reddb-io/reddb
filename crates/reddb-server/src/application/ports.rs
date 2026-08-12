@@ -1,3 +1,14 @@
+//! Application ports that carry invariants not owned by transports.
+//!
+//! - Entity enforces collection contracts, normalization, uniqueness, and write policy.
+//! - Schema and tree translate typed commands while preserving their structural rules.
+//! - Admin and native guard lifecycle transitions and physical-authority operations.
+//! - Graph resolves projections and applies traversal/analytics limits.
+//! - VCS preserves repository, history, and conflict invariants.
+//!
+//! Query and catalog reads are deliberately absent: callers already own the runtime,
+//! and an interface that only repeats its methods is not an application boundary.
+
 use std::collections::BTreeMap;
 
 use crate::application::entity::{
@@ -15,10 +26,6 @@ use crate::application::tree::{
     CreateTreeInput, DeleteTreeNodeInput, DropTreeInput, InsertTreeNodeInput, MoveTreeNodeInput,
     RebalanceTreeInput, ValidateTreeInput,
 };
-use crate::catalog::{
-    CatalogAnalyticsJobStatus, CatalogAttentionSummary, CatalogConsistencyReport,
-    CatalogGraphProjectionStatus, CatalogIndexStatus, CatalogModelSnapshot, CollectionDescriptor,
-};
 use crate::health::HealthProvider;
 use crate::physical::{ExportDescriptor, ManifestEvent, PhysicalMetadataFile, SnapshotDescriptor};
 use crate::runtime::{
@@ -28,99 +35,19 @@ use crate::runtime::{
     RuntimeGraphHitsResult, RuntimeGraphNeighborhoodResult, RuntimeGraphPathAlgorithm,
     RuntimeGraphPathResult, RuntimeGraphPattern, RuntimeGraphProjection,
     RuntimeGraphPropertiesResult, RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult,
-    RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult, RuntimeQueryExplain, RuntimeQueryResult,
-    RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
+    RuntimeGraphTraversalStrategy, RuntimeQueryResult,
 };
 use crate::storage::engine::PhysicalFileHeader;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::devx::{
     NativeVectorArtifactBatchInspection, NativeVectorArtifactInspection, PhysicalAuthorityStatus,
-    SimilarResult,
 };
-use crate::storage::unified::dsl::QueryResult as DslQueryResult;
 use crate::storage::unified::store::{
     NativeCatalogSummary, NativeManifestSummary, NativeMetadataStateSummary, NativePhysicalState,
     NativeRecoverySummary, NativeRegistrySummary, NativeVectorArtifactPageSummary,
 };
 use crate::RedDBResult;
 use crate::{PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState};
-
-pub trait RuntimeQueryPort {
-    fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult>;
-    fn explain_query(&self, query: &str) -> RedDBResult<RuntimeQueryExplain>;
-    fn scan_collection(
-        &self,
-        collection: &str,
-        cursor: Option<ScanCursor>,
-        limit: usize,
-    ) -> RedDBResult<ScanPage>;
-    fn search_similar(
-        &self,
-        collection: &str,
-        vector: &[f32],
-        k: usize,
-        min_score: f32,
-    ) -> RedDBResult<Vec<SimilarResult>>;
-    fn search_ivf(
-        &self,
-        collection: &str,
-        vector: &[f32],
-        k: usize,
-        n_lists: usize,
-        n_probes: Option<usize>,
-    ) -> RedDBResult<RuntimeIvfSearchResult>;
-    fn search_hybrid(
-        &self,
-        vector: Option<Vec<f32>>,
-        query: Option<String>,
-        k: Option<usize>,
-        collections: Option<Vec<String>>,
-        entity_types: Option<Vec<String>>,
-        capabilities: Option<Vec<String>>,
-        graph_pattern: Option<RuntimeGraphPattern>,
-        filters: Vec<RuntimeFilter>,
-        weights: Option<RuntimeQueryWeights>,
-        min_score: Option<f32>,
-        limit: Option<usize>,
-    ) -> RedDBResult<DslQueryResult>;
-    fn search_text(
-        &self,
-        query: String,
-        collections: Option<Vec<String>>,
-        entity_types: Option<Vec<String>>,
-        capabilities: Option<Vec<String>>,
-        fields: Option<Vec<String>>,
-        limit: Option<usize>,
-        fuzzy: bool,
-    ) -> RedDBResult<DslQueryResult>;
-    fn search_multimodal(
-        &self,
-        query: String,
-        collections: Option<Vec<String>>,
-        entity_types: Option<Vec<String>>,
-        capabilities: Option<Vec<String>>,
-        limit: Option<usize>,
-    ) -> RedDBResult<DslQueryResult>;
-    fn search_index(
-        &self,
-        index: String,
-        value: String,
-        exact: bool,
-        collections: Option<Vec<String>>,
-        entity_types: Option<Vec<String>>,
-        capabilities: Option<Vec<String>>,
-        limit: Option<usize>,
-    ) -> RedDBResult<DslQueryResult>;
-    fn search_context(
-        &self,
-        input: crate::application::SearchContextInput,
-    ) -> RedDBResult<crate::runtime::ContextSearchResult>;
-    fn resolve_semantic_api_key(&self, provider: &crate::ai::AiProvider) -> RedDBResult<String>;
-    /// Planner-level provider policy gate (#711, S3). Returns `Ok(())`
-    /// to proceed, `Err` when an explicit Deny matches. Default-allow
-    /// when no `ai:provider:*` policy is attached.
-    fn enforce_ai_provider_policy(&self, provider: &crate::ai::AiProvider) -> RedDBResult<()>;
-}
 
 pub trait RuntimeEntityPort {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput>;
@@ -265,29 +192,6 @@ pub trait RuntimeAdminPort {
         projection_name: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> RedDBResult<PhysicalAnalyticsJob>;
-}
-
-pub trait RuntimeCatalogPort {
-    fn collections(&self) -> Vec<String>;
-    fn catalog(&self) -> CatalogModelSnapshot;
-    fn catalog_consistency_report(&self) -> CatalogConsistencyReport;
-    fn catalog_attention_summary(&self) -> CatalogAttentionSummary;
-    fn collection_attention(&self) -> Vec<CollectionDescriptor>;
-    fn indexes(&self) -> Vec<PhysicalIndexState>;
-    fn declared_indexes(&self) -> Vec<PhysicalIndexState>;
-    fn indexes_for_collection(&self, collection: &str) -> Vec<PhysicalIndexState>;
-    fn declared_indexes_for_collection(&self, collection: &str) -> Vec<PhysicalIndexState>;
-    fn index_statuses(&self) -> Vec<CatalogIndexStatus>;
-    fn index_attention(&self) -> Vec<CatalogIndexStatus>;
-    fn graph_projections(&self) -> RedDBResult<Vec<PhysicalGraphProjection>>;
-    fn operational_graph_projections(&self) -> Vec<PhysicalGraphProjection>;
-    fn graph_projection_statuses(&self) -> Vec<CatalogGraphProjectionStatus>;
-    fn graph_projection_attention(&self) -> Vec<CatalogGraphProjectionStatus>;
-    fn analytics_jobs(&self) -> RedDBResult<Vec<PhysicalAnalyticsJob>>;
-    fn operational_analytics_jobs(&self) -> Vec<PhysicalAnalyticsJob>;
-    fn analytics_job_statuses(&self) -> Vec<CatalogAnalyticsJobStatus>;
-    fn analytics_job_attention(&self) -> Vec<CatalogAnalyticsJobStatus>;
-    fn stats(&self) -> RuntimeStats;
 }
 
 pub trait RuntimeNativePort {
@@ -646,40 +550,10 @@ impl<T: RuntimeEntityPort + ?Sized> RuntimeEntityPortCtx for T {}
 // the new surface for free. Future PRs replace the forwards
 // with real `ctx.write_consent` / `ctx.xid` handling.
 //
-// Read-only ports (RuntimeCatalogPort, RuntimeGraphPort) and the
+// Read-only ports (RuntimeGraphPort) and the
 // read-only methods of mutating ports are intentionally absent —
 // `OperationContext` adds no locality there until the snapshot-
 // xid migration also lands.
-
-pub trait RuntimeQueryPortCtx: RuntimeQueryPort {
-    fn execute_query_ctx(
-        &self,
-        ctx: &crate::application::OperationContext,
-        query: &str,
-    ) -> RedDBResult<RuntimeQueryResult> {
-        let _ = ctx;
-        self.execute_query(query)
-    }
-    fn explain_query_ctx(
-        &self,
-        ctx: &crate::application::OperationContext,
-        query: &str,
-    ) -> RedDBResult<RuntimeQueryExplain> {
-        let _ = ctx;
-        self.explain_query(query)
-    }
-    fn scan_collection_ctx(
-        &self,
-        ctx: &crate::application::OperationContext,
-        collection: &str,
-        cursor: Option<ScanCursor>,
-        limit: usize,
-    ) -> RedDBResult<ScanPage> {
-        let _ = ctx;
-        self.scan_collection(collection, cursor, limit)
-    }
-}
-impl<T: RuntimeQueryPort + ?Sized> RuntimeQueryPortCtx for T {}
 
 pub trait RuntimeSchemaPortCtx: RuntimeSchemaPort {
     fn create_table_ctx(
