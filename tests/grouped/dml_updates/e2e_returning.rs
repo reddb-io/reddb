@@ -4,7 +4,7 @@
 //! post-image of the mutated row (matches PG).
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 fn rt() -> RedDBRuntime {
@@ -14,7 +14,7 @@ fn rt() -> RedDBRuntime {
 #[test]
 fn returning_star_on_insert_returns_inserted_row() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let result = q
         .execute(ExecuteQueryInput {
             query: "INSERT INTO users (name, age) VALUES ('alice', 30) RETURNING *".into(),
@@ -45,7 +45,7 @@ fn returning_star_on_insert_returns_inserted_row() {
 #[test]
 fn returning_column_list_projects_subset() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let result = q
         .execute(ExecuteQueryInput {
             query: "INSERT INTO users (name, age) VALUES ('bob', 25) RETURNING name".into(),
@@ -64,7 +64,7 @@ fn returning_column_list_projects_subset() {
 #[test]
 fn returning_surfaces_column_defaults() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE users (id INT, name TEXT DEFAULT = 'unknown', active BOOLEAN DEFAULT = true)".into(),
     })
@@ -90,7 +90,7 @@ fn returning_surfaces_column_defaults() {
 #[test]
 fn returning_expression_reports_not_yet_supported() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "INSERT INTO users (id, name) VALUES (1, 'a')".into(),
     })
@@ -108,7 +108,7 @@ fn returning_expression_reports_not_yet_supported() {
 #[test]
 fn returning_multi_row_insert_returns_all_rows() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let result = q
         .execute(ExecuteQueryInput {
             query: "INSERT INTO users (name, age) VALUES ('a', 1), ('b', 2), ('c', 3) RETURNING *"
@@ -123,7 +123,7 @@ fn returning_multi_row_insert_returns_all_rows() {
 #[test]
 fn no_returning_leaves_result_empty() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     let result = q
         .execute(ExecuteQueryInput {
             query: "INSERT INTO users (name, age) VALUES ('x', 99)".into(),
@@ -139,7 +139,7 @@ fn no_returning_leaves_result_empty() {
 #[test]
 fn returning_star_on_update_returns_post_image() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "INSERT INTO users (name, age) VALUES ('u', 1)".into(),
     })
@@ -168,7 +168,7 @@ fn returning_star_on_update_returns_post_image() {
 #[test]
 fn returning_column_list_on_update_projects_subset() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "INSERT INTO users (name, age) VALUES ('v', 5)".into(),
     })
@@ -196,7 +196,7 @@ fn returning_on_update_survives_where_column_mutation() {
     // before the mutation, not via a post-UPDATE SELECT that would
     // miss rows whose WHERE predicate no longer matches.
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "INSERT INTO users (name, age) VALUES ('w', 10)".into(),
     })
@@ -219,7 +219,7 @@ fn returning_on_update_survives_where_column_mutation() {
 #[test]
 fn update_without_returning_leaves_result_empty() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "INSERT INTO users (name, age) VALUES ('z', 0)".into(),
     })
@@ -239,7 +239,7 @@ fn update_without_returning_leaves_result_empty() {
 #[test]
 fn returning_star_on_delete_returns_pre_image() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "INSERT INTO users (name, age) VALUES ('d1', 11), ('d2', 22)".into(),
     })
@@ -268,7 +268,7 @@ fn returning_star_on_delete_returns_pre_image() {
 #[test]
 fn returning_column_list_on_delete_projects_subset() {
     let rt = rt();
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "INSERT INTO users (name, age) VALUES ('k', 9)".into(),
     })
