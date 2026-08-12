@@ -16,11 +16,7 @@ pub mod histogram;
 pub mod hypertable_pruning;
 pub mod index_only;
 pub mod join_dp;
-pub mod optimizer;
 pub mod partition_pruning;
-pub mod pathkeys;
-pub mod projections;
-pub mod rewriter;
 pub mod shape;
 pub mod stats_provider;
 
@@ -31,8 +27,6 @@ mod types;
 pub use cache::{CachedPlan, PlanCache};
 pub use cost::{CardinalityEstimate, ColumnStats, CostEstimator, PlanCost, TableStats};
 pub use histogram::{Bucket, ColumnValue, Histogram, MostCommonValues};
-pub use optimizer::{OptimizationPass, QueryOptimizer};
-pub use rewriter::{QueryRewriter, RewriteContext, RewriteRule};
 pub use stats_provider::{NullProvider, RegistryProvider, StaticProvider, StatsProvider};
 pub use types::{
     build_canonical_plan, AccessPathDecision, CacheStats, CanonicalLogicalNode,
