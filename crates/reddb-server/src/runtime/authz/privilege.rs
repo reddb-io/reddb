@@ -12,11 +12,11 @@ impl RedDBRuntime {
     /// that don't touch user data (transaction control, SHOW, SET, etc.).
     pub(crate) fn check_query_privilege(
         &self,
-        expr: &crate::storage::query::ast::QueryExpr,
+        expr: &reddb_rql::ast::QueryExpr,
     ) -> Result<(), String> {
         use crate::auth::privileges::{Action, AuthzContext, Resource};
         use crate::auth::UserId;
-        use crate::storage::query::ast::QueryExpr;
+        use reddb_rql::ast::QueryExpr;
 
         // No auth store wired (embedded mode / fresh DB / tests) → bypass.
         // The bootstrap path itself goes through `execute_query` so this
@@ -62,7 +62,7 @@ impl RedDBRuntime {
                 );
             }
             QueryExpr::QueueCommand(cmd) => {
-                use crate::storage::query::ast::QueueCommand;
+                use reddb_rql::ast::QueueCommand;
                 let (queue, action_verb) = match cmd {
                     QueueCommand::Push { queue, .. } => (queue.as_str(), "queue:enqueue"),
                     QueueCommand::Pop { queue, .. }
@@ -137,7 +137,7 @@ impl RedDBRuntime {
                 );
             }
             QueryExpr::GraphCommand(cmd) => {
-                use crate::storage::query::ast::GraphCommand;
+                use reddb_rql::ast::GraphCommand;
                 let action_verb = match cmd {
                     // Metadata / property reads.
                     GraphCommand::Properties { .. } => "graph:read",
@@ -186,7 +186,7 @@ impl RedDBRuntime {
                 return Ok(());
             }
             QueryExpr::SearchCommand(cmd) => {
-                use crate::storage::query::ast::SearchCommand;
+                use reddb_rql::ast::SearchCommand;
                 if auth_store.iam_authorization_enabled() {
                     // `SEARCH SIMILAR [..] COLLECTION <c>` and `SEARCH
                     // HYBRID ... COLLECTION <c>` are the same UI
@@ -929,7 +929,7 @@ impl RedDBRuntime {
         auth_store: &Arc<crate::auth::store::AuthStore>,
         principal: &crate::auth::UserId,
         ctx: &crate::auth::policies::EvalContext,
-        table: &crate::storage::query::ast::TableQuery,
+        table: &reddb_rql::ast::TableQuery,
     ) -> Result<(), String> {
         use crate::auth::{ColumnAccessRequest, ColumnDecisionEffect};
 
@@ -973,7 +973,7 @@ impl RedDBRuntime {
         principal: &crate::auth::UserId,
         role: crate::auth::Role,
         tenant: Option<&str>,
-        query: &crate::storage::query::ast::GraphQuery,
+        query: &reddb_rql::ast::GraphQuery,
     ) -> Result<(), String> {
         let columns = explicit_graph_projection_properties(query);
         if columns.is_empty() {
