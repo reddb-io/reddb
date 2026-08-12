@@ -13,7 +13,7 @@
 //!
 //! Values: string literal (`'acme'`) or `NULL` (clears just that field).
 
-use crate::storage::query::lexer::{Lexer, Token};
+use reddb_rql::lexer::{Lexer, Token};
 
 /// Tri-state for a single overridable field. `Inherit` means the
 /// `WITHIN` clause didn't mention this field and the runtime should
