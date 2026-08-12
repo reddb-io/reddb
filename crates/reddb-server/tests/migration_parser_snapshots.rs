@@ -9,7 +9,7 @@
 //!   - Reviewing changes: `cargo insta review`.
 //!   - CI: snapshots must match exactly.
 
-use reddb_server::storage::query::parser;
+use reddb_rql::parser;
 
 /// Parse `input` and format the resulting error for snapshotting.
 /// Successful parses render as `UNEXPECTED OK` so a missing error
