@@ -106,7 +106,7 @@ impl GroupAccumulator {
                 }
                 Slot::Sum { sum, seen_any } => {
                     if let Some(v) = inputs.get(expr.input_index) {
-                        if let Some(n) = numeric_value(v) {
+                        if let Some(n) = super::super::aggregate_value_to_f64(v) {
                             *sum += n;
                             *seen_any = true;
                         }
@@ -114,7 +114,7 @@ impl GroupAccumulator {
                 }
                 Slot::Avg { sum, count } => {
                     if let Some(v) = inputs.get(expr.input_index) {
-                        if let Some(n) = numeric_value(v) {
+                        if let Some(n) = super::super::aggregate_value_to_f64(v) {
                             *sum += n;
                             *count += 1;
                         }
@@ -173,30 +173,6 @@ fn sum_f64_to_value(f: f64) -> Value {
     }
 }
 
-/// Cast a `Value` into `f64` for SUM/AVG. NULL and non-numeric
-/// values yield `None`; the caller decides how to react (skip, or
-/// flip the all-NULL flag). Mirrors the casts the legacy path
-/// performs in `aggregate.rs::value_to_f64`, but kept private to
-/// this module so the planner has no dependency on the legacy
-/// internals.
-///
-/// That claim used to be false for `Decimal`: this cast was raw while the
-/// legacy path divided by the fixed scale, so `SUM`/`AVG` over a `DECIMAL`
-/// column returned results differing by 10^4 depending on which route the
-/// planner picked (#2058). Both now go through `schema::decimal_to_f64`, and
-/// `decimal_sum_agrees_with_the_legacy_aggregate_path` pins them together —
-/// duplicating the match arms is what let them drift silently.
-fn numeric_value(v: &Value) -> Option<f64> {
-    match v {
-        Value::Integer(i) => Some(*i as f64),
-        Value::UnsignedInteger(u) => Some(*u as f64),
-        Value::Float(f) if f.is_finite() => Some(*f),
-        Value::Decimal(d) => Some(reddb_types::types::decimal_to_f64(*d)),
-        Value::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
-        _ => None,
-    }
-}
-
 /// Update `current` if `candidate` extends `target_ordering`.
 ///
 /// `Ordering::Less` → MIN behaviour (replace when candidate < current).
@@ -236,8 +212,7 @@ fn update_extreme(current: &mut Option<Value>, candidate: &Value, target: std::c
 
 #[cfg(test)]
 mod tests {
-    use super::numeric_value;
-    use crate::runtime::query_exec::aggregate::value_to_f64;
+    use super::super::super::aggregate_value_to_f64;
     use reddb_types::Value;
 
     /// The planner's `SUM`/`AVG` cast and the legacy path's must agree on
@@ -251,50 +226,70 @@ mod tests {
     #[test]
     fn decimal_sum_agrees_with_the_legacy_aggregate_path() {
         let cases = [
-            Value::Decimal(387_600),   // 38.76
-            Value::Decimal(-771_500),  // -77.15
-            Value::Decimal(1_234_567), // 123.4567 — the rendering test's value
-            Value::Decimal(0),
-            Value::Decimal(i64::MAX),
-            Value::Decimal(i64::MIN),
-            Value::Integer(42),
-            Value::UnsignedInteger(7),
-            Value::Float(1.5),
-            Value::Null,
+            (Value::Decimal(387_600), Some(38.76)),
+            (Value::Decimal(-771_500), Some(-77.15)),
+            (Value::Decimal(1_234_567), Some(123.4567)),
+            (Value::Decimal(0), Some(0.0)),
+            (
+                Value::Decimal(i64::MAX),
+                Some(reddb_types::types::decimal_to_f64(i64::MAX)),
+            ),
+            (
+                Value::Decimal(i64::MIN),
+                Some(reddb_types::types::decimal_to_f64(i64::MIN)),
+            ),
+            (Value::Integer(42), Some(42.0)),
+            (Value::UnsignedInteger(7), Some(7.0)),
+            (Value::Float(1.5), Some(1.5)),
+            (Value::Null, None),
         ];
-        for value in cases {
+        for (value, expected) in cases {
             assert_eq!(
-                numeric_value(&value),
-                value_to_f64(&value),
-                "planner and legacy aggregate casts disagree on {value:?}"
+                aggregate_value_to_f64(&value),
+                expected,
+                "shared aggregate cast changed for {value:?}"
             );
         }
     }
 
-    /// Types the two routes still disagree on, tracked in #2060.
-    ///
-    /// This documents current behaviour; it does not endorse it. `SUM` over a
-    /// `BIGINT` column returning a number on one route and `NULL` on the other
-    /// is a defect, but closing it means deciding whether `SUM(boolean)` is
-    /// supported at all and how non-finite floats aggregate — semantics calls
-    /// rather than mechanical edits, so #2058 fixed only the `Decimal` arm and
-    /// left these visible instead of silently narrowing the pin above.
-    ///
-    /// When #2060 is fixed this test will fail. That is the point: update it
-    /// then, and fold the surviving cases into the agreement test.
+    enum Expected {
+        Number(Option<f64>),
+        Nan,
+    }
+
+    /// The planner and legacy routes must accept the same complete value matrix.
     #[test]
-    fn planner_and_legacy_diverge_on_bigint_boolean_and_nonfinite_float() {
-        // The planner has no BigInt arm; the legacy path does.
-        assert_eq!(numeric_value(&Value::BigInt(9)), None);
-        assert_eq!(value_to_f64(&Value::BigInt(9)), Some(9.0));
+    fn planner_and_legacy_agree_on_the_complete_value_matrix() {
+        let cases = [
+            (Value::Integer(-3), Expected::Number(Some(-3.0))),
+            (Value::UnsignedInteger(4), Expected::Number(Some(4.0))),
+            (Value::BigInt(9), Expected::Number(Some(9.0))),
+            (Value::Float(1.5), Expected::Number(Some(1.5))),
+            (Value::Float(f64::NAN), Expected::Nan),
+            (
+                Value::Float(f64::INFINITY),
+                Expected::Number(Some(f64::INFINITY)),
+            ),
+            (
+                Value::Float(f64::NEG_INFINITY),
+                Expected::Number(Some(f64::NEG_INFINITY)),
+            ),
+            (Value::Decimal(1_234_567), Expected::Number(Some(123.4567))),
+            (Value::Boolean(true), Expected::Number(Some(1.0))),
+            (Value::Boolean(false), Expected::Number(Some(0.0))),
+            (Value::Text("not numeric".into()), Expected::Number(None)),
+            (Value::Null, Expected::Number(None)),
+        ];
 
-        // The planner counts booleans; the legacy path rejects them.
-        assert_eq!(numeric_value(&Value::Boolean(true)), Some(1.0));
-        assert_eq!(value_to_f64(&Value::Boolean(true)), None);
-
-        // The planner guards on `is_finite`; the legacy path does not.
-        assert_eq!(numeric_value(&Value::Float(f64::NAN)), None);
-        assert!(value_to_f64(&Value::Float(f64::NAN)).is_some_and(f64::is_nan));
+        for (value, expected) in cases {
+            let converted = aggregate_value_to_f64(&value);
+            match expected {
+                Expected::Number(expected) => {
+                    assert_eq!(converted, expected, "unexpected cast for {value:?}")
+                }
+                Expected::Nan => assert!(converted.is_some_and(f64::is_nan)),
+            }
+        }
     }
 
     /// A `DECIMAL` read for aggregation must equal what the engine renders and
@@ -302,6 +297,9 @@ mod tests {
     #[test]
     fn decimal_aggregation_matches_the_rendered_value() {
         // `Decimal(1_234_567)` renders as "123.4567" (pinned in entity_json).
-        assert_eq!(numeric_value(&Value::Decimal(1_234_567)), Some(123.4567));
+        assert_eq!(
+            aggregate_value_to_f64(&Value::Decimal(1_234_567)),
+            Some(123.4567)
+        );
     }
 }
