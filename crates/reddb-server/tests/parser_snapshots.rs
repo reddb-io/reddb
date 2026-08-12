@@ -16,7 +16,7 @@ mod support {
     pub mod parser_hardening;
 }
 
-use reddb_server::storage::query::parser::{self, ParseError};
+use reddb_rql::parser::{self, ParseError};
 
 /// Parse `input` and format the resulting error for snapshotting.
 /// Successful parses are formatted as `UNEXPECTED OK` so a missing
@@ -42,10 +42,7 @@ macro_rules! snap {
 // Use the test that exists to make rust-analyzer / linter happy.
 #[allow(dead_code)]
 fn _unused_warn_silencer() {
-    let _ = ParseError::new(
-        "",
-        reddb_server::storage::query::lexer::Position::new(1, 1, 0),
-    );
+    let _ = ParseError::new("", reddb_rql::lexer::Position::new(1, 1, 0));
 }
 
 // ----- 30+ pinned error scenarios --------------------------------
