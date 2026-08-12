@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::storage::engine::graph_store::{GraphStore, StoredNode};
 use crate::storage::engine::graph_table_index::GraphTableIndex;
-use crate::storage::query::ast::{
+use reddb_rql::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, JoinQuery,
     JoinType, NodePattern, NodeSelector, PathQuery, Projection, QueryExpr, TableQuery,
 };
