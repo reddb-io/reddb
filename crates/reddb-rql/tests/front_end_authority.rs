@@ -249,11 +249,10 @@ fn server_must_not_redeclare_the_query_front_end() {
     }
 }
 
-/// The `storage::query` shims must stay pure re-exports of the front-end crate.
-/// Guards the boundary from the positive side: if a shim is ever replaced by a
-/// real declaration, its `pub use reddb_rql::` line disappears and this fails.
+/// The retired `storage::query` front-end shims must stay deleted, and imports
+/// must name the `reddb-rql` authority crate directly.
 #[test]
-fn front_end_shims_reexport_from_rql_crate() {
+fn server_has_no_query_front_end_shims() {
     let root = repo_root();
     let query = root.join("crates/reddb-server/src/storage/query");
     for shim in [
@@ -273,10 +272,70 @@ fn front_end_shims_reexport_from_rql_crate() {
         "planner/projections.rs",
         "planner/rewriter.rs",
     ] {
-        let text = read(query.join(shim));
         assert!(
-            text.contains("pub use reddb_rql::"),
-            "storage/query/{shim} must re-export from reddb_rql, not declare items locally"
+            !query.join(shim).exists(),
+            "storage/query/{shim} is a retired query-front-end shim"
+        );
+    }
+
+    let retired_modules = [
+        "analyzer",
+        "ast",
+        "expr_typing",
+        "filter_optimizer",
+        "lexer",
+        "modes",
+        "optimizer",
+        "parser",
+        "renderer",
+        "sql",
+        "sql_lowering",
+    ];
+    let retired_planner_modules = ["optimizer", "pathkeys", "projections", "rewriter"];
+    let mut violations = Vec::new();
+    for dir in [
+        root.join("crates/reddb-server/src"),
+        root.join("crates/reddb-server/tests"),
+        root.join("crates/reddb-client/src"),
+        root.join("crates/reddb-client/tests"),
+        root.join("tests"),
+        root.join("examples"),
+        root.join("drivers"),
+        root.join("fuzz"),
+    ] {
+        if !dir.exists() {
+            continue;
+        }
+        for path in rust_files_under(&dir) {
+            for (line_index, line) in read(&path).lines().enumerate() {
+                let line = line.trim_start();
+                if line.starts_with("//") {
+                    continue;
+                }
+                let has_retired_module = retired_modules
+                    .iter()
+                    .any(|module| line.contains(&format!("storage::query::{module}")));
+                let has_retired_planner_module = retired_planner_modules
+                    .iter()
+                    .any(|module| line.contains(&format!("storage::query::planner::{module}")));
+                if has_retired_module || has_retired_planner_module {
+                    let rel = path.strip_prefix(&root).unwrap_or(path.as_path());
+                    violations.push(format!("{}:{}:{line}", rel.display(), line_index + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "call sites still name retired storage::query front-end paths:\n{}",
+        violations.join("\n")
+    );
+
+    let query_mod = read(query.join("mod.rs"));
+    for retired_module in retired_modules {
+        assert!(
+            !query_mod.contains(&format!("pub mod {retired_module};")),
+            "storage/query/mod.rs still exposes retired front-end module `{retired_module}`"
         );
     }
 }
