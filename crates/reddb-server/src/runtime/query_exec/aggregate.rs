@@ -486,7 +486,7 @@ pub(crate) fn execute_aggregate_query(
                 }
             };
             let Some(val) = val else { continue };
-            let num = value_to_f64(&val);
+            let num = super::aggregate_value_to_f64(&val);
 
             match slot {
                 ProjSlot::CountStar => {}
@@ -1620,7 +1620,7 @@ fn render_aggregate_argument_key(arg: &Projection) -> String {
 fn resolve_static_projection_number(arg: Option<&Projection>) -> Option<f64> {
     let record = UnifiedRecord::new();
     let value = eval_projection_value_with_db(None, arg?, &record)?;
-    value_to_f64(&value)
+    super::aggregate_value_to_f64(&value)
 }
 
 fn resolve_static_projection_text(arg: Option<&Projection>) -> Option<String> {
@@ -2072,17 +2072,6 @@ pub(super) fn update_extreme_value_slot(
         None => {
             *slot = Some(candidate.clone());
         }
-    }
-}
-
-pub(crate) fn value_to_f64(val: &Value) -> Option<f64> {
-    match val {
-        Value::Integer(n) => Some(*n as f64),
-        Value::UnsignedInteger(n) => Some(*n as f64),
-        Value::BigInt(n) => Some(*n as f64),
-        Value::Float(f) => Some(*f),
-        Value::Decimal(d) => Some(reddb_types::types::decimal_to_f64(*d)),
-        _ => None,
     }
 }
 
@@ -3166,7 +3155,7 @@ fn try_execute_parallel_single_col_numeric_aggs(
                         let Some(value) = accessor.get_value(entity) else {
                             continue;
                         };
-                        let Some(num) = value_to_f64(value.as_ref()) else {
+                        let Some(num) = super::aggregate_value_to_f64(value.as_ref()) else {
                             continue;
                         };
                         if let Some(sum) = group.sums.get_mut(*slot) {
@@ -3627,6 +3616,141 @@ mod parallel_group_by_tests {
             "expected at least one group record"
         );
         assert!(total > 0, "expected some rows past filter");
+    }
+}
+
+#[cfg(test)]
+mod aggregate_numeric_route_parity_tests {
+    use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+    use crate::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
+    use std::collections::HashMap;
+
+    const PLANNER_SUM_QUERY: &str = "SELECT bucket, SUM(value) FROM samples GROUP BY bucket";
+    const PLANNER_AVG_QUERY: &str = "SELECT bucket, AVG(value) FROM samples GROUP BY bucket";
+    // HAVING is deliberately outside the push-down and parallel fast-path
+    // envelopes, so these otherwise equivalent queries force the legacy route.
+    const LEGACY_SUM_QUERY: &str =
+        "SELECT bucket, SUM(value) FROM samples GROUP BY bucket HAVING COUNT(*) > 0";
+    const LEGACY_AVG_QUERY: &str =
+        "SELECT bucket, AVG(value) FROM samples GROUP BY bucket HAVING COUNT(*) > 0";
+
+    fn runtime_with_table(value_type: &str) -> RedDBRuntime {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory())
+            .expect("in-memory runtime should open");
+        runtime
+            .execute_query(&format!(
+                "CREATE TABLE samples (bucket TEXT, value {value_type})"
+            ))
+            .expect("table should be created");
+        runtime
+    }
+
+    fn insert(runtime: &RedDBRuntime, bucket: &str, value: Value) {
+        let named = HashMap::from([
+            ("bucket".to_string(), Value::text(bucket)),
+            ("value".to_string(), value),
+        ]);
+        let entity = UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TableRow {
+                table: "samples".into(),
+                row_id: 0,
+            },
+            EntityData::Row(RowData {
+                columns: Vec::new(),
+                named: Some(named),
+                schema: None,
+            }),
+        );
+        runtime
+            .db()
+            .store()
+            .insert("samples", entity)
+            .expect("typed aggregate input should be inserted");
+    }
+
+    fn aggregate_rows(runtime: &RedDBRuntime, query: &str) -> Vec<(String, f64)> {
+        let result = runtime
+            .execute_query(query)
+            .expect("aggregate query should run");
+        let aggregate_column = result
+            .result
+            .columns
+            .iter()
+            .find(|column| column.as_str() != "bucket")
+            .expect("aggregate column label")
+            .clone();
+        let mut rows = result
+            .result
+            .records
+            .iter()
+            .map(|record| {
+                let Value::Text(bucket) = record.get("bucket").expect("bucket output") else {
+                    panic!("bucket should be text")
+                };
+                (
+                    bucket.to_string(),
+                    number(record.get(&aggregate_column).expect("aggregate output")),
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.0.cmp(&right.0));
+        rows
+    }
+
+    fn number(value: &Value) -> f64 {
+        match value {
+            Value::Integer(value) => *value as f64,
+            Value::UnsignedInteger(value) => *value as f64,
+            Value::BigInt(value) => *value as f64,
+            Value::Float(value) => *value,
+            other => panic!("expected numeric aggregate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sum_and_avg_bigint_agree_on_planner_and_legacy_routes() {
+        let runtime = runtime_with_table("BIGINT");
+        insert(&runtime, "all", Value::BigInt(10));
+        insert(&runtime, "all", Value::BigInt(20));
+
+        let expected_sum = vec![("all".to_string(), 30.0)];
+        let expected_avg = vec![("all".to_string(), 15.0)];
+        assert_eq!(aggregate_rows(&runtime, PLANNER_SUM_QUERY), expected_sum);
+        assert_eq!(aggregate_rows(&runtime, LEGACY_SUM_QUERY), expected_sum);
+        assert_eq!(aggregate_rows(&runtime, PLANNER_AVG_QUERY), expected_avg);
+        assert_eq!(aggregate_rows(&runtime, LEGACY_AVG_QUERY), expected_avg);
+    }
+
+    #[test]
+    fn sum_boolean_counts_true_values_on_planner_and_legacy_routes() {
+        let runtime = runtime_with_table("BOOLEAN");
+        insert(&runtime, "all", Value::Boolean(true));
+        insert(&runtime, "all", Value::Boolean(false));
+        insert(&runtime, "all", Value::Boolean(true));
+
+        let planner = aggregate_rows(&runtime, PLANNER_SUM_QUERY);
+        let legacy = aggregate_rows(&runtime, LEGACY_SUM_QUERY);
+        assert_eq!(planner[0].1, 2.0);
+        assert_eq!(legacy[0].1, 2.0);
+    }
+
+    #[test]
+    fn nonfinite_float_propagates_on_planner_and_legacy_routes() {
+        let runtime = runtime_with_table("FLOAT");
+        insert(&runtime, "infinity", Value::Float(1.0));
+        insert(&runtime, "infinity", Value::Float(f64::INFINITY));
+        insert(&runtime, "nan", Value::Float(1.0));
+        insert(&runtime, "nan", Value::Float(f64::NAN));
+
+        for query in [PLANNER_SUM_QUERY, LEGACY_SUM_QUERY] {
+            let rows = aggregate_rows(&runtime, query);
+            assert_eq!(rows[0].0, "infinity");
+            assert_eq!(rows[0].1, f64::INFINITY);
+            assert_eq!(rows[1].0, "nan");
+            assert!(rows[1].1.is_nan());
+        }
     }
 }
 
