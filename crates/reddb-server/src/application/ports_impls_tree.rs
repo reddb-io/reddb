@@ -1,8 +1,6 @@
 use super::*;
 use crate::application::entity::metadata_to_json;
-use crate::storage::query::ast::{
-    CreateTreeQuery, DropTreeQuery, TreeCommand, TreeNodeSpec, TreePosition,
-};
+use reddb_rql::ast::{CreateTreeQuery, DropTreeQuery, TreeCommand, TreeNodeSpec, TreePosition};
 
 fn api_tree_query(label: &str, collection: &str, tree: &str) -> String {
     format!("api.{label}({collection}.{tree})")
