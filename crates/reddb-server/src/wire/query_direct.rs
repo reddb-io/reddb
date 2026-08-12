@@ -20,11 +20,9 @@ use crate::runtime::query_exec::{
     try_sorted_index_lookup, CompiledEntityFilter,
 };
 use crate::runtime::RedDBRuntime;
-use crate::storage::query::ast::{
-    Expr, FieldRef, Filter, QueryExpr, SelectItem, TableQuery, TableSource,
-};
-use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::unified::{EntityData, EntityId, RowData, UnifiedEntity};
+use reddb_rql::ast::{Expr, FieldRef, Filter, QueryExpr, SelectItem, TableQuery, TableSource};
+use reddb_rql::sql_lowering::effective_table_filter;
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 use super::protocol::encode_value;
@@ -76,7 +74,7 @@ pub(super) fn try_handle_query_binary_direct(runtime: &RedDBRuntime, sql: &str) 
 
     // Full parse. Cost ~50µs; amortised by the record allocations
     // skipped on hit. On miss the caller re-parses via `handle_query`.
-    let expr = crate::storage::query::modes::parse_multi(sql).ok()?;
+    let expr = reddb_rql::modes::parse_multi(sql).ok()?;
     let tq = match &expr {
         QueryExpr::Table(tq) => tq,
         _ => return None,
