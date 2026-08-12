@@ -121,9 +121,7 @@ pub(crate) fn legacy_action_to_iam(action: crate::auth::privileges::Action) -> &
     }
 }
 
-pub(crate) fn update_set_target_columns(
-    query: &crate::storage::query::ast::UpdateQuery,
-) -> Vec<String> {
+pub(crate) fn update_set_target_columns(query: &reddb_rql::ast::UpdateQuery) -> Vec<String> {
     let mut columns = Vec::new();
     for (column, _) in &query.assignment_exprs {
         if !columns.iter().any(|seen| seen == column) {
@@ -161,18 +159,18 @@ pub(crate) fn column_access_request_for_table_select(
 
 pub(crate) fn update_returning_columns_for_policy(
     runtime: &RedDBRuntime,
-    query: &crate::storage::query::ast::UpdateQuery,
+    query: &reddb_rql::ast::UpdateQuery,
 ) -> Option<Vec<String>> {
     let items = query.returning.as_ref()?;
     let mut columns = Vec::new();
     let project_all = items
         .iter()
-        .any(|item| matches!(item, crate::storage::query::ast::ReturningItem::All));
+        .any(|item| matches!(item, reddb_rql::ast::ReturningItem::All));
     if project_all {
         collect_returning_star_columns(runtime, query, &mut columns);
     } else {
         for item in items {
-            let crate::storage::query::ast::ReturningItem::Column(column) = item else {
+            let reddb_rql::ast::ReturningItem::Column(column) = item else {
                 continue;
             };
             push_returning_policy_column(&mut columns, column);
@@ -183,7 +181,7 @@ pub(crate) fn update_returning_columns_for_policy(
 
 pub(crate) fn collect_returning_star_columns(
     runtime: &RedDBRuntime,
-    query: &crate::storage::query::ast::UpdateQuery,
+    query: &reddb_rql::ast::UpdateQuery,
     columns: &mut Vec<String>,
 ) {
     let store = runtime.db().store();
@@ -244,9 +242,9 @@ pub(crate) fn returning_public_envelope_column(column: &str) -> bool {
 
 pub(crate) fn returning_entity_matches_update_target(
     entity: &crate::storage::UnifiedEntity,
-    target: crate::storage::query::ast::UpdateTarget,
+    target: reddb_rql::ast::UpdateTarget,
 ) -> bool {
-    use crate::storage::query::ast::UpdateTarget;
+    use reddb_rql::ast::UpdateTarget;
     match target {
         UpdateTarget::Rows => {
             matches!(returning_row_item_kind(entity), Some(ReturningRowKind::Row))
@@ -303,9 +301,9 @@ pub(crate) fn returning_row_item_kind(
 }
 
 pub(crate) fn requested_table_columns_for_policy(
-    table: &crate::storage::query::ast::TableQuery,
+    table: &reddb_rql::ast::TableQuery,
 ) -> Vec<String> {
-    use crate::storage::query::sql_lowering::{
+    use reddb_rql::sql_lowering::{
         effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
         effective_table_projections,
     };
@@ -338,12 +336,12 @@ pub(crate) fn requested_table_columns_for_policy(
 }
 
 pub(crate) fn collect_projection_columns(
-    projection: &crate::storage::query::ast::Projection,
+    projection: &reddb_rql::ast::Projection,
     table_name: &str,
     table_alias: Option<&str>,
     columns: &mut std::collections::BTreeSet<String>,
 ) {
-    use crate::storage::query::ast::Projection;
+    use reddb_rql::ast::Projection;
     match projection {
         Projection::All => {
             columns.insert("*".to_string());
@@ -376,12 +374,12 @@ pub(crate) fn collect_projection_columns(
 }
 
 pub(crate) fn collect_filter_columns(
-    filter: &crate::storage::query::ast::Filter,
+    filter: &reddb_rql::ast::Filter,
     table_name: &str,
     table_alias: Option<&str>,
     columns: &mut std::collections::BTreeSet<String>,
 ) {
-    use crate::storage::query::ast::Filter;
+    use reddb_rql::ast::Filter;
     match filter {
         Filter::Compare { field, .. }
         | Filter::IsNull(field)
@@ -411,12 +409,12 @@ pub(crate) fn collect_filter_columns(
 }
 
 pub(crate) fn collect_expr_columns(
-    expr: &crate::storage::query::ast::Expr,
+    expr: &reddb_rql::ast::Expr,
     table_name: &str,
     table_alias: Option<&str>,
     columns: &mut std::collections::BTreeSet<String>,
 ) {
-    use crate::storage::query::ast::Expr;
+    use reddb_rql::ast::Expr;
     match expr {
         Expr::Column { field, .. } => {
             collect_field_ref_column(field, table_name, table_alias, columns);
@@ -477,7 +475,7 @@ pub(crate) fn collect_expr_columns(
 }
 
 pub(crate) fn collect_field_ref_column(
-    field: &crate::storage::query::ast::FieldRef,
+    field: &reddb_rql::ast::FieldRef,
     table_name: &str,
     table_alias: Option<&str>,
     columns: &mut std::collections::BTreeSet<String>,
@@ -490,12 +488,12 @@ pub(crate) fn collect_field_ref_column(
 }
 
 pub(crate) fn policy_column_name_from_field_ref(
-    field: &crate::storage::query::ast::FieldRef,
+    field: &reddb_rql::ast::FieldRef,
     table_name: &str,
     table_alias: Option<&str>,
 ) -> Option<String> {
     match field {
-        crate::storage::query::ast::FieldRef::TableColumn { table, column } => {
+        reddb_rql::ast::FieldRef::TableColumn { table, column } => {
             if column == "*" {
                 return Some("*".to_string());
             }
@@ -740,13 +738,11 @@ pub(crate) fn runtime_iam_context(
     }
 }
 
-pub(crate) fn explicit_table_projection_columns(
-    query: &crate::storage::query::ast::TableQuery,
-) -> Vec<String> {
-    use crate::storage::query::ast::{FieldRef, Projection};
+pub(crate) fn explicit_table_projection_columns(query: &reddb_rql::ast::TableQuery) -> Vec<String> {
+    use reddb_rql::ast::{FieldRef, Projection};
 
     let mut columns = Vec::new();
-    for projection in crate::storage::query::sql_lowering::effective_table_projections(query) {
+    for projection in reddb_rql::sql_lowering::effective_table_projections(query) {
         match projection {
             Projection::Column(column) | Projection::Alias(column, _) => {
                 push_unique(&mut columns, column)
@@ -764,9 +760,9 @@ pub(crate) fn explicit_table_projection_columns(
 }
 
 pub(crate) fn explicit_graph_projection_properties(
-    query: &crate::storage::query::ast::GraphQuery,
+    query: &reddb_rql::ast::GraphQuery,
 ) -> Vec<String> {
-    use crate::storage::query::ast::{FieldRef, Projection};
+    use reddb_rql::ast::{FieldRef, Projection};
 
     let mut columns = Vec::new();
     for projection in &query.return_ {
@@ -787,8 +783,8 @@ pub(crate) fn push_unique(columns: &mut Vec<String>, column: String) {
     }
 }
 
-pub(crate) fn principal_label(p: &crate::storage::query::ast::PolicyPrincipalRef) -> String {
-    use crate::storage::query::ast::PolicyPrincipalRef;
+pub(crate) fn principal_label(p: &reddb_rql::ast::PolicyPrincipalRef) -> String {
+    use reddb_rql::ast::PolicyPrincipalRef;
     match p {
         PolicyPrincipalRef::User(u) => match &u.tenant {
             Some(t) => format!("user:{t}/{}", u.username),
