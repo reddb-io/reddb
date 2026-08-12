@@ -9,11 +9,9 @@
 //! so they add zero latency to the SELECT hot path and keep CI fast.
 #![allow(clippy::needless_borrow)]
 
-use reddb_server::storage::query::ast::{
-    CompareOp, CreatePolicyQuery, Expr, Filter, QueryExpr, TableQuery,
-};
-use reddb_server::storage::query::modes::parse_multi;
-use reddb_server::storage::query::parser;
+use reddb_rql::ast::{CompareOp, CreatePolicyQuery, Expr, Filter, QueryExpr, TableQuery};
+use reddb_rql::modes::parse_multi;
+use reddb_rql::parser;
 use reddb_server::storage::query::planner::shape::{
     bind_parameterized_query, parameterize_query_expr,
 };
