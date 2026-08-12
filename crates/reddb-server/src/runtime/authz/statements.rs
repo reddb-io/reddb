@@ -11,11 +11,11 @@ impl RedDBRuntime {
     pub(crate) fn execute_grant_statement(
         &self,
         query: &str,
-        stmt: &crate::storage::query::ast::GrantStmt,
+        stmt: &reddb_rql::ast::GrantStmt,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::privileges::{Action, GrantPrincipal, Resource};
         use crate::auth::UserId;
-        use crate::storage::query::ast::{GrantObjectKind, GrantPrincipalRef};
+        use reddb_rql::ast::{GrantObjectKind, GrantPrincipalRef};
 
         let auth_store = self
             .inner
@@ -129,11 +129,11 @@ impl RedDBRuntime {
     pub(crate) fn execute_revoke_statement(
         &self,
         query: &str,
-        stmt: &crate::storage::query::ast::RevokeStmt,
+        stmt: &reddb_rql::ast::RevokeStmt,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::privileges::{Action, GrantPrincipal, Resource};
         use crate::auth::UserId;
-        use crate::storage::query::ast::{GrantObjectKind, GrantPrincipalRef};
+        use reddb_rql::ast::{GrantObjectKind, GrantPrincipalRef};
 
         let auth_store = self
             .inner
@@ -199,7 +199,7 @@ impl RedDBRuntime {
     pub(crate) fn execute_create_user_statement(
         &self,
         query: &str,
-        stmt: &crate::storage::query::ast::CreateUserStmt,
+        stmt: &reddb_rql::ast::CreateUserStmt,
     ) -> RedDBResult<RuntimeQueryResult> {
         let auth_store = self
             .inner
@@ -244,11 +244,11 @@ impl RedDBRuntime {
     pub(crate) fn execute_alter_user_statement(
         &self,
         query: &str,
-        stmt: &crate::storage::query::ast::AlterUserStmt,
+        stmt: &reddb_rql::ast::AlterUserStmt,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::privileges::UserAttributes;
         use crate::auth::UserId;
-        use crate::storage::query::ast::AlterUserAttribute;
+        use reddb_rql::ast::AlterUserAttribute;
 
         let auth_store = self
             .inner
@@ -481,11 +481,11 @@ impl RedDBRuntime {
         &self,
         query: &str,
         policy_id: &str,
-        principal: &crate::storage::query::ast::PolicyPrincipalRef,
+        principal: &reddb_rql::ast::PolicyPrincipalRef,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::store::PrincipalRef;
         use crate::auth::UserId;
-        use crate::storage::query::ast::PolicyPrincipalRef;
+        use reddb_rql::ast::PolicyPrincipalRef;
 
         let auth_store = self
             .inner
@@ -548,11 +548,11 @@ impl RedDBRuntime {
         &self,
         query: &str,
         policy_id: &str,
-        principal: &crate::storage::query::ast::PolicyPrincipalRef,
+        principal: &reddb_rql::ast::PolicyPrincipalRef,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::store::PrincipalRef;
         use crate::auth::UserId;
-        use crate::storage::query::ast::PolicyPrincipalRef;
+        use reddb_rql::ast::PolicyPrincipalRef;
 
         let auth_store = self
             .inner
@@ -614,11 +614,11 @@ impl RedDBRuntime {
     pub(crate) fn execute_show_policies(
         &self,
         query: &str,
-        filter: Option<&crate::storage::query::ast::PolicyPrincipalRef>,
+        filter: Option<&reddb_rql::ast::PolicyPrincipalRef>,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::UserId;
-        use crate::storage::query::ast::PolicyPrincipalRef;
         use crate::storage::query::unified::UnifiedRecord;
+        use reddb_rql::ast::PolicyPrincipalRef;
         use reddb_types::Value as SchemaValue;
         use std::sync::Arc;
 
@@ -681,7 +681,7 @@ impl RedDBRuntime {
         result.records = records;
         Ok(RuntimeQueryResult {
             query: query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "show_policies",
             engine: "iam-policies",
             result,
@@ -695,8 +695,8 @@ impl RedDBRuntime {
     pub(crate) fn execute_show_effective_permissions(
         &self,
         query: &str,
-        user: &crate::storage::query::ast::PolicyUserRef,
-        resource: Option<&crate::storage::query::ast::PolicyResourceRef>,
+        user: &reddb_rql::ast::PolicyUserRef,
+        resource: Option<&reddb_rql::ast::PolicyResourceRef>,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::UserId;
         use crate::storage::query::unified::UnifiedRecord;
@@ -757,7 +757,7 @@ impl RedDBRuntime {
         result.records = records;
         Ok(RuntimeQueryResult {
             query: query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "show_effective_permissions",
             engine: "iam-policies",
             result,
@@ -771,11 +771,11 @@ impl RedDBRuntime {
     pub(crate) fn execute_lint_policy(
         &self,
         query: &str,
-        source: &crate::storage::query::ast::LintPolicySource,
+        source: &reddb_rql::ast::LintPolicySource,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::policy_linter::lint;
-        use crate::storage::query::ast::LintPolicySource;
         use crate::storage::query::unified::UnifiedRecord;
+        use reddb_rql::ast::LintPolicySource;
         use reddb_types::Value as SchemaValue;
         use std::sync::Arc;
 
@@ -855,7 +855,7 @@ impl RedDBRuntime {
         result.records = records;
         Ok(RuntimeQueryResult {
             query: query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "lint_policy",
             engine: "iam-policies",
             result,
@@ -1027,7 +1027,7 @@ impl RedDBRuntime {
         result.records = records;
         Ok(RuntimeQueryResult {
             query: query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "migrate_policy_mode",
             engine: "iam-policies",
             result,
@@ -1041,9 +1041,9 @@ impl RedDBRuntime {
     pub(crate) fn execute_simulate_policy(
         &self,
         query: &str,
-        user: &crate::storage::query::ast::PolicyUserRef,
+        user: &reddb_rql::ast::PolicyUserRef,
         action: &str,
-        resource: &crate::storage::query::ast::PolicyResourceRef,
+        resource: &reddb_rql::ast::PolicyResourceRef,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::auth::policies::ResourceRef;
         use crate::auth::store::SimCtx;
@@ -1106,7 +1106,7 @@ impl RedDBRuntime {
         result.records = vec![rec];
         Ok(RuntimeQueryResult {
             query: query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "simulate_policy",
             engine: "iam-policies",
             result,
