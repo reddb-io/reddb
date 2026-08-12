@@ -10,14 +10,14 @@
 //! authority's per-file line budget. Behavior is identical to the pre-split code.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{
-    copy_file_durable, invalid_data, sanitize_component, sync_dir, CollectionEntry,
-    CollectionState, Manifest, OperationalManifest, FORKS_DIR,
+    invalid_data, sanitize_component, CollectionEntry, CollectionState, Manifest,
+    OperationalManifest, FORKS_DIR,
 };
+use crate::Vfs;
 
 /// Where a store fork came from: the parent store's identity and the durable LSN
 /// the fork is pinned at. Recorded in the fork's own operational manifest so a
@@ -47,10 +47,10 @@ pub struct ForkInfo {
 }
 
 #[derive(Debug, Clone)]
-pub struct PromoteForkOutcome {
+pub struct PromoteForkOutcome<V = crate::StdVfs> {
     pub name: String,
     pub fork_lsn: u64,
-    pub archived_parent: OperationalManifest,
+    pub archived_parent: OperationalManifest<V>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,12 +91,13 @@ impl Default for ForkHydrationProgress {
     }
 }
 
-impl OperationalManifest {
+impl<V: Vfs> OperationalManifest<V> {
     /// A fork's own operational manifest, rooted under this store's `forks/` dir.
     /// The fork is a full operational store root in its own right.
     pub fn fork_handle(&self, name: &str) -> Self {
         Self {
             root: self.forks_dir().join(sanitize_component(name)),
+            vfs: self.vfs.clone(),
         }
     }
 
@@ -149,7 +150,7 @@ impl OperationalManifest {
             }),
         };
         fork.publish(&manifest)?;
-        sync_dir(&self.forks_dir())
+        self.vfs.sync_dir(&self.forks_dir())
     }
 
     /// Hydrate a fork collection's private copy (copy-on-write): called on the
@@ -169,7 +170,7 @@ impl OperationalManifest {
         };
         self.ensure_dirs()?;
         let dest = self.collections_dir().join(&entry.path);
-        copy_file_durable(Path::new(&source), &dest)?;
+        self.copy_file_durable(Path::new(&source), &dest)?;
         entry.source = None;
         manifest.generation += 1;
         self.publish(&manifest)
@@ -201,7 +202,7 @@ impl OperationalManifest {
             }
             fork.ensure_dirs()?;
             let dest = fork.collections_dir().join(&fork_entry.path);
-            copy_file_durable(&source, &dest)?;
+            self.copy_file_durable(&source, &dest)?;
             fork_entry.source = None;
             manifest.generation += 1;
             fork.publish(&manifest)?;
@@ -212,17 +213,19 @@ impl OperationalManifest {
     /// List every store fork of this store: name, parent identity, and fork LSN.
     pub fn list_forks(&self) -> io::Result<Vec<ForkInfo>> {
         let mut out = Vec::new();
-        let entries = match fs::read_dir(self.forks_dir()) {
+        let entries = match self.vfs.read_dir(&self.forks_dir()) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(out),
             Err(err) => return Err(err),
         };
         for entry in entries {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+            if !entry.is_dir {
                 continue;
             }
-            let fork = Self { root: entry.path() };
+            let fork = Self {
+                root: entry.path,
+                vfs: self.vfs.clone(),
+            };
             if let Some(manifest) = fork.load_current()? {
                 let Some(origin) = manifest.fork_origin.as_ref() else {
                     continue;
@@ -250,11 +253,11 @@ impl OperationalManifest {
     /// fork was actually removed.
     pub fn drop_fork(&self, name: &str) -> io::Result<bool> {
         let fork = self.fork_handle(name);
-        if !fork.root.exists() {
+        if !self.vfs.exists(&fork.root) {
             return Ok(false);
         }
-        fs::remove_dir_all(&fork.root)?;
-        let _ = sync_dir(&self.forks_dir());
+        self.vfs.remove_dir_all(&fork.root)?;
+        let _ = self.vfs.sync_dir(&self.forks_dir());
         if let Some(manifest) = self.load_current()? {
             let protected_paths = self.protected_collection_paths(&manifest)?;
             self.quarantine_unreferenced_collection_files(&protected_paths)?;
@@ -278,8 +281,8 @@ impl OperationalManifest {
         let fork = self.fork_handle(name);
         let detached = self.detached_fork_handle(name);
 
-        if detached.root.exists() {
-            if fork.root.exists() {
+        if self.vfs.exists(&detached.root) {
+            if self.vfs.exists(&fork.root) {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!("detached store already exists for fork: {name}"),
@@ -290,18 +293,18 @@ impl OperationalManifest {
             return Ok(was_fork.then_some(detached));
         }
 
-        if !fork.root.exists() {
+        if !self.vfs.exists(&fork.root) {
             return Ok(None);
         }
 
         fork.hydrate_shared_collections()?;
         if let Some(parent) = detached.root.parent() {
-            fs::create_dir_all(parent)?;
+            self.vfs.create_dir_all(parent)?;
         }
-        fs::rename(&fork.root, &detached.root)?;
-        sync_dir(&self.forks_dir())?;
+        self.vfs.rename(&fork.root, &detached.root)?;
+        self.vfs.sync_dir(&self.forks_dir())?;
         if let Some(parent) = detached.root.parent() {
-            sync_dir(parent)?;
+            self.vfs.sync_dir(parent)?;
         }
         detached.clear_fork_origin()?;
         Ok(Some(detached))
@@ -313,9 +316,9 @@ impl OperationalManifest {
     /// used by restore/fork detach. The superseded primary is then moved to a
     /// deterministic retired root, so its disposition is explicit and cannot be
     /// mistaken for the active store.
-    pub fn promote_fork(&self, name: &str) -> io::Result<Option<PromoteForkOutcome>> {
+    pub fn promote_fork(&self, name: &str) -> io::Result<Option<PromoteForkOutcome<V>>> {
         let fork = self.fork_handle(name);
-        if !fork.root.exists() {
+        if !self.vfs.exists(&fork.root) {
             return Ok(None);
         }
         let origin = fork
@@ -330,14 +333,14 @@ impl OperationalManifest {
         }
 
         let staging = self.promoting_fork_handle(name);
-        if staging.root.exists() {
+        if self.vfs.exists(&staging.root) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("store fork promotion staging path already exists: {name}"),
             ));
         }
         let archived_parent = self.archived_parent_handle(name);
-        if archived_parent.root.exists() {
+        if self.vfs.exists(&archived_parent.root) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("retired parent store already exists for promoted fork: {name}"),
@@ -346,21 +349,21 @@ impl OperationalManifest {
 
         fork.hydrate_shared_collections()?;
         if let Some(parent) = staging.root.parent() {
-            fs::create_dir_all(parent)?;
+            self.vfs.create_dir_all(parent)?;
         }
-        fs::rename(&fork.root, &staging.root)?;
-        sync_dir(&self.forks_dir())?;
+        self.vfs.rename(&fork.root, &staging.root)?;
+        self.vfs.sync_dir(&self.forks_dir())?;
         if let Some(parent) = staging.root.parent() {
-            sync_dir(parent)?;
+            self.vfs.sync_dir(parent)?;
         }
 
-        fs::rename(&self.root, &archived_parent.root)?;
+        self.vfs.rename(&self.root, &archived_parent.root)?;
         if let Some(parent) = self.root.parent() {
-            sync_dir(parent)?;
+            self.vfs.sync_dir(parent)?;
         }
-        fs::rename(&staging.root, &self.root)?;
+        self.vfs.rename(&staging.root, &self.root)?;
         if let Some(parent) = self.root.parent() {
-            sync_dir(parent)?;
+            self.vfs.sync_dir(parent)?;
         }
         self.clear_fork_origin()?;
 
@@ -384,15 +387,17 @@ impl OperationalManifest {
 
     fn fork_handles(&self) -> io::Result<Vec<Self>> {
         let mut out = Vec::new();
-        let entries = match fs::read_dir(self.forks_dir()) {
+        let entries = match self.vfs.read_dir(&self.forks_dir()) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(out),
             Err(err) => return Err(err),
         };
         for entry in entries {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                out.push(Self { root: entry.path() });
+            if entry.is_dir {
+                out.push(Self {
+                    root: entry.path,
+                    vfs: self.vfs.clone(),
+                });
             }
         }
         Ok(out)
@@ -408,6 +413,7 @@ impl OperationalManifest {
             root: self
                 .root
                 .with_file_name(format!("{root_name}.detached-{}", sanitize_component(name))),
+            vfs: self.vfs.clone(),
         }
     }
 
@@ -422,6 +428,7 @@ impl OperationalManifest {
                 "{root_name}.retired-by-promote-{}",
                 sanitize_component(name)
             )),
+            vfs: self.vfs.clone(),
         }
     }
 
@@ -436,6 +443,7 @@ impl OperationalManifest {
                 "{root_name}.promoting-{}",
                 sanitize_component(name)
             )),
+            vfs: self.vfs.clone(),
         }
     }
 
@@ -451,7 +459,7 @@ impl OperationalManifest {
                 continue;
             };
             let dest = self.collections_dir().join(&entry.path);
-            copy_file_durable(Path::new(&source), &dest)?;
+            self.copy_file_durable(Path::new(&source), &dest)?;
             entry.source = None;
             changed = true;
         }
@@ -480,7 +488,7 @@ impl OperationalManifest {
         }
 
         let fork = self.fork_handle(&origin.name);
-        if fork.root.exists() {
+        if self.vfs.exists(&fork.root) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!(
@@ -491,8 +499,8 @@ impl OperationalManifest {
         }
 
         let archived_parent = self.archived_parent_handle(&origin.name);
-        if archived_parent.root.exists() {
-            if self.root.exists() {
+        if self.vfs.exists(&archived_parent.root) {
+            if self.vfs.exists(&self.root) {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!(
@@ -502,21 +510,21 @@ impl OperationalManifest {
                 ));
             }
         } else {
-            if !self.root.exists() {
+            if !self.vfs.exists(&self.root) {
                 return Err(invalid_data(format!(
                     "store fork promotion lost active parent before archive: {}",
                     origin.name
                 )));
             }
-            fs::rename(&self.root, &archived_parent.root)?;
+            self.vfs.rename(&self.root, &archived_parent.root)?;
             if let Some(parent) = self.root.parent() {
-                sync_dir(parent)?;
+                self.vfs.sync_dir(parent)?;
             }
         }
 
-        fs::rename(&staging.root, &self.root)?;
+        self.vfs.rename(&staging.root, &self.root)?;
         if let Some(parent) = self.root.parent() {
-            sync_dir(parent)?;
+            self.vfs.sync_dir(parent)?;
         }
         self.clear_fork_origin()
     }
@@ -539,7 +547,9 @@ impl OperationalManifest {
             return Ok(());
         };
         if origin.parent_store == self.store_identity()
-            && self.archived_parent_handle(&origin.name).root.exists()
+            && self
+                .vfs
+                .exists(&self.archived_parent_handle(&origin.name).root)
         {
             self.clear_fork_origin()?;
         }
@@ -554,25 +564,27 @@ impl OperationalManifest {
             return Ok(None);
         };
         let prefix = format!("{}.promoting-", root_name.to_string_lossy());
-        let entries = match fs::read_dir(parent) {
+        let entries = match self.vfs.read_dir(parent) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err),
         };
         let mut staging = None;
         for entry in entries {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+            if !entry.is_dir {
                 continue;
             }
-            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let file_name = entry.file_name;
             if !file_name.starts_with(&prefix) {
                 continue;
             }
             if staging.is_some() {
                 return Err(invalid_data("multiple interrupted store fork promotions"));
             }
-            staging = Some(Self { root: entry.path() });
+            staging = Some(Self {
+                root: entry.path,
+                vfs: self.vfs.clone(),
+            });
         }
         Ok(staging)
     }
@@ -616,7 +628,7 @@ impl OperationalManifest {
                 progress.hydrated += 1;
                 continue;
             }
-            if self.collections_dir().join(&entry.path).exists() {
+            if self.vfs.exists(&self.collections_dir().join(&entry.path)) {
                 progress.hydrating += 1;
             } else {
                 progress.shared_by_reference += 1;
