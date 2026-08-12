@@ -41,7 +41,7 @@ impl VfsFile for RecordingFile {
         })
     }
 
-    fn len(&self) -> io::Result<u64> {
+    fn file_len(&self) -> io::Result<u64> {
         Ok(self
             .state
             .lock()
