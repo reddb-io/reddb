@@ -5,7 +5,7 @@
 //! `RuntimeQueryResult`.
 
 use super::*;
-use crate::storage::query::ast::GraphCommandOrderBy;
+use reddb_rql::ast::GraphCommandOrderBy;
 use std::cmp::Ordering;
 
 impl RedDBRuntime {
