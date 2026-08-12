@@ -38,15 +38,13 @@ pub enum IsolationLevel {
     Serializable,
 }
 
-impl From<crate::storage::query::ast::IsolationLevel> for IsolationLevel {
-    fn from(level: crate::storage::query::ast::IsolationLevel) -> Self {
+impl From<reddb_rql::ast::IsolationLevel> for IsolationLevel {
+    fn from(level: reddb_rql::ast::IsolationLevel) -> Self {
         match level {
-            crate::storage::query::ast::IsolationLevel::ReadUncommitted => Self::ReadUncommitted,
-            crate::storage::query::ast::IsolationLevel::ReadCommitted => Self::ReadCommitted,
-            crate::storage::query::ast::IsolationLevel::SnapshotIsolation => {
-                Self::SnapshotIsolation
-            }
-            crate::storage::query::ast::IsolationLevel::Serializable => Self::Serializable,
+            reddb_rql::ast::IsolationLevel::ReadUncommitted => Self::ReadUncommitted,
+            reddb_rql::ast::IsolationLevel::ReadCommitted => Self::ReadCommitted,
+            reddb_rql::ast::IsolationLevel::SnapshotIsolation => Self::SnapshotIsolation,
+            reddb_rql::ast::IsolationLevel::Serializable => Self::Serializable,
         }
     }
 }
