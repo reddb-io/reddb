@@ -10,8 +10,8 @@
 //! so they add zero latency to the SELECT hot path.
 #![allow(clippy::needless_borrow)]
 
-use reddb_server::storage::query::ast::{Expr, Filter, QueryExpr};
-use reddb_server::storage::query::parser;
+use reddb_rql::ast::{Expr, Filter, QueryExpr};
+use reddb_rql::parser;
 use reddb_types::Value;
 
 /// F1 — the reporter's exact `$my.special.key` reference fails at parse
@@ -173,7 +173,7 @@ fn kv_function_args_are_typed_path_literals() {
     assert_eq!(table.columns.len(), 1);
     // The projection wraps the KV call; assert it is structurally a
     // function call over typed string literals (not SQL fragments).
-    use reddb_server::storage::query::ast::Projection;
+    use reddb_rql::ast::Projection;
     match &table.columns[0] {
         Projection::Function(name, _args) => {
             assert!(
