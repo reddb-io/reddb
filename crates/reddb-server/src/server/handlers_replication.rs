@@ -397,7 +397,7 @@ mod tests {
     use crate::runtime::RedDBRuntime;
     use crate::RedDBOptions;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_data_path(name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -423,6 +423,7 @@ mod tests {
     fn replica_waiting_for_rejoin_rewind() -> RedDBRuntime {
         let runtime = RedDBRuntime::with_options(
             RedDBOptions::in_memory()
+                .with_replica_loop_enabled(false)
                 .with_replication(ReplicationConfig::replica("http://primary:5050")),
         )
         .expect("runtime");
@@ -438,6 +439,33 @@ mod tests {
             }),
         );
         runtime
+    }
+
+    #[test]
+    fn replica_runtime_without_loop_preserves_seeded_rejoin_rewind_state() {
+        let runtime = replica_waiting_for_rejoin_rewind();
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert_eq!(
+            runtime.config_string("red.replication.state", ""),
+            "rejoin_rewind_required"
+        );
+    }
+
+    #[test]
+    fn replica_runtime_starts_replica_loop_by_default() {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_replication(ReplicationConfig::replica("http://127.0.0.1:1")),
+        )
+        .expect("runtime");
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        while runtime.config_string("red.replication.state", "") != "connecting" {
+            assert!(Instant::now() < deadline, "replica loop did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

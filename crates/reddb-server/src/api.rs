@@ -213,6 +213,8 @@ pub struct RedDBOptions {
     pub remote_key: Option<String>,
     /// Replication configuration.
     pub replication: ReplicationConfig,
+    /// Whether replica runtimes start the background replication loop.
+    pub replica_loop_enabled: bool,
     /// Authentication & authorization configuration.
     pub auth: AuthConfig,
     /// Control Event Ledger configuration (issue #652). Read from
@@ -282,6 +284,7 @@ impl fmt::Debug for RedDBOptions {
             .field("remote_backend", &backend_name)
             .field("remote_key", &self.remote_key)
             .field("replication", &self.replication)
+            .field("replica_loop_enabled", &self.replica_loop_enabled)
             .field("auth", &self.auth)
             .field("control_events", &self.control_events)
             .field("query_audit", &self.query_audit)
@@ -317,6 +320,7 @@ impl Clone for RedDBOptions {
             remote_backend_atomic: self.remote_backend_atomic.clone(),
             remote_key: self.remote_key.clone(),
             replication: self.replication.clone(),
+            replica_loop_enabled: self.replica_loop_enabled,
             auth: self.auth.clone(),
             control_events: self.control_events,
             query_audit: self.query_audit.clone(),
@@ -361,6 +365,7 @@ impl Default for RedDBOptions {
             remote_backend_atomic: None,
             remote_key: None,
             replication: ReplicationConfig::standalone(),
+            replica_loop_enabled: true,
             auth: AuthConfig::default(),
             control_events: crate::runtime::control_events::ControlEventConfig::default(),
             query_audit: crate::runtime::query_audit::QueryAuditConfig::default(),
@@ -570,6 +575,11 @@ impl RedDBOptions {
 
     pub fn with_replication(mut self, config: ReplicationConfig) -> Self {
         self.replication = config;
+        self
+    }
+
+    pub fn with_replica_loop_enabled(mut self, enabled: bool) -> Self {
+        self.replica_loop_enabled = enabled;
         self
     }
 
