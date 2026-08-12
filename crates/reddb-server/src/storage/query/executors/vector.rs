@@ -11,11 +11,11 @@ use crate::storage::engine::hnsw::{HnswConfig, HnswIndex};
 use crate::storage::engine::unified_index::UnifiedIndex;
 use crate::storage::engine::vector_metadata::{MetadataFilter, MetadataValue};
 use crate::storage::engine::vector_store::VectorStore;
-use crate::storage::query::ast::{QueryExpr, VectorQuery, VectorSource};
-use crate::storage::query::sql_lowering::effective_vector_filter;
 use crate::storage::query::unified::{
     ExecutionError, QueryStats, UnifiedRecord, UnifiedResult, VectorSearchResult,
 };
+use reddb_rql::ast::{QueryExpr, VectorQuery, VectorSource};
+use reddb_rql::sql_lowering::effective_vector_filter;
 use reddb_types::Value;
 
 /// Vector query executor using HNSW index
