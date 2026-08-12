@@ -5,12 +5,12 @@
 //! the default ordered range frame.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::RedDBRuntime;
 use reddb_types::Value;
 
 fn setup_purchases() -> RedDBRuntime {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
-    let q = QueryUseCases::new(&rt);
+    let q = &rt;
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE purchases (id INTEGER, user_id TEXT, ts BIGINT, amount BIGINT)".into(),
     })
@@ -19,7 +19,7 @@ fn setup_purchases() -> RedDBRuntime {
 }
 
 fn insert_purchase(rt: &RedDBRuntime, id: i64, user: &str, ts: i64, amount: i64) {
-    QueryUseCases::new(rt)
+    rt
         .execute(ExecuteQueryInput {
             query: format!(
                 "INSERT INTO purchases (id, user_id, ts, amount) VALUES ({id}, '{user}', {ts}, {amount})"
@@ -61,13 +61,12 @@ fn col_f64(row: &reddb::storage::query::unified::UnifiedRecord, col: &str) -> f6
 }
 
 fn run(rt: &RedDBRuntime, query: &str) -> Vec<reddb::storage::query::unified::UnifiedRecord> {
-    QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput {
-            query: query.to_string(),
-        })
-        .expect("query")
-        .result
-        .records
+    rt.execute(ExecuteQueryInput {
+        query: query.to_string(),
+    })
+    .expect("query")
+    .result
+    .records
 }
 
 #[test]
