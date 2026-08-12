@@ -182,7 +182,7 @@ impl<V: Vfs> WalWriter<V> {
         // the raw VFS file BEFORE wrapping in a VfsBufWriter so we don't
         // have to worry about flush ordering during construction.
         let mut raw = vfs.open(path.as_ref(), OpenMode::create_keep())?;
-        let existing_len = raw.len()?;
+        let existing_len = raw.file_len()?;
 
         let current_lsn = if existing_len == 0 {
             raw.write_all(&reddb_file::encode_wal_file_header())?;
