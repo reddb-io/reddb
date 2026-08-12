@@ -257,10 +257,20 @@ impl UnifiedStore {
         collections.insert(name.clone(), Arc::new(manager));
         drop(collections);
 
-        if let Err(err) = self.publish_operational_collection_create(&name) {
-            let mut collections = self.collections.write();
-            collections.remove(&name);
-            return Err(err);
+        let create = match self.prepare_operational_collection_create(&name) {
+            Ok(create) => create,
+            Err(err) => {
+                let mut collections = self.collections.write();
+                collections.remove(&name);
+                return Err(err);
+            }
+        };
+        if let Some(create) = create {
+            if let Err(err) = create.publish().map_err(StoreError::Io) {
+                let mut collections = self.collections.write();
+                collections.remove(&name);
+                return Err(err);
+            }
         }
 
         self.mark_paged_registry_dirty();
@@ -395,7 +405,7 @@ impl UnifiedStore {
 
     /// Drop a collection
     pub fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
-        self.publish_operational_collection_pending_drop(name)?;
+        let drop = self.prepare_operational_collection_drop(name)?;
         let manager = {
             let mut collections = self.collections.write();
 
@@ -436,7 +446,9 @@ impl UnifiedStore {
         self.finish_paged_write([StoreWalAction::DropCollection {
             name: name.to_string(),
         }])?;
-        self.publish_operational_collection_drop_finished(name)?;
+        if let Some(drop) = drop {
+            drop.finish().map_err(StoreError::Io)?;
+        }
 
         Ok(())
     }
