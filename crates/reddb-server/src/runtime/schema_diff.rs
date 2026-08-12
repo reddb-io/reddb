@@ -45,7 +45,7 @@
 use std::collections::HashMap;
 
 use crate::physical::DeclaredColumnContract;
-use crate::storage::query::ast::CreateColumnDef;
+use reddb_rql::ast::CreateColumnDef;
 
 /// Aggregate result of a column-level schema diff.
 #[derive(Debug, Clone)]
