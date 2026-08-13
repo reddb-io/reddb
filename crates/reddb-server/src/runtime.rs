@@ -1569,7 +1569,6 @@ mod result_cache_runtime;
 pub(crate) mod retention_filter;
 pub(crate) mod retention_sweeper;
 mod rls_injection;
-pub(crate) mod scalar_evaluator;
 pub mod schema_diff;
 pub mod schema_vocabulary;
 pub(crate) mod score_sketch;
