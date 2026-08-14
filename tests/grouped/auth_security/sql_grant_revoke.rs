@@ -11,8 +11,9 @@
 use reddb::auth::privileges::{Action, GrantPrincipal, Resource};
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
-use reddb::storage::query::{GrantObjectKind, GrantPrincipalRef, Parser, QueryExpr};
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_rql::ast::{GrantObjectKind, GrantPrincipalRef, QueryExpr};
+use reddb_rql::Parser;
 use std::sync::Arc;
 
 fn parse(sql: &str) -> QueryExpr {

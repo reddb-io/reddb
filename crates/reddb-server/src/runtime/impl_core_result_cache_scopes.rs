@@ -10,10 +10,8 @@ fn cache_scope_insert(scopes: &mut HashSet<String>, name: &str) {
 
 fn collect_table_source_scopes(scopes: &mut HashSet<String>, query: &TableQuery) {
     match query.source.as_ref() {
-        Some(crate::storage::query::ast::TableSource::Name(name)) => {
-            cache_scope_insert(scopes, name)
-        }
-        Some(crate::storage::query::ast::TableSource::Subquery(subquery)) => {
+        Some(reddb_rql::ast::TableSource::Name(name)) => cache_scope_insert(scopes, name),
+        Some(reddb_rql::ast::TableSource::Subquery(subquery)) => {
             collect_query_expr_result_cache_scopes(scopes, subquery);
         }
         // Graph-collection TVFs (e.g. `louvain(g)`) read the graph store
@@ -22,7 +20,7 @@ fn collect_table_source_scopes(scopes: &mut HashSet<String>, query: &TableQuery)
         // that collection (`INSERT INTO g NODE/EDGE …`) invalidates the
         // entry via `invalidate_result_cache_for_table`. Non-graph or
         // zero-arg functions contribute no scope.
-        Some(crate::storage::query::ast::TableSource::Function { name, args, .. }) => {
+        Some(reddb_rql::ast::TableSource::Function { name, args, .. }) => {
             if is_graph_tvf_name(name) {
                 if let Some(graph) = args.first() {
                     cache_scope_insert(scopes, graph);
@@ -33,9 +31,7 @@ fn collect_table_source_scopes(scopes: &mut HashSet<String>, query: &TableQuery)
         // `nodes`/`edges` subqueries, so its result cache must be scoped to
         // those source collections — mutating any of them invalidates the
         // cached result (issue #799).
-        Some(crate::storage::query::ast::TableSource::InlineGraphFunction {
-            nodes, edges, ..
-        }) => {
+        Some(reddb_rql::ast::TableSource::InlineGraphFunction { nodes, edges, .. }) => {
             collect_query_expr_result_cache_scopes(scopes, nodes);
             collect_query_expr_result_cache_scopes(scopes, edges);
         }
@@ -45,25 +41,24 @@ fn collect_table_source_scopes(scopes: &mut HashSet<String>, query: &TableQuery)
 
 fn collect_vector_source_scopes(
     scopes: &mut HashSet<String>,
-    source: &crate::storage::query::ast::VectorSource,
+    source: &reddb_rql::ast::VectorSource,
 ) {
     match source {
-        crate::storage::query::ast::VectorSource::Reference { collection, .. } => {
+        reddb_rql::ast::VectorSource::Reference { collection, .. } => {
             cache_scope_insert(scopes, collection);
         }
-        crate::storage::query::ast::VectorSource::Subquery(subquery) => {
+        reddb_rql::ast::VectorSource::Subquery(subquery) => {
             collect_query_expr_result_cache_scopes(scopes, subquery);
         }
-        crate::storage::query::ast::VectorSource::Literal(_)
-        | crate::storage::query::ast::VectorSource::Text(_) => {}
+        reddb_rql::ast::VectorSource::Literal(_) | reddb_rql::ast::VectorSource::Text(_) => {}
     }
 }
 
 fn collect_path_selector_scopes(
     scopes: &mut HashSet<String>,
-    selector: &crate::storage::query::ast::NodeSelector,
+    selector: &reddb_rql::ast::NodeSelector,
 ) {
-    if let crate::storage::query::ast::NodeSelector::ByRow { table, .. } = selector {
+    if let reddb_rql::ast::NodeSelector::ByRow { table, .. } = selector {
         cache_scope_insert(scopes, table);
     }
 }
@@ -175,8 +170,8 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         }
         QueryExpr::ExplainAlter(query) => cache_scope_insert(scopes, &query.target.name),
         QueryExpr::MaintenanceCommand(cmd) => match cmd {
-            crate::storage::query::ast::MaintenanceCommand::Vacuum { target, .. }
-            | crate::storage::query::ast::MaintenanceCommand::Analyze { target } => {
+            reddb_rql::ast::MaintenanceCommand::Vacuum { target, .. }
+            | reddb_rql::ast::MaintenanceCommand::Analyze { target } => {
                 if let Some(t) = target {
                     cache_scope_insert(scopes, t);
                 }
@@ -234,7 +229,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::ExplainMigration(_)
         | QueryExpr::EventsBackfillStatus { .. } => {}
         QueryExpr::KvCommand(cmd) => {
-            use crate::storage::query::ast::KvCommand;
+            use reddb_rql::ast::KvCommand;
             match cmd {
                 KvCommand::Put { collection, .. }
                 | KvCommand::InvalidateTags { collection, .. }
@@ -251,7 +246,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             }
         }
         QueryExpr::ConfigCommand(cmd) => {
-            use crate::storage::query::ast::ConfigCommand;
+            use reddb_rql::ast::ConfigCommand;
             match cmd {
                 ConfigCommand::Put { collection, .. }
                 | ConfigCommand::Get { collection, .. }

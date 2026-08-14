@@ -186,7 +186,7 @@ fn try_composite_and_lookup(
     idx_store: &IndexStore,
     limit: Option<usize>,
 ) -> Option<Vec<EntityId>> {
-    use crate::storage::query::ast::FieldRef;
+    use reddb_rql::ast::FieldRef;
     use reddb_types::CanonicalKey;
 
     // Extract equality side (col, value) and range side (col, low, high).

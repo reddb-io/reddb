@@ -19,7 +19,7 @@ mod support {
 }
 
 use proptest::prelude::*;
-use reddb_server::storage::query::parser::{self, ParseError, ParserLimits};
+use reddb_rql::parser::{self, ParseError, ParserLimits};
 use support::parser_hardening::{
     self as harness, assert_no_panic_on, corpus::graph_dsl_adversarial_inputs, graph_dsl_grammar,
     HardenedParser,
@@ -192,9 +192,7 @@ proptest! {
 // surface as a test failure (with the exact AST shape printed),
 // not a runtime regression three layers deep.
 
-use reddb_server::storage::query::ast::{
-    EdgeDirection, GraphCommand, GraphCommandOrderBy, NodeSelector, QueryExpr,
-};
+use reddb_rql::ast::{EdgeDirection, GraphCommand, GraphCommandOrderBy, NodeSelector, QueryExpr};
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)

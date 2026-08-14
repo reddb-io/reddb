@@ -126,7 +126,7 @@ pub(crate) fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEve
             schema("alter_table", Some(format!("table:{}", q.name)));
             for op in &q.operations {
                 match op {
-                    crate::storage::query::ast::AlterOperation::EnableRowLevelSecurity => {
+                    reddb_rql::ast::AlterOperation::EnableRowLevelSecurity => {
                         specs.push(QueryControlEventSpec {
                             kind: EventKind::RlsGovernance,
                             action: "enable_rls",
@@ -134,7 +134,7 @@ pub(crate) fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEve
                             fields: Vec::new(),
                         });
                     }
-                    crate::storage::query::ast::AlterOperation::DisableRowLevelSecurity => {
+                    reddb_rql::ast::AlterOperation::DisableRowLevelSecurity => {
                         specs.push(QueryControlEventSpec {
                             kind: EventKind::RlsGovernance,
                             action: "disable_rls",
@@ -142,7 +142,7 @@ pub(crate) fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEve
                             fields: Vec::new(),
                         });
                     }
-                    crate::storage::query::ast::AlterOperation::EnableTenancy { column } => {
+                    reddb_rql::ast::AlterOperation::EnableTenancy { column } => {
                         specs.push(QueryControlEventSpec {
                             kind: EventKind::TenantGovernance,
                             action: "enable_tenancy",
@@ -150,7 +150,7 @@ pub(crate) fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEve
                             fields: vec![("tenant_column".to_string(), Sensitivity::raw(column))],
                         });
                     }
-                    crate::storage::query::ast::AlterOperation::DisableTenancy => {
+                    reddb_rql::ast::AlterOperation::DisableTenancy => {
                         specs.push(QueryControlEventSpec {
                             kind: EventKind::TenantGovernance,
                             action: "disable_tenancy",
@@ -164,15 +164,15 @@ pub(crate) fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEve
         }
         QueryExpr::CreateVcsRef(q) => {
             let kind = match q.kind {
-                crate::storage::query::ast::VcsRefKind::Branch => "branch",
-                crate::storage::query::ast::VcsRefKind::Tag => "tag",
+                reddb_rql::ast::VcsRefKind::Branch => "branch",
+                reddb_rql::ast::VcsRefKind::Tag => "tag",
             };
             schema("create_vcs_ref", Some(format!("{kind}:{}", q.name)));
         }
         QueryExpr::DropVcsRef(q) => {
             let kind = match q.kind {
-                crate::storage::query::ast::VcsRefKind::Branch => "branch",
-                crate::storage::query::ast::VcsRefKind::Tag => "tag",
+                reddb_rql::ast::VcsRefKind::Branch => "branch",
+                reddb_rql::ast::VcsRefKind::Tag => "tag",
             };
             schema("drop_vcs_ref", Some(format!("{kind}:{}", q.name)));
         }
@@ -269,10 +269,10 @@ pub(crate) fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEve
             });
         }
         QueryExpr::ConfigCommand(cmd) => match cmd {
-            crate::storage::query::ast::ConfigCommand::Put {
+            reddb_rql::ast::ConfigCommand::Put {
                 collection, key, ..
             }
-            | crate::storage::query::ast::ConfigCommand::Rotate {
+            | reddb_rql::ast::ConfigCommand::Rotate {
                 collection, key, ..
             } => {
                 let target = format!("{collection}/{key}");
@@ -286,7 +286,7 @@ pub(crate) fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEve
                     ],
                 });
             }
-            crate::storage::query::ast::ConfigCommand::Delete { collection, key } => {
+            reddb_rql::ast::ConfigCommand::Delete { collection, key } => {
                 let target = format!("{collection}/{key}");
                 specs.push(QueryControlEventSpec {
                     kind: EventKind::ConfigDelete,
@@ -301,12 +301,10 @@ pub(crate) fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEve
             _ => {}
         },
         QueryExpr::AlterUser(stmt) => {
-            let disables = stmt.attributes.iter().any(|attr| {
-                matches!(
-                    attr,
-                    crate::storage::query::ast::AlterUserAttribute::Disable
-                )
-            });
+            let disables = stmt
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, reddb_rql::ast::AlterUserAttribute::Disable));
             specs.push(QueryControlEventSpec {
                 kind: if disables {
                     EventKind::UserDisable

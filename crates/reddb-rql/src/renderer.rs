@@ -236,8 +236,8 @@ fn render_filter(filter: &Filter) -> String {
 /// Render a `Value` as a SQL literal suitable for embedding in a query string.
 /// Only the subset used by property tests is handled; others fall back to NULL.
 ///
-/// `pub` (was `pub(crate)`) so the server's `storage::query::renderer` shim can
-/// re-export it for the runtime `render_value_sql` call-sites (#1103).
+/// `pub` (was `pub(crate)`) so server runtime call-sites can import it directly
+/// without duplicating the rendering logic (#1103).
 pub fn render_value_sql(v: &Value) -> String {
     match v {
         Value::Null => "NULL".to_string(),

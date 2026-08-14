@@ -18,11 +18,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::storage::engine::graph_store::GraphStore;
-use crate::storage::query::modes::gremlin::{
-    GremlinParser, GremlinPredicate, GremlinStep, GremlinTraversal, GremlinValue, TraversalSource,
-};
 use crate::storage::query::unified::{
     ExecutionError, GraphPath, MatchedEdge, MatchedNode, QueryStats, UnifiedRecord, UnifiedResult,
+};
+use reddb_rql::modes::gremlin::{
+    GremlinParser, GremlinPredicate, GremlinStep, GremlinTraversal, GremlinValue, TraversalSource,
 };
 
 /// A traverser represents a position in the graph during traversal

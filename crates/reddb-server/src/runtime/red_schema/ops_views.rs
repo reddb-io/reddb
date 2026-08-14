@@ -412,7 +412,7 @@ pub(super) fn queue_pending_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&HashSet<String>>,
 ) -> Vec<UnifiedRecord> {
-    use crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
+    use reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
 
     let schema = Arc::new(
         QUEUE_PENDING_COLUMNS
@@ -545,7 +545,7 @@ pub(super) fn queues_snapshot(
     tenant: Option<&str>,
     visible_collections: Option<&HashSet<String>>,
 ) -> Vec<UnifiedRecord> {
-    use crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
+    use reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
 
     let snapshot = runtime.db().catalog_model_snapshot();
     let schema = Arc::new(

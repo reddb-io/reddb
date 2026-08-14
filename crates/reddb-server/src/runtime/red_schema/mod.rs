@@ -14,10 +14,10 @@ use super::*;
 use crate::auth::policies::{ActionPattern, Effect, Policy, ResourcePattern, Statement};
 use crate::catalog::{CollectionModel, SchemaMode};
 use crate::runtime::mvcc::current_connection_id;
-use crate::storage::query::ast::{CompareOp, Expr, FieldRef, Filter, PolicyAction, UnaryOp};
-use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
 use crate::storage::unified::EntityData;
 use crate::storage::unified::UnifiedStore;
+use reddb_rql::ast::{CompareOp, Expr, FieldRef, Filter, PolicyAction, UnaryOp};
+use reddb_rql::sql_lowering::{effective_table_filter, effective_table_projections};
 use reddb_types::DataType;
 
 pub(super) const COLLECTIONS: &str = "red.collections";

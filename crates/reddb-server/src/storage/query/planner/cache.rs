@@ -337,8 +337,8 @@ impl Default for PlanCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::{Projection, QueryExpr, TableQuery};
     use crate::storage::query::planner::cost::PlanCost;
+    use reddb_rql::ast::{Projection, QueryExpr, TableQuery};
 
     fn make_test_plan() -> QueryPlan {
         QueryPlan::new(

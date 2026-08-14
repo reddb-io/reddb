@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::engine::{GraphStore, GraphTableIndex, StoredNode};
-use crate::storage::query::ast::*;
 use crate::storage::query::test_support::{add_node_or_panic, unified_query_graph};
+use reddb_rql::ast::*;
 use reddb_types::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ fn test_simple_graph_query() {
     let executor = UnifiedExecutor::new(graph, index);
 
     let query = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("h").of_label("host"))
+        .node(reddb_rql::ast::NodePattern::new("h").of_label("host"))
         .return_field(FieldRef::node_id("h"))
         .build();
 
@@ -36,9 +36,9 @@ fn test_graph_query_with_edge() {
     let executor = UnifiedExecutor::new(graph, index);
 
     let query = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("h").of_label("host"))
-        .node(super::super::ast::NodePattern::new("s").of_label("service"))
-        .edge(super::super::ast::EdgePattern::new("h", "s").of_label("has_service"))
+        .node(reddb_rql::ast::NodePattern::new("h").of_label("host"))
+        .node(reddb_rql::ast::NodePattern::new("s").of_label("service"))
+        .edge(reddb_rql::ast::EdgePattern::new("h", "s").of_label("has_service"))
         .return_field(FieldRef::node_id("h"))
         .return_field(FieldRef::node_id("s"))
         .build();
@@ -123,7 +123,7 @@ fn test_graph_query_filter_custom_node_property() {
 
     let query = QueryExpr::graph()
         .node(
-            super::super::ast::NodePattern::new("h")
+            reddb_rql::ast::NodePattern::new("h")
                 .of_label("host")
                 .with_property("os", CompareOp::Eq, Value::text("linux".to_string())),
         )
@@ -240,7 +240,7 @@ fn test_query_stats_tracking() {
     let executor = UnifiedExecutor::new(graph, index);
 
     let query = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("h").of_label("host"))
+        .node(reddb_rql::ast::NodePattern::new("h").of_label("host"))
         .return_field(FieldRef::node_id("h"))
         .build();
 
@@ -359,12 +359,12 @@ fn test_join_query_execution() {
 
     // Join two graph queries
     let left = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("h").of_label("host"))
+        .node(reddb_rql::ast::NodePattern::new("h").of_label("host"))
         .return_field(FieldRef::node_id("h"))
         .build();
 
     let right = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("s").of_label("service"))
+        .node(reddb_rql::ast::NodePattern::new("s").of_label("service"))
         .return_field(FieldRef::node_id("s"))
         .build();
 
@@ -373,7 +373,7 @@ fn test_join_query_execution() {
         left: Box::new(left),
         right: Box::new(right),
         join_type: JoinType::Inner,
-        on: super::super::ast::JoinCondition {
+        on: reddb_rql::ast::JoinCondition {
             left_field: FieldRef::node_prop("h", "id"),
             right_field: FieldRef::node_prop("s", "id"),
         },

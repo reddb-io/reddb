@@ -6,11 +6,11 @@ use super::{
 };
 use crate::storage::engine::graph_store::{GraphStore, Namespace, StoredNode};
 use crate::storage::engine::graph_table_index::GraphTableIndex;
-use crate::storage::query::ast::{
+use reddb_rql::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, JoinQuery,
     JoinType, NodePattern, NodeSelector, PathQuery, Projection, QueryExpr, TableQuery,
 };
-use crate::storage::query::sql_lowering::{
+use reddb_rql::sql_lowering::{
     effective_graph_filter, effective_graph_projections, effective_path_filter,
 };
 use reddb_types::Value;
@@ -761,7 +761,7 @@ impl UnifiedExecutor {
     fn eval_node_property_filter(
         &self,
         node: &StoredNode,
-        filter: &crate::storage::query::ast::PropertyFilter,
+        filter: &reddb_rql::ast::PropertyFilter,
     ) -> bool {
         let Some(value) = self.node_property_value(node, filter.name.as_str()) else {
             return false;

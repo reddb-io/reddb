@@ -1257,8 +1257,8 @@ fn collection_dropped_event_payload(
 
 /// Parse a raw SQL WHERE predicate string into an AST `Filter`.
 /// Returns `None` on parse error — callers treat that as "pass all rows".
-fn parse_where_filter(sql: &str) -> Option<crate::storage::query::AstFilter> {
-    crate::storage::query::Parser::new(sql)
+fn parse_where_filter(sql: &str) -> Option<reddb_rql::ast::Filter> {
+    reddb_rql::Parser::new(sql)
         .ok()
         .and_then(|mut p| p.parse_filter().ok())
 }
@@ -1295,8 +1295,8 @@ fn json_passes_where_filter(
     eval_filter_against_json(json, &filter)
 }
 
-fn eval_filter_against_json(json: &JsonValue, filter: &crate::storage::query::AstFilter) -> bool {
-    use crate::storage::query::AstFilter as F;
+fn eval_filter_against_json(json: &JsonValue, filter: &reddb_rql::ast::Filter) -> bool {
+    use reddb_rql::ast::Filter as F;
     match filter {
         F::Compare { field, op, value } => {
             let col = ast_field_col_name(field);
@@ -1316,8 +1316,8 @@ fn eval_filter_against_json(json: &JsonValue, filter: &crate::storage::query::As
     }
 }
 
-fn ast_field_col_name(field: &crate::storage::query::FieldRef) -> &str {
-    use crate::storage::query::FieldRef;
+fn ast_field_col_name(field: &reddb_rql::ast::FieldRef) -> &str {
+    use reddb_rql::ast::FieldRef;
     match field {
         FieldRef::TableColumn { column, .. } => column.as_str(),
         FieldRef::NodeProperty { property, .. } => property.as_str(),
@@ -1339,9 +1339,9 @@ fn json_object_field<'a>(json: &'a JsonValue, col: &str) -> Option<&'a JsonValue
 fn compare_json_to_store_value(
     json: Option<&JsonValue>,
     rhs: &Value,
-    op: crate::storage::query::CompareOp,
+    op: reddb_rql::ast::CompareOp,
 ) -> bool {
-    use crate::storage::query::CompareOp;
+    use reddb_rql::ast::CompareOp;
     use std::cmp::Ordering;
 
     let lhs: Value = match json {

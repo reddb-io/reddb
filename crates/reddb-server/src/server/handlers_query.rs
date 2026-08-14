@@ -1129,8 +1129,8 @@ impl RedDBServer {
             return write_sse_http_response(&response, writer);
         }
 
-        let ask = match crate::storage::query::modes::parse_multi(&query) {
-            Ok(crate::storage::query::ast::QueryExpr::Ask(ask)) if ask.stream => ask,
+        let ask = match reddb_rql::modes::parse_multi(&query) {
+            Ok(reddb_rql::ast::QueryExpr::Ask(ask)) if ask.stream => ask,
             Ok(_) => {
                 let response = json_error(400, "query is not ASK ... STREAM");
                 return write_sse_http_response(&response, writer);
@@ -1333,7 +1333,7 @@ impl RedDBServer {
             };
 
         // Read-only gate — parse and classify before any wire framing.
-        match crate::storage::query::modes::parse_multi(&query) {
+        match reddb_rql::modes::parse_multi(&query) {
             Ok(expr) => {
                 if let Err((kind, hint)) = classify_stream_read_only(&expr) {
                     let response = with_statement_kind(
@@ -1597,9 +1597,9 @@ fn is_client_disconnect(err: &io::Error) -> bool {
 /// a clear refusal rather than silent acceptance of a shape whose
 /// streaming descriptor is not yet specified.
 fn classify_stream_read_only(
-    expr: &crate::storage::query::ast::QueryExpr,
+    expr: &reddb_rql::ast::QueryExpr,
 ) -> Result<(), (&'static str, &'static str)> {
-    use crate::storage::query::ast::QueryExpr::*;
+    use reddb_rql::ast::QueryExpr::*;
     match expr {
         Table(_) => Ok(()),
         Insert(_) | Update(_) | Delete(_) | Truncate(_) | CopyFrom(_) => {
@@ -2035,8 +2035,8 @@ pub(crate) fn is_stream_ask_query_body(body: &[u8]) -> bool {
 
 fn is_stream_ask_query(query: &str) -> bool {
     matches!(
-        crate::storage::query::modes::parse_multi(query),
-        Ok(crate::storage::query::ast::QueryExpr::Ask(ask)) if ask.stream
+        reddb_rql::modes::parse_multi(query),
+        Ok(reddb_rql::ast::QueryExpr::Ask(ask)) if ask.stream
     )
 }
 

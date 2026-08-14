@@ -13,9 +13,9 @@ use super::impl_core::{
 use super::{RedDBRuntime, RuntimeQueryResult, RuntimeResultCacheEntry};
 use crate::api::{RedDBError, RedDBResult};
 use crate::auth::Role;
-use crate::storage::query::ast::QueryExpr;
-use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};
 use crate::storage::transaction::snapshot::{Snapshot, Xid};
+use reddb_rql::ast::QueryExpr;
+use reddb_rql::modes::{detect_mode, parse_multi, QueryMode};
 
 /// Coarse privilege classification for a statement, computed once at
 /// frame-build time from the SQL text. Mirrors the three-role auth
@@ -570,8 +570,8 @@ impl StatementExecutionFrame {
         if !has_with_prefix(query) {
             return Ok(None);
         }
-        let parsed = crate::storage::query::parser::parse(query)
-            .map_err(|err| RedDBError::Query(err.to_string()))?;
+        let parsed =
+            reddb_rql::parser::parse(query).map_err(|err| RedDBError::Query(err.to_string()))?;
         if parsed.with_clause.is_some() {
             let rewritten = crate::storage::query::executors::inline_ctes(parsed)
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
@@ -1521,7 +1521,7 @@ mod tests {
         // dispatch. We drive a synthetic `QueryExpr::Table` because
         // the SELECT/INSERT parser would happen to also fail, and we
         // want the failure to come from the privilege seam.
-        use crate::storage::query::ast::{QueryExpr, TableQuery};
+        use reddb_rql::ast::{QueryExpr, TableQuery};
         let expr = QueryExpr::Table(TableQuery::new("t"));
         let err = frame
             .check_query_privilege(&rt, &expr)
@@ -1658,7 +1658,7 @@ mod tests {
         // expression that WOULD normally yield `(IS, IS)`; the frame's
         // `lock_intent() == None` short-circuit must still suppress
         // the guard.
-        use crate::storage::query::ast::{QueryExpr, TableQuery};
+        use reddb_rql::ast::{QueryExpr, TableQuery};
         let expr = QueryExpr::Table(TableQuery::new("t"));
         let guard = frame.acquire_intent_locks(&rt, &expr);
         assert!(
@@ -1692,7 +1692,7 @@ mod tests {
         rt.execute_query("INSERT INTO nested_snap (id) VALUES (1)")
             .expect("concurrent insert");
 
-        let expr = QueryExpr::Table(crate::storage::query::ast::TableQuery::new("nested_snap"));
+        let expr = QueryExpr::Table(reddb_rql::ast::TableQuery::new("nested_snap"));
         let nested = StatementExecutionFrame::build(&rt, StatementIdentity::Expr(&expr))
             .expect("nested frame builds");
 
@@ -1755,8 +1755,8 @@ mod tests {
         reset_thread_locals();
         let rt = fresh_runtime();
 
-        let mut table = crate::storage::query::ast::TableQuery::new("red_commits");
-        table.as_of = Some(crate::storage::query::ast::AsOfClause::Snapshot(1));
+        let mut table = reddb_rql::ast::TableQuery::new("red_commits");
+        table.as_of = Some(reddb_rql::ast::AsOfClause::Snapshot(1));
         let expr = QueryExpr::Table(table);
 
         let err = match StatementExecutionFrame::build(&rt, StatementIdentity::Expr(&expr)) {
@@ -1778,7 +1778,7 @@ mod tests {
         reset_thread_locals();
         let rt = fresh_runtime();
 
-        let expr = QueryExpr::Table(crate::storage::query::ast::TableQuery::new("t"));
+        let expr = QueryExpr::Table(reddb_rql::ast::TableQuery::new("t"));
         let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Expr(&expr))
             .expect("expr frame builds");
 

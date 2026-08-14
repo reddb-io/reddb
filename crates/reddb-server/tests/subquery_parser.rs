@@ -20,7 +20,7 @@ mod support {
 }
 
 use proptest::prelude::*;
-use reddb_server::storage::query::parser::{self, ParseError, ParseErrorKind, ParserLimits};
+use reddb_rql::parser::{self, ParseError, ParseErrorKind, ParserLimits};
 use support::parser_hardening::{
     self as harness, assert_no_panic_on, corpus::subquery_adversarial_inputs, subquery_grammar,
     HardenedParser,

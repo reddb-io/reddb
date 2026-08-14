@@ -87,7 +87,7 @@ impl RedDBRuntime {
         let store = self.inner.db.store();
         let descriptors = crate::runtime::continuous_materialized_view::load_all(store.as_ref());
         for descriptor in descriptors {
-            let parsed = match crate::storage::query::parser::parse(&descriptor.source_sql) {
+            let parsed = match reddb_rql::parser::parse(&descriptor.source_sql) {
                 Ok(qc) => qc,
                 Err(err) => {
                     crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
@@ -103,7 +103,7 @@ impl RedDBRuntime {
                     continue;
                 }
             };
-            let crate::storage::query::ast::QueryExpr::CreateView(create) = parsed.query else {
+            let reddb_rql::ast::QueryExpr::CreateView(create) = parsed.query else {
                 crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
                     collection: crate::runtime::continuous_materialized_view::CATALOG_COLLECTION
                         .to_string(),
@@ -171,9 +171,7 @@ impl RedDBRuntime {
     /// row-level security on the table. Idempotent — re-registering
     /// the same `(table, column)` replaces the prior auto-policy.
     pub fn register_tenant_table(&self, table: &str, column: &str) {
-        use crate::storage::query::ast::{
-            CompareOp, CreatePolicyQuery, Expr, FieldRef, Filter, Span,
-        };
+        use reddb_rql::ast::{CompareOp, CreatePolicyQuery, Expr, FieldRef, Filter, Span};
         self.inner
             .tenant_tables
             .write()
@@ -214,7 +212,7 @@ impl RedDBRuntime {
             // matching kind — but for now we keep the auto-policy
             // kind-agnostic so the evaluator can apply it to any
             // entity living in the collection.
-            target_kind: crate::storage::query::ast::PolicyTargetKind::Table,
+            target_kind: reddb_rql::ast::PolicyTargetKind::Table,
         };
 
         // Replace any prior auto-policy for this table (column rename).

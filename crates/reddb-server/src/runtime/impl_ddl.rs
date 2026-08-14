@@ -9,10 +9,11 @@ use super::*;
 use crate::catalog::CollectionModel;
 use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
 use crate::runtime::ddl::polymorphic_resolver;
-use crate::storage::query::ast::{
+use reddb_rql::analyzer::{analyze_create_table, resolve_declared_data_type};
+use reddb_rql::ast::CreateColumnDef;
+use reddb_rql::ast::{
     CreateVcsRefQuery, DropForkQuery, DropVcsRefQuery, ForkStoreQuery, VcsRefKind,
 };
-use crate::storage::query::{analyze_create_table, resolve_declared_data_type, CreateColumnDef};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 fn operational_wal_retention_floor(durable_lsn: u64) -> u64 {
@@ -141,9 +142,9 @@ impl RedDBRuntime {
         // via `ALTER TABLE parent ATTACH PARTITION child ...`.
         if let Some(spec) = &query.partition_by {
             let kind_str = match spec.kind {
-                crate::storage::query::ast::PartitionKind::Range => "range",
-                crate::storage::query::ast::PartitionKind::List => "list",
-                crate::storage::query::ast::PartitionKind::Hash => "hash",
+                reddb_rql::ast::PartitionKind::Range => "range",
+                reddb_rql::ast::PartitionKind::List => "list",
+                reddb_rql::ast::PartitionKind::Hash => "hash",
             };
             store.set_config_tree(
                 &format!("partition.{}.by", query.name),

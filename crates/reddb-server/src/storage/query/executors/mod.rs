@@ -53,10 +53,10 @@ pub use window::{
 
 use std::sync::Arc;
 
-use super::modes::{detect_mode, parse_multi, QueryMode};
 use super::unified::{ExecutionError, UnifiedExecutor, UnifiedResult};
 use crate::storage::engine::graph_store::GraphStore;
 use crate::storage::engine::graph_table_index::GraphTableIndex;
+use reddb_rql::modes::{detect_mode, parse_multi, QueryMode};
 
 /// Multi-mode executor that routes to specialized executors
 pub struct MultiModeExecutor {

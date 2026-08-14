@@ -1,11 +1,12 @@
 use crate::json::{Map, Value as JsonValue};
 use crate::runtime::{RuntimeQueryResult, RuntimeStats};
-use crate::storage::query::modes::QueryMode;
+use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::unified::{
     GraphPath, MatchedEdge, MatchedNode, QueryStats, UnifiedRecord, UnifiedResult,
     VectorSearchResult,
 };
-use crate::storage::query::{is_universal_entity_source as is_universal_query_source, QueryExpr};
+use reddb_rql::ast::QueryExpr;
+use reddb_rql::modes::QueryMode;
 use reddb_types::types::Value as StorageValue;
 
 pub(crate) fn query_mode_name(mode: QueryMode) -> &'static str {
@@ -582,7 +583,7 @@ fn query_mode_capability_from_runtime_result(result: &RuntimeQueryResult) -> &'s
 }
 
 fn is_any_table_query(query: &str) -> bool {
-    let Ok(expr) = crate::storage::query::modes::parse_multi(query) else {
+    let Ok(expr) = reddb_rql::modes::parse_multi(query) else {
         return false;
     };
 
@@ -1130,7 +1131,7 @@ mod descriptor_tests {
         // that pre-#737 clients rely on must all still be present,
         // and `descriptor` is the only new top-level key.
         use crate::runtime::RuntimeQueryResult;
-        use crate::storage::query::modes::QueryMode;
+        use reddb_rql::modes::QueryMode;
 
         let mut unified = UnifiedResult::with_columns(vec!["x".into()]);
         unified.push(UnifiedRecord::with_schema(

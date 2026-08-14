@@ -5,7 +5,7 @@
 //! sibling `impl_dml` call sites unchanged.
 
 use super::*;
-use crate::storage::query::ast::BinOp;
+use reddb_rql::ast::BinOp;
 
 pub(super) fn record_claim_outcome(
     telemetry: &crate::runtime::claim_telemetry::ClaimTelemetryCounters,

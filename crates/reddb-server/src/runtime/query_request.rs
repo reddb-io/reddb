@@ -1,9 +1,9 @@
 use super::{RedDBRuntime, RuntimeQueryResult};
-use crate::storage::query::ast::QueryExpr;
-use crate::storage::query::modes::parse_multi;
 use crate::storage::query::planner::shape::{bind_parameterized_query, parameterize_query_expr};
 use crate::storage::query::user_params;
 use crate::{RedDBError, RedDBResult};
+use reddb_rql::ast::QueryExpr;
+use reddb_rql::modes::parse_multi;
 use reddb_types::Value;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;

@@ -467,7 +467,7 @@ where
 {
     let inferred_param_type_oids = infer_pg_cast_param_type_oids(&msg.query);
     let sql = rewrite_pg_parameter_casts(&msg.query);
-    let parsed_param_count = match crate::storage::query::modes::parse_multi(&sql) {
+    let parsed_param_count = match reddb_rql::modes::parse_multi(&sql) {
         Ok(parsed) => Some(
             crate::storage::query::user_params::scan_parameters(&parsed)
                 .into_iter()
@@ -742,7 +742,7 @@ fn execute_pg_query_result(
         return match translate_pg_catalog_query(runtime, sql) {
             Ok(Some(result)) => Ok(crate::runtime::RuntimeQueryResult {
                 query: sql.to_string(),
-                mode: crate::storage::query::modes::QueryMode::Sql,
+                mode: reddb_rql::modes::QueryMode::Sql,
                 statement: "select",
                 engine: "pg-catalog",
                 result,
@@ -779,7 +779,7 @@ fn try_execute_pg_scalar_select(
     result.push(record);
     Some(crate::runtime::RuntimeQueryResult {
         query: sql.to_string(),
-        mode: crate::storage::query::modes::QueryMode::Sql,
+        mode: reddb_rql::modes::QueryMode::Sql,
         statement: "select",
         engine: "pg-wire",
         result,
@@ -1108,7 +1108,7 @@ where
     let query_result = match translate_pg_catalog_query(runtime, sql) {
         Ok(Some(result)) => Ok(crate::runtime::RuntimeQueryResult {
             query: sql.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "select",
             engine: "pg-catalog",
             result,
@@ -1708,8 +1708,8 @@ mod tests {
     use crate::api::RedDBOptions;
     use crate::auth::{AuthConfig, AuthStore};
     use crate::runtime::RuntimeQueryResult;
-    use crate::storage::query::modes::QueryMode;
     use crate::storage::query::unified::UnifiedResult;
+    use reddb_rql::modes::QueryMode;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
     #[tokio::test]

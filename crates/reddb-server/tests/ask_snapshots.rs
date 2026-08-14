@@ -20,7 +20,7 @@ mod support {
     pub mod parser_hardening;
 }
 
-use reddb_server::storage::query::parser;
+use reddb_rql::parser;
 use support::parser_hardening::secret_redactor;
 
 // Note on file naming: the more natural filename

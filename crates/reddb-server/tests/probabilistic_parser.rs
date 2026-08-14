@@ -5,7 +5,7 @@
 //! cover CREATE / DROP envelopes, HLL ADD / COUNT / MERGE / INFO,
 //! SKETCH ADD / COUNT / MERGE / INFO, and FILTER ADD / CHECK /
 //! DELETE / COUNT / INFO. The probabilistic grammar is reached
-//! through the standard `reddb_server::storage::query::parser::parse`
+//! through the standard `reddb_rql::parser::parse`
 //! entry point, so `ParserLimits` (max_depth / max_input_bytes /
 //! max_identifier_chars) cascade automatically — this file pins the
 //! contract.
@@ -21,7 +21,7 @@ mod support {
 }
 
 use proptest::prelude::*;
-use reddb_server::storage::query::parser::{self, ParseError, ParserLimits};
+use reddb_rql::parser::{self, ParseError, ParserLimits};
 use support::parser_hardening::{
     self as harness, assert_no_panic_on, corpus::probabilistic_adversarial_inputs,
     probabilistic_grammar, HardenedParser,
@@ -183,7 +183,7 @@ proptest! {
 // surfaces as a precise failure rather than a fuzzy proptest
 // shrink.
 
-use reddb_server::storage::query::ast::{ProbabilisticCommand, QueryExpr};
+use reddb_rql::ast::{ProbabilisticCommand, QueryExpr};
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)
@@ -396,9 +396,11 @@ fn sketch_depth_clause_parses() {
     let parsed = parser::parse("CREATE SKETCH events DEPTH 5")
         .expect("DEPTH should be accepted as a sketch modifier");
     match parsed.query {
-        reddb_server::storage::query::ast::QueryExpr::ProbabilisticCommand(
-            ProbabilisticCommand::CreateSketch { width, depth, .. },
-        ) => {
+        reddb_rql::ast::QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateSketch {
+            width,
+            depth,
+            ..
+        }) => {
             assert_eq!(width, 1000, "default WIDTH stays at 1000");
             assert_eq!(depth, 5, "user-supplied DEPTH lands at 5");
         }

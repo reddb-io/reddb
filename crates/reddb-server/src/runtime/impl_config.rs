@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::catalog::{CollectionModel, SchemaMode};
 use crate::physical::{CollectionContract, ContractOrigin};
-use crate::storage::query::ast::ConfigValueType;
 use crate::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+use reddb_rql::ast::ConfigValueType;
 
 use super::impl_core::{current_auth_identity, current_connection_id, current_tenant};
 use super::*;
@@ -83,9 +83,9 @@ impl RedDBRuntime {
     pub fn execute_config_command(
         &self,
         raw_query: &str,
-        cmd: &crate::storage::query::ast::ConfigCommand,
+        cmd: &reddb_rql::ast::ConfigCommand,
     ) -> RedDBResult<RuntimeQueryResult> {
-        use crate::storage::query::ast::ConfigCommand;
+        use reddb_rql::ast::ConfigCommand;
 
         match cmd {
             ConfigCommand::Put {
@@ -150,9 +150,9 @@ impl RedDBRuntime {
 
     pub(crate) fn validate_config_command_before_auth(
         &self,
-        cmd: &crate::storage::query::ast::ConfigCommand,
+        cmd: &reddb_rql::ast::ConfigCommand,
     ) -> RedDBResult<()> {
-        use crate::storage::query::ast::ConfigCommand;
+        use reddb_rql::ast::ConfigCommand;
         match cmd {
             ConfigCommand::InvalidVolatileOperation { operation, .. } => {
                 Err(invalid_config_volatility(operation))
@@ -283,7 +283,7 @@ impl RedDBRuntime {
                 result.push(record);
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: "config_resolve",
                     engine: "config",
                     result,
@@ -710,7 +710,7 @@ impl RedDBRuntime {
         result.push(record);
         Ok(RuntimeQueryResult {
             query: raw_query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "config_get",
             engine: "config",
             result,
@@ -764,7 +764,7 @@ impl RedDBRuntime {
         }
         Ok(RuntimeQueryResult {
             query: raw_query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "config_history",
             engine: "config",
             result,
@@ -827,7 +827,7 @@ impl RedDBRuntime {
         }
         Ok(RuntimeQueryResult {
             query: raw_query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "config_list",
             engine: "config",
             result,
@@ -880,7 +880,7 @@ impl RedDBRuntime {
         result.push(record);
         Ok(RuntimeQueryResult {
             query: raw_query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "config_watch",
             engine: "config",
             result,
@@ -1612,7 +1612,7 @@ fn config_write_output(
     result.push(record);
     RuntimeQueryResult {
         query: raw_query.to_string(),
-        mode: crate::storage::query::modes::QueryMode::Sql,
+        mode: reddb_rql::modes::QueryMode::Sql,
         statement,
         engine: "config",
         result,

@@ -9,7 +9,7 @@
 //! mutating candidate is never auto-executed.
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::query::ast::QueryExpr;
+use reddb_rql::ast::QueryExpr;
 
 /// Read-only vs mutating classification of a parser-validated candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,7 @@ pub fn validate_candidate(rql: &str) -> RedDBResult<ValidatedCandidate> {
             "ASK planner produced an empty RQL candidate".to_string(),
         ));
     }
-    let parsed = crate::storage::query::parser::parse(trimmed).map_err(|err| {
+    let parsed = reddb_rql::parser::parse(trimmed).map_err(|err| {
         RedDBError::Query(format!(
             "ASK planner produced an invalid RQL candidate: {err}"
         ))

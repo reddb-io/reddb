@@ -17,12 +17,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::storage::engine::graph_store::GraphStore;
-use crate::storage::query::ast::CompareOp;
-use crate::storage::query::modes::sparql::{
-    SparqlFilter, SparqlParser, SparqlQuery, SparqlTerm, TriplePattern,
-};
 use crate::storage::query::unified::{
     ExecutionError, MatchedEdge, MatchedNode, QueryStats, UnifiedRecord, UnifiedResult,
+};
+use reddb_rql::ast::CompareOp;
+use reddb_rql::modes::sparql::{
+    SparqlFilter, SparqlParser, SparqlQuery, SparqlTerm, TriplePattern,
 };
 use reddb_types::Value;
 

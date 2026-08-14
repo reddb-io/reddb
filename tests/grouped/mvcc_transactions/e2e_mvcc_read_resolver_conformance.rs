@@ -163,7 +163,7 @@ fn snapshot_table_scan_indexed_read_and_logical_lookup_agree() {
 /// the bound expression together with its text, exactly as the gRPC and
 /// stdio `execute_prepared` handlers do.
 fn prepared_text(rt: &RedDBRuntime, sql: &str, column: &str) -> String {
-    let expr = reddb::storage::query::modes::parse_multi(sql).expect("prepare statement");
+    let expr = reddb_rql::modes::parse_multi(sql).expect("prepare statement");
     let result = rt
         .execute_prepared_query(sql, expr)
         .unwrap_or_else(|err| panic!("prepared {sql}: {err:?}"));
@@ -304,7 +304,7 @@ fn expression_only_entry_refuses_as_of_instead_of_answering_live() {
         "SELECT status FROM mvcc_expr_asof AS OF COMMIT '{before_update}' \
          WHERE marker = 'stable'"
     );
-    let expr = reddb::storage::query::modes::parse_multi(&as_of_sql).expect("parse AS OF");
+    let expr = reddb_rql::modes::parse_multi(&as_of_sql).expect("parse AS OF");
     let err = rt
         .execute_query_expr(expr)
         .expect_err("AS OF without statement text must be refused, not answered live");

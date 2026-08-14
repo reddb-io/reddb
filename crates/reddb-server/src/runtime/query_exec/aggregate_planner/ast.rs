@@ -2,7 +2,7 @@
 //!
 //! Intentionally narrow: the planner only handles the subset of
 //! aggregate queries described in the module header. The wider SQL
-//! AST lives in [`crate::storage::query::ast`]; the dispatch site
+//! AST lives in [`reddb_rql::ast`]; the dispatch site
 //! lowers the relevant subset into this shape and falls back to the
 //! legacy path otherwise.
 

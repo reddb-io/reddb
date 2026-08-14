@@ -19,9 +19,9 @@
 use super::join_filter::{compare_runtime_values, resolve_runtime_field};
 use std::collections::{HashMap, HashSet};
 
-use crate::storage::query::ast::{BinOp, Expr, FieldRef, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::RedDB;
+use reddb_rql::ast::{BinOp, Expr, FieldRef, UnaryOp};
 use reddb_types::Value;
 
 /// Evaluate an `Expr` against a record and return its resulting
@@ -282,11 +282,7 @@ pub(super) fn evaluate_runtime_expr_with_db(
                 if let Some(candidate) =
                     evaluate_runtime_expr_with_db(db, v, record, table_name, table_alias)
                 {
-                    if compare_runtime_values(
-                        &t,
-                        &candidate,
-                        crate::storage::query::ast::CompareOp::Eq,
-                    ) {
+                    if compare_runtime_values(&t, &candidate, reddb_rql::ast::CompareOp::Eq) {
                         hit = true;
                         break;
                     }
@@ -305,9 +301,8 @@ pub(super) fn evaluate_runtime_expr_with_db(
             let t = evaluate_runtime_expr_with_db(db, target, record, table_name, table_alias)?;
             let lo = evaluate_runtime_expr_with_db(db, low, record, table_name, table_alias)?;
             let hi = evaluate_runtime_expr_with_db(db, high, record, table_name, table_alias)?;
-            let in_range =
-                compare_runtime_values(&t, &lo, crate::storage::query::ast::CompareOp::Ge)
-                    && compare_runtime_values(&t, &hi, crate::storage::query::ast::CompareOp::Le);
+            let in_range = compare_runtime_values(&t, &lo, reddb_rql::ast::CompareOp::Ge)
+                && compare_runtime_values(&t, &hi, reddb_rql::ast::CompareOp::Le);
             Some(Value::Boolean(if *negated { !in_range } else { in_range }))
         }
 
@@ -455,7 +450,7 @@ fn negate_value(v: &Value) -> Option<Value> {
 }
 
 fn apply_binop(op: BinOp, a: Value, b: Value) -> Option<Value> {
-    use crate::storage::query::ast::CompareOp;
+    use reddb_rql::ast::CompareOp;
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => arith(op, a, b),
         BinOp::Concat => Some(Value::text(format!("{}{}", a.plain_text(), b.plain_text()))),

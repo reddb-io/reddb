@@ -950,8 +950,8 @@ mod grpc_query_value_tests {
 #[cfg(test)]
 mod grpc_ask_query_reply_tests {
     use super::*;
-    use crate::storage::query::modes::QueryMode;
     use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
+    use reddb_rql::modes::QueryMode;
     use reddb_types::Value as SchemaValue;
 
     fn ask_runtime_result() -> RuntimeQueryResult {

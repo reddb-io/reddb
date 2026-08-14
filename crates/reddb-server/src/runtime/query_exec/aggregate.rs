@@ -18,16 +18,16 @@ use crate::runtime::join_filter::{
     projection_name, resolve_runtime_field, runtime_partial_cmp, sort_records_by_order_by_with_db,
 };
 use crate::runtime::runtime_table_record_from_entity_ref;
-use crate::storage::query::ast::{
+use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
+use crate::RedDB;
+use reddb_rql::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
 };
-use crate::storage::query::sql_lowering::{
+use reddb_rql::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections, expr_to_projection as lower_expr_to_projection,
     projection_to_expr,
 };
-use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::RedDB;
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 use super::TableQuery;
@@ -1358,7 +1358,7 @@ fn aggregate_argument_key(args: &[Projection]) -> Option<String> {
 
 fn having_matches(
     db: &RedDB,
-    having: Option<&crate::storage::query::ast::Filter>,
+    having: Option<&reddb_rql::ast::Filter>,
     record: &UnifiedRecord,
 ) -> bool {
     match having {

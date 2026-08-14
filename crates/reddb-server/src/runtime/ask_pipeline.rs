@@ -485,7 +485,7 @@ pub fn text_search_bm25_scoped(
 
     let _scope_guard = AskScopeGuard::install(scope);
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-    let mut rls_cache: HashMap<String, Option<crate::storage::query::ast::Filter>> = HashMap::new();
+    let mut rls_cache: HashMap<String, Option<reddb_rql::ast::Filter>> = HashMap::new();
     let store = runtime.inner.db.store();
 
     runtime
@@ -882,7 +882,7 @@ pub fn vector_search_scoped(
     let mut hits: Vec<VectorHit> = Vec::new();
     let _scope_guard = AskScopeGuard::install(scope);
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-    let mut rls_cache: HashMap<String, Option<crate::storage::query::ast::Filter>> = HashMap::new();
+    let mut rls_cache: HashMap<String, Option<reddb_rql::ast::Filter>> = HashMap::new();
     let store = runtime.inner.db.store();
     for collection in &candidates.collections {
         match super::authorized_search::AuthorizedSearch::execute_similar(
@@ -1073,7 +1073,7 @@ pub fn filter_values(
     let mut out: Vec<FilteredRow> = Vec::new();
     let _scope_guard = AskScopeGuard::install(scope);
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-    let mut rls_cache: HashMap<String, Option<crate::storage::query::ast::Filter>> = HashMap::new();
+    let mut rls_cache: HashMap<String, Option<reddb_rql::ast::Filter>> = HashMap::new();
 
     'collection: for collection in &candidates.collections {
         // Defence-in-depth: redo the visibility check here so a Stage
@@ -1119,7 +1119,7 @@ fn ask_entity_allowed(
     collection: &str,
     entity: &UnifiedEntity,
     snap_ctx: Option<&crate::runtime::impl_core::SnapshotContext>,
-    rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
+    rls_cache: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
 ) -> bool {
     if scope
         .visible_collections()
@@ -1135,7 +1135,7 @@ fn ask_scanned_entity_allowed(
     scope: &EffectiveScope,
     collection: &str,
     entity: &UnifiedEntity,
-    rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
+    rls_cache: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
 ) -> bool {
     if scope
         .visible_collections()

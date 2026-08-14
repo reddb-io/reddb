@@ -48,7 +48,7 @@ impl RedDBRuntime {
     pub(crate) fn execute_create_metric(
         &self,
         raw_query: &str,
-        query: &crate::storage::query::ast::CreateMetricQuery,
+        query: &reddb_rql::ast::CreateMetricQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
@@ -142,7 +142,7 @@ impl RedDBRuntime {
     pub(crate) fn execute_rank_of(
         &self,
         raw_query: &str,
-        req: &crate::storage::query::ast::RankOfQuery,
+        req: &reddb_rql::ast::RankOfQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let descriptor = super::ranking_descriptor_catalog::get(store.as_ref(), &req.ranking)
@@ -170,7 +170,7 @@ impl RedDBRuntime {
     pub(crate) fn execute_rank_range(
         &self,
         raw_query: &str,
-        req: &crate::storage::query::ast::RankRangeQuery,
+        req: &reddb_rql::ast::RankRangeQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let descriptor = super::ranking_descriptor_catalog::get(store.as_ref(), &req.ranking)
@@ -293,7 +293,7 @@ impl RedDBRuntime {
     pub(crate) fn execute_approx_rank_of(
         &self,
         raw_query: &str,
-        req: &crate::storage::query::ast::RankOfQuery,
+        req: &reddb_rql::ast::RankOfQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let descriptor = super::ranking_descriptor_catalog::get(store.as_ref(), &req.ranking)
@@ -392,7 +392,7 @@ impl RedDBRuntime {
     pub(crate) fn execute_alter_metric(
         &self,
         raw_query: &str,
-        query: &crate::storage::query::ast::AlterMetricQuery,
+        query: &reddb_rql::ast::AlterMetricQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
@@ -414,7 +414,7 @@ impl RedDBRuntime {
     pub(crate) fn execute_create_slo(
         &self,
         raw_query: &str,
-        query: &crate::storage::query::ast::CreateSloQuery,
+        query: &reddb_rql::ast::CreateSloQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();

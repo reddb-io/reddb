@@ -107,7 +107,7 @@ impl PrimaryQueueStore {
     /// knob — it lives on each message and is read at decision time via
     /// [`QueueStore::read_max_attempts`].
     pub(crate) fn lifecycle_config(&self, queue: &str) -> LifecycleConfig {
-        use crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
+        use reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
 
         let desc = self.descriptor(queue);
         let lock_ms = desc
@@ -1209,7 +1209,7 @@ mod tests {
 
     #[test]
     fn lifecycle_config_falls_back_to_defaults_for_unknown_queue() {
-        use crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
+        use reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
         let rt = boot();
         let ps = PrimaryQueueStore::new(rt);
         let cfg = ps.lifecycle_config("missing");

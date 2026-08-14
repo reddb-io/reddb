@@ -3,17 +3,17 @@ use std::collections::BTreeMap;
 #[path = "logical_helpers.rs"]
 mod logical_helpers;
 
-use crate::storage::query::ast::{
+use crate::storage::query::is_universal_entity_source as is_universal_query_source;
+use crate::storage::RedDB;
+use reddb_rql::ast::{
     FieldRef, Filter, FusionStrategy, JoinQuery, JoinType, OrderByClause, Projection, QueryExpr,
     TableQuery, VectorSource,
 };
-use crate::storage::query::is_universal_entity_source as is_universal_query_source;
-use crate::storage::query::sql_lowering::{
+use reddb_rql::sql_lowering::{
     effective_graph_filter, effective_graph_projections, effective_join_filter,
     effective_join_projections, effective_path_filter, effective_path_projections,
     effective_table_filter, effective_table_projections, effective_vector_filter,
 };
-use crate::storage::RedDB;
 use reddb_types::Value;
 
 use super::{AccessPathDecision, CanonicalLogicalNode, CardinalityEstimate, CostEstimator};

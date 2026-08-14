@@ -62,7 +62,7 @@
 
 use std::sync::Arc;
 
-use super::ast::{BinOp, Expr, FieldRef, UnaryOp};
+use reddb_rql::ast::{BinOp, Expr, FieldRef, UnaryOp};
 use reddb_types::coerce::coerce_via_catalog;
 use reddb_types::coercion_spine;
 use reddb_types::function_catalog::FUNCTION_CATALOG;
@@ -1147,7 +1147,7 @@ fn eval_between(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::ast::Span;
+    use reddb_rql::ast::Span;
 
     fn lit(v: Value) -> Expr {
         Expr::Literal {

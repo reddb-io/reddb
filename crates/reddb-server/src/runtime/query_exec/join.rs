@@ -11,7 +11,7 @@
 
 use super::super::*;
 use super::*;
-use crate::storage::query::sql_lowering::{effective_join_filter, effective_join_projections};
+use reddb_rql::sql_lowering::{effective_join_filter, effective_join_projections};
 
 pub(crate) fn execute_runtime_join_query(
     db: &RedDB,

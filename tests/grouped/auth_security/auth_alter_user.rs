@@ -10,7 +10,8 @@
 
 use reddb::auth::privileges::UserAttributes;
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
-use reddb::storage::query::{AlterUserAttribute, Parser, QueryExpr};
+use reddb_rql::ast::{AlterUserAttribute, QueryExpr};
+use reddb_rql::Parser;
 
 fn parse(sql: &str) -> QueryExpr {
     let mut p = Parser::new(sql).expect("parser construct");

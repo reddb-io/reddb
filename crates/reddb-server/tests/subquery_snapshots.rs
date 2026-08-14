@@ -24,8 +24,8 @@ mod support {
     pub mod parser_hardening;
 }
 
-use reddb_server::storage::query::ast::{Expr, Filter, QueryExpr};
-use reddb_server::storage::query::parser;
+use reddb_rql::ast::{Expr, Filter, QueryExpr};
+use reddb_rql::parser;
 use support::parser_hardening::secret_redactor;
 
 /// Parse `input` and format the resulting error for snapshotting.

@@ -1,7 +1,7 @@
 use super::*;
-use crate::storage::query::ast::{Expr, SelectItem};
 use crate::storage::query::evaluator;
-use crate::storage::query::sql_lowering::{
+use reddb_rql::ast::{Expr, SelectItem};
+use reddb_rql::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections,
 };
@@ -497,7 +497,7 @@ fn session_context_scalar_value(expr: &Expr) -> Option<Value> {
 
 pub(super) fn evaluate_runtime_document_filter(
     record: &UnifiedRecord,
-    filter: &crate::storage::query::ast::Filter,
+    filter: &reddb_rql::ast::Filter,
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) -> bool {
@@ -541,10 +541,7 @@ pub(super) fn execute_runtime_canonical_expr_node(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     match expr {
         QueryExpr::Table(table) => {
-            if matches!(
-                table.source,
-                Some(crate::storage::query::ast::TableSource::Subquery(_))
-            ) {
+            if matches!(table.source, Some(reddb_rql::ast::TableSource::Subquery(_))) {
                 return execute_runtime_canonical_table_query_indexed(db, table, None);
             }
             let table_name = table.table.as_str();

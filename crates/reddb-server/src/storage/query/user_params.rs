@@ -6,9 +6,9 @@
 //! into the AST. Type validation is delegated to the existing engine
 //! type checker, which runs on the substituted literals downstream.
 
-use crate::storage::query::ast::{Expr, QueryExpr, SearchCommand, Span};
 use crate::storage::query::planner::shape::bind_user_param_query;
-use crate::storage::query::sql_lowering::{expr_to_filter, fold_expr_to_value};
+use reddb_rql::ast::{Expr, QueryExpr, SearchCommand, Span};
+use reddb_rql::sql_lowering::{expr_to_filter, fold_expr_to_value};
 use reddb_types::Value;
 
 /// One parameter placeholder found in the parsed query AST.
@@ -29,7 +29,7 @@ pub struct ParameterRef {
 /// the AST that already lives in the crate. This re-export keeps the
 /// historical `storage::query::user_params::expr_contains_parameter` path
 /// resolving for the binder's call-sites.
-pub use crate::storage::query::sql_lowering::expr_contains_parameter;
+pub use reddb_rql::sql_lowering::expr_contains_parameter;
 
 /// Substitute every `Expr::Parameter { index }` in `expr` with
 /// `Expr::Literal { value: params[index] }`. Used by INSERT binding,
@@ -163,7 +163,7 @@ fn substitute_params_in_expr(expr: Expr, params: &[Value]) -> Result<Expr, UserP
                 .order_by
                 .into_iter()
                 .map(|o| {
-                    Ok::<_, UserParamError>(crate::storage::query::ast::WindowOrderItem {
+                    Ok::<_, UserParamError>(reddb_rql::ast::WindowOrderItem {
                         expr: substitute_params_in_expr(o.expr, params)?,
                         ascending: o.ascending,
                         nulls_first: o.nulls_first,
@@ -173,7 +173,7 @@ fn substitute_params_in_expr(expr: Expr, params: &[Value]) -> Result<Expr, UserP
             Ok(Expr::WindowFunctionCall {
                 name,
                 args: new_args,
-                window: crate::storage::query::ast::WindowSpec {
+                window: reddb_rql::ast::WindowSpec {
                     partition_by: new_partition,
                     order_by: new_order,
                     frame: window.frame,
@@ -1086,7 +1086,7 @@ fn visit_query_expr<F: FnMut(&Expr)>(expr: &QueryExpr, visit: &mut F) {
     match expr {
         QueryExpr::Table(q) => {
             for item in &q.select_items {
-                if let crate::storage::query::ast::SelectItem::Expr { expr, .. } = item {
+                if let reddb_rql::ast::SelectItem::Expr { expr, .. } = item {
                     visit_expr(expr, visit);
                 }
             }
@@ -1104,7 +1104,7 @@ fn visit_query_expr<F: FnMut(&Expr)>(expr: &QueryExpr, visit: &mut F) {
                     visit_expr(e, visit);
                 }
             }
-            if let Some(crate::storage::query::ast::TableSource::Subquery(inner)) = &q.source {
+            if let Some(reddb_rql::ast::TableSource::Subquery(inner)) = &q.source {
                 visit_query_expr(inner, visit);
             }
         }
@@ -1198,7 +1198,7 @@ fn visit_expr<F: FnMut(&Expr)>(expr: &Expr, visit: &mut F) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::query::modes::parse_multi;
+    use reddb_rql::modes::parse_multi;
 
     fn parse(sql: &str) -> QueryExpr {
         parse_multi(sql).expect("parse")

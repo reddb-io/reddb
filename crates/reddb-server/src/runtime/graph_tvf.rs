@@ -736,8 +736,8 @@ impl RedDBRuntime {
         crate::storage::query::unified::EdgeProperties,
     )> {
         use crate::storage::engine::GraphStore;
-        use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
         use crate::storage::unified::entity::{EntityData, EntityKind};
+        use reddb_rql::ast::{PolicyAction, PolicyTargetKind};
         use std::collections::{HashMap, HashSet};
 
         let store = self.inner.db.store();
@@ -753,10 +753,8 @@ impl RedDBRuntime {
         // Per-collection cached compiled filters — Nodes-kind for
         // first pass, Edges-kind for the second. None entries mean
         // "RLS enabled, zero matching policy → deny all of this kind".
-        let mut node_rls: HashMap<String, Option<crate::storage::query::ast::Filter>> =
-            HashMap::new();
-        let mut edge_rls: HashMap<String, Option<crate::storage::query::ast::Filter>> =
-            HashMap::new();
+        let mut node_rls: HashMap<String, Option<reddb_rql::ast::Filter>> = HashMap::new();
+        let mut edge_rls: HashMap<String, Option<reddb_rql::ast::Filter>> = HashMap::new();
 
         let collections = store.list_collections();
 

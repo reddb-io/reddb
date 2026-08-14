@@ -1536,9 +1536,9 @@ impl RedDBRuntime {
     pub fn execute_kv_command(
         &self,
         raw_query: &str,
-        cmd: &crate::storage::query::ast::KvCommand,
+        cmd: &reddb_rql::ast::KvCommand,
     ) -> RedDBResult<RuntimeQueryResult> {
-        use crate::storage::query::ast::KvCommand;
+        use reddb_rql::ast::KvCommand;
 
         let ops = KvAtomicOps::new(self);
 
@@ -1586,7 +1586,7 @@ impl RedDBRuntime {
 
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: if *model == crate::catalog::CollectionModel::Vault {
                         "vault_put"
                     } else {
@@ -1622,7 +1622,7 @@ impl RedDBRuntime {
 
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: "kv_invalidate_tags",
                     engine: "kv",
                     result,
@@ -1759,7 +1759,7 @@ impl RedDBRuntime {
                     }
                     Ok(RuntimeQueryResult {
                         query: raw_query.to_string(),
-                        mode: crate::storage::query::modes::QueryMode::Sql,
+                        mode: reddb_rql::modes::QueryMode::Sql,
                         statement: "vault_list",
                         engine: "vault",
                         result,
@@ -1829,7 +1829,7 @@ impl RedDBRuntime {
                         }
                         Ok(RuntimeQueryResult {
                             query: raw_query.to_string(),
-                            mode: crate::storage::query::modes::QueryMode::Sql,
+                            mode: reddb_rql::modes::QueryMode::Sql,
                             statement: "kv_list",
                             engine: "kv",
                             result,
@@ -1874,7 +1874,7 @@ impl RedDBRuntime {
                 )?;
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: "vault_history",
                     engine: "vault",
                     result,
@@ -1945,7 +1945,7 @@ impl RedDBRuntime {
                 result.push(record);
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: "vault_purge",
                     engine: "vault",
                     result,
@@ -1993,7 +1993,7 @@ impl RedDBRuntime {
                     )?;
                     return Ok(RuntimeQueryResult {
                         query: raw_query.to_string(),
-                        mode: crate::storage::query::modes::QueryMode::Sql,
+                        mode: reddb_rql::modes::QueryMode::Sql,
                         statement: "vault_get",
                         engine: "vault",
                         result,
@@ -2040,7 +2040,7 @@ impl RedDBRuntime {
 
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: "kv_get",
                     engine: "kv",
                     result,
@@ -2096,7 +2096,7 @@ impl RedDBRuntime {
 
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: "kv_watch",
                     engine: keyed_model_name(*model),
                     result,
@@ -2226,7 +2226,7 @@ impl RedDBRuntime {
                         result.push(record);
                         Ok(RuntimeQueryResult {
                             query: raw_query.to_string(),
-                            mode: crate::storage::query::modes::QueryMode::Sql,
+                            mode: reddb_rql::modes::QueryMode::Sql,
                             statement: "vault_unseal",
                             engine: "vault",
                             result,
@@ -2285,7 +2285,7 @@ impl RedDBRuntime {
 
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: "kv_incr",
                     engine: "kv",
                     result,
@@ -2329,7 +2329,7 @@ impl RedDBRuntime {
 
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: "kv_cas",
                     engine: "kv",
                     result,
@@ -2401,7 +2401,7 @@ impl RedDBRuntime {
 
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
-                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    mode: reddb_rql::modes::QueryMode::Sql,
                     statement: "kv_delete",
                     engine: "kv",
                     result,
@@ -2549,7 +2549,7 @@ fn vault_write_result(
     result.push(record);
     RuntimeQueryResult {
         query: raw_query.to_string(),
-        mode: crate::storage::query::modes::QueryMode::Sql,
+        mode: reddb_rql::modes::QueryMode::Sql,
         statement,
         engine: "vault",
         result,
@@ -2892,7 +2892,7 @@ fn kv_list_json_result(
     result.push(record);
     RuntimeQueryResult {
         query: raw_query.to_string(),
-        mode: crate::storage::query::modes::QueryMode::Sql,
+        mode: reddb_rql::modes::QueryMode::Sql,
         statement: "kv_list_json",
         engine: "kv",
         result,

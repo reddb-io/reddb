@@ -1059,10 +1059,10 @@ impl SortedIndexManager {
         collection: &str,
         column: &str,
         threshold: CanonicalKey,
-        op: &crate::storage::query::ast::CompareOp,
+        op: &reddb_rql::ast::CompareOp,
         limit: usize,
     ) -> Option<Vec<CanonicalKey>> {
-        use crate::storage::query::ast::CompareOp;
+        use reddb_rql::ast::CompareOp;
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         let idx = indices.get(&key)?;

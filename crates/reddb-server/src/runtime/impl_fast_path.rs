@@ -80,7 +80,7 @@ impl RedDBRuntime {
 
         Some(Ok(RuntimeQueryResult {
             query: query.to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "select",
             engine: "fast-entity-lookup",
             result: crate::storage::query::unified::UnifiedResult {

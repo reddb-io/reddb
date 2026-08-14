@@ -3,8 +3,8 @@
 //! Phase 4b: the parser records the clause in `TableQuery.as_of`;
 //! executor-side snapshot binding lands in Phase 4c.
 
-use reddb::storage::query::ast::{AsOfClause, QueryExpr};
-use reddb::storage::query::parser::parse;
+use reddb_rql::ast::{AsOfClause, QueryExpr};
+use reddb_rql::parser::parse;
 
 fn as_of_of(sql: &str) -> AsOfClause {
     match parse(sql)

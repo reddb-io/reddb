@@ -400,7 +400,7 @@ impl McpServer {
     fn tool_ask(&self, args: &JsonValue) -> Result<String, String> {
         let invocation =
             crate::runtime::ai::mcp_ask_tool::parse(args).map_err(format_mcp_ask_parse_error)?;
-        let ask = crate::storage::query::ast::AskQuery {
+        let ask = reddb_rql::ast::AskQuery {
             explain: false,
             question: invocation.question,
             question_param: None,
@@ -415,11 +415,11 @@ impl McpServer {
             strict: invocation.strict.unwrap_or(true),
             stream: false,
             cache: if matches!(invocation.nocache, Some(true)) {
-                crate::storage::query::ast::AskCacheClause::NoCache
+                reddb_rql::ast::AskCacheClause::NoCache
             } else if let Some(ttl) = invocation.cache_ttl {
-                crate::storage::query::ast::AskCacheClause::CacheTtl(ttl)
+                reddb_rql::ast::AskCacheClause::CacheTtl(ttl)
             } else {
-                crate::storage::query::ast::AskCacheClause::Default
+                reddb_rql::ast::AskCacheClause::Default
             },
             plan_only: false,
             steps: None,

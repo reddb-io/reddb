@@ -25,8 +25,8 @@ mod support {
     pub mod parser_hardening;
 }
 
-use reddb_server::storage::query::ast::{FusionStrategy, QueryExpr, SearchCommand, VectorSource};
-use reddb_server::storage::query::parser;
+use reddb_rql::ast::{FusionStrategy, QueryExpr, SearchCommand, VectorSource};
+use reddb_rql::parser;
 use support::parser_hardening::secret_redactor;
 
 /// Parse `input` and format the resulting error for snapshotting.

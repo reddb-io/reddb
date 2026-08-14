@@ -644,7 +644,7 @@ impl RedDBRuntime {
         &self,
         query: &TableQuery,
     ) -> RedDBResult<Option<UnifiedResult>> {
-        let projections = crate::storage::query::sql_lowering::effective_table_projections(query);
+        let projections = reddb_rql::sql_lowering::effective_table_projections(query);
         let mut read_projections = Vec::new();
         for projection in &projections {
             if let Some(read_projection) =
@@ -1522,7 +1522,7 @@ fn probabilistic_select_row_visible(
     }
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
-    crate::storage::query::sql_lowering::effective_table_filter(query).is_none_or(|filter| {
+    reddb_rql::sql_lowering::effective_table_filter(query).is_none_or(|filter| {
         super::join_filter::evaluate_runtime_filter_with_db(
             Some(&runtime.inner.db),
             record,

@@ -4,7 +4,7 @@
 //! cover the `CREATE MIGRATION`, `APPLY MIGRATION`,
 //! `ROLLBACK MIGRATION`, and `EXPLAIN MIGRATION` shapes. The
 //! migration parser is reached through the standard
-//! `reddb_server::storage::query::parser::parse` entry point, so
+//! `reddb_rql::parser::parse` entry point, so
 //! `ParserLimits` (max_depth / max_input_bytes /
 //! max_identifier_chars) cascade automatically — this test file
 //! pins the contract.
@@ -14,7 +14,7 @@ mod support {
 }
 
 use proptest::prelude::*;
-use reddb_server::storage::query::parser::{self, ParseError, ParserLimits};
+use reddb_rql::parser::{self, ParseError, ParserLimits};
 use support::parser_hardening::{
     self as harness, assert_no_panic_on, corpus::migration_adversarial_inputs, migration_grammar,
     HardenedParser,
@@ -149,7 +149,7 @@ proptest! {
 // now parse, and `APPLY <name>` without `MIGRATION` errors instead of
 // silently succeeding.
 
-use reddb_server::storage::query::ast::{ApplyMigrationTarget, QueryExpr};
+use reddb_rql::ast::{ApplyMigrationTarget, QueryExpr};
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)

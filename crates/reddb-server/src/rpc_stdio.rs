@@ -1907,7 +1907,7 @@ mod tests {
 
         let json = query_result_to_json(&RuntimeQueryResult {
             query: "SELECT payload FROM docs".to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "select",
             engine: "runtime-table",
             result,
@@ -1953,7 +1953,7 @@ mod tests {
 
         let json = query_result_to_json(&RuntimeQueryResult {
             query: "SELECT exact".to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "select",
             engine: "runtime-table",
             result,
@@ -2118,7 +2118,7 @@ mod tests {
 
         let json = query_result_to_json(&RuntimeQueryResult {
             query: "ASK 'why did deploy fail?'".to_string(),
-            mode: crate::storage::query::modes::QueryMode::Sql,
+            mode: reddb_rql::modes::QueryMode::Sql,
             statement: "ask",
             engine: "runtime-ai",
             result,

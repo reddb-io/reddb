@@ -65,9 +65,9 @@ impl RedDBRuntime {
             row.push(lit.clone());
         }
         for row in augmented.value_exprs.iter_mut() {
-            row.push(crate::storage::query::ast::Expr::Literal {
+            row.push(reddb_rql::ast::Expr::Literal {
                 value: lit.clone(),
-                span: crate::storage::query::ast::Span::synthetic(),
+                span: reddb_rql::ast::Span::synthetic(),
             });
         }
         Ok(Some(augmented))
@@ -128,9 +128,9 @@ impl RedDBRuntime {
                         .and_then(|v| v.get(idx))
                         .cloned()
                         .unwrap_or(Value::Null);
-                    *slot = crate::storage::query::ast::Expr::Literal {
+                    *slot = reddb_rql::ast::Expr::Literal {
                         value: new_value,
-                        span: crate::storage::query::ast::Span::synthetic(),
+                        span: reddb_rql::ast::Span::synthetic(),
                     };
                 }
             }
@@ -152,9 +152,9 @@ impl RedDBRuntime {
                 row.push(fresh.clone());
             }
             for row in augmented.value_exprs.iter_mut() {
-                row.push(crate::storage::query::ast::Expr::Literal {
+                row.push(reddb_rql::ast::Expr::Literal {
                     value: fresh.clone(),
-                    span: crate::storage::query::ast::Span::synthetic(),
+                    span: reddb_rql::ast::Span::synthetic(),
                 });
             }
         }

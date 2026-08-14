@@ -3,7 +3,7 @@
 //! Reuses the `tests/support/parser_hardening` harness from #87 to
 //! cover the `CREATE QUEUE`, `DROP QUEUE`, `QUEUE PUSH/POP/PEEK/...`,
 //! and consumer-group surfaces. The queue parser is reached through
-//! the standard `reddb_server::storage::query::parser::parse` entry
+//! the standard `reddb_rql::parser::parse` entry
 //! point, so `ParserLimits` (max_depth / max_input_bytes /
 //! max_identifier_chars) cascade automatically — this file pins the
 //! contract.
@@ -13,7 +13,7 @@ mod support {
 }
 
 use proptest::prelude::*;
-use reddb_server::storage::query::parser::{self, ParseError, ParserLimits};
+use reddb_rql::parser::{self, ParseError, ParserLimits};
 use support::parser_hardening::{
     self as harness, assert_no_panic_on, corpus::queue_adversarial_inputs, queue_grammar,
     HardenedParser,
@@ -165,7 +165,7 @@ proptest! {
 // surface is exercised end-to-end through `parser::parse` and the
 // AST contract is observable from the consumer side.
 
-use reddb_server::storage::query::ast::{QueryExpr, QueueCommand, QueueSide};
+use reddb_rql::ast::{QueryExpr, QueueCommand, QueueSide};
 use reddb_server::storage::queue::QueueMode;
 
 fn parse_query(input: &str) -> QueryExpr {
@@ -239,7 +239,7 @@ fn create_queue_with_lock_deadline_and_in_flight_cap_parses() {
 
 #[test]
 fn create_queue_defaults_for_policy_clauses() {
-    use reddb_server::storage::query::{
+    use reddb_rql::ast::{
         DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP, DEFAULT_QUEUE_LOCK_DEADLINE_MS,
         DEFAULT_QUEUE_MAX_ATTEMPTS,
     };

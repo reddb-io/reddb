@@ -1,7 +1,7 @@
 //! cargo-fuzz target for the migration DSL parser (issue #88).
 //!
 //! Mirrors `sql_parser.rs`. Feeds arbitrary bytes prefixed with a
-//! migration keyword into `reddb_server::storage::query::parser::parse`
+//! migration keyword into `reddb_rql::parser::parse`
 //! and asserts the parser never panics.
 //!
 //! The migration grammar lives behind the same top-level entry as
@@ -23,7 +23,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use reddb_server::storage::query::parser;
+use reddb_rql::parser;
 
 const PREFIXES: &[&str] = &[
     "CREATE MIGRATION ",

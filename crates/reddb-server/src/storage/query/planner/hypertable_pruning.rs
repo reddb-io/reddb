@@ -21,8 +21,8 @@
 //! about), the pruner is conservative and keeps every chunk — exactly the
 //! Timescale / Postgres contract.
 
-use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
 use crate::storage::timeseries::{ChunkMeta, HypertableSpec};
+use reddb_rql::ast::{CompareOp, FieldRef, Filter};
 use reddb_types::Value;
 
 use super::partition_pruning::{

@@ -22,12 +22,12 @@ use super::indexed_scan::{
 };
 use super::*;
 use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
-use crate::storage::query::ast::geo_predicate::{geo_within_truth_test, GeoWithinPredicate};
-use crate::storage::query::sql_lowering::{
+use crate::storage::unified::manager::SegmentScanStats;
+use reddb_rql::ast::geo_predicate::{geo_within_truth_test, GeoWithinPredicate};
+use reddb_rql::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections,
 };
-use crate::storage::unified::manager::SegmentScanStats;
 
 thread_local! {
     static LAST_SEGMENT_SCAN_STATS: std::cell::Cell<SegmentScanStats> =
@@ -517,9 +517,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     //
     // Only QueryExpr::Table nested shapes are supported here —
     // joins / unions / CTEs in FROM-subquery position error loudly.
-    if let Some(crate::storage::query::ast::TableSource::Subquery(inner)) = &query.source {
+    if let Some(reddb_rql::ast::TableSource::Subquery(inner)) = &query.source {
         match inner.as_ref() {
-            crate::storage::query::ast::QueryExpr::Table(inner_table) => {
+            reddb_rql::ast::QueryExpr::Table(inner_table) => {
                 let mut records =
                     execute_runtime_canonical_table_query_indexed(db, inner_table, index_store)?;
 
@@ -714,9 +714,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let table_alias = query.alias.as_deref().unwrap_or(table_name);
             let filter_fully_covered = matches!(
                 filter,
-                crate::storage::query::ast::Filter::Between { .. }
-                    | crate::storage::query::ast::Filter::Compare { .. }
-                    | crate::storage::query::ast::Filter::In { .. }
+                reddb_rql::ast::Filter::Between { .. }
+                    | reddb_rql::ast::Filter::Compare { .. }
+                    | reddb_rql::ast::Filter::In { .. }
             );
             let compiled_filter = if filter_fully_covered {
                 None
@@ -2263,11 +2263,11 @@ fn collect_filter_document_path_roots(
 }
 
 fn collect_expr_document_path_roots(
-    expr: &crate::storage::query::ast::Expr,
+    expr: &reddb_rql::ast::Expr,
     query: &TableQuery,
     out: &mut Vec<Option<String>>,
 ) {
-    use crate::storage::query::ast::Expr;
+    use reddb_rql::ast::Expr;
     match expr {
         Expr::Literal { .. } | Expr::Parameter { .. } => {}
         Expr::Column { field, .. } => push_field_document_path_root(field, query, out),
@@ -2390,11 +2390,8 @@ fn runtime_filter_uses_document_path(filter: &Filter, query: &TableQuery) -> boo
 /// Runtime twin of the planner's `expr_uses_document_path` — must stay
 /// in sync so FAST PATH 2 gating agrees with the operator the planner
 /// chose. See `planner::logical_helpers::expr_uses_document_path`.
-fn runtime_expr_uses_document_path(
-    expr: &crate::storage::query::ast::Expr,
-    query: &TableQuery,
-) -> bool {
-    use crate::storage::query::ast::Expr;
+fn runtime_expr_uses_document_path(expr: &reddb_rql::ast::Expr, query: &TableQuery) -> bool {
+    use reddb_rql::ast::Expr;
     match expr {
         Expr::Literal { .. } | Expr::Parameter { .. } => false,
         Expr::Column { field, .. } => runtime_field_ref_uses_document_path(field, query),
@@ -2689,9 +2686,9 @@ fn fields_match_any(fields: &[String], candidates: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
-    use crate::storage::query::ast::{CompareOp, FieldRef, Filter, QueryExpr};
     use crate::storage::unified::EntityId;
     use crate::{RedDBOptions, RedDBRuntime};
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter, QueryExpr};
     use reddb_types::Value;
 
     fn rt() -> RedDBRuntime {
@@ -2790,14 +2787,13 @@ mod tests {
              VALUES ('city', 'Place', 'Paris')",
         );
 
-        let query =
-            match crate::storage::query::parser::parse("SELECT * WHERE passport = 'ABC123123'")
-                .expect("parse")
-                .query
-            {
-                QueryExpr::Table(query) => query,
-                other => panic!("expected table query, got {other:?}"),
-            };
+        let query = match reddb_rql::parser::parse("SELECT * WHERE passport = 'ABC123123'")
+            .expect("parse")
+            .query
+        {
+            QueryExpr::Table(query) => query,
+            other => panic!("expected table query, got {other:?}"),
+        };
         let filter = Filter::Compare {
             field: FieldRef::column("", "passport"),
             op: CompareOp::Eq,

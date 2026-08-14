@@ -121,8 +121,8 @@ fn with_redwire_wait_context<T>(
 /// Convert a lifecycle `QueueSide` view into the AST flavour we accept
 /// from `QueueCommand` callers. Both enums are isomorphic but live in
 /// different modules.
-fn ast_side_to_lc(side: crate::storage::query::ast::QueueSide) -> LcQueueSide {
-    use crate::storage::query::ast::QueueSide as Ast;
+fn ast_side_to_lc(side: reddb_rql::ast::QueueSide) -> LcQueueSide {
+    use reddb_rql::ast::QueueSide as Ast;
     match side {
         Ast::Left => LcQueueSide::Left,
         Ast::Right => LcQueueSide::Right,
@@ -396,8 +396,8 @@ impl RedDBRuntime {
     ) -> RedDBResult<RedwireWaitOutcome> {
         let group_owned: RedDBResult<String> =
             with_redwire_wait_context(&auth_identity, &tenant, || {
-                let expr = crate::storage::query::ast::QueryExpr::QueueCommand(
-                    crate::storage::query::ast::QueueCommand::GroupRead {
+                let expr = reddb_rql::ast::QueryExpr::QueueCommand(
+                    reddb_rql::ast::QueueCommand::GroupRead {
                         queue: queue.to_string(),
                         group: group.map(str::to_string),
                         consumer: consumer.to_string(),
@@ -1036,7 +1036,7 @@ impl RedDBRuntime {
                 if let Some(dedup_key) = dedup_key.as_deref() {
                     let window_ms = config
                         .dedup_window_ms
-                        .unwrap_or(crate::storage::query::DEFAULT_QUEUE_DEDUP_WINDOW_MS);
+                        .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_DEDUP_WINDOW_MS);
                     let expires_at_ns =
                         now_ns().saturating_add(window_ms.saturating_mul(1_000_000));
                     let metadata_id =
@@ -1056,12 +1056,10 @@ impl RedDBRuntime {
                 // absolute unix-ms. Both collapse to a unix-ns timestamp
                 // delivery paths compare against. `None` means immediate.
                 let available_at_ns = available.map(|a| match a {
-                    crate::storage::query::ast::QueueAvailability::DelayMs(ms) => {
+                    reddb_rql::ast::QueueAvailability::DelayMs(ms) => {
                         now_ns().saturating_add(ms.saturating_mul(1_000_000))
                     }
-                    crate::storage::query::ast::QueueAvailability::AtUnixMs(ms) => {
-                        ms.saturating_mul(1_000_000)
-                    }
+                    reddb_rql::ast::QueueAvailability::AtUnixMs(ms) => ms.saturating_mul(1_000_000),
                 });
                 if config.ttl_ms.is_some() || available_at_ns.is_some() || key.is_some() {
                     store
@@ -1986,9 +1984,9 @@ pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRunti
         max_size: None,
         ttl_ms: None,
         dlq: None,
-        max_attempts: crate::storage::query::DEFAULT_QUEUE_MAX_ATTEMPTS,
-        lock_deadline_ms: crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS,
-        in_flight_cap_per_group: crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP,
+        max_attempts: reddb_rql::ast::DEFAULT_QUEUE_MAX_ATTEMPTS,
+        lock_deadline_ms: reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS,
+        in_flight_cap_per_group: reddb_rql::ast::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP,
         retry_delay_ms: None,
         dedup_window_ms: None,
     };
@@ -2017,12 +2015,12 @@ pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRunti
                 dlq: row_text(row, "dlq"),
                 max_attempts: row_u64(row, "max_attempts")
                     .map(|value| value as u32)
-                    .unwrap_or(crate::storage::query::DEFAULT_QUEUE_MAX_ATTEMPTS),
+                    .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_MAX_ATTEMPTS),
                 lock_deadline_ms: row_u64(row, "lock_deadline_ms")
-                    .unwrap_or(crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS),
+                    .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS),
                 in_flight_cap_per_group: row_u64(row, "in_flight_cap_per_group")
                     .map(|value| value as u32)
-                    .unwrap_or(crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
+                    .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
                 retry_delay_ms: row_u64(row, "retry_delay_ms").filter(|v| *v > 0),
                 dedup_window_ms: row_u64(row, "dedup_window_ms"),
             })
@@ -2433,8 +2431,8 @@ pub(super) fn load_queue_message_views_with_runtime(
         crate::runtime::impl_core::rls_policy_filter_for_kind(
             rt,
             queue,
-            crate::storage::query::ast::PolicyAction::Select,
-            crate::storage::query::ast::PolicyTargetKind::Messages,
+            reddb_rql::ast::PolicyAction::Select,
+            reddb_rql::ast::PolicyTargetKind::Messages,
         )
     });
     let rls_enabled_but_denied = runtime.map(|rt| rt.is_rls_enabled(queue)).unwrap_or(false)

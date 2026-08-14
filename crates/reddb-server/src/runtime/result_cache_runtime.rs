@@ -51,27 +51,27 @@ fn result_cache_fingerprint(result: &RuntimeQueryResult) -> String {
     )
 }
 
-fn mode_to_byte(mode: crate::storage::query::modes::QueryMode) -> u8 {
+fn mode_to_byte(mode: reddb_rql::modes::QueryMode) -> u8 {
     match mode {
-        crate::storage::query::modes::QueryMode::Sql => 0,
-        crate::storage::query::modes::QueryMode::Gremlin => 1,
-        crate::storage::query::modes::QueryMode::Cypher => 2,
-        crate::storage::query::modes::QueryMode::Sparql => 3,
-        crate::storage::query::modes::QueryMode::Path => 4,
-        crate::storage::query::modes::QueryMode::Natural => 5,
-        crate::storage::query::modes::QueryMode::Unknown => 255,
+        reddb_rql::modes::QueryMode::Sql => 0,
+        reddb_rql::modes::QueryMode::Gremlin => 1,
+        reddb_rql::modes::QueryMode::Cypher => 2,
+        reddb_rql::modes::QueryMode::Sparql => 3,
+        reddb_rql::modes::QueryMode::Path => 4,
+        reddb_rql::modes::QueryMode::Natural => 5,
+        reddb_rql::modes::QueryMode::Unknown => 255,
     }
 }
 
-fn mode_from_byte(byte: u8) -> Option<crate::storage::query::modes::QueryMode> {
+fn mode_from_byte(byte: u8) -> Option<reddb_rql::modes::QueryMode> {
     match byte {
-        0 => Some(crate::storage::query::modes::QueryMode::Sql),
-        1 => Some(crate::storage::query::modes::QueryMode::Gremlin),
-        2 => Some(crate::storage::query::modes::QueryMode::Cypher),
-        3 => Some(crate::storage::query::modes::QueryMode::Sparql),
-        4 => Some(crate::storage::query::modes::QueryMode::Path),
-        5 => Some(crate::storage::query::modes::QueryMode::Natural),
-        255 => Some(crate::storage::query::modes::QueryMode::Unknown),
+        0 => Some(reddb_rql::modes::QueryMode::Sql),
+        1 => Some(reddb_rql::modes::QueryMode::Gremlin),
+        2 => Some(reddb_rql::modes::QueryMode::Cypher),
+        3 => Some(reddb_rql::modes::QueryMode::Sparql),
+        4 => Some(reddb_rql::modes::QueryMode::Path),
+        5 => Some(reddb_rql::modes::QueryMode::Natural),
+        255 => Some(reddb_rql::modes::QueryMode::Unknown),
         _ => None,
     }
 }

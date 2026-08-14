@@ -27,13 +27,13 @@ use super::filter_compiled::{
     EntityFieldKind,
 };
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::query::ast::{Expr, FieldRef, Projection};
-use crate::storage::query::sql_lowering::{
+use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
+use crate::RedDB;
+use reddb_rql::ast::{Expr, FieldRef, Projection};
+use reddb_rql::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections,
 };
-use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::RedDB;
 use reddb_types::Value;
 
 use super::TableQuery;

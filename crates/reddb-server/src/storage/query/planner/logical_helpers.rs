@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::storage::query::ast::{
+use crate::storage::query::is_universal_entity_source as is_universal_query_source;
+use crate::storage::query::planner::stats_provider::CatalogStatsProvider;
+use crate::storage::RedDB;
+use reddb_rql::ast::{
     Expr, FieldRef, Filter, FusionStrategy, JoinQuery, OrderByClause, Projection, QueryExpr,
     TableQuery,
 };
-use crate::storage::query::is_universal_entity_source as is_universal_query_source;
-use crate::storage::query::planner::stats_provider::CatalogStatsProvider;
-use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
-use crate::storage::RedDB;
+use reddb_rql::sql_lowering::{effective_table_filter, effective_table_projections};
 use reddb_types::Value;
 
 use super::{AccessPathDecision, CanonicalLogicalNode, CardinalityEstimate, CostEstimator};
@@ -1000,8 +1000,8 @@ pub(crate) fn summarize_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::query::ast::{Projection, QueryExpr, TableQuery};
     use crate::storage::query::planner::QueryPlanner;
+    use reddb_rql::ast::{Projection, QueryExpr, TableQuery};
 
     fn make_simple_query() -> QueryExpr {
         QueryExpr::Table(TableQuery {
@@ -1070,7 +1070,7 @@ mod tests {
     // `runtime_record_has_document_capability` gate dropped every plain
     // table row, so `WITHIN TENANT … SELECT …` returned 0 rows.
     use super::{expr_uses_document_path, filter_uses_document_path};
-    use crate::storage::query::ast::{CompareOp, Expr, FieldRef, Filter, Span};
+    use reddb_rql::ast::{CompareOp, Expr, FieldRef, Filter, Span};
 
     fn table_query(table: &str) -> TableQuery {
         match make_simple_query() {

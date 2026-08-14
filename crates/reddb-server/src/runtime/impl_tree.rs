@@ -2,10 +2,8 @@
 
 use crate::application::entity::json_to_metadata_value;
 use crate::application::ports::RuntimeEntityPort;
-use crate::storage::query::ast::{
-    CreateTreeQuery, DropTreeQuery, TreeCommand, TreeNodeSpec, TreePosition,
-};
 use crate::storage::unified::{Metadata, MetadataValue};
+use reddb_rql::ast::{CreateTreeQuery, DropTreeQuery, TreeCommand, TreeNodeSpec, TreePosition};
 
 use super::*;
 

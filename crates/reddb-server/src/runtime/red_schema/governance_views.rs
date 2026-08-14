@@ -576,7 +576,7 @@ pub(super) fn render_filter_for_catalog(filter: &Filter) -> String {
                 "{} {} {}",
                 render_field_for_catalog(field),
                 op,
-                crate::storage::query::renderer::render_value_sql(value)
+                reddb_rql::renderer::render_value_sql(value)
             )
         }
         Filter::CompareFields { left, op, right } => {
@@ -613,15 +613,15 @@ pub(super) fn render_filter_for_catalog(filter: &Filter) -> String {
             render_field_for_catalog(field),
             values
                 .iter()
-                .map(crate::storage::query::renderer::render_value_sql)
+                .map(reddb_rql::renderer::render_value_sql)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
         Filter::Between { field, low, high } => format!(
             "{} BETWEEN {} AND {}",
             render_field_for_catalog(field),
-            crate::storage::query::renderer::render_value_sql(low),
-            crate::storage::query::renderer::render_value_sql(high)
+            reddb_rql::renderer::render_value_sql(low),
+            reddb_rql::renderer::render_value_sql(high)
         ),
         Filter::Like { field, pattern } => {
             format!("{} LIKE '{}'", render_field_for_catalog(field), pattern)
@@ -648,7 +648,7 @@ pub(super) fn render_filter_for_catalog(filter: &Filter) -> String {
 
 pub(super) fn render_expr_for_catalog(expr: &Expr) -> String {
     match expr {
-        Expr::Literal { value, .. } => crate::storage::query::renderer::render_value_sql(value),
+        Expr::Literal { value, .. } => reddb_rql::renderer::render_value_sql(value),
         Expr::Column { field, .. } => render_field_for_catalog(field),
         Expr::Parameter { index, .. } => format!("${index}"),
         Expr::BinaryOp { op, lhs, rhs, .. } => format!(

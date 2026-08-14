@@ -6,7 +6,7 @@
 //! (future slices) can read them sub-ms. `ALTER QUEUE SET <clause>`
 //! mutates them. Defaults apply when clauses are omitted.
 
-use reddb_server::storage::query::{
+use reddb_rql::ast::{
     DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP, DEFAULT_QUEUE_LOCK_DEADLINE_MS,
     DEFAULT_QUEUE_MAX_ATTEMPTS,
 };

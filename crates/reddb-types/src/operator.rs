@@ -9,11 +9,10 @@
 //! Re-homing only the spine while leaving `BinOp` in the server would force
 //! this crate to depend back on `reddb-server` — the exact cycle ADR 0052
 //! exists to prevent. So the operator vocabulary moves here and the query
-//! AST (`reddb-server`'s `storage::query::ast`) re-exports it, keeping every
-//! existing `ast::BinOp` call-site untouched.
+//! AST in `reddb-rql` imports it directly, keeping one operator definition.
 //!
 //! The move is byte-faithful: the enum, its variant set, and the
-//! `precedence()` table are relocated verbatim from `storage::query::ast`.
+//! `precedence()` table was relocated verbatim from the former server AST.
 
 /// Syntactic binary operators. Parsed precedence determines grouping;
 /// this enum only identifies the operator itself. Comparison and logical

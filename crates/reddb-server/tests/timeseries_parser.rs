@@ -16,7 +16,7 @@ mod support {
 }
 
 use proptest::prelude::*;
-use reddb_server::storage::query::parser::{self, ParseError, ParserLimits};
+use reddb_rql::parser::{self, ParseError, ParserLimits};
 use support::parser_hardening::{
     self as harness, assert_no_panic_on, corpus::timeseries_adversarial_inputs, timeseries_grammar,
     HardenedParser,
@@ -161,7 +161,7 @@ proptest! {
 // future grammar tweak surfaces as a diff here rather than as a
 // silent behavioural drift downstream of the runtime dispatcher.
 
-use reddb_server::storage::query::ast::QueryExpr;
+use reddb_rql::ast::QueryExpr;
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)
