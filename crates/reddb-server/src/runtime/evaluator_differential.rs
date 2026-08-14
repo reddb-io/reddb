@@ -8,7 +8,8 @@ use std::collections::HashMap;
 
 use super::expr_eval::evaluate_runtime_expr;
 use super::join_filter::{
-    evaluate_runtime_filter, resolve_runtime_field, runtime_partial_cmp, runtime_values_equal,
+    evaluate_runtime_filter_result_with_db, resolve_runtime_field, runtime_partial_cmp,
+    runtime_values_equal,
 };
 use crate::storage::query::ast::{BinOp, CompareOp, Expr, FieldRef, Filter as RuntimeFilter, Span};
 use crate::storage::query::engine::binding::Value as BindingValue;
@@ -389,7 +390,16 @@ fn eval_runtime_filter_adapter(case: &Case) -> String {
     let Some((filter, record)) = runtime_filter_fixture(case) else {
         return "unsupported".to_string();
     };
-    evaluate_runtime_filter(&record, &filter, None, None).to_string()
+    match evaluate_runtime_filter_result_with_db(None, &record, &filter, None, None) {
+        Ok(value) => value.to_string(),
+        Err(crate::RedDBError::Query(message)) if message.contains("arithmetic overflow") => {
+            "error:overflow".to_string()
+        }
+        Err(crate::RedDBError::Query(message)) if message.contains("division by zero") => {
+            "error:division-by-zero".to_string()
+        }
+        Err(error) => format!("error:{error}"),
+    }
 }
 
 fn eval_legacy_filter(case: &Case) -> String {
@@ -523,6 +533,18 @@ fn runtime_filter_fixture(case: &Case) -> Option<(RuntimeFilter, UnifiedRecord)>
                 RuntimeFilter::And(Box::new(left), Box::new(right))
             } else {
                 RuntimeFilter::Or(Box::new(left), Box::new(right))
+            }
+        }
+        CaseKind::Binary { op, .. }
+            if matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+            ) =>
+        {
+            RuntimeFilter::CompareExpr {
+                lhs: expression_for(case)?,
+                op: CompareOp::Eq,
+                rhs: Expr::lit(Value::Boolean(true)),
             }
         }
         CaseKind::Like { value, pattern } => {

@@ -46,6 +46,31 @@ fn record_segment_scan_stats(stats: SegmentScanStats) {
     LAST_SEGMENT_SCAN_STATS.with(|slot| slot.set(stats));
 }
 
+fn filter_records_result(
+    records: Vec<UnifiedRecord>,
+    mut matches: impl FnMut(&UnifiedRecord) -> RedDBResult<bool>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let mut filtered = Vec::with_capacity(records.len());
+    for record in records {
+        if matches(&record)? {
+            filtered.push(record);
+        }
+    }
+    Ok(filtered)
+}
+
+fn runtime_filter_contains_compare_expr(filter: &Filter) -> bool {
+    match filter {
+        Filter::CompareExpr { .. } => true,
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            runtime_filter_contains_compare_expr(left)
+                || runtime_filter_contains_compare_expr(right)
+        }
+        Filter::Not(inner) => runtime_filter_contains_compare_expr(inner),
+        _ => false,
+    }
+}
+
 fn compiled_entity_filter_matches(
     db: &RedDB,
     compiled: &super::filter_compiled::CompiledEntityFilter,
@@ -530,15 +555,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 // back onto the inner projection keys.
                 let outer_alias = query.alias.as_deref();
                 if let Some(ref outer_filter) = effective_filter {
-                    records.retain(|record| {
-                        super::super::join_filter::evaluate_runtime_filter_with_db(
+                    records = filter_records_result(records, |record| {
+                        super::super::join_filter::evaluate_runtime_filter_result_with_db(
                             Some(db),
                             record,
                             outer_filter,
                             outer_alias,
                             outer_alias,
                         )
-                    });
+                    })?;
                 }
 
                 // Outer ORDER BY: sort the materialised records
@@ -1365,6 +1390,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let tag_index_can_filter = tag_series_candidates_for_filter.is_some();
 
     if effective_filter.is_some()
+        && !effective_filter
+            .as_ref()
+            .is_some_and(runtime_filter_contains_compare_expr)
         && (!effective_filter
             .as_ref()
             .is_some_and(|filter| runtime_filter_uses_document_path(filter, query))
@@ -1893,6 +1921,9 @@ pub(crate) fn execute_runtime_canonical_table_node(
             // creating UnifiedRecord for entities that match the filter.
             // Skip for universal sources ("any") which need cross-collection scanning.
             if effective_filter.is_some()
+                && !effective_filter
+                    .as_ref()
+                    .is_some_and(runtime_filter_contains_compare_expr)
                 && !effective_filter.as_ref().is_some_and(|filter| {
                     runtime_filter_uses_document_path(filter, context.query)
                 })
@@ -2043,15 +2074,15 @@ pub(crate) fn execute_runtime_canonical_table_node(
 
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if let Some(filter) = effective_filter.as_ref() {
-                records.retain(|record| {
-                    super::super::join_filter::evaluate_runtime_filter_with_db(
+                records = filter_records_result(records, |record| {
+                    super::super::join_filter::evaluate_runtime_filter_result_with_db(
                         Some(db),
                         record,
                         filter,
                         Some(context.table_name),
                         Some(context.table_alias),
                     )
-                });
+                })?;
             }
             Ok(records)
         }
@@ -2069,21 +2100,24 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 // root column the document path traverses; the resolver
                 // already parses JSON-in-TEXT, and an unresolvable path
                 // is excluded by the predicate itself.
-                records.retain(|record| {
-                    (runtime_record_has_document_capability(record)
+                records = filter_records_result(records, |record| {
+                    if !(runtime_record_has_document_capability(record)
                         || runtime_record_carries_filter_document_roots(
                             record,
                             filter,
                             context.query,
                         ))
-                        && evaluate_runtime_filter_with_db(
-                            Some(db),
-                            record,
-                            filter,
-                            Some(context.table_name),
-                            Some(context.table_alias),
-                        )
-                });
+                    {
+                        return Ok(false);
+                    }
+                    evaluate_runtime_filter_result_with_db(
+                        Some(db),
+                        record,
+                        filter,
+                        Some(context.table_name),
+                        Some(context.table_alias),
+                    )
+                })?;
             }
             Ok(records)
         }
@@ -2701,6 +2735,29 @@ mod tests {
     fn exec(rt: &RedDBRuntime, sql: &str) {
         rt.execute_query(sql)
             .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    }
+
+    #[test]
+    fn where_arithmetic_errors_do_not_switch_evaluators() {
+        let rt = rt();
+        exec(&rt, "CREATE TABLE where_errors (id INT)");
+        exec(&rt, "INSERT INTO where_errors (id) VALUES (1)");
+
+        let overflow = rt
+            .execute_query("SELECT id FROM where_errors WHERE 9223372036854775807 + 1 > 0")
+            .expect_err("WHERE integer overflow must propagate");
+        assert!(
+            overflow.to_string().contains("arithmetic overflow"),
+            "unexpected overflow error: {overflow}"
+        );
+
+        let division = rt
+            .execute_query("SELECT id FROM where_errors WHERE 1 / 0 > 0")
+            .expect_err("WHERE division by zero must propagate");
+        assert!(
+            division.to_string().contains("division by zero"),
+            "unexpected division error: {division}"
+        );
     }
 
     fn rid(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
