@@ -298,6 +298,8 @@ struct PreparedStatement {
 pub struct PreparedRegistry {
     statements: parking_lot::RwLock<BTreeMap<PreparedId, PreparedStatement>>,
     next_id: AtomicU64,
+    #[cfg(test)]
+    parse_count: AtomicU64,
     enabled: AtomicBool,
     capacity: NonZeroUsize,
 }
@@ -326,6 +328,8 @@ impl PreparedRegistry {
         Self {
             statements: parking_lot::RwLock::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
+            #[cfg(test)]
+            parse_count: AtomicU64::new(0),
             enabled: AtomicBool::new(!prepared_disabled_from_env()),
             capacity,
         }
@@ -335,6 +339,8 @@ impl PreparedRegistry {
     /// placeholders (ADR 0015).
     pub fn prepare(&self, runtime: &RedDBRuntime, sql: &str) -> RedDBResult<PreparedQuery> {
         self.ensure_enabled()?;
+        #[cfg(test)]
+        self.parse_count.fetch_add(1, Ordering::Relaxed);
         let shape = parse_multi(sql).map_err(|error| RedDBError::Query(error.to_string()))?;
         let indices = user_params::collect_indices(&shape);
         let parameter_count = indices.iter().copied().max().map_or(0, |index| index + 1);
@@ -429,6 +435,11 @@ impl PreparedRegistry {
             .read()
             .get(&id)
             .map(|statement| statement.ddl_epoch)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_count(&self) -> u64 {
+        self.parse_count.load(Ordering::Relaxed)
     }
 
     /// Drop a prepared entry — DEALLOCATE frees the shape, not just the
