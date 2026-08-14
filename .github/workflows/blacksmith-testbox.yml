@@ -35,7 +35,7 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: testbox-rust-1.91.0-2vcpu
@@ -62,7 +62,7 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: testbox-rust-1.91.0-4vcpu
@@ -89,7 +89,7 @@ jobs:
         with:
           version: '28.3'
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: testbox-rust-1.91.0-8vcpu
