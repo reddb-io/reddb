@@ -8,14 +8,15 @@
 //! lives in a `case_*` function that takes a `&Reddb`, so the *same* assertions
 //! run against **both** transports the issue requires:
 //!
-//! - **Embedded** (`memory://`) — always on. One `#[tokio::test]` per case,
-//!   named after the case ID (dots → underscores) so cross-driver CI dashboards
-//!   line up.
-//! - **Client** (`red://`, RedWire) — gated behind `RED_SMOKE=1` + `RED_BIN` and
-//!   the `grpc` feature (see the `client_transport` module). The harness spawns
-//!   one `red server` process and replays every case body over the wire,
-//!   proving the helper surface is transport-agnostic rather than asserting it
-//!   by comment.
+//! - **Embedded** (`memory://`) — always on.
+//! - **RedWire** (`red://`) — always on when the `redwire` feature is enabled.
+//!   Each case starts a `red server` process and runs the same case body over
+//!   the wire. `RED_BIN` can override the server path; otherwise the harness
+//!   expects the `red` binary beside the current test profile.
+//!
+//! The shared case list generates one `#[tokio::test]` per case and transport,
+//! named after the case ID (dots → underscores) so CI exposes every wire-path
+//! assertion instead of hiding them behind one aggregate smoke test.
 //!
 //! Other-language drivers MUST port the same case IDs verbatim.
 
@@ -573,6 +574,39 @@ async fn case_wire_probabilistic_hll_round_trip(db: &Reddb) {
 }
 
 // ============================================================================
+// One canonical case list, expanded once per transport below.
+// ============================================================================
+
+macro_rules! conformance_cases {
+    ($case:ident) => {
+        $case!(case_generic_query_no_params);
+        $case!(case_generic_query_with_params);
+        $case!(case_generic_insert_rid);
+        $case!(case_generic_bulk_insert_rids);
+        $case!(case_generic_delete);
+        $case!(case_documents_crud_nested_patch);
+        $case!(case_documents_delete_missing_no_error);
+        $case!(case_documents_patch_empty_rejects);
+        $case!(case_kv_exact_key_round_trip);
+        $case!(case_kv_missing_get_returns_none);
+        $case!(case_kv_delete_returns_envelope);
+        $case!(case_queues_fifo_peek_pop_len);
+        $case!(case_queues_empty_pop_returns_empty);
+        $case!(case_queues_purge_resets_len);
+        $case!(case_queues_push_key_dedup_and_combined);
+        $case!(case_queues_push_key_rejects_delay);
+        $case!(case_tx_commit_persists);
+        $case!(case_tx_rollback_discards);
+        $case!(case_errors_invalid_argument_empty_sql);
+        $case!(case_errors_not_found_document_get);
+        $case!(case_wire_vectors_sql_round_trip);
+        $case!(case_wire_graph_sql_round_trip);
+        $case!(case_wire_timeseries_sql_round_trip);
+        $case!(case_wire_probabilistic_hll_round_trip);
+    };
+}
+
+// ============================================================================
 // Embedded transport — `memory://`. One test per spec §12 case ID.
 // ============================================================================
 
@@ -591,122 +625,98 @@ macro_rules! embedded_case {
 mod embedded {
     use super::Reddb;
 
-    embedded_case!(case_generic_query_no_params);
-    embedded_case!(case_generic_query_with_params);
-    embedded_case!(case_generic_insert_rid);
-    embedded_case!(case_generic_bulk_insert_rids);
-    embedded_case!(case_generic_delete);
-    embedded_case!(case_documents_crud_nested_patch);
-    embedded_case!(case_documents_delete_missing_no_error);
-    embedded_case!(case_documents_patch_empty_rejects);
-    embedded_case!(case_kv_exact_key_round_trip);
-    embedded_case!(case_kv_missing_get_returns_none);
-    embedded_case!(case_kv_delete_returns_envelope);
-    embedded_case!(case_queues_fifo_peek_pop_len);
-    embedded_case!(case_queues_empty_pop_returns_empty);
-    embedded_case!(case_queues_purge_resets_len);
-    embedded_case!(case_queues_push_key_dedup_and_combined);
-    embedded_case!(case_queues_push_key_rejects_delay);
-    embedded_case!(case_tx_commit_persists);
-    embedded_case!(case_tx_rollback_discards);
-    embedded_case!(case_errors_invalid_argument_empty_sql);
-    embedded_case!(case_errors_not_found_document_get);
-    embedded_case!(case_wire_vectors_sql_round_trip);
-    embedded_case!(case_wire_graph_sql_round_trip);
-    embedded_case!(case_wire_timeseries_sql_round_trip);
-    embedded_case!(case_wire_probabilistic_hll_round_trip);
+    conformance_cases!(embedded_case);
 }
 
 // ============================================================================
-// Client transport — `red://` over RedWire. Replays every case body against a
-// live `red server`. Gated behind the `redwire` feature + `RED_SMOKE=1` +
-// `RED_BIN`, mirroring the `redwire_query_with_live` smoke contract so the
-// default `cargo test` run (embedded only) is unaffected.
+// RedWire transport — `red://`. One live-server test per spec §12 case ID.
 // ============================================================================
 
 #[cfg(feature = "redwire")]
-mod client_transport {
+mod redwire {
     use super::*;
     use std::net::TcpListener;
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    #[tokio::test]
-    async fn client_transport_conformance_suite() {
-        if std::env::var("RED_SMOKE").as_deref() != Ok("1") {
-            eprintln!(
-                "skipping client-transport conformance; set RED_SMOKE=1 and RED_BIN=/path/to/red"
-            );
-            return;
-        }
-        let bin = match std::env::var("RED_BIN") {
-            Ok(path) if std::path::Path::new(&path).exists() => path,
-            _ => {
-                eprintln!("skipping client-transport conformance; RED_BIN is unset or missing");
-                return;
+    macro_rules! redwire_case {
+        ($name:ident) => {
+            #[tokio::test]
+            async fn $name() {
+                let fixture = RedWireFixture::start().await;
+                super::$name(&fixture.db).await;
+                fixture.close().await;
             }
         };
-
-        let port = pick_free_port().expect("pick port");
-        // Held for the whole test: the TempDir guard removes the scratch DB
-        // directory on drop (incl. panic), after the server is killed below.
-        let data_dir_guard = tempfile::Builder::new()
-            .prefix("reddb-test-rust-conformance-")
-            .tempdir()
-            .expect("scratch dir");
-        let data_dir = data_dir_guard.path();
-
-        let mut server = Command::new(&bin)
-            .arg("server")
-            .arg("--wire-bind")
-            .arg(format!("127.0.0.1:{port}"))
-            .arg("--path")
-            .arg(data_dir.join("data.db"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn red server");
-
-        let result = run_suite(port).await;
-
-        let _ = server.kill();
-        let _ = server.wait();
-
-        result.expect("client-transport conformance suite");
     }
 
-    async fn run_suite(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-        let db = wait_for_connection(port).await?;
+    conformance_cases!(redwire_case);
 
-        // Same case bodies as the embedded suite — proves the helper surface
-        // is transport-agnostic rather than asserting it by comment.
-        case_generic_query_no_params(&db).await;
-        case_generic_query_with_params(&db).await;
-        case_generic_insert_rid(&db).await;
-        case_generic_bulk_insert_rids(&db).await;
-        case_generic_delete(&db).await;
-        case_documents_crud_nested_patch(&db).await;
-        case_documents_delete_missing_no_error(&db).await;
-        case_documents_patch_empty_rejects(&db).await;
-        case_kv_exact_key_round_trip(&db).await;
-        case_kv_missing_get_returns_none(&db).await;
-        case_kv_delete_returns_envelope(&db).await;
-        case_queues_fifo_peek_pop_len(&db).await;
-        case_queues_empty_pop_returns_empty(&db).await;
-        case_queues_purge_resets_len(&db).await;
-        case_queues_push_key_dedup_and_combined(&db).await;
-        case_queues_push_key_rejects_delay(&db).await;
-        case_tx_commit_persists(&db).await;
-        case_tx_rollback_discards(&db).await;
-        case_errors_invalid_argument_empty_sql(&db).await;
-        case_errors_not_found_document_get(&db).await;
-        case_wire_vectors_sql_round_trip(&db).await;
-        case_wire_graph_sql_round_trip(&db).await;
-        case_wire_timeseries_sql_round_trip(&db).await;
-        case_wire_probabilistic_hll_round_trip(&db).await;
+    struct RedWireFixture {
+        db: Reddb,
+        server: std::process::Child,
+        _data_dir: tempfile::TempDir,
+    }
 
-        let _ = db.close().await;
-        Ok(())
+    impl RedWireFixture {
+        async fn start() -> Self {
+            let bin = red_bin();
+            assert!(
+                bin.is_file(),
+                "RedWire conformance requires the red binary at {}; run cargo build --bin red or set RED_BIN",
+                bin.display()
+            );
+
+            let port = pick_free_port().expect("pick port");
+            let data_dir = tempfile::Builder::new()
+                .prefix("reddb-test-rust-conformance-")
+                .tempdir()
+                .expect("scratch dir");
+            let server = Command::new(&bin)
+                .arg("server")
+                .arg("--wire-bind")
+                .arg(format!("127.0.0.1:{port}"))
+                .arg("--path")
+                .arg(data_dir.path().join("data.db"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn red server");
+            let db = wait_for_connection(port)
+                .await
+                .expect("connect to RedWire conformance server");
+
+            Self {
+                db,
+                server,
+                _data_dir: data_dir,
+            }
+        }
+
+        async fn close(self) {
+            let _ = self.db.close().await;
+        }
+    }
+
+    impl Drop for RedWireFixture {
+        fn drop(&mut self) {
+            let _ = self.server.kill();
+            let _ = self.server.wait();
+        }
+    }
+
+    fn red_bin() -> PathBuf {
+        if let Some(path) = std::env::var_os("RED_BIN") {
+            return PathBuf::from(path);
+        }
+
+        let test_binary = std::env::current_exe().expect("resolve conformance test binary");
+        let profile_dir = test_binary
+            .parent()
+            .and_then(|deps| deps.parent())
+            .expect("conformance test binary must live under target/<profile>/deps");
+        profile_dir.join(format!("red{}", std::env::consts::EXE_SUFFIX))
     }
 
     async fn wait_for_connection(port: u16) -> Result<Reddb, Box<dyn std::error::Error>> {
