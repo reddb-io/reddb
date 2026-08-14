@@ -6,12 +6,19 @@
 # routes the issue to `ready-for-human` with `blocked:validation`
 # and the offending lines end up in the envelope.
 #
-# Contract (see ADR 0062):
+# Contract (see ADR 0062, and the hook table in the dev plugin's
+# `afk/docs/CONFIG.md` which is the authority on the stdio protocol):
 #   - Input:  RED_AFK_WORKTREE_PATH env + (optional) unified diff on
 #             stdin. The harness guarantees the worktree is on the
 #             worker branch with the attempt's commits applied.
-#   - Output: human-readable report on stdout. The AFK captures it
-#             for the envelope; we do NOT mutate context here.
+#   - Output: report goes to STDERR. Stdout is the engine's structured
+#             channel: "empty stdout -> context unchanged; JSON object
+#             -> AFK replaces the mutable slice; non-JSON stdout is a
+#             parse failure". We do NOT mutate context here, so stdout
+#             must stay empty. Printing the report to stdout aborted
+#             the merge and mislabelled it `merge-conflict` — it cost
+#             10 workers a full attempt each on 2026-08-13
+#             (red-skills#3862). Keep every report line `>&2`.
 #   - Exit:   0 = merge allowed; non-zero = merge BLOCKED.
 #             `pre_*` non-zero aborts the step, which is the gate.
 #
@@ -78,7 +85,7 @@ failed=0
 check() {
     local title="$1"
     local detail="$2"
-    printf '[FAIL] %s\n%s\n\n' "$title" "$detail"
+    printf '[FAIL] %s\n%s\n\n' "$title" "$detail" >&2
     failed=1
 }
 
@@ -191,5 +198,5 @@ if [ "$failed" -ne 0 ]; then
 fi
 
 printf 'pre_merge: OK (%s files, base=%s head=%s)\n' \
-    "$NUM_CHANGED" "$BASE" "$HEAD"
+    "$NUM_CHANGED" "$BASE" "$HEAD" >&2
 exit 0
