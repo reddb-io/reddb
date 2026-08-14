@@ -126,6 +126,29 @@ pub struct AskResult {
     pub retry_count: u32,
 }
 
+impl Default for AskResult {
+    fn default() -> Self {
+        Self {
+            answer: String::new(),
+            sources_flat: Vec::new(),
+            citations: Vec::new(),
+            validation: Validation {
+                ok: true,
+                warnings: Vec::new(),
+                errors: Vec::new(),
+            },
+            cache_hit: false,
+            provider: String::new(),
+            model: String::new(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: 0.0,
+            effective_mode: Mode::Strict,
+            retry_count: 0,
+        }
+    }
+}
+
 /// Serialise an [`AskResult`] to its canonical JSON envelope.
 ///
 /// Output is a `Value::Object` ready to drop into a JSON-RPC `result`
