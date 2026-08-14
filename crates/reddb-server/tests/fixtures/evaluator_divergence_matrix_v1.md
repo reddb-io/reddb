@@ -8,7 +8,6 @@ The table covers the known LIKE case/byte, NULL equality and 3VL, overflow, divi
 
 - `typed-expr`: `storage/query/evaluator.rs`
 - `runtime-expr`: `runtime/expr_eval.rs`
-- `compiled-scalar`: `runtime/scalar_evaluator.rs`
 - `runtime-filter`: `runtime/join_filter/filter.rs`
 - `legacy-filter`: `storage/query/filter.rs`
 - `compiled-filter`: `storage/query/filter_compiled.rs`
@@ -18,35 +17,35 @@ The table covers the known LIKE case/byte, NULL equality and 3VL, overflow, divi
 
 ## Matrix
 
-| family / case | typed-expr | runtime-expr | compiled-scalar | runtime-filter | legacy-filter | compiled-filter | types-compare | runtime-compare | executor-compare |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| NULL / 3VL / NULL = NULL | `null` | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
-| NULL / 3VL / NULL AND TRUE | `null` | `none` | `none` | `false` | `false` | `false` | `unsupported` | `unsupported` | `unsupported` |
-| NULL / 3VL / NULL OR FALSE | `null` | `none` | `none` | `false` | `false` | `false` | `unsupported` | `unsupported` | `unsupported` |
-| NULL / 3VL / missing column = NULL | `error:missing-column` | `none` | `none` | `false` | `false` | `compile-error:compiled filter: unknown column 'value'` | `unsupported` | `unsupported` | `unsupported` |
-| NULL / 3VL / missing column IS NULL | `error:missing-column` | `true` | `compile-error:scalar compile: unsupported shape (IS NULL)` | `true` | `true` | `compile-error:compiled filter: unknown column 'value'` | `unsupported` | `unsupported` | `unsupported` |
-| float edge cases / NaN = NaN | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` |
-| float edge cases / NaN < +inf | `error:operator Lt not defined for (Float, Float)` | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` |
-| float edge cases / -inf < +inf | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
-| float edge cases / -0.0 = 0.0 | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
-| integer boundaries / i64::MAX = same u64 | `true` | `true` | `true` | `true` | `false` | `false` | `true` | `true` | `unsupported` |
-| integer boundaries / i64::MIN < -1 | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
-| integer boundaries / i64::MAX < u64::MAX | `error:implicit cast UnsignedInteger -> Integer failed: number too large to fit in target type` | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `unsupported` |
-| arithmetic errors / i64::MAX + 1 | `error:overflow` | `i64:9223372036854775807` | `i64:9223372036854775807` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` |
-| arithmetic errors / 1 / 0 | `error:division-by-zero` | `none` | `none` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` |
-| numeric coercion / Integer(5) = Text(5) | `error:operator Eq not defined for (Integer, Text)` | `true` | `true` | `true` | `false` | `false` | `false` | `true` | `false` |
-| decimal / Decimal(1.0000) = DecimalText(1) | `error:operator Eq not defined for (Decimal, DecimalText)` | `false` | `false` | `false` | `false` | `false` | `true` | `false` | `unsupported` |
-| decimal / DecimalText(2) < DecimalText(10) | `error:operator Lt not defined for (DecimalText, DecimalText)` | `false` | `false` | `false` | `true` | `true` | `true` | `false` | `unsupported` |
-| unicode text / combining e-acute = precomposed | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` |
-| LIKE case / byte / AbC LIKE a% | `unsupported` | `unsupported` | `unsupported` | `false` | `true` | `true` | `unsupported` | `unsupported` | `unsupported` |
-| LIKE case / byte / café LIKE caf_ | `unsupported` | `unsupported` | `unsupported` | `false` | `true` | `true` | `unsupported` | `unsupported` | `unsupported` |
-| LIKE case / byte / combining e-acute LIKE _ | `unsupported` | `unsupported` | `unsupported` | `false` | `false` | `false` | `unsupported` | `unsupported` | `unsupported` |
-| LIKE case / byte / Turkish dotted İ LIKE i | `unsupported` | `unsupported` | `unsupported` | `false` | `true` | `true` | `unsupported` | `unsupported` | `unsupported` |
-| LIKE case / byte / Turkish dotless ı LIKE I | `unsupported` | `unsupported` | `unsupported` | `false` | `false` | `false` | `unsupported` | `unsupported` | `unsupported` |
-| temporal / Timestamp(1) < Timestamp(2) | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `unsupported` |
-| temporal / Date(1) < Date(2) | `error:operator Lt not defined for (Date, Date)` | `true` | `true` | `true` | `false` | `false` | `false` | `true` | `unsupported` |
-| temporal / Time(1) < Time(2) | `error:operator Lt not defined for (Time, Time)` | `true` | `true` | `true` | `false` | `false` | `false` | `true` | `unsupported` |
-| boolean / FALSE < TRUE | `error:operator Lt not defined for (Boolean, Boolean)` | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
+| family / case | typed-expr | runtime-expr | runtime-filter | legacy-filter | compiled-filter | types-compare | runtime-compare | executor-compare |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| NULL / 3VL / NULL = NULL | `null` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
+| NULL / 3VL / NULL AND TRUE | `null` | `none` | `false` | `false` | `false` | `unsupported` | `unsupported` | `unsupported` |
+| NULL / 3VL / NULL OR FALSE | `null` | `none` | `false` | `false` | `false` | `unsupported` | `unsupported` | `unsupported` |
+| NULL / 3VL / missing column = NULL | `error:missing-column` | `none` | `false` | `false` | `compile-error:compiled filter: unknown column 'value'` | `unsupported` | `unsupported` | `unsupported` |
+| NULL / 3VL / missing column IS NULL | `error:missing-column` | `true` | `true` | `true` | `compile-error:compiled filter: unknown column 'value'` | `unsupported` | `unsupported` | `unsupported` |
+| float edge cases / NaN = NaN | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` |
+| float edge cases / NaN < +inf | `error:operator Lt not defined for (Float, Float)` | `false` | `false` | `false` | `false` | `false` | `false` | `false` |
+| float edge cases / -inf < +inf | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
+| float edge cases / -0.0 = 0.0 | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
+| integer boundaries / i64::MAX = same u64 | `true` | `true` | `true` | `false` | `false` | `true` | `true` | `unsupported` |
+| integer boundaries / i64::MIN < -1 | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
+| integer boundaries / i64::MAX < u64::MAX | `error:implicit cast UnsignedInteger -> Integer failed: number too large to fit in target type` | `true` | `true` | `true` | `true` | `true` | `true` | `unsupported` |
+| arithmetic errors / i64::MAX + 1 | `error:overflow` | `i64:9223372036854775807` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` |
+| arithmetic errors / 1 / 0 | `error:division-by-zero` | `none` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` |
+| numeric coercion / Integer(5) = Text(5) | `error:operator Eq not defined for (Integer, Text)` | `true` | `true` | `false` | `false` | `false` | `true` | `false` |
+| decimal / Decimal(1.0000) = DecimalText(1) | `error:operator Eq not defined for (Decimal, DecimalText)` | `false` | `false` | `false` | `false` | `true` | `false` | `unsupported` |
+| decimal / DecimalText(2) < DecimalText(10) | `error:operator Lt not defined for (DecimalText, DecimalText)` | `false` | `false` | `true` | `true` | `true` | `false` | `unsupported` |
+| unicode text / combining e-acute = precomposed | `false` | `false` | `false` | `false` | `false` | `false` | `false` | `false` |
+| LIKE case / byte / AbC LIKE a% | `unsupported` | `unsupported` | `false` | `true` | `true` | `unsupported` | `unsupported` | `unsupported` |
+| LIKE case / byte / café LIKE caf_ | `unsupported` | `unsupported` | `false` | `true` | `true` | `unsupported` | `unsupported` | `unsupported` |
+| LIKE case / byte / combining e-acute LIKE _ | `unsupported` | `unsupported` | `false` | `false` | `false` | `unsupported` | `unsupported` | `unsupported` |
+| LIKE case / byte / Turkish dotted İ LIKE i | `unsupported` | `unsupported` | `false` | `true` | `true` | `unsupported` | `unsupported` | `unsupported` |
+| LIKE case / byte / Turkish dotless ı LIKE I | `unsupported` | `unsupported` | `false` | `false` | `false` | `unsupported` | `unsupported` | `unsupported` |
+| temporal / Timestamp(1) < Timestamp(2) | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `unsupported` |
+| temporal / Date(1) < Date(2) | `error:operator Lt not defined for (Date, Date)` | `true` | `true` | `false` | `false` | `false` | `true` | `unsupported` |
+| temporal / Time(1) < Time(2) | `error:operator Lt not defined for (Time, Time)` | `true` | `true` | `false` | `false` | `false` | `true` | `unsupported` |
+| boolean / FALSE < TRUE | `error:operator Lt not defined for (Boolean, Boolean)` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
 
 ## Regeneration
 

@@ -10,7 +10,6 @@ use super::expr_eval::evaluate_runtime_expr;
 use super::join_filter::{
     evaluate_runtime_filter, resolve_runtime_field, runtime_partial_cmp, runtime_values_equal,
 };
-use super::scalar_evaluator::{DefaultScalarEvaluator, PermissiveScope, ScalarEvaluator};
 use crate::storage::query::ast::{BinOp, CompareOp, Expr, FieldRef, Filter as RuntimeFilter, Span};
 use crate::storage::query::engine::binding::Value as BindingValue;
 use crate::storage::query::filter::Filter as StorageFilter;
@@ -293,11 +292,10 @@ fn cases() -> Vec<Case> {
 
 type Adapter = (&'static str, fn(&Case) -> String);
 
-fn adapters() -> [Adapter; 9] {
+fn adapters() -> [Adapter; 8] {
     [
         ("typed-expr", eval_typed_expr),
         ("runtime-expr", eval_runtime_expr),
-        ("compiled-scalar", eval_compiled_scalar),
         ("runtime-filter", eval_runtime_filter_adapter),
         ("legacy-filter", eval_legacy_filter),
         ("compiled-filter", eval_compiled_filter),
@@ -324,7 +322,6 @@ operand.\n\n\
 ## Implementations\n\n\
 - `typed-expr`: `storage/query/evaluator.rs`\n\
 - `runtime-expr`: `runtime/expr_eval.rs`\n\
-- `compiled-scalar`: `runtime/scalar_evaluator.rs`\n\
 - `runtime-filter`: `runtime/join_filter/filter.rs`\n\
 - `legacy-filter`: `storage/query/filter.rs`\n\
 - `compiled-filter`: `storage/query/filter_compiled.rs`\n\
@@ -332,8 +329,8 @@ operand.\n\n\
 - `runtime-compare`: `runtime/join_filter/value_compare.rs`\n\
 - `executor-compare`: `storage/query/executors/value_compare.rs`\n\n\
 ## Matrix\n\n\
-| family / case | typed-expr | runtime-expr | compiled-scalar | runtime-filter | legacy-filter | compiled-filter | types-compare | runtime-compare | executor-compare |\n\
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+| family / case | typed-expr | runtime-expr | runtime-filter | legacy-filter | compiled-filter | types-compare | runtime-compare | executor-compare |\n\
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
 
     for case in cases() {
@@ -386,18 +383,6 @@ fn eval_runtime_expr(case: &Case) -> String {
     };
     let record = UnifiedRecord::new();
     render_optional_value(evaluate_runtime_expr(&expr, &record, None, None))
-}
-
-fn eval_compiled_scalar(case: &Case) -> String {
-    let Some(expr) = expression_for(case) else {
-        return "unsupported".to_string();
-    };
-    let record = UnifiedRecord::new();
-    let evaluator = DefaultScalarEvaluator;
-    match evaluator.compile(&expr, &PermissiveScope) {
-        Ok(compiled) => render_optional_value(evaluator.eval(&compiled, &record, None, None)),
-        Err(error) => format!("compile-error:{error}"),
-    }
 }
 
 fn eval_runtime_filter_adapter(case: &Case) -> String {

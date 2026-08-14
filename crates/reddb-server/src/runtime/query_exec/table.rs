@@ -198,11 +198,6 @@ fn execute_geo_candidate_scan(
         .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
-    let compiled = crate::runtime::scalar_evaluator::compile_filter(
-        filter,
-        &crate::runtime::scalar_evaluator::PermissiveScope,
-    );
-
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let hydrate_store = db.store();
     let mut records = Vec::new();
@@ -220,10 +215,10 @@ fn execute_geo_candidate_scan(
         let Some(record) = runtime_table_record_from_entity(hydrated) else {
             return true;
         };
-        if crate::runtime::scalar_evaluator::evaluate_compiled_filter(
+        if super::super::join_filter::evaluate_runtime_filter_with_db(
             Some(db),
-            &compiled,
             &record,
+            filter,
             Some(table_name),
             Some(table_alias),
         ) {
@@ -1296,15 +1291,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 Some(candidate_collections.as_slice()),
                 None,
             )?;
-            let compiled = crate::runtime::scalar_evaluator::compile_filter(
-                filter,
-                &crate::runtime::scalar_evaluator::PermissiveScope,
-            );
             records.retain(|record| {
-                crate::runtime::scalar_evaluator::evaluate_compiled_filter(
+                super::super::join_filter::evaluate_runtime_filter_with_db(
                     Some(db),
-                    &compiled,
                     record,
+                    filter,
                     Some(table_name),
                     Some(table_alias),
                 )
@@ -2052,22 +2043,11 @@ pub(crate) fn execute_runtime_canonical_table_node(
 
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if let Some(filter) = effective_filter.as_ref() {
-                // Compile the filter through the ScalarEvaluator
-                // interface ONCE before the per-row loop. Every
-                // `Filter::CompareExpr` arm has its operator / cast /
-                // function entries resolved here; the per-row
-                // dispatch below only walks the resolved IR. Other
-                // Filter variants stay on the legacy walker via the
-                // `Legacy` arm of `CompiledFilter`.
-                let compiled = crate::runtime::scalar_evaluator::compile_filter(
-                    filter,
-                    &crate::runtime::scalar_evaluator::PermissiveScope,
-                );
                 records.retain(|record| {
-                    crate::runtime::scalar_evaluator::evaluate_compiled_filter(
+                    super::super::join_filter::evaluate_runtime_filter_with_db(
                         Some(db),
-                        &compiled,
                         record,
+                        filter,
                         Some(context.table_name),
                         Some(context.table_alias),
                     )
