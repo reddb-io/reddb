@@ -523,39 +523,29 @@ impl UnifiedStore {
         Ok(())
     }
 
-    pub(crate) fn publish_operational_collection_create(
+    pub(crate) fn prepare_operational_collection_create(
         &self,
         name: &str,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<reddb_file::PreparedCollectionCreate<reddb_file::StdVfs>>, StoreError> {
         let Some(path) = &self.db_path else {
-            return Ok(());
+            return Ok(None);
         };
         crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
-            .create_collection(name)
+            .prepare_collection_create(name)
+            .map(Some)
             .map_err(StoreError::Io)
     }
 
-    pub(crate) fn publish_operational_collection_pending_drop(
+    pub(crate) fn prepare_operational_collection_drop(
         &self,
         name: &str,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<reddb_file::PreparedCollectionDrop<reddb_file::StdVfs>>, StoreError> {
         let Some(path) = &self.db_path else {
-            return Ok(());
+            return Ok(None);
         };
         crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
-            .begin_drop_collection(name)
-            .map_err(StoreError::Io)
-    }
-
-    pub(crate) fn publish_operational_collection_drop_finished(
-        &self,
-        name: &str,
-    ) -> Result<(), StoreError> {
-        let Some(path) = &self.db_path else {
-            return Ok(());
-        };
-        crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
-            .finish_drop_collection(name)
+            .prepare_collection_drop(name)
+            .map(Some)
             .map_err(StoreError::Io)
     }
 

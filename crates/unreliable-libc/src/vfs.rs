@@ -48,7 +48,7 @@
 
 use crate::prng::SplitMix64;
 use reddb_file::dst::{self, FaultClass, FaultDecision, FaultRecord};
-use reddb_file::{OpenMode, Vfs, VfsFile};
+use reddb_file::{OpenMode, Vfs, VfsDirEntry, VfsFile};
 use std::collections::HashMap;
 use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -610,7 +610,13 @@ impl Vfs for SimVfs {
             return Err(power_cut_error());
         }
         let exists = state.files.contains_key(path);
-        if !exists && !mode.create {
+        if mode.create_new && exists {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "file already exists",
+            ));
+        }
+        if !exists && !mode.create && !mode.create_new {
             return Err(io::Error::new(io::ErrorKind::NotFound, "no such file"));
         }
         let entry = state.files.entry(path.to_path_buf()).or_default();
@@ -674,6 +680,72 @@ impl Vfs for SimVfs {
             file.dirty.clear();
         }
         Ok(())
+    }
+
+    fn create_dir_all(&self, _dir: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<VfsDirEntry>> {
+        let state = self.lock();
+        let mut entries = Vec::new();
+        for path in state.files.keys() {
+            let Ok(relative) = path.strip_prefix(dir) else {
+                continue;
+            };
+            let Some(component) = relative.components().next() else {
+                continue;
+            };
+            let child = dir.join(component);
+            if entries
+                .iter()
+                .any(|entry: &VfsDirEntry| entry.path == child)
+            {
+                continue;
+            }
+            let is_file = path == &child;
+            entries.push(VfsDirEntry {
+                file_name: child
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                path: child,
+                is_file,
+                is_dir: !is_file,
+            });
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(entries)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        let mut state = self.lock();
+        state
+            .files
+            .remove(path)
+            .map(|_| ())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "file not found"))
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        let mut state = self.lock();
+        state
+            .files
+            .retain(|candidate, _| !candidate.starts_with(path));
+        Ok(())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        let state = self.lock();
+        state.files.contains_key(path)
+            || state
+                .files
+                .keys()
+                .any(|candidate| candidate.starts_with(path))
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        self.lock().files.contains_key(path)
     }
 }
 

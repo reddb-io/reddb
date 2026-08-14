@@ -72,7 +72,7 @@ mod tests {
             store.create_collection("gone").unwrap();
         }
         let manifest = OperationalManifest::for_db_path(&path);
-        manifest.begin_drop_collection("gone").unwrap();
+        let _drop = manifest.prepare_collection_drop("gone").unwrap();
 
         let reopened = UnifiedStore::open(&path).unwrap();
         assert!(reopened.get_collection("gone").is_none());

@@ -5,11 +5,12 @@
 //! runtime crates do not define persistent manifest formats.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+
+use crate::{OpenMode, StdVfs, Vfs, VfsFile};
 
 use crate::append_only_segment::{
     append_only_segment_chunk_checksums, decode_append_only_segment, AppendOnlySegmentBloom,
@@ -130,16 +131,51 @@ struct AppendOnlyRetiredState {
 }
 
 #[derive(Debug, Clone)]
-pub struct OperationalManifest {
+pub struct OperationalManifest<V = StdVfs> {
     root: PathBuf,
+    vfs: V,
 }
 
-impl OperationalManifest {
+/// Manifest-owned create operation. Construction durably prepares the physical
+/// collection file; [`publish`](Self::publish) is the only legal next phase.
+pub struct PreparedCollectionCreate<V: Vfs> {
+    manifest: OperationalManifest<V>,
+    name: String,
+}
+
+impl<V: Vfs> PreparedCollectionCreate<V> {
+    pub fn publish(self) -> io::Result<()> {
+        self.manifest.publish_collection_create(&self.name)
+    }
+}
+
+/// Manifest-owned drop operation. Construction durably publishes
+/// `pending_drop`; [`finish`](Self::finish) removes the physical file and then
+/// publishes the final manifest generation.
+pub struct PreparedCollectionDrop<V: Vfs> {
+    manifest: OperationalManifest<V>,
+    name: String,
+}
+
+impl<V: Vfs> PreparedCollectionDrop<V> {
+    pub fn finish(self) -> io::Result<()> {
+        self.manifest.finish_drop_collection(&self.name)
+    }
+}
+
+impl OperationalManifest<StdVfs> {
     pub fn for_db_path(path: &Path) -> Self {
+        Self::with_vfs(path, StdVfs)
+    }
+}
+
+impl<V: Vfs> OperationalManifest<V> {
+    pub fn with_vfs(path: &Path, vfs: V) -> Self {
         let mut root = path.as_os_str().to_os_string();
         root.push(".ops");
         Self {
             root: PathBuf::from(root),
+            vfs,
         }
     }
 
@@ -192,7 +228,7 @@ impl OperationalManifest {
             let fork_referenced_paths = self.fork_referenced_collection_paths()?;
             for (_, path) in &pending_drops {
                 if !fork_referenced_paths.contains(path) {
-                    let _ = fs::remove_file(self.collections_dir().join(path));
+                    let _ = self.vfs.remove_file(&self.collections_dir().join(path));
                 }
             }
             for (name, _) in pending_drops {
@@ -213,7 +249,9 @@ impl OperationalManifest {
             .collect::<Vec<_>>();
         if !pending_segments.is_empty() {
             for entry in &pending_segments {
-                let _ = fs::remove_file(self.append_only_segments_dir().join(&entry.path));
+                let _ = self
+                    .vfs
+                    .remove_file(&self.append_only_segments_dir().join(&entry.path));
                 record_retired_append_only_segment(&mut manifest, entry);
             }
             manifest
@@ -231,7 +269,31 @@ impl OperationalManifest {
     }
 
     pub fn create_collection(&self, name: &str) -> io::Result<()> {
+        self.prepare_collection_create(name)?.publish()
+    }
+
+    pub fn prepare_collection_create(&self, name: &str) -> io::Result<PreparedCollectionCreate<V>> {
         self.ensure_dirs()?;
+        let manifest = self.load_current()?.unwrap_or_else(empty_manifest);
+        if matches!(
+            manifest.collections.get(name).map(|entry| entry.state),
+            Some(CollectionState::Active)
+        ) {
+            return Ok(PreparedCollectionCreate {
+                manifest: self.clone(),
+                name: name.to_string(),
+            });
+        }
+
+        let path = self.collection_file_name(name);
+        self.prepare_collection_file_by_name(&path)?;
+        Ok(PreparedCollectionCreate {
+            manifest: self.clone(),
+            name: name.to_string(),
+        })
+    }
+
+    fn publish_collection_create(&self, name: &str) -> io::Result<()> {
         let mut manifest = self.load_current()?.unwrap_or_else(empty_manifest);
         if matches!(
             manifest.collections.get(name).map(|entry| entry.state),
@@ -239,9 +301,7 @@ impl OperationalManifest {
         ) {
             return Ok(());
         }
-
         let path = self.collection_file_name(name);
-        self.prepare_collection_file_by_name(&path)?;
         manifest.collections.insert(
             name.to_string(),
             CollectionEntry {
@@ -254,21 +314,29 @@ impl OperationalManifest {
         self.publish(&manifest)
     }
 
-    pub fn begin_drop_collection(&self, name: &str) -> io::Result<()> {
+    pub fn prepare_collection_drop(&self, name: &str) -> io::Result<PreparedCollectionDrop<V>> {
         self.ensure_dirs()?;
         let mut manifest = match self.load_current()? {
             Some(manifest) => manifest,
-            None => return Ok(()),
+            None => {
+                return Ok(PreparedCollectionDrop {
+                    manifest: self.clone(),
+                    name: name.to_string(),
+                })
+            }
         };
-        let Some(entry) = manifest.collections.get_mut(name) else {
-            return Ok(());
-        };
-        entry.state = CollectionState::PendingDrop;
-        manifest.generation += 1;
-        self.publish(&manifest)
+        if let Some(entry) = manifest.collections.get_mut(name) {
+            entry.state = CollectionState::PendingDrop;
+            manifest.generation += 1;
+            self.publish(&manifest)?;
+        }
+        Ok(PreparedCollectionDrop {
+            manifest: self.clone(),
+            name: name.to_string(),
+        })
     }
 
-    pub fn finish_drop_collection(&self, name: &str) -> io::Result<()> {
+    fn finish_drop_collection(&self, name: &str) -> io::Result<()> {
         self.ensure_dirs()?;
         let mut manifest = match self.load_current()? {
             Some(manifest) => manifest,
@@ -281,7 +349,9 @@ impl OperationalManifest {
             .fork_referenced_collection_paths()?
             .contains(&entry.path)
         {
-            let _ = fs::remove_file(self.collections_dir().join(entry.path));
+            let _ = self
+                .vfs
+                .remove_file(&self.collections_dir().join(entry.path));
         }
         manifest.generation += 1;
         self.publish(&manifest)
@@ -334,21 +404,18 @@ impl OperationalManifest {
 
         let path = self.append_only_segment_file_name(collection, segment_id);
         let segment_path = self.append_only_segments_dir().join(&path);
-        if segment_path.exists() {
+        if self.vfs.exists(&segment_path) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("closed append-only segment already exists: {path}"),
             ));
         }
         {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&segment_path)?;
+            let mut file = self.vfs.open(&segment_path, OpenMode::create_new())?;
             file.write_all(bytes)?;
             file.sync_all()?;
         }
-        sync_dir(&self.append_only_segments_dir())?;
+        self.vfs.sync_dir(&self.append_only_segments_dir())?;
 
         let entry = AppendOnlySegmentManifestEntry {
             collection: collection.to_string(),
@@ -436,7 +503,9 @@ impl OperationalManifest {
             return Ok(false);
         };
         let entry = manifest.append_only_segments.remove(index);
-        let _ = fs::remove_file(self.append_only_segments_dir().join(&entry.path));
+        let _ = self
+            .vfs
+            .remove_file(&self.append_only_segments_dir().join(&entry.path));
         record_retired_append_only_segment(&mut manifest, &entry);
         manifest.generation += 1;
         self.publish(&manifest)?;
@@ -522,20 +591,20 @@ impl OperationalManifest {
         );
         manifest.generation += 1;
         let bytes = manifest_to_bytes(&manifest)?;
-        fs::write(self.root.join(NEXT_MANIFEST_FILE), bytes)
+        self.write_file(&self.root.join(NEXT_MANIFEST_FILE), &bytes, false)
     }
 
     fn ensure_dirs(&self) -> io::Result<()> {
-        fs::create_dir_all(self.collections_dir())?;
-        fs::create_dir_all(self.append_only_segments_dir())?;
-        fs::create_dir_all(self.quarantine_dir())?;
-        sync_dir(&self.root)?;
+        self.vfs.create_dir_all(&self.collections_dir())?;
+        self.vfs.create_dir_all(&self.append_only_segments_dir())?;
+        self.vfs.create_dir_all(&self.quarantine_dir())?;
+        self.vfs.sync_dir(&self.root)?;
         Ok(())
     }
 
     fn load_current(&self) -> io::Result<Option<Manifest>> {
         let path = self.root.join(MANIFEST_FILE);
-        match fs::read(&path) {
+        match self.read_file(&path) {
             Ok(bytes) => manifest_from_bytes(&bytes).map(Some),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err),
@@ -548,23 +617,19 @@ impl OperationalManifest {
         let next = self.root.join(NEXT_MANIFEST_FILE);
         let bytes = manifest_to_bytes(manifest)?;
         {
-            let mut file = File::create(&next)?;
+            let mut file = self.vfs.open(&next, OpenMode::create_truncate())?;
             file.write_all(&bytes)?;
             file.sync_all()?;
         }
-        fs::rename(&next, &current)?;
-        sync_dir(&self.root)
+        self.vfs.rename(&next, &current)?;
+        self.vfs.sync_dir(&self.root)
     }
 
     fn prepare_collection_file_by_name(&self, file_name: &str) -> io::Result<()> {
         let path = self.collections_dir().join(file_name);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)?;
+        let mut file = self.vfs.open(&path, OpenMode::create_keep_write())?;
         file.sync_all()?;
-        sync_dir(&self.collections_dir())
+        self.vfs.sync_dir(&self.collections_dir())
     }
 
     fn quarantine_unreferenced_collection_files(
@@ -588,25 +653,22 @@ impl OperationalManifest {
         dir: &Path,
         active_paths: &BTreeSet<String>,
     ) -> io::Result<()> {
-        if !dir.exists() {
+        if !self.vfs.exists(dir) {
             return Ok(());
         }
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            if !file_type.is_file() {
+        for entry in self.vfs.read_dir(dir)? {
+            if !entry.is_file {
                 continue;
             }
-            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let file_name = entry.file_name;
             if active_paths.contains(&file_name) {
                 continue;
             }
-            let from = entry.path();
-            let to = unique_quarantine_path(&self.quarantine_dir(), &file_name);
-            fs::rename(from, to)?;
+            let to = self.unique_quarantine_path(&file_name);
+            self.vfs.rename(&entry.path, &to)?;
         }
-        sync_dir(dir)?;
-        sync_dir(&self.quarantine_dir())
+        self.vfs.sync_dir(dir)?;
+        self.vfs.sync_dir(&self.quarantine_dir())
     }
 
     fn validate_manifest_artifacts(&self, manifest: &Manifest) -> io::Result<()> {
@@ -615,7 +677,7 @@ impl OperationalManifest {
                 continue;
             }
             if let Some(source) = &entry.source {
-                if !Path::new(source).is_file() {
+                if !self.vfs.is_file(Path::new(source)) {
                     return Err(invalid_data(format!(
                         "missing collection artifact for shared fork source {name}: {source}"
                     )));
@@ -623,7 +685,7 @@ impl OperationalManifest {
                 continue;
             }
             let path = self.collections_dir().join(&entry.path);
-            if !path.is_file() {
+            if !self.vfs.is_file(&path) {
                 return Err(invalid_data(format!(
                     "missing collection artifact for {name}: {}",
                     path.display()
@@ -635,7 +697,7 @@ impl OperationalManifest {
                 continue;
             }
             let path = self.append_only_segments_dir().join(&entry.path);
-            if !path.is_file() {
+            if !self.vfs.is_file(&path) {
                 return Err(invalid_data(format!(
                     "missing append-only artifact for {}/{}: {}",
                     entry.collection,
@@ -645,6 +707,53 @@ impl OperationalManifest {
             }
         }
         Ok(())
+    }
+
+    fn read_file(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let mut file = self.vfs.open(path, OpenMode::read_only())?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 8 * 1024];
+        loop {
+            let read = file.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        Ok(bytes)
+    }
+
+    fn write_file(&self, path: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
+        let mut file = self.vfs.open(path, OpenMode::create_truncate())?;
+        file.write_all(bytes)?;
+        if sync {
+            file.sync_all()?;
+        }
+        Ok(())
+    }
+
+    fn copy_file_durable(&self, source: &Path, dest: &Path) -> io::Result<()> {
+        let bytes = self.read_file(source)?;
+        self.write_file(dest, &bytes, true)?;
+        if let Some(parent) = dest.parent() {
+            self.vfs.sync_dir(parent)?;
+        }
+        Ok(())
+    }
+
+    fn unique_quarantine_path(&self, file_name: &str) -> PathBuf {
+        let mut candidate = self.quarantine_dir().join(file_name);
+        if !self.vfs.exists(&candidate) {
+            return candidate;
+        }
+        for n in 1.. {
+            candidate = self.quarantine_dir().join(format!("{file_name}.{n}"));
+            if !self.vfs.exists(&candidate) {
+                return candidate;
+            }
+        }
+        unreachable!()
     }
 
     fn collections_dir(&self) -> PathBuf {
@@ -1210,20 +1319,6 @@ fn u8_from_u64(value: u64) -> io::Result<u8> {
     u8::try_from(value).map_err(|_| invalid_data(format!("value does not fit u8: {value}")))
 }
 
-fn unique_quarantine_path(dir: &Path, file_name: &str) -> PathBuf {
-    let mut candidate = dir.join(file_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    for n in 1.. {
-        candidate = dir.join(format!("{file_name}.{n}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    unreachable!()
-}
-
 /// Escape an arbitrary name into a single safe path component (no separators),
 /// mirroring the collection-file escaping so a fork name like `tenant/exp 1`
 /// becomes one directory.
@@ -1242,27 +1337,14 @@ fn sanitize_component(name: &str) -> String {
 
 /// Copy a file's bytes to `dest` durably (fsync file + parent dir). Used to
 /// hydrate a fork's private collection copy on copy-on-write.
-fn copy_file_durable(source: &Path, dest: &Path) -> io::Result<()> {
-    let bytes = fs::read(source)?;
-    let mut file = File::create(dest)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    if let Some(parent) = dest.parent() {
-        sync_dir(parent)?;
-    }
-    Ok(())
-}
-
-fn sync_dir(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
 fn invalid_data(message: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn temp_db_path(name: &str) -> PathBuf {
@@ -1318,7 +1400,7 @@ mod tests {
             .recover_or_bootstrap(&["live".to_string(), "gone".to_string()])
             .unwrap();
         fs::write(manifest.collection_path_for_test("orphan"), b"orphan").unwrap();
-        manifest.begin_drop_collection("gone").unwrap();
+        let _drop = manifest.prepare_collection_drop("gone").unwrap();
 
         let completed = manifest.recover_or_bootstrap(&[]).unwrap();
 
@@ -1349,14 +1431,16 @@ mod tests {
             .to_string_lossy()
             .contains("%2F"));
 
-        manifest.begin_drop_collection("missing").unwrap();
+        let _drop = manifest.prepare_collection_drop("missing").unwrap();
         assert_eq!(
             manifest.read_generation_for_test().unwrap(),
             first_generation
         );
-        manifest.begin_drop_collection("tenant/a b").unwrap();
-        manifest.finish_drop_collection("missing").unwrap();
-        manifest.finish_drop_collection("tenant/a b").unwrap();
+        manifest
+            .prepare_collection_drop("tenant/a b")
+            .unwrap()
+            .finish()
+            .unwrap();
         assert!(!manifest.collection_path_for_test("tenant/a b").exists());
         assert!(manifest.read_generation_for_test().unwrap() > first_generation);
     }
@@ -1419,13 +1503,15 @@ mod tests {
 
     #[test]
     fn unique_quarantine_path_adds_suffix_when_needed() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("orphan.rcol"), b"one").unwrap();
-        fs::write(dir.path().join("orphan.rcol.1"), b"two").unwrap();
+        let path = temp_db_path("unique_quarantine");
+        let manifest = OperationalManifest::for_db_path(&path);
+        manifest.ensure_dirs().unwrap();
+        fs::write(manifest.quarantine_dir().join("orphan.rcol"), b"one").unwrap();
+        fs::write(manifest.quarantine_dir().join("orphan.rcol.1"), b"two").unwrap();
 
         assert_eq!(
-            unique_quarantine_path(dir.path(), "orphan.rcol"),
-            dir.path().join("orphan.rcol.2")
+            manifest.unique_quarantine_path("orphan.rcol"),
+            manifest.quarantine_dir().join("orphan.rcol.2")
         );
     }
 
@@ -1570,7 +1656,7 @@ mod tests {
         write_collection(&parent, "users", b"as-of-fork");
         parent.create_fork("exp", 12).unwrap();
 
-        parent.begin_drop_collection("users").unwrap();
+        let _drop = parent.prepare_collection_drop("users").unwrap();
         let completed = parent.recover_or_bootstrap(&[]).unwrap();
 
         assert_eq!(completed, vec!["users".to_string()]);
@@ -1590,7 +1676,7 @@ mod tests {
         parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
         write_collection(&parent, "users", b"as-of-fork");
         parent.create_fork("exp", 12).unwrap();
-        parent.begin_drop_collection("users").unwrap();
+        let _drop = parent.prepare_collection_drop("users").unwrap();
         parent.recover_or_bootstrap(&[]).unwrap();
 
         assert!(parent.drop_fork("exp").unwrap());
@@ -1703,7 +1789,7 @@ mod tests {
         parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
         write_collection(&parent, "users", b"as-of-fork");
         parent.create_fork("exp", 55).unwrap();
-        parent.begin_drop_collection("users").unwrap();
+        let _drop = parent.prepare_collection_drop("users").unwrap();
         parent.recover_or_bootstrap(&[]).unwrap();
         assert!(parent.collection_path_for_test("users").exists());
 
