@@ -144,6 +144,30 @@ impl Vfs for RecordingVfs {
     fn sync_dir(&self, _dir: &Path) -> io::Result<()> {
         unreachable!("WAL append does not sync directories")
     }
+
+    fn create_dir_all(&self, _dir: &Path) -> io::Result<()> {
+        unreachable!("WAL append does not create directories")
+    }
+
+    fn read_dir(&self, _dir: &Path) -> io::Result<Vec<reddb_file::VfsDirEntry>> {
+        unreachable!("WAL append does not read directories")
+    }
+
+    fn remove_file(&self, _path: &Path) -> io::Result<()> {
+        unreachable!("WAL append does not remove files")
+    }
+
+    fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+        unreachable!("WAL append does not remove directories")
+    }
+
+    fn exists(&self, _path: &Path) -> bool {
+        unreachable!("WAL append does not inspect paths")
+    }
+
+    fn is_file(&self, _path: &Path) -> bool {
+        unreachable!("WAL append does not inspect paths")
+    }
 }
 
 #[test]
