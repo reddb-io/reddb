@@ -329,6 +329,82 @@ fn test_parse_aggregate_keywords_as_column_identifiers() {
 }
 
 #[test]
+fn insert_on_conflict_do_nothing_is_preserved_in_the_ast() {
+    let query = parse("INSERT INTO users (email) VALUES ('a@example.com') ON CONFLICT DO NOTHING")
+        .expect("ON CONFLICT DO NOTHING should parse");
+    let QueryExpr::Insert(insert) = query else {
+        panic!("expected insert query");
+    };
+
+    assert!(matches!(
+        insert.on_conflict,
+        Some(crate::ast::OnConflictClause {
+            target: None,
+            action: crate::ast::OnConflictAction::DoNothing,
+        })
+    ));
+}
+
+#[test]
+fn insert_on_conflict_column_target_is_preserved_in_the_ast() {
+    let query = parse(
+        "INSERT INTO users (tenant_id, email) VALUES (7, 'a@example.com') \
+         ON CONFLICT (tenant_id, email) DO NOTHING",
+    )
+    .expect("ON CONFLICT column target should parse");
+    let QueryExpr::Insert(insert) = query else {
+        panic!("expected insert query");
+    };
+
+    assert!(matches!(
+        insert.on_conflict,
+        Some(crate::ast::OnConflictClause {
+            target: Some(columns),
+            action: crate::ast::OnConflictAction::DoNothing,
+        }) if columns == ["tenant_id", "email"]
+    ));
+}
+
+#[test]
+fn insert_on_conflict_do_update_preserves_excluded_assignments() {
+    let query = parse(
+        "INSERT INTO users (email, name) VALUES ('a@example.com', 'Ada') \
+         ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name",
+    )
+    .expect("ON CONFLICT DO UPDATE should parse");
+    let QueryExpr::Insert(insert) = query else {
+        panic!("expected insert query");
+    };
+    let Some(crate::ast::OnConflictClause {
+        target: Some(target),
+        action: crate::ast::OnConflictAction::DoUpdate { assignments },
+    }) = insert.on_conflict
+    else {
+        panic!("expected DO UPDATE conflict clause");
+    };
+
+    assert_eq!(target, ["email"]);
+    assert!(matches!(
+        assignments.as_slice(),
+        [(column, Expr::Column {
+            field: FieldRef::TableColumn { table, column: source },
+            ..
+        })] if column == "name" && table.eq_ignore_ascii_case("excluded") && source == "name"
+    ));
+}
+
+#[test]
+fn insert_on_conflict_do_update_requires_a_conflict_target() {
+    let error = parse(
+        "INSERT INTO users (email, name) VALUES ('a@example.com', 'Ada') \
+         ON CONFLICT DO UPDATE SET name = EXCLUDED.name",
+    )
+    .expect_err("DO UPDATE without a target must be rejected");
+
+    assert!(error.to_string().contains("requires a column target"));
+}
+
+#[test]
 fn test_parse_arithmetic_projection_sub() {
     // Regression: Fase 1.3 projection Pratt referenced Token::Minus
     // but the lexer emits Token::Dash. Subtraction silently fell
