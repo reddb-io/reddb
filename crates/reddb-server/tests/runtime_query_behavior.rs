@@ -2125,6 +2125,291 @@ fn insert_on_conflict_do_nothing_skips_the_duplicate_row() {
 }
 
 #[test]
+fn insert_document_on_conflict_do_nothing_uses_a_unique_index() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE DOCUMENT profiles")
+        .expect("create document collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX profiles_email ON profiles (email) USING HASH")
+        .expect("create document identity index");
+    runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT VALUES ({\"email\":\"ada@example.com\",\"name\":\"Ada\"})",
+        )
+        .expect("insert original document");
+
+    let ignored = runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT VALUES ({\"email\":\"ada@example.com\",\"name\":\"Grace\"}) \
+             ON CONFLICT (email) DO NOTHING",
+        )
+        .expect("duplicate document should be ignored");
+
+    assert_eq!(ignored.affected_rows, 0);
+    let selected = runtime
+        .execute_query("SELECT name FROM profiles WHERE email = 'ada@example.com'")
+        .expect("select original document");
+    assert_eq!(selected.result.len(), 1);
+    assert_eq!(text_at(&selected, 0, "name"), "Ada");
+}
+
+#[test]
+fn insert_document_on_conflict_target_does_not_hide_another_unique_index() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE DOCUMENT profiles")
+        .expect("create document collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX profiles_email ON profiles (email) USING HASH")
+        .expect("create email identity index");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX profiles_username ON profiles (username) USING HASH")
+        .expect("create username identity index");
+    runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT \
+             VALUES ({\"email\":\"ada@example.com\",\"username\":\"ada\"})",
+        )
+        .expect("insert original document");
+
+    let error = runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT \
+             VALUES ({\"email\":\"grace@example.com\",\"username\":\"ada\"}) \
+             ON CONFLICT (email) DO NOTHING",
+        )
+        .expect_err("an email target must not hide a username conflict");
+    assert!(error.to_string().contains("unique index"));
+
+    let selected = runtime
+        .execute_query("SELECT email FROM profiles")
+        .expect("verify the rejected document was not persisted");
+    assert_eq!(selected.result.len(), 1);
+    assert_eq!(text_at(&selected, 0, "email"), "ada@example.com");
+}
+
+#[test]
+fn insert_document_on_conflict_do_update_uses_excluded_fields() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE DOCUMENT profiles")
+        .expect("create document collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX profiles_email ON profiles (email) USING HASH")
+        .expect("create document identity index");
+    runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT VALUES ({\"email\":\"ada@example.com\",\"name\":\"Ada\"})",
+        )
+        .expect("insert original document");
+
+    let updated = runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT VALUES ({\"email\":\"ada@example.com\",\"name\":\"Grace\"}) \
+             ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name",
+        )
+        .expect("conflicting document should be updated");
+
+    assert_eq!(updated.affected_rows, 1);
+    let selected = runtime
+        .execute_query("SELECT name FROM profiles WHERE email = 'ada@example.com'")
+        .expect("select updated document");
+    assert_eq!(selected.result.len(), 1);
+    assert_eq!(text_at(&selected, 0, "name"), "Grace");
+}
+
+#[test]
+fn insert_document_on_conflict_do_update_returning_exposes_the_updated_document() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE DOCUMENT profiles")
+        .expect("create document collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX profiles_email ON profiles (email) USING HASH")
+        .expect("create document identity index");
+    runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT VALUES ({\"email\":\"ada@example.com\",\"name\":\"Ada\"})",
+        )
+        .expect("insert original document");
+
+    let returned = runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT VALUES ({\"email\":\"ada@example.com\",\"name\":\"Grace\"}) \
+             ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name RETURNING email, name",
+        )
+        .expect("conflicting document update should return its post-image");
+
+    assert_eq!(returned.affected_rows, 1);
+    assert_eq!(returned.result.len(), 1);
+    assert_eq!(text_at(&returned, 0, "email"), "ada@example.com");
+    assert_eq!(text_at(&returned, 0, "name"), "Grace");
+}
+
+#[test]
+fn insert_node_on_conflict_do_nothing_uses_a_unique_index() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE GRAPH people")
+        .expect("create graph collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX people_email ON people (email) USING HASH")
+        .expect("create node identity index");
+    runtime
+        .execute_query(
+            "INSERT INTO people NODE (label, email, name) \
+             VALUES ('person', 'ada@example.com', 'Ada')",
+        )
+        .expect("insert original node");
+
+    let ignored = runtime
+        .execute_query(
+            "INSERT INTO people NODE (label, email, name) \
+             VALUES ('person', 'ada@example.com', 'Grace') \
+             ON CONFLICT (email) DO NOTHING",
+        )
+        .expect("duplicate node should be ignored");
+
+    assert_eq!(ignored.affected_rows, 0);
+    let selected = runtime
+        .execute_query("SELECT name FROM people WHERE email = 'ada@example.com'")
+        .expect("select original node");
+    assert_eq!(selected.result.len(), 1);
+    assert_eq!(text_at(&selected, 0, "name"), "Ada");
+}
+
+#[test]
+fn insert_node_on_conflict_do_nothing_skips_duplicates_in_the_same_batch() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE GRAPH people")
+        .expect("create graph collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX people_email ON people (email) USING HASH")
+        .expect("create node identity index");
+
+    let inserted = runtime
+        .execute_query(
+            "INSERT INTO people NODE (label, email, name) VALUES \
+             ('person', 'ada@example.com', 'Ada'), \
+             ('person', 'ada@example.com', 'Duplicate'), \
+             ('person', 'grace@example.com', 'Grace') \
+             ON CONFLICT (email) DO NOTHING RETURNING email, name",
+        )
+        .expect("later duplicate node should be ignored before the graph batch");
+
+    assert_eq!(inserted.affected_rows, 2);
+    assert_eq!(inserted.result.len(), 2);
+    assert_eq!(text_at(&inserted, 0, "email"), "ada@example.com");
+    assert_eq!(text_at(&inserted, 0, "name"), "Ada");
+    assert_eq!(text_at(&inserted, 1, "email"), "grace@example.com");
+    assert_eq!(text_at(&inserted, 1, "name"), "Grace");
+}
+
+#[test]
+fn insert_node_on_conflict_do_update_uses_excluded_properties() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE GRAPH people")
+        .expect("create graph collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX people_email ON people (email) USING HASH")
+        .expect("create node identity index");
+    runtime
+        .execute_query(
+            "INSERT INTO people NODE (label, email, name) \
+             VALUES ('person', 'ada@example.com', 'Ada')",
+        )
+        .expect("insert original node");
+
+    let updated = runtime
+        .execute_query(
+            "INSERT INTO people NODE (label, email, name) \
+             VALUES ('person', 'ada@example.com', 'Grace') \
+             ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name",
+        )
+        .expect("conflicting node should be updated");
+
+    assert_eq!(updated.affected_rows, 1);
+    let selected = runtime
+        .execute_query("SELECT name FROM people WHERE email = 'ada@example.com'")
+        .expect("select updated node");
+    assert_eq!(selected.result.len(), 1);
+    assert_eq!(text_at(&selected, 0, "name"), "Grace");
+}
+
+#[test]
+fn insert_edge_on_conflict_do_nothing_uses_a_unique_index() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE GRAPH network")
+        .expect("create graph collection");
+    runtime
+        .execute_query("INSERT INTO network NODE (label) VALUES ('ada'), ('grace')")
+        .expect("insert edge endpoints");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX edge_external_id ON network (external_id) USING HASH")
+        .expect("create edge identity index");
+    runtime
+        .execute_query(
+            "INSERT INTO network EDGE (label, from, to, external_id, note) \
+             VALUES ('knows', 'ada', 'grace', 'edge-1', 'original')",
+        )
+        .expect("insert original edge");
+
+    let ignored = runtime
+        .execute_query(
+            "INSERT INTO network EDGE (label, from, to, external_id, note) \
+             VALUES ('knows', 'ada', 'grace', 'edge-1', 'duplicate') \
+             ON CONFLICT (external_id) DO NOTHING",
+        )
+        .expect("duplicate edge should be ignored");
+
+    assert_eq!(ignored.affected_rows, 0);
+    let selected = runtime
+        .execute_query("SELECT note FROM network WHERE external_id = 'edge-1'")
+        .expect("select original edge");
+    assert_eq!(selected.result.len(), 1);
+    assert_eq!(text_at(&selected, 0, "note"), "original");
+}
+
+#[test]
+fn insert_edge_on_conflict_do_update_uses_excluded_properties() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE GRAPH network")
+        .expect("create graph collection");
+    runtime
+        .execute_query("INSERT INTO network NODE (label) VALUES ('ada'), ('grace')")
+        .expect("insert edge endpoints");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX edge_external_id ON network (external_id) USING HASH")
+        .expect("create edge identity index");
+    runtime
+        .execute_query(
+            "INSERT INTO network EDGE (label, from, to, external_id, note) \
+             VALUES ('knows', 'ada', 'grace', 'edge-1', 'original')",
+        )
+        .expect("insert original edge");
+
+    let updated = runtime
+        .execute_query(
+            "INSERT INTO network EDGE (label, from, to, external_id, note) \
+             VALUES ('knows', 'ada', 'grace', 'edge-1', 'updated') \
+             ON CONFLICT (external_id) DO UPDATE SET note = EXCLUDED.note",
+        )
+        .expect("conflicting edge should be updated");
+
+    assert_eq!(updated.affected_rows, 1);
+    let selected = runtime
+        .execute_query("SELECT note FROM network WHERE external_id = 'edge-1'")
+        .expect("select updated edge");
+    assert_eq!(selected.result.len(), 1);
+    assert_eq!(text_at(&selected, 0, "note"), "updated");
+}
+
+#[test]
 fn insert_on_conflict_column_target_only_handles_the_selected_unique_rule() {
     let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     runtime
@@ -2285,6 +2570,50 @@ fn concurrent_insert_on_conflict_do_nothing_has_one_winner() {
 }
 
 #[test]
+fn concurrent_document_on_conflict_do_nothing_has_one_winner() {
+    const WRITERS: usize = 8;
+
+    let runtime =
+        Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots"));
+    runtime
+        .execute_query("CREATE DOCUMENT profiles")
+        .expect("create document collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX profiles_email ON profiles (email) USING HASH")
+        .expect("create document identity index");
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let mut writers = Vec::new();
+    for writer in 0..WRITERS {
+        let runtime = Arc::clone(&runtime);
+        let barrier = Arc::clone(&barrier);
+        writers.push(std::thread::spawn(move || {
+            barrier.wait();
+            runtime.execute_query(&format!(
+                "INSERT INTO profiles DOCUMENT \
+                 VALUES ({{\"email\":\"ada@example.com\",\"writer\":{writer}}}) \
+                 ON CONFLICT (email) DO NOTHING"
+            ))
+        }));
+    }
+
+    let affected_rows = writers
+        .into_iter()
+        .map(|writer| {
+            writer
+                .join()
+                .expect("writer thread should not panic")
+                .expect("conflicting document writers should not error")
+                .affected_rows
+        })
+        .sum::<u64>();
+    assert_eq!(affected_rows, 1);
+    let selected = runtime
+        .execute_query("SELECT email FROM profiles")
+        .expect("select winner");
+    assert_eq!(selected.result.len(), 1);
+}
+
+#[test]
 fn insert_on_conflict_retries_when_the_conflicting_key_is_uncommitted() {
     use reddb_server::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 
@@ -2324,17 +2653,72 @@ fn insert_on_conflict_retries_when_the_conflicting_key_is_uncommitted() {
 }
 
 #[test]
-fn insert_on_conflict_rejects_non_table_and_multi_row_update_shapes() {
+fn document_on_conflict_retries_when_the_conflicting_key_is_uncommitted() {
+    use reddb_server::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
     let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     runtime
-        .execute_query("CREATE DOCUMENT docs")
-        .expect("create docs");
+        .execute_query("CREATE DOCUMENT profiles")
+        .expect("create document collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX profiles_email ON profiles (email) USING HASH")
+        .expect("create document identity index");
+
+    set_current_connection_id(92_001);
+    runtime
+        .execute_query("BEGIN")
+        .expect("begin first transaction");
+    runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT VALUES ({\"email\":\"ada@example.com\"}) \
+             ON CONFLICT (email) DO NOTHING",
+        )
+        .expect("stage first document");
+
+    set_current_connection_id(92_002);
+    runtime
+        .execute_query("BEGIN")
+        .expect("begin second transaction");
+    let error = runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT VALUES ({\"email\":\"ada@example.com\"}) \
+             ON CONFLICT (email) DO NOTHING",
+        )
+        .expect_err("an uncommitted document identity should require a retry");
+    assert!(error.to_string().contains("serialization conflict"));
+
+    set_current_connection_id(92_001);
+    runtime
+        .execute_query("ROLLBACK")
+        .expect("rollback first transaction");
+    set_current_connection_id(92_002);
+    let retried = runtime
+        .execute_query(
+            "INSERT INTO profiles DOCUMENT VALUES ({\"email\":\"ada@example.com\"}) \
+             ON CONFLICT (email) DO NOTHING",
+        )
+        .expect("retry after rollback should insert the document");
+    assert_eq!(retried.affected_rows, 1);
+    runtime.execute_query("COMMIT").expect("commit retry");
+
+    clear_current_connection_id();
+}
+
+#[test]
+fn insert_on_conflict_rejects_timeseries_and_multi_row_update_shapes() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE TIMESERIES metrics")
+        .expect("create metrics");
     let model_error = runtime
-        .execute_query("INSERT INTO docs DOCUMENT VALUES ({\"id\":1}) ON CONFLICT DO NOTHING")
-        .expect_err("ON CONFLICT should be table-only");
+        .execute_query(
+            "INSERT INTO metrics (metric, value, timestamp) VALUES ('cpu', 1.0, 1) \
+             ON CONFLICT DO NOTHING",
+        )
+        .expect_err("ON CONFLICT should reject time-series ambiguity");
     assert!(model_error
         .to_string()
-        .contains("only supported for table rows"));
+        .contains("not supported for time-series"));
 
     runtime
         .execute_query("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")

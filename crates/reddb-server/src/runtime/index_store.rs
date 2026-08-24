@@ -2028,7 +2028,10 @@ impl IndexStore {
     }
 }
 
-fn index_field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<Cow<'a, Value>> {
+pub(crate) fn index_field_value<'a>(
+    fields: &'a [(String, Value)],
+    column: &str,
+) -> Option<Cow<'a, Value>> {
     if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
         // Single-source document: an index on a bare or dotted document field
         // (`score`, `location.gps`) is backed by the body, not a stored column.
@@ -2040,7 +2043,14 @@ fn index_field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<
         // index. Descend into nested structure only AFTER the offset-read.
         let segments = super::join_filter::parse_runtime_document_path(column);
         if let Some((root, tail)) = segments.split_first() {
-            if let Some(root_value) = crate::document_body::read_body_field(bytes, root) {
+            let root_value = crate::document_body::read_body_field(bytes, root).or_else(|| {
+                crate::json::from_slice::<crate::json::Value>(bytes)
+                    .ok()?
+                    .as_object()?
+                    .get(root)
+                    .and_then(|value| crate::application::entity::json_to_storage_value(value).ok())
+            });
+            if let Some(root_value) = root_value {
                 if tail.is_empty() {
                     return Some(Cow::Owned(root_value));
                 }
