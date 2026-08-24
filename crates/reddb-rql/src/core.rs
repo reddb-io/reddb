@@ -1907,6 +1907,28 @@ pub enum ReturningItem {
     Column(String),
 }
 
+/// Conflict handling attached to an INSERT statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnConflictClause {
+    /// Columns used to select the unique constraint. `None` means any
+    /// uniqueness violation may be ignored by `DO NOTHING`.
+    pub target: Option<Vec<String>>,
+    /// Action taken when the selected uniqueness rule conflicts.
+    pub action: OnConflictAction,
+}
+
+/// Action taken by an INSERT conflict clause.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OnConflictAction {
+    /// Skip the conflicting input row.
+    DoNothing,
+    /// Update the conflicting row using expressions that may reference
+    /// columns from the proposed row through the `EXCLUDED` qualifier.
+    DoUpdate {
+        assignments: Vec<(String, super::Expr)>,
+    },
+}
+
 /// INSERT INTO table (columns) VALUES (row1), (row2), ... [WITH TTL duration] [WITH METADATA (k=v)]
 #[derive(Debug, Clone)]
 pub struct InsertQuery {
@@ -1920,6 +1942,8 @@ pub struct InsertQuery {
     pub value_exprs: Vec<Vec<super::Expr>>,
     /// Rows of values (each inner Vec is one row)
     pub values: Vec<Vec<Value>>,
+    /// Optional PostgreSQL-compatible conflict action.
+    pub on_conflict: Option<OnConflictClause>,
     /// Optional RETURNING clause items.
     pub returning: Option<Vec<ReturningItem>>,
     /// Optional TTL in milliseconds (from WITH TTL clause)

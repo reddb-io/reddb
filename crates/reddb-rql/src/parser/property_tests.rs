@@ -147,6 +147,7 @@ fn arb_insert_query() -> impl Strategy<Value = QueryExpr> {
                 columns,
                 value_exprs: Vec::new(),
                 values: vec![values],
+                on_conflict: None,
                 returning: None,
                 ttl_ms: None,
                 expires_at_ms: None,
