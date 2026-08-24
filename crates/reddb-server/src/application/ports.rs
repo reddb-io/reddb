@@ -61,6 +61,11 @@ pub trait RuntimeEntityPort {
     /// and `enforce_row_batch_uniqueness`. Returns the row count.
     /// Used by `MSG_BULK_INSERT_PREVALIDATED`.
     fn create_rows_batch_prevalidated(&self, input: CreateRowsBatchInput) -> RedDBResult<usize>;
+    /// Pre-validated bulk insert that also returns the persisted rows and assigned ids.
+    fn create_rows_batch_prevalidated_with_outputs(
+        &self,
+        input: CreateRowsBatchInput,
+    ) -> RedDBResult<Vec<CreateEntityOutput>>;
     /// Columnar pre-validated bulk insert — the wire handler
     /// decoded straight into `Vec<Vec<Value>>` + a shared column-
     /// name vector, no per-cell `(String, Value)` tuples allocated.

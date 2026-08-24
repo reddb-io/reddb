@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 
 const TEST_CERTIFICATE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
@@ -2100,6 +2100,258 @@ fn insert_returning_star_exposes_entity_id_for_non_graph_entities() {
         let id = u64_at(&res, 0, "rid");
         assert!(id > 0, "{sql} must expose rid");
     }
+}
+
+#[test]
+fn insert_on_conflict_do_nothing_skips_the_duplicate_row() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        .expect("create users");
+    runtime
+        .execute_query("INSERT INTO users (id, name) VALUES (1, 'Ada')")
+        .expect("insert original user");
+
+    let result = runtime
+        .execute_query("INSERT INTO users (id, name) VALUES (1, 'Grace') ON CONFLICT DO NOTHING")
+        .expect("duplicate insert should be ignored");
+
+    assert_eq!(result.affected_rows, 0);
+    let selected = runtime
+        .execute_query("SELECT name FROM users WHERE id = 1")
+        .expect("select original user");
+    assert_eq!(selected.result.records.len(), 1);
+    assert_eq!(text_at(&selected, 0, "name"), "Ada");
+}
+
+#[test]
+fn insert_on_conflict_column_target_only_handles_the_selected_unique_rule() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE)")
+        .expect("create users");
+    runtime
+        .execute_query("INSERT INTO users (id, email) VALUES (1, 'ada@example.com')")
+        .expect("insert original user");
+
+    let primary_key_error = runtime
+        .execute_query(
+            "INSERT INTO users (id, email) VALUES (1, 'grace@example.com') \
+             ON CONFLICT (email) DO NOTHING",
+        )
+        .expect_err("an email target must not hide a primary-key conflict");
+    assert!(primary_key_error.to_string().contains("primary key"));
+
+    let ignored = runtime
+        .execute_query(
+            "INSERT INTO users (id, email) VALUES (2, 'ada@example.com') \
+             ON CONFLICT (email) DO NOTHING",
+        )
+        .expect("the selected email conflict should be ignored");
+    assert_eq!(ignored.affected_rows, 0);
+}
+
+#[test]
+fn insert_on_conflict_do_update_uses_the_excluded_row() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE TABLE users (email TEXT UNIQUE, name TEXT)")
+        .expect("create users");
+    runtime
+        .execute_query("INSERT INTO users (email, name) VALUES ('ada@example.com', 'Ada')")
+        .expect("insert original user");
+
+    let result = runtime
+        .execute_query(
+            "INSERT INTO users (email, name) VALUES ('ada@example.com', 'Grace') \
+             ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name",
+        )
+        .expect("conflicting insert should update the existing row");
+
+    assert_eq!(result.affected_rows, 1);
+    let selected = runtime
+        .execute_query("SELECT name FROM users WHERE email = 'ada@example.com'")
+        .expect("select updated user");
+    assert_eq!(selected.result.records.len(), 1);
+    assert_eq!(text_at(&selected, 0, "name"), "Grace");
+}
+
+#[test]
+fn insert_on_conflict_do_update_combines_existing_and_excluded_values() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE TABLE counters (name TEXT PRIMARY KEY, value INT)")
+        .expect("create counters");
+    runtime
+        .execute_query("INSERT INTO counters (name, value) VALUES ('jobs', 2)")
+        .expect("insert original counter");
+
+    runtime
+        .execute_query(
+            "INSERT INTO counters (name, value) VALUES ('jobs', 3) \
+             ON CONFLICT (name) DO UPDATE SET value = value + EXCLUDED.value",
+        )
+        .expect("conflict update expression should execute");
+
+    let selected = runtime
+        .execute_query("SELECT value FROM counters WHERE name = 'jobs'")
+        .expect("select updated counter");
+    assert_eq!(int_at(&selected, 0, "value"), 5);
+}
+
+#[test]
+fn insert_on_conflict_do_update_returning_exposes_the_updated_row() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE TABLE users (email TEXT UNIQUE, name TEXT)")
+        .expect("create users");
+    runtime
+        .execute_query("INSERT INTO users (email, name) VALUES ('ada@example.com', 'Ada')")
+        .expect("insert original user");
+
+    let result = runtime
+        .execute_query(
+            "INSERT INTO users (email, name) VALUES ('ada@example.com', 'Grace') \
+             ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name RETURNING email, name",
+        )
+        .expect("conflict update returning should execute");
+
+    assert_eq!(result.affected_rows, 1);
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(text_at(&result, 0, "email"), "ada@example.com");
+    assert_eq!(text_at(&result, 0, "name"), "Grace");
+}
+
+#[test]
+fn insert_on_conflict_do_nothing_skips_later_duplicates_in_the_same_batch() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        .expect("create users");
+
+    let result = runtime
+        .execute_query(
+            "INSERT INTO users (id, name) VALUES (1, 'Ada'), (1, 'Grace'), (2, 'Linus') \
+             ON CONFLICT DO NOTHING RETURNING id, name",
+        )
+        .expect("later duplicate input rows should be ignored");
+
+    assert_eq!(result.affected_rows, 2);
+    assert_eq!(result.result.records.len(), 2);
+    assert_eq!(int_at(&result, 0, "id"), 1);
+    assert_eq!(text_at(&result, 0, "name"), "Ada");
+    assert_eq!(int_at(&result, 1, "id"), 2);
+    assert_eq!(text_at(&result, 1, "name"), "Linus");
+}
+
+#[test]
+fn concurrent_insert_on_conflict_do_nothing_has_one_winner() {
+    const WRITERS: usize = 8;
+
+    let runtime =
+        Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots"));
+    runtime
+        .execute_query("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        .expect("create users");
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let mut writers = Vec::new();
+    for writer in 0..WRITERS {
+        let runtime = Arc::clone(&runtime);
+        let barrier = Arc::clone(&barrier);
+        writers.push(std::thread::spawn(move || {
+            barrier.wait();
+            runtime.execute_query(&format!(
+                "INSERT INTO users (id, name) VALUES (1, 'writer-{writer}') \
+                 ON CONFLICT DO NOTHING"
+            ))
+        }));
+    }
+
+    let affected_rows = writers
+        .into_iter()
+        .map(|writer| {
+            writer
+                .join()
+                .expect("writer thread should not panic")
+                .expect("conflicting writers should not error")
+                .affected_rows
+        })
+        .sum::<u64>();
+    assert_eq!(affected_rows, 1);
+    let selected = runtime
+        .execute_query("SELECT id FROM users")
+        .expect("select winner");
+    assert_eq!(selected.result.records.len(), 1);
+}
+
+#[test]
+fn insert_on_conflict_retries_when_the_conflicting_key_is_uncommitted() {
+    use reddb_server::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    set_current_connection_id(91_001);
+    runtime
+        .execute_query("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        .expect("create users");
+    runtime
+        .execute_query("BEGIN")
+        .expect("begin first transaction");
+    runtime
+        .execute_query("INSERT INTO users (id, name) VALUES (1, 'Ada') ON CONFLICT DO NOTHING")
+        .expect("stage first insert");
+
+    set_current_connection_id(91_002);
+    runtime
+        .execute_query("BEGIN")
+        .expect("begin second transaction");
+    let error = runtime
+        .execute_query("INSERT INTO users (id, name) VALUES (1, 'Grace') ON CONFLICT DO NOTHING")
+        .expect_err("an uncommitted conflicting key should require a retry");
+    assert!(error.to_string().contains("serialization conflict"));
+
+    set_current_connection_id(91_001);
+    runtime
+        .execute_query("ROLLBACK")
+        .expect("rollback first transaction");
+    set_current_connection_id(91_002);
+    let retried = runtime
+        .execute_query("INSERT INTO users (id, name) VALUES (1, 'Grace') ON CONFLICT DO NOTHING")
+        .expect("retry after rollback should insert");
+    assert_eq!(retried.affected_rows, 1);
+    runtime.execute_query("COMMIT").expect("commit retry");
+
+    clear_current_connection_id();
+}
+
+#[test]
+fn insert_on_conflict_rejects_non_table_and_multi_row_update_shapes() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    runtime
+        .execute_query("CREATE DOCUMENT docs")
+        .expect("create docs");
+    let model_error = runtime
+        .execute_query("INSERT INTO docs DOCUMENT VALUES ({\"id\":1}) ON CONFLICT DO NOTHING")
+        .expect_err("ON CONFLICT should be table-only");
+    assert!(model_error
+        .to_string()
+        .contains("only supported for table rows"));
+
+    runtime
+        .execute_query("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        .expect("create users");
+    let batch_error = runtime
+        .execute_query(
+            "INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Grace') \
+             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
+        )
+        .expect_err("multi-row conflict updates should fail before mutation");
+    assert!(batch_error
+        .to_string()
+        .contains("multi-row ON CONFLICT DO UPDATE"));
+    let selected = runtime
+        .execute_query("SELECT id FROM users")
+        .expect("verify no partial rows");
+    assert!(selected.result.records.is_empty());
 }
 
 #[test]

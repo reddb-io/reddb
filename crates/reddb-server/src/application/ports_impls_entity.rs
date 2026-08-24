@@ -1892,6 +1892,7 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let db = self.db();
         let collection = input.collection;
+        let suppress_events = input.suppress_events;
         let contract = CollectionContractWriteEnforcer::new(&db, &collection);
         contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
@@ -1919,7 +1920,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // instead of N separate cdc_emit() calls (each acquires a write lock).
         let engine = {
             let e = self.mutation_engine();
-            if input.suppress_events {
+            if suppress_events {
                 e.with_suppress_events()
             } else {
                 e
@@ -2048,8 +2049,16 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn create_rows_batch_prevalidated(&self, input: CreateRowsBatchInput) -> RedDBResult<usize> {
+        self.create_rows_batch_prevalidated_with_outputs(input)
+            .map(|outputs| outputs.len())
+    }
+
+    fn create_rows_batch_prevalidated_with_outputs(
+        &self,
+        input: CreateRowsBatchInput,
+    ) -> RedDBResult<Vec<CreateEntityOutput>> {
         if input.rows.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         self.check_batch_size(input.rows.len())?;
@@ -2057,6 +2066,7 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let db = self.db();
         let collection = input.collection;
+        let suppress_events = input.suppress_events;
         // Still verify the collection's declared model before we blast
         // rows at it — this one-off check is O(1), independent of
         // ncols, and catches schema-kind mismatches that the client
@@ -2091,11 +2101,26 @@ impl RuntimeEntityPort for RedDBRuntime {
             });
         }
 
-        let engine = self.mutation_engine();
+        let engine = {
+            let engine = self.mutation_engine();
+            if suppress_events {
+                engine.with_suppress_events()
+            } else {
+                engine
+            }
+        };
         let result = engine
-            .apply(collection, mutation_rows)
+            .apply(collection.clone(), mutation_rows)
             .map_err(|e| crate::RedDBError::Internal(e.to_string()))?;
-        Ok(result.ids.len())
+        let store = db.store();
+        Ok(result
+            .ids
+            .into_iter()
+            .map(|id| CreateEntityOutput {
+                id,
+                entity: store.get(&collection, id),
+            })
+            .collect())
     }
 
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {

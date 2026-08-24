@@ -4,7 +4,8 @@ use super::error::ParseError;
 use super::Parser;
 use crate::ast::{
     AskCacheClause, AskQuery, BinOp, DeleteQuery, Expr, FieldRef, Filter, InsertEntityType,
-    InsertQuery, OrderByClause, QueryExpr, ReturningItem, UpdateQuery, UpdateTarget,
+    InsertQuery, OnConflictAction, OnConflictClause, OrderByClause, QueryExpr, ReturningItem,
+    UpdateQuery, UpdateTarget,
 };
 use crate::lexer::Token;
 use crate::sql_lowering::{filter_to_expr, fold_expr_to_value};
@@ -168,6 +169,7 @@ impl<'a> Parser<'a> {
         // Parse optional WITH clauses
         let (ttl_ms, expires_at_ms, with_metadata, auto_embed) = self.parse_with_clauses()?;
 
+        let on_conflict = self.parse_on_conflict_clause()?;
         let returning = self.parse_returning_clause()?;
 
         let suppress_events = if self.consume_ident_ci("SUPPRESS")? {
@@ -183,6 +185,7 @@ impl<'a> Parser<'a> {
             columns,
             value_exprs: all_value_exprs,
             values: all_values,
+            on_conflict,
             returning,
             ttl_ms,
             expires_at_ms,
@@ -190,6 +193,44 @@ impl<'a> Parser<'a> {
             auto_embed,
             suppress_events,
         }))
+    }
+
+    fn parse_on_conflict_clause(&mut self) -> Result<Option<OnConflictClause>, ParseError> {
+        if !self.consume(&Token::On)? {
+            return Ok(None);
+        }
+        self.expect_ident_ci("CONFLICT")?;
+        let target = if self.consume(&Token::LParen)? {
+            let columns = self.parse_ident_list()?;
+            self.expect(Token::RParen)?;
+            Some(columns)
+        } else {
+            None
+        };
+        self.expect_ident_ci("DO")?;
+        let action = if self.consume_ident_ci("NOTHING")? {
+            OnConflictAction::DoNothing
+        } else {
+            if target.is_none() {
+                return Err(ParseError::new(
+                    "ON CONFLICT DO UPDATE requires a column target",
+                    self.position(),
+                ));
+            }
+            self.expect(Token::Update)?;
+            self.expect(Token::Set)?;
+            let mut assignments = Vec::new();
+            loop {
+                let column = self.parse_update_assignment_target()?;
+                self.expect(Token::Eq)?;
+                assignments.push((column, self.parse_expr()?));
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+            OnConflictAction::DoUpdate { assignments }
+        };
+        Ok(Some(OnConflictClause { target, action }))
     }
 
     /// ADR 0067 (#1709): the document INSERT column list is dead. The
