@@ -46,7 +46,7 @@ jobs:
 
       - name: Create release PR or tag the release
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@v2
         with:
           # Run via pnpm so root-package `release:version` chains
           # `changeset version` + `node scripts/sync-version.js`. This is

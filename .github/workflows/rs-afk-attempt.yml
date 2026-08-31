@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   attempt:
-    uses: reddb-io/red-skills/.github/workflows/reusable-afk-attempt.yml@v3.12.5
+    uses: reddb-io/red-skills/.github/workflows/reusable-afk-attempt.yml@v4.4.1
     with:
       issue_number: ${{ inputs.issue_number }}
       runner: ${{ inputs.runner }}
