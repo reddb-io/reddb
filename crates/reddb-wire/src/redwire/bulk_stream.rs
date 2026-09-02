@@ -136,10 +136,26 @@ pub fn decode_bulk_stream_rows_payload(
 ) -> Result<BulkStreamRowsPayload, BulkStreamError> {
     let mut pos = 0;
     let nrows = read_u32(payload, &mut pos, BulkStreamError::MissingRowCount)? as usize;
-    // Bound the pre-allocation by the payload (one byte per value minimum)
-    // so a hostile row count cannot trigger an allocation abort.
+    // A rows frame with no columns carries no data, and with `column_count`
+    // zero the value loop below consumes nothing — so nothing would ever hit
+    // the truncation error that normally terminates decoding, and the row
+    // loop would run up to `u32::MAX` times pushing empty vectors. Refuse
+    // the frame instead.
+    if column_count == 0 {
+        return Err(BulkStreamError::RowWidthMismatch {
+            got: 0,
+            expected: 1,
+        });
+    }
+    // Reject, rather than merely under-allocate for, a row count the payload
+    // cannot possibly hold: every value costs at least one byte, so a count
+    // above `remaining` is a malformed frame. Clamping only the capacity hint
+    // still let the loop itself run for hours on a few bytes of input.
     let remaining = payload.len().saturating_sub(pos);
-    let mut rows = Vec::with_capacity(nrows.min(remaining / column_count.max(1)));
+    if nrows > remaining / column_count {
+        return Err(BulkStreamError::RowCountOverflow);
+    }
+    let mut rows = Vec::with_capacity(nrows);
     for _ in 0..nrows {
         let mut values = Vec::with_capacity(column_count);
         for _ in 0..column_count {
@@ -240,17 +256,34 @@ mod tests {
     }
 
     #[test]
-    fn hostile_row_count_does_not_drive_a_huge_preallocation() {
-        // A 8-byte payload claiming u32::MAX rows used to request a
-        // ~96 GiB `Vec`, and an allocation failure aborts the process
-        // rather than erroring the connection. The decode must fail on
-        // truncated data instead.
+    fn hostile_row_count_is_rejected_not_merely_under_allocated() {
+        // A 4-byte payload claiming u32::MAX rows used to request a ~96 GiB
+        // `Vec`, and an allocation failure aborts the process rather than
+        // erroring the connection. Clamping only the capacity hint was not
+        // enough: the row loop still ran, so the count itself must be
+        // rejected against what the payload can hold.
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32::MAX.to_le_bytes());
         let err = decode_bulk_stream_rows_payload(&payload, 4)
             .expect_err("a row count with no rows behind it must be refused");
         assert!(
-            matches!(err, BulkStreamError::Value(_)),
+            matches!(err, BulkStreamError::RowCountOverflow),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn zero_column_rows_frame_is_refused() {
+        // Found by the `redwire_bulk` fuzz target: with no columns the value
+        // loop consumes nothing, so the truncation error that normally ends
+        // decoding never fires and the row loop runs up to u32::MAX times
+        // pushing empty vectors — gigabytes of allocation from four bytes.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0x0a7f_007fu32.to_le_bytes());
+        let err = decode_bulk_stream_rows_payload(&payload, 0)
+            .expect_err("a rows frame with no columns carries no data");
+        assert!(
+            matches!(err, BulkStreamError::RowWidthMismatch { .. }),
             "unexpected error: {err:?}"
         );
     }

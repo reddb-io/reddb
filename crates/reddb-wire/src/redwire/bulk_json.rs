@@ -91,10 +91,14 @@ pub fn decode_bulk_json_payload(payload: &[u8]) -> Result<BulkJsonPayload, BulkJ
     )?;
 
     let nrows = read_u32(payload, &mut pos, BulkJsonError::MissingRowCount)? as usize;
-    // Bound the pre-allocation by the payload: each row carries at least a
-    // 4-byte length prefix, so `nrows` cannot exceed `remaining / 4`.
+    // Each row carries at least a 4-byte length prefix, so a count above
+    // `remaining / 4` cannot be satisfied. Reject it up front rather than
+    // discovering it one truncated row at a time.
     let remaining = payload.len().saturating_sub(pos);
-    let mut json_payloads = Vec::with_capacity(nrows.min(remaining / 4));
+    if nrows > remaining / 4 {
+        return Err(BulkJsonError::RowCountOverflow);
+    }
+    let mut json_payloads = Vec::with_capacity(nrows);
     for _ in 0..nrows {
         let json_len = read_u32(payload, &mut pos, BulkJsonError::MissingJsonLength)? as usize;
         json_payloads.push(read_string(

@@ -150,11 +150,24 @@ pub fn decode_bulk_binary_payload(
         )?);
     }
     let nrows = read_u32(payload, &mut pos, BulkBinaryError::MissingRowCount(flavor))? as usize;
-    // `nrows` is attacker-controlled: bound the pre-allocation by what the
-    // payload could physically hold (every value costs at least one byte),
-    // so a 20-byte frame cannot request a multi-gigabyte allocation.
+    // With `ncols` zero the value loop consumes nothing, so the truncation
+    // error that normally terminates decoding never fires and the row loop
+    // runs up to `u32::MAX` times pushing empty vectors. A zero-column bulk
+    // insert is meaningless anyway.
+    if ncols == 0 {
+        return Err(BulkBinaryError::RowWidthMismatch {
+            got: 0,
+            expected: 1,
+        });
+    }
+    // `nrows` is attacker-controlled. Reject a count the payload cannot hold
+    // (every value costs at least one byte) rather than only trimming the
+    // capacity hint — clamping the allocation still left the loop free to run.
     let remaining = payload.len().saturating_sub(pos);
-    let mut rows = Vec::with_capacity(nrows.min(remaining / ncols.max(1)));
+    if nrows > remaining / ncols {
+        return Err(BulkBinaryError::RowCountOverflow);
+    }
+    let mut rows = Vec::with_capacity(nrows);
     for _ in 0..nrows {
         let mut values = Vec::with_capacity(ncols);
         for _ in 0..ncols {

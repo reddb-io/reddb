@@ -175,6 +175,18 @@ impl<'a> KvAtomicOps<'a> {
         if_not_exists: bool,
         mut metadata: Vec<(String, MetadataValue)>,
     ) -> RedDBResult<(bool, crate::storage::EntityId)> {
+        // `if_not_exists` reads the key, decides, then conditionally writes —
+        // a read-modify-write, exactly like `incr`, and it needs the same
+        // per-key lock. Without it two concurrent `PUT ... IF NOT EXISTS` on
+        // one key can both observe "absent" and both report having inserted,
+        // which defeats the only thing the flag exists to guarantee (it is
+        // the primitive callers build locks and once-only initialisation on).
+        // Unconditional puts are last-writer-wins by definition and take no
+        // lock, so the hot path is unchanged.
+        let rmw_lock =
+            if_not_exists.then(|| self.runtime.inner.rmw_locks.lock_for(collection, key));
+        let _rmw_guard = rmw_lock.as_ref().map(|lock| lock.lock());
+
         self.ensure_keyed_collection(model, collection)?;
 
         if model == crate::catalog::CollectionModel::Vault {
@@ -2952,6 +2964,56 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn concurrent_put_if_not_exists_has_exactly_one_winner() {
+        // `IF NOT EXISTS` is the primitive callers build locks and once-only
+        // initialisation on, so "did I insert it?" must be true for exactly
+        // one racer. It reads the key, decides, then writes — the same
+        // read-modify-write shape as `incr`, and it needs the same per-key
+        // lock; without one, every thread could observe "absent" and claim
+        // the insert.
+        const THREADS: usize = 8;
+
+        let runtime = std::sync::Arc::new(rt());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let winners = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for i in 0..THREADS {
+            let runtime = std::sync::Arc::clone(&runtime);
+            let barrier = std::sync::Arc::clone(&barrier);
+            let winners = std::sync::Arc::clone(&winners);
+            handles.push(std::thread::spawn(move || {
+                let ops = super::KvAtomicOps::new(&runtime);
+                barrier.wait();
+                let (inserted, _) = ops
+                    .set_with_tags_and_metadata_for_model(
+                        CollectionModel::Kv,
+                        "kv_default",
+                        "once",
+                        reddb_types::Value::Integer(i as i64),
+                        None,
+                        &[],
+                        true,
+                        Vec::new(),
+                    )
+                    .expect("put should succeed");
+                if inserted {
+                    winners.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker should finish");
+        }
+
+        assert_eq!(
+            winners.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "exactly one racer may report having inserted the key"
+        );
     }
 
     #[test]
