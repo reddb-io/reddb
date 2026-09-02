@@ -1,4 +1,5 @@
 pub mod env_secret;
+pub mod file_mode;
 pub mod hex;
 pub mod json;
 pub mod secret_file;

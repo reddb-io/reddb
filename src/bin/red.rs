@@ -1336,6 +1336,13 @@ fn main() {
         std::process::exit(2);
     }
 
+    // Owner-only permissions for everything created from here on: the .rdb,
+    // WAL segments, the audit log, exports and backups all inherited the
+    // process umask (typically world-readable) because only a handful of
+    // call sites set an explicit mode. Done before any file is created, and
+    // before threads exist, so the process-global change races nothing.
+    reddb::utils::file_mode::restrict_new_file_permissions();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Handle empty args early.
