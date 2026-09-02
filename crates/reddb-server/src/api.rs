@@ -870,7 +870,7 @@ impl fmt::Display for StorageIntegrityError {
         }
         write!(
             f,
-            ": {}. RedDB refused to serve unverified bytes; run `red doctor` to classify the fault, or `red salvage` to recover trusted rows.",
+            ": {}. RedDB refused to serve unverified bytes; run the `SCRUB` statement to classify the fault, or `red salvage` to recover trusted rows.",
             self.detail
         )
     }

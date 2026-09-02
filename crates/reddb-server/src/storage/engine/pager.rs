@@ -132,7 +132,7 @@ impl std::fmt::Display for PagerError {
                 f,
                 "internal manifest zone of {} failed its checksum: the zone that names \
                  collections, indexes and the checkpoint boundary cannot be trusted, so no \
-                 rows are returned rather than garbage ones. Run `red doctor` to classify the fault \
+                 rows are returned rather than garbage ones. Run the `SCRUB` statement to classify the fault \
                  and `red salvage` to extract what survives (ADR 0074 §2/§4).",
                 path.display()
             ),
@@ -140,7 +140,7 @@ impl std::fmt::Display for PagerError {
                 f,
                 "double-write zone of {} failed validation: page recovery cannot prove \
                  whether the protected in-place write completed. The store will not be opened \
-                 silently; run `red doctor` to classify the fault and `red salvage` to extract trusted \
+                 silently; run the `SCRUB` statement to classify the fault and `red salvage` to extract trusted \
                  rows (ADR 0074 §2/§4).",
                 path.display()
             ),

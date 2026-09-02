@@ -3509,6 +3509,7 @@ pub fn provider_mode_to_provider(mode: AiProviderMode) -> AiProvider {
 ///   * plaintext `http://` only for loopback hosts (local OpenAI-compatible
 ///     servers), `https://` everywhere else;
 ///   * literal private / link-local / multicast IP addresses are refused.
+///
 /// `REDDB_AI_ALLOW_PRIVATE_PROVIDERS=1` lifts both restrictions for
 /// deployments that run providers on a private network.
 fn validate_custom_provider_url(url: &str) -> crate::RedDBResult<()> {

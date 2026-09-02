@@ -39,9 +39,9 @@ impl std::fmt::Display for RdbFileError {
                 f,
                 "{zone} zone of {} failed validation, so the store will not be opened \
                  (opening it could only return data the zone can no longer vouch for). \
-                 Run `red doctor` to classify the fault and `red salvage` to extract every \
-                 entity the damage did not touch; `red salvage` never writes into the \
-                 damaged file (ADR 0074 §2/§4).",
+                 Run the `SCRUB` statement to classify the fault and `red salvage` to \
+                 extract every entity the damage did not touch; `red salvage` never writes \
+                 into the damaged file (ADR 0074 §2/§4).",
                 path.display()
             ),
         }
@@ -225,10 +225,6 @@ impl EmbeddedRdbArtifact {
 
     pub fn open(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
         Self::open_inner(path, true)
-    }
-
-    fn open_for_wal_append(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
-        Self::open_inner(path, false)
     }
 
     fn open_inner(

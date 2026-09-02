@@ -482,10 +482,6 @@ impl<'a> KvAtomicOps<'a> {
         Ok(())
     }
 
-    /// Atomically increment (or decrement) a counter key. Returns the new value.
-    ///
-    /// - Missing key initialises at `by` (Redis-compat).
-    /// - Non-integer value returns an error before any mutation.
     /// The `_ttl_ms` currently recorded for `key`, if it has one.
     ///
     /// Used to carry an existing expiry across the delete-then-create that
@@ -509,6 +505,10 @@ impl<'a> KvAtomicOps<'a> {
         }
     }
 
+    /// Atomically increment (or decrement) a counter key. Returns the new value.
+    ///
+    /// - Missing key initialises at `by` (Redis-compat).
+    /// - Non-integer value returns an error before any mutation.
     pub fn incr(
         &self,
         model: crate::catalog::CollectionModel,

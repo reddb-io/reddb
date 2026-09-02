@@ -627,12 +627,12 @@ fn zone_failure_guidance_names_real_commands() {
         .to_string();
     assert!(msg.contains("failed validation"), "{msg}");
     assert!(
-        msg.contains("red doctor") && msg.contains("red salvage"),
-        "guidance must name shipped commands: {msg}"
+        msg.contains("`SCRUB` statement") && msg.contains("red salvage"),
+        "guidance must be invocable as written: {msg}"
     );
     assert!(
-        !msg.contains("Run scrub"),
-        "`red scrub` is not a command the binary ships: {msg}"
+        !msg.contains("Run scrub "),
+        "`scrub` is a SQL statement, not a bare command: {msg}"
     );
 }
 

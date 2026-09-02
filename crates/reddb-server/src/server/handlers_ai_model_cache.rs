@@ -489,21 +489,28 @@ where
         if trimmed.is_empty() {
             return Err("'fixture_dir' cannot be empty".to_string());
         }
-        // A request-supplied directory is only honoured *inside* the
-        // configured fixture root: the handler walks, copies and hashes
-        // every file under it, so an unconstrained path would let a
-        // caller enumerate and fingerprint the server filesystem.
+        // The handler walks, copies and hashes every file under this
+        // directory, so an unconstrained path is a filesystem-enumeration
+        // primitive. The route being admin-only (see `ai.route.rs`) is the
+        // security boundary; an operator who wants to narrow it further sets
+        // `AI_LOCAL_FIXTURE_DIR_KEY`, and the override is then confined to
+        // that root. Leaving it unset keeps the documented workflow of
+        // pulling from a per-request fixture directory.
+        // Canonicalise only when there is a root to compare against, so a
+        // path that simply does not exist keeps reaching the downstream
+        // validation that reports it as such.
         let Some(root) = configured_root else {
-            return Err(format!(
-                "'fixture_dir' overrides require '{AI_LOCAL_FIXTURE_DIR_KEY}' to be configured; the override must live under it"
-            ));
+            return Ok(PathBuf::from(trimmed));
         };
         let root = std::fs::canonicalize(&root)
             .map_err(|e| format!("configured fixture root is not usable: {e}"))?;
         let requested =
             std::fs::canonicalize(trimmed).map_err(|e| format!("'fixture_dir' {trimmed}: {e}"))?;
         if !requested.starts_with(&root) {
-            return Err("'fixture_dir' must be inside the configured fixture root".to_string());
+            return Err(format!(
+                "'fixture_dir' must be inside the configured fixture root {}",
+                root.display()
+            ));
         }
         return Ok(requested);
     }

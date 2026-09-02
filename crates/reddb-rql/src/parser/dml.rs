@@ -15,9 +15,16 @@ use reddb_types::types::Value;
 /// depth cap is co-located with [`crate::limits::ParserLimits`].
 pub(crate) use crate::limits::JSON_LITERAL_MAX_DEPTH;
 
-/// Walk a parsed `JsonValue` tree and bail out if nesting exceeds
-/// `JSON_LITERAL_MAX_DEPTH`. Iterative to avoid the very stack
-/// overflow we're trying to prevent.
+/// Walk a `JsonValue` tree and bail out if nesting exceeds
+/// `JSON_LITERAL_MAX_DEPTH`.
+///
+/// This runs *after* the document has been parsed, so despite the iterative
+/// walk it never actually prevented a stack overflow in the parser — the
+/// recursive descent had already built the whole tree by the time it ran.
+/// The parser enforces the same bound while parsing
+/// (`reddb_types::utils::json::JSON_MAX_NESTING_DEPTH`), which is what makes
+/// a hostile document safe; this walk remains as a cheap check for trees
+/// built by other means.
 pub(crate) fn json_literal_depth_check(
     value: &reddb_types::utils::json::JsonValue,
 ) -> Result<(), String> {
