@@ -165,7 +165,24 @@ fn ai_prompt(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpRespons
     Some(server.handle_ai_prompt(req.body.to_vec()))
 }
 
+/// Mutations of provider credentials and the local model cache touch the
+/// server filesystem and decide which secret is sent to which host; they
+/// are operator actions, not user actions. The dispatcher installed the
+/// caller's identity before routing, so an authenticated non-admin is
+/// refused here (anonymous / auth-disabled deployments keep working).
+fn require_admin_identity() -> Option<HttpResponse> {
+    match crate::runtime::execution_context::current_auth_identity_for_audit() {
+        Some((_, role)) if !role.can_admin() => {
+            Some(json_error(403, "admin role required"))
+        }
+        _ => None,
+    }
+}
+
 fn ai_credentials(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    if let Some(denied) = require_admin_identity() {
+        return Some(denied);
+    }
     Some(server.handle_ai_credentials(req.body.to_vec()))
 }
 
@@ -174,6 +191,9 @@ fn ai_models_list(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpR
 }
 
 fn ai_models_register(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    if let Some(denied) = require_admin_identity() {
+        return Some(denied);
+    }
     Some(server.handle_ai_model_register(req.body.to_vec()))
 }
 
@@ -183,11 +203,17 @@ fn ai_models_get(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpRes
 }
 
 fn ai_models_update(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    if let Some(denied) = require_admin_identity() {
+        return Some(denied);
+    }
     let name = req.matched.params.get("name")?;
     Some(server.handle_ai_model_update(name, req.body.to_vec()))
 }
 
 fn ai_models_pull(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    if let Some(denied) = require_admin_identity() {
+        return Some(denied);
+    }
     let name = req.matched.params.get("name")?;
     Some(server.handle_ai_model_pull(name, req.body.to_vec()))
 }
@@ -198,6 +224,9 @@ fn ai_models_cache_status(server: &RedDBServer, req: &RouteRequest<'_>) -> Optio
 }
 
 fn ai_models_cache_drop(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    if let Some(denied) = require_admin_identity() {
+        return Some(denied);
+    }
     let name = req.matched.params.get("name")?;
     Some(server.handle_ai_model_cache_drop(name))
 }

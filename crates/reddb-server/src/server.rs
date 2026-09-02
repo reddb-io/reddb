@@ -168,6 +168,7 @@ pub mod output_stream;
 mod patch_support;
 mod request_body;
 mod request_context;
+mod request_identity;
 pub(crate) mod route_catalog;
 mod routes;
 pub(crate) use routes::discovered_route_catalog;

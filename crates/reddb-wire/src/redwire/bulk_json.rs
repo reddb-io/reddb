@@ -91,7 +91,10 @@ pub fn decode_bulk_json_payload(payload: &[u8]) -> Result<BulkJsonPayload, BulkJ
     )?;
 
     let nrows = read_u32(payload, &mut pos, BulkJsonError::MissingRowCount)? as usize;
-    let mut json_payloads = Vec::with_capacity(nrows);
+    // Bound the pre-allocation by the payload: each row carries at least a
+    // 4-byte length prefix, so `nrows` cannot exceed `remaining / 4`.
+    let remaining = payload.len().saturating_sub(pos);
+    let mut json_payloads = Vec::with_capacity(nrows.min(remaining / 4));
     for _ in 0..nrows {
         let json_len = read_u32(payload, &mut pos, BulkJsonError::MissingJsonLength)? as usize;
         json_payloads.push(read_string(

@@ -372,9 +372,82 @@ fn grpc_query_value_to_param_value(value: QueryValue) -> Result<ParamValue, Stat
     }
 }
 
+/// RAII guard scoping the runtime's thread-local identity to one gRPC SQL
+/// call. The catalog interceptor resolves the principal (`tenant/user` or
+/// `user`) but the runtime gates read a thread-local; without installing it
+/// every `Query`/`BatchQuery`/`ExecutePrepared` ran with enforcement off.
+/// The executor is synchronous, so the thread-local holds for the call.
+struct GrpcIdentityGuard {
+    previous_identity: Option<(String, crate::auth::Role)>,
+    previous_tenant: Option<String>,
+}
+
+impl GrpcIdentityGuard {
+    fn install(identity: Option<(crate::auth::UserId, crate::auth::Role)>) -> Self {
+        use crate::runtime::execution_context as ctx;
+        let previous_identity = ctx::current_auth_identity_for_audit();
+        let previous_tenant = ctx::current_tenant();
+        match identity {
+            Some((id, role)) => {
+                match id.tenant {
+                    Some(tenant) => ctx::set_current_tenant(tenant),
+                    None => ctx::clear_current_tenant(),
+                }
+                ctx::set_current_auth_identity(id.username, role);
+            }
+            None => {
+                ctx::clear_current_auth_identity();
+                ctx::clear_current_tenant();
+            }
+        }
+        Self {
+            previous_identity,
+            previous_tenant,
+        }
+    }
+}
+
+impl Drop for GrpcIdentityGuard {
+    fn drop(&mut self) {
+        use crate::runtime::execution_context as ctx;
+        match self.previous_identity.take() {
+            Some((username, role)) => ctx::set_current_auth_identity(username, role),
+            None => ctx::clear_current_auth_identity(),
+        }
+        match self.previous_tenant.take() {
+            Some(tenant) => ctx::set_current_tenant(tenant),
+            None => ctx::clear_current_tenant(),
+        }
+    }
+}
+
+/// Resolve the `(UserId, Role)` a gRPC request executes as, from the
+/// dispatch context the catalog interceptor attached plus the metadata
+/// bearer (for the role).
+fn grpc_request_identity<T>(
+    runtime: &GrpcRuntime,
+    request: &Request<T>,
+) -> Option<(crate::auth::UserId, crate::auth::Role)> {
+    let principal = request
+        .extensions()
+        .get::<catalog_dispatch::GrpcDispatchContext>()
+        .and_then(|context| context.principal.clone())?;
+    let role = match runtime.resolve_auth(request.metadata()) {
+        crate::auth::middleware::AuthResult::Authenticated { role, .. } => role,
+        _ => return None,
+    };
+    let (tenant, username) = principal
+        .split_once('/')
+        .map_or((None, principal.as_str()), |(tenant, username)| {
+            (Some(tenant), username)
+        });
+    Some((crate::auth::UserId::from_parts(tenant, username), role))
+}
+
 fn execute_grpc_query_request(
     runtime: &RedDBRuntime,
     prepared: &PreparedRegistry,
+    identity: Option<(crate::auth::UserId, crate::auth::Role)>,
     query: String,
     params: Vec<QueryValue>,
     commit_policy: Option<crate::replication::CommitPolicy>,
@@ -382,6 +455,7 @@ fn execute_grpc_query_request(
     if query.trim().is_empty() {
         return Err(Status::invalid_argument("query field cannot be empty"));
     }
+    let _identity = GrpcIdentityGuard::install(identity);
 
     let params = params
         .into_iter()
@@ -550,9 +624,15 @@ mod grpc_query_value_tests {
         let runtime =
             RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
         let prepared = PreparedRegistry::new();
-        let err =
-            execute_grpc_query_request(&runtime, &prepared, "  ".to_string(), Vec::new(), None)
-                .expect_err("empty query should fail");
+        let err = execute_grpc_query_request(
+            &runtime,
+            &prepared,
+            None,
+            "  ".to_string(),
+            Vec::new(),
+            None,
+        )
+        .expect_err("empty query should fail");
 
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert_eq!(err.message(), "query field cannot be empty");
@@ -568,6 +648,7 @@ mod grpc_query_value_tests {
         let result = execute_grpc_query_request(
             &runtime,
             &prepared,
+            None,
             "SELECT id, name FROM p WHERE id = $1 AND name = $2".to_string(),
             grpc_param_values(),
             None,
@@ -598,6 +679,7 @@ mod grpc_query_value_tests {
         let err = execute_grpc_query_request(
             &runtime,
             &prepared,
+            None,
             "INSERT INTO grpc_ack_items (id, name) VALUES (1, 'alpha')".to_string(),
             Vec::new(),
             None,

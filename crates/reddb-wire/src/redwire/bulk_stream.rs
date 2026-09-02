@@ -136,7 +136,10 @@ pub fn decode_bulk_stream_rows_payload(
 ) -> Result<BulkStreamRowsPayload, BulkStreamError> {
     let mut pos = 0;
     let nrows = read_u32(payload, &mut pos, BulkStreamError::MissingRowCount)? as usize;
-    let mut rows = Vec::with_capacity(nrows);
+    // Bound the pre-allocation by the payload (one byte per value minimum)
+    // so a hostile row count cannot trigger an allocation abort.
+    let remaining = payload.len().saturating_sub(pos);
+    let mut rows = Vec::with_capacity(nrows.min(remaining / column_count.max(1)));
     for _ in 0..nrows {
         let mut values = Vec::with_capacity(column_count);
         for _ in 0..column_count {
@@ -233,6 +236,22 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "stream rows: truncated i64 value"
+        );
+    }
+
+    #[test]
+    fn hostile_row_count_does_not_drive_a_huge_preallocation() {
+        // A 8-byte payload claiming u32::MAX rows used to request a
+        // ~96 GiB `Vec`, and an allocation failure aborts the process
+        // rather than erroring the connection. The decode must fail on
+        // truncated data instead.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        let err = decode_bulk_stream_rows_payload(&payload, 4)
+            .expect_err("a row count with no rows behind it must be refused");
+        assert!(
+            matches!(err, BulkStreamError::Value(_)),
+            "unexpected error: {err:?}"
         );
     }
 }

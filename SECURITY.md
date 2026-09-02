@@ -30,7 +30,8 @@ We follow coordinated disclosure: we ask reporters to keep findings private unti
 ## Hardening notes for self-hosters
 
 - Run RedDB behind a reverse proxy with TLS terminated. The bundled HTTP server supports TLS but most operators prefer to terminate at the proxy.
-- Set `RED_AUTH_REQUIRED=true` in production. Anonymous access is convenient for local development only.
+- Set `REDDB_AUTH=true` and `REDDB_REQUIRE_AUTH=true` in production (the official images set both). Anonymous access is convenient for local development only; `REDDB_NO_AUTH=true` opts out explicitly.
+- Set `RED_ADMIN_TOKEN` for the operator surface (`/admin/*`, `/metrics`). Without it those routes require an admin-role bearer from the user auth store.
 - Use the `vault` module for AI provider keys instead of plaintext config.
 - Enable WAL fsync (default). Only disable on disposable nodes where replay-from-source is acceptable.
 - Restrict the admin API (`/v1/admin`) to a private network or behind SSO.

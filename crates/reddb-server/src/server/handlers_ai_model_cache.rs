@@ -350,11 +350,6 @@ impl RedDBServer {
     }
 
     fn cache_root(&self) -> Result<PathBuf, String> {
-        if let Some(override_path) = self.read_config_text(AI_LOCAL_CACHE_DIR_KEY) {
-            let p = PathBuf::from(override_path);
-            ensure_dir(&p)?;
-            return Ok(p);
-        }
         let db = self.runtime().db();
         let store = db.store();
         let db_path = store.db_path();
@@ -365,6 +360,24 @@ impl RedDBServer {
             },
             None => std::env::temp_dir(),
         };
+        if let Some(override_path) = self.read_config_text(AI_LOCAL_CACHE_DIR_KEY) {
+            // The cache root is `remove_dir_all`-ed on cache drop, so a
+            // config-writable override must stay inside the data directory;
+            // otherwise `cache_dir=/var/lib` + DELETE …/cache is `rm -rf`.
+            let p = PathBuf::from(override_path);
+            ensure_dir(&p)?;
+            let resolved = std::fs::canonicalize(&p)
+                .map_err(|e| format!("AI cache dir override is not usable: {e}"))?;
+            let base_resolved = std::fs::canonicalize(&base)
+                .map_err(|e| format!("data directory is not usable: {e}"))?;
+            if !resolved.starts_with(&base_resolved) {
+                return Err(format!(
+                    "'{AI_LOCAL_CACHE_DIR_KEY}' must point inside the data directory {}",
+                    base_resolved.display()
+                ));
+            }
+            return Ok(resolved);
+        }
         let root = ai_model_cache_root(&base);
         ensure_dir(&root)?;
         Ok(root)
@@ -470,15 +483,32 @@ fn resolve_fixture_dir<F>(payload: &JsonValue, config_lookup: F) -> Result<PathB
 where
     F: FnOnce(&str) -> Option<String>,
 {
+    let configured_root = config_lookup(AI_LOCAL_FIXTURE_DIR_KEY).map(PathBuf::from);
     if let Some(value) = payload.get("fixture_dir").and_then(JsonValue::as_str) {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             return Err("'fixture_dir' cannot be empty".to_string());
         }
-        return Ok(PathBuf::from(trimmed));
+        // A request-supplied directory is only honoured *inside* the
+        // configured fixture root: the handler walks, copies and hashes
+        // every file under it, so an unconstrained path would let a
+        // caller enumerate and fingerprint the server filesystem.
+        let Some(root) = configured_root else {
+            return Err(format!(
+                "'fixture_dir' overrides require '{AI_LOCAL_FIXTURE_DIR_KEY}' to be configured; the override must live under it"
+            ));
+        };
+        let root = std::fs::canonicalize(&root)
+            .map_err(|e| format!("configured fixture root is not usable: {e}"))?;
+        let requested =
+            std::fs::canonicalize(trimmed).map_err(|e| format!("'fixture_dir' {trimmed}: {e}"))?;
+        if !requested.starts_with(&root) {
+            return Err("'fixture_dir' must be inside the configured fixture root".to_string());
+        }
+        return Ok(requested);
     }
-    if let Some(value) = config_lookup(AI_LOCAL_FIXTURE_DIR_KEY) {
-        return Ok(PathBuf::from(value));
+    if let Some(root) = configured_root {
+        return Ok(root);
     }
     Err(format!(
         "no artifact source configured: provide 'fixture_dir' in the request body or set '{AI_LOCAL_FIXTURE_DIR_KEY}'; live HuggingFace pull is not implemented in this slice"

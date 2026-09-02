@@ -1033,6 +1033,12 @@ impl RedDBRuntime {
             };
         }
 
+        // Only a *policy-typed* managed entry hands the decision to the
+        // execution-side `ManagedPolicyGate`. Matching on id alone let a
+        // policy named after any managed entry of another type (e.g. the
+        // cloud preset's `red.config.cloud` config namespace) skip this
+        // check entirely, while the managed gate ignored the non-policy
+        // entry — an unauthenticated route to an allow-all policy.
         if resource_kind == "policy"
             && matches!(
                 action,
@@ -1042,7 +1048,10 @@ impl RedDBRuntime {
                 .inner
                 .config_registry
                 .get_active(resource_name)
-                .map(|entry| entry.managed)
+                .map(|entry| {
+                    entry.managed
+                        && entry.resource_type == crate::auth::managed_policy::RESOURCE_TYPE_POLICY
+                })
                 .unwrap_or(false)
         {
             return Ok(());
@@ -1116,6 +1125,169 @@ impl RedDBRuntime {
         Err(RedDBError::Query(format!(
             "permission denied: principal=`{}` action=`secret:write` resource=`secret:{}` denied by IAM policy",
             principal, key
+        )))
+    }
+
+    /// Gate for `SET CONFIG key = value`. Under IAM the principal needs
+    /// `config:write` on `config:<key>`; under legacy RBAC any write-role
+    /// principal may set ordinary keys, but the AI provider namespace
+    /// (`red.config.ai.*`, which can redirect provider calls and select which
+    /// vault secret is sent as a bearer) is admin-only. Embedded callers with
+    /// no identity pass, as everywhere else in this gate.
+    pub(crate) fn check_config_write_privilege(&self, key: &str) -> RedDBResult<()> {
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let tenant = current_tenant();
+        if auth_store.iam_authorization_enabled() {
+            let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+            let mut resource =
+                crate::auth::policies::ResourceRef::new("config".to_string(), key.to_string());
+            if let Some(tenant) = &tenant {
+                resource = resource.with_tenant(tenant.clone());
+            }
+            let ctx = runtime_iam_context(role, tenant.as_deref());
+            if auth_store.check_policy_authz_with_role(
+                &principal,
+                "config:write",
+                &resource,
+                &ctx,
+                role,
+            ) {
+                return Ok(());
+            }
+            return Err(RedDBError::Query(format!(
+                "permission denied: principal=`{}` action=`config:write` resource=`config:{}` denied by IAM policy",
+                principal, key
+            )));
+        }
+        let lowered = key.to_ascii_lowercase();
+        let admin_only = lowered.starts_with("red.config.ai.");
+        let allowed = if admin_only {
+            role.can_admin()
+        } else {
+            role.can_write()
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(RedDBError::Query(format!(
+                "permission denied: principal=`{}` role=`{:?}` cannot SET CONFIG `{}`",
+                username, role, key
+            )))
+        }
+    }
+
+    /// Gate for `SHOW CONFIG`. Under IAM the principal needs `config:read`
+    /// on the config namespace (`config:*`); legacy RBAC lets any
+    /// authenticated principal read.
+    pub(crate) fn check_config_read_privilege(&self) -> RedDBResult<()> {
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let tenant = current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("config".to_string(), "*".to_string());
+        if let Some(tenant) = &tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = runtime_iam_context(role, tenant.as_deref());
+        if auth_store.check_policy_authz_with_role(&principal, "config:read", &resource, &ctx, role)
+        {
+            return Ok(());
+        }
+        Err(RedDBError::Query(format!(
+            "permission denied: principal=`{}` action=`config:read` resource=`config:*` denied by IAM policy",
+            principal
+        )))
+    }
+
+    /// Gate for the VCS commands that are dispatched before the statement
+    /// frame is built (`CHECKPOINT`, `CHECKOUT`, `RESET`, `MERGE`, …).
+    /// `RESET` rewinds the whole store and is admin-only; every other VCS
+    /// command mutates history and needs at least the write role.
+    pub(crate) fn check_vcs_command_privilege(
+        &self,
+        command: &super::super::vcs_command::RuntimeVcsCommand,
+    ) -> RedDBResult<()> {
+        use super::super::vcs_command::RuntimeVcsCommand;
+        if self.inner.auth_store.read().is_none() {
+            return Ok(());
+        }
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let (verb, allowed) = match command {
+            RuntimeVcsCommand::Reset { .. } => ("RESET", role.can_admin()),
+            RuntimeVcsCommand::Checkpoint { .. } => ("CHECKPOINT", role.can_write()),
+            RuntimeVcsCommand::Checkout { .. } => ("CHECKOUT", role.can_write()),
+            RuntimeVcsCommand::Merge { .. } => ("MERGE", role.can_write()),
+            RuntimeVcsCommand::CherryPick { .. } => ("CHERRY PICK", role.can_write()),
+            RuntimeVcsCommand::Revert { .. } => ("REVERT", role.can_write()),
+            RuntimeVcsCommand::ResolveConflict { .. } => ("RESOLVE CONFLICT", role.can_write()),
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(RedDBError::Query(format!(
+                "permission denied: principal=`{}` role=`{:?}` cannot issue {}",
+                username, role, verb
+            )))
+        }
+    }
+
+    /// Gate for `COPY <table> FROM '<path>'`: the statement reads a file
+    /// from the *server's* filesystem, so — like PostgreSQL's
+    /// `pg_read_server_files` — it is admin-only whenever an identity is
+    /// installed.
+    pub(crate) fn check_copy_from_privilege(&self, table: &str) -> RedDBResult<()> {
+        if self.inner.auth_store.read().is_none() {
+            return Ok(());
+        }
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        if role.can_admin() {
+            Ok(())
+        } else {
+            Err(RedDBError::Query(format!(
+                "permission denied: principal=`{}` role=`{:?}` cannot COPY `{}` FROM a server file (admin only)",
+                username, role, table
+            )))
+        }
+    }
+
+    /// Gate for `SET TENANT` / `RESET TENANT`: a tenant-scoped principal
+    /// (its transport pinned a tenant) may only re-select its own tenant;
+    /// switching to another tenant or clearing the scope would let it read
+    /// through the victim tenant's RLS predicates. Platform-scoped
+    /// principals (no tenant) and embedded callers keep the old behaviour.
+    pub(crate) fn check_set_tenant_privilege(&self, target: Option<&str>) -> RedDBResult<()> {
+        if self.inner.auth_store.read().is_none() {
+            return Ok(());
+        }
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let Some(own_tenant) = current_tenant() else {
+            return Ok(());
+        };
+        if target == Some(own_tenant.as_str()) {
+            return Ok(());
+        }
+        Err(RedDBError::Query(format!(
+            "permission denied: principal=`{}` role=`{:?}` is scoped to tenant `{}` and cannot switch tenant",
+            username, role, own_tenant
         )))
     }
 

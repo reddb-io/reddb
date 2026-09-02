@@ -286,6 +286,7 @@ impl RedDBRuntime {
         // record, mutates the relevant field, writes back.
         let mut attrs = auth_store.user_attributes(&target);
         let mut enable_change: Option<bool> = None;
+        let mut new_password_change: Option<String> = None;
 
         for a in &stmt.attributes {
             match a {
@@ -320,10 +321,8 @@ impl RedDBRuntime {
                 }
                 AlterUserAttribute::Enable => enable_change = Some(true),
                 AlterUserAttribute::Disable => enable_change = Some(false),
-                AlterUserAttribute::Password(_) => {
-                    // Out of scope — accept the AST but no-op so the
-                    // parser stays compatible with future password
-                    // rotation work.
+                AlterUserAttribute::Password(new_password) => {
+                    new_password_change = Some(new_password.clone());
                 }
             }
         }
@@ -336,6 +335,11 @@ impl RedDBRuntime {
                 .set_user_enabled(&target, en)
                 .map_err(|e| RedDBError::Query(e.to_string()))?;
         }
+        if let Some(new_password) = &new_password_change {
+            auth_store
+                .set_password_by_admin(&target, new_password)
+                .map_err(|e| RedDBError::Query(e.to_string()))?;
+        }
         self.invalidate_result_cache();
         tracing::info!(
             target: "audit",
@@ -344,8 +348,13 @@ impl RedDBRuntime {
             "ALTER USER applied"
         );
 
+        let echoed_query = if new_password_change.is_some() {
+            format!("ALTER USER {} PASSWORD '***'", target)
+        } else {
+            query.to_string()
+        };
         Ok(RuntimeQueryResult::ok_message(
-            query.to_string(),
+            echoed_query,
             &format!("ALTER USER {} applied", target),
             "alter_user",
         ))

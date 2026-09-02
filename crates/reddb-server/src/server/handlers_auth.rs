@@ -19,10 +19,10 @@ use crate::auth::{AuthError, AuthStore, Role, UserId};
 use std::collections::BTreeSet;
 
 /// Resolved caller for an admin-only auth endpoint.
-struct AuthCaller {
+pub(crate) struct AuthCaller {
     /// Owner UserId (tenant + username) carried by the validated token.
-    id: UserId,
-    role: crate::auth::Role,
+    pub(crate) id: UserId,
+    pub(crate) role: crate::auth::Role,
 }
 
 impl AuthCaller {
@@ -41,7 +41,7 @@ impl AuthCaller {
 /// Stays out of Agent A's bearer-extractor lane by re-using the same
 /// `Authorization: Bearer` parsing inline; the OAuth-JWT path is
 /// shared with `routing::resolve_bearer_role`.
-fn resolve_auth_caller(
+pub(crate) fn resolve_auth_caller(
     server: &RedDBServer,
     headers: &BTreeMap<String, String>,
 ) -> Option<AuthCaller> {
@@ -325,11 +325,11 @@ impl RedDBServer {
                 return json_error(403, "admin role required to create users");
             }
             None => {
-                // No bearer present: only allowed when require_auth is
-                // off (the routing gate already handled this for the
-                // auth-disabled case). Fall through and treat as
-                // platform admin so existing dev workflows work.
-                if auth_store.is_enabled() && auth_store.config().require_auth {
+                // No bearer present. Principal lifecycle is never an
+                // anonymous operation once the auth store is enabled —
+                // `require_auth=false` only relaxes *data* access, it must
+                // not let an unauthenticated caller mint an admin.
+                if auth_store.is_enabled() {
                     return json_error(401, "authentication required");
                 }
             }
@@ -483,7 +483,9 @@ impl RedDBServer {
                 return json_error(403, "admin role required");
             }
             None => {
-                if auth_store.is_enabled() && auth_store.config().require_auth {
+                // Same rule as `handle_auth_create_user`: deleting a
+                // principal is never anonymous while the store is enabled.
+                if auth_store.is_enabled() {
                     return json_error(401, "authentication required");
                 }
                 tenant_path_override
@@ -517,8 +519,17 @@ impl RedDBServer {
     /// POST /auth/api-keys
     ///
     /// Creates a new API key for a user.
-    /// Body: `{ "username": "alice", "name": "ci-deploy", "role": "write" }`
-    pub(crate) fn handle_auth_create_api_key(&self, body: Vec<u8>) -> HttpResponse {
+    /// Body: `{ "username": "alice", "name": "ci-deploy", "role": "write",
+    ///          "tenant_id": "acme" }`
+    ///
+    /// Authorization: the caller must be the target user (and may not
+    /// request a role above their own), or an admin of the target's tenant
+    /// (a platform admin may target any tenant via `tenant_id`).
+    pub(crate) fn handle_auth_create_api_key(
+        &self,
+        headers: &BTreeMap<String, String>,
+        body: Vec<u8>,
+    ) -> HttpResponse {
         let auth_store = match &self.auth_store {
             Some(store) => store,
             None => return json_error(501, "authentication is not configured"),
@@ -545,7 +556,50 @@ impl RedDBServer {
             }
         };
 
-        match auth_store.create_api_key(&username, &name, role) {
+        let caller = match resolve_auth_caller(self, headers) {
+            Some(caller) => caller,
+            None => {
+                if auth_store.is_enabled() {
+                    return json_error(401, "authentication required");
+                }
+                // Auth store present but disabled: legacy open posture.
+                return self.create_api_key_response(auth_store, None, &username, &name, role);
+            }
+        };
+
+        let body_tenant = json_string_field(&payload, "tenant_id");
+        let target_tenant: Option<String> = if caller.is_platform_admin() {
+            body_tenant
+        } else if caller.role.can_admin() {
+            // Tenant-scoped admin: clamp to their own tenant.
+            caller.id.tenant.clone()
+        } else {
+            // Self-service only: same principal, role capped at the caller's.
+            let target = UserId::from_parts(caller.id.tenant.as_deref(), &username);
+            if target != caller.id {
+                return json_error(
+                    403,
+                    "admin role required to create API keys for other users",
+                );
+            }
+            if role > caller.role {
+                return json_error(403, "API key role cannot exceed the caller's role");
+            }
+            caller.id.tenant.clone()
+        };
+
+        self.create_api_key_response(auth_store, target_tenant.as_deref(), &username, &name, role)
+    }
+
+    fn create_api_key_response(
+        &self,
+        auth_store: &AuthStore,
+        tenant: Option<&str>,
+        username: &str,
+        name: &str,
+        role: crate::auth::Role,
+    ) -> HttpResponse {
+        match auth_store.create_api_key_in_tenant(tenant, username, name, role) {
             Ok(api_key) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
@@ -563,12 +617,33 @@ impl RedDBServer {
 
     /// DELETE /auth/api-keys/:key
     ///
-    /// Revokes an API key.
-    pub(crate) fn handle_auth_revoke_api_key(&self, key: &str) -> HttpResponse {
+    /// Revokes an API key. Only the key's owner or an admin of the owner's
+    /// tenant may revoke it; a foreign key is reported as not found so the
+    /// endpoint is not an existence oracle.
+    pub(crate) fn handle_auth_revoke_api_key(
+        &self,
+        headers: &BTreeMap<String, String>,
+        key: &str,
+    ) -> HttpResponse {
         let auth_store = match &self.auth_store {
             Some(store) => store,
             None => return json_error(501, "authentication is not configured"),
         };
+
+        if auth_store.is_enabled() {
+            let Some(caller) = resolve_auth_caller(self, headers) else {
+                return json_error(401, "authentication required");
+            };
+            let Some((owner, _)) = auth_store.validate_token_full(key) else {
+                return json_error(404, "API key not found");
+            };
+            let may_revoke = owner == caller.id
+                || caller.is_platform_admin()
+                || (caller.role.can_admin() && caller.id.tenant == owner.tenant);
+            if !may_revoke {
+                return json_error(404, "API key not found");
+            }
+        }
 
         match auth_store.revoke_api_key(key) {
             Ok(()) => json_ok("API key revoked"),

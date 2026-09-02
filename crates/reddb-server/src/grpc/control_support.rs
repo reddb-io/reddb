@@ -82,10 +82,11 @@ impl GrpcRuntime {
                 if let Some((username, role)) = self.auth_store.validate_token(token) {
                     return AuthResult::password(username, role);
                 }
-                // Token was provided but invalid -- if require_auth is on, deny.
-                if self.auth_store.config().require_auth {
-                    return AuthResult::Denied("invalid or expired token".into());
-                }
+                // A presented-but-invalid credential is always a hard
+                // reject: degrading a revoked or forged token to
+                // `Anonymous` (which may read *and* write when
+                // `require_auth` is off) would let it keep working.
+                return AuthResult::Denied("invalid or expired token".into());
             } else if self.auth_store.config().require_auth {
                 return AuthResult::Denied("authentication required".into());
             }

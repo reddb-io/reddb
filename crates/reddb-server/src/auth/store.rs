@@ -1277,7 +1277,13 @@ impl AuthStore {
             return None;
         }
         let users = self.users.read().ok()?;
-        users.get(id).and_then(|u| u.scram_verifier.clone())
+        // A disabled account keeps its verifier (re-enable restores it)
+        // but must not authenticate; returning `None` here makes the
+        // handshake use the dummy verifier, so timing stays uniform.
+        users
+            .get(id)
+            .filter(|u| u.enabled)
+            .and_then(|u| u.scram_verifier.clone())
     }
 
     /// Backwards-compatible shim for the v2 wire bootstrap path: looks
@@ -1653,6 +1659,28 @@ impl AuthStore {
         Ok(())
     }
 
+    /// Administrative password reset (`ALTER USER … PASSWORD '…'`): no
+    /// old-password check. Rehashes, regenerates the SCRAM verifier and
+    /// revokes every live session of the account so a rotated credential
+    /// cannot keep an existing session alive. Callers gate authorization.
+    pub fn set_password_by_admin(&self, id: &UserId, new_password: &str) -> Result<(), AuthError> {
+        if new_password.is_empty() {
+            return Err(AuthError::Forbidden("password cannot be empty".to_string()));
+        }
+        {
+            let mut users = self.users.write().map_err(lock_err)?;
+            let user = users
+                .get_mut(id)
+                .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
+            user.password_hash = hash_password(new_password);
+            user.scram_verifier = Some(make_scram_verifier(new_password));
+            user.updated_at = now_ms();
+        }
+        self.purge_sessions_for(id);
+        self.persist_to_vault();
+        Ok(())
+    }
+
     fn change_password_in_tenant_controlled(
         &self,
         tenant_id: Option<&str>,
@@ -1945,6 +1973,18 @@ impl AuthStore {
     /// Tenant-aware token validation. Returns the resolved `UserId`
     /// (which carries the tenant) and the granted `Role`.
     pub fn validate_token_full(&self, token: &str) -> Option<(UserId, Role)> {
+        let resolved = self.resolve_token_unchecked(token)?;
+        // Every credential is re-checked against the live user record so
+        // `ALTER USER … DISABLE` / `VALID UNTIL` take effect immediately for
+        // sessions and API keys, not only at password login.
+        if !self.principal_is_active(&resolved.0) {
+            return None;
+        }
+        Some(resolved)
+    }
+
+    /// Token → `(UserId, Role)` without consulting the owning user record.
+    fn resolve_token_unchecked(&self, token: &str) -> Option<(UserId, Role)> {
         // Try session tokens first.
         if token.starts_with("rs_") {
             if let Ok(sessions) = self.sessions.read() {
@@ -1970,6 +2010,22 @@ impl AuthStore {
         }
 
         None
+    }
+
+    /// Whether `id` names an enabled account whose `VALID UNTIL` (if any)
+    /// has not passed. Unknown accounts are inactive.
+    fn principal_is_active(&self, id: &UserId) -> bool {
+        let enabled = match self.users.read() {
+            Ok(users) => users.get(id).map(|u| u.enabled).unwrap_or(false),
+            Err(_) => false,
+        };
+        if !enabled {
+            return false;
+        }
+        match self.user_attributes(id).valid_until {
+            Some(deadline) => now_ms() < deadline,
+            None => true,
+        }
     }
 
     // -----------------------------------------------------------------
@@ -2672,8 +2728,19 @@ impl AuthStore {
         user.enabled = enabled;
         user.updated_at = now_ms();
         drop(users);
+        if !enabled {
+            self.purge_sessions_for(uid);
+        }
         self.persist_to_vault();
         Ok(())
+    }
+
+    /// Drop every live session belonging to `uid` (tenant + username match
+    /// so a same-named user in another tenant is untouched).
+    fn purge_sessions_for(&self, uid: &UserId) {
+        if let Ok(mut sessions) = self.sessions.write() {
+            sessions.retain(|_, s| !(s.username == uid.username && s.tenant_id == uid.tenant));
+        }
     }
 
     fn set_user_enabled_controlled(
@@ -4713,12 +4780,11 @@ fn random_hex(n: usize) -> String {
 /// then mix with SHA-256 for domain separation.
 pub(crate) fn random_bytes(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n.max(32)];
-    if os_random::fill_bytes(&mut buf).is_err() {
-        // Fallback: use system time and pointers as entropy (best-effort).
-        let seed = now_ms().to_le_bytes();
-        for (i, byte) in buf.iter_mut().enumerate() {
-            *byte = seed[i % seed.len()] ^ (i as u8);
-        }
+    // Fail closed: these bytes become session tokens, API keys, salts and
+    // AES-GCM nonces. A predictable fallback (the old time-derived seed)
+    // is strictly worse than refusing the operation.
+    if let Err(err) = os_random::fill_bytes(&mut buf) {
+        panic!("OS CSPRNG unavailable; refusing to generate credential material: {err}");
     }
     // SHA-256 mix to ensure uniform distribution.
     let digest = sha256(&buf);
@@ -4882,6 +4948,11 @@ mod tests {
         let key = store
             .create_api_key("system", "rotation", Role::Read)
             .unwrap();
+        // The account is disabled at this point: every credential it owns
+        // must stop validating, API keys included (they used to be resolved
+        // straight from the index without consulting the user record).
+        assert!(store.validate_token(&key.key).is_none());
+        store.set_user_enabled(&uid, true).unwrap();
         assert!(store.validate_token(&key.key).is_some());
         store.revoke_api_key(&key.key).unwrap();
         assert!(store.validate_token(&key.key).is_none());
@@ -5438,5 +5509,61 @@ mod tests {
             &resource,
             &enforcement_eval_ctx(Role::Admin),
         ));
+    }
+
+    #[test]
+    fn disabling_a_user_invalidates_its_api_keys_and_sessions() {
+        let store = AuthStore::new(test_config());
+        store.create_user("carol", "pw", Role::Write).unwrap();
+        let key = store
+            .create_api_key("carol", "ci", Role::Write)
+            .unwrap()
+            .key;
+        let session = store.authenticate("carol", "pw").unwrap();
+        assert!(store.validate_token(&key).is_some());
+        assert!(store.validate_token(&session.token).is_some());
+
+        let uid = UserId::platform("carol");
+        store.set_user_enabled(&uid, false).unwrap();
+
+        // API keys resolved straight from the index and never consulted the
+        // user record, so a disabled (or offboarded) account kept a working
+        // credential forever.
+        assert!(
+            store.validate_token(&key).is_none(),
+            "an API key must stop working the moment its owner is disabled"
+        );
+        assert!(
+            store.validate_token(&session.token).is_none(),
+            "live sessions must not survive disabling the account"
+        );
+        assert!(
+            store.lookup_scram_verifier(&uid).is_none(),
+            "SCRAM must not authenticate a disabled account"
+        );
+    }
+
+    #[test]
+    fn admin_password_reset_applies_and_revokes_sessions() {
+        let store = AuthStore::new(test_config());
+        store.create_user("dave", "old", Role::Write).unwrap();
+        let session = store.authenticate("dave", "old").unwrap();
+
+        store
+            .set_password_by_admin(&UserId::platform("dave"), "rotated")
+            .expect("admin reset");
+
+        assert!(
+            store.authenticate("dave", "old").is_err(),
+            "the old password must stop working after a reset"
+        );
+        assert!(
+            store.authenticate("dave", "rotated").is_ok(),
+            "the new password must work after a reset"
+        );
+        assert!(
+            store.validate_token(&session.token).is_none(),
+            "a password rotation must revoke live sessions"
+        );
     }
 }

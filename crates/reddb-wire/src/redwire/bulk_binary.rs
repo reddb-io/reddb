@@ -150,7 +150,11 @@ pub fn decode_bulk_binary_payload(
         )?);
     }
     let nrows = read_u32(payload, &mut pos, BulkBinaryError::MissingRowCount(flavor))? as usize;
-    let mut rows = Vec::with_capacity(nrows);
+    // `nrows` is attacker-controlled: bound the pre-allocation by what the
+    // payload could physically hold (every value costs at least one byte),
+    // so a 20-byte frame cannot request a multi-gigabyte allocation.
+    let remaining = payload.len().saturating_sub(pos);
+    let mut rows = Vec::with_capacity(nrows.min(remaining / ncols.max(1)));
     for _ in 0..nrows {
         let mut values = Vec::with_capacity(ncols);
         for _ in 0..ncols {

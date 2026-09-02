@@ -131,6 +131,13 @@ impl RedDBServer {
             return Ok(true);
         }
 
+        // See `dispatch_route`: streaming statements need the caller's
+        // identity installed for the privilege / RLS gates too.
+        let _identity = crate::server::request_identity::RequestIdentityGuard::install(
+            crate::server::handlers_auth::resolve_auth_caller(self, &request.headers)
+                .map(|caller| (caller.id, caller.role)),
+        );
+
         let principal = principal_for(&request.headers);
         match self.runtime.quota_bucket().consume(&principal) {
             crate::runtime::quota_bucket::QuotaOutcome::Throttled => {
@@ -367,6 +374,15 @@ impl RedDBServer {
         if !self.is_authorized(&method, &path, &headers) {
             return json_error(401, "unauthorized");
         }
+
+        // Scope the runtime's thread-local identity (principal, role,
+        // tenant) to this request so the privilege / column-policy / RLS
+        // gates see who is calling. Without this every statement over
+        // HTTP ran as an "embedded" caller with enforcement off.
+        let _identity = crate::server::request_identity::RequestIdentityGuard::install(
+            crate::server::handlers_auth::resolve_auth_caller(self, &headers)
+                .map(|caller| (caller.id, caller.role)),
+        );
 
         // PLAN.md Phase 4.4 — per-caller QPS quota. Health probes
         // skip the gate so probes never trip 429 on a hot instance.
@@ -676,6 +692,11 @@ impl RedDBServer {
     /// nominally would only cost a per-request principal hash and context
     /// build whose result is discarded.
     fn is_authorized(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> bool {
+        // Set when the matched route is an operator (`AdminToken`) route and
+        // no `RED_ADMIN_TOKEN` is configured: instead of staying open, the
+        // route falls through to the user-auth chain below and additionally
+        // demands an admin-role bearer.
+        let mut admin_role_required = false;
         if let Some(matched) = Self::discovered_route(method, path) {
             if matches!(
                 matched.spec.auth,
@@ -694,7 +715,10 @@ impl RedDBServer {
                         expected.as_bytes(),
                     );
                 }
-                return !path.starts_with("/v1/_admin/");
+                if path.starts_with("/v1/_admin/") {
+                    return false;
+                }
+                admin_role_required = true;
             }
         }
 
@@ -747,6 +771,11 @@ impl RedDBServer {
             if requires_admin_token {
                 return false;
             }
+            // No operator token configured: `/admin/*` and `/metrics` are
+            // only reachable by an admin-role bearer (or when the user auth
+            // store itself is absent / disabled, i.e. an explicitly
+            // unauthenticated dev install).
+            admin_role_required = true;
         }
 
         // Public endpoints that never require authentication.
@@ -813,7 +842,9 @@ impl RedDBServer {
                 // what they themselves are permitted to do.
                 let is_self_probe = matches!((method, path), ("POST", "/auth/can"));
                 let is_write = !matches!(method, "GET" | "HEAD" | "OPTIONS");
-                if is_self_probe {
+                if admin_role_required {
+                    role.can_admin()
+                } else if is_self_probe {
                     role.can_read()
                 } else if is_write {
                     role.can_write()
@@ -822,8 +853,10 @@ impl RedDBServer {
                 }
             }
             None => {
-                // No token: allow only if require_auth is false.
-                !auth_store.config().require_auth
+                // No token: allow only if require_auth is false, and never
+                // for operator routes (those need an admin bearer when no
+                // `RED_ADMIN_TOKEN` is configured).
+                !admin_role_required && !auth_store.config().require_auth
             }
         }
     }
@@ -3610,6 +3643,209 @@ mod tests {
                 l.contains("\"action\":\"stream.closed\"") && l.contains("\"reason\":\"ok\"")
             }),
             "input stream missing stream.closed ok: {log}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Security-review regressions (pre-launch hardening)
+    // ---------------------------------------------------------------
+
+    /// Restores an environment variable when dropped.
+    struct SecurityEnvGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl SecurityEnvGuard {
+        fn unset(name: &'static str) -> Self {
+            let previous = std::env::var(name).ok();
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for SecurityEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    fn auth_enabled_config() -> crate::auth::AuthConfig {
+        crate::auth::AuthConfig {
+            enabled: true,
+            session_ttl_secs: 60,
+            require_auth: true,
+            auto_encrypt_storage: false,
+            vault_enabled: false,
+            cert: Default::default(),
+            oauth: Default::default(),
+        }
+    }
+
+    /// Server with auth enabled plus an admin and a write-role user.
+    /// Returns `(server, store, admin_key, writer_key)`.
+    fn server_with_users() -> (
+        RedDBServer,
+        std::sync::Arc<crate::auth::store::AuthStore>,
+        String,
+        String,
+    ) {
+        use crate::auth::Role;
+        let store = std::sync::Arc::new(crate::auth::store::AuthStore::new(auth_enabled_config()));
+        store.create_user("root", "pw", Role::Admin).expect("admin");
+        store.create_user("bob", "pw", Role::Write).expect("writer");
+        let admin_key = store
+            .create_api_key("root", "admin-key", Role::Admin)
+            .expect("admin key")
+            .key;
+        let writer_key = store
+            .create_api_key("bob", "writer-key", Role::Write)
+            .expect("writer key")
+            .key;
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime).with_auth(std::sync::Arc::clone(&store));
+        (server, store, admin_key, writer_key)
+    }
+
+    fn authed_request(method: &str, path: &str, body: &str, bearer: Option<&str>) -> HttpRequest {
+        let mut request = request_with(method, path, body.as_bytes().to_vec());
+        if let Some(token) = bearer {
+            request
+                .headers
+                .insert("authorization".to_string(), format!("Bearer {token}"));
+        }
+        request
+    }
+
+    #[test]
+    fn admin_routes_require_an_admin_bearer_when_no_admin_token_is_configured() {
+        let _token = SecurityEnvGuard::unset("RED_ADMIN_TOKEN");
+        let _token_file = SecurityEnvGuard::unset("RED_ADMIN_TOKEN_FILE");
+        let (server, _store, admin_key, writer_key) = server_with_users();
+
+        // `RouteAuth::AdminToken` used to return `true` outright when no
+        // operator token was configured, so `/admin/*` (shutdown, restore,
+        // failover, IAM policies) was reachable anonymously even under
+        // `require_auth`. It must now fall through to the bearer chain.
+        assert_eq!(
+            server
+                .route(authed_request("POST", "/admin/readonly", "{}", None))
+                .status,
+            401,
+            "anonymous callers must not reach /admin/* without an operator token"
+        );
+        assert_eq!(
+            server
+                .route(authed_request(
+                    "POST",
+                    "/admin/readonly",
+                    "{}",
+                    Some(&writer_key)
+                ))
+                .status,
+            401,
+            "a write-role bearer must not reach /admin/*"
+        );
+        // Operators are not locked out: an admin bearer still passes.
+        assert_ne!(
+            server
+                .route(authed_request(
+                    "POST",
+                    "/admin/readonly",
+                    "{}",
+                    Some(&admin_key)
+                ))
+                .status,
+            401,
+            "an admin bearer must still reach /admin/*"
+        );
+    }
+
+    #[test]
+    fn write_role_user_cannot_mint_an_api_key_for_another_principal() {
+        let (server, store, _admin_key, writer_key) = server_with_users();
+
+        // The handler took no headers at all: any write-role bearer could
+        // name `root` in the body and receive an admin key.
+        assert_eq!(
+            server
+                .route(authed_request(
+                    "POST",
+                    "/auth/api-keys",
+                    r#"{"username":"root","name":"pivot","role":"admin"}"#,
+                    Some(&writer_key),
+                ))
+                .status,
+            403,
+            "a write-role principal must not mint keys for another user"
+        );
+        assert_eq!(
+            server
+                .route(authed_request(
+                    "POST",
+                    "/auth/api-keys",
+                    r#"{"username":"bob","name":"self","role":"admin"}"#,
+                    Some(&writer_key),
+                ))
+                .status,
+            403,
+            "an API key must not exceed the caller's own role"
+        );
+        // Self-service at or below the caller's own role keeps working.
+        assert_eq!(
+            server
+                .route(authed_request(
+                    "POST",
+                    "/auth/api-keys",
+                    r#"{"username":"bob","name":"ci","role":"read"}"#,
+                    Some(&writer_key),
+                ))
+                .status,
+            201,
+            "self-service key issuance must still work"
+        );
+
+        let root_keys = store
+            .list_users()
+            .iter()
+            .find(|u| u.username == "root")
+            .map(|u| u.api_keys.len())
+            .unwrap_or_default();
+        assert_eq!(root_keys, 1, "root must still own exactly its own key");
+    }
+
+    #[test]
+    fn unauthenticated_callers_cannot_create_or_delete_principals() {
+        let (server, store, _admin_key, _writer_key) = server_with_users();
+
+        let created = server.route(authed_request(
+            "POST",
+            "/auth/users",
+            r#"{"username":"evil","password":"pw","role":"admin"}"#,
+            None,
+        ));
+        assert!(
+            matches!(created.status, 401 | 403),
+            "anonymous principal creation must be refused, got {}",
+            created.status
+        );
+        assert!(
+            !store.list_users().iter().any(|u| u.username == "evil"),
+            "no principal may be created by an unauthenticated caller"
+        );
+
+        let deleted = server.route(authed_request("DELETE", "/auth/users/root", "", None));
+        assert!(
+            matches!(deleted.status, 401 | 403),
+            "anonymous principal deletion must be refused, got {}",
+            deleted.status
+        );
+        assert!(
+            store.list_users().iter().any(|u| u.username == "root"),
+            "the admin must survive an unauthenticated delete"
         );
     }
 }

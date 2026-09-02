@@ -247,7 +247,16 @@ impl fmt::Display for JsonValue {
 pub struct JsonParser<'a> {
     input: &'a [u8],
     pos: usize,
+    /// Current array/object nesting depth. Bounded by
+    /// [`JSON_MAX_NESTING_DEPTH`] so a hostile body such as `[[[[…` cannot
+    /// overflow the stack of the (recursive) parser before authentication.
+    depth: u32,
 }
+
+/// Maximum array/object nesting the parser accepts. Mirrors
+/// `reddb_rql::limits::JSON_LITERAL_MAX_DEPTH` so JSON reaching the engine
+/// through HTTP bodies and through SQL literals is bounded identically.
+pub const JSON_MAX_NESTING_DEPTH: u32 = 128;
 
 impl<'a> JsonParser<'a> {
     /// Creates a new parser from input slice.
@@ -255,7 +264,19 @@ impl<'a> JsonParser<'a> {
         Self {
             input: input.as_bytes(),
             pos: 0,
+            depth: 0,
         }
+    }
+
+    /// Enter one nesting level; errors once the depth cap is reached.
+    fn push_depth(&mut self) -> Result<(), String> {
+        if self.depth >= JSON_MAX_NESTING_DEPTH {
+            return Err(format!(
+                "json nesting depth exceeds {JSON_MAX_NESTING_DEPTH}"
+            ));
+        }
+        self.depth += 1;
+        Ok(())
     }
 
     /// Parses a JSON value from the current position.
@@ -270,8 +291,18 @@ impl<'a> JsonParser<'a> {
             b't' | b'f' => self.parse_bool(),
             b'-' | b'0'..=b'9' => self.parse_number(),
             b'"' => self.parse_string().map(JsonValue::String),
-            b'[' => self.parse_array(),
-            b'{' => self.parse_object(),
+            b'[' => {
+                self.push_depth()?;
+                let value = self.parse_array();
+                self.depth -= 1;
+                value
+            }
+            b'{' => {
+                self.push_depth()?;
+                let value = self.parse_object();
+                self.depth -= 1;
+                value
+            }
             _ => Err(format!("unexpected character '{}'", ch as char)),
         }
     }
@@ -758,5 +789,27 @@ mod tests {
             let output = parsed.to_json_string();
             prop_assert_eq!(output, input);
         }
+    }
+
+    #[test]
+    fn deeply_nested_json_is_rejected_instead_of_overflowing_the_stack() {
+        // `parse_value` recurses through arrays and objects, and the HTTP
+        // edge feeds it 32 MiB bodies on unauthenticated routes
+        // (`/auth/login`, `/auth/bootstrap`). Without a depth cap a body of
+        // a few hundred thousand `[` aborts the process.
+        let bomb = "[".repeat((JSON_MAX_NESTING_DEPTH as usize) + 5);
+        let err = parse_json(&bomb).expect_err("nesting bomb must be refused");
+        assert!(err.contains("nesting depth"), "unexpected error: {err}");
+
+        let object_bomb = "{\"a\":".repeat((JSON_MAX_NESTING_DEPTH as usize) + 5);
+        let err = parse_json(&object_bomb).expect_err("object nesting bomb must be refused");
+        assert!(err.contains("nesting depth"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn nesting_just_below_the_cap_still_parses() {
+        let depth = (JSON_MAX_NESTING_DEPTH as usize) - 1;
+        let doc = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        parse_json(&doc).expect("documents under the cap must still parse");
     }
 }

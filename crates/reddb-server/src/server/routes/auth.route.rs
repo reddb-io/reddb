@@ -375,12 +375,12 @@ fn auth_can(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse
 }
 
 fn auth_api_keys_create(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
-    Some(server.handle_auth_create_api_key(req.body.to_vec()))
+    Some(server.handle_auth_create_api_key(req.headers, req.body.to_vec()))
 }
 
 fn auth_api_keys_delete(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
     let key = req.matched.params.get("key")?;
-    Some(server.handle_auth_revoke_api_key(key))
+    Some(server.handle_auth_revoke_api_key(req.headers, key))
 }
 
 fn auth_change_password(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {

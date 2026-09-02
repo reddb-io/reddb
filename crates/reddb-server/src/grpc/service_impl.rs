@@ -1689,11 +1689,13 @@ impl RedDb for GrpcRuntime {
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
+        let identity = grpc_request_identity(self, &request);
         let request = request.into_inner();
         let (entity_types, capabilities) = grpc_parse_query_filters(&request)?;
         let result = execute_grpc_query_request(
             &self.runtime,
             &self.prepared_registry,
+            identity,
             request.query,
             request.params,
             commit_policy,
@@ -1710,6 +1712,7 @@ impl RedDb for GrpcRuntime {
         request: Request<BatchQueryRequest>,
     ) -> Result<Response<BatchQueryReply>, Status> {
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
+        let identity = grpc_request_identity(self, &request);
         let queries = request.into_inner().queries;
         let no_filter: Option<Vec<String>> = None;
         let mut results = Vec::with_capacity(queries.len());
@@ -1717,6 +1720,7 @@ impl RedDb for GrpcRuntime {
             let result = execute_grpc_query_request(
                 &self.runtime,
                 &self.prepared_registry,
+                identity.clone(),
                 sql,
                 Vec::new(),
                 commit_policy,
@@ -1746,6 +1750,7 @@ impl RedDb for GrpcRuntime {
         request: Request<ExecutePreparedRequest>,
     ) -> Result<Response<QueryReply>, Status> {
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
+        let identity = grpc_request_identity(self, &request);
         let inner = request.into_inner();
         let params = inner
             .bind_json
@@ -1757,6 +1762,7 @@ impl RedDb for GrpcRuntime {
         if let Some(commit_policy) = commit_policy {
             request = request.with_commit_policy(commit_policy);
         }
+        let _identity = GrpcIdentityGuard::install(identity);
         let result = QueryRequestExecutor::new(&self.runtime, &self.prepared_registry)
             .execute(request)
             .map_err(grpc_query_request_error)?;
