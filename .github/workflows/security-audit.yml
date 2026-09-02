@@ -1,0 +1,56 @@
+# Dependency CVE scan (RustSec advisory database).
+#
+# SECURITY.md points auditors at `cargo audit` and states it runs in CI; this
+# workflow is what makes that claim true. Accepted advisories, with the reason
+# each was accepted and what would make us revisit it, live in `audit.toml` —
+# so a *new* advisory fails the build while a reviewed one does not.
+#
+# Runs on pull requests that touch dependencies, and daily, because an
+# advisory can land against a lockfile that has not changed.
+
+name: Security Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "audit.toml"
+      - ".github/workflows/security-audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "audit.toml"
+      - ".github/workflows/security-audit.yml"
+  schedule:
+    # Daily, so an advisory published against an unchanged lockfile is caught.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version ^0.21
+
+      # The workspace lockfile plus the Python driver's standalone one, which
+      # resolves its own dependency graph and has drifted behind before.
+      - name: Audit workspace
+        run: cargo audit --deny warnings
+
+      - name: Audit python driver lockfile
+        run: cargo audit --deny warnings --file drivers/python/Cargo.lock

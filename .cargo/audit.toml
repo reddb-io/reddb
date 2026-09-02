@@ -1,0 +1,35 @@
+# `cargo audit` configuration.
+#
+# SECURITY.md tells auditors to run `cargo audit` and states that it runs in
+# CI; `.github/workflows/security-audit.yml` is what makes that true. Every
+# entry below is an advisory we have assessed and accepted, with the reason
+# and the condition that would make us revisit it. Nothing is ignored to make
+# the build quiet.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin attack (timing side-channel key recovery) in
+    # `rsa`, no fixed upstream release.
+    #
+    # Reachability: `rsa` arrives only through `jsonwebtoken`'s `rust_crypto`
+    # feature, which bundles every algorithm backend behind one flag — there
+    # is no way to select HS256 alone. The server signs and verifies browser
+    # tokens exclusively with HS256 (`auth/browser_token.rs`), so no RSA code
+    # path executes in production. The only RS256 use is a test fixture that
+    # mints JWTs with a locally generated key (`tests/common/jwt_mint.rs`);
+    # the advisory concerns private-key operations on attacker-influenced
+    # input, which that fixture is not.
+    #
+    # Revisit if: the OAuth validator is wired into production (it is
+    # currently constructed only by tests) and configured for an RS*/PS*
+    # issuer, or if `jsonwebtoken` gains per-algorithm features. The
+    # alternative today is switching to the `aws_lc_rs` backend, which adds a
+    # C toolchain dependency to every release target.
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2025-0134 — `rustls-pemfile` is unmaintained (not a
+    # vulnerability). Transitive through the rustls stack; the functionality
+    # has moved into `rustls-pki-types`. Revisit when our rustls dependency
+    # drops it.
+    "RUSTSEC-2025-0134",
+]
