@@ -9,6 +9,20 @@ function read(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
 
+/**
+ * Regex source matching `uses: <repo>@<tag>` in either of the forms the
+ * workflows may use: the bare tag, or a commit SHA pinned with the tag kept in
+ * a trailing comment (`@<sha> # <tag>`). Actions are SHA-pinned so a
+ * retagged release cannot swap the code a workflow runs; Dependabot keeps the
+ * SHA and the comment in step. The assertions below care about *which*
+ * release is used, not how it is spelled.
+ */
+function actionRef(repo, tag) {
+  const r = repo.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  const t = tag.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  return `${r}@(?:${t}|[0-9a-f]{40} # ${t})`;
+}
+
 function workflowJob(workflow, name) {
   const job = workflow.match(new RegExp(`\\n  ${name}:[\\s\\S]*?(?=\\n  [a-zA-Z0-9_-]+:|\\n$)`));
   return job?.[0] ?? "";
@@ -83,8 +97,8 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
 
   const publishDocker = releaseWorkflow.match(/publish-docker:[\s\S]*?(?=\n  publish-client-image:)/)?.[0] ?? "";
   const publishClient = releaseWorkflow.match(/publish-client-image:[\s\S]*?(?=\n  publish-python-wheels:)/)?.[0] ?? "";
-  assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-x86_64/);
-  assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-aarch64/);
+  assert.match(publishDocker, new RegExp(`${actionRef("actions/download-artifact", "v8")}[\\s\\S]*name: linux-x86_64`));
+  assert.match(publishDocker, new RegExp(`${actionRef("actions/download-artifact", "v8")}[\\s\\S]*name: linux-aarch64`));
   assert.match(publishDocker, /file: docker\/Dockerfile\.release/);
 
   for (const [jobName, job, imagePattern] of [
@@ -92,8 +106,8 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
     ["publish-client-image", publishClient, /IMAGE: ghcr\.io\/\$\{\{ github\.repository \}\}-client/],
   ]) {
     assert.match(job, /id-token: write/, `${jobName} must allow keyless signing`);
-    assert.match(job, /uses: sigstore\/cosign-installer@v4\.1\.2/, `${jobName} installs Cosign`);
-    assert.match(job, /id: build[\s\S]*uses: docker\/build-push-action@v7/, `${jobName} exposes build digest`);
+    assert.match(job, new RegExp(`uses: ${actionRef("sigstore/cosign-installer", "v4.1.2")}`), `${jobName} installs Cosign`);
+    assert.match(job, new RegExp(`id: build[\\s\\S]*uses: ${actionRef("docker/build-push-action", "v7")}`), `${jobName} exposes build digest`);
     assert.match(job, imagePattern, `${jobName} signs the expected GHCR image`);
     assert.match(job, /DIGEST: \$\{\{ steps\.build\.outputs\.digest \}\}/, `${jobName} signs by digest`);
     assert.match(job, /cosign sign --yes "\$\{IMAGE\}@\$\{DIGEST\}"/, `${jobName} signs with Cosign`);
@@ -169,7 +183,7 @@ test("release workflows publish aggregate checksum manifests for installers", ()
 
   for (const workflow of [releaseWorkflow, rcWorkflow]) {
     assert.match(workflow, /name: Generate checksum manifest/);
-    assert.match(workflow, /uses: anchore\/sbom-action\/download-syft@v0\.24\.0/);
+    assert.match(workflow, new RegExp(`uses: ${actionRef("anchore/sbom-action/download-syft", "v0.24.0")}`));
     assert.match(workflow, /syft-version: v1\.46\.0/);
     assert.match(workflow, /name: Generate source SBOMs/);
     assert.match(workflow, /--exclude '\.\/\.git\/\*\*'/);
@@ -212,7 +226,7 @@ test("nightly DR drill workflow uses the current-shell runner and public make ta
 
 test("changesets checkout uses the default token before release PAT handoff", () => {
   const workflow = read(".github/workflows/changesets.yml");
-  const checkoutStep = workflow.match(/- uses: actions\/checkout@v\d+[\s\S]*?(?=\n\n      - uses: pnpm\/action-setup@v\d+)/)?.[0] ?? "";
+  const checkoutStep = workflow.match(new RegExp(`- uses: actions/checkout@(?:v\\d+|[0-9a-f]{40} # v\\d+)[\\s\\S]*?(?=\\n\\n      - uses: pnpm/action-setup@(?:v[\\d.]+|[0-9a-f]{40} # v[\\d.]+))`))?.[0] ?? "";
 
   assert.match(checkoutStep, /fetch-depth: 0/);
   assert.doesNotMatch(checkoutStep, /\n\s+token:/);
@@ -233,7 +247,7 @@ test("parser fuzz nightly installs protoc before fuzz builds", () => {
   assert.match(workflow, /uses: \.\/\.github\/actions\/install-protoc[\s\S]*version: '28\.3'/);
   assert.match(
     workflow,
-    /uses: dtolnay\/rust-toolchain@nightly[\s\S]*uses: \.\/\.github\/actions\/install-protoc[\s\S]*name: Run \$\{\{ matrix\.target \}\}/,
+    new RegExp(`uses: ${actionRef("dtolnay/rust-toolchain", "nightly")}[\\s\\S]*uses: \\./\\.github/actions/install-protoc[\\s\\S]*name: Run \\$\\{\\{ matrix\\.target \\}\\}`),
   );
 });
 

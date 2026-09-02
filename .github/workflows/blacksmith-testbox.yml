@@ -29,18 +29,18 @@ jobs:
         uses: useblacksmith/begin-testbox@233448af4bfdc6fca509a7f0974411ac6d8a8043 # v2
         with:
           testbox_id: ${{ inputs.testbox_id }}
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.11
-      - uses: Swatinem/rust-cache@v2
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: testbox-rust-1.91.0-2vcpu
           cache-on-failure: 'true'
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
         with:
           tool: nextest
       - name: Run Testbox
@@ -56,18 +56,18 @@ jobs:
         uses: useblacksmith/begin-testbox@233448af4bfdc6fca509a7f0974411ac6d8a8043 # v2
         with:
           testbox_id: ${{ inputs.testbox_id }}
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.11
-      - uses: Swatinem/rust-cache@v2
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: testbox-rust-1.91.0-4vcpu
           cache-on-failure: 'true'
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
         with:
           tool: nextest
       - name: Run Testbox
@@ -83,18 +83,18 @@ jobs:
         uses: useblacksmith/begin-testbox@233448af4bfdc6fca509a7f0974411ac6d8a8043 # v2
         with:
           testbox_id: ${{ inputs.testbox_id }}
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.11
-      - uses: Swatinem/rust-cache@v2
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: testbox-rust-1.91.0-8vcpu
           cache-on-failure: 'true'
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
         with:
           tool: nextest
       - name: Run Testbox
