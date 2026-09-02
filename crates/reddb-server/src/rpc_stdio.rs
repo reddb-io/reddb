@@ -890,7 +890,11 @@ fn dispatch_method(
                 "missing 'id' string".to_string(),
             ))?;
             ensure_sql_collection(collection).map_err(|m| (error_code::INVALID_PARAMS, m))?;
-            let rid = parse_rid(id).map_err(|m| (error_code::INVALID_PARAMS, m))?;
+            let Some(rid) = rid_from_str(id) else {
+                return Ok(Value::Object(
+                    [("entity".to_string(), Value::Null)].into_iter().collect(),
+                ));
+            };
             let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
             let qr = runtime
                 .execute_query(&sql)
@@ -916,7 +920,13 @@ fn dispatch_method(
                 "missing 'id' string".to_string(),
             ))?;
             ensure_sql_collection(collection).map_err(|m| (error_code::INVALID_PARAMS, m))?;
-            let rid = parse_rid(id).map_err(|m| (error_code::INVALID_PARAMS, m))?;
+            let Some(rid) = rid_from_str(id) else {
+                return Ok(Value::Object(
+                    [("affected".to_string(), Value::Number(0.0))]
+                        .into_iter()
+                        .collect(),
+                ));
+            };
             let sql = format!("DELETE FROM {collection} WHERE rid = {rid}");
 
             if let Some(tx) = session.current_tx_mut() {
@@ -1039,11 +1049,10 @@ pub(crate) fn ensure_sql_collection(collection: &str) -> Result<(), String> {
 }
 
 /// Parse a client-supplied entity id for a `WHERE rid = …` predicate.
-/// Rids are unsigned integers; anything else is rejected rather than
-/// interpolated into the statement.
-pub(crate) fn parse_rid(id: &str) -> Result<u64, String> {
-    id.parse::<u64>()
-        .map_err(|_| format!("invalid rid '{id}': expected an unsigned integer"))
+/// Rids are unsigned integers, so any other text names no row: callers
+/// answer "not found" / 0 affected without splicing it into SQL.
+pub(crate) fn rid_from_str(id: &str) -> Option<u64> {
+    id.parse::<u64>().ok()
 }
 
 pub(crate) fn build_insert_sql<'a, I>(collection: &str, fields: I) -> String
@@ -1411,7 +1420,11 @@ fn dispatch_method_remote(
                 "missing 'id' string".to_string(),
             ))?;
             ensure_sql_collection(collection).map_err(|m| (error_code::INVALID_PARAMS, m))?;
-            let rid = parse_rid(id).map_err(|m| (error_code::INVALID_PARAMS, m))?;
+            let Some(rid) = rid_from_str(id) else {
+                return Ok(Value::Object(
+                    [("entity".to_string(), Value::Null)].into_iter().collect(),
+                ));
+            };
             let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
             let json_str = tokio_rt
                 .block_on(async {

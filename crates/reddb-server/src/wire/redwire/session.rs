@@ -1388,16 +1388,6 @@ where
     sql
 }
 
-/// Validate the `(collection, id)` pair of a Get/Delete frame before it
-/// is spliced into generated SQL: the collection must be a bare
-/// identifier and the id an unsigned rid. Neither has a quoted form on
-/// this path, so rejecting is the only safe option.
-fn rid_target<'a>(collection: &'a str, id: &str) -> Result<(&'a str, u64), String> {
-    crate::rpc_stdio::ensure_sql_collection(collection)?;
-    let rid = crate::rpc_stdio::parse_rid(id)?;
-    Ok((collection, rid))
-}
-
 fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_insert_dispatch_payload(&frame.payload) {
         Ok(request) => request,
@@ -1574,9 +1564,13 @@ fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         Ok(request) => request,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
-    let (collection, rid) = match rid_target(&request.collection, &request.id) {
-        Ok(target) => target,
-        Err(msg) => return build_error_frame_lossy(frame.correlation_id, &msg),
+    let collection = request.collection.as_str();
+    if let Err(msg) = crate::rpc_stdio::ensure_sql_collection(collection) {
+        return build_error_frame_lossy(frame.correlation_id, &msg);
+    }
+    let Some(rid) = crate::rpc_stdio::rid_from_str(&request.id) else {
+        let payload = encode_get_result_payload(false);
+        return build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload);
     };
     let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
     match runtime.execute_query(&sql) {
@@ -1597,9 +1591,13 @@ fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         Ok(request) => request,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
-    let (collection, rid) = match rid_target(&request.collection, &request.id) {
-        Ok(target) => target,
-        Err(msg) => return build_error_frame_lossy(frame.correlation_id, &msg),
+    let collection = request.collection.as_str();
+    if let Err(msg) = crate::rpc_stdio::ensure_sql_collection(collection) {
+        return build_error_frame_lossy(frame.correlation_id, &msg);
+    }
+    let Some(rid) = crate::rpc_stdio::rid_from_str(&request.id) else {
+        let payload = encode_delete_ok_payload(0);
+        return build_dispatch_reply_frame(frame.correlation_id, MessageKind::DeleteOk, payload);
     };
     let sql = format!("DELETE FROM {collection} WHERE rid = {rid}");
     match runtime.execute_query(&sql) {
@@ -1961,21 +1959,28 @@ mod tests {
         let found = decode_get_result_payload(&reply.payload).expect("get payload");
         assert_eq!(found.get("found").and_then(|v| v.as_bool()), Some(true));
 
-        // A crafted id or collection is refused, never spliced into SQL.
-        for (collection, id) in [
-            ("rows_rid_del", "1 OR 1=1"),
-            ("rows_rid_del", "'1'"),
-            ("rows_rid_del WHERE 1=1 --", rid.as_str()),
-        ] {
-            let del = build_delete_frame(13, encode_key_payload(collection, id)).expect("del");
+        // A non-numeric id names no row: not found / 0 affected, and the
+        // text is never spliced into SQL.
+        for id in ["1 OR 1=1", "'1'", "rid_that_does_not_exist"] {
+            let get = build_get_frame(13, encode_key_payload("rows_rid_del", id)).expect("get");
+            let reply = run_get(&runtime, &get);
+            assert_eq!(reply.kind, MessageKind::Result, "{id:?}");
+            let found = decode_get_result_payload(&reply.payload).expect("get payload");
+            assert_eq!(found.get("found").and_then(|v| v.as_bool()), Some(false));
+
+            let del = build_delete_frame(13, encode_key_payload("rows_rid_del", id)).expect("del");
             let reply = run_delete(&runtime, &del);
+            assert_eq!(reply.kind, MessageKind::DeleteOk, "{id:?}");
             assert_eq!(
-                reply.kind,
-                MessageKind::Error,
-                "{collection:?}/{id:?} must be rejected: {:?}",
-                String::from_utf8_lossy(&reply.payload)
+                decode_delete_ok_affected(&reply.payload).expect("affected"),
+                0
             );
         }
+        // A collection that is not a bare identifier is refused outright.
+        let del = build_delete_frame(13, encode_key_payload("rows_rid_del WHERE 1=1 --", &rid))
+            .expect("del");
+        let reply = run_delete(&runtime, &del);
+        assert_eq!(reply.kind, MessageKind::Error);
 
         let del = build_delete_frame(14, encode_key_payload("rows_rid_del", &rid)).expect("del");
         let reply = run_delete(&runtime, &del);
