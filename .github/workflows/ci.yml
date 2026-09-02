@@ -737,8 +737,18 @@ jobs:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
           save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: nextest
       - name: Run chaos, drill, and persistence tests
-        run: cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast
+        # nextest, like the main suite: one process per test. The
+        # config_tier cases read process-wide tier state (the active
+        # layout slot, the seq-N journal policy) that every persistent
+        # runtime open in the chaos/persistence modules rewrites, so
+        # under `cargo test`'s shared process they fail whenever the
+        # scheduler interleaves them — which on the 4-vCPU runner is
+        # every run.
+        run: cargo nextest run --locked --test grouped_chaos_drill_persistence --no-fail-fast
 
   chaos-floci:
     # PLAN.md Phase 8.4 — chaos suite against an S3-compatible
