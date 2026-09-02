@@ -643,14 +643,33 @@ impl<'a> KvAtomicOps<'a> {
             return Ok((false, current));
         }
 
+        // `KV CAS key EXPECT <v> SET <v> [EXPIRE dur]` has no TAGS clause and
+        // an optional EXPIRE, so — exactly as with INCR — the delete-then-
+        // create below would drop a TTL and tags the caller never asked to
+        // change. Carry both across the swap.
+        let carried_tags = self
+            .runtime
+            .inner
+            .kv_tag_index
+            .tags_for_key(collection, key);
+        let carried_ttl_ms = if ttl_ms.is_none() {
+            self.existing_ttl_ms(collection, key)
+        } else {
+            None
+        };
+
         // Swap: delete old entry (if present), write new one.
         if current.is_some() {
             self.runtime.delete_kv(collection, key)?;
         }
 
-        let meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> = ttl_metadata(ttl_ms)
-            .map(|m| m.fields.into_iter().collect())
-            .unwrap_or_default();
+        let mut meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> =
+            ttl_metadata(ttl_ms.or(carried_ttl_ms))
+                .map(|m| m.fields.into_iter().collect())
+                .unwrap_or_default();
+        if let Some(tags_metadata) = kv_tags_metadata(&carried_tags) {
+            meta_vec.push(tags_metadata);
+        }
 
         let output = self
             .runtime
@@ -663,7 +682,7 @@ impl<'a> KvAtomicOps<'a> {
         self.runtime
             .inner
             .kv_tag_index
-            .replace(collection, key, output.id, &[]);
+            .replace(collection, key, output.id, &carried_tags);
 
         self.runtime.record_kv_watch_event(
             if current.is_some() {
@@ -3225,6 +3244,60 @@ mod tests {
         assert!(
             metadata.get("_ttl_ms").is_some(),
             "INCR without EXPIRE must not make an expiring key permanent; metadata was {:?}",
+            metadata
+        );
+    }
+
+    #[test]
+    fn cas_preserves_ttl_and_tags_it_was_not_asked_to_change() {
+        // `KV CAS key EXPECT <v> SET <v> [EXPIRE dur]` has the same shape as
+        // INCR — no TAGS clause, optional EXPIRE — and the same
+        // delete-then-create underneath, so it had the same defect.
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+
+        ops.set_with_tags_and_metadata_for_model(
+            CollectionModel::Kv,
+            "kv_default",
+            "flag",
+            reddb_types::Value::Integer(1),
+            Some(60_000),
+            &["daily".to_string()],
+            false,
+            Vec::new(),
+        )
+        .expect("seed put");
+
+        let (swapped, _) = ops
+            .cas(
+                CollectionModel::Kv,
+                "kv_default",
+                "flag",
+                Some(&reddb_types::Value::Integer(1)),
+                reddb_types::Value::Integer(2),
+                None,
+            )
+            .expect("cas");
+        assert!(swapped, "expected value matched, so the swap must apply");
+
+        assert_eq!(
+            r.inner.kv_tag_index.tags_for_key("kv_default", "flag"),
+            vec!["daily".to_string()],
+            "CAS must not drop the key's tags"
+        );
+        let entity = ops
+            .get_entity(CollectionModel::Kv, "kv_default", "flag")
+            .expect("lookup")
+            .expect("key still present");
+        let metadata = r
+            .inner
+            .db
+            .store()
+            .get_metadata("kv_default", entity.id)
+            .expect("kv entry carries metadata");
+        assert!(
+            metadata.get("_ttl_ms").is_some(),
+            "CAS without EXPIRE must not make an expiring key permanent; metadata was {:?}",
             metadata
         );
     }
