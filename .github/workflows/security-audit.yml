@@ -45,7 +45,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.91.0
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked --version ^0.21
+        # 0.22+ is required: advisories now carry CVSS 4.0 vectors (e.g.
+        # RUSTSEC-2026-0180), and 0.21 fails to parse the advisory database
+        # outright — a hard error that has nothing to do with our
+        # dependencies. Pinned rather than floating so a database change
+        # cannot silently break the gate again.
+        run: cargo install cargo-audit --locked --version ^0.22
 
       # The workspace lockfile plus the Python driver's standalone one, which
       # resolves its own dependency graph and has drifted behind before.
