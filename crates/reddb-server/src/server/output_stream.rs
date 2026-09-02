@@ -550,12 +550,12 @@ pub fn write_chunked_response_header<W: std::io::Write>(
         content_type,
     );
     // Same permissive CORS posture as the buffered path — sourced from
-    // the single `CORS_HEADER_PAIRS` choke point so streaming routes
+    // the single `cors_header_pairs` choke point so streaming routes
     // (graph/vector NDJSON results) are reachable cross-origin too.
-    for (name, value) in crate::server::transport::CORS_HEADER_PAIRS {
+    for (name, value) in crate::server::transport::cors_header_pairs() {
         header.push_str(name);
         header.push_str(": ");
-        header.push_str(value);
+        header.push_str(&value);
         header.push_str("\r\n");
     }
     header.push_str("\r\n");

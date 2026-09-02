@@ -1706,7 +1706,7 @@ fn sql_value_literal(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Strin
 }
 
 fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 fn kv_path(collection: &str, key: &str) -> PyResult<String> {

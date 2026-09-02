@@ -114,7 +114,7 @@ function queueValueLiteral(value) {
 }
 
 function queueStringLiteral(value) {
-  return `'${String(value).replace(/'/g, "''")}'`
+  return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }
 
 function queuePayloads(result) {

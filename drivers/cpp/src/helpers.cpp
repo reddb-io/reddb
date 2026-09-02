@@ -214,7 +214,7 @@ static std::string replace_all(std::string s, const std::string& from, const std
 
 static std::string kv_key_segment(const std::string& value) {
     if (!value.empty() && all_ident_chars(value)) return value;
-    return "'" + replace_all(value, "'", "''") + "'";
+    return "'" + replace_all(replace_all(value, "\\", "\\\\"), "'", "''") + "'";
 }
 
 std::string kv_path(const std::string& collection, const std::string& key) {
@@ -299,7 +299,7 @@ std::string kv_value_literal(const JsonValue& v) {
     switch (v.kind()) {
         case JsonValue::Kind::Null:   return "NULL";
         case JsonValue::Kind::Bool:   return v.as_bool() ? "true" : "false";
-        case JsonValue::Kind::String: return "'" + replace_all(v.as_string(), "'", "''") + "'";
+        case JsonValue::Kind::String: return "'" + replace_all(replace_all(v.as_string(), "\\", "\\\\"), "'", "''") + "'";
         case JsonValue::Kind::Int: {
             std::ostringstream os; os << v.as_int(); return os.str();
         }
@@ -308,20 +308,20 @@ std::string kv_value_literal(const JsonValue& v) {
         }
         default: {
             std::string enc = json_encode(v);
-            return "'" + replace_all(enc, "'", "''") + "'";
+            return "'" + replace_all(replace_all(enc, "\\", "\\\\"), "'", "''") + "'";
         }
     }
 }
 
 std::string kv_tag_literal(const std::string& tag) {
-    return "'" + replace_all(tag, "'", "''") + "'";
+    return "'" + replace_all(replace_all(tag, "\\", "\\\\"), "'", "''") + "'";
 }
 
 std::string queue_value_literal(const JsonValue& v) {
     switch (v.kind()) {
         case JsonValue::Kind::Null:   return "NULL";
         case JsonValue::Kind::Bool:   return v.as_bool() ? "true" : "false";
-        case JsonValue::Kind::String: return "'" + replace_all(v.as_string(), "'", "''") + "'";
+        case JsonValue::Kind::String: return "'" + replace_all(replace_all(v.as_string(), "\\", "\\\\"), "'", "''") + "'";
         case JsonValue::Kind::Int: {
             std::ostringstream os; os << v.as_int(); return os.str();
         }
@@ -336,7 +336,7 @@ std::string value_literal(const JsonValue& v) { return kv_value_literal(v); }
 
 std::string json_literal(const JsonValue& v) {
     std::string enc = json_encode(v);
-    return "'" + replace_all(enc, "'", "''") + "'";
+    return "'" + replace_all(replace_all(enc, "\\", "\\\\"), "'", "''") + "'";
 }
 
 // ADR 0067 (#1709): a document body is written as an inline strict-JSON

@@ -23,7 +23,7 @@
 //! ## CORS / cross-origin note
 //!
 //! The HTTP edge's CORS posture is a wildcard `Access-Control-Allow-Origin:
-//! *` with no `Allow-Credentials` (see `transport::CORS_HEADER_PAIRS`),
+//! *` with no `Allow-Credentials` (see `transport::cors_header_pairs`),
 //! which is the correct posture for a header-authenticated API. The
 //! refresh **cookie** therefore only flows on **same-origin** requests:
 //! the hybrid-token flow assumes the SPA is served from the same origin as

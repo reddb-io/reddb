@@ -608,6 +608,11 @@ fn quoteWith(allocator: Allocator, value: []const u8, quote: u8) ![]u8 {
     defer buf.deinit();
     try buf.append(quote);
     for (value) |c| {
+        // The RQL lexer honours backslash escapes inside string literals, so
+        // a backslash must be doubled too: otherwise a value containing a
+        // backslash before a quote closes the literal early and the rest is
+        // parsed as RQL.
+        if (c == '\\') try buf.append('\\');
         if (c == quote) try buf.append(quote);
         try buf.append(c);
     }

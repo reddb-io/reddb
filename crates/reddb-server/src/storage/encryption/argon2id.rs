@@ -1,12 +1,27 @@
-//! Argon2id Key Derivation Function (RFC 9106)
+//! Retired in-tree Argon2id-shaped KDF — **not** RFC 9106.
 //!
-//! Argon2id is a memory-hard password hashing function that is resistant to GPU/ASIC attacks.
-//! It is the winner of the Password Hashing Competition (PHC).
+//! This module was written as an Argon2id implementation but diverges from
+//! the specification in load-bearing places: the `G` mixing function adds
+//! the block indices (`v[a] + v[b] + (a + b)`) where RFC 9106 §3.5 calls
+//! for `2·lo32(a)·lo32(b)`, the compression function runs one ad-hoc round
+//! per 16-word chunk plus an invented rotation, and `index_alpha` uses its
+//! own mixer. There are no RFC test vectors, so its memory-hardness — the
+//! entire point of Argon2 — is unknown.
 //!
-//! This implementation follows RFC 9106.
+//! Password hashing therefore moved to the RustCrypto `argon2` crate (see
+//! `auth::store::hash_password`). Two callers remain, both deliberate:
 //!
-//! # References
-//! - [RFC 9106](https://tools.ietf.org/html/rfc9106)
+//!   * [`crate::auth::store::verify_password`] verifies pre-existing
+//!     `argon2id$<salt>$<hash>` records so an upgrade does not lock every
+//!     account out; those records are re-hashed with the real KDF on the
+//!     owner's next successful login.
+//!   * [`crate::auth::vault`] derives the vault seal key from the
+//!     bootstrap certificate. That input is 256 bits of CSPRNG output, not
+//!     a password, so memory-hardness is not what protects it — and
+//!     changing the derivation would make every existing vault
+//!     unopenable. Migrating it needs a vault format version bump.
+//!
+//! Do not use this for any new key derivation.
 
 use super::blake2b::Blake2b;
 

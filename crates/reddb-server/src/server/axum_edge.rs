@@ -11,7 +11,7 @@
 //!     [`RedDBServer::route`] (buffered) and
 //!     [`RedDBServer::try_route_streaming`] (NDJSON/SSE) entry points.
 //!   * The single CORS choke point — buffered responses get the
-//!     [`super::transport::CORS_HEADER_PAIRS`] set applied here; streaming
+//!     [`super::transport::cors_header_pairs`] set applied here; streaming
 //!     heads carry it inline (written by the sync emitters) and are
 //!     forwarded verbatim.
 //!   * The `HeaderEscapeGuard` — guard-validated `extra_headers` ride
@@ -41,7 +41,7 @@ use super::http_connection_limiter::HttpConnectionPermit;
 use super::http_handler_metrics::{HttpRejectReason, HttpTransport};
 use super::http_principal_limiter::{PrincipalCapExceeded, PrincipalInflightPermit};
 use super::transport::{
-    find_header_end, json_error, parse_query_string, HttpRequest, HttpResponse, CORS_HEADER_PAIRS,
+    cors_header_pairs, find_header_end, json_error, parse_query_string, HttpRequest, HttpResponse,
 };
 use super::RedDBServer;
 
@@ -370,7 +370,7 @@ impl RedDBServer {
             .status(503)
             .header(http::header::CONTENT_TYPE, "application/json")
             .header(http::header::RETRY_AFTER, self.retry_after_secs.to_string());
-        for (name, value) in CORS_HEADER_PAIRS {
+        for (name, value) in cors_header_pairs() {
             builder = builder.header(name, value);
         }
         builder
@@ -429,7 +429,7 @@ fn buffered_response_to_axum(response: HttpResponse) -> Response {
     let mut builder = Response::builder()
         .status(response.status)
         .header(http::header::CONTENT_TYPE, response.content_type);
-    for (name, value) in CORS_HEADER_PAIRS {
+    for (name, value) in cors_header_pairs() {
         builder = builder.header(name, value);
     }
     for (name, value) in response.extra_headers {
@@ -485,7 +485,7 @@ fn handler_timeout_response() -> Response {
     let mut builder = Response::builder()
         .status(503)
         .header(http::header::CONTENT_TYPE, "application/json");
-    for (name, value) in CORS_HEADER_PAIRS {
+    for (name, value) in cors_header_pairs() {
         builder = builder.header(name, value);
     }
     builder

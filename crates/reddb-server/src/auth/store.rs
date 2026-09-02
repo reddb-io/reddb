@@ -1920,7 +1920,8 @@ impl AuthStore {
             return Err(AuthError::InvalidCredentials);
         }
 
-        if !verify_password(password, &user.password_hash) {
+        let stored_hash = user.password_hash.clone();
+        if !verify_password(password, &stored_hash) {
             return Err(AuthError::InvalidCredentials);
         }
 
@@ -1951,6 +1952,27 @@ impl AuthStore {
 
         let mut sessions = self.sessions.write().map_err(lock_err)?;
         sessions.insert(session.token.clone(), session.clone());
+        drop(sessions);
+
+        // Transparently upgrade a hash produced by the retired in-tree KDF.
+        // This is the only point where the verified plaintext is in hand.
+        if password_hash_needs_upgrade(&stored_hash) {
+            let upgraded = hash_password(password);
+            let mut rehashed = false;
+            if let Ok(mut users) = self.users.write() {
+                if let Some(user) = users.get_mut(&id) {
+                    // Skip if a concurrent password change already moved it.
+                    if user.password_hash == stored_hash {
+                        user.password_hash = upgraded;
+                        rehashed = true;
+                    }
+                }
+            }
+            if rehashed {
+                self.persist_to_vault();
+            }
+        }
+
         Ok(session)
     }
 
@@ -4715,36 +4737,81 @@ fn make_scram_verifier(password: &str) -> crate::auth::scram::ScramVerifier {
     )
 }
 
-/// Hash a password using Argon2id.
-///
-/// Format: `argon2id$<salt_hex>$<hash_hex>`
-pub(crate) fn hash_password(password: &str) -> String {
-    let salt = random_bytes(16);
-    let params = auth_argon2_params();
-    let hash = derive_key(password.as_bytes(), &salt, &params);
-    format!("argon2id${}${}", hex::encode(&salt), hex::encode(&hash))
+/// Argon2id cost parameters for password hashing, at the OWASP floor
+/// (19 MiB, t=2, p=1). The previous in-tree KDF ran at 4 MiB / t=3, which
+/// is below that floor; the parameters are encoded in the PHC string so
+/// they can be raised again without another format change.
+const PASSWORD_M_COST_KIB: u32 = 19 * 1024;
+const PASSWORD_T_COST: u32 = 2;
+const PASSWORD_P_COST: u32 = 1;
+const PASSWORD_TAG_LEN: usize = 32;
+
+fn password_hasher() -> argon2::Argon2<'static> {
+    let params = argon2::Params::new(
+        PASSWORD_M_COST_KIB,
+        PASSWORD_T_COST,
+        PASSWORD_P_COST,
+        Some(PASSWORD_TAG_LEN),
+    )
+    .expect("Argon2id parameters are constant and valid");
+    argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
 }
 
-/// Verify a password against a stored `argon2id$<salt>$<hash>` string.
+/// Hash a password with Argon2id (RFC 9106) via the RustCrypto `argon2`
+/// crate, encoded as a PHC string:
+/// `$argon2id$v=19$m=19456,t=2,p=1$<salt_b64>$<hash_b64>`.
+///
+/// The previous in-tree implementation was not RFC 9106 — its `G` mixing
+/// function added the block indices where the specification calls for the
+/// `2·lo32(a)·lo32(b)` term, and its compression function was ad hoc — so
+/// its memory-hardness was unknown. Hashes in the old
+/// `argon2id$<salt_hex>$<hash_hex>` form still verify (see
+/// [`verify_password`]) and are transparently upgraded on the owner's next
+/// successful login.
+pub(crate) fn hash_password(password: &str) -> String {
+    use argon2::PasswordHasher;
+    // The salt comes from the OS CSPRNG inside the hasher and, like
+    // `random_bytes`, fails closed rather than degrading.
+    password_hasher()
+        .hash_password(password.as_bytes())
+        .expect("Argon2id hashing cannot fail for valid parameters and a working CSPRNG")
+        .to_string()
+}
+
+/// Whether `stored_hash` was produced by the retired in-tree KDF and should
+/// be re-hashed the next time its owner authenticates.
+pub(crate) fn password_hash_needs_upgrade(stored_hash: &str) -> bool {
+    stored_hash.starts_with("argon2id$")
+}
+
+/// Verify a password against either encoding: the current PHC string, or a
+/// legacy `argon2id$<salt_hex>$<hash_hex>` produced by the retired in-tree
+/// KDF. Legacy hashes stay verifiable so an upgrade does not lock every
+/// account out; [`password_hash_needs_upgrade`] drives the rehash.
 pub(crate) fn verify_password(password: &str, stored_hash: &str) -> bool {
-    let parts: Vec<&str> = stored_hash.splitn(3, '$').collect();
-    if parts.len() != 3 || parts[0] != "argon2id" {
-        return false;
+    if let Some(rest) = stored_hash.strip_prefix("argon2id$") {
+        return verify_legacy_password(password, rest);
     }
-
-    let salt = match hex::decode(parts[1]) {
-        Ok(s) => s,
-        Err(_) => return false,
+    use argon2::{PasswordHash, PasswordVerifier};
+    let Ok(parsed) = stored_hash.parse::<PasswordHash>() else {
+        return false;
     };
+    password_hasher()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
+}
 
-    let expected_hash = match hex::decode(parts[2]) {
-        Ok(h) => h,
-        Err(_) => return false,
+/// Verify against the retired in-tree KDF, whose stored form is
+/// `<salt_hex>$<hash_hex>` (the `argon2id$` prefix is already stripped).
+fn verify_legacy_password(password: &str, salt_and_hash: &str) -> bool {
+    let Some((salt_hex, hash_hex)) = salt_and_hash.split_once('$') else {
+        return false;
     };
-
-    let params = auth_argon2_params();
-    let computed = derive_key(password.as_bytes(), &salt, &params);
-    constant_time_eq(&computed, &expected_hash)
+    let (Ok(salt), Ok(expected)) = (hex::decode(salt_hex), hex::decode(hash_hex)) else {
+        return false;
+    };
+    let computed = derive_key(password.as_bytes(), &salt, &auth_argon2_params());
+    constant_time_eq(&computed, &expected)
 }
 
 /// Constant-time byte comparison to avoid timing side-channels.
@@ -5105,14 +5172,72 @@ mod tests {
 
     #[test]
     fn test_password_hash_format() {
+        // PHC string: `$argon2id$v=19$m=19456,t=2,p=1$<salt_b64>$<hash_b64>`.
+        // Encoding the parameters is what lets the cost be raised later
+        // without another format change — the retired in-tree form stored
+        // only salt and tag, so its 4 MiB / t=3 cost was frozen.
         let hash = hash_password("test");
-        assert!(hash.starts_with("argon2id$"));
-        let parts: Vec<&str> = hash.splitn(3, '$').collect();
-        assert_eq!(parts.len(), 3);
-        // Salt is 16 bytes = 32 hex chars.
-        assert_eq!(parts[1].len(), 32);
-        // Hash is 32 bytes = 64 hex chars.
-        assert_eq!(parts[2].len(), 64);
+        assert!(
+            hash.starts_with("$argon2id$v=19$"),
+            "expected a PHC-encoded Argon2id hash, got: {hash}"
+        );
+        assert!(
+            hash.contains(&format!(
+                "m={PASSWORD_M_COST_KIB},t={PASSWORD_T_COST},p={PASSWORD_P_COST}"
+            )),
+            "the PHC string must carry the cost parameters: {hash}"
+        );
+        assert!(verify_password("test", &hash));
+        assert!(!verify_password("wrong", &hash));
+        assert!(
+            !password_hash_needs_upgrade(&hash),
+            "a freshly minted hash must not be flagged for upgrade"
+        );
+    }
+
+    #[test]
+    fn legacy_password_hashes_still_verify_and_upgrade_on_login() {
+        // Records written by the retired in-tree KDF must keep verifying —
+        // otherwise the upgrade locks every existing account out — and must
+        // be re-hashed with the real KDF once the plaintext is in hand.
+        let legacy = {
+            let salt = random_bytes(16);
+            let hash = derive_key(b"hunter2", &salt, &auth_argon2_params());
+            format!("argon2id${}${}", hex::encode(&salt), hex::encode(&hash))
+        };
+        assert!(verify_password("hunter2", &legacy));
+        assert!(!verify_password("wrong", &legacy));
+        assert!(password_hash_needs_upgrade(&legacy));
+
+        let store = AuthStore::new(test_config());
+        store
+            .create_user("erin", "placeholder", Role::Write)
+            .unwrap();
+        {
+            let mut users = store.users.write().unwrap();
+            users
+                .get_mut(&UserId::platform("erin"))
+                .unwrap()
+                .password_hash = legacy.clone();
+        }
+
+        store
+            .authenticate("erin", "hunter2")
+            .expect("a legacy hash must still authenticate");
+
+        let stored = store
+            .users
+            .read()
+            .unwrap()
+            .get(&UserId::platform("erin"))
+            .unwrap()
+            .password_hash
+            .clone();
+        assert!(
+            stored.starts_with("$argon2id$v=19$"),
+            "a successful login must upgrade the stored hash, got: {stored}"
+        );
+        assert!(store.authenticate("erin", "hunter2").is_ok());
     }
 
     #[test]

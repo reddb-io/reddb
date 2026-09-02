@@ -3946,18 +3946,26 @@ pub(crate) fn wants_ndjson_response(headers: &BTreeMap<String, String>) -> bool 
 /// requests share the `anon` bucket; replica RPCs that pass a
 /// `x-reddb-replica-id` header get their own `replica:<id>` bucket.
 pub(crate) fn principal_for(headers: &BTreeMap<String, String>) -> String {
-    if let Some(replica) = headers.get("x-reddb-replica-id") {
-        let trimmed = replica.trim();
-        if !trimmed.is_empty() {
-            return format!("replica:{trimmed}");
-        }
-    }
+    // `x-reddb-replica-id` is attacker-controlled and used to be consulted
+    // first, so rotating it per request defeated both the QPS bucket and the
+    // per-principal in-flight cap while growing the bucket map without
+    // bound. It now only labels a bucket for a caller that already presented
+    // a bearer, and the bearer still decides the identity — a replica gets
+    // its own bucket, an anonymous client cannot mint one.
+    let replica = headers
+        .get("x-reddb-replica-id")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
     if let Some(auth) = headers.get("authorization") {
         if let Some(token) = auth.strip_prefix("Bearer ") {
             let trimmed = token.trim();
             if !trimmed.is_empty() {
                 let digest = crate::crypto::sha256(trimmed.as_bytes());
-                return format!("bearer:{}", crate::utils::to_hex_prefix(&digest, 8));
+                let bearer = crate::utils::to_hex_prefix(&digest, 8);
+                return match replica {
+                    Some(replica) => format!("replica:{bearer}:{replica}"),
+                    None => format!("bearer:{bearer}"),
+                };
             }
         }
     }

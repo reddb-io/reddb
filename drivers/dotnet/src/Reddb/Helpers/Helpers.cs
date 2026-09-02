@@ -509,7 +509,7 @@ internal static class Sql
     public static string KvKeySegment(string value)
         => !string.IsNullOrEmpty(value) && AllIdentChars(value)
             ? value
-            : "'" + value.Replace("'", "''") + "'";
+            : "'" + value.Replace("\\", "\\\\").Replace("'", "''") + "'";
 
     public static string KvValueLiteral(object? value)
     {
@@ -517,16 +517,16 @@ internal static class Sql
         {
             null => "NULL",
             bool b => b ? "true" : "false",
-            string s => "'" + s.Replace("'", "''") + "'",
+            string s => "'" + s.Replace("\\", "\\\\").Replace("'", "''") + "'",
             sbyte or byte or short or ushort or int or uint or long or ulong => value.ToString()!,
             float f => f.ToString(System.Globalization.CultureInfo.InvariantCulture),
             double d => d.ToString(System.Globalization.CultureInfo.InvariantCulture),
             decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            _ => "'" + JsonSerializer.Serialize(value, JsonOpts).Replace("'", "''") + "'",
+            _ => "'" + JsonSerializer.Serialize(value, JsonOpts).Replace("\\", "\\\\").Replace("'", "''") + "'",
         };
     }
 
-    public static string KvTagLiteral(string tag) => "'" + tag.Replace("'", "''") + "'";
+    public static string KvTagLiteral(string tag) => "'" + tag.Replace("\\", "\\\\").Replace("'", "''") + "'";
 
     public static string QueueValueLiteral(object? value)
     {
@@ -534,7 +534,7 @@ internal static class Sql
         {
             null => "NULL",
             bool b => b ? "true" : "false",
-            string s => "'" + s.Replace("'", "''") + "'",
+            string s => "'" + s.Replace("\\", "\\\\").Replace("'", "''") + "'",
             sbyte or byte or short or ushort or int or uint or long or ulong => value.ToString()!,
             float f => f.ToString(System.Globalization.CultureInfo.InvariantCulture),
             double d => d.ToString(System.Globalization.CultureInfo.InvariantCulture),
