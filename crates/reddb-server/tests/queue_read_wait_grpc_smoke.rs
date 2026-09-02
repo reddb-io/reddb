@@ -218,7 +218,18 @@ async fn grpc_wait_cancellation_returns_explicit_error_not_empty_timeout() {
     // cancellation cannot unwind the parked sync call today.
     let registry = h.runtime.queue_wait_registry();
     let canceler = tokio::spawn(async move {
-        sleep(Duration::from_millis(150)).await;
+        // Wait for the query to actually park in WAIT rather than sleeping a
+        // fixed 150 ms and hoping. Under parallel test load the query had not
+        // always parked by then, so `cancel_all` was a no-op, the WAIT ran its
+        // full 5 s and returned zero rows instead of the expected error.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // The registry is keyed on (tenant scope, queue); this fixture runs
+        // with no tenant, so the scope is the empty string.
+        while registry.live_waiters("", "qgrpc_cancel") == 0
+            && tokio::time::Instant::now() < deadline
+        {
+            sleep(Duration::from_millis(5)).await;
+        }
         registry.cancel_all();
     });
 

@@ -486,6 +486,29 @@ impl<'a> KvAtomicOps<'a> {
     ///
     /// - Missing key initialises at `by` (Redis-compat).
     /// - Non-integer value returns an error before any mutation.
+    /// The `_ttl_ms` currently recorded for `key`, if it has one.
+    ///
+    /// Used to carry an existing expiry across the delete-then-create that
+    /// non-versioned KV updates go through, so an operation that does not
+    /// mention TTL does not silently clear it.
+    fn existing_ttl_ms(&self, collection: &str, key: &str) -> Option<u64> {
+        let entity = self
+            .get_entity(crate::catalog::CollectionModel::Kv, collection, key)
+            .ok()
+            .flatten()?;
+        let metadata = self
+            .runtime
+            .inner
+            .db
+            .store()
+            .get_metadata(collection, entity.id)?;
+        match metadata.get("_ttl_ms")? {
+            MetadataValue::Int(ms) if *ms >= 0 => Some(*ms as u64),
+            MetadataValue::Timestamp(ms) => Some(*ms),
+            _ => None,
+        }
+    }
+
     pub fn incr(
         &self,
         model: crate::catalog::CollectionModel,
@@ -519,14 +542,35 @@ impl<'a> KvAtomicOps<'a> {
             .checked_add(by)
             .ok_or_else(|| RedDBError::Internal(format!("INCR overflow: {current} + {by}")))?;
 
+        // `KV INCR key [BY n] [EXPIRE dur]` has no TAGS clause, and EXPIRE is
+        // optional, so the command cannot restate either. Non-versioned KV
+        // updates by delete-then-create (that is how a TTL gets refreshed),
+        // which drops whatever the previous version carried — so a plain
+        // INCR silently made an expiring key permanent and cleared its tags.
+        // Carry both forward unless the caller asked to change them.
+        let carried_tags = self
+            .runtime
+            .inner
+            .kv_tag_index
+            .tags_for_key(collection, key);
+        let carried_ttl_ms = if ttl_ms.is_none() {
+            self.existing_ttl_ms(collection, key)
+        } else {
+            None
+        };
+
         // Delete then re-create so TTL is refreshed.
         if existing.is_some() {
             self.runtime.delete_kv(collection, key)?;
         }
 
-        let meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> = ttl_metadata(ttl_ms)
-            .map(|m| m.fields.into_iter().collect())
-            .unwrap_or_default();
+        let mut meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> =
+            ttl_metadata(ttl_ms.or(carried_ttl_ms))
+                .map(|m| m.fields.into_iter().collect())
+                .unwrap_or_default();
+        if let Some(tags_metadata) = kv_tags_metadata(&carried_tags) {
+            meta_vec.push(tags_metadata);
+        }
 
         let output = self
             .runtime
@@ -539,7 +583,7 @@ impl<'a> KvAtomicOps<'a> {
         self.runtime
             .inner
             .kv_tag_index
-            .replace(collection, key, output.id, &[]);
+            .replace(collection, key, output.id, &carried_tags);
 
         self.runtime.record_kv_watch_event(
             if existing.is_some() {
@@ -3136,6 +3180,53 @@ mod tests {
         }
 
         assert_eq!(r.stats().kv.watch_streams_active, 0);
+    }
+
+    #[test]
+    fn incr_preserves_ttl_and_tags_it_was_not_asked_to_change() {
+        // `KV INCR key [BY n] [EXPIRE dur]` has no TAGS clause and EXPIRE is
+        // optional, so a plain INCR cannot restate either. It is implemented
+        // as delete-then-create (that is how non-versioned KV refreshes TTL),
+        // which drops whatever the previous version carried — so an INCR
+        // silently made an expiring key permanent and cleared its tags.
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+
+        ops.set_with_tags_and_metadata_for_model(
+            CollectionModel::Kv,
+            "kv_default",
+            "hits",
+            reddb_types::Value::Integer(1),
+            Some(60_000),
+            &["daily".to_string()],
+            false,
+            Vec::new(),
+        )
+        .expect("seed put");
+
+        ops.incr(CollectionModel::Kv, "kv_default", "hits", 1, None)
+            .expect("incr");
+
+        assert_eq!(
+            r.inner.kv_tag_index.tags_for_key("kv_default", "hits"),
+            vec!["daily".to_string()],
+            "INCR must not drop the key's tags"
+        );
+        let entity = ops
+            .get_entity(CollectionModel::Kv, "kv_default", "hits")
+            .expect("lookup")
+            .expect("key still present");
+        let metadata = r
+            .inner
+            .db
+            .store()
+            .get_metadata("kv_default", entity.id)
+            .expect("kv entry carries metadata");
+        assert!(
+            metadata.get("_ttl_ms").is_some(),
+            "INCR without EXPIRE must not make an expiring key permanent; metadata was {:?}",
+            metadata
+        );
     }
 
     #[test]
