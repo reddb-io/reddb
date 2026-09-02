@@ -1,3 +1,4 @@
+pub(crate) mod admission;
 pub mod listener;
 pub mod postgres;
 pub mod protocol;

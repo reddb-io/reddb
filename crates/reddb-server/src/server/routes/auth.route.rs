@@ -323,8 +323,8 @@ fn auth_browser_refresh(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<
     Some(server.handle_browser_refresh(req.headers))
 }
 
-fn auth_browser_logout(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
-    Some(server.handle_browser_logout())
+fn auth_browser_logout(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    Some(server.handle_browser_logout(req.headers))
 }
 
 fn auth_capabilities(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {

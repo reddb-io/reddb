@@ -237,13 +237,21 @@ pub async fn start_pg_wire_listener_on(
         "listener online"
     );
     let cfg = Arc::new(config);
+    let admission = crate::wire::admission::ConnectionAdmission::new("pg-wire");
     loop {
         let (stream, peer) = listener.accept().await?;
+        // Bound concurrent sessions. Without this the accept loop spawned a
+        // task per connection with no ceiling, so an unauthenticated peer
+        // could exhaust descriptors before presenting a credential.
+        let Some(permit) = admission.try_admit() else {
+            continue;
+        };
         let rt = Arc::clone(&runtime);
         let cfg = Arc::clone(&cfg);
         let acceptor = tls_acceptor.clone();
         let peer_str = peer.to_string();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = handle_connection(stream, rt, cfg, acceptor).await {
                 tracing::warn!(
                     transport = "pg-wire",
@@ -276,14 +284,26 @@ pub(crate) async fn handle_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    // Bound the whole pre-session negotiation. `read_startup` and the rustls
+    // handshake both block on the peer, and neither had a deadline: a client
+    // that connected and sent nothing (or stalled mid-handshake) pinned a
+    // task and a connection slot indefinitely, before any credential was
+    // presented. The loop below can iterate (SSLRequest/GSSENCRequest are
+    // declined and the client retries), so each read is bounded rather than
+    // the loop as a whole.
     loop {
-        match read_startup(&mut stream).await? {
+        let startup = crate::wire::admission::with_handshake_deadline(read_startup(&mut stream))
+            .await
+            .map_err(PgWireError::from)??;
+        match startup {
             FrontendMessage::SslRequest => {
                 if let Some(acceptor) = tls_acceptor.as_ref() {
                     // 'S' = SSL supported. Perform the rustls handshake and
                     // hand the encrypted stream to the session driver.
                     write_raw_byte(&mut stream, b'S').await?;
-                    let tls_stream = acceptor.accept(stream).await?;
+                    let tls_stream =
+                        crate::wire::admission::with_handshake_deadline(acceptor.accept(stream))
+                            .await??;
                     return serve_session_after_tls(tls_stream, runtime, config).await;
                 }
                 // 'N' = not supported — client continues in plaintext and

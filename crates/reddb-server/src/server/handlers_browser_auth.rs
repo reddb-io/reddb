@@ -196,16 +196,45 @@ impl RedDBServer {
             }
         };
 
+        // The claims describe the principal as it was up to 30 days ago.
+        // Re-read the live user record so a disabled, deleted, demoted or
+        // expired account cannot keep minting access tokens off an old
+        // cookie; the role that goes into the new token comes from the
+        // store, not from the token being replaced.
+        let identity = match self.runtime.auth_store() {
+            None => identity,
+            Some(auth_store) => {
+                let id =
+                    crate::auth::UserId::from_parts(identity.tenant.as_deref(), &identity.username);
+                match auth_store.active_user_role(&id) {
+                    Some(role) => BrowserIdentity { role, ..identity },
+                    None => {
+                        authority.revoke_refresh_token(refresh);
+                        tracing::warn!(
+                            target: "reddb::http_auth",
+                            principal = %id,
+                            "browser refresh refused: principal is no longer active"
+                        );
+                        let response = json_error(401, "invalid or expired refresh token");
+                        return with_set_cookie(response, &authority.clear_cookie());
+                    }
+                }
+            }
+        };
+
         let access_token = match authority.issue_access(&identity, now) {
             Ok(t) => t,
             Err(e) => return json_error(500, format!("failed to issue access token: {e}")),
         };
         // Rotate the refresh cookie too — limits how long a leaked cookie
-        // stays valid and re-arms the sliding refresh window.
+        // stays valid and re-arms the sliding refresh window. The presented
+        // token is revoked as the replacement is minted, so a cookie captured
+        // in transit stops working the moment the real browser refreshes.
         let new_refresh = match authority.issue(&identity, now) {
             Ok(t) => t.refresh_token,
             Err(e) => return json_error(500, format!("failed to rotate refresh token: {e}")),
         };
+        authority.revoke_refresh_token(refresh);
 
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
@@ -235,11 +264,19 @@ impl RedDBServer {
     ///
     /// Clears the refresh cookie. Stateless: the access JWT the SPA holds
     /// in memory simply expires on its own short TTL.
-    pub(crate) fn handle_browser_logout(&self) -> HttpResponse {
+    pub(crate) fn handle_browser_logout(&self, headers: &BTreeMap<String, String>) -> HttpResponse {
         let authority = match self.browser_authority() {
             Ok(a) => a,
             Err(resp) => return resp,
         };
+        // Clearing the cookie only asks the browser to forget the token; the
+        // token itself stayed valid for the rest of its 30 days. Revoke it
+        // server-side so a copy taken before logout is dead too.
+        if let Some(cookie_header) = headers.get("cookie") {
+            if let Some(refresh) = cookie_value(cookie_header, authority.cookie_name()) {
+                authority.revoke_refresh_token(refresh);
+            }
+        }
         let response = json_ok("logged out");
         with_set_cookie(response, &authority.clear_cookie())
     }

@@ -121,6 +121,32 @@ impl GrpcTlsOptions {
     }
 }
 
+/// Per-connection ceiling on concurrent HTTP/2 streams. tonic's default is
+/// unbounded, so one connection could open arbitrarily many RPCs.
+const GRPC_MAX_CONCURRENT_STREAMS: u32 = 256;
+
+/// Ceiling on concurrent in-flight requests per connection, mirroring the
+/// HTTP edge's in-flight cap.
+const GRPC_CONCURRENCY_LIMIT_PER_CONNECTION: usize = 256;
+
+/// Keepalive ping cadence and reply grace. Without these a half-open
+/// connection is only reclaimed when the OS notices.
+const GRPC_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const GRPC_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The gRPC listener had no timeouts and no concurrency ceiling: a peer could
+/// open a connection, never finish a request, and hold server resources
+/// indefinitely, or open unbounded concurrent streams on one connection.
+/// Every `serve*` entry point builds through here so the three of them cannot
+/// drift apart.
+fn configured_transport_builder() -> tonic::transport::Server {
+    tonic::transport::Server::builder()
+        .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS))
+        .concurrency_limit_per_connection(GRPC_CONCURRENCY_LIMIT_PER_CONNECTION)
+        .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+}
+
 impl Default for GrpcServerOptions {
     fn default() -> Self {
         Self {
@@ -237,7 +263,7 @@ impl RedDBGrpcServer {
 
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error>> {
         let addr = self.options.bind_addr.parse()?;
-        let mut builder = tonic::transport::Server::builder();
+        let mut builder = configured_transport_builder();
         if let Some(tls) = &self.options.tls {
             // Constant-time SHA256 fingerprint logged for ops triage —
             // never the bytes of cert/key themselves.
@@ -258,7 +284,7 @@ impl RedDBGrpcServer {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let incoming = TcpListenerStream::new(listener);
-        let mut builder = tonic::transport::Server::builder();
+        let mut builder = configured_transport_builder();
         if let Some(tls) = &self.options.tls {
             log_grpc_tls_identity(tls);
             builder = builder.tls_config(tls.to_tonic_config()?)?;
@@ -282,7 +308,7 @@ impl RedDBGrpcServer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use tokio_stream::StreamExt;
         let incoming = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, std::io::Error>);
-        let mut builder = tonic::transport::Server::builder();
+        let mut builder = configured_transport_builder();
         if let Some(tls) = &self.options.tls {
             log_grpc_tls_identity(tls);
             builder = builder.tls_config(tls.to_tonic_config()?)?;

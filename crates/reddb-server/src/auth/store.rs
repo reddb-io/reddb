@@ -2034,6 +2034,18 @@ impl AuthStore {
         None
     }
 
+    /// The current role of `id` when the account is active, else `None`.
+    ///
+    /// Callers holding a long-lived credential (the browser refresh cookie)
+    /// use this to re-derive the principal's role at use time rather than
+    /// trusting a role captured when the credential was minted.
+    pub fn active_user_role(&self, id: &UserId) -> Option<Role> {
+        if !self.principal_is_active(id) {
+            return None;
+        }
+        self.users.read().ok()?.get(id).map(|user| user.role)
+    }
+
     /// Whether `id` names an enabled account whose `VALID UNTIL` (if any)
     /// has not passed. Unknown accounts are inactive.
     fn principal_is_active(&self, id: &UserId) -> bool {

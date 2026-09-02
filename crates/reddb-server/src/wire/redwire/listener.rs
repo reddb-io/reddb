@@ -72,13 +72,21 @@ async fn serve_redwire_tcp(
     auth_store: Option<Arc<AuthStore>>,
     oauth: Option<Arc<crate::auth::oauth::OAuthValidator>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = crate::wire::admission::ConnectionAdmission::new("redwire");
     loop {
         let (stream, peer) = listener.accept().await?;
+        // Bound concurrent sessions: the accept loop used to spawn a task per
+        // connection with no ceiling, so an unauthenticated peer could open
+        // sockets until the process ran out of descriptors.
+        let Some(_permit) = admission.try_admit() else {
+            continue;
+        };
         let rt = runtime.clone();
         let auth = auth_store.clone();
         let oauth = oauth.clone();
         let peer_str = peer.to_string();
         tokio::spawn(async move {
+            let _permit = _permit;
             if let Err(err) = handle_standalone(stream, rt, auth, oauth).await {
                 tracing::warn!(
                     transport = "redwire",
@@ -106,10 +114,15 @@ pub async fn start_redwire_unix_listener(
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
     tracing::info!(transport = "redwire-unix", bind = %path, "listener online");
+    let admission = crate::wire::admission::ConnectionAdmission::new("redwire-unix");
     loop {
         let (stream, _addr) = listener.accept().await?;
+        let Some(_permit) = admission.try_admit() else {
+            continue;
+        };
         let rt = runtime.clone();
         tokio::spawn(async move {
+            let _permit = _permit;
             if let Err(err) = handle_standalone_unix(stream, rt).await {
                 tracing::warn!(transport = "redwire-unix", err = %err, "connection failed");
             }
@@ -146,13 +159,34 @@ async fn serve_redwire_tls(
     acceptor: tokio_rustls::TlsAcceptor,
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = crate::wire::admission::ConnectionAdmission::new("redwire+tls");
     loop {
         let (tcp_stream, peer) = listener.accept().await?;
+        let Some(_permit) = admission.try_admit() else {
+            continue;
+        };
         let acceptor = acceptor.clone();
         let rt = runtime.clone();
         let peer_str = peer.to_string();
         tokio::spawn(async move {
-            match acceptor.accept(tcp_stream).await {
+            let _permit = _permit;
+            // The TLS handshake runs before any session exists, so nothing
+            // downstream would have timed out a peer that stalls here.
+            let accepted =
+                crate::wire::admission::with_handshake_deadline(acceptor.accept(tcp_stream)).await;
+            let accepted = match accepted {
+                Ok(result) => result,
+                Err(err) => {
+                    tracing::warn!(
+                        transport = "redwire+tls",
+                        peer = %peer_str,
+                        err = %err,
+                        "TLS handshake timed out"
+                    );
+                    return;
+                }
+            };
+            match accepted {
                 Ok(tls_stream) => {
                     if let Err(err) = handle_standalone_tls(tls_stream, rt).await {
                         tracing::warn!(
@@ -226,7 +260,7 @@ async fn handle_standalone_unix(
     runtime: Arc<RedDBRuntime>,
 ) -> io::Result<()> {
     let mut magic = [0u8; 1];
-    stream.read_exact(&mut magic).await?;
+    crate::wire::admission::with_handshake_deadline(stream.read_exact(&mut magic)).await??;
     validate_startup_magic(magic[0]).map_err(io::Error::other)?;
     handle_session(stream, runtime, None, None).await
 }
@@ -239,7 +273,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let mut magic = [0u8; 1];
-    stream.read_exact(&mut magic).await?;
+    crate::wire::admission::with_handshake_deadline(stream.read_exact(&mut magic)).await??;
     validate_startup_magic(magic[0]).map_err(io::Error::other)?;
     handle_session(stream, runtime, None, None).await
 }

@@ -1806,7 +1806,15 @@ fn main() {
                 )
                 .unwrap(),
             };
-            let mut server = reddb::mcp::server::McpServer::new(runtime);
+            let capability = reddb::mcp::capability::McpCapability::from_flags(
+                flag_bool(&result.flags, "allow-write"),
+                flag_bool(&result.flags, "allow-admin"),
+            );
+            if capability != reddb::mcp::capability::McpCapability::ReadOnly {
+                eprintln!("[reddb] MCP session capability: {capability}");
+            }
+            let mut server =
+                reddb::mcp::server::McpServer::new(runtime).with_capability(capability);
             server.run_stdio();
         }
 

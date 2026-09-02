@@ -39,8 +39,25 @@
 //! mTLS stays native-only (ADR 0036): browser client certificates are
 //! hostile UX, so there is no browser mTLS path here. The access JWT /
 //! refresh cookie pair is the browser's sole credential.
+//!
+//! ## Refresh tokens are revocable
+//!
+//! Access tokens are deliberately stateless: they live 15 minutes and the
+//! cost of validating one must stay a signature check. Refresh tokens are
+//! not — they live 30 days, and a purely stateless one cannot be taken
+//! back. Logging out, rotating, disabling the account or changing its role
+//! would all leave a valid credential in the wild until natural expiry.
+//!
+//! Every refresh token therefore carries a `jti` recorded in a server-side
+//! live-token registry, and [`BrowserTokenAuthority::validate_refresh`]
+//! refuses a `jti` the registry does not hold. Rotation removes the old
+//! entry as it adds the new one, so a captured cookie stops working the
+//! moment the legitimate browser refreshes. The registry is in memory, so a
+//! restart invalidates outstanding refresh tokens — the same semantics as
+//! the session store, and the safe direction.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 
@@ -134,6 +151,16 @@ impl BrowserTokenConfig {
     }
 }
 
+/// Mint a unique refresh-token id. 128 bits from the OS CSPRNG: the value
+/// is a registry key rather than a secret (the JWT signature is what
+/// authenticates), but it must not collide across concurrently live tokens.
+fn new_token_id() -> String {
+    let mut bytes = [0u8; 16];
+    crate::crypto::os_random::fill_bytes(&mut bytes)
+        .expect("OS CSPRNG unavailable; refusing to mint a refresh token id");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The identity carried by a validated browser token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserIdentity {
@@ -159,6 +186,11 @@ pub enum BrowserTokenError {
     NotYetValid,
     /// The embedded `role` claim is not a known [`Role`].
     BadRole(String),
+    /// A structurally valid refresh token whose `jti` is no longer live:
+    /// the browser logged out, the token was rotated, or every token for
+    /// the principal was revoked. Distinct from [`Self::Expired`] so logs
+    /// tell "credential withdrawn" apart from "credential aged out".
+    Revoked,
 }
 
 impl std::fmt::Display for BrowserTokenError {
@@ -175,6 +207,7 @@ impl std::fmt::Display for BrowserTokenError {
             BrowserTokenError::Expired => write!(f, "token expired"),
             BrowserTokenError::NotYetValid => write!(f, "token not yet valid"),
             BrowserTokenError::BadRole(r) => write!(f, "token carries unknown role {r:?}"),
+            BrowserTokenError::Revoked => write!(f, "refresh token has been revoked"),
         }
     }
 }
@@ -216,6 +249,10 @@ struct Claims {
     role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tenant: Option<String>,
+    /// Unique token id. Present on refresh tokens, which are tracked in the
+    /// live-token registry; absent on access tokens, which are stateless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jti: Option<String>,
 }
 
 /// The pair returned to the browser by a successful login / refresh: the
@@ -236,6 +273,18 @@ pub struct BrowserTokenAuthority {
     config: BrowserTokenConfig,
     encoding: EncodingKey,
     decoding: DecodingKey,
+    /// Live refresh tokens: `jti` -> the identity it was minted for. An
+    /// allowlist rather than a revocation list, so anything the server does
+    /// not remember is refused — a restart or an evicted entry fails closed.
+    live_refresh: Arc<Mutex<HashMap<String, RefreshOwner>>>,
+}
+
+/// Who a live refresh token belongs to, so every token for a principal can
+/// be revoked at once when the account is disabled or its role changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefreshOwner {
+    username: String,
+    tenant: Option<String>,
 }
 
 impl std::fmt::Debug for BrowserTokenAuthority {
@@ -268,6 +317,7 @@ impl BrowserTokenAuthority {
             config,
             encoding,
             decoding,
+            live_refresh: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -319,6 +369,12 @@ impl BrowserTokenAuthority {
         now: i64,
         ttl: i64,
     ) -> Result<String, String> {
+        // Only refresh tokens are tracked; an access token is short-lived
+        // and validating one must stay a pure signature check.
+        let jti = match typ {
+            TokenType::Refresh => Some(new_token_id()),
+            TokenType::Access => None,
+        };
         let claims = Claims {
             iss: self.config.issuer.clone(),
             aud: self.config.audience.clone(),
@@ -329,9 +385,68 @@ impl BrowserTokenAuthority {
             typ: typ.as_str().to_string(),
             role: identity.role.as_str().to_string(),
             tenant: identity.tenant.clone(),
+            jti: jti.clone(),
         };
-        encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)
-            .map_err(|e| format!("encode browser token: {e}"))
+        let token = encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)
+            .map_err(|e| format!("encode browser token: {e}"))?;
+        if let Some(jti) = jti {
+            self.register_refresh(jti, identity);
+        }
+        Ok(token)
+    }
+
+    /// Record a freshly minted refresh token as live.
+    fn register_refresh(&self, jti: String, identity: &BrowserIdentity) {
+        if let Ok(mut live) = self.live_refresh.lock() {
+            live.insert(
+                jti,
+                RefreshOwner {
+                    username: identity.username.clone(),
+                    tenant: identity.tenant.clone(),
+                },
+            );
+        }
+    }
+
+    /// Revoke one refresh token by the `jti` inside it. Called on logout and
+    /// on rotation, so the cookie the browser just replaced stops working
+    /// even if it was captured in transit.
+    pub fn revoke_refresh_token(&self, token: &str) {
+        if let Some(jti) = self.refresh_token_id(token) {
+            if let Ok(mut live) = self.live_refresh.lock() {
+                live.remove(&jti);
+            }
+        }
+    }
+
+    /// Revoke every refresh token belonging to a principal. Called when the
+    /// account is disabled, deleted, or has its role or password changed —
+    /// the cases where a 30-day credential must not outlive the decision.
+    pub fn revoke_all_for(&self, username: &str, tenant: Option<&str>) {
+        if let Ok(mut live) = self.live_refresh.lock() {
+            live.retain(|_, owner| {
+                !(owner.username == username && owner.tenant.as_deref() == tenant)
+            });
+        }
+    }
+
+    /// Number of live refresh tokens. Test and telemetry helper.
+    pub fn live_refresh_count(&self) -> usize {
+        self.live_refresh.lock().map(|live| live.len()).unwrap_or(0)
+    }
+
+    /// Decode `token` far enough to read its `jti` without enforcing
+    /// expiry — revocation must work on a token that is already expired.
+    fn refresh_token_id(&self, token: &str) -> Option<String> {
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_issuer(&[self.config.issuer.as_str()]);
+        validation.set_audience(&[self.config.audience.as_str()]);
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        validation.required_spec_claims = HashSet::new();
+        decode::<Claims>(token, &self.decoding, &validation)
+            .ok()
+            .and_then(|data| data.claims.jti)
     }
 
     /// Verify an access token presented in the RedWire WS handshake.
@@ -393,6 +508,25 @@ impl BrowserTokenAuthority {
             }
         }
         let role = Role::from_str(&claims.role).ok_or(BrowserTokenError::BadRole(claims.role))?;
+        if expected == TokenType::Refresh {
+            // A signature-valid refresh token is not enough: it must still be
+            // one this server considers live. Logout, rotation and account
+            // changes drop the entry, which is what makes those actions
+            // actually revoke the 30-day credential.
+            let live = claims
+                .jti
+                .as_ref()
+                .and_then(|jti| {
+                    self.live_refresh
+                        .lock()
+                        .ok()
+                        .map(|live| live.contains_key(jti))
+                })
+                .unwrap_or(false);
+            if !live {
+                return Err(BrowserTokenError::Revoked);
+            }
+        }
         Ok(BrowserIdentity {
             username: claims.sub,
             tenant: claims.tenant,

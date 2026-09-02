@@ -33,9 +33,10 @@ use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoConnBuilder;
 use hyper_util::service::TowerToHyperService;
+use std::time::Duration;
 
 use super::http_connection_limiter::HttpConnectionPermit;
 use super::http_handler_metrics::{HttpRejectReason, HttpTransport};
@@ -63,9 +64,40 @@ const STREAM_CHANNEL_DEPTH: usize = 16;
 /// side.
 fn connection_builder() -> AutoConnBuilder<TokioExecutor> {
     let mut builder = AutoConnBuilder::new(TokioExecutor::new());
-    builder.http1().half_close(true);
+    // hyper's own timeouts are inert unless a timer is installed, so
+    // `header_read_timeout` below only takes effect with this line present.
+    // Without it a client could open a connection and never send a request
+    // line, holding the socket (and, on the TLS listener, a handshake slot)
+    // for as long as it liked.
+    builder.http1().half_close(true).timer(TokioTimer::new());
+    builder
+        .http1()
+        .header_read_timeout(Some(HEADER_READ_TIMEOUT));
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(Some(HTTP2_KEEPALIVE_INTERVAL))
+        .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+        .max_concurrent_streams(Some(MAX_CONCURRENT_HTTP2_STREAMS));
     builder
 }
+
+/// How long a connection may take to send its complete request head.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the TLS handshake may take before the connection is dropped.
+/// The handshake runs before any request exists, so it is not covered by the
+/// per-request handler deadline or by the in-flight caps.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// HTTP/2 keepalive ping cadence and the grace period for a reply. Without
+/// these a half-open connection is only reclaimed by the OS.
+const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
+const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Per-connection HTTP/2 stream ceiling. Bounds how much concurrent work a
+/// single connection can open before the in-flight caps see it.
+const MAX_CONCURRENT_HTTP2_STREAMS: u32 = 256;
 
 /// State threaded into the axum fallback handler. Carries a cheap clone of
 /// the server plus which transport this listener represents (so reject /
@@ -156,15 +188,28 @@ impl RedDBServer {
             let acceptor = acceptor.clone();
             let service = TowerToHyperService::new(router.clone());
             tokio::spawn(async move {
-                match acceptor.accept(stream).await {
-                    Ok(tls_stream) => {
+                // A peer that opens a socket and then stalls mid-handshake
+                // used to pin this task forever: `accept` has no deadline of
+                // its own, and nothing downstream had started yet, so no
+                // request timeout or in-flight cap applied.
+                let accepted =
+                    tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+                match accepted {
+                    Ok(Ok(tls_stream)) => {
                         let io = TokioIo::new(tls_stream);
                         if let Err(err) = connection_builder().serve_connection(io, service).await {
                             tracing::debug!(target: "reddb::http_tls", error = %err, "connection closed with error");
                         }
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         tracing::warn!(target: "reddb::http_tls", error = %err, "TLS handshake failed");
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            target: "reddb::http_tls",
+                            timeout_secs = TLS_HANDSHAKE_TIMEOUT.as_secs(),
+                            "TLS handshake timed out"
+                        );
                     }
                 }
             });

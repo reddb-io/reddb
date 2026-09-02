@@ -340,6 +340,16 @@ impl RedDBRuntime {
                 .set_password_by_admin(&target, new_password)
                 .map_err(|e| RedDBError::Query(e.to_string()))?;
         }
+        // Disabling the account, or rotating its password, must also take
+        // back the browser refresh cookie: it lives 30 days and the store
+        // that mints it is separate from the session table these calls
+        // clear. The refresh endpoint re-checks the principal too, so this
+        // is defence in depth for the window before its next refresh.
+        if enable_change == Some(false) || new_password_change.is_some() {
+            if let Some(authority) = self.browser_token_authority() {
+                authority.revoke_all_for(&target.username, target.tenant.as_deref());
+            }
+        }
         self.invalidate_result_cache();
         tracing::info!(
             target: "audit",

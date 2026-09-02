@@ -278,7 +278,12 @@ test("on-demand parser fuzz runs as one bounded smoke check", () => {
   assert.equal(workflowJob(workflow, "fuzz-targets"), "", "fuzz smoke must not fan out into separate runners");
   assert.match(fuzzParsers, /name: Fuzz Parsers/);
   assert.match(fuzzParsers, /needs: gate/);
-  assert.match(fuzzParsers, /if: github\.event_name == 'workflow_dispatch' && inputs\.full_ci/);
+  // The job also sits behind the `run_heavy` gate; the contract this test
+  // pins is that it stays dispatch-only and opt-in, not the exact prefix.
+  assert.match(
+    fuzzParsers,
+    /if:[^\n]*github\.event_name == 'workflow_dispatch' && inputs\.full_ci/,
+  );
   assert.match(fuzzParsers, /timeout-minutes: 15/);
   assert.match(fuzzParsers, /FUZZ_PR_TIME_SECONDS: 30/);
   assert.match(fuzzParsers, /shared-key: ubuntu-fuzz-pr-smoke/);
@@ -304,4 +309,32 @@ test("weekly parser fuzz keeps bounded coverage for every smoke target", () => {
     assert.match(fuzz, new RegExp(`- ${target}`));
   }
   assert.match(fuzz, /cargo \+nightly fuzz run \$\{\{ matrix\.target \}\} --[\s\S]*-max_total_time="\$\{FUZZ_DURATION_SECONDS\}"/);
+});
+
+
+test("vendored asset-fetcher copies match the source package byte for byte", () => {
+  // `packages/internal-asset-fetcher` is workspace-private, so each
+  // publishable package carries its own copy. Nothing enforced that they
+  // stayed in sync, and this is the code that downloads a binary which
+  // postinstall then executes — a copy missing a hardening change is a copy
+  // that installs an unverified binary. Compare rather than trust.
+  const sourceDir = "packages/internal-asset-fetcher/src";
+  const vendored = [
+    "drivers/js/src/internal/asset-fetcher",
+    "drivers/js-client/src/internal/asset-fetcher",
+    "packages/mcp/src/internal/asset-fetcher",
+  ];
+  const files = ["index.js", "download.js", "checksum.js", "asset-name.js"];
+
+  for (const dir of vendored) {
+    for (const file of files) {
+      const vendoredPath = path.join(repoRoot, dir, file);
+      if (!fs.existsSync(vendoredPath)) continue;
+      assert.equal(
+        read(`${dir}/${file}`),
+        read(`${sourceDir}/${file}`),
+        `${dir}/${file} has drifted from ${sourceDir}/${file}`,
+      );
+    }
+  }
 });

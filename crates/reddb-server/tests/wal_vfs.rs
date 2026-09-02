@@ -1,4 +1,4 @@
-use reddb_file::{OpenMode, Vfs, VfsFile};
+use reddb_file::{OpenMode, Vfs, VfsDirEntry, VfsFile};
 use reddb_server::storage::wal::{WalRecord, WalWriter};
 use std::io::{self, SeekFrom};
 use std::path::Path;
@@ -143,6 +143,33 @@ impl Vfs for RecordingVfs {
 
     fn sync_dir(&self, _dir: &Path) -> io::Result<()> {
         unreachable!("WAL append does not sync directories")
+    }
+
+    // The namespace half of the trait: the WAL append path opens one file and
+    // writes to it, so a call here means the code under test grew a
+    // filesystem dependency this fixture no longer models.
+    fn create_dir_all(&self, _dir: &Path) -> io::Result<()> {
+        unreachable!("WAL append does not create directories")
+    }
+
+    fn read_dir(&self, _dir: &Path) -> io::Result<Vec<VfsDirEntry>> {
+        unreachable!("WAL append does not list directories")
+    }
+
+    fn remove_file(&self, _path: &Path) -> io::Result<()> {
+        unreachable!("WAL append does not remove files")
+    }
+
+    fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+        unreachable!("WAL append does not remove directories")
+    }
+
+    fn exists(&self, _path: &Path) -> bool {
+        unreachable!("WAL append does not probe for existence")
+    }
+
+    fn is_file(&self, _path: &Path) -> bool {
+        unreachable!("WAL append does not probe path kinds")
     }
 }
 
