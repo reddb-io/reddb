@@ -1375,12 +1375,38 @@ fn param_to_request_value(value: RedWireParamValue) -> ParamValue {
 ///
 /// Mirrors the JSON-RPC `insert` / `bulk_insert` method shapes
 /// from `rpc_stdio.rs` so both transports agree on the payload.
+/// `INSERT … RETURNING rid` for one JSON row. A bare SQL INSERT result
+/// carries only `affected_rows`; the engine-assigned id is exposed
+/// through RETURNING, which is what `insert_result_to_json` reads to
+/// fill the BulkOk `id`/`ids` keys.
+fn insert_sql_returning_rid<'a, I>(collection: &str, fields: I) -> String
+where
+    I: Iterator<Item = (&'a String, &'a crate::json::Value)>,
+{
+    let mut sql = crate::rpc_stdio::build_insert_sql(collection, fields);
+    sql.push_str(" RETURNING rid");
+    sql
+}
+
+/// Validate the `(collection, id)` pair of a Get/Delete frame before it
+/// is spliced into generated SQL: the collection must be a bare
+/// identifier and the id an unsigned rid. Neither has a quoted form on
+/// this path, so rejecting is the only safe option.
+fn rid_target<'a>(collection: &'a str, id: &str) -> Result<(&'a str, u64), String> {
+    crate::rpc_stdio::ensure_sql_collection(collection)?;
+    let rid = crate::rpc_stdio::parse_rid(id)?;
+    Ok((collection, rid))
+}
+
 fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_insert_dispatch_payload(&frame.payload) {
         Ok(request) => request,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
     let collection = request.collection.as_str();
+    if let Err(msg) = crate::rpc_stdio::ensure_sql_collection(collection) {
+        return build_error_frame_lossy(frame.correlation_id, &msg);
+    }
     let payload = request.payload.map(wire_json_to_server_json);
     let payloads = request.payloads.map(|rows| {
         rows.into_iter()
@@ -1449,7 +1475,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         let mut affected: u64 = 0;
         let mut ids = Vec::with_capacity(objects.len());
         for row in objects {
-            let sql = crate::rpc_stdio::build_insert_sql(collection, row.iter());
+            let sql = insert_sql_returning_rid(collection, row.iter());
             match runtime.execute_query(&sql) {
                 Ok(qr) => {
                     affected += qr.affected_rows;
@@ -1476,7 +1502,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             )
         }
     };
-    let sql = crate::rpc_stdio::build_insert_sql(collection, row.iter());
+    let sql = insert_sql_returning_rid(collection, row.iter());
     match runtime.execute_query(&sql) {
         Ok(qr) => {
             let body = crate::rpc_stdio::insert_result_to_json(&qr);
@@ -1541,20 +1567,18 @@ fn wire_json_to_server_json(value: impl std::fmt::Display) -> JsonValue {
 }
 
 /// Get payload shape: `{ "collection": "...", "id": "..." }`.
-/// Bridges to `SELECT * FROM <coll> WHERE _id = '<id>' LIMIT 1`.
+/// Bridges to `SELECT * FROM <coll> WHERE rid = <id> LIMIT 1`.
 /// Reply: Result frame with the row, or empty `{}` when not found.
 fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_get_payload(&frame.payload) {
         Ok(request) => request,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
-    // Sanitise the id by treating it as a string literal — same
-    // approach as build_insert_sql for arbitrary input.
-    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(request.id));
-    let sql = format!(
-        "SELECT * FROM {} WHERE _id = {id_lit} LIMIT 1",
-        request.collection
-    );
+    let (collection, rid) = match rid_target(&request.collection, &request.id) {
+        Ok(target) => target,
+        Err(msg) => return build_error_frame_lossy(frame.correlation_id, &msg),
+    };
+    let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
     match runtime.execute_query(&sql) {
         Ok(qr) => {
             // Preserve the existing Get envelope: presence only.
@@ -1566,15 +1590,18 @@ fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 }
 
 /// Delete payload shape: `{ "collection": "...", "id": "..." }`.
-/// Bridges to `DELETE FROM <coll> WHERE _id = '<id>'`.
+/// Bridges to `DELETE FROM <coll> WHERE rid = <id>`.
 /// Reply: DeleteOk frame with `{ affected }`.
 fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_delete_payload(&frame.payload) {
         Ok(request) => request,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
-    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(request.id));
-    let sql = format!("DELETE FROM {} WHERE _id = {id_lit}", request.collection);
+    let (collection, rid) = match rid_target(&request.collection, &request.id) {
+        Ok(target) => target,
+        Err(msg) => return build_error_frame_lossy(frame.correlation_id, &msg),
+    };
+    let sql = format!("DELETE FROM {collection} WHERE rid = {rid}");
     match runtime.execute_query(&sql) {
         Ok(qr) => {
             let payload = encode_delete_ok_payload(qr.affected_rows);
@@ -1863,6 +1890,106 @@ mod tests {
                 .and_then(JsonValue::as_array)
                 .map(|ids| ids.len()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn bulk_insert_dispatch_surfaces_row_ids() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+
+        let single = bulk_insert_frame(
+            9,
+            br#"{"collection":"rows_rid","payload":{"name":"eve"}}"#.to_vec(),
+        );
+        let reply = run_insert_dispatch(&runtime, &single);
+        assert_eq!(
+            reply.kind,
+            MessageKind::BulkOk,
+            "body={:?}",
+            String::from_utf8_lossy(&reply.payload)
+        );
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("single json");
+        assert_eq!(body.get("affected").and_then(JsonValue::as_u64), Some(1));
+        assert!(
+            body.get("id").and_then(JsonValue::as_u64).is_some(),
+            "single insert must carry the assigned id: {body}"
+        );
+
+        let batch = bulk_insert_frame(
+            10,
+            br#"{"collection":"rows_rid","payloads":[{"name":"a"},{"name":"b"}]}"#.to_vec(),
+        );
+        let reply = run_insert_dispatch(&runtime, &batch);
+        assert_eq!(reply.kind, MessageKind::BulkOk);
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("batch json");
+        assert_eq!(body.get("affected").and_then(JsonValue::as_u64), Some(2));
+        let ids: Vec<u64> = body
+            .get("ids")
+            .and_then(JsonValue::as_array)
+            .expect("ids array")
+            .iter()
+            .map(|id| id.as_u64().expect("numeric id"))
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "ids must be distinct");
+    }
+
+    #[test]
+    fn get_and_delete_dispatch_address_rows_by_rid() {
+        use reddb_wire::redwire::operations::{
+            decode_delete_ok_affected, decode_get_result_payload, encode_key_payload,
+        };
+        use reddb_wire::redwire::{build_delete_frame, build_get_frame};
+
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let insert = bulk_insert_frame(
+            11,
+            br#"{"collection":"rows_rid_del","payload":{"name":"k"}}"#.to_vec(),
+        );
+        let reply = run_insert_dispatch(&runtime, &insert);
+        assert_eq!(reply.kind, MessageKind::BulkOk);
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("insert json");
+        let rid = body
+            .get("id")
+            .and_then(JsonValue::as_u64)
+            .expect("assigned id");
+        let rid = rid.to_string();
+
+        let get = build_get_frame(12, encode_key_payload("rows_rid_del", &rid)).expect("get");
+        let reply = run_get(&runtime, &get);
+        assert_eq!(reply.kind, MessageKind::Result);
+        let found = decode_get_result_payload(&reply.payload).expect("get payload");
+        assert_eq!(found.get("found").and_then(|v| v.as_bool()), Some(true));
+
+        // A crafted id or collection is refused, never spliced into SQL.
+        for (collection, id) in [
+            ("rows_rid_del", "1 OR 1=1"),
+            ("rows_rid_del", "'1'"),
+            ("rows_rid_del WHERE 1=1 --", rid.as_str()),
+        ] {
+            let del = build_delete_frame(13, encode_key_payload(collection, id)).expect("del");
+            let reply = run_delete(&runtime, &del);
+            assert_eq!(
+                reply.kind,
+                MessageKind::Error,
+                "{collection:?}/{id:?} must be rejected: {:?}",
+                String::from_utf8_lossy(&reply.payload)
+            );
+        }
+
+        let del = build_delete_frame(14, encode_key_payload("rows_rid_del", &rid)).expect("del");
+        let reply = run_delete(&runtime, &del);
+        assert_eq!(reply.kind, MessageKind::DeleteOk);
+        assert_eq!(
+            decode_delete_ok_affected(&reply.payload).expect("affected"),
+            1
+        );
+
+        let reply = run_delete(&runtime, &del);
+        assert_eq!(reply.kind, MessageKind::DeleteOk);
+        assert_eq!(
+            decode_delete_ok_affected(&reply.payload).expect("affected"),
+            0
         );
     }
 

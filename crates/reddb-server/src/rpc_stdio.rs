@@ -795,6 +795,7 @@ fn dispatch_method(
                 "'payload' must be a JSON object".to_string(),
             ))?;
             if let Some(tx) = session.current_tx_mut() {
+                ensure_sql_collection(collection).map_err(|m| (error_code::INVALID_PARAMS, m))?;
                 let sql = build_insert_sql(collection, payload_obj.iter());
                 tx.write_set.push(PendingSql::Insert(sql));
                 return Ok(pending_tx_response(tx.tx_id));
@@ -888,7 +889,9 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("SELECT * FROM {collection} WHERE rid = {id} LIMIT 1");
+            ensure_sql_collection(collection).map_err(|m| (error_code::INVALID_PARAMS, m))?;
+            let rid = parse_rid(id).map_err(|m| (error_code::INVALID_PARAMS, m))?;
+            let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
             let qr = runtime
                 .execute_query(&sql)
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -912,7 +915,9 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("DELETE FROM {collection} WHERE rid = {id}");
+            ensure_sql_collection(collection).map_err(|m| (error_code::INVALID_PARAMS, m))?;
+            let rid = parse_rid(id).map_err(|m| (error_code::INVALID_PARAMS, m))?;
+            let sql = format!("DELETE FROM {collection} WHERE rid = {rid}");
 
             if let Some(tx) = session.current_tx_mut() {
                 tx.write_set.push(PendingSql::Delete(sql));
@@ -1017,6 +1022,28 @@ fn pending_tx_response(tx_id: u64) -> Value {
         .into_iter()
         .collect(),
     )
+}
+
+/// Reject a client-supplied collection name that cannot be spliced into
+/// generated SQL as a bare identifier (same rule as the HTTP insert
+/// path, issue #763). Values go through `value_to_sql_literal`; the
+/// table name has no literal form, so it must be validated instead.
+pub(crate) fn ensure_sql_collection(collection: &str) -> Result<(), String> {
+    if crate::server::handlers_query::is_safe_sql_identifier(collection) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid collection name '{collection}': expected [A-Za-z_][A-Za-z0-9_]*"
+        ))
+    }
+}
+
+/// Parse a client-supplied entity id for a `WHERE rid = …` predicate.
+/// Rids are unsigned integers; anything else is rejected rather than
+/// interpolated into the statement.
+pub(crate) fn parse_rid(id: &str) -> Result<u64, String> {
+    id.parse::<u64>()
+        .map_err(|_| format!("invalid rid '{id}': expected an unsigned integer"))
 }
 
 pub(crate) fn build_insert_sql<'a, I>(collection: &str, fields: I) -> String
@@ -1199,13 +1226,15 @@ pub(crate) fn insert_result_to_json(qr: &RuntimeQueryResult) -> Value {
         "affected".to_string(),
         Value::Number(qr.affected_rows as f64),
     );
-    // First row of the result, if any, contains the inserted entity id.
+    // A plain INSERT result has no records; callers that want the
+    // assigned id append `RETURNING rid`, which lands it as the `rid`
+    // column of the first row.
     if let Some(first) = qr.result.records.first() {
         if let Some(id_val) = first
             .iter_fields()
             .find(|(k, _)| {
                 let s: &str = k;
-                s == "_entity_id"
+                s == "rid"
             })
             .map(|(_, v)| schema_value_to_json(v))
         {
@@ -1381,7 +1410,9 @@ fn dispatch_method_remote(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("SELECT * FROM {collection} WHERE rid = {id} LIMIT 1");
+            ensure_sql_collection(collection).map_err(|m| (error_code::INVALID_PARAMS, m))?;
+            let rid = parse_rid(id).map_err(|m| (error_code::INVALID_PARAMS, m))?;
+            let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
             let json_str = tokio_rt
                 .block_on(async {
                     let mut guard = client.lock().await;
