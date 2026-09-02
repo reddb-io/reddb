@@ -25,7 +25,13 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        checksum/auth: {{ include (print $.Template.BasePath "/secret-auth.yaml") . | sha256sum }}
+        # Deliberately *not* a hash of the rendered secret. That manifest is
+        # deterministic apart from the password, so publishing its sha256 to
+        # anyone with `pods get` — a routine, low-privilege grant — hands them
+        # an offline oracle to brute-force the credential. Roll on the secret's
+        # identity instead; `helm upgrade` with a changed password still
+        # replaces the Secret, and pods pick it up on their next restart.
+        checksum/auth-name: {{ include "reddb.authSecretName" . | sha256sum }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}

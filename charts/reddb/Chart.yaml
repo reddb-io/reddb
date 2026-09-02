@@ -5,7 +5,7 @@ description: |
   Supports standalone, serverless, primary/read-replica, and cluster topologies.
 type: application
 version: 0.3.0
-appVersion: "0.1.2"
+appVersion: "1.23.2"
 kubeVersion: ">=1.23.0-0"
 home: https://github.com/reddb-io/reddb
 sources:

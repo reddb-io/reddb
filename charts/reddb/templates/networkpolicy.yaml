@@ -22,7 +22,11 @@ spec:
           protocol: TCP
         - port: 5000
           protocol: TCP
-      {{- if or (and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0)) .Values.networkPolicy.ingressFrom }}
+      # An ingress rule with ports but no `from` selector allows those ports
+      # from every source in the cluster. A policy that names ports and nothing
+      # else therefore protects nothing, while looking like it does — so the
+      # chart always emits a `from`, defaulting to the release namespace when
+      # the operator has not narrowed it further.
       from:
         {{- if and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0) }}
         - podSelector:
@@ -31,8 +35,13 @@ spec:
         {{- end }}
         {{- with .Values.networkPolicy.ingressFrom }}
         {{- toYaml . | nindent 8 }}
+        {{- else }}
+        {{- if not (and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0)) }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
         {{- end }}
-      {{- end }}
+        {{- end }}
 {{- if and (eq .Values.mode "primary-replica") (gt (int .Values.replica.replicaCount) 0) }}
 ---
 apiVersion: networking.k8s.io/v1

@@ -338,3 +338,27 @@ test("vendored asset-fetcher copies match the source package byte for byte", () 
     }
   }
 });
+
+
+test("the Helm chart's appVersion is synced, not hand-maintained", () => {
+  // `appVersion` is the image tag `helm install` pulls. It was absent from
+  // sync-version.js and had drifted to 0.1.2 — a tag that does not exist on
+  // ghcr — so a fresh install pulled a missing image or silently fell back to
+  // `latest`. Bumping it once only resets the clock; being a sync target is
+  // what stops it drifting again.
+  const sync = read("scripts/sync-version.js");
+  assert.match(sync, /charts\/reddb\/Chart\.yaml/, "the chart must be a sync target");
+  assert.match(sync, /type: 'helm-chart'/, "the chart needs its own target type");
+  assert.match(sync, /\^appVersion: "/, "the helm-chart type must rewrite appVersion");
+
+  const chart = read("charts/reddb/Chart.yaml");
+  const workspace = read("Cargo.toml");
+  const appVersion = chart.match(/^appVersion: "(.+?)"/m)?.[1];
+  const version = workspace.match(/^version = "(.+?)"/m)?.[1];
+  assert.ok(appVersion, "Chart.yaml must declare appVersion");
+  assert.equal(
+    appVersion,
+    version,
+    "Chart.yaml appVersion must match the workspace version, or helm pulls a tag that was never published",
+  );
+});
