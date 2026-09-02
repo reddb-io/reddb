@@ -1155,8 +1155,12 @@ mod tests {
         let err = plan
             .read_current_pointer_verified()
             .expect_err("verified pointer must reject missing required pack");
+        // Assert the error *kind*, not the OS message: the prose is
+        // platform-specific (POSIX says "No such file or directory",
+        // Windows says "The system cannot find the file specified") and
+        // localised. The kind is the thing the caller actually branches on.
         assert!(
-            err.to_string().contains("No such file") || err.to_string().contains("not found"),
+            matches!(&err, RdbFileError::Io(io) if io.kind() == std::io::ErrorKind::NotFound),
             "{err}"
         );
 

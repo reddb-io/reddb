@@ -1149,7 +1149,14 @@ mod tests {
         let err = manifest
             .verify_snapshot_parts(plan.basebackup_dir())
             .expect_err("missing chunk rejected");
-        assert!(err.to_string().contains("No such file"), "{err}");
+        // Assert the error *kind*, not the OS message: the prose is
+        // platform-specific (POSIX says "No such file or directory",
+        // Windows says "The system cannot find the file specified") and
+        // localised. The kind is the thing the caller actually branches on.
+        assert!(
+            matches!(&err, RdbFileError::Io(io) if io.kind() == std::io::ErrorKind::NotFound),
+            "{err}"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
