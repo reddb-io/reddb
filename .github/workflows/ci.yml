@@ -834,6 +834,15 @@ jobs:
         # Skip integration tests that hit Unix-only facilities (systemd,
         # mmap, /proc). --lib stays within the library crate.
         run: cargo test --locked --lib
+      - name: Embedded file-format tests
+        # Issues #2265 / #2266: every embedded write failed on Windows
+        # because the writer locked the data file and then reopened it —
+        # `LockFileEx` locks are mandatory and per-handle, while POSIX
+        # `flock` is advisory. The bug was therefore invisible to the
+        # Linux suite, and `--lib` above does not reach reddb-io-file's
+        # integration tests where the regression coverage lives. Running
+        # them here is what makes that class of fault detectable at all.
+        run: cargo test --locked -p reddb-io-file
 
   macos:
     # Mirror of the Windows job for Darwin; keeps the cross-platform
