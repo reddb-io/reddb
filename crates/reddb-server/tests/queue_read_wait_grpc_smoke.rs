@@ -143,8 +143,17 @@ async fn grpc_enqueue_during_wait_delivers_message_to_waiter() {
     exec_ok(&mut waiter, "CREATE QUEUE qgrpc_wake").await;
     exec_ok(&mut waiter, "QUEUE GROUP CREATE qgrpc_wake workers").await;
 
+    // Push only once the reader has actually parked in WAIT, so the test
+    // exercises the wake path it names rather than racing a fixed 150 ms
+    // sleep against gRPC connection setup under parallel load (the
+    // registry is keyed on (tenant scope, queue); no tenant here).
+    let registry = h.runtime.queue_wait_registry();
     let producer_task = tokio::spawn(async move {
-        sleep(Duration::from_millis(150)).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while registry.live_waiters("", "qgrpc_wake") == 0 && tokio::time::Instant::now() < deadline
+        {
+            sleep(Duration::from_millis(5)).await;
+        }
         exec_ok(&mut producer, "QUEUE PUSH qgrpc_wake 'wakeup'").await
     });
 
@@ -159,7 +168,7 @@ async fn grpc_enqueue_during_wait_delivers_message_to_waiter() {
 
     assert_eq!(
         reply.record_count, 1,
-        "committed enqueue must wake the waiter and deliver over gRPC, json={}",
+        "committed enqueue must wake the waiter and deliver over gRPC, elapsed={elapsed:?}, json={}",
         reply.result_json
     );
     assert!(
