@@ -346,6 +346,51 @@ impl RedDBRuntime {
         self.config_bool("red.config.secret.auto_decrypt", true)
     }
 
+    /// Whether the executing principal may see `SECRET()` columns in clear.
+    ///
+    /// Auto-decryption used to apply to every reader of a table: anyone
+    /// with Select on `users` saw `SECRET()` values in clear, and the
+    /// `secret:read` action only guarded `$secret.*` vault references. Now
+    /// an embedded caller (no identity) and admins decrypt; everyone else
+    /// needs an explicit IAM allow for `secret:read` on the `column`
+    /// resource — the legacy role fallback is deliberately not consulted,
+    /// so a plain read-role grant leaves the column masked as `***`.
+    fn caller_may_read_secret_columns(&self) -> bool {
+        let Some((username, role)) = crate::runtime::impl_core::current_auth_identity() else {
+            return true;
+        };
+        if role == crate::auth::Role::Admin {
+            return true;
+        }
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return true;
+        };
+        let tenant = crate::runtime::mvcc::current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("secret".to_string(), "column".to_string());
+        if let Some(tenant) = &tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant.clone(),
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::auth::now_ms(),
+            principal_is_admin_role: false,
+            principal_is_platform_scoped: tenant.is_none(),
+        };
+        let policies = auth_store.effective_policies(&principal);
+        let refs: Vec<&crate::auth::policies::Policy> =
+            policies.iter().map(|p| p.as_ref()).collect();
+        matches!(
+            crate::auth::policies::evaluate(&refs, "secret:read", &resource, &ctx),
+            crate::auth::policies::Decision::Allow { .. }
+                | crate::auth::policies::Decision::AdminBypass
+        )
+    }
+
     /// Walk every record in `result` and swap `Value::Secret(bytes)`
     /// for the decrypted plaintext when the runtime has the vault
     /// AES key AND `red.config.secret.auto_decrypt = true`. If the
@@ -354,6 +399,9 @@ impl RedDBRuntime {
     /// (Display, JSON) already masks as `***`.
     pub(crate) fn apply_secret_decryption(&self, result: &mut RuntimeQueryResult) {
         if !self.secret_auto_decrypt() {
+            return;
+        }
+        if !self.caller_may_read_secret_columns() {
             return;
         }
         let Some(key) = self.secret_aes_key() else {

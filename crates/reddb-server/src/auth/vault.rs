@@ -201,16 +201,9 @@ impl KeyPair {
     }
 }
 
-/// Constant-time byte comparison to avoid timing side-channels.
+/// Constant-time byte comparison — one implementation for the crate.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    crate::crypto::constant_time_eq(a, b)
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +266,7 @@ fn decode_certificate_hex(certificate_hex: &str) -> Result<Vec<u8>, VaultError> 
 /// Serializable snapshot of all auth state (users, api keys, bootstrap seal,
 /// the master secret for the certificate-based seal, and a key-value store
 /// for arbitrary encrypted secrets).
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct VaultState {
     pub users: Vec<User>,
     /// `(owner UserId, api_key)` pairs. The owner carries tenant scope
@@ -289,6 +282,21 @@ pub struct VaultState {
     /// Keys use dot-notation with `red.secret.*` prefix (e.g., "red.secret.aes_key").
     /// Values are hex-encoded bytes or UTF-8 strings.
     pub kv: std::collections::HashMap<String, String>,
+}
+
+impl std::fmt::Debug for VaultState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultState")
+            .field("users", &self.users.len())
+            .field("api_keys", &self.api_keys.len())
+            .field("bootstrapped", &self.bootstrapped)
+            .field(
+                "master_secret",
+                &self.master_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("kv", &self.kv.len())
+            .finish()
+    }
 }
 
 impl VaultState {

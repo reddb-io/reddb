@@ -143,3 +143,28 @@ mod tests {
         }
     }
 }
+
+/// The secret inputs the server accepts either inline or via a `_FILE`
+/// companion. Giving both is a misconfiguration to refuse at boot, not a
+/// precedence to resolve silently.
+pub const FILE_BACKED_SECRET_ENV: &[&str] = &[
+    "REDDB_CERTIFICATE",
+    "REDDB_USERNAME",
+    "REDDB_PASSWORD",
+    "REDDB_ROOT_TOKEN",
+    "RED_ADMIN_TOKEN",
+];
+
+/// The first secret that is set both inline and through its `_FILE`
+/// companion, if any.
+pub fn conflicting_secret_env() -> Option<&'static str> {
+    FILE_BACKED_SECRET_ENV.iter().copied().find(|name| {
+        let inline = std::env::var(name)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let file = std::env::var(format!("{name}_FILE"))
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        inline && file
+    })
+}

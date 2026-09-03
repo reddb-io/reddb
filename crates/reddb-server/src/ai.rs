@@ -3512,7 +3512,7 @@ pub fn provider_mode_to_provider(mode: AiProviderMode) -> AiProvider {
 ///
 /// `REDDB_AI_ALLOW_PRIVATE_PROVIDERS=1` lifts both restrictions for
 /// deployments that run providers on a private network.
-fn validate_custom_provider_url(url: &str) -> crate::RedDBResult<()> {
+pub(crate) fn validate_custom_provider_url(url: &str) -> crate::RedDBResult<()> {
     if std::env::var("REDDB_AI_ALLOW_PRIVATE_PROVIDERS")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false)

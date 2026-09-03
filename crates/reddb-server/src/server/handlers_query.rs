@@ -1730,14 +1730,7 @@ pub(crate) fn record_rid(record: &crate::storage::query::unified::UnifiedRecord)
 /// of limited cryptographic interest, but consistency with the rest
 /// of the auth-adjacent code path is the cheaper default.
 pub(crate) fn constant_time_str_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.as_bytes().iter().zip(b.as_bytes().iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    crate::crypto::constant_time_eq(a.as_bytes(), b.as_bytes())
 }
 
 /// Issue #760 — map a runtime error to a stable NDJSON error code so

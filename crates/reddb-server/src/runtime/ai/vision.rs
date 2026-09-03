@@ -246,20 +246,69 @@ pub fn fetch_image_bytes(reference: &str) -> RedDBResult<Vec<u8>> {
         ));
     }
 
-    if let Some(rest) = reference.strip_prefix("file://") {
-        // Tolerate the `file://localhost/path` authority form.
-        let path = rest.strip_prefix("localhost").unwrap_or(rest);
-        return std::fs::read(path)
-            .map_err(|err| RedDBError::Internal(format!("read image '{path}': {err}")));
-    }
-
+    // The reference is row data: whoever can write the image column
+    // chooses what the server fetches. Local paths are therefore off
+    // unless the operator opts in, and HTTP targets follow the same
+    // egress rule as AI providers (https off loopback, no private or
+    // link-local hosts).
     if reference.starts_with("http://") || reference.starts_with("https://") {
+        crate::ai::validate_custom_provider_url(reference)?;
         return fetch_http_image(reference);
     }
 
+    if !local_files_allowed() {
+        return Err(RedDBError::Query(format!(
+            "vision image reference '{reference}' names a local file; local image \
+             paths are disabled unless {LOCAL_FILES_ENV}=1"
+        )));
+    }
+
+    if let Some(rest) = reference.strip_prefix("file://") {
+        // Tolerate the `file://localhost/path` authority form.
+        let path = rest.strip_prefix("localhost").unwrap_or(rest);
+        return read_local_image(path);
+    }
+
     // Bare filesystem path.
-    std::fs::read(reference)
-        .map_err(|err| RedDBError::Internal(format!("read image '{reference}': {err}")))
+    read_local_image(reference)
+}
+
+/// Operator opt-in for `file://` and bare-path image references.
+const LOCAL_FILES_ENV: &str = "REDDB_AI_VISION_ALLOW_LOCAL_FILES";
+
+/// Largest image the enrichment lane will read, in bytes; override with
+/// `REDDB_AI_VISION_MAX_IMAGE_BYTES`.
+const DEFAULT_MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+
+fn local_files_allowed() -> bool {
+    std::env::var(LOCAL_FILES_ENV)
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn max_image_bytes() -> u64 {
+    std::env::var("REDDB_AI_VISION_MAX_IMAGE_BYTES")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_IMAGE_BYTES)
+}
+
+fn read_local_image(path: &str) -> RedDBResult<Vec<u8>> {
+    use std::io::Read;
+    let limit = max_image_bytes();
+    let file = std::fs::File::open(path)
+        .map_err(|err| RedDBError::Internal(format!("read image '{path}': {err}")))?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| RedDBError::Internal(format!("read image '{path}': {err}")))?;
+    if bytes.len() as u64 > limit {
+        return Err(RedDBError::Query(format!(
+            "image '{path}' exceeds the {limit}-byte vision limit"
+        )));
+    }
+    Ok(bytes)
 }
 
 fn fetch_http_image(url: &str) -> RedDBResult<Vec<u8>> {
@@ -283,14 +332,54 @@ fn fetch_http_image(url: &str) -> RedDBResult<Vec<u8>> {
         )));
     }
 
-    resp.body_mut()
+    let limit = max_image_bytes();
+    let bytes = resp
+        .body_mut()
+        .with_config()
+        .limit(limit + 1)
         .read_to_vec()
-        .map_err(|err| RedDBError::Internal(format!("read image body from '{url}': {err}")))
+        .map_err(|err| RedDBError::Internal(format!("read image body from '{url}': {err}")))?;
+    if bytes.len() as u64 > limit {
+        return Err(RedDBError::Query(format!(
+            "image at '{url}' exceeds the {limit}-byte vision limit"
+        )));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_references_from_row_data_cannot_name_local_files_or_private_hosts() {
+        if std::env::var_os(LOCAL_FILES_ENV).is_some()
+            || std::env::var_os("REDDB_AI_ALLOW_PRIVATE_PROVIDERS").is_some()
+        {
+            return; // an operator opt-in is active in this environment
+        }
+        for reference in [
+            "file:///etc/hostname",
+            "/etc/hostname",
+            "relative/image.png",
+        ] {
+            let err = fetch_image_bytes(reference).expect_err(reference);
+            assert!(
+                err.to_string().contains(LOCAL_FILES_ENV),
+                "{reference}: {err}"
+            );
+        }
+        for reference in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.8/internal.png",
+            "http://example.com/plaintext.png",
+        ] {
+            assert!(
+                fetch_image_bytes(reference).is_err(),
+                "{reference} must be refused"
+            );
+        }
+    }
 
     #[test]
     fn deterministic_fake_is_pure() {
@@ -330,17 +419,16 @@ mod tests {
     }
 
     #[test]
-    fn fetch_reads_file_uri_and_bare_path() {
+    fn local_reads_honour_the_size_limit() {
+        // The policy gate in `fetch_image_bytes` is exercised separately;
+        // this covers the reader an operator opts into.
         let dir = std::env::temp_dir();
         let path = dir.join("reddb_vision_fetch_fixture.bin");
         std::fs::write(&path, b"\x89PNG fixture").expect("write fixture");
 
-        let via_bare = fetch_image_bytes(path.to_str().expect("utf8 path")).expect("bare");
-        assert_eq!(via_bare, b"\x89PNG fixture");
-
-        let uri = format!("file://{}", path.to_str().expect("utf8 path"));
-        let via_uri = fetch_image_bytes(&uri).expect("file uri");
-        assert_eq!(via_uri, b"\x89PNG fixture");
+        let bytes = read_local_image(path.to_str().expect("utf8 path")).expect("read");
+        assert_eq!(bytes, b"\x89PNG fixture");
+        assert!(read_local_image("/definitely/missing/image.png").is_err());
 
         let _ = std::fs::remove_file(&path);
     }

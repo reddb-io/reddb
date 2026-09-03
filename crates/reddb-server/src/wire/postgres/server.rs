@@ -167,16 +167,7 @@ impl Drop for PgAuthContextGuard {
 /// authentication survives only for loopback binds with no credentials
 /// configured; every other bind requires a verified password.
 fn is_loopback_bind(bind_addr: &str) -> bool {
-    let host = bind_addr
-        .rsplit_once(':')
-        .map(|(host, _)| host.trim_matches(['[', ']']))
-        .unwrap_or(bind_addr);
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    host.parse::<std::net::IpAddr>()
-        .map(|addr| addr.is_loopback())
-        .unwrap_or(false)
+    crate::transport::is_loopback_bind(bind_addr)
 }
 
 /// Extract the cleartext password from a `PasswordMessage` payload (a
@@ -1075,13 +1066,15 @@ where
         .await?;
     }
 
-    // BackendKeyData: (pid, secret_key). Used by CancelRequest; we don't
-    // honour cancels in 3.1 so random-ish values are fine.
+    // BackendKeyData: (pid, secret_key). CancelRequest is not honoured
+    // yet, but the key is what a future cancel path authenticates on, so
+    // it is random per connection rather than a constant a client could
+    // learn once and reuse against every session.
     write_frame(
         stream,
         &BackendMessage::BackendKeyData {
             pid: std::process::id(),
-            key: 0xDEADBEEF,
+            key: random_cancel_key(),
         },
     )
     .await?;
@@ -1152,7 +1145,7 @@ where
             // 42P01 (undefined_table) and 42601 (syntax_error) when we can
             // detect; otherwise fall back to XX000 (internal error).
             let code = classify_sqlstate(&err.to_string());
-            send_error(stream, code, &err.to_string()).await?;
+            send_error(stream, code, &crate::api::client_facing_message(&err)).await?;
         }
     }
 
@@ -2213,4 +2206,20 @@ mod tests {
         out.extend_from_slice(value.as_bytes());
         out.push(0);
     }
+}
+
+/// A fresh 32-bit cancel key from the OS CSPRNG. Falls back to a
+/// process/time-derived value only if the CSPRNG is unavailable — the
+/// key guards nothing yet, so refusing the connection would be the
+/// wrong trade.
+fn random_cancel_key() -> u32 {
+    let mut bytes = [0u8; 4];
+    if crate::crypto::os_random::fill_bytes(&mut bytes).is_ok() {
+        return u32::from_le_bytes(bytes);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    std::process::id() ^ nanos
 }

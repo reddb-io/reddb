@@ -307,15 +307,48 @@ pub(crate) fn register(registry: &mut RouteRegistry) {
 // Handlers. Each route above binds one of these by fn pointer, so a
 // declared route always has a live handler behind it.
 
+/// Credential endpoints accept only `Content-Type: application/json`.
+/// They parsed whatever arrived, so a cross-site form or `text/plain`
+/// POST — the simple-request shapes a browser sends without a preflight —
+/// could drive a login or a bootstrap from another origin.
+fn require_json_body(req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    let content_type = req
+        .headers
+        .get("content-type")
+        .map(String::as_str)
+        .unwrap_or_default();
+    if content_type
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("application/json")
+    {
+        None
+    } else {
+        Some(json_error(
+            415,
+            "credential endpoints require Content-Type: application/json",
+        ))
+    }
+}
+
 fn auth_bootstrap(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
-    Some(server.handle_auth_bootstrap(req.body.to_vec()))
+    if let Some(deny) = require_json_body(req) {
+        return Some(deny);
+    }
+    Some(server.handle_auth_bootstrap(req.headers, req.body.to_vec()))
 }
 
 fn auth_login(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    if let Some(deny) = require_json_body(req) {
+        return Some(deny);
+    }
     Some(server.handle_auth_login(req.body.to_vec()))
 }
 
 fn auth_browser_login(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    if let Some(deny) = require_json_body(req) {
+        return Some(deny);
+    }
     Some(server.handle_browser_login(req.body.to_vec()))
 }
 

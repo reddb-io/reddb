@@ -137,6 +137,7 @@ impl BootedNode {
             return Err("at least one server bind address must be configured".to_string());
         };
         let transport_set = transport_set(&config);
+        warn_plaintext_listeners(&config, &transport_set);
 
         // Phase 1 — the HTTP and gRPC listeners the pre-#2133 runners bound
         // before opening the DB, so an explicit port collision fails the boot
@@ -907,5 +908,45 @@ fn log_listener_exit(kind: TransportKind, err: &str) {
             tracing::error!(transport = "grpc+tls", err, "gRPC TLS listener error")
         }
         _ => tracing::error!(transport = kind.as_str(), err, "listener error"),
+    }
+}
+
+/// Announce every listener that will accept connections from beyond the
+/// host without TLS. Plaintext is still the default, so an operator who
+/// never configured a certificate has never been told that credentials
+/// and data cross the network in clear.
+fn warn_plaintext_listeners(config: &ServerCommandConfig, transports: &TransportSet) {
+    use crate::transport::{is_loopback_bind, TransportKind};
+    let http_tls = config.http_tls_bind_addr.is_some()
+        || (config.http_tls_cert.is_some() && config.http_tls_key.is_some());
+    let grpc_tls = config.grpc_tls_bind_addr.is_some()
+        || (config.grpc_tls_cert.is_some() && config.grpc_tls_key.is_some());
+    let wire_tls = config.wire_tls_bind_addr.is_some()
+        || (config.wire_tls_cert.is_some() && config.wire_tls_key.is_some());
+    for descriptor in transports.descriptors() {
+        let tls_configured = match descriptor.kind {
+            TransportKind::Http => http_tls,
+            TransportKind::Grpc => grpc_tls,
+            TransportKind::Wire | TransportKind::Postgres => wire_tls,
+            TransportKind::Router => http_tls || grpc_tls || wire_tls,
+            TransportKind::Https | TransportKind::GrpcTls | TransportKind::WireTls => true,
+        };
+        if tls_configured || is_loopback_bind(&descriptor.bind_addr) {
+            continue;
+        }
+        let message = format!(
+            "⚠ {} listener on {} is plaintext and reachable beyond this host — \
+             credentials and data cross the network in clear; configure TLS or \
+             bind to loopback behind a TLS-terminating proxy",
+            descriptor.kind.as_str(),
+            descriptor.bind_addr
+        );
+        eprintln!("{message}");
+        tracing::warn!(
+            target: "reddb::security",
+            transport = descriptor.kind.as_str(),
+            bind = %descriptor.bind_addr,
+            "{message}"
+        );
     }
 }

@@ -87,11 +87,18 @@ impl RedDBServer {
     ///
     /// Creates the first admin user. One-shot, irreversible.
     /// Body: `{ "username": "admin", "password": "secret" }`
-    pub(crate) fn handle_auth_bootstrap(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_auth_bootstrap(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        body: Vec<u8>,
+    ) -> HttpResponse {
         let auth_store = match &self.auth_store {
             Some(store) => store,
             None => return json_error(501, "authentication is not configured"),
         };
+        if let Some(deny) = bootstrap_token_gate(headers.get("x-reddb-bootstrap-token")) {
+            return deny;
+        }
 
         let payload = match parse_json_body(&body) {
             Ok(value) => value,
@@ -1263,4 +1270,36 @@ fn unix_now_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+/// Shared secret an operator can demand on the bootstrap call.
+///
+/// Bootstrap is first-caller-wins and reachable before any account
+/// exists, so on a network-exposed listener whoever reaches it first owns
+/// the store. With `REDDB_BOOTSTRAP_TOKEN` (or its `_FILE` companion) set,
+/// the caller must present it in `x-reddb-bootstrap-token` (HTTP) or the
+/// gRPC metadata key of the same name. Unset keeps today's behaviour.
+pub(crate) fn bootstrap_token_expected() -> Option<String> {
+    crate::utils::env_with_file_fallback("REDDB_BOOTSTRAP_TOKEN")
+}
+
+pub(crate) fn bootstrap_token_matches(presented: Option<&str>) -> bool {
+    match bootstrap_token_expected() {
+        None => true,
+        Some(expected) => {
+            let presented = presented.unwrap_or_default();
+            crate::crypto::constant_time_eq(presented.as_bytes(), expected.as_bytes())
+        }
+    }
+}
+
+fn bootstrap_token_gate(presented: Option<&String>) -> Option<HttpResponse> {
+    if bootstrap_token_matches(presented.map(String::as_str)) {
+        None
+    } else {
+        Some(json_error(
+            403,
+            "bootstrap requires the token configured in REDDB_BOOTSTRAP_TOKEN",
+        ))
+    }
 }

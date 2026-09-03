@@ -112,7 +112,7 @@ mod handlers_admin_metrics;
 mod handlers_admin_status;
 mod handlers_ai;
 mod handlers_ai_model_cache;
-mod handlers_auth;
+pub(crate) mod handlers_auth;
 mod handlers_backup;
 mod handlers_browser_auth;
 mod handlers_capabilities;

@@ -1325,14 +1325,13 @@ fn json_error(command: &str, error: &str) -> ! {
 }
 
 fn main() {
-    // PLAN.md Phase 6.4 — expand `*_FILE` env companions before any
-    // other env reads. Containerised deployments mount tmpfs secrets
-    // at /run/secrets/x and point e.g. `REDDB_PASSWORD_FILE` at the
-    // mount; we read the file, place the contents in `REDDB_PASSWORD`,
-    // and strip the `_FILE` var so it can't leak into `env` dumps.
-    // No threads are alive yet, so the unsafe `set_var` is sound.
-    if let Some((name, err)) = reddb::utils::expand_all_reddb_secrets().into_iter().next() {
-        eprintln!("error: failed to expand {name}_FILE: {err}");
+    // `*_FILE` secret companions (`REDDB_PASSWORD_FILE`, …) are read at
+    // the point of use via `env_with_file_fallback`; they are no longer
+    // copied into the process environment, where they showed up in
+    // `/proc/<pid>/environ` and in every child process. A secret given
+    // both ways is still a refusal, not a silent precedence.
+    if let Some(name) = reddb::utils::conflicting_secret_env() {
+        eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
         std::process::exit(2);
     }
 

@@ -192,6 +192,15 @@ const ADMIN_MUTATION_ROUTES: &[RouteEntry] = &[
         ),
         admin_replication_confirm_rewind,
     ),
+    // Taking a replication snapshot writes to the backend; it sat in the
+    // read-capability group, so any read-role bearer could trigger one.
+    RouteEntry::with_aliases(
+        "ops.replication.snapshot",
+        RouteMethod::Post,
+        "/replication/snapshot",
+        ops_aliases!(RouteMethod::Post, "/v1/ops/replication/snapshot"),
+        ops_replication_snapshot,
+    ),
 ];
 
 const ADMIN_POLICY_AUDIT_ROUTES: &[RouteEntry] = &[RouteEntry::with_aliases(
@@ -368,13 +377,6 @@ const OPS_READ_ROUTES: &[RouteEntry] = &[
         "/replication/status",
         ops_aliases!(RouteMethod::Get, "/v1/ops/replication/status"),
         ops_replication_status,
-    ),
-    RouteEntry::with_aliases(
-        "ops.replication.snapshot",
-        RouteMethod::Post,
-        "/replication/snapshot",
-        ops_aliases!(RouteMethod::Post, "/v1/ops/replication/snapshot"),
-        ops_replication_snapshot,
     ),
     RouteEntry::with_aliases(
         "ops.topology.graph",

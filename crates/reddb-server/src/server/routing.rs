@@ -697,12 +697,25 @@ impl RedDBServer {
         // route falls through to the user-auth chain below and additionally
         // demands an admin-role bearer.
         let mut admin_role_required = false;
+        let mut bearer_required = false;
         if let Some(matched) = Self::discovered_route(method, path) {
             if matches!(
                 matched.spec.auth,
                 route_catalog::RouteAuth::Public | route_catalog::RouteAuth::OptionalUser
             ) {
                 return true;
+            }
+            // Operator read surfaces (`ops:*` capabilities: replication and
+            // cluster status, topology) never answer an anonymous caller,
+            // even when the store runs with `require_auth = false` — that
+            // flag opens the data plane, not the operator plane. The
+            // capability itself is enforced by the IAM policy middleware
+            // when policies are installed.
+            if matches!(
+                matched.spec.auth,
+                route_catalog::RouteAuth::OpsCapability(_)
+            ) {
+                bearer_required = true;
             }
             if matches!(matched.spec.auth, route_catalog::RouteAuth::AdminToken) {
                 if let Some(expected) = read_admin_token() {
@@ -856,7 +869,7 @@ impl RedDBServer {
                 // No token: allow only if require_auth is false, and never
                 // for operator routes (those need an admin bearer when no
                 // `RED_ADMIN_TOKEN` is configured).
-                !admin_role_required && !auth_store.config().require_auth
+                !admin_role_required && !bearer_required && !auth_store.config().require_auth
             }
         }
     }
@@ -1115,6 +1128,73 @@ mod tests {
         request
     }
 
+    fn server_with_open_store() -> (RedDBServer, std::sync::Arc<crate::auth::store::AuthStore>) {
+        let store = std::sync::Arc::new(crate::auth::store::AuthStore::new(
+            crate::auth::AuthConfig {
+                enabled: true,
+                session_ttl_secs: 60,
+                require_auth: false,
+                auto_encrypt_storage: false,
+                vault_enabled: false,
+                cert: Default::default(),
+                oauth: Default::default(),
+            },
+        ));
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        runtime.set_auth_store(std::sync::Arc::clone(&store));
+        let server = RedDBServer::new(runtime).with_auth(std::sync::Arc::clone(&store));
+        (server, store)
+    }
+
+    #[test]
+    fn operator_read_surfaces_never_answer_anonymous_callers() {
+        let (server, store) = server_with_open_store();
+        // `require_auth = false` opens the data plane; the operator plane
+        // (cluster status, replication status, topology) still needs a
+        // credential.
+        for path in [
+            "/cluster/status",
+            "/replication/status",
+            "/v1/topology/graph",
+        ] {
+            let response = server.route(request(path));
+            assert_eq!(response.status, 401, "{path} answered an anonymous caller");
+        }
+        store
+            .create_user("viewer", "pw", crate::auth::Role::Read)
+            .expect("user");
+        let session = store.authenticate("viewer", "pw").expect("login");
+        let response = server.route(request_with_bearer(
+            "GET",
+            "/cluster/status",
+            Vec::new(),
+            &session.token,
+        ));
+        assert_ne!(
+            response.status, 401,
+            "a read bearer is enough for a read surface"
+        );
+        assert_ne!(response.status, 403);
+    }
+
+    #[test]
+    fn credential_posts_require_a_json_content_type() {
+        let (server, _store) = server_with_open_store();
+        let body = br#"{"username":"nobody","password":"x"}"#.to_vec();
+        let response = server.route(request_with("POST", "/auth/login", body.clone()));
+        assert_eq!(
+            response.status, 415,
+            "a bodied POST without a JSON content type"
+        );
+        let mut request = request_with("POST", "/auth/login", body);
+        request.headers.insert(
+            "content-type".to_string(),
+            "application/json; charset=utf-8".to_string(),
+        );
+        let response = server.route(request);
+        assert_ne!(response.status, 415);
+    }
+
     #[test]
     fn http_request_counter_collapses_raw_paths_to_route_template() {
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
@@ -1319,11 +1399,15 @@ mod tests {
             .expect("auth login route should be cataloged");
         assert_eq!(matched.spec.id, "auth.login");
 
-        let response = server.route(request_with(
+        let mut login = request_with(
             "POST",
             "/v1/auth/login",
             br#"{"username":"admin","password":"pw"}"#.to_vec(),
-        ));
+        );
+        login
+            .headers
+            .insert("content-type".to_string(), "application/json".to_string());
+        let response = server.route(login);
         assert_eq!(
             response.status,
             501,

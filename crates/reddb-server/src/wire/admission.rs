@@ -80,11 +80,21 @@ impl ConnectionAdmission {
 
 /// Read the per-listener connection ceiling.
 fn max_connections() -> usize {
-    std::env::var(MAX_CONNECTIONS_ENV)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_CONNECTIONS)
+    // `RED_MAX_CONNECTIONS` is the documented operator cap; the
+    // wire-specific name stays as the override for a single listener.
+    [
+        MAX_CONNECTIONS_ENV,
+        "RED_MAX_CONNECTIONS",
+        "REDDB_MAX_CONNECTIONS",
+    ]
+    .iter()
+    .find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+    })
+    .unwrap_or(DEFAULT_MAX_CONNECTIONS)
 }
 
 /// The window a connection has to finish TLS and the protocol handshake.

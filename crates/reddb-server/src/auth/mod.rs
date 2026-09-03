@@ -116,7 +116,7 @@ impl fmt::Display for Role {
 /// verifier (used by the v2 wire handshake). Both derive from the
 /// same plaintext at user creation; the SCRAM path never sees
 /// plaintext or the salted password again.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct User {
     pub username: String,
     /// Tenant scope. `None` = platform-wide (the bootstrap admin and any
@@ -218,7 +218,7 @@ pub struct ApiKey {
 // ---------------------------------------------------------------------------
 
 /// An ephemeral session created by login.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Session {
     /// Token value: `"rs_<hex32>"`
     pub token: String,
@@ -378,5 +378,40 @@ mod tests {
 
         let err = AuthError::InvalidCredentials;
         assert!(err.to_string().contains("invalid"));
+    }
+}
+
+// Credential-bearing structs print their secrets redacted. A derived
+// `Debug` would put the password hash, the SCRAM verifier and live
+// session tokens into any `{:?}` log line or panic message.
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("username", &self.username)
+            .field("tenant_id", &self.tenant_id)
+            .field("password_hash", &"<redacted>")
+            .field(
+                "scram_verifier",
+                &self.scram_verifier.as_ref().map(|_| "<redacted>"),
+            )
+            .field("role", &self.role)
+            .field("api_keys", &self.api_keys.len())
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("token", &"<redacted>")
+            .field("username", &self.username)
+            .field("tenant_id", &self.tenant_id)
+            .field("role", &self.role)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
     }
 }

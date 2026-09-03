@@ -6,6 +6,150 @@ use super::super::execution_context::{current_auth_identity, current_tenant};
 use super::super::*;
 use super::policy_columns::*;
 
+/// Collect every table a statement reads *below* its top level: FROM
+/// subqueries and derived tables, join children, `IN (SELECT …)` and scalar
+/// subqueries in projections and predicates, the structured half of a
+/// hybrid search, and vector sources. The top-level table is the caller's
+/// business; synthetic subquery wrappers (`__subq_N`) and the source-free
+/// scalar table (`any`) name no real table and are skipped.
+fn collect_nested_read_tables(expr: &reddb_rql::ast::QueryExpr, out: &mut Vec<String>) {
+    use reddb_rql::ast::{QueryExpr, TableSource, VectorSource};
+
+    fn push_table(name: &str, out: &mut Vec<String>) {
+        if name.is_empty() || name == "any" || name.starts_with("__subq_") {
+            return;
+        }
+        if !out.iter().any(|seen| seen == name) {
+            out.push(name.to_string());
+        }
+    }
+
+    // A nested statement counts in full: its own table plus whatever it
+    // nests. Only the outermost statement's table is excluded.
+    fn walk_nested(expr: &QueryExpr, out: &mut Vec<String>) {
+        match expr {
+            QueryExpr::Table(t) if t.source.is_none() => push_table(&t.table, out),
+            QueryExpr::Insert(i) => push_table(&i.table, out),
+            QueryExpr::Update(u) => push_table(&u.table, out),
+            QueryExpr::Delete(d) => push_table(&d.table, out),
+            _ => {}
+        }
+        collect_nested_read_tables(expr, out);
+    }
+
+    match expr {
+        QueryExpr::Table(t) => {
+            match &t.source {
+                Some(TableSource::Subquery(inner)) => walk_nested(inner, out),
+                Some(TableSource::InlineGraphFunction { nodes, edges, .. }) => {
+                    walk_nested(nodes, out);
+                    walk_nested(edges, out);
+                }
+                Some(TableSource::Name(name)) => push_table(name, out),
+                Some(TableSource::Function { .. }) | None => {}
+            }
+            for item in &t.select_items {
+                if let reddb_rql::ast::SelectItem::Expr { expr, .. } = item {
+                    collect_expr_subqueries(expr, out);
+                }
+            }
+            if let Some(e) = &t.where_expr {
+                collect_expr_subqueries(e, out);
+            }
+            if let Some(e) = &t.having_expr {
+                collect_expr_subqueries(e, out);
+            }
+            for e in &t.group_by_exprs {
+                collect_expr_subqueries(e, out);
+            }
+        }
+        QueryExpr::Join(j) => {
+            walk_nested(&j.left, out);
+            walk_nested(&j.right, out);
+        }
+        QueryExpr::Hybrid(h) => {
+            walk_nested(&h.structured, out);
+            if let VectorSource::Subquery(inner) = &h.vector.query_vector {
+                walk_nested(inner, out);
+            }
+        }
+        QueryExpr::Vector(v) => {
+            if let VectorSource::Subquery(inner) = &v.query_vector {
+                walk_nested(inner, out);
+            }
+        }
+        QueryExpr::Update(u) => {
+            if let Some(e) = &u.where_expr {
+                collect_expr_subqueries(e, out);
+            }
+        }
+        QueryExpr::Delete(d) => {
+            if let Some(e) = &d.where_expr {
+                collect_expr_subqueries(e, out);
+            }
+        }
+        QueryExpr::Explain(e) => collect_nested_read_tables(&e.inner, out),
+        _ => {}
+    }
+}
+
+fn collect_expr_subqueries(expr: &reddb_rql::ast::Expr, out: &mut Vec<String>) {
+    use reddb_rql::ast::Expr;
+    match expr {
+        Expr::Subquery { query, .. } => {
+            let inner: &reddb_rql::ast::QueryExpr = &query.query;
+            if let reddb_rql::ast::QueryExpr::Table(t) = inner {
+                if t.source.is_none()
+                    && t.table != "any"
+                    && !t.table.starts_with("__subq_")
+                    && !out.iter().any(|seen| seen == &t.table)
+                {
+                    out.push(t.table.clone());
+                }
+            }
+            collect_nested_read_tables(inner, out);
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            collect_expr_subqueries(lhs, out);
+            collect_expr_subqueries(rhs, out);
+        }
+        Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => {
+            collect_expr_subqueries(operand, out);
+        }
+        Expr::Cast { inner, .. } => collect_expr_subqueries(inner, out),
+        Expr::FunctionCall { args, .. } | Expr::WindowFunctionCall { args, .. } => {
+            for arg in args {
+                collect_expr_subqueries(arg, out);
+            }
+        }
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            for (when, then) in branches {
+                collect_expr_subqueries(when, out);
+                collect_expr_subqueries(then, out);
+            }
+            if let Some(e) = else_ {
+                collect_expr_subqueries(e, out);
+            }
+        }
+        Expr::InList { target, values, .. } => {
+            collect_expr_subqueries(target, out);
+            for v in values {
+                collect_expr_subqueries(v, out);
+            }
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            collect_expr_subqueries(target, out);
+            collect_expr_subqueries(low, out);
+            collect_expr_subqueries(high, out);
+        }
+        Expr::Literal { .. } | Expr::Column { .. } | Expr::Parameter { .. } => {}
+    }
+}
+
 /// Role-tier gate for statements that have no finer-grained resource:
 /// `role` must be at least `needed`.
 fn require_role_tier(
@@ -250,6 +394,10 @@ impl RedDBRuntime {
                 return Ok(());
             }
             QueryExpr::Hybrid(h) => {
+                // The structured half is an arbitrary statement — a table
+                // read, a join, another hybrid — and needs its own gate in
+                // every enforcement mode; the vector half is checked below.
+                self.check_query_privilege(&h.structured)?;
                 if auth_store.iam_authorization_enabled() {
                     // The vector half of a hybrid search is gated under
                     // the same `vector:search` verb as a standalone
@@ -336,8 +484,52 @@ impl RedDBRuntime {
                     policy_id,
                 );
             }
-            QueryExpr::ShowPolicies { .. } | QueryExpr::ShowEffectivePermissions { .. } => {
-                return Ok(());
+            // A principal may always inspect its own effective set; anything
+            // wider (every policy, or another principal's set — including one
+            // in another tenant, since the target tenant comes from the
+            // statement text) is policy management.
+            QueryExpr::ShowPolicies { filter } => {
+                // Admins inspect policies as part of managing them; the
+                // explicit-allow requirement below is for everyone else.
+                if role == crate::auth::Role::Admin {
+                    return Ok(());
+                }
+                let self_only = matches!(
+                    filter,
+                    Some(reddb_rql::ast::PolicyPrincipalRef::User(u))
+                        if u.username == username && u.tenant.as_deref() == tenant.as_deref()
+                );
+                if self_only {
+                    return Ok(());
+                }
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "policy:simulate",
+                    "policy",
+                    "*",
+                );
+            }
+            QueryExpr::ShowEffectivePermissions { user, .. } => {
+                // Admins inspect policies as part of managing them; the
+                // explicit-allow requirement below is for everyone else.
+                if role == crate::auth::Role::Admin {
+                    return Ok(());
+                }
+                if user.username == username && user.tenant.as_deref() == tenant.as_deref() {
+                    return Ok(());
+                }
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "policy:simulate",
+                    "policy",
+                    "*",
+                );
             }
             QueryExpr::SimulatePolicy { .. } => {
                 return self.check_policy_management_privilege(
@@ -995,6 +1187,45 @@ impl RedDBRuntime {
             // here until it is classified, instead of running ungated.
         };
 
+        // The outer statement names one table; the tables it reads through
+        // a FROM-subquery, a derived table, a join child, `IN (SELECT …)` or
+        // a vector source were never checked, so a principal with no grant
+        // on `salaries` could still read it as `SELECT * FROM (SELECT * FROM
+        // salaries) s`. Every nested read needs Select on its own table.
+        let mut nested_tables = Vec::new();
+        collect_nested_read_tables(expr, &mut nested_tables);
+        for table in nested_tables {
+            let nested_resource = Resource::table_from_name(&table);
+            if auth_store.iam_authorization_enabled() {
+                let iam_action = legacy_action_to_iam(Action::Select);
+                let iam_resource = legacy_resource_to_iam(&nested_resource, tenant.as_deref());
+                let iam_ctx = runtime_iam_context(role, tenant.as_deref());
+                if !auth_store.check_policy_authz_with_role(
+                    &principal_id,
+                    iam_action,
+                    &iam_resource,
+                    &iam_ctx,
+                    role,
+                ) {
+                    return Err(format!(
+                        "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
+                        username, iam_action, iam_resource.kind, iam_resource.name
+                    ));
+                }
+            } else {
+                auth_store
+                    .check_grant(&ctx, Action::Select, &nested_resource)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        // A derived-table wrapper (`SELECT … FROM (SELECT …) s`) names only
+        // the synthetic `__subq_*` table; every read it performs was just
+        // checked above, and there is no grant to hold on the wrapper.
+        if matches!(expr, QueryExpr::Table(t) if t.table.starts_with("__subq_")) {
+            return Ok(());
+        }
+
         if auth_store.iam_authorization_enabled() {
             let iam_action = legacy_action_to_iam(action);
             let iam_resource = legacy_resource_to_iam(&resource, tenant.as_deref());
@@ -1311,8 +1542,23 @@ impl RedDBRuntime {
                 principal, key
             )));
         }
+        // Namespaces that steer where data goes or who may read it: the AI
+        // egress (which vault secret is sent to which host), backup and WAL
+        // archive destinations, secret auto-decryption, and the IAM / ACL
+        // stores themselves. A write-role principal could otherwise repoint
+        // the backup head or switch secret decryption on.
         let lowered = key.to_ascii_lowercase();
-        let admin_only = lowered.starts_with("red.config.ai.");
+        let admin_only = [
+            "red.config.ai.",
+            "red.config.backup.",
+            "red.config.wal.",
+            "red.config.secret.",
+            "red.config.iam.",
+            "red.config.acl.",
+            "red.config.replication.",
+        ]
+        .iter()
+        .any(|prefix| lowered.starts_with(prefix));
         let allowed = if admin_only {
             role.can_admin()
         } else {

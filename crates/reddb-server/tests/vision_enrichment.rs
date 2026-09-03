@@ -59,6 +59,9 @@ fn install_mock() {
 /// Write a tiny image fixture to a unique temp path and return a
 /// `file://` URI referencing it.
 fn write_fixture(tag: &str) -> (std::path::PathBuf, String) {
+    // Row data may not name local files unless the operator opts in; this
+    // suite is that operator (the fixture lives in a temp dir).
+    std::env::set_var("REDDB_AI_VISION_ALLOW_LOCAL_FILES", "1");
     let path = std::env::temp_dir().join(format!("reddb_vision_{tag}.png"));
     std::fs::write(&path, b"\x89PNG\r\n\x1a\n mock image fixture").expect("write fixture");
     let uri = format!("file://{}", path.to_str().expect("utf8 path"));

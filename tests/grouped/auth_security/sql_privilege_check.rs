@@ -162,6 +162,7 @@ fn revoke_invalidates_cache() {
     // Revoke and confirm the cache is rebuilt as denying.
     store
         .revoke(
+            &reddb::auth::UserId::from_parts(None, "platform-admin"),
             Role::Admin,
             &GrantPrincipal::User(alice.clone()),
             &r,

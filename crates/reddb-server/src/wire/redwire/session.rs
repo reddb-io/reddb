@@ -1312,7 +1312,7 @@ fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame)
         QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new()));
     crate::presentation::query_result::summary_frame(
         frame.correlation_id,
-        result.as_ref().map_err(ToString::to_string),
+        result.as_ref().map_err(crate::api::client_facing_message),
     )
 }
 
@@ -1342,7 +1342,7 @@ fn run_query_with_params(
     let result = QueryRequestExecutor::new(runtime, prepared).execute(query);
     crate::presentation::query_result::envelope_frame(
         frame.correlation_id,
-        result.as_ref().map_err(ToString::to_string),
+        result.as_ref().map_err(crate::api::client_facing_message),
     )
 }
 
@@ -1487,7 +1487,12 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                         ids.push(id.clone());
                     }
                 }
-                Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
+                Err(err) => {
+                    return build_error_frame_lossy(
+                        frame.correlation_id,
+                        &crate::api::client_facing_message(&err),
+                    )
+                }
             }
         }
         let payload = encode_bulk_ok_payload_from_json_id_literals(
@@ -1513,7 +1518,10 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             let payload = body.to_string_compact().into_bytes();
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload)
         }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(
+            frame.correlation_id,
+            &crate::api::client_facing_message(&err),
+        ),
     }
 }
 
@@ -1593,7 +1601,10 @@ fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             let payload = encode_get_result_payload(!qr.result.records.is_empty());
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
         }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(
+            frame.correlation_id,
+            &crate::api::client_facing_message(&err),
+        ),
     }
 }
 
@@ -1619,7 +1630,10 @@ fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             let payload = encode_delete_ok_payload(qr.affected_rows);
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::DeleteOk, payload)
         }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(
+            frame.correlation_id,
+            &crate::api::client_facing_message(&err),
+        ),
     }
 }
 

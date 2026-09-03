@@ -66,7 +66,7 @@ use proto::{
 };
 
 pub(crate) mod catalog_dispatch;
-mod control_support;
+pub(crate) mod control_support;
 mod entity_ops;
 mod input_support;
 pub(crate) mod scan_json;

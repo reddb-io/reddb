@@ -92,12 +92,24 @@ struct AuthStoreControlEvents {
 ///
 /// The `certificate` is the hex-encoded string the admin must save --
 /// it is the ONLY way to unseal the vault after a restart.
-#[derive(Debug)]
 pub struct BootstrapResult {
     pub user: User,
     pub api_key: ApiKey,
     /// Certificate hex string.  `None` when vault is not configured.
     pub certificate: Option<String>,
+}
+
+impl std::fmt::Debug for BootstrapResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BootstrapResult")
+            .field("user", &self.user)
+            .field("api_key", &"<redacted>")
+            .field(
+                "certificate",
+                &self.certificate.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -721,13 +733,7 @@ impl AuthStore {
                     "bootstrapped admin user from REDDB_USERNAME/REDDB_PASSWORD"
                 );
                 if let Some(ref cert) = result.certificate {
-                    // Certificate must be readable by the operator — keep it
-                    // in the log stream but print raw to stderr too so it
-                    // survives even if the log file gets rotated.
-                    eprintln!("[reddb] CERTIFICATE: {}", cert);
-                    tracing::warn!(
-                        "vault certificate issued — save it: ONLY way to unseal after restart"
-                    );
+                    deliver_bootstrap_certificate(cert);
                 }
                 Some(result)
             }
@@ -2627,6 +2633,7 @@ impl AuthStore {
     /// grants removed.
     pub fn revoke(
         &self,
+        granter: &UserId,
         granter_role: Role,
         principal: &GrantPrincipal,
         resource: &Resource,
@@ -2634,9 +2641,23 @@ impl AuthStore {
     ) -> Result<usize, AuthError> {
         if granter_role != Role::Admin {
             return Err(AuthError::Forbidden(format!(
-                "REVOKE requires Admin role; granter has `{:?}`",
-                granter_role
+                "REVOKE requires Admin role; granter `{}` has `{:?}`",
+                granter, granter_role
             )));
+        }
+
+        // Cross-tenant guard, mirroring GRANT: a tenant-scoped admin can only
+        // touch grants of principals in its own tenant. The target tenant
+        // comes from the statement text, so without this a tenant admin could
+        // strip another tenant's grants. Platform admin (tenant=None) may
+        // revoke anywhere.
+        if let GrantPrincipal::User(uid) = principal {
+            if granter.tenant.is_some() && granter.tenant != uid.tenant {
+                return Err(AuthError::Forbidden(format!(
+                    "cross-tenant REVOKE denied: granter tenant `{:?}` != principal tenant `{:?}`",
+                    granter.tenant, uid.tenant
+                )));
+            }
         }
 
         let removed = match principal {
@@ -5004,16 +5025,9 @@ fn verify_legacy_password(password: &str, salt_and_hash: &str) -> bool {
     constant_time_eq(&computed, &expected)
 }
 
-/// Constant-time byte comparison to avoid timing side-channels.
+/// Constant-time byte comparison — one implementation for the crate.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    crate::crypto::constant_time_eq(a, b)
 }
 
 // ===========================================================================
@@ -5191,6 +5205,34 @@ mod tests {
         // Revocation accepts the stored id as well as the secret.
         store.revoke_api_key(&stored.key).unwrap();
         assert!(store.revoke_api_key(&key.key).is_err());
+    }
+
+    #[test]
+    fn revoke_is_clamped_to_the_granter_tenant() {
+        use crate::auth::privileges::{Action, GrantPrincipal, Resource};
+        let store = AuthStore::new(test_config());
+        let acme_admin = UserId::from_parts(Some("acme"), "adm");
+        let globex_user = UserId::from_parts(Some("globex"), "u");
+        let err = store
+            .revoke(
+                &acme_admin,
+                Role::Admin,
+                &GrantPrincipal::User(globex_user),
+                &Resource::table_from_name("orders"),
+                &[Action::Select],
+            )
+            .expect_err("a tenant admin must not touch another tenant's grants");
+        assert!(err.to_string().contains("cross-tenant"), "{err}");
+        // Platform admin may.
+        store
+            .revoke(
+                &UserId::from_parts(None, "platform"),
+                Role::Admin,
+                &GrantPrincipal::User(UserId::from_parts(Some("globex"), "u")),
+                &Resource::table_from_name("orders"),
+                &[Action::Select],
+            )
+            .expect("platform admin revokes anywhere");
     }
 
     #[test]
@@ -5978,4 +6020,41 @@ mod tests {
             "a password rotation must revoke live sessions"
         );
     }
+}
+
+/// Hand the operator the vault certificate minted by an env bootstrap.
+///
+/// It used to be printed to stderr unconditionally, which in a container
+/// means the log aggregator now holds the one secret that unseals the
+/// vault. With `REDDB_BOOTSTRAP_CERT_OUT` set it is written there
+/// (owner-only, thanks to the boot umask) and only the path is logged;
+/// without it, stderr remains the delivery channel, with a warning that
+/// says so.
+fn deliver_bootstrap_certificate(cert: &str) {
+    if let Some(path) = crate::utils::env_with_file_fallback("REDDB_BOOTSTRAP_CERT_OUT") {
+        match std::fs::write(&path, format!("{cert}\n")) {
+            Ok(()) => {
+                tracing::warn!(
+                    target: "reddb::security",
+                    path = %path,
+                    "vault certificate written — save it: the ONLY way to unseal after a restart"
+                );
+                return;
+            }
+            Err(err) => {
+                tracing::error!(
+                    target: "reddb::security",
+                    path = %path,
+                    error = %err,
+                    "could not write the vault certificate; falling back to stderr"
+                );
+            }
+        }
+    }
+    eprintln!("[reddb] CERTIFICATE: {cert}");
+    tracing::warn!(
+        target: "reddb::security",
+        "vault certificate issued on stderr — save it (ONLY way to unseal after restart); \
+         set REDDB_BOOTSTRAP_CERT_OUT to receive it as a file instead of a log line"
+    );
 }

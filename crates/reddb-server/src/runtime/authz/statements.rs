@@ -142,9 +142,10 @@ impl RedDBRuntime {
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
 
-        let (_gname, grole) = current_auth_identity().ok_or_else(|| {
+        let (gname, grole) = current_auth_identity().ok_or_else(|| {
             RedDBError::Query("REVOKE requires an authenticated principal".to_string())
         })?;
+        let granter = UserId::from_parts(current_tenant().as_deref(), &gname);
         let granter_role = grole;
 
         let actions: Vec<Action> = if stmt.all {
@@ -179,7 +180,7 @@ impl RedDBRuntime {
                     }
                 };
                 let removed = auth_store
-                    .revoke(granter_role, &p, &resource, &actions)
+                    .revoke(&granter, granter_role, &p, &resource, &actions)
                     .map_err(|e| RedDBError::Query(e.to_string()))?;
                 let _removed_policies =
                     auth_store.delete_synthetic_grant_policies(&p, &resource, &actions);

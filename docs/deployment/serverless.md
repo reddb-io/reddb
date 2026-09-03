@@ -49,12 +49,18 @@ gauge that tooling can read out of `/admin/status` or `/metrics`.
 
 | Variable | Cap | Metric |
 |----------|-----|--------|
-| `RED_MAX_DB_SIZE_BYTES` | Primary DB file size | `reddb_limit_db_size_bytes` |
-| `RED_MAX_CONNECTIONS` | Concurrent client connections | `reddb_limit_connections` |
-| `RED_MAX_QPS` | Sustained per-instance QPS | `reddb_limit_qps` |
-| `RED_MAX_QPS_PER_CALLER` | Per-caller token-bucket QPS (HMAC keyed by `bearer:<sha256-prefix>` / `replica:<id>` / `anon`) | `reddb_quota_rejected_total{principal}` |
-| `RED_MAX_BATCH_SIZE` | Rows per bulk DML batch | `reddb_limit_batch_size` |
-| `RED_MAX_MEMORY_BYTES` | Soft RSS budget; honoured against the cgroup memory hint when present | `reddb_limit_memory_bytes` |
+| `RED_MAX_DB_SIZE_BYTES` | Primary DB file size (enforced on write) | `reddb_limit_db_size_bytes` |
+| `RED_MAX_CONNECTIONS` | Concurrent connections per binary listener (RedWire, PG-wire); `REDDB_WIRE_MAX_CONNECTIONS` overrides it for the wire listeners only | `reddb_limit_connections` |
+| `RED_MAX_QPS` | Advertised per-instance QPS budget. Exported as a gauge for autoscalers; not enforced by the server — use `RED_MAX_QPS_PER_CALLER` for enforcement | `reddb_limit_qps` |
+| `RED_MAX_QPS_PER_CALLER` | Per-caller token-bucket QPS (keyed by `bearer:<sha256-prefix>` / `replica:<id>` / `anon`); `RED_QPS_BURST` sets the burst | `reddb_quota_rejected_total{principal}` |
+| `RED_MAX_BATCH_SIZE` | Rows per bulk DML batch (enforced) | `reddb_limit_batch_size` |
+| `RED_MAX_MEMORY_MB` | Soft RSS budget in MiB; honoured against the cgroup memory hint when present | `reddb_limit_memory_bytes` |
+| `RED_MAX_QUERY_DURATION_MS` | Per-statement wall-clock budget | — |
+| `RED_MAX_RESULT_BYTES` | Largest result set returned to a client | — |
+| `REDDB_WIRE_HANDSHAKE_TIMEOUT_SECS` | Window for TLS + protocol handshake on the wire listeners (default 15) | — |
+| `REDDB_GRPC_MAX_MESSAGE_BYTES` | Largest gRPC message accepted or produced (default 32 MiB) | — |
+
+Every `RED_*` name also accepts the `REDDB_*` spelling.
 
 Hot-path enforcement applies before request dispatch — once the cap
 is hit the surface returns `429` with a `Retry-After` header, while

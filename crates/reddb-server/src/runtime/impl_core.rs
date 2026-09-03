@@ -3534,6 +3534,118 @@ mod security_gate_tests {
         runtime
     }
 
+    fn runtime_with_store(username: &str, role: Role) -> (RedDBRuntime, std::sync::Arc<AuthStore>) {
+        let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            session_ttl_secs: 60,
+            require_auth: true,
+            auto_encrypt_storage: false,
+            vault_enabled: false,
+            cert: Default::default(),
+            oauth: Default::default(),
+        }));
+        store.create_user(username, "pw", role).expect("user");
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.set_auth_store(std::sync::Arc::clone(&store));
+        (runtime, store)
+    }
+
+    #[test]
+    fn nested_reads_need_select_on_the_inner_table() {
+        use crate::auth::privileges::{Action, GrantPrincipal, Resource};
+        use crate::auth::UserId;
+        let (runtime, store) = runtime_with_store("ro", Role::Read);
+        runtime
+            .execute_query("CREATE TABLE gate_open (a INTEGER)")
+            .expect("create");
+        runtime
+            .execute_query("CREATE TABLE gate_closed (b INTEGER)")
+            .expect("create");
+        // One explicit grant switches the legacy fallback off, so `ro`
+        // may read exactly `gate_open`.
+        store
+            .grant(
+                &UserId::from_parts(None, "admin"),
+                Role::Admin,
+                GrantPrincipal::User(UserId::from_parts(None, "ro")),
+                Resource::table_from_name("gate_open"),
+                vec![Action::Select],
+                false,
+                None,
+            )
+            .expect("grant");
+        let _identity = IdentityGuard::install("ro", Role::Read);
+        runtime
+            .execute_query("SELECT * FROM (SELECT a FROM gate_open) s")
+            .expect("derived table over a granted table is fine");
+        // The outer statement names only the synthetic subquery table, so
+        // the inner table used to be read with no check at all.
+        for sql in [
+            "SELECT * FROM (SELECT b FROM gate_closed) s",
+            "SELECT a FROM gate_open WHERE a IN (SELECT b FROM gate_closed)",
+        ] {
+            let err = runtime
+                .execute_query(sql)
+                .expect_err("nested read of an ungranted table must be refused");
+            assert!(
+                err.to_string().contains("permission denied"),
+                "{sql}: unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_listings_are_self_or_policy_management() {
+        let (runtime, store) = runtime_with_store("ro", Role::Read);
+        store.create_user("other", "pw", Role::Read).expect("user");
+        let _identity = IdentityGuard::install("ro", Role::Read);
+        runtime
+            .execute_query("SHOW EFFECTIVE PERMISSIONS FOR ro")
+            .expect("a principal may inspect its own permissions");
+        let err = runtime
+            .execute_query("SHOW EFFECTIVE PERMISSIONS FOR other")
+            .expect_err("inspecting another principal is policy management");
+        assert!(
+            err.to_string().contains("permission denied"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn secret_columns_stay_masked_for_readers_without_secret_read() {
+        use reddb_types::Value;
+        let (runtime, store) = runtime_with_store("ro", Role::Read);
+        store.create_user("root", "pw", Role::Admin).expect("admin");
+        store.ensure_vault_secret_key();
+        runtime
+            .execute_query(
+                "INSERT INTO creds_gate (name, token) VALUES ('stripe', SECRET('sk_live_abc'))",
+            )
+            .expect("insert");
+
+        let token_for = |username: &str, role: Role| {
+            let _identity = IdentityGuard::install(username, role);
+            let result = runtime
+                .execute_query("SELECT name, token FROM creds_gate")
+                .expect("select");
+            result.result.records[0]
+                .get("token")
+                .cloned()
+                .expect("token column")
+        };
+        // Any table reader used to get the plaintext; now only an admin or
+        // a principal with an explicit `secret:read` allow does.
+        assert!(
+            matches!(token_for("ro", Role::Read), Value::Secret(_)),
+            "a read-role principal must see the column masked"
+        );
+        assert_eq!(
+            token_for("root", Role::Admin),
+            Value::text("sk_live_abc".to_string())
+        );
+    }
+
     #[test]
     fn store_wide_operations_need_the_admin_tier() {
         let runtime = runtime_with_user("bob", Role::Write);

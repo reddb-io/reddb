@@ -312,11 +312,14 @@ async fn spawn_ui_bridge_backend(
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(async move {
-        let _ = axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await;
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        })
+        .await;
     });
 
     Ok(UiBridge {
@@ -352,11 +355,14 @@ pub async fn spawn_direct_ui_server(
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(async move {
-        let _ = axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await;
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        })
+        .await;
     });
 
     Ok(UiBridge {
@@ -372,9 +378,22 @@ pub async fn spawn_direct_ui_server(
 /// against the embedded engine (the same seam as the internet WS edge).
 async fn loopback_redwire_upgrade(
     State(state): State<BridgeState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // `Origin` is asserted by the browser; the peer address is asserted
+    // by the kernel. The bridge exists for a page on this host, so a
+    // connection from anywhere else is refused before the header is
+    // even read — a misbound or forwarded listener cannot widen it.
+    if !peer.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            "loopback redwire websocket accepts connections from this host only",
+        )
+            .into_response();
+    }
+
     let origin = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok());
