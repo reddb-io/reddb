@@ -1143,22 +1143,33 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Build UPDATE SQL and execute via runtime
+        // Build UPDATE SQL and execute via runtime. The collection and the
+        // column names are spliced as identifiers, so they must be bare
+        // identifiers; the values go through the SQL literal renderer, which
+        // escapes quotes and backslashes the way the lexer reads them.
+        use crate::server::handlers_query::is_safe_sql_identifier;
+        if !is_safe_sql_identifier(collection) {
+            return Err(format!(
+                "invalid collection name '{collection}': expected [A-Za-z_][A-Za-z0-9_]*"
+            ));
+        }
         let mut sql = format!("UPDATE {} SET ", collection);
         if let Some(obj) = set_obj.as_object() {
             let assignments: Vec<String> = obj
                 .iter()
                 .map(|(k, v)| {
-                    let val_str = match v {
-                        JsonValue::String(s) => format!("'{}'", s),
-                        JsonValue::Integer(n) => n.to_string(),
-                        JsonValue::Number(n) => n.to_string(),
-                        JsonValue::Bool(b) => b.to_string(),
-                        _ => format!("'{}'", v),
-                    };
-                    format!("{} = {}", k, val_str)
+                    if !is_safe_sql_identifier(k) {
+                        return Err(format!(
+                            "invalid column name '{k}': expected [A-Za-z_][A-Za-z0-9_]*"
+                        ));
+                    }
+                    Ok(format!(
+                        "{} = {}",
+                        k,
+                        crate::rpc_stdio::value_to_sql_literal(v)
+                    ))
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
             sql.push_str(&assignments.join(", "));
         } else {
             return Err("'set' must be a JSON object".to_string());
@@ -1885,6 +1896,41 @@ mod tests {
     fn make_read_only_server() -> McpServer {
         let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
         McpServer::new(rt)
+    }
+
+    #[test]
+    fn update_tool_renders_values_as_literals_and_refuses_crafted_identifiers() {
+        let srv = make_server();
+        srv.tool_query(&parse_json(
+            r#"{"sql":"CREATE TABLE mcp_upd (id INTEGER, name TEXT)"}"#,
+        ))
+        .expect("create");
+        srv.tool_query(&parse_json(
+            r#"{"sql":"INSERT INTO mcp_upd (id, name) VALUES (1, 'a')"}"#,
+        ))
+        .expect("seed");
+        // A quote inside the value used to close the literal and run the
+        // remainder as SQL.
+        srv.tool_update(&parse_json(
+            r#"{"collection":"mcp_upd","set":{"name":"o'brien"},"where_filter":"id = 1"}"#,
+        ))
+        .expect("escaped value");
+        let rows = srv
+            .tool_query(&parse_json(
+                r#"{"sql":"SELECT name FROM mcp_upd WHERE id = 1"}"#,
+            ))
+            .expect("read back");
+        assert!(rows.contains("o'brien"), "{rows}");
+
+        for args in [
+            r#"{"collection":"mcp_upd; DROP TABLE mcp_upd","set":{"name":"x"}}"#,
+            r#"{"collection":"mcp_upd","set":{"name = 'x' WHERE 1=1 --":"x"}}"#,
+        ] {
+            let err = srv
+                .tool_update(&parse_json(args))
+                .expect_err("crafted identifier must be refused");
+            assert!(err.contains("invalid"), "{err}");
+        }
     }
 
     #[test]

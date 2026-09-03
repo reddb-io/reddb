@@ -69,6 +69,7 @@ fn fat_state() -> VaultState {
                 name: format!("k{i}"),
                 role: Role::Write,
                 created_at: now,
+                expires_at: None,
             },
         ));
     }

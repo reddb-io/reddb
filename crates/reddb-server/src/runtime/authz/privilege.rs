@@ -6,6 +6,41 @@ use super::super::execution_context::{current_auth_identity, current_tenant};
 use super::super::*;
 use super::policy_columns::*;
 
+/// Role-tier gate for statements that have no finer-grained resource:
+/// `role` must be at least `needed`.
+fn require_role_tier(
+    username: &str,
+    role: crate::auth::Role,
+    needed: crate::auth::Role,
+    statement: &str,
+) -> Result<(), String> {
+    if role >= needed {
+        Ok(())
+    } else {
+        Err(format!(
+            "principal=`{username}` role=`{role:?}` cannot issue {statement} (requires {needed:?})"
+        ))
+    }
+}
+
+/// Human label for the statement families the tier gate names in its
+/// denial message.
+fn statement_family(expr: &reddb_rql::ast::QueryExpr) -> &'static str {
+    use reddb_rql::ast::QueryExpr;
+    match expr {
+        QueryExpr::Scrub { .. } => "SCRUB",
+        QueryExpr::MaintenanceCommand { .. } => "a maintenance command",
+        QueryExpr::EventsBackfill { .. } => "EVENTS BACKFILL",
+        QueryExpr::ForkStore { .. } => "FORK STORE",
+        QueryExpr::PromoteFork { .. } => "PROMOTE FORK",
+        QueryExpr::DropFork { .. } => "DROP FORK",
+        QueryExpr::ShowSecrets { .. } => "SHOW SECRETS",
+        QueryExpr::CreateVcsRef { .. } => "CREATE REF",
+        QueryExpr::DropVcsRef { .. } => "DROP REF",
+        _ => "this statement",
+    }
+}
+
 impl RedDBRuntime {
     /// Project a `QueryExpr` to the (action, resource) pair the
     /// privilege engine cares about. Returns `Ok(())` for statements
@@ -16,7 +51,9 @@ impl RedDBRuntime {
     ) -> Result<(), String> {
         use crate::auth::privileges::{Action, AuthzContext, Resource};
         use crate::auth::UserId;
-        use reddb_rql::ast::QueryExpr;
+        use reddb_rql::ast::{
+            ConfigCommand, KvCommand, ProbabilisticCommand, QueryExpr, TreeCommand,
+        };
 
         // No auth store wired (embedded mode / fresh DB / tests) → bypass.
         // The bootstrap path itself goes through `execute_query` so this
@@ -842,10 +879,120 @@ impl RedDBRuntime {
             }
             // EXPLAIN MIGRATION is read-only — any authenticated principal.
             QueryExpr::ExplainMigration(_) => return Ok(()),
-            // Everything else (SET, SHOW, transaction control, graph
-            // commands, queue/tree commands, MaintenanceCommand …)
-            // is allowed for any authenticated principal.
-            _ => return Ok(()),
+            // EXPLAIN plans the inner statement and reports its schema and
+            // cardinality, so it needs exactly what that statement needs.
+            QueryExpr::Explain(explain) => return self.check_query_privilege(&explain.inner),
+            // EXPLAIN ALTER simulates a schema change on the named table and
+            // reports the resulting layout — a read of that table.
+            QueryExpr::ExplainAlter(explain) => (
+                Action::Select,
+                Resource::table_from_name(&explain.target.name),
+            ),
+            // ASK retrieves over the store before calling the model.
+            QueryExpr::Ask { .. } => (Action::Select, Resource::Database),
+            // Operator-grade store operations: whole-store forks, scrub,
+            // maintenance, event backfill, and the secret catalogue.
+            QueryExpr::Scrub { .. }
+            | QueryExpr::MaintenanceCommand { .. }
+            | QueryExpr::EventsBackfill { .. }
+            | QueryExpr::ForkStore { .. }
+            | QueryExpr::PromoteFork { .. }
+            | QueryExpr::DropFork { .. }
+            | QueryExpr::ShowSecrets { .. } => {
+                return require_role_tier(
+                    &username,
+                    role,
+                    crate::auth::Role::Admin,
+                    statement_family(expr),
+                );
+            }
+            // Mutations of VCS refs, trees, probabilistic structures and the
+            // KV / config namespaces need the Write tier; their reads are
+            // open to any authenticated principal, and the executor applies
+            // the per-key IAM checks on top.
+            QueryExpr::CreateVcsRef { .. } | QueryExpr::DropVcsRef { .. } => {
+                return require_role_tier(
+                    &username,
+                    role,
+                    crate::auth::Role::Write,
+                    statement_family(expr),
+                );
+            }
+            QueryExpr::TreeCommand(cmd) => {
+                return if matches!(cmd, TreeCommand::Validate { .. }) {
+                    Ok(())
+                } else {
+                    require_role_tier(&username, role, crate::auth::Role::Write, "tree command")
+                };
+            }
+            QueryExpr::ProbabilisticCommand(cmd) => {
+                let read_only = matches!(
+                    cmd,
+                    ProbabilisticCommand::HllCount { .. }
+                        | ProbabilisticCommand::HllInfo { .. }
+                        | ProbabilisticCommand::SketchCount { .. }
+                        | ProbabilisticCommand::SketchInfo { .. }
+                        | ProbabilisticCommand::FilterCheck { .. }
+                        | ProbabilisticCommand::FilterCount { .. }
+                        | ProbabilisticCommand::FilterInfo { .. }
+                );
+                return if read_only {
+                    Ok(())
+                } else {
+                    require_role_tier(
+                        &username,
+                        role,
+                        crate::auth::Role::Write,
+                        "probabilistic structure command",
+                    )
+                };
+            }
+            QueryExpr::KvCommand(cmd) => {
+                let mutation = matches!(
+                    cmd,
+                    KvCommand::Put { .. }
+                        | KvCommand::InvalidateTags { .. }
+                        | KvCommand::Unseal { .. }
+                        | KvCommand::Rotate { .. }
+                );
+                return if mutation {
+                    require_role_tier(&username, role, crate::auth::Role::Write, "KV command")
+                } else {
+                    Ok(())
+                };
+            }
+            QueryExpr::ConfigCommand(cmd) => {
+                let mutation = matches!(
+                    cmd,
+                    ConfigCommand::Put { .. } | ConfigCommand::Rotate { .. }
+                );
+                return if mutation {
+                    require_role_tier(&username, role, crate::auth::Role::Write, "config command")
+                } else {
+                    Ok(())
+                };
+            }
+            // Read-only status and session statements.
+            QueryExpr::EventsBackfillStatus { .. }
+            | QueryExpr::ShowTenant
+            | QueryExpr::TransactionControl { .. } => return Ok(()),
+            // Gated at dispatch by a dedicated check, because the gate needs
+            // the executor's view of the key or path the statement names:
+            // `check_config_write_privilege` / `check_config_read_privilege`,
+            // `check_secret_write_privilege`, `check_kv_write_privilege`,
+            // `check_set_tenant_privilege`, `check_copy_from_privilege`,
+            // `check_vcs_command_privilege`.
+            QueryExpr::SetConfig { .. }
+            | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetSecret { .. }
+            | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::SetKv { .. }
+            | QueryExpr::DeleteKv { .. }
+            | QueryExpr::SetTenant { .. }
+            | QueryExpr::CopyFrom { .. }
+            | QueryExpr::VcsCommand { .. } => return Ok(()),
+            // No wildcard: a statement kind added later fails to compile
+            // here until it is classified, instead of running ungated.
         };
 
         if auth_store.iam_authorization_enabled() {

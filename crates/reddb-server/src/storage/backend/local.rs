@@ -17,6 +17,67 @@ pub struct LocalBackend;
 
 static LOCAL_UPLOAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// When set, every key this backend touches must resolve under this
+/// directory. Relative keys are joined onto it; absolute keys must already
+/// be inside it.
+const ROOT_ENV: &str = "REDDB_LOCAL_BACKEND_ROOT";
+
+/// Resolve a backend key to the filesystem path it names.
+///
+/// Keys are paths by design on this backend, but they arrive from backup
+/// manifests and request bodies as well as from configuration, so a key is
+/// data, not an instruction: a `..` component is refused outright, and when
+/// [`ROOT_ENV`] is set the resolved path must stay under that root.
+fn confined_path(remote_key: &str) -> Result<PathBuf, BackendError> {
+    confine(
+        remote_key,
+        std::env::var_os(ROOT_ENV).map(PathBuf::from).as_deref(),
+    )
+}
+
+fn confine(remote_key: &str, root: Option<&Path>) -> Result<PathBuf, BackendError> {
+    use std::path::Component;
+    if remote_key.is_empty() {
+        return Err(BackendError::Transport(
+            "local backend: empty key".to_string(),
+        ));
+    }
+    let path = Path::new(remote_key);
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(BackendError::Transport(format!(
+            "local backend: key {remote_key:?} contains a parent-directory component"
+        )));
+    }
+    let Some(root) = root else {
+        return Ok(path.to_path_buf());
+    };
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    if !full.starts_with(root) {
+        return Err(BackendError::Transport(format!(
+            "local backend: key {remote_key:?} resolves outside {ROOT_ENV}"
+        )));
+    }
+    Ok(full)
+}
+
+/// [`confined_path`] rendered back to the string form the file-level
+/// helpers take.
+fn confined_key(remote_key: &str) -> Result<String, BackendError> {
+    let path = confined_path(remote_key)?;
+    path.to_str().map(str::to_string).ok_or_else(|| {
+        BackendError::Transport(format!(
+            "local backend: key {remote_key:?} is not valid UTF-8"
+        ))
+    })
+}
+
 fn local_version_for(path: &Path) -> Result<Option<BackendObjectVersion>, BackendError> {
     if !path.exists() {
         return Ok(None);
@@ -45,22 +106,27 @@ impl RemoteBackend for LocalBackend {
     }
 
     fn download(&self, remote_key: &str, local_path: &Path) -> Result<bool, BackendError> {
-        reddb_file::local_backend_download(remote_key, local_path)
+        reddb_file::local_backend_download(&confined_key(remote_key)?, local_path)
             .map_err(|e| BackendError::Transport(format!("local download failed: {e}")))
     }
 
     fn upload(&self, local_path: &Path, remote_key: &str) -> Result<(), BackendError> {
         let unique = LOCAL_UPLOAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        reddb_file::local_backend_atomic_upload(local_path, remote_key, std::process::id(), unique)
-            .map_err(|e| BackendError::Transport(format!("local upload failed: {e}")))
+        reddb_file::local_backend_atomic_upload(
+            local_path,
+            &confined_key(remote_key)?,
+            std::process::id(),
+            unique,
+        )
+        .map_err(|e| BackendError::Transport(format!("local upload failed: {e}")))
     }
 
     fn exists(&self, remote_key: &str) -> Result<bool, BackendError> {
-        Ok(Path::new(remote_key).exists())
+        Ok(confined_path(remote_key)?.exists())
     }
 
     fn delete(&self, remote_key: &str) -> Result<(), BackendError> {
-        let path = Path::new(remote_key);
+        let path = confined_path(remote_key)?;
         if path.exists() {
             fs::remove_file(path)
                 .map_err(|e| BackendError::Transport(format!("delete failed: {e}")))?;
@@ -69,7 +135,8 @@ impl RemoteBackend for LocalBackend {
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError> {
-        let prefix_path = Path::new(prefix);
+        let prefix_buf = confined_path(prefix)?;
+        let prefix_path = prefix_buf.as_path();
         let mut results = Vec::new();
 
         if prefix_path.is_dir() {
@@ -120,7 +187,7 @@ impl AtomicRemoteBackend for LocalBackend {
         &self,
         remote_key: &str,
     ) -> Result<Option<BackendObjectVersion>, BackendError> {
-        local_version_for(Path::new(remote_key))
+        local_version_for(&confined_path(remote_key)?)
     }
 
     fn upload_conditional(
@@ -129,7 +196,8 @@ impl AtomicRemoteBackend for LocalBackend {
         remote_key: &str,
         condition: ConditionalPut,
     ) -> Result<BackendObjectVersion, BackendError> {
-        let dest = Path::new(remote_key);
+        let dest_buf = confined_path(remote_key)?;
+        let dest = dest_buf.as_path();
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| BackendError::Transport(format!("mkdir failed: {e}")))?;
@@ -185,7 +253,8 @@ impl AtomicRemoteBackend for LocalBackend {
         remote_key: &str,
         condition: ConditionalDelete,
     ) -> Result<(), BackendError> {
-        let dest = Path::new(remote_key);
+        let dest_buf = confined_path(remote_key)?;
+        let dest = dest_buf.as_path();
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| BackendError::Transport(format!("mkdir failed: {e}")))?;
@@ -338,5 +407,46 @@ mod tests {
         assert!(!remote.exists());
 
         let _ = fs::remove_file(src);
+    }
+}
+
+#[cfg(test)]
+mod key_confinement_tests {
+    use super::*;
+
+    #[test]
+    fn parent_directory_components_are_refused() {
+        for key in [
+            "../secrets.rdb",
+            "backups/../../etc/passwd",
+            "/var/backups/../x",
+        ] {
+            let err = confine(key, None).expect_err(key);
+            assert!(err.to_string().contains("parent-directory"), "{key}: {err}");
+        }
+        assert!(confine("", None).is_err());
+    }
+
+    #[test]
+    fn keys_stay_under_the_configured_root() {
+        let root = Path::new("/var/lib/reddb/backups");
+        assert_eq!(
+            confine("head.json", Some(root)).unwrap(),
+            root.join("head.json")
+        );
+        assert_eq!(
+            confine("/var/lib/reddb/backups/wal/000001", Some(root)).unwrap(),
+            Path::new("/var/lib/reddb/backups/wal/000001")
+        );
+        let err = confine("/etc/shadow", Some(root)).expect_err("outside root");
+        assert!(err.to_string().contains(ROOT_ENV), "{err}");
+    }
+
+    #[test]
+    fn without_a_root_absolute_keys_pass_through() {
+        assert_eq!(
+            confine("/tmp/reddb-backup.bin", None).unwrap(),
+            Path::new("/tmp/reddb-backup.bin")
+        );
     }
 }

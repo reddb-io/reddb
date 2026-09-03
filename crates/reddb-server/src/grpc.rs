@@ -320,14 +320,29 @@ impl RedDBGrpcServer {
         Ok(())
     }
 
+    /// Largest gRPC message accepted on the way in or produced on the way
+    /// out. Bulk inserts ride on this, so it is generous, but it is no longer
+    /// 256 MiB: that let one request pin a quarter gigabyte of decoded
+    /// protobuf per stream before any handler ran. Override with
+    /// `REDDB_GRPC_MAX_MESSAGE_BYTES`; a malformed value keeps the default.
+    fn max_message_bytes() -> usize {
+        const DEFAULT: usize = 32 * 1024 * 1024;
+        std::env::var("REDDB_GRPC_MAX_MESSAGE_BYTES")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT)
+    }
+
     fn configured_service(runtime: GrpcRuntime) -> GrpcCatalogService {
         // Advertise zstd + gzip so clients can opt in. Server compresses
         // outbound replies with zstd; sticking to a single send codec keeps
         // CPU predictable while still accepting either on inbound.
         use tonic::codec::CompressionEncoding;
+        let max_message = Self::max_message_bytes();
         let service = RedDbServer::new(runtime.clone())
-            .max_decoding_message_size(256 * 1024 * 1024)
-            .max_encoding_message_size(256 * 1024 * 1024)
+            .max_decoding_message_size(max_message)
+            .max_encoding_message_size(max_message)
             .accept_compressed(CompressionEncoding::Zstd)
             .accept_compressed(CompressionEncoding::Gzip)
             .send_compressed(CompressionEncoding::Zstd);

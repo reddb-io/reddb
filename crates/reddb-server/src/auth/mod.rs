@@ -197,13 +197,20 @@ impl fmt::Display for UserId {
 /// A persistent API key bound to a user.
 #[derive(Debug, Clone)]
 pub struct ApiKey {
-    /// Token value: `"rk_<hex32>"`
+    /// Credential id: `"rkh_<sha256 hex of the secret>"`.
+    ///
+    /// The secret itself (`"rk_<hex64>"`) exists only in the value that
+    /// `create_api_key*` returns — the store, its index and the vault hold
+    /// the id, so a dumped vault or a heap snapshot yields nothing a client
+    /// can present.
     pub key: String,
     /// Human-readable label.
     pub name: String,
     /// Role granted by this key (cannot exceed user's role).
     pub role: Role,
     pub created_at: u128,
+    /// Absolute expiry (ms since epoch); `None` never expires.
+    pub expires_at: Option<u128>,
 }
 
 // ---------------------------------------------------------------------------

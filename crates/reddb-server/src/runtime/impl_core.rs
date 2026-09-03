@@ -3157,6 +3157,18 @@ impl RedDBRuntime {
         reverted
     }
 
+    /// `EXPLAIN` is peeled off the statement text before parsing, so the
+    /// planner ran on the inner statement with no privilege check at all:
+    /// a read-only principal could plan any write and read the table's
+    /// column list and row estimate back out of the plan. The plan needs
+    /// exactly the privilege the statement it describes needs.
+    fn check_explain_target_privilege(&self, inner_sql: &str) -> RedDBResult<()> {
+        let parsed =
+            reddb_rql::parser::parse(inner_sql).map_err(|e| RedDBError::Query(e.to_string()))?;
+        self.check_query_privilege(&parsed.query)
+            .map_err(|err| RedDBError::Query(format!("permission denied: {err}")))
+    }
+
     /// Wrap the planner's `RuntimeQueryExplain` as rows on a
     /// `RuntimeQueryResult` so callers over the SQL interface see the
     /// plan tree in the same shape a SELECT produces.
@@ -3165,6 +3177,7 @@ impl RedDBRuntime {
     /// Nodes are walked depth-first; `depth` counts from 0 at the
     /// root so a text renderer can indent without re-walking.
     fn explain_as_rows(&self, raw_query: &str, inner_sql: &str) -> RedDBResult<RuntimeQueryResult> {
+        self.check_explain_target_privilege(inner_sql)?;
         let explain = self.explain_query(inner_sql)?;
 
         let columns = vec![
@@ -3226,6 +3239,7 @@ impl RedDBRuntime {
             ));
         }
 
+        self.check_explain_target_privilege(inner_sql)?;
         let explain = self.explain_query(inner_sql)?;
         let conn_id = current_connection_id();
         if self.inner.transaction_state.in_transaction(conn_id) {
@@ -3518,6 +3532,41 @@ mod security_gate_tests {
             RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
         runtime.set_auth_store(store);
         runtime
+    }
+
+    #[test]
+    fn store_wide_operations_need_the_admin_tier() {
+        let runtime = runtime_with_user("bob", Role::Write);
+        let _identity = IdentityGuard::install("bob", Role::Write);
+        // These fell through the gate's wildcard arm, so a write-role
+        // principal could scrub or vacuum the store and list every secret.
+        for sql in ["VACUUM", "SCRUB", "SHOW SECRETS"] {
+            let err = runtime
+                .execute_query(sql)
+                .expect_err("store-wide operation must be refused for a non-admin");
+            assert!(
+                err.to_string().contains("permission denied"),
+                "{sql}: unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn explain_needs_the_privilege_of_the_statement_it_plans() {
+        let runtime = runtime_with_user("ro", Role::Read);
+        let _identity = IdentityGuard::install("ro", Role::Read);
+        runtime
+            .execute_query("EXPLAIN SELECT 1 AS one")
+            .expect("planning a read is a read");
+        // EXPLAIN used to bypass the gate entirely, so a read-only
+        // principal could plan any write and read the schema back.
+        let err = runtime
+            .execute_query("EXPLAIN INSERT INTO gate_t (a) VALUES (1)")
+            .expect_err("planning a write needs the write privilege");
+        assert!(
+            err.to_string().contains("permission denied"),
+            "unexpected EXPLAIN error: {err}"
+        );
     }
 
     #[test]

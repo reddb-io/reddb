@@ -244,6 +244,7 @@ impl RedDBRuntime {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
+        let no_auth_boot = crate::service_cli::no_auth_active(&options);
         let runtime = Self {
             inner: Arc::new(RuntimeInner {
                 db: db.clone(),
@@ -1018,6 +1019,38 @@ impl RedDBRuntime {
                     );
                 })
                 .ok();
+        }
+
+        // Anonymous access is the most consequential posture an operator can
+        // choose. It was only ever announced on stderr; leave it in the
+        // chained ledger too, so an audit of the store itself shows it.
+        if no_auth_boot {
+            use crate::runtime::control_events::{
+                ActorRef, ControlEvent, ControlEventCtx, EventKind, Outcome,
+            };
+            let ledger = std::sync::Arc::clone(&runtime.inner.control_event_ledger.read());
+            let ctx = ControlEventCtx {
+                actor: ActorRef::System("boot"),
+                scope: None,
+                request_id: None,
+                trace_id: None,
+            };
+            let event = ControlEvent {
+                kind: EventKind::AuthDisabled,
+                outcome: Outcome::Allowed,
+                action: std::borrow::Cow::Borrowed("auth.disabled"),
+                resource: Some("server".to_string()),
+                reason: Some("--no-auth / --dev".to_string()),
+                matched_policy_id: None,
+                fields: std::collections::HashMap::new(),
+            };
+            if let Err(err) = ledger.emit(&ctx, event) {
+                tracing::warn!(
+                    target: "reddb::security",
+                    error = %err,
+                    "could not record the auth-disabled boot in the control-event ledger"
+                );
+            }
         }
 
         Ok(runtime)

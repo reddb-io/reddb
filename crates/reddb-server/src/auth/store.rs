@@ -327,8 +327,20 @@ fn api_key_resource(api_key_id: &str) -> String {
     format!("apikey:{api_key_id}")
 }
 
+/// Hex digest that identifies an API key in control events and, with the
+/// `rkh_` prefix, at rest. Accepts either the secret or the stored id, so
+/// every entry point can take whichever the caller holds.
 fn api_key_id(key: &str) -> String {
-    hex::encode(sha256(key.as_bytes()))
+    match key.strip_prefix("rkh_") {
+        Some(hex) => hex.to_string(),
+        None => hex::encode(sha256(key.as_bytes())),
+    }
+}
+
+/// Stored form of an API key: `rkh_<sha256(secret)>`. The secret is only
+/// ever compared by hashing it and looking the result up.
+pub(crate) fn api_key_credential_id(token: &str) -> String {
+    format!("rkh_{}", api_key_id(token))
 }
 
 fn password_evidence() -> Sensitivity {
@@ -587,8 +599,13 @@ impl AuthStore {
         }
 
         let user = self.create_user_in_tenant_unaudited(None, username, password, Role::Admin)?;
-        let key =
-            self.create_api_key_in_tenant_unaudited(None, username, "bootstrap", Role::Admin)?;
+        let key = self.create_api_key_in_tenant_unaudited(
+            None,
+            username,
+            "bootstrap",
+            Role::Admin,
+            None,
+        )?;
 
         // Generate a certificate-based keypair and re-seal the vault.
         let certificate = if let Some(ref pager) = self.pager {
@@ -1085,8 +1102,16 @@ impl AuthStore {
             .write()
             .unwrap_or_else(|e| e.into_inner());
 
-        for user in state.users {
+        for mut user in state.users {
             let id = UserId::from_parts(user.tenant_id.as_deref(), &user.username);
+            // A vault written before keys were hashed at rest holds the
+            // secret itself. Hash it on the way in; the next persist
+            // rewrites the line and the secret is gone from disk.
+            for key in &mut user.api_keys {
+                if !key.key.starts_with("rkh_") {
+                    key.key = api_key_credential_id(&key.key);
+                }
+            }
             // Register API keys in the index.
             for key in &user.api_keys {
                 idx.insert(key.key.clone(), (id.clone(), key.role));
@@ -1826,6 +1851,13 @@ impl AuthStore {
             }
         }
 
+        // Sessions snapshot the role at login. A change in either direction
+        // must not keep riding on a token minted under the old one — a
+        // demotion would otherwise stay ineffective for the session TTL.
+        if prior_role != new_role {
+            self.purge_sessions_for(&id);
+        }
+
         self.persist_to_vault();
         Ok(())
     }
@@ -1900,7 +1932,105 @@ impl AuthStore {
     /// Verify credentials for `(tenant_id, username, password)` and
     /// create a session. Tenant-aware: `alice@acme` and `alice@globex`
     /// authenticate independently.
+    ///
+    /// Every outcome is recorded in the control-event ledger when one is
+    /// configured: login was the one credential decision with no chained
+    /// trace, so a brute-force run or a login from a freshly re-enabled
+    /// account was invisible to an audit of the store. Under a
+    /// compliance-mode ledger a login that cannot be recorded is refused.
     pub fn authenticate_in_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        password: &str,
+    ) -> Result<Session, AuthError> {
+        let id = UserId::from_parts(tenant_id, username);
+        match self.authenticate_in_tenant_unaudited(tenant_id, username, password) {
+            Ok(session) => {
+                if let Err(err) = self.emit_auth_event(
+                    EventKind::AuthLogin,
+                    Outcome::Allowed,
+                    &id,
+                    Some(session.role),
+                    None,
+                ) {
+                    if let Ok(mut sessions) = self.sessions.write() {
+                        sessions.remove(&session.token);
+                    }
+                    return Err(err);
+                }
+                Ok(session)
+            }
+            Err(err) => {
+                let outcome = if matches!(err, AuthError::InvalidCredentials) {
+                    Outcome::Denied
+                } else {
+                    Outcome::Error
+                };
+                // Already refusing; a ledger failure cannot make it worse.
+                let _ = self.emit_auth_event(
+                    EventKind::AuthLoginFailed,
+                    outcome,
+                    &id,
+                    None,
+                    Some(&err.to_string()),
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Record one authentication decision. `Err` only when the ledger is
+    /// configured to require persistence and refused the event.
+    fn emit_auth_event(
+        &self,
+        kind: EventKind,
+        outcome: Outcome,
+        id: &UserId,
+        role: Option<Role>,
+        reason: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let Some(configured) = self.configured_control_events() else {
+            return Ok(());
+        };
+        let ctx = ControlEventCtx {
+            actor: crate::runtime::control_events::ActorRef::User(id),
+            scope: id.tenant.as_deref().map(Cow::Borrowed),
+            request_id: None,
+            trace_id: None,
+        };
+        let mut fields: HashMap<String, Sensitivity> = HashMap::new();
+        fields.insert("principal".to_string(), Sensitivity::raw(id.to_string()));
+        if let Some(role) = role {
+            fields.insert("role".to_string(), Sensitivity::raw(role.as_str()));
+        }
+        let event = ControlEvent {
+            kind,
+            outcome,
+            action: Cow::Borrowed(kind.as_str()),
+            resource: Some(format!("principal:{id}")),
+            reason: reason.map(str::to_string),
+            matched_policy_id: None,
+            fields,
+        };
+        match configured.ledger.emit(&ctx, event) {
+            Ok(_) => Ok(()),
+            Err(err) if configured.config.require_persistence() => Err(AuthError::Internal(
+                format!("control-event ledger refused {}: {err}", kind.as_str()),
+            )),
+            Err(err) => {
+                tracing::warn!(
+                    target: "reddb::security",
+                    kind = kind.as_str(),
+                    error = %err,
+                    "control-event ledger refused an auth event"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn authenticate_in_tenant_unaudited(
         &self,
         tenant_id: Option<&str>,
         username: &str,
@@ -2023,15 +2153,35 @@ impl AuthStore {
             return None;
         }
 
-        // Try API keys.
+        // Try API keys: the index is keyed by the credential id, so the
+        // presented secret is hashed and never compared as text.
         if token.starts_with("rk_") {
-            if let Ok(idx) = self.api_key_index.read() {
-                return idx.get(token).cloned();
+            let id = api_key_credential_id(token);
+            let (owner, role) = self
+                .api_key_index
+                .read()
+                .ok()
+                .and_then(|idx| idx.get(&id).cloned())?;
+            if self.api_key_expired(&owner, &id) {
+                return None;
             }
-            return None;
+            return Some((owner, role));
         }
 
         None
+    }
+
+    /// Whether the key `id` owned by `owner` has passed its `expires_at`.
+    /// A key the owner no longer lists counts as expired.
+    fn api_key_expired(&self, owner: &UserId, id: &str) -> bool {
+        let Ok(users) = self.users.read() else {
+            return true;
+        };
+        users
+            .get(owner)
+            .and_then(|user| user.api_keys.iter().find(|key| key.key == id))
+            .map(|key| key.expires_at.is_some_and(|deadline| now_ms() >= deadline))
+            .unwrap_or(true)
     }
 
     /// The current role of `id` when the account is active, else `None`.
@@ -2099,6 +2249,19 @@ impl AuthStore {
         name: &str,
         role: Role,
     ) -> Result<ApiKey, AuthError> {
+        self.create_api_key_in_tenant_expiring(tenant_id, username, name, role, None)
+    }
+
+    /// Create an API key that stops validating at `expires_at` (ms since
+    /// epoch). The returned value carries the secret; nothing else does.
+    pub fn create_api_key_in_tenant_expiring(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        name: &str,
+        role: Role,
+        expires_at: Option<u128>,
+    ) -> Result<ApiKey, AuthError> {
         if let Some(configured) = self.configured_control_events() {
             let ctx = default_user_lifecycle_ctx();
             let control = UserLifecycleControl {
@@ -2106,9 +2269,11 @@ impl AuthStore {
                 ledger: configured.ledger.as_ref(),
                 config: configured.config,
             };
-            self.create_api_key_in_tenant_controlled(tenant_id, username, name, role, &control)
+            self.create_api_key_in_tenant_controlled(
+                tenant_id, username, name, role, expires_at, &control,
+            )
         } else {
-            self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role)
+            self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role, expires_at)
         }
     }
 
@@ -2128,7 +2293,7 @@ impl AuthStore {
             ledger,
             config,
         };
-        self.create_api_key_in_tenant_controlled(tenant_id, username, name, role, &control)
+        self.create_api_key_in_tenant_controlled(tenant_id, username, name, role, None, &control)
     }
 
     fn create_api_key_in_tenant_unaudited(
@@ -2137,6 +2302,7 @@ impl AuthStore {
         username: &str,
         name: &str,
         role: Role,
+        expires_at: Option<u128>,
     ) -> Result<ApiKey, AuthError> {
         let id = UserId::from_parts(tenant_id, username);
         let mut users = self.users.write().map_err(lock_err)?;
@@ -2152,24 +2318,30 @@ impl AuthStore {
             });
         }
 
-        let api_key = ApiKey {
-            key: generate_api_key(),
+        let secret = generate_api_key();
+        let stored = ApiKey {
+            key: api_key_credential_id(&secret),
             name: name.to_string(),
             role,
             created_at: now_ms(),
+            expires_at,
         };
 
-        user.api_keys.push(api_key.clone());
+        user.api_keys.push(stored.clone());
         user.updated_at = now_ms();
 
         // Update the index.
         if let Ok(mut idx) = self.api_key_index.write() {
-            idx.insert(api_key.key.clone(), (id.clone(), api_key.role));
+            idx.insert(stored.key.clone(), (id.clone(), stored.role));
         }
 
         drop(users); // release lock before vault I/O
         self.persist_to_vault();
-        Ok(api_key)
+        // The secret leaves the store exactly once, here.
+        Ok(ApiKey {
+            key: secret,
+            ..stored
+        })
     }
 
     fn create_api_key_in_tenant_controlled(
@@ -2178,10 +2350,11 @@ impl AuthStore {
         username: &str,
         name: &str,
         role: Role,
+        expires_at: Option<u128>,
         control: &UserLifecycleControl<'_>,
     ) -> Result<ApiKey, AuthError> {
         let id = UserId::from_parts(tenant_id, username);
-        match self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role) {
+        match self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role, expires_at) {
             Ok(api_key) => {
                 let key_id = api_key_id(&api_key.key);
                 if let Err(err) = self.emit_api_key_allowed(
@@ -2246,6 +2419,8 @@ impl AuthStore {
     }
 
     fn revoke_api_key_unaudited(&self, key: &str) -> Result<(), AuthError> {
+        let key_id = api_key_credential_id(key);
+        let key = key_id.as_str();
         let mut users = self.users.write().map_err(lock_err)?;
 
         // Find which user owns this key (look up by the api_key_index
@@ -3005,6 +3180,8 @@ impl AuthStore {
     }
 
     fn rollback_create_api_key(&self, id: &UserId, key: &str) {
+        let key_id = api_key_credential_id(key);
+        let key = key_id.as_str();
         if let Ok(mut users) = self.users.write() {
             if let Some(user) = users.get_mut(id) {
                 user.api_keys.retain(|api_key| api_key.key != key);
@@ -3018,6 +3195,7 @@ impl AuthStore {
     }
 
     fn api_key_rollback_snapshot(&self, key: &str) -> Option<(UserId, ApiKey)> {
+        let key = api_key_credential_id(key);
         let users = self.users.read().ok()?;
         users.iter().find_map(|(id, user)| {
             user.api_keys
@@ -4929,6 +5107,103 @@ mod tests {
         store.create_user("alice", "pass", Role::Admin).unwrap();
         let err = store.create_user("alice", "pass2", Role::Read).unwrap_err();
         assert!(matches!(err, AuthError::UserExists(_)));
+    }
+
+    struct RecordingLedger(std::sync::Mutex<Vec<(String, String)>>);
+
+    impl crate::runtime::control_events::ControlEventLedger for RecordingLedger {
+        fn emit(
+            &self,
+            _ctx: &ControlEventCtx<'_>,
+            event: ControlEvent,
+        ) -> Result<
+            crate::runtime::control_events::EventId,
+            crate::runtime::control_events::ControlEventError,
+        > {
+            self.0.lock().unwrap().push((
+                event.kind.as_str().to_string(),
+                event.outcome.as_str().to_string(),
+            ));
+            Ok(crate::runtime::control_events::EventId("evt".to_string()))
+        }
+    }
+
+    #[test]
+    fn logins_land_in_the_control_event_ledger() {
+        let store = AuthStore::new(test_config());
+        store.create_user("dave", "pw", Role::Read).unwrap();
+        let ledger = std::sync::Arc::new(RecordingLedger(std::sync::Mutex::new(Vec::new())));
+        store.configure_control_events(
+            ledger.clone(),
+            crate::runtime::control_events::ControlEventConfig::default(),
+        );
+        store.authenticate("dave", "pw").expect("login");
+        store
+            .authenticate("dave", "nope")
+            .expect_err("bad password");
+        store
+            .authenticate("nobody", "pw")
+            .expect_err("unknown user");
+        let seen = ledger.0.lock().unwrap().clone();
+        let allowed = Outcome::Allowed.as_str().to_string();
+        let denied = Outcome::Denied.as_str().to_string();
+        assert!(
+            seen.contains(&("auth.login".to_string(), allowed)),
+            "success not recorded: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter()
+                .filter(|(k, o)| k == "auth.login_failed" && *o == denied)
+                .count(),
+            2,
+            "both refusals must be recorded: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn api_keys_are_hashed_at_rest_and_expire() {
+        let store = AuthStore::new(test_config());
+        store.create_user("erin", "pw", Role::Write).unwrap();
+        let key = store
+            .create_api_key_in_tenant_expiring(None, "erin", "ci", Role::Read, Some(now_ms() + 60))
+            .unwrap();
+        assert!(key.key.starts_with("rk_"));
+
+        let stored = store
+            .users
+            .read()
+            .unwrap()
+            .get(&UserId::from_parts(None, "erin"))
+            .unwrap()
+            .api_keys[0]
+            .clone();
+        assert!(stored.key.starts_with("rkh_"), "{}", stored.key);
+        assert_ne!(stored.key, key.key, "the secret must not be stored");
+        assert_eq!(stored.key, api_key_credential_id(&key.key));
+
+        assert!(store.validate_token(&key.key).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert!(
+            store.validate_token(&key.key).is_none(),
+            "an expired key must not validate"
+        );
+
+        // Revocation accepts the stored id as well as the secret.
+        store.revoke_api_key(&stored.key).unwrap();
+        assert!(store.revoke_api_key(&key.key).is_err());
+    }
+
+    #[test]
+    fn role_change_revokes_sessions_minted_under_the_old_role() {
+        let store = AuthStore::new(test_config());
+        store.create_user("carol", "pw", Role::Write).unwrap();
+        let session = store.authenticate("carol", "pw").unwrap();
+        assert!(store.validate_token(&session.token).is_some());
+        store.change_role("carol", Role::Read).unwrap();
+        assert!(
+            store.validate_token(&session.token).is_none(),
+            "a demotion must not keep riding on the old session"
+        );
     }
 
     #[test]

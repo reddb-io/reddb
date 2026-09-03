@@ -433,6 +433,13 @@ impl RedDBServer {
                     .iter()
                     .map(|k| {
                         let mut key_obj = Map::new();
+                        key_obj.insert("key_id".to_string(), JsonValue::String(k.key.clone()));
+                        key_obj.insert(
+                            "expires_at".to_string(),
+                            k.expires_at
+                                .map(|deadline| JsonValue::Number(deadline as f64))
+                                .unwrap_or(JsonValue::Null),
+                        );
                         key_obj.insert("name".to_string(), JsonValue::String(k.name.clone()));
                         key_obj.insert("role".to_string(), JsonValue::String(k.role.to_string()));
                         key_obj.insert(
@@ -556,6 +563,14 @@ impl RedDBServer {
             }
         };
 
+        let expires_at = match payload.get("expires_in_secs") {
+            None => None,
+            Some(value) => match value.as_u64() {
+                Some(secs) if secs > 0 => Some(unix_now_ms() + secs as u128 * 1000),
+                _ => return json_error(400, "'expires_in_secs' must be a positive integer"),
+            },
+        };
+
         let caller = match resolve_auth_caller(self, headers) {
             Some(caller) => caller,
             None => {
@@ -563,7 +578,8 @@ impl RedDBServer {
                     return json_error(401, "authentication required");
                 }
                 // Auth store present but disabled: legacy open posture.
-                return self.create_api_key_response(auth_store, None, &username, &name, role);
+                return self
+                    .create_api_key_response(auth_store, None, &username, &name, role, expires_at);
             }
         };
 
@@ -588,7 +604,14 @@ impl RedDBServer {
             caller.id.tenant.clone()
         };
 
-        self.create_api_key_response(auth_store, target_tenant.as_deref(), &username, &name, role)
+        self.create_api_key_response(
+            auth_store,
+            target_tenant.as_deref(),
+            &username,
+            &name,
+            role,
+            expires_at,
+        )
     }
 
     fn create_api_key_response(
@@ -598,12 +621,27 @@ impl RedDBServer {
         username: &str,
         name: &str,
         role: crate::auth::Role,
+        expires_at: Option<u128>,
     ) -> HttpResponse {
-        match auth_store.create_api_key_in_tenant(tenant, username, name, role) {
+        match auth_store.create_api_key_in_tenant_expiring(tenant, username, name, role, expires_at)
+        {
             Ok(api_key) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
+                // The secret is shown here and nowhere else; `key_id` is
+                // what listings and revocation refer to from now on.
                 object.insert("key".to_string(), JsonValue::String(api_key.key.clone()));
+                object.insert(
+                    "key_id".to_string(),
+                    JsonValue::String(crate::auth::store::api_key_credential_id(&api_key.key)),
+                );
+                object.insert(
+                    "expires_at".to_string(),
+                    api_key
+                        .expires_at
+                        .map(|deadline| JsonValue::Number(deadline as f64))
+                        .unwrap_or(JsonValue::Null),
+                );
                 object.insert("name".to_string(), JsonValue::String(api_key.name.clone()));
                 object.insert(
                     "role".to_string(),
@@ -1217,4 +1255,12 @@ fn check_error_json(index: usize, message: &str) -> JsonValue {
         crate::json_field::SerializedJsonField::tainted(message),
     );
     JsonValue::Object(obj)
+}
+
+/// Milliseconds since the Unix epoch, for request-supplied expiries.
+fn unix_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }

@@ -248,7 +248,7 @@ where
     // under a mutex so chunk frames stay byte-atomic on the wire.
     let (mut reader, writer) = tokio::io::split(stream);
     let writer = Arc::new(TokioMutex::new(writer));
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_FRAMES);
     let writer_drain = Arc::clone(&writer);
     tokio::spawn(async move {
         while let Some(bytes) = out_rx.recv().await {
@@ -310,7 +310,7 @@ where
             &RedWireAuthenticatedSessionPolicy,
         ) {
             let err_frame = build_error_frame_lossy(frame.correlation_id, &error.to_string());
-            queue_send(&out_tx, encode_frame(&err_frame))?;
+            queue_send(&out_tx, encode_frame(&err_frame)).await?;
             continue;
         }
 
@@ -323,7 +323,7 @@ where
                 frame.correlation_id,
                 &format!("redwire: {:?} is server-only", frame.kind),
             );
-            queue_send(&out_tx, encode_frame(&err_frame))?;
+            queue_send(&out_tx, encode_frame(&err_frame)).await?;
             continue;
         }
 
@@ -334,7 +334,7 @@ where
                     MessageKind::Bye,
                     vec![],
                 )?);
-                let _ = out_tx.send(bye);
+                let _ = out_tx.send(bye).await;
                 return Ok(());
             }
             MessageKind::Ping => {
@@ -343,21 +343,21 @@ where
                     MessageKind::Pong,
                     vec![],
                 )?);
-                queue_send(&out_tx, pong)?;
+                queue_send(&out_tx, pong).await?;
             }
             MessageKind::Query => {
                 let response =
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_query(&runtime, prepared_stmts.registry(), &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             MessageKind::QueryWithParams => {
                 let response =
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_query_with_params(&runtime, prepared_stmts.registry(), &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             // BulkInsert handles both single-row and bulk shapes off
             // the same frame kind: payload `payload` = single,
@@ -367,7 +367,7 @@ where
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_insert_dispatch(&runtime, &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             MessageKind::BulkInsertBinary => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -379,7 +379,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::BulkInsertPrevalidated => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -394,7 +395,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::QueryBinary => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -406,7 +408,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             // Streaming bulk insert (PG COPY equivalent).
             MessageKind::BulkStreamStart => {
@@ -418,7 +421,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::BulkStreamRows => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -435,7 +439,8 @@ where
                             &raw,
                             frame.correlation_id,
                         )),
-                    )?;
+                    )
+                    .await?;
                 }
             }
             MessageKind::BulkStreamCommit => {
@@ -448,7 +453,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::Prepare => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -464,7 +470,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::ExecutePrepared => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -480,21 +487,22 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::Get => {
                 let response =
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_get(&runtime, &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             MessageKind::Delete => {
                 let response =
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_delete(&runtime, &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             // Output-stream lifecycle (issue #762 / PRD #759 S3).
             //
@@ -528,7 +536,7 @@ where
                                 0,
                                 0,
                             )?;
-                            queue_send(&out_tx, encode_frame(&err))?;
+                            queue_send(&out_tx, encode_frame(&err)).await?;
                             continue;
                         }
                     };
@@ -547,7 +555,7 @@ where
                                 0,
                                 snapshot_lsn,
                             )?;
-                            queue_send(&out_tx, encode_frame(&err))?;
+                            queue_send(&out_tx, encode_frame(&err)).await?;
                             continue;
                         }
                     };
@@ -563,13 +571,13 @@ where
                             0,
                             snapshot_lsn,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                     let ack =
                         os::build_open_ack_frame(frame_id, sid, lease_id, lease_snapshot, false)
                             .map_err(|e| io::Error::other(format!("build OpenAck: {e}")))?;
-                    queue_send(&out_tx, encode_frame(&ack))?;
+                    queue_send(&out_tx, encode_frame(&ack)).await?;
                     continue;
                 }
 
@@ -578,7 +586,7 @@ where
                     Err(e) => {
                         let err =
                             os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                 };
@@ -587,7 +595,7 @@ where
                     Err(e) => {
                         let err =
                             os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                 };
@@ -636,7 +644,7 @@ where
                                 .map_err(|e| {
                                     io::Error::other(format!("build queue-wait error: {e}"))
                                 })?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                 };
@@ -652,7 +660,7 @@ where
                         &msg,
                     )
                     .map_err(|e| io::Error::other(format!("build queue-wait cap error: {e}")))?;
-                    queue_send(&out_tx, encode_frame(&err))?;
+                    queue_send(&out_tx, encode_frame(&err)).await?;
                     continue;
                 }
                 let runtime_ref = Arc::clone(&runtime);
@@ -683,7 +691,7 @@ where
                             for message in messages {
                                 match qw::build_event_push_frame(frame_id, sid, &message) {
                                     Ok(push) => {
-                                        if queue_send(&out, encode_frame(&push)).is_err() {
+                                        if queue_send(&out, encode_frame(&push)).await.is_err() {
                                             return;
                                         }
                                     }
@@ -701,7 +709,7 @@ where
                                 &queue_name,
                                 wait_ms,
                             ) {
-                                let _ = queue_send(&out, encode_frame(&t));
+                                let _ = queue_send(&out, encode_frame(&t)).await;
                             }
                         }
                         // Server-side cancellation: a StreamError with
@@ -714,7 +722,7 @@ where
                                 qw::WAIT_CANCELLED_CODE,
                                 "queue wait cancelled by server",
                             ) {
-                                let _ = queue_send(&out, encode_frame(&ef));
+                                let _ = queue_send(&out, encode_frame(&ef)).await;
                             }
                         }
                         // A genuine runtime failure. Server-shutdown
@@ -728,7 +736,7 @@ where
                                 qw::WAIT_FAILED_CODE,
                                 &err.to_string(),
                             ) {
-                                let _ = queue_send(&out, encode_frame(&ef));
+                                let _ = queue_send(&out, encode_frame(&ef)).await;
                             }
                         }
                     }
@@ -758,7 +766,7 @@ where
                         0,
                         0,
                     )?;
-                    queue_send(&out_tx, encode_frame(&err))?;
+                    queue_send(&out_tx, encode_frame(&err)).await?;
                     continue;
                 }
                 let chunk = match is::parse_input_chunk(&frame.payload) {
@@ -775,7 +783,7 @@ where
                             state.chunk_count,
                             state.committed_rid,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                 };
@@ -807,7 +815,7 @@ where
                             state.chunk_count,
                             state.committed_rid,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                     }
                     Ok(()) => {
                         if chunk.terminal {
@@ -823,7 +831,7 @@ where
                                 state.snapshot_lsn,
                                 false,
                             )?;
-                            queue_send(&out_tx, encode_frame(&end))?;
+                            queue_send(&out_tx, encode_frame(&end)).await?;
                         }
                     }
                 }
@@ -850,7 +858,7 @@ where
                         state.snapshot_lsn,
                         true,
                     )?;
-                    queue_send(&out_tx, encode_frame(&end))?;
+                    queue_send(&out_tx, encode_frame(&end)).await?;
                 } else {
                     // AC #6: protocol violation surfaces as a
                     // StreamError envelope, not a connection drop.
@@ -860,7 +868,7 @@ where
                         "unknown_stream",
                         "no active stream for this stream_id",
                     )?;
-                    queue_send(&out_tx, encode_frame(&err))?;
+                    queue_send(&out_tx, encode_frame(&err)).await?;
                 }
             }
             other => {
@@ -868,16 +876,22 @@ where
                     frame.correlation_id,
                     &format!("redwire: cannot dispatch {other:?} yet"),
                 );
-                queue_send(&out_tx, encode_frame(&err_frame))?;
+                queue_send(&out_tx, encode_frame(&err_frame)).await?;
             }
         }
     }
 }
 
-#[inline]
-fn queue_send(out_tx: &mpsc::UnboundedSender<Vec<u8>>, bytes: Vec<u8>) -> io::Result<()> {
+/// Frames a connection may have queued for its socket writer before the
+/// producers block. Bounded so a peer that stops reading cannot make the
+/// server buffer an output stream without limit; the writer task drains it
+/// as fast as the socket accepts bytes.
+const OUTBOUND_QUEUE_FRAMES: usize = 256;
+
+async fn queue_send(out_tx: &mpsc::Sender<Vec<u8>>, bytes: Vec<u8>) -> io::Result<()> {
     out_tx
         .send(bytes)
+        .await
         .map_err(|_| io::Error::other("redwire: write channel closed"))
 }
 
