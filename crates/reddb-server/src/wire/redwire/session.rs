@@ -248,7 +248,7 @@ where
     // under a mutex so chunk frames stay byte-atomic on the wire.
     let (mut reader, writer) = tokio::io::split(stream);
     let writer = Arc::new(TokioMutex::new(writer));
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_FRAMES);
     let writer_drain = Arc::clone(&writer);
     tokio::spawn(async move {
         while let Some(bytes) = out_rx.recv().await {
@@ -310,7 +310,7 @@ where
             &RedWireAuthenticatedSessionPolicy,
         ) {
             let err_frame = build_error_frame_lossy(frame.correlation_id, &error.to_string());
-            queue_send(&out_tx, encode_frame(&err_frame))?;
+            queue_send(&out_tx, encode_frame(&err_frame)).await?;
             continue;
         }
 
@@ -323,7 +323,7 @@ where
                 frame.correlation_id,
                 &format!("redwire: {:?} is server-only", frame.kind),
             );
-            queue_send(&out_tx, encode_frame(&err_frame))?;
+            queue_send(&out_tx, encode_frame(&err_frame)).await?;
             continue;
         }
 
@@ -334,7 +334,7 @@ where
                     MessageKind::Bye,
                     vec![],
                 )?);
-                let _ = out_tx.send(bye);
+                let _ = out_tx.send(bye).await;
                 return Ok(());
             }
             MessageKind::Ping => {
@@ -343,21 +343,21 @@ where
                     MessageKind::Pong,
                     vec![],
                 )?);
-                queue_send(&out_tx, pong)?;
+                queue_send(&out_tx, pong).await?;
             }
             MessageKind::Query => {
                 let response =
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_query(&runtime, prepared_stmts.registry(), &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             MessageKind::QueryWithParams => {
                 let response =
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_query_with_params(&runtime, prepared_stmts.registry(), &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             // BulkInsert handles both single-row and bulk shapes off
             // the same frame kind: payload `payload` = single,
@@ -367,7 +367,7 @@ where
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_insert_dispatch(&runtime, &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             MessageKind::BulkInsertBinary => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -379,7 +379,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::BulkInsertPrevalidated => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -394,7 +395,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::QueryBinary => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -406,7 +408,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             // Streaming bulk insert (PG COPY equivalent).
             MessageKind::BulkStreamStart => {
@@ -418,7 +421,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::BulkStreamRows => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -435,7 +439,8 @@ where
                             &raw,
                             frame.correlation_id,
                         )),
-                    )?;
+                    )
+                    .await?;
                 }
             }
             MessageKind::BulkStreamCommit => {
@@ -448,7 +453,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::Prepare => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -464,7 +470,8 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::ExecutePrepared => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -480,21 +487,22 @@ where
                         &raw,
                         frame.correlation_id,
                     )),
-                )?;
+                )
+                .await?;
             }
             MessageKind::Get => {
                 let response =
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_get(&runtime, &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             MessageKind::Delete => {
                 let response =
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_delete(&runtime, &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response))?;
+                queue_send(&out_tx, encode_frame(&response)).await?;
             }
             // Output-stream lifecycle (issue #762 / PRD #759 S3).
             //
@@ -528,7 +536,7 @@ where
                                 0,
                                 0,
                             )?;
-                            queue_send(&out_tx, encode_frame(&err))?;
+                            queue_send(&out_tx, encode_frame(&err)).await?;
                             continue;
                         }
                     };
@@ -547,7 +555,7 @@ where
                                 0,
                                 snapshot_lsn,
                             )?;
-                            queue_send(&out_tx, encode_frame(&err))?;
+                            queue_send(&out_tx, encode_frame(&err)).await?;
                             continue;
                         }
                     };
@@ -563,13 +571,13 @@ where
                             0,
                             snapshot_lsn,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                     let ack =
                         os::build_open_ack_frame(frame_id, sid, lease_id, lease_snapshot, false)
                             .map_err(|e| io::Error::other(format!("build OpenAck: {e}")))?;
-                    queue_send(&out_tx, encode_frame(&ack))?;
+                    queue_send(&out_tx, encode_frame(&ack)).await?;
                     continue;
                 }
 
@@ -578,7 +586,7 @@ where
                     Err(e) => {
                         let err =
                             os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                 };
@@ -587,7 +595,7 @@ where
                     Err(e) => {
                         let err =
                             os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                 };
@@ -636,7 +644,7 @@ where
                                 .map_err(|e| {
                                     io::Error::other(format!("build queue-wait error: {e}"))
                                 })?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                 };
@@ -652,7 +660,7 @@ where
                         &msg,
                     )
                     .map_err(|e| io::Error::other(format!("build queue-wait cap error: {e}")))?;
-                    queue_send(&out_tx, encode_frame(&err))?;
+                    queue_send(&out_tx, encode_frame(&err)).await?;
                     continue;
                 }
                 let runtime_ref = Arc::clone(&runtime);
@@ -683,7 +691,7 @@ where
                             for message in messages {
                                 match qw::build_event_push_frame(frame_id, sid, &message) {
                                     Ok(push) => {
-                                        if queue_send(&out, encode_frame(&push)).is_err() {
+                                        if queue_send(&out, encode_frame(&push)).await.is_err() {
                                             return;
                                         }
                                     }
@@ -701,7 +709,7 @@ where
                                 &queue_name,
                                 wait_ms,
                             ) {
-                                let _ = queue_send(&out, encode_frame(&t));
+                                let _ = queue_send(&out, encode_frame(&t)).await;
                             }
                         }
                         // Server-side cancellation: a StreamError with
@@ -714,7 +722,7 @@ where
                                 qw::WAIT_CANCELLED_CODE,
                                 "queue wait cancelled by server",
                             ) {
-                                let _ = queue_send(&out, encode_frame(&ef));
+                                let _ = queue_send(&out, encode_frame(&ef)).await;
                             }
                         }
                         // A genuine runtime failure. Server-shutdown
@@ -728,7 +736,7 @@ where
                                 qw::WAIT_FAILED_CODE,
                                 &err.to_string(),
                             ) {
-                                let _ = queue_send(&out, encode_frame(&ef));
+                                let _ = queue_send(&out, encode_frame(&ef)).await;
                             }
                         }
                     }
@@ -758,7 +766,7 @@ where
                         0,
                         0,
                     )?;
-                    queue_send(&out_tx, encode_frame(&err))?;
+                    queue_send(&out_tx, encode_frame(&err)).await?;
                     continue;
                 }
                 let chunk = match is::parse_input_chunk(&frame.payload) {
@@ -775,7 +783,7 @@ where
                             state.chunk_count,
                             state.committed_rid,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                         continue;
                     }
                 };
@@ -807,7 +815,7 @@ where
                             state.chunk_count,
                             state.committed_rid,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err))?;
+                        queue_send(&out_tx, encode_frame(&err)).await?;
                     }
                     Ok(()) => {
                         if chunk.terminal {
@@ -823,7 +831,7 @@ where
                                 state.snapshot_lsn,
                                 false,
                             )?;
-                            queue_send(&out_tx, encode_frame(&end))?;
+                            queue_send(&out_tx, encode_frame(&end)).await?;
                         }
                     }
                 }
@@ -850,7 +858,7 @@ where
                         state.snapshot_lsn,
                         true,
                     )?;
-                    queue_send(&out_tx, encode_frame(&end))?;
+                    queue_send(&out_tx, encode_frame(&end)).await?;
                 } else {
                     // AC #6: protocol violation surfaces as a
                     // StreamError envelope, not a connection drop.
@@ -860,7 +868,7 @@ where
                         "unknown_stream",
                         "no active stream for this stream_id",
                     )?;
-                    queue_send(&out_tx, encode_frame(&err))?;
+                    queue_send(&out_tx, encode_frame(&err)).await?;
                 }
             }
             other => {
@@ -868,16 +876,22 @@ where
                     frame.correlation_id,
                     &format!("redwire: cannot dispatch {other:?} yet"),
                 );
-                queue_send(&out_tx, encode_frame(&err_frame))?;
+                queue_send(&out_tx, encode_frame(&err_frame)).await?;
             }
         }
     }
 }
 
-#[inline]
-fn queue_send(out_tx: &mpsc::UnboundedSender<Vec<u8>>, bytes: Vec<u8>) -> io::Result<()> {
+/// Frames a connection may have queued for its socket writer before the
+/// producers block. Bounded so a peer that stops reading cannot make the
+/// server buffer an output stream without limit; the writer task drains it
+/// as fast as the socket accepts bytes.
+const OUTBOUND_QUEUE_FRAMES: usize = 256;
+
+async fn queue_send(out_tx: &mpsc::Sender<Vec<u8>>, bytes: Vec<u8>) -> io::Result<()> {
     out_tx
         .send(bytes)
+        .await
         .map_err(|_| io::Error::other("redwire: write channel closed"))
 }
 
@@ -1298,7 +1312,7 @@ fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame)
         QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new()));
     crate::presentation::query_result::summary_frame(
         frame.correlation_id,
-        result.as_ref().map_err(ToString::to_string),
+        result.as_ref().map_err(crate::api::client_facing_message),
     )
 }
 
@@ -1328,7 +1342,7 @@ fn run_query_with_params(
     let result = QueryRequestExecutor::new(runtime, prepared).execute(query);
     crate::presentation::query_result::envelope_frame(
         frame.correlation_id,
-        result.as_ref().map_err(ToString::to_string),
+        result.as_ref().map_err(crate::api::client_facing_message),
     )
 }
 
@@ -1375,12 +1389,28 @@ fn param_to_request_value(value: RedWireParamValue) -> ParamValue {
 ///
 /// Mirrors the JSON-RPC `insert` / `bulk_insert` method shapes
 /// from `rpc_stdio.rs` so both transports agree on the payload.
+/// `INSERT … RETURNING rid` for one JSON row. A bare SQL INSERT result
+/// carries only `affected_rows`; the engine-assigned id is exposed
+/// through RETURNING, which is what `insert_result_to_json` reads to
+/// fill the BulkOk `id`/`ids` keys.
+fn insert_sql_returning_rid<'a, I>(collection: &str, fields: I) -> String
+where
+    I: Iterator<Item = (&'a String, &'a crate::json::Value)>,
+{
+    let mut sql = crate::rpc_stdio::build_insert_sql(collection, fields);
+    sql.push_str(" RETURNING rid");
+    sql
+}
+
 fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_insert_dispatch_payload(&frame.payload) {
         Ok(request) => request,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
     let collection = request.collection.as_str();
+    if let Err(msg) = crate::rpc_stdio::ensure_sql_collection(collection) {
+        return build_error_frame_lossy(frame.correlation_id, &msg);
+    }
     let payload = request.payload.map(wire_json_to_server_json);
     let payloads = request.payloads.map(|rows| {
         rows.into_iter()
@@ -1449,7 +1479,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         let mut affected: u64 = 0;
         let mut ids = Vec::with_capacity(objects.len());
         for row in objects {
-            let sql = crate::rpc_stdio::build_insert_sql(collection, row.iter());
+            let sql = insert_sql_returning_rid(collection, row.iter());
             match runtime.execute_query(&sql) {
                 Ok(qr) => {
                     affected += qr.affected_rows;
@@ -1457,7 +1487,12 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                         ids.push(id.clone());
                     }
                 }
-                Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
+                Err(err) => {
+                    return build_error_frame_lossy(
+                        frame.correlation_id,
+                        &crate::api::client_facing_message(&err),
+                    )
+                }
             }
         }
         let payload = encode_bulk_ok_payload_from_json_id_literals(
@@ -1476,14 +1511,17 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             )
         }
     };
-    let sql = crate::rpc_stdio::build_insert_sql(collection, row.iter());
+    let sql = insert_sql_returning_rid(collection, row.iter());
     match runtime.execute_query(&sql) {
         Ok(qr) => {
             let body = crate::rpc_stdio::insert_result_to_json(&qr);
             let payload = body.to_string_compact().into_bytes();
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload)
         }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(
+            frame.correlation_id,
+            &crate::api::client_facing_message(&err),
+        ),
     }
 }
 
@@ -1541,46 +1579,61 @@ fn wire_json_to_server_json(value: impl std::fmt::Display) -> JsonValue {
 }
 
 /// Get payload shape: `{ "collection": "...", "id": "..." }`.
-/// Bridges to `SELECT * FROM <coll> WHERE _id = '<id>' LIMIT 1`.
+/// Bridges to `SELECT * FROM <coll> WHERE rid = <id> LIMIT 1`.
 /// Reply: Result frame with the row, or empty `{}` when not found.
 fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_get_payload(&frame.payload) {
         Ok(request) => request,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
-    // Sanitise the id by treating it as a string literal — same
-    // approach as build_insert_sql for arbitrary input.
-    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(request.id));
-    let sql = format!(
-        "SELECT * FROM {} WHERE _id = {id_lit} LIMIT 1",
-        request.collection
-    );
+    let collection = request.collection.as_str();
+    if let Err(msg) = crate::rpc_stdio::ensure_sql_collection(collection) {
+        return build_error_frame_lossy(frame.correlation_id, &msg);
+    }
+    let Some(rid) = crate::rpc_stdio::rid_from_str(&request.id) else {
+        let payload = encode_get_result_payload(false);
+        return build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload);
+    };
+    let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
     match runtime.execute_query(&sql) {
         Ok(qr) => {
             // Preserve the existing Get envelope: presence only.
             let payload = encode_get_result_payload(!qr.result.records.is_empty());
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::Result, payload)
         }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(
+            frame.correlation_id,
+            &crate::api::client_facing_message(&err),
+        ),
     }
 }
 
 /// Delete payload shape: `{ "collection": "...", "id": "..." }`.
-/// Bridges to `DELETE FROM <coll> WHERE _id = '<id>'`.
+/// Bridges to `DELETE FROM <coll> WHERE rid = <id>`.
 /// Reply: DeleteOk frame with `{ affected }`.
 fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let request = match decode_delete_payload(&frame.payload) {
         Ok(request) => request,
         Err(err) => return build_error_frame_lossy(frame.correlation_id, &err.to_string()),
     };
-    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(request.id));
-    let sql = format!("DELETE FROM {} WHERE _id = {id_lit}", request.collection);
+    let collection = request.collection.as_str();
+    if let Err(msg) = crate::rpc_stdio::ensure_sql_collection(collection) {
+        return build_error_frame_lossy(frame.correlation_id, &msg);
+    }
+    let Some(rid) = crate::rpc_stdio::rid_from_str(&request.id) else {
+        let payload = encode_delete_ok_payload(0);
+        return build_dispatch_reply_frame(frame.correlation_id, MessageKind::DeleteOk, payload);
+    };
+    let sql = format!("DELETE FROM {collection} WHERE rid = {rid}");
     match runtime.execute_query(&sql) {
         Ok(qr) => {
             let payload = encode_delete_ok_payload(qr.affected_rows);
             build_dispatch_reply_frame(frame.correlation_id, MessageKind::DeleteOk, payload)
         }
-        Err(err) => build_error_frame_lossy(frame.correlation_id, &err.to_string()),
+        Err(err) => build_error_frame_lossy(
+            frame.correlation_id,
+            &crate::api::client_facing_message(&err),
+        ),
     }
 }
 
@@ -1863,6 +1916,113 @@ mod tests {
                 .and_then(JsonValue::as_array)
                 .map(|ids| ids.len()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn bulk_insert_dispatch_surfaces_row_ids() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+
+        let single = bulk_insert_frame(
+            9,
+            br#"{"collection":"rows_rid","payload":{"name":"eve"}}"#.to_vec(),
+        );
+        let reply = run_insert_dispatch(&runtime, &single);
+        assert_eq!(
+            reply.kind,
+            MessageKind::BulkOk,
+            "body={:?}",
+            String::from_utf8_lossy(&reply.payload)
+        );
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("single json");
+        assert_eq!(body.get("affected").and_then(JsonValue::as_u64), Some(1));
+        assert!(
+            body.get("id").and_then(JsonValue::as_u64).is_some(),
+            "single insert must carry the assigned id: {body}"
+        );
+
+        let batch = bulk_insert_frame(
+            10,
+            br#"{"collection":"rows_rid","payloads":[{"name":"a"},{"name":"b"}]}"#.to_vec(),
+        );
+        let reply = run_insert_dispatch(&runtime, &batch);
+        assert_eq!(reply.kind, MessageKind::BulkOk);
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("batch json");
+        assert_eq!(body.get("affected").and_then(JsonValue::as_u64), Some(2));
+        let ids: Vec<u64> = body
+            .get("ids")
+            .and_then(JsonValue::as_array)
+            .expect("ids array")
+            .iter()
+            .map(|id| id.as_u64().expect("numeric id"))
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "ids must be distinct");
+    }
+
+    #[test]
+    fn get_and_delete_dispatch_address_rows_by_rid() {
+        use reddb_wire::redwire::operations::{
+            decode_delete_ok_affected, decode_get_result_payload, encode_key_payload,
+        };
+        use reddb_wire::redwire::{build_delete_frame, build_get_frame};
+
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let insert = bulk_insert_frame(
+            11,
+            br#"{"collection":"rows_rid_del","payload":{"name":"k"}}"#.to_vec(),
+        );
+        let reply = run_insert_dispatch(&runtime, &insert);
+        assert_eq!(reply.kind, MessageKind::BulkOk);
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("insert json");
+        let rid = body
+            .get("id")
+            .and_then(JsonValue::as_u64)
+            .expect("assigned id");
+        let rid = rid.to_string();
+
+        let get = build_get_frame(12, encode_key_payload("rows_rid_del", &rid)).expect("get");
+        let reply = run_get(&runtime, &get);
+        assert_eq!(reply.kind, MessageKind::Result);
+        let found = decode_get_result_payload(&reply.payload).expect("get payload");
+        assert_eq!(found.get("found").and_then(|v| v.as_bool()), Some(true));
+
+        // A non-numeric id names no row: not found / 0 affected, and the
+        // text is never spliced into SQL.
+        for id in ["1 OR 1=1", "'1'", "rid_that_does_not_exist"] {
+            let get = build_get_frame(13, encode_key_payload("rows_rid_del", id)).expect("get");
+            let reply = run_get(&runtime, &get);
+            assert_eq!(reply.kind, MessageKind::Result, "{id:?}");
+            let found = decode_get_result_payload(&reply.payload).expect("get payload");
+            assert_eq!(found.get("found").and_then(|v| v.as_bool()), Some(false));
+
+            let del = build_delete_frame(13, encode_key_payload("rows_rid_del", id)).expect("del");
+            let reply = run_delete(&runtime, &del);
+            assert_eq!(reply.kind, MessageKind::DeleteOk, "{id:?}");
+            assert_eq!(
+                decode_delete_ok_affected(&reply.payload).expect("affected"),
+                0
+            );
+        }
+        // A collection that is not a bare identifier is refused outright.
+        let del = build_delete_frame(13, encode_key_payload("rows_rid_del WHERE 1=1 --", &rid))
+            .expect("del");
+        let reply = run_delete(&runtime, &del);
+        assert_eq!(reply.kind, MessageKind::Error);
+
+        let del = build_delete_frame(14, encode_key_payload("rows_rid_del", &rid)).expect("del");
+        let reply = run_delete(&runtime, &del);
+        assert_eq!(reply.kind, MessageKind::DeleteOk);
+        assert_eq!(
+            decode_delete_ok_affected(&reply.payload).expect("affected"),
+            1
+        );
+
+        let reply = run_delete(&runtime, &del);
+        assert_eq!(reply.kind, MessageKind::DeleteOk);
+        assert_eq!(
+            decode_delete_ok_affected(&reply.payload).expect("affected"),
+            0
         );
     }
 

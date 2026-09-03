@@ -914,13 +914,26 @@ mod tests {
             backup_wal_dir(Path::new("/tmp/reddb")).as_path(),
             Path::new("/tmp/reddb/wal")
         );
+        // These are *local filesystem* prefixes (the remote-key builders
+        // above are the string-joined ones), so the expectation has to be
+        // built with the same platform separator `Path::join` uses — hard
+        // coding `/` for the join while using MAIN_SEPARATOR for the trailing
+        // byte only matched on POSIX.
         assert_eq!(
             backup_snapshot_dir_prefix(Path::new("/tmp/reddb")),
-            format!("/tmp/reddb/snapshots{}", std::path::MAIN_SEPARATOR)
+            format!(
+                "{}{}",
+                Path::new("/tmp/reddb").join("snapshots").display(),
+                std::path::MAIN_SEPARATOR
+            )
         );
         assert_eq!(
             backup_wal_dir_prefix(Path::new("/tmp/reddb")),
-            format!("/tmp/reddb/wal{}", std::path::MAIN_SEPARATOR)
+            format!(
+                "{}{}",
+                Path::new("/tmp/reddb").join("wal").display(),
+                std::path::MAIN_SEPARATOR
+            )
         );
         assert_eq!(remote_database_key("tenant/db/"), "tenant/db/data.rdb");
         assert_eq!(

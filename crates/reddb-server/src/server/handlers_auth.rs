@@ -19,10 +19,10 @@ use crate::auth::{AuthError, AuthStore, Role, UserId};
 use std::collections::BTreeSet;
 
 /// Resolved caller for an admin-only auth endpoint.
-struct AuthCaller {
+pub(crate) struct AuthCaller {
     /// Owner UserId (tenant + username) carried by the validated token.
-    id: UserId,
-    role: crate::auth::Role,
+    pub(crate) id: UserId,
+    pub(crate) role: crate::auth::Role,
 }
 
 impl AuthCaller {
@@ -41,7 +41,7 @@ impl AuthCaller {
 /// Stays out of Agent A's bearer-extractor lane by re-using the same
 /// `Authorization: Bearer` parsing inline; the OAuth-JWT path is
 /// shared with `routing::resolve_bearer_role`.
-fn resolve_auth_caller(
+pub(crate) fn resolve_auth_caller(
     server: &RedDBServer,
     headers: &BTreeMap<String, String>,
 ) -> Option<AuthCaller> {
@@ -87,11 +87,18 @@ impl RedDBServer {
     ///
     /// Creates the first admin user. One-shot, irreversible.
     /// Body: `{ "username": "admin", "password": "secret" }`
-    pub(crate) fn handle_auth_bootstrap(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_auth_bootstrap(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        body: Vec<u8>,
+    ) -> HttpResponse {
         let auth_store = match &self.auth_store {
             Some(store) => store,
             None => return json_error(501, "authentication is not configured"),
         };
+        if let Some(deny) = bootstrap_token_gate(headers.get("x-reddb-bootstrap-token")) {
+            return deny;
+        }
 
         let payload = match parse_json_body(&body) {
             Ok(value) => value,
@@ -325,11 +332,11 @@ impl RedDBServer {
                 return json_error(403, "admin role required to create users");
             }
             None => {
-                // No bearer present: only allowed when require_auth is
-                // off (the routing gate already handled this for the
-                // auth-disabled case). Fall through and treat as
-                // platform admin so existing dev workflows work.
-                if auth_store.is_enabled() && auth_store.config().require_auth {
+                // No bearer present. Principal lifecycle is never an
+                // anonymous operation once the auth store is enabled —
+                // `require_auth=false` only relaxes *data* access, it must
+                // not let an unauthenticated caller mint an admin.
+                if auth_store.is_enabled() {
                     return json_error(401, "authentication required");
                 }
             }
@@ -433,6 +440,13 @@ impl RedDBServer {
                     .iter()
                     .map(|k| {
                         let mut key_obj = Map::new();
+                        key_obj.insert("key_id".to_string(), JsonValue::String(k.key.clone()));
+                        key_obj.insert(
+                            "expires_at".to_string(),
+                            k.expires_at
+                                .map(|deadline| JsonValue::Number(deadline as f64))
+                                .unwrap_or(JsonValue::Null),
+                        );
                         key_obj.insert("name".to_string(), JsonValue::String(k.name.clone()));
                         key_obj.insert("role".to_string(), JsonValue::String(k.role.to_string()));
                         key_obj.insert(
@@ -483,7 +497,9 @@ impl RedDBServer {
                 return json_error(403, "admin role required");
             }
             None => {
-                if auth_store.is_enabled() && auth_store.config().require_auth {
+                // Same rule as `handle_auth_create_user`: deleting a
+                // principal is never anonymous while the store is enabled.
+                if auth_store.is_enabled() {
                     return json_error(401, "authentication required");
                 }
                 tenant_path_override
@@ -517,8 +533,17 @@ impl RedDBServer {
     /// POST /auth/api-keys
     ///
     /// Creates a new API key for a user.
-    /// Body: `{ "username": "alice", "name": "ci-deploy", "role": "write" }`
-    pub(crate) fn handle_auth_create_api_key(&self, body: Vec<u8>) -> HttpResponse {
+    /// Body: `{ "username": "alice", "name": "ci-deploy", "role": "write",
+    ///          "tenant_id": "acme" }`
+    ///
+    /// Authorization: the caller must be the target user (and may not
+    /// request a role above their own), or an admin of the target's tenant
+    /// (a platform admin may target any tenant via `tenant_id`).
+    pub(crate) fn handle_auth_create_api_key(
+        &self,
+        headers: &BTreeMap<String, String>,
+        body: Vec<u8>,
+    ) -> HttpResponse {
         let auth_store = match &self.auth_store {
             Some(store) => store,
             None => return json_error(501, "authentication is not configured"),
@@ -545,11 +570,85 @@ impl RedDBServer {
             }
         };
 
-        match auth_store.create_api_key(&username, &name, role) {
+        let expires_at = match payload.get("expires_in_secs") {
+            None => None,
+            Some(value) => match value.as_u64() {
+                Some(secs) if secs > 0 => Some(unix_now_ms() + secs as u128 * 1000),
+                _ => return json_error(400, "'expires_in_secs' must be a positive integer"),
+            },
+        };
+
+        let caller = match resolve_auth_caller(self, headers) {
+            Some(caller) => caller,
+            None => {
+                if auth_store.is_enabled() {
+                    return json_error(401, "authentication required");
+                }
+                // Auth store present but disabled: legacy open posture.
+                return self
+                    .create_api_key_response(auth_store, None, &username, &name, role, expires_at);
+            }
+        };
+
+        let body_tenant = json_string_field(&payload, "tenant_id");
+        let target_tenant: Option<String> = if caller.is_platform_admin() {
+            body_tenant
+        } else if caller.role.can_admin() {
+            // Tenant-scoped admin: clamp to their own tenant.
+            caller.id.tenant.clone()
+        } else {
+            // Self-service only: same principal, role capped at the caller's.
+            let target = UserId::from_parts(caller.id.tenant.as_deref(), &username);
+            if target != caller.id {
+                return json_error(
+                    403,
+                    "admin role required to create API keys for other users",
+                );
+            }
+            if role > caller.role {
+                return json_error(403, "API key role cannot exceed the caller's role");
+            }
+            caller.id.tenant.clone()
+        };
+
+        self.create_api_key_response(
+            auth_store,
+            target_tenant.as_deref(),
+            &username,
+            &name,
+            role,
+            expires_at,
+        )
+    }
+
+    fn create_api_key_response(
+        &self,
+        auth_store: &AuthStore,
+        tenant: Option<&str>,
+        username: &str,
+        name: &str,
+        role: crate::auth::Role,
+        expires_at: Option<u128>,
+    ) -> HttpResponse {
+        match auth_store.create_api_key_in_tenant_expiring(tenant, username, name, role, expires_at)
+        {
             Ok(api_key) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
+                // The secret is shown here and nowhere else; `key_id` is
+                // what listings and revocation refer to from now on.
                 object.insert("key".to_string(), JsonValue::String(api_key.key.clone()));
+                object.insert(
+                    "key_id".to_string(),
+                    JsonValue::String(crate::auth::store::api_key_credential_id(&api_key.key)),
+                );
+                object.insert(
+                    "expires_at".to_string(),
+                    api_key
+                        .expires_at
+                        .map(|deadline| JsonValue::Number(deadline as f64))
+                        .unwrap_or(JsonValue::Null),
+                );
                 object.insert("name".to_string(), JsonValue::String(api_key.name.clone()));
                 object.insert(
                     "role".to_string(),
@@ -563,12 +662,33 @@ impl RedDBServer {
 
     /// DELETE /auth/api-keys/:key
     ///
-    /// Revokes an API key.
-    pub(crate) fn handle_auth_revoke_api_key(&self, key: &str) -> HttpResponse {
+    /// Revokes an API key. Only the key's owner or an admin of the owner's
+    /// tenant may revoke it; a foreign key is reported as not found so the
+    /// endpoint is not an existence oracle.
+    pub(crate) fn handle_auth_revoke_api_key(
+        &self,
+        headers: &BTreeMap<String, String>,
+        key: &str,
+    ) -> HttpResponse {
         let auth_store = match &self.auth_store {
             Some(store) => store,
             None => return json_error(501, "authentication is not configured"),
         };
+
+        if auth_store.is_enabled() {
+            let Some(caller) = resolve_auth_caller(self, headers) else {
+                return json_error(401, "authentication required");
+            };
+            let Some((owner, _)) = auth_store.validate_token_full(key) else {
+                return json_error(404, "API key not found");
+            };
+            let may_revoke = owner == caller.id
+                || caller.is_platform_admin()
+                || (caller.role.can_admin() && caller.id.tenant == owner.tenant);
+            if !may_revoke {
+                return json_error(404, "API key not found");
+            }
+        }
 
         match auth_store.revoke_api_key(key) {
             Ok(()) => json_ok("API key revoked"),
@@ -1142,4 +1262,44 @@ fn check_error_json(index: usize, message: &str) -> JsonValue {
         crate::json_field::SerializedJsonField::tainted(message),
     );
     JsonValue::Object(obj)
+}
+
+/// Milliseconds since the Unix epoch, for request-supplied expiries.
+fn unix_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// Shared secret an operator can demand on the bootstrap call.
+///
+/// Bootstrap is first-caller-wins and reachable before any account
+/// exists, so on a network-exposed listener whoever reaches it first owns
+/// the store. With `REDDB_BOOTSTRAP_TOKEN` (or its `_FILE` companion) set,
+/// the caller must present it in `x-reddb-bootstrap-token` (HTTP) or the
+/// gRPC metadata key of the same name. Unset keeps today's behaviour.
+pub(crate) fn bootstrap_token_expected() -> Option<String> {
+    crate::utils::env_with_file_fallback("REDDB_BOOTSTRAP_TOKEN")
+}
+
+pub(crate) fn bootstrap_token_matches(presented: Option<&str>) -> bool {
+    match bootstrap_token_expected() {
+        None => true,
+        Some(expected) => {
+            let presented = presented.unwrap_or_default();
+            crate::crypto::constant_time_eq(presented.as_bytes(), expected.as_bytes())
+        }
+    }
+}
+
+fn bootstrap_token_gate(presented: Option<&String>) -> Option<HttpResponse> {
+    if bootstrap_token_matches(presented.map(String::as_str)) {
+        None
+    } else {
+        Some(json_error(
+            403,
+            "bootstrap requires the token configured in REDDB_BOOTSTRAP_TOKEN",
+        ))
+    }
 }

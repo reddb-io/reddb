@@ -388,15 +388,30 @@ impl RedDBRuntime {
     }
 
     /// PLAN.md Phase 6.3 — whether at-rest encryption is configured.
-    /// Reads `RED_ENCRYPTION_KEY` / `RED_ENCRYPTION_KEY_FILE` lazily;
-    /// returns `("enabled", None)` when a key is loadable, `("error", Some(msg))`
-    /// when the operator set the env but it doesn't parse, and
-    /// `("disabled", None)` when no key is configured. The pager
-    /// hookup is deferred — this accessor surfaces the operator's
-    /// intent for /admin/status without yet using the key in writes.
+    ///
+    /// Reads `RED_ENCRYPTION_KEY` / `RED_ENCRYPTION_KEY_FILE` lazily and
+    /// reports what is actually true:
+    ///
+    ///   * `configured_not_active` — a key is loadable, but the pager still
+    ///     opens with `encryption: None` (see `storage::engine::database`),
+    ///     so pages are written in plaintext. This used to report `enabled`,
+    ///     which told an operator on `/admin/status` that their data was
+    ///     encrypted at rest when it was not — the single worst thing a
+    ///     security status field can do.
+    ///   * `error` — the operator set the env but it does not parse.
+    ///   * `disabled` — no key configured.
+    ///
+    /// When the pager hookup lands this collapses back to `enabled`.
     pub fn encryption_at_rest_status(&self) -> (&'static str, Option<String>) {
         match crate::crypto::page_encryption::key_from_env() {
-            Ok(Some(_)) => ("enabled", None),
+            Ok(Some(_)) => (
+                "configured_not_active",
+                Some(
+                    "an encryption key is configured but the pager does not yet \
+                     encrypt pages; data on disk is plaintext"
+                        .to_string(),
+                ),
+            ),
             Ok(None) => ("disabled", None),
             Err(err) => ("error", Some(err)),
         }

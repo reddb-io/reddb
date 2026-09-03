@@ -25,7 +25,7 @@ jobs:
       rc_version: ${{ steps.plan.outputs.rc_version }}
       rc_tag: ${{ steps.plan.outputs.rc_tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Compute release candidate version
         id: plan
         env:
@@ -57,15 +57,15 @@ jobs:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: mozilla-actions/sccache-action@v0.0.11
-      - uses: rui314/setup-mold@v1
-      - uses: actions/setup-node@v7
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '22'
 
@@ -86,7 +86,7 @@ jobs:
       - name: Regenerate lockfile after version sync
         run: cargo generate-lockfile
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: rc-linux-x86_64
           cache-on-failure: "true"
@@ -117,7 +117,7 @@ jobs:
           set +e; ./red_client-linux-x86_64; rc=$?; set -e
           [[ "$rc" == "1" ]] || { echo "red_client smoke: expected exit 1, got $rc"; exit 1; }
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: linux-x86_64
           path: |
@@ -140,11 +140,11 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Syft
         id: syft
-        uses: anchore/sbom-action/download-syft@v0.24.0
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           syft-version: v1.46.0
 
@@ -170,7 +170,7 @@ jobs:
           test -s "release-sbom/red-${RELEASE_TAG}.spdx.json"
           test -s "release-sbom/red-${RELEASE_TAG}.cyclonedx.json"
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: release
           merge-multiple: true
@@ -195,12 +195,12 @@ jobs:
           cat release/checksums.txt
 
       - name: Attest release candidate artifacts
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-checksums: release/SHA256SUMS
 
       - name: Create pre-release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ needs.plan.outputs.rc_tag }}
           name: RedDB ${{ needs.plan.outputs.rc_tag }}
@@ -231,8 +231,8 @@ jobs:
     needs: [plan, publish-github]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -267,12 +267,12 @@ jobs:
     # internal path dependency cycles (notably wire <-> grpc-proto) that make exact
     # RC version rewriting unsafe; stable release publishing remains authoritative.
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '22'
 

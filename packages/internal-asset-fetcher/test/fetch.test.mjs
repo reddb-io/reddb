@@ -12,9 +12,18 @@ import { verifySha256, sha256Hex, ChecksumMismatchError } from '../src/checksum.
 import {
   downloadFollowingRedirects,
   AssetNotFoundError,
+  DisallowedHostError,
   HttpError,
   TooManyRedirectsError,
 } from '../src/download.js'
+import { sha256FromSumsFile } from '../src/index.js'
+
+/**
+ * The transport tests drive a local http server. Production downloads are
+ * https-only on a GitHub allowlist, so the suite opts into loopback
+ * explicitly rather than the policy being loose enough to admit it.
+ */
+const LOOPBACK = { allowedHosts: new Set(['127.0.0.1']) }
 
 let passed = 0
 let failed = 0
@@ -77,6 +86,70 @@ function startServer(handler) {
 function stopServer(server) {
   return new Promise((resolve) => server.close(() => resolve()))
 }
+
+// -----------------------------------------------------------------------
+// Download policy — the bytes fetched here are written to disk and executed
+// by postinstall, so where they may come from is a security boundary.
+
+await test('downloadFollowingRedirects refuses non-https URLs under the default policy', async () => {
+  await assertRejects(
+    downloadFollowingRedirects('http://github.com/reddb-io/reddb/releases/download/v1/red'),
+    (err) => err instanceof DisallowedHostError && err.code === 'DISALLOWED_HOST',
+    'plain http is refused',
+  )
+})
+
+await test('downloadFollowingRedirects refuses hosts outside the allowlist', async () => {
+  await assertRejects(
+    downloadFollowingRedirects('https://attacker.example/red'),
+    (err) => err instanceof DisallowedHostError,
+    'a foreign host is refused',
+  )
+})
+
+await test('a redirect off the allowlist is refused mid-chain', async () => {
+  // The allowlist has to be re-checked per hop: a redirect is exactly how an
+  // attacker would leave it after a legitimate first request.
+  const { server, url } = await startServer((req, res) => {
+    res.writeHead(302, { Location: 'https://attacker.example/evil' })
+    res.end()
+  })
+  try {
+    await assertRejects(
+      downloadFollowingRedirects(url('/start'), LOOPBACK),
+      (err) => err instanceof DisallowedHostError,
+      'redirect target is checked too',
+    )
+  } finally {
+    await stopServer(server)
+  }
+})
+
+await test('sha256FromSumsFile finds the digest for one asset', () => {
+  const sums = [
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  red-linux-aarch64',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  red-linux-x86_64',
+  ].join('\n')
+  assertEqual(
+    sha256FromSumsFile(sums, 'red-linux-x86_64'),
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'matches the right line',
+  )
+  assertEqual(sha256FromSumsFile(sums, 'red-macos-x86_64'), null, 'absent asset returns null')
+})
+
+await test('fetchReleaseAsset rejects a repo that is not owner/name', async () => {
+  // `repo` comes from REDDB_POSTINSTALL_REPO and is interpolated into the
+  // download URL, so a value carrying a path or authority would redirect the
+  // download somewhere else.
+  for (const repo of ['evil.example/x/../..', 'not-a-repo', 'a/b/c', 'https://evil/x']) {
+    await assertRejects(
+      fetchReleaseAsset({ repo, tag: 'v1.0.0', platform: 'linux', arch: 'x64', binName: 'red' }),
+      (err) => err instanceof TypeError,
+      `repo ${repo} is refused`,
+    )
+  }
+})
 
 console.log('@reddb-io/internal-asset-fetcher tests')
 
@@ -176,7 +249,7 @@ await test('downloadFollowingRedirects returns 200 body as Buffer', async () => 
     res.end(payload)
   })
   try {
-    const got = await downloadFollowingRedirects(url('/asset'))
+    const got = await downloadFollowingRedirects(url('/asset'), LOOPBACK)
     assert(Buffer.isBuffer(got), 'returns Buffer')
     assert(got.equals(payload), 'body bytes match')
   } finally {
@@ -208,7 +281,7 @@ await test('downloadFollowingRedirects follows a 3-hop redirect chain', async ()
     res.end()
   })
   try {
-    const got = await downloadFollowingRedirects(url('/start'))
+    const got = await downloadFollowingRedirects(url('/start'), LOOPBACK)
     assert(got.equals(payload), 'final body matches')
     assertEqual(hits, 3, 'exactly 3 hops')
   } finally {
@@ -224,7 +297,7 @@ await test('downloadFollowingRedirects raises AssetNotFoundError on 404', async 
   })
   try {
     await assertRejects(
-      downloadFollowingRedirects(startUrl(port)),
+      downloadFollowingRedirects(startUrl(port), LOOPBACK),
       (err) => err instanceof AssetNotFoundError && err.code === 'ASSET_NOT_FOUND',
       '404 maps to AssetNotFoundError',
     )
@@ -240,7 +313,7 @@ await test('downloadFollowingRedirects raises HttpError on non-404 non-2xx', asy
   })
   try {
     await assertRejects(
-      downloadFollowingRedirects(url('/x')),
+      downloadFollowingRedirects(url('/x'), LOOPBACK),
       (err) => err instanceof HttpError && err.code === 'HTTP_ERROR' && err.status === 503,
       '503 maps to HttpError',
     )
@@ -257,7 +330,7 @@ await test('downloadFollowingRedirects raises TooManyRedirectsError after 5 hops
   })
   try {
     await assertRejects(
-      downloadFollowingRedirects(url('/r/0')),
+      downloadFollowingRedirects(url('/r/0'), LOOPBACK),
       (err) => err instanceof TooManyRedirectsError && err.code === 'TOO_MANY_REDIRECTS',
       'redirect cycle is bounded',
     )

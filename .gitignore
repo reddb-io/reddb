@@ -66,3 +66,7 @@ crates/*/tmp/
 
 # RedSkills wiki — local-only, never committed
 .red/wiki/
+
+# Lease artifacts left behind by failover crash-injection tests, which write
+# relative to the crate dir rather than a temp dir.
+crates/reddb-server/leases/

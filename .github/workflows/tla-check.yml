@@ -58,17 +58,17 @@ jobs:
           - OwnershipTransition
     name: model-check (${{ matrix.spec }})
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up JDK
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Cache tla2tools.jar
         id: cache-tla
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: tools/tla2tools.jar
           key: tla2tools-${{ env.TLA_TOOLS_VERSION }}-${{ env.TLA_TOOLS_SHA256 }}

@@ -870,7 +870,7 @@ impl fmt::Display for StorageIntegrityError {
         }
         write!(
             f,
-            ": {}. RedDB refused to serve unverified bytes; run scrub when available, or use red salvage to recover trusted rows.",
+            ": {}. RedDB refused to serve unverified bytes; run the `SCRUB` statement to classify the fault, or `red salvage` to recover trusted rows.",
             self.detail
         )
     }
@@ -917,6 +917,19 @@ pub enum RedDBError {
         current: usize,
     },
     Internal(String),
+}
+
+/// The text a wire client may see for `err`.
+///
+/// `Io` and `Internal` carry OS messages, filesystem paths and storage
+/// invariants meant for the operator's log, not for a peer; every other
+/// variant is a statement-level message the caller needs verbatim.
+pub fn client_facing_message(err: &RedDBError) -> String {
+    match err {
+        RedDBError::Io(inner) => format!("io error: {:?}", inner.kind()),
+        RedDBError::Internal(_) => "internal error; see the server log".to_string(),
+        other => other.to_string(),
+    }
 }
 
 impl fmt::Display for RedDBError {
@@ -1013,4 +1026,22 @@ pub mod prelude {
         QueryPlanner, RedDBError, RedDBOptions, RedDBResult, SchemaManifest, StorageMode,
         REDDB_FORMAT_VERSION, REDDB_PROTOCOL_VERSION,
     };
+}
+
+#[cfg(test)]
+mod client_facing_message_tests {
+    use super::{client_facing_message, RedDBError};
+
+    #[test]
+    fn client_facing_message_hides_io_and_internal_detail() {
+        let io = RedDBError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "/var/lib/reddb/data.rdb: No such file",
+        ));
+        assert_eq!(client_facing_message(&io), "io error: NotFound");
+        let internal = RedDBError::Internal("pager invariant broke at /srv/db.wal".to_string());
+        assert!(!client_facing_message(&internal).contains("/srv"));
+        let query = RedDBError::Query("unknown column `x`".to_string());
+        assert_eq!(client_facing_message(&query), query.to_string());
+    }
 }

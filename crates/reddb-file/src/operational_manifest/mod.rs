@@ -627,7 +627,7 @@ impl<V: Vfs> OperationalManifest<V> {
 
     fn prepare_collection_file_by_name(&self, file_name: &str) -> io::Result<()> {
         let path = self.collections_dir().join(file_name);
-        let mut file = self.vfs.open(&path, OpenMode::create_keep_write())?;
+        let file = self.vfs.open(&path, OpenMode::create_keep_write())?;
         file.sync_all()?;
         self.vfs.sync_dir(&self.collections_dir())
     }

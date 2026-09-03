@@ -116,7 +116,7 @@ impl fmt::Display for Role {
 /// verifier (used by the v2 wire handshake). Both derive from the
 /// same plaintext at user creation; the SCRAM path never sees
 /// plaintext or the salted password again.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct User {
     pub username: String,
     /// Tenant scope. `None` = platform-wide (the bootstrap admin and any
@@ -197,13 +197,20 @@ impl fmt::Display for UserId {
 /// A persistent API key bound to a user.
 #[derive(Debug, Clone)]
 pub struct ApiKey {
-    /// Token value: `"rk_<hex32>"`
+    /// Credential id: `"rkh_<sha256 hex of the secret>"`.
+    ///
+    /// The secret itself (`"rk_<hex64>"`) exists only in the value that
+    /// `create_api_key*` returns — the store, its index and the vault hold
+    /// the id, so a dumped vault or a heap snapshot yields nothing a client
+    /// can present.
     pub key: String,
     /// Human-readable label.
     pub name: String,
     /// Role granted by this key (cannot exceed user's role).
     pub role: Role,
     pub created_at: u128,
+    /// Absolute expiry (ms since epoch); `None` never expires.
+    pub expires_at: Option<u128>,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +218,7 @@ pub struct ApiKey {
 // ---------------------------------------------------------------------------
 
 /// An ephemeral session created by login.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Session {
     /// Token value: `"rs_<hex32>"`
     pub token: String,
@@ -371,5 +378,40 @@ mod tests {
 
         let err = AuthError::InvalidCredentials;
         assert!(err.to_string().contains("invalid"));
+    }
+}
+
+// Credential-bearing structs print their secrets redacted. A derived
+// `Debug` would put the password hash, the SCRAM verifier and live
+// session tokens into any `{:?}` log line or panic message.
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("username", &self.username)
+            .field("tenant_id", &self.tenant_id)
+            .field("password_hash", &"<redacted>")
+            .field(
+                "scram_verifier",
+                &self.scram_verifier.as_ref().map(|_| "<redacted>"),
+            )
+            .field("role", &self.role)
+            .field("api_keys", &self.api_keys.len())
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("token", &"<redacted>")
+            .field("username", &self.username)
+            .field("tenant_id", &self.tenant_id)
+            .field("role", &self.role)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
     }
 }

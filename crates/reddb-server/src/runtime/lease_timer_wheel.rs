@@ -305,10 +305,16 @@ mod tests {
         let wheel_clone = Arc::clone(&wheel);
 
         // Schedule at t+50, then immediately reschedule to t+150.
-        wheel.schedule("x".to_string(), Instant::now() + ms(50));
-        wheel.schedule("x".to_string(), Instant::now() + ms(150));
-
+        //
+        // `start` is the origin both deadlines are computed from. Taking it
+        // *after* scheduling (as this test used to) measured the window from
+        // a later instant than the deadline, so `fired - start` came out just
+        // under 150 ms and the assertion below failed whenever the scheduling
+        // calls were slow enough to matter — a flake under parallel test load.
         let start = Instant::now();
+        wheel.schedule("x".to_string(), start + ms(50));
+        wheel.schedule("x".to_string(), start + ms(150));
+
         let t = thread::spawn(move || {
             wheel_clone.run_until_shutdown(move |_id| {
                 fire_times_clone.lock().unwrap().push(Instant::now());

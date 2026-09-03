@@ -29,31 +29,31 @@ final class Sql {
 
     static String kvKeySegment(String value) {
         if (!value.isEmpty() && allIdentChars(value)) return value;
-        return "'" + value.replace("'", "''") + "'";
+        return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'";
     }
 
     static String kvValueLiteral(Object value) {
         if (value == null) return "NULL";
         if (value instanceof Boolean b) return b ? "true" : "false";
         if (value instanceof Number n) return n.toString();
-        if (value instanceof String s) return "'" + s.replace("'", "''") + "'";
+        if (value instanceof String s) return "'" + s.replace("\\", "\\\\").replace("'", "''") + "'";
         try {
             String s = JSON.writeValueAsString(value);
-            return "'" + s.replace("'", "''") + "'";
+            return "'" + s.replace("\\", "\\\\").replace("'", "''") + "'";
         } catch (JsonProcessingException e) {
             throw new HelperException.InvalidArgument(e.getMessage());
         }
     }
 
     static String kvTagLiteral(String tag) {
-        return "'" + tag.replace("'", "''") + "'";
+        return "'" + tag.replace("\\", "\\\\").replace("'", "''") + "'";
     }
 
     static String queueValueLiteral(Object value) {
         if (value == null) return "NULL";
         if (value instanceof Boolean b) return b ? "true" : "false";
         if (value instanceof Number n) return n.toString();
-        if (value instanceof String s) return "'" + s.replace("'", "''") + "'";
+        if (value instanceof String s) return "'" + s.replace("\\", "\\\\").replace("'", "''") + "'";
         try {
             return JSON.writeValueAsString(value);
         } catch (JsonProcessingException e) {
@@ -66,7 +66,7 @@ final class Sql {
     static String jsonLiteral(Object value) {
         try {
             String s = JSON.writeValueAsString(value);
-            return "'" + s.replace("'", "''") + "'";
+            return "'" + s.replace("\\", "\\\\").replace("'", "''") + "'";
         } catch (JsonProcessingException e) {
             throw new HelperException.InvalidArgument(e.getMessage());
         }

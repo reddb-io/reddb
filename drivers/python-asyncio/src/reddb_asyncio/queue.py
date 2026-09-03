@@ -125,7 +125,7 @@ def _queue_value_literal(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        return "'" + value.replace("'", "''") + "'"
+        return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
     return _json.dumps(value, separators=(",", ":"))
 
 

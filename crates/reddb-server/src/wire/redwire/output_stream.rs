@@ -199,7 +199,7 @@ pub async fn run_output_stream(
                 Ok(f) => f,
                 Err(_) => return,
             };
-            send.send_frame(frame);
+            send.send_frame(frame).await;
             return;
         }
     };
@@ -215,7 +215,7 @@ pub async fn run_output_stream(
         Ok(f) => f,
         Err(_) => return,
     };
-    send.send_frame(ack);
+    send.send_frame(ack).await;
 
     // Materialise.
     let result = super::session::execute_with_redwire_context(&operation_context, role, || {
@@ -270,7 +270,7 @@ pub async fn run_output_stream(
                         Ok(f) => f,
                         Err(_) => break,
                     };
-                send.send_frame(frame);
+                send.send_frame(frame).await;
                 seq += 1;
                 row_count += 1;
             }
@@ -292,7 +292,7 @@ pub async fn run_output_stream(
             &code,
             &message,
         ) {
-            send.send_frame(frame);
+            send.send_frame(frame).await;
         }
     }
 
@@ -307,7 +307,7 @@ pub async fn run_output_stream(
         lease.snapshot_lsn,
         cancelled,
     ) {
-        send.send_frame(frame);
+        send.send_frame(frame).await;
     }
 }
 
@@ -318,20 +318,20 @@ pub async fn run_output_stream(
 /// (AC #2 — interleaved chunks for two streams on one connection).
 #[derive(Clone)]
 pub struct FrameTx {
-    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 }
 
 impl FrameTx {
-    pub fn new(tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) -> Self {
+    pub fn new(tx: tokio::sync::mpsc::Sender<Vec<u8>>) -> Self {
         Self { tx }
     }
 
     /// Encode + enqueue. Drops silently if the receiver has been
     /// dropped (connection torn down); the worker's next iteration
     /// will hit cancellation / EOF and exit naturally.
-    pub fn send_frame(&self, frame: Frame) {
+    pub async fn send_frame(&self, frame: Frame) {
         let bytes = encode_frame(&frame);
-        let _ = self.tx.send(bytes);
+        let _ = self.tx.send(bytes).await;
     }
 }
 

@@ -155,7 +155,7 @@ def kv_key_segment(value: Any) -> str:
     key = str(value)
     if key and all(ch.isalnum() or ch == "_" for ch in key):
         return key
-    return "'" + key.replace("'", "''") + "'"
+    return "'" + key.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def kv_value_literal(value: Any) -> str:
@@ -168,12 +168,12 @@ def kv_value_literal(value: Any) -> str:
     if isinstance(value, (dict, list, tuple)):
         import json as _json
 
-        return "'" + _json.dumps(value, separators=(",", ":")).replace("'", "''") + "'"
-    return "'" + str(value).replace("'", "''") + "'"
+        return "'" + _json.dumps(value, separators=(",", ":")).replace("\\", "\\\\").replace("'", "''") + "'"
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def kv_tag_literal(value: Any) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def _rows(result: Any) -> list[dict[str, Any]]:

@@ -28,7 +28,7 @@ def sql_identifier_path(value: Any) -> str:
 
 
 def sql_string(value: Any) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def sql_json_literal(value: Any) -> str:

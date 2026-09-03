@@ -50,7 +50,13 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     // to rebuild the binary. Returns None unchanged when the shape
     // / filter / index don't qualify, so we fall through to the
     // standard executor without semantic drift.
-    if !direct_scan_disabled() {
+    // The zero-copy path executes the scan without the privilege, column
+    // policy, RLS or tenant gates the standard executor applies, so it is
+    // only taken when no identity is installed (auth disabled / embedded).
+    // Authenticated sessions always go through the gated path.
+    if !direct_scan_disabled()
+        && crate::runtime::execution_context::current_auth_identity_for_audit().is_none()
+    {
         if let Some(resp) = super::query_direct::try_handle_query_binary_direct(runtime, sql) {
             return resp;
         }

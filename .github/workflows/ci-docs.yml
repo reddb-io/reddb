@@ -81,13 +81,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@v1
-      - uses: Swatinem/rust-cache@v2
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: ci-docs-quickstarts-rust-1.91.0
           cache-on-failure: "true"

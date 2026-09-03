@@ -15,6 +15,7 @@ use crate::auth::{AuthConfig, Role};
 use crate::json::{
     from_str as json_from_str, to_string as json_to_string, Map, Value as JsonValue,
 };
+use crate::mcp::capability::McpCapability;
 use crate::mcp::{protocol, tools};
 use crate::presentation::entity_json::created_entity_output_json;
 use crate::presentation::entity_json::storage_value_to_json;
@@ -35,6 +36,10 @@ pub struct McpServer {
     runtime: RedDBRuntime,
     auth_store: Arc<AuthStore>,
     initialized: bool,
+    /// What this session may do. Read-only unless the operator opted in —
+    /// see [`crate::mcp::capability`] for why the tool list, not the
+    /// transport, is the boundary that matters here.
+    capability: McpCapability,
 }
 
 impl McpServer {
@@ -50,6 +55,33 @@ impl McpServer {
             runtime,
             auth_store,
             initialized: false,
+            capability: McpCapability::default(),
+        }
+    }
+
+    /// Set the session's capability level. The default is read-only; the
+    /// CLI raises it from `--allow-write` / `--allow-admin`.
+    pub fn with_capability(mut self, capability: McpCapability) -> Self {
+        self.capability = capability;
+        self
+    }
+
+    /// The session's capability level.
+    pub fn capability(&self) -> McpCapability {
+        self.capability
+    }
+
+    /// Refuse `tool_name` when the session is below the level it needs.
+    fn check_tool_capability(&self, tool_name: &str) -> Result<(), String> {
+        let required = crate::mcp::capability::tool_capability(tool_name);
+        if self.capability.permits(required) {
+            Ok(())
+        } else {
+            Err(crate::mcp::capability::refusal(
+                &format!("tool `{tool_name}`"),
+                self.capability,
+                required,
+            ))
         }
     }
 
@@ -281,6 +313,7 @@ impl McpServer {
         let args = params.and_then(|p| p.get("arguments")).unwrap_or(&empty);
 
         let result = tools::authorize_tool(name, tools::McpIdentityPosture::EmbeddedImplicitAdmin)
+            .and_then(|_| self.check_tool_capability(name))
             .and_then(|_| match name {
                 "reddb_query" => self.tool_query(args),
                 "reddb_collections" => self.tool_collections(),
@@ -364,6 +397,19 @@ impl McpServer {
             .get("sql")
             .and_then(|v| v.as_str())
             .ok_or("missing required field 'sql'")?;
+
+        // `reddb_query` is a read-only *tool* that accepts arbitrary SQL, so
+        // the statement decides what it needs. Without this a read-only
+        // session could send `DROP COLLECTION` through the one tool it was
+        // allowed to call.
+        let required = crate::mcp::capability::statement_capability(sql);
+        if !self.capability.permits(required) {
+            return Err(crate::mcp::capability::refusal(
+                "this statement",
+                self.capability,
+                required,
+            ));
+        }
 
         // Optional positional `$N` bind parameters. MCP, stdio, and HTTP
         // all decode through the Request module's transport-neutral codec.
@@ -1097,22 +1143,33 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Build UPDATE SQL and execute via runtime
+        // Build UPDATE SQL and execute via runtime. The collection and the
+        // column names are spliced as identifiers, so they must be bare
+        // identifiers; the values go through the SQL literal renderer, which
+        // escapes quotes and backslashes the way the lexer reads them.
+        use crate::server::handlers_query::is_safe_sql_identifier;
+        if !is_safe_sql_identifier(collection) {
+            return Err(format!(
+                "invalid collection name '{collection}': expected [A-Za-z_][A-Za-z0-9_]*"
+            ));
+        }
         let mut sql = format!("UPDATE {} SET ", collection);
         if let Some(obj) = set_obj.as_object() {
             let assignments: Vec<String> = obj
                 .iter()
                 .map(|(k, v)| {
-                    let val_str = match v {
-                        JsonValue::String(s) => format!("'{}'", s),
-                        JsonValue::Integer(n) => n.to_string(),
-                        JsonValue::Number(n) => n.to_string(),
-                        JsonValue::Bool(b) => b.to_string(),
-                        _ => format!("'{}'", v),
-                    };
-                    format!("{} = {}", k, val_str)
+                    if !is_safe_sql_identifier(k) {
+                        return Err(format!(
+                            "invalid column name '{k}': expected [A-Za-z_][A-Za-z0-9_]*"
+                        ));
+                    }
+                    Ok(format!(
+                        "{} = {}",
+                        k,
+                        crate::rpc_stdio::value_to_sql_literal(v)
+                    ))
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
             sql.push_str(&assignments.join(", "));
         } else {
             return Err("'set' must be a JSON object".to_string());
@@ -1827,9 +1884,113 @@ mod tests {
 
     static ASK_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// The existing suite exercises the whole tool surface (DDL, inserts,
+    /// vault, auth), so it runs at the level an operator would opt into with
+    /// `--allow-admin`. `read_only_session_*` below cover the default.
     fn make_server() -> McpServer {
         let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+        McpServer::new(rt).with_capability(McpCapability::Admin)
+    }
+
+    /// A session at the shipped default: no flags.
+    fn make_read_only_server() -> McpServer {
+        let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
         McpServer::new(rt)
+    }
+
+    #[test]
+    fn update_tool_renders_values_as_literals_and_refuses_crafted_identifiers() {
+        let srv = make_server();
+        srv.tool_query(&parse_json(
+            r#"{"sql":"CREATE TABLE mcp_upd (id INTEGER, name TEXT)"}"#,
+        ))
+        .expect("create");
+        srv.tool_query(&parse_json(
+            r#"{"sql":"INSERT INTO mcp_upd (id, name) VALUES (1, 'a')"}"#,
+        ))
+        .expect("seed");
+        // A quote inside the value used to close the literal and run the
+        // remainder as SQL.
+        srv.tool_update(&parse_json(
+            r#"{"collection":"mcp_upd","set":{"name":"o'brien"},"where_filter":"id = 1"}"#,
+        ))
+        .expect("escaped value");
+        let rows = srv
+            .tool_query(&parse_json(
+                r#"{"sql":"SELECT name FROM mcp_upd WHERE id = 1"}"#,
+            ))
+            .expect("read back");
+        assert!(rows.contains("o'brien"), "{rows}");
+
+        for args in [
+            r#"{"collection":"mcp_upd; DROP TABLE mcp_upd","set":{"name":"x"}}"#,
+            r#"{"collection":"mcp_upd","set":{"name = 'x' WHERE 1=1 --":"x"}}"#,
+        ] {
+            let err = srv
+                .tool_update(&parse_json(args))
+                .expect_err("crafted identifier must be refused");
+            assert!(err.contains("invalid"), "{err}");
+        }
+    }
+
+    #[test]
+    fn read_only_session_refuses_mutating_tools() {
+        // The MCP transport has no second principal to authenticate, so the
+        // tool list is the boundary: a model steered by injected content
+        // must not reach `drop_collection` or the vault by default.
+        let srv = make_read_only_server();
+        assert_eq!(srv.capability(), McpCapability::ReadOnly);
+        for tool in [
+            "reddb_drop_collection",
+            "reddb_delete",
+            "reddb_insert_row",
+            "reddb_vault_unseal",
+            "reddb_auth_create_api_key",
+        ] {
+            let err = srv
+                .check_tool_capability(tool)
+                .expect_err("mutating tool must be refused by default");
+            assert!(err.contains("read-only"), "{tool}: {err}");
+        }
+        // Reads still work, otherwise the default is useless.
+        srv.check_tool_capability("reddb_query")
+            .expect("reads stay available");
+        srv.check_tool_capability("reddb_collections")
+            .expect("introspection stays available");
+    }
+
+    #[test]
+    fn read_only_session_refuses_mutating_sql_through_the_query_tool() {
+        // `reddb_query` is a read tool that takes arbitrary SQL, so the
+        // statement has to be classified too — otherwise the one tool a
+        // read-only session may call is a full write channel.
+        let srv = make_read_only_server();
+        let err = srv
+            .tool_query(&parse_json(r#"{"sql":"DROP TABLE users"}"#))
+            .expect_err("DDL must be refused in a read-only session");
+        assert!(err.contains("write"), "{err}");
+
+        let err = srv
+            .tool_query(&parse_json(r#"{"sql":"SHOW SECRETS"}"#))
+            .expect_err("secret reads must require admin");
+        assert!(err.contains("admin"), "{err}");
+
+        srv.tool_query(&parse_json(r#"{"sql":"SELECT 1 AS one"}"#))
+            .expect("plain reads still work");
+    }
+
+    #[test]
+    fn allow_write_does_not_unlock_vault_or_auth_tools() {
+        // `--allow-write` is for data and schema. Credentials need the
+        // separate, louder opt-in.
+        let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+        let srv = McpServer::new(rt).with_capability(McpCapability::Write);
+        srv.check_tool_capability("reddb_insert_row")
+            .expect("writes are enabled");
+        let err = srv
+            .check_tool_capability("reddb_vault_get")
+            .expect_err("vault stays behind --allow-admin");
+        assert!(err.contains("admin"), "{err}");
     }
 
     fn parse_json(s: &str) -> JsonValue {

@@ -92,12 +92,24 @@ struct AuthStoreControlEvents {
 ///
 /// The `certificate` is the hex-encoded string the admin must save --
 /// it is the ONLY way to unseal the vault after a restart.
-#[derive(Debug)]
 pub struct BootstrapResult {
     pub user: User,
     pub api_key: ApiKey,
     /// Certificate hex string.  `None` when vault is not configured.
     pub certificate: Option<String>,
+}
+
+impl std::fmt::Debug for BootstrapResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BootstrapResult")
+            .field("user", &self.user)
+            .field("api_key", &"<redacted>")
+            .field(
+                "certificate",
+                &self.certificate.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,8 +339,20 @@ fn api_key_resource(api_key_id: &str) -> String {
     format!("apikey:{api_key_id}")
 }
 
+/// Hex digest that identifies an API key in control events and, with the
+/// `rkh_` prefix, at rest. Accepts either the secret or the stored id, so
+/// every entry point can take whichever the caller holds.
 fn api_key_id(key: &str) -> String {
-    hex::encode(sha256(key.as_bytes()))
+    match key.strip_prefix("rkh_") {
+        Some(hex) => hex.to_string(),
+        None => hex::encode(sha256(key.as_bytes())),
+    }
+}
+
+/// Stored form of an API key: `rkh_<sha256(secret)>`. The secret is only
+/// ever compared by hashing it and looking the result up.
+pub(crate) fn api_key_credential_id(token: &str) -> String {
+    format!("rkh_{}", api_key_id(token))
 }
 
 fn password_evidence() -> Sensitivity {
@@ -587,8 +611,13 @@ impl AuthStore {
         }
 
         let user = self.create_user_in_tenant_unaudited(None, username, password, Role::Admin)?;
-        let key =
-            self.create_api_key_in_tenant_unaudited(None, username, "bootstrap", Role::Admin)?;
+        let key = self.create_api_key_in_tenant_unaudited(
+            None,
+            username,
+            "bootstrap",
+            Role::Admin,
+            None,
+        )?;
 
         // Generate a certificate-based keypair and re-seal the vault.
         let certificate = if let Some(ref pager) = self.pager {
@@ -704,13 +733,7 @@ impl AuthStore {
                     "bootstrapped admin user from REDDB_USERNAME/REDDB_PASSWORD"
                 );
                 if let Some(ref cert) = result.certificate {
-                    // Certificate must be readable by the operator — keep it
-                    // in the log stream but print raw to stderr too so it
-                    // survives even if the log file gets rotated.
-                    eprintln!("[reddb] CERTIFICATE: {}", cert);
-                    tracing::warn!(
-                        "vault certificate issued — save it: ONLY way to unseal after restart"
-                    );
+                    deliver_bootstrap_certificate(cert);
                 }
                 Some(result)
             }
@@ -1085,8 +1108,16 @@ impl AuthStore {
             .write()
             .unwrap_or_else(|e| e.into_inner());
 
-        for user in state.users {
+        for mut user in state.users {
             let id = UserId::from_parts(user.tenant_id.as_deref(), &user.username);
+            // A vault written before keys were hashed at rest holds the
+            // secret itself. Hash it on the way in; the next persist
+            // rewrites the line and the secret is gone from disk.
+            for key in &mut user.api_keys {
+                if !key.key.starts_with("rkh_") {
+                    key.key = api_key_credential_id(&key.key);
+                }
+            }
             // Register API keys in the index.
             for key in &user.api_keys {
                 idx.insert(key.key.clone(), (id.clone(), key.role));
@@ -1277,7 +1308,13 @@ impl AuthStore {
             return None;
         }
         let users = self.users.read().ok()?;
-        users.get(id).and_then(|u| u.scram_verifier.clone())
+        // A disabled account keeps its verifier (re-enable restores it)
+        // but must not authenticate; returning `None` here makes the
+        // handshake use the dummy verifier, so timing stays uniform.
+        users
+            .get(id)
+            .filter(|u| u.enabled)
+            .and_then(|u| u.scram_verifier.clone())
     }
 
     /// Backwards-compatible shim for the v2 wire bootstrap path: looks
@@ -1653,6 +1690,28 @@ impl AuthStore {
         Ok(())
     }
 
+    /// Administrative password reset (`ALTER USER … PASSWORD '…'`): no
+    /// old-password check. Rehashes, regenerates the SCRAM verifier and
+    /// revokes every live session of the account so a rotated credential
+    /// cannot keep an existing session alive. Callers gate authorization.
+    pub fn set_password_by_admin(&self, id: &UserId, new_password: &str) -> Result<(), AuthError> {
+        if new_password.is_empty() {
+            return Err(AuthError::Forbidden("password cannot be empty".to_string()));
+        }
+        {
+            let mut users = self.users.write().map_err(lock_err)?;
+            let user = users
+                .get_mut(id)
+                .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
+            user.password_hash = hash_password(new_password);
+            user.scram_verifier = Some(make_scram_verifier(new_password));
+            user.updated_at = now_ms();
+        }
+        self.purge_sessions_for(id);
+        self.persist_to_vault();
+        Ok(())
+    }
+
     fn change_password_in_tenant_controlled(
         &self,
         tenant_id: Option<&str>,
@@ -1798,6 +1857,13 @@ impl AuthStore {
             }
         }
 
+        // Sessions snapshot the role at login. A change in either direction
+        // must not keep riding on a token minted under the old one — a
+        // demotion would otherwise stay ineffective for the session TTL.
+        if prior_role != new_role {
+            self.purge_sessions_for(&id);
+        }
+
         self.persist_to_vault();
         Ok(())
     }
@@ -1872,7 +1938,105 @@ impl AuthStore {
     /// Verify credentials for `(tenant_id, username, password)` and
     /// create a session. Tenant-aware: `alice@acme` and `alice@globex`
     /// authenticate independently.
+    ///
+    /// Every outcome is recorded in the control-event ledger when one is
+    /// configured: login was the one credential decision with no chained
+    /// trace, so a brute-force run or a login from a freshly re-enabled
+    /// account was invisible to an audit of the store. Under a
+    /// compliance-mode ledger a login that cannot be recorded is refused.
     pub fn authenticate_in_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        password: &str,
+    ) -> Result<Session, AuthError> {
+        let id = UserId::from_parts(tenant_id, username);
+        match self.authenticate_in_tenant_unaudited(tenant_id, username, password) {
+            Ok(session) => {
+                if let Err(err) = self.emit_auth_event(
+                    EventKind::AuthLogin,
+                    Outcome::Allowed,
+                    &id,
+                    Some(session.role),
+                    None,
+                ) {
+                    if let Ok(mut sessions) = self.sessions.write() {
+                        sessions.remove(&session.token);
+                    }
+                    return Err(err);
+                }
+                Ok(session)
+            }
+            Err(err) => {
+                let outcome = if matches!(err, AuthError::InvalidCredentials) {
+                    Outcome::Denied
+                } else {
+                    Outcome::Error
+                };
+                // Already refusing; a ledger failure cannot make it worse.
+                let _ = self.emit_auth_event(
+                    EventKind::AuthLoginFailed,
+                    outcome,
+                    &id,
+                    None,
+                    Some(&err.to_string()),
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Record one authentication decision. `Err` only when the ledger is
+    /// configured to require persistence and refused the event.
+    fn emit_auth_event(
+        &self,
+        kind: EventKind,
+        outcome: Outcome,
+        id: &UserId,
+        role: Option<Role>,
+        reason: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let Some(configured) = self.configured_control_events() else {
+            return Ok(());
+        };
+        let ctx = ControlEventCtx {
+            actor: crate::runtime::control_events::ActorRef::User(id),
+            scope: id.tenant.as_deref().map(Cow::Borrowed),
+            request_id: None,
+            trace_id: None,
+        };
+        let mut fields: HashMap<String, Sensitivity> = HashMap::new();
+        fields.insert("principal".to_string(), Sensitivity::raw(id.to_string()));
+        if let Some(role) = role {
+            fields.insert("role".to_string(), Sensitivity::raw(role.as_str()));
+        }
+        let event = ControlEvent {
+            kind,
+            outcome,
+            action: Cow::Borrowed(kind.as_str()),
+            resource: Some(format!("principal:{id}")),
+            reason: reason.map(str::to_string),
+            matched_policy_id: None,
+            fields,
+        };
+        match configured.ledger.emit(&ctx, event) {
+            Ok(_) => Ok(()),
+            Err(err) if configured.config.require_persistence() => Err(AuthError::Internal(
+                format!("control-event ledger refused {}: {err}", kind.as_str()),
+            )),
+            Err(err) => {
+                tracing::warn!(
+                    target: "reddb::security",
+                    kind = kind.as_str(),
+                    error = %err,
+                    "control-event ledger refused an auth event"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn authenticate_in_tenant_unaudited(
         &self,
         tenant_id: Option<&str>,
         username: &str,
@@ -1892,7 +2056,8 @@ impl AuthStore {
             return Err(AuthError::InvalidCredentials);
         }
 
-        if !verify_password(password, &user.password_hash) {
+        let stored_hash = user.password_hash.clone();
+        if !verify_password(password, &stored_hash) {
             return Err(AuthError::InvalidCredentials);
         }
 
@@ -1923,6 +2088,27 @@ impl AuthStore {
 
         let mut sessions = self.sessions.write().map_err(lock_err)?;
         sessions.insert(session.token.clone(), session.clone());
+        drop(sessions);
+
+        // Transparently upgrade a hash produced by the retired in-tree KDF.
+        // This is the only point where the verified plaintext is in hand.
+        if password_hash_needs_upgrade(&stored_hash) {
+            let upgraded = hash_password(password);
+            let mut rehashed = false;
+            if let Ok(mut users) = self.users.write() {
+                if let Some(user) = users.get_mut(&id) {
+                    // Skip if a concurrent password change already moved it.
+                    if user.password_hash == stored_hash {
+                        user.password_hash = upgraded;
+                        rehashed = true;
+                    }
+                }
+            }
+            if rehashed {
+                self.persist_to_vault();
+            }
+        }
+
         Ok(session)
     }
 
@@ -1945,6 +2131,18 @@ impl AuthStore {
     /// Tenant-aware token validation. Returns the resolved `UserId`
     /// (which carries the tenant) and the granted `Role`.
     pub fn validate_token_full(&self, token: &str) -> Option<(UserId, Role)> {
+        let resolved = self.resolve_token_unchecked(token)?;
+        // Every credential is re-checked against the live user record so
+        // `ALTER USER … DISABLE` / `VALID UNTIL` take effect immediately for
+        // sessions and API keys, not only at password login.
+        if !self.principal_is_active(&resolved.0) {
+            return None;
+        }
+        Some(resolved)
+    }
+
+    /// Token → `(UserId, Role)` without consulting the owning user record.
+    fn resolve_token_unchecked(&self, token: &str) -> Option<(UserId, Role)> {
         // Try session tokens first.
         if token.starts_with("rs_") {
             if let Ok(sessions) = self.sessions.read() {
@@ -1961,15 +2159,63 @@ impl AuthStore {
             return None;
         }
 
-        // Try API keys.
+        // Try API keys: the index is keyed by the credential id, so the
+        // presented secret is hashed and never compared as text.
         if token.starts_with("rk_") {
-            if let Ok(idx) = self.api_key_index.read() {
-                return idx.get(token).cloned();
+            let id = api_key_credential_id(token);
+            let (owner, role) = self
+                .api_key_index
+                .read()
+                .ok()
+                .and_then(|idx| idx.get(&id).cloned())?;
+            if self.api_key_expired(&owner, &id) {
+                return None;
             }
-            return None;
+            return Some((owner, role));
         }
 
         None
+    }
+
+    /// Whether the key `id` owned by `owner` has passed its `expires_at`.
+    /// A key the owner no longer lists counts as expired.
+    fn api_key_expired(&self, owner: &UserId, id: &str) -> bool {
+        let Ok(users) = self.users.read() else {
+            return true;
+        };
+        users
+            .get(owner)
+            .and_then(|user| user.api_keys.iter().find(|key| key.key == id))
+            .map(|key| key.expires_at.is_some_and(|deadline| now_ms() >= deadline))
+            .unwrap_or(true)
+    }
+
+    /// The current role of `id` when the account is active, else `None`.
+    ///
+    /// Callers holding a long-lived credential (the browser refresh cookie)
+    /// use this to re-derive the principal's role at use time rather than
+    /// trusting a role captured when the credential was minted.
+    pub fn active_user_role(&self, id: &UserId) -> Option<Role> {
+        if !self.principal_is_active(id) {
+            return None;
+        }
+        self.users.read().ok()?.get(id).map(|user| user.role)
+    }
+
+    /// Whether `id` names an enabled account whose `VALID UNTIL` (if any)
+    /// has not passed. Unknown accounts are inactive.
+    fn principal_is_active(&self, id: &UserId) -> bool {
+        let enabled = match self.users.read() {
+            Ok(users) => users.get(id).map(|u| u.enabled).unwrap_or(false),
+            Err(_) => false,
+        };
+        if !enabled {
+            return false;
+        }
+        match self.user_attributes(id).valid_until {
+            Some(deadline) => now_ms() < deadline,
+            None => true,
+        }
     }
 
     // -----------------------------------------------------------------
@@ -2009,6 +2255,19 @@ impl AuthStore {
         name: &str,
         role: Role,
     ) -> Result<ApiKey, AuthError> {
+        self.create_api_key_in_tenant_expiring(tenant_id, username, name, role, None)
+    }
+
+    /// Create an API key that stops validating at `expires_at` (ms since
+    /// epoch). The returned value carries the secret; nothing else does.
+    pub fn create_api_key_in_tenant_expiring(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        name: &str,
+        role: Role,
+        expires_at: Option<u128>,
+    ) -> Result<ApiKey, AuthError> {
         if let Some(configured) = self.configured_control_events() {
             let ctx = default_user_lifecycle_ctx();
             let control = UserLifecycleControl {
@@ -2016,9 +2275,11 @@ impl AuthStore {
                 ledger: configured.ledger.as_ref(),
                 config: configured.config,
             };
-            self.create_api_key_in_tenant_controlled(tenant_id, username, name, role, &control)
+            self.create_api_key_in_tenant_controlled(
+                tenant_id, username, name, role, expires_at, &control,
+            )
         } else {
-            self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role)
+            self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role, expires_at)
         }
     }
 
@@ -2038,7 +2299,7 @@ impl AuthStore {
             ledger,
             config,
         };
-        self.create_api_key_in_tenant_controlled(tenant_id, username, name, role, &control)
+        self.create_api_key_in_tenant_controlled(tenant_id, username, name, role, None, &control)
     }
 
     fn create_api_key_in_tenant_unaudited(
@@ -2047,6 +2308,7 @@ impl AuthStore {
         username: &str,
         name: &str,
         role: Role,
+        expires_at: Option<u128>,
     ) -> Result<ApiKey, AuthError> {
         let id = UserId::from_parts(tenant_id, username);
         let mut users = self.users.write().map_err(lock_err)?;
@@ -2062,24 +2324,30 @@ impl AuthStore {
             });
         }
 
-        let api_key = ApiKey {
-            key: generate_api_key(),
+        let secret = generate_api_key();
+        let stored = ApiKey {
+            key: api_key_credential_id(&secret),
             name: name.to_string(),
             role,
             created_at: now_ms(),
+            expires_at,
         };
 
-        user.api_keys.push(api_key.clone());
+        user.api_keys.push(stored.clone());
         user.updated_at = now_ms();
 
         // Update the index.
         if let Ok(mut idx) = self.api_key_index.write() {
-            idx.insert(api_key.key.clone(), (id.clone(), api_key.role));
+            idx.insert(stored.key.clone(), (id.clone(), stored.role));
         }
 
         drop(users); // release lock before vault I/O
         self.persist_to_vault();
-        Ok(api_key)
+        // The secret leaves the store exactly once, here.
+        Ok(ApiKey {
+            key: secret,
+            ..stored
+        })
     }
 
     fn create_api_key_in_tenant_controlled(
@@ -2088,10 +2356,11 @@ impl AuthStore {
         username: &str,
         name: &str,
         role: Role,
+        expires_at: Option<u128>,
         control: &UserLifecycleControl<'_>,
     ) -> Result<ApiKey, AuthError> {
         let id = UserId::from_parts(tenant_id, username);
-        match self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role) {
+        match self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role, expires_at) {
             Ok(api_key) => {
                 let key_id = api_key_id(&api_key.key);
                 if let Err(err) = self.emit_api_key_allowed(
@@ -2156,6 +2425,8 @@ impl AuthStore {
     }
 
     fn revoke_api_key_unaudited(&self, key: &str) -> Result<(), AuthError> {
+        let key_id = api_key_credential_id(key);
+        let key = key_id.as_str();
         let mut users = self.users.write().map_err(lock_err)?;
 
         // Find which user owns this key (look up by the api_key_index
@@ -2362,6 +2633,7 @@ impl AuthStore {
     /// grants removed.
     pub fn revoke(
         &self,
+        granter: &UserId,
         granter_role: Role,
         principal: &GrantPrincipal,
         resource: &Resource,
@@ -2369,9 +2641,23 @@ impl AuthStore {
     ) -> Result<usize, AuthError> {
         if granter_role != Role::Admin {
             return Err(AuthError::Forbidden(format!(
-                "REVOKE requires Admin role; granter has `{:?}`",
-                granter_role
+                "REVOKE requires Admin role; granter `{}` has `{:?}`",
+                granter, granter_role
             )));
+        }
+
+        // Cross-tenant guard, mirroring GRANT: a tenant-scoped admin can only
+        // touch grants of principals in its own tenant. The target tenant
+        // comes from the statement text, so without this a tenant admin could
+        // strip another tenant's grants. Platform admin (tenant=None) may
+        // revoke anywhere.
+        if let GrantPrincipal::User(uid) = principal {
+            if granter.tenant.is_some() && granter.tenant != uid.tenant {
+                return Err(AuthError::Forbidden(format!(
+                    "cross-tenant REVOKE denied: granter tenant `{:?}` != principal tenant `{:?}`",
+                    granter.tenant, uid.tenant
+                )));
+            }
         }
 
         let removed = match principal {
@@ -2672,8 +2958,19 @@ impl AuthStore {
         user.enabled = enabled;
         user.updated_at = now_ms();
         drop(users);
+        if !enabled {
+            self.purge_sessions_for(uid);
+        }
         self.persist_to_vault();
         Ok(())
+    }
+
+    /// Drop every live session belonging to `uid` (tenant + username match
+    /// so a same-named user in another tenant is untouched).
+    fn purge_sessions_for(&self, uid: &UserId) {
+        if let Ok(mut sessions) = self.sessions.write() {
+            sessions.retain(|_, s| !(s.username == uid.username && s.tenant_id == uid.tenant));
+        }
     }
 
     fn set_user_enabled_controlled(
@@ -2904,6 +3201,8 @@ impl AuthStore {
     }
 
     fn rollback_create_api_key(&self, id: &UserId, key: &str) {
+        let key_id = api_key_credential_id(key);
+        let key = key_id.as_str();
         if let Ok(mut users) = self.users.write() {
             if let Some(user) = users.get_mut(id) {
                 user.api_keys.retain(|api_key| api_key.key != key);
@@ -2917,6 +3216,7 @@ impl AuthStore {
     }
 
     fn api_key_rollback_snapshot(&self, key: &str) -> Option<(UserId, ApiKey)> {
+        let key = api_key_credential_id(key);
         let users = self.users.read().ok()?;
         users.iter().find_map(|(id, user)| {
             user.api_keys
@@ -4648,48 +4948,86 @@ fn make_scram_verifier(password: &str) -> crate::auth::scram::ScramVerifier {
     )
 }
 
-/// Hash a password using Argon2id.
+/// Argon2id cost parameters for password hashing, at the OWASP floor
+/// (19 MiB, t=2, p=1). The previous in-tree KDF ran at 4 MiB / t=3, which
+/// is below that floor; the parameters are encoded in the PHC string so
+/// they can be raised again without another format change.
+const PASSWORD_M_COST_KIB: u32 = 19 * 1024;
+const PASSWORD_T_COST: u32 = 2;
+const PASSWORD_P_COST: u32 = 1;
+const PASSWORD_TAG_LEN: usize = 32;
+
+fn password_hasher() -> argon2::Argon2<'static> {
+    let params = argon2::Params::new(
+        PASSWORD_M_COST_KIB,
+        PASSWORD_T_COST,
+        PASSWORD_P_COST,
+        Some(PASSWORD_TAG_LEN),
+    )
+    .expect("Argon2id parameters are constant and valid");
+    argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+}
+
+/// Hash a password with Argon2id (RFC 9106) via the RustCrypto `argon2`
+/// crate, encoded as a PHC string:
+/// `$argon2id$v=19$m=19456,t=2,p=1$<salt_b64>$<hash_b64>`.
 ///
-/// Format: `argon2id$<salt_hex>$<hash_hex>`
+/// The previous in-tree implementation was not RFC 9106 — its `G` mixing
+/// function added the block indices where the specification calls for the
+/// `2·lo32(a)·lo32(b)` term, and its compression function was ad hoc — so
+/// its memory-hardness was unknown. Hashes in the old
+/// `argon2id$<salt_hex>$<hash_hex>` form still verify (see
+/// [`verify_password`]) and are transparently upgraded on the owner's next
+/// successful login.
 pub(crate) fn hash_password(password: &str) -> String {
-    let salt = random_bytes(16);
-    let params = auth_argon2_params();
-    let hash = derive_key(password.as_bytes(), &salt, &params);
-    format!("argon2id${}${}", hex::encode(&salt), hex::encode(&hash))
+    use argon2::PasswordHasher;
+    // The salt comes from the OS CSPRNG inside the hasher and, like
+    // `random_bytes`, fails closed rather than degrading.
+    password_hasher()
+        .hash_password(password.as_bytes())
+        .expect("Argon2id hashing cannot fail for valid parameters and a working CSPRNG")
+        .to_string()
 }
 
-/// Verify a password against a stored `argon2id$<salt>$<hash>` string.
+/// Whether `stored_hash` was produced by the retired in-tree KDF and should
+/// be re-hashed the next time its owner authenticates.
+pub(crate) fn password_hash_needs_upgrade(stored_hash: &str) -> bool {
+    stored_hash.starts_with("argon2id$")
+}
+
+/// Verify a password against either encoding: the current PHC string, or a
+/// legacy `argon2id$<salt_hex>$<hash_hex>` produced by the retired in-tree
+/// KDF. Legacy hashes stay verifiable so an upgrade does not lock every
+/// account out; [`password_hash_needs_upgrade`] drives the rehash.
 pub(crate) fn verify_password(password: &str, stored_hash: &str) -> bool {
-    let parts: Vec<&str> = stored_hash.splitn(3, '$').collect();
-    if parts.len() != 3 || parts[0] != "argon2id" {
-        return false;
+    if let Some(rest) = stored_hash.strip_prefix("argon2id$") {
+        return verify_legacy_password(password, rest);
     }
-
-    let salt = match hex::decode(parts[1]) {
-        Ok(s) => s,
-        Err(_) => return false,
+    use argon2::{PasswordHash, PasswordVerifier};
+    let Ok(parsed) = stored_hash.parse::<PasswordHash>() else {
+        return false;
     };
-
-    let expected_hash = match hex::decode(parts[2]) {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-
-    let params = auth_argon2_params();
-    let computed = derive_key(password.as_bytes(), &salt, &params);
-    constant_time_eq(&computed, &expected_hash)
+    password_hasher()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
 }
 
-/// Constant-time byte comparison to avoid timing side-channels.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
+/// Verify against the retired in-tree KDF, whose stored form is
+/// `<salt_hex>$<hash_hex>` (the `argon2id$` prefix is already stripped).
+fn verify_legacy_password(password: &str, salt_and_hash: &str) -> bool {
+    let Some((salt_hex, hash_hex)) = salt_and_hash.split_once('$') else {
         return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    };
+    let (Ok(salt), Ok(expected)) = (hex::decode(salt_hex), hex::decode(hash_hex)) else {
+        return false;
+    };
+    let computed = derive_key(password.as_bytes(), &salt, &auth_argon2_params());
+    constant_time_eq(&computed, &expected)
+}
+
+/// Constant-time byte comparison — one implementation for the crate.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    crate::crypto::constant_time_eq(a, b)
 }
 
 // ===========================================================================
@@ -4713,12 +5051,11 @@ fn random_hex(n: usize) -> String {
 /// then mix with SHA-256 for domain separation.
 pub(crate) fn random_bytes(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n.max(32)];
-    if os_random::fill_bytes(&mut buf).is_err() {
-        // Fallback: use system time and pointers as entropy (best-effort).
-        let seed = now_ms().to_le_bytes();
-        for (i, byte) in buf.iter_mut().enumerate() {
-            *byte = seed[i % seed.len()] ^ (i as u8);
-        }
+    // Fail closed: these bytes become session tokens, API keys, salts and
+    // AES-GCM nonces. A predictable fallback (the old time-derived seed)
+    // is strictly worse than refusing the operation.
+    if let Err(err) = os_random::fill_bytes(&mut buf) {
+        panic!("OS CSPRNG unavailable; refusing to generate credential material: {err}");
     }
     // SHA-256 mix to ensure uniform distribution.
     let digest = sha256(&buf);
@@ -4784,6 +5121,131 @@ mod tests {
         store.create_user("alice", "pass", Role::Admin).unwrap();
         let err = store.create_user("alice", "pass2", Role::Read).unwrap_err();
         assert!(matches!(err, AuthError::UserExists(_)));
+    }
+
+    struct RecordingLedger(std::sync::Mutex<Vec<(String, String)>>);
+
+    impl crate::runtime::control_events::ControlEventLedger for RecordingLedger {
+        fn emit(
+            &self,
+            _ctx: &ControlEventCtx<'_>,
+            event: ControlEvent,
+        ) -> Result<
+            crate::runtime::control_events::EventId,
+            crate::runtime::control_events::ControlEventError,
+        > {
+            self.0.lock().unwrap().push((
+                event.kind.as_str().to_string(),
+                event.outcome.as_str().to_string(),
+            ));
+            Ok(crate::runtime::control_events::EventId("evt".to_string()))
+        }
+    }
+
+    #[test]
+    fn logins_land_in_the_control_event_ledger() {
+        let store = AuthStore::new(test_config());
+        store.create_user("dave", "pw", Role::Read).unwrap();
+        let ledger = std::sync::Arc::new(RecordingLedger(std::sync::Mutex::new(Vec::new())));
+        store.configure_control_events(
+            ledger.clone(),
+            crate::runtime::control_events::ControlEventConfig::default(),
+        );
+        store.authenticate("dave", "pw").expect("login");
+        store
+            .authenticate("dave", "nope")
+            .expect_err("bad password");
+        store
+            .authenticate("nobody", "pw")
+            .expect_err("unknown user");
+        let seen = ledger.0.lock().unwrap().clone();
+        let allowed = Outcome::Allowed.as_str().to_string();
+        let denied = Outcome::Denied.as_str().to_string();
+        assert!(
+            seen.contains(&("auth.login".to_string(), allowed)),
+            "success not recorded: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter()
+                .filter(|(k, o)| k == "auth.login_failed" && *o == denied)
+                .count(),
+            2,
+            "both refusals must be recorded: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn api_keys_are_hashed_at_rest_and_expire() {
+        let store = AuthStore::new(test_config());
+        store.create_user("erin", "pw", Role::Write).unwrap();
+        let key = store
+            .create_api_key_in_tenant_expiring(None, "erin", "ci", Role::Read, Some(now_ms() + 60))
+            .unwrap();
+        assert!(key.key.starts_with("rk_"));
+
+        let stored = store
+            .users
+            .read()
+            .unwrap()
+            .get(&UserId::from_parts(None, "erin"))
+            .unwrap()
+            .api_keys[0]
+            .clone();
+        assert!(stored.key.starts_with("rkh_"), "{}", stored.key);
+        assert_ne!(stored.key, key.key, "the secret must not be stored");
+        assert_eq!(stored.key, api_key_credential_id(&key.key));
+
+        assert!(store.validate_token(&key.key).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert!(
+            store.validate_token(&key.key).is_none(),
+            "an expired key must not validate"
+        );
+
+        // Revocation accepts the stored id as well as the secret.
+        store.revoke_api_key(&stored.key).unwrap();
+        assert!(store.revoke_api_key(&key.key).is_err());
+    }
+
+    #[test]
+    fn revoke_is_clamped_to_the_granter_tenant() {
+        use crate::auth::privileges::{Action, GrantPrincipal, Resource};
+        let store = AuthStore::new(test_config());
+        let acme_admin = UserId::from_parts(Some("acme"), "adm");
+        let globex_user = UserId::from_parts(Some("globex"), "u");
+        let err = store
+            .revoke(
+                &acme_admin,
+                Role::Admin,
+                &GrantPrincipal::User(globex_user),
+                &Resource::table_from_name("orders"),
+                &[Action::Select],
+            )
+            .expect_err("a tenant admin must not touch another tenant's grants");
+        assert!(err.to_string().contains("cross-tenant"), "{err}");
+        // Platform admin may.
+        store
+            .revoke(
+                &UserId::from_parts(None, "platform"),
+                Role::Admin,
+                &GrantPrincipal::User(UserId::from_parts(Some("globex"), "u")),
+                &Resource::table_from_name("orders"),
+                &[Action::Select],
+            )
+            .expect("platform admin revokes anywhere");
+    }
+
+    #[test]
+    fn role_change_revokes_sessions_minted_under_the_old_role() {
+        let store = AuthStore::new(test_config());
+        store.create_user("carol", "pw", Role::Write).unwrap();
+        let session = store.authenticate("carol", "pw").unwrap();
+        assert!(store.validate_token(&session.token).is_some());
+        store.change_role("carol", Role::Read).unwrap();
+        assert!(
+            store.validate_token(&session.token).is_none(),
+            "a demotion must not keep riding on the old session"
+        );
     }
 
     #[test]
@@ -4882,6 +5344,11 @@ mod tests {
         let key = store
             .create_api_key("system", "rotation", Role::Read)
             .unwrap();
+        // The account is disabled at this point: every credential it owns
+        // must stop validating, API keys included (they used to be resolved
+        // straight from the index without consulting the user record).
+        assert!(store.validate_token(&key.key).is_none());
+        store.set_user_enabled(&uid, true).unwrap();
         assert!(store.validate_token(&key.key).is_some());
         store.revoke_api_key(&key.key).unwrap();
         assert!(store.validate_token(&key.key).is_none());
@@ -5034,14 +5501,72 @@ mod tests {
 
     #[test]
     fn test_password_hash_format() {
+        // PHC string: `$argon2id$v=19$m=19456,t=2,p=1$<salt_b64>$<hash_b64>`.
+        // Encoding the parameters is what lets the cost be raised later
+        // without another format change — the retired in-tree form stored
+        // only salt and tag, so its 4 MiB / t=3 cost was frozen.
         let hash = hash_password("test");
-        assert!(hash.starts_with("argon2id$"));
-        let parts: Vec<&str> = hash.splitn(3, '$').collect();
-        assert_eq!(parts.len(), 3);
-        // Salt is 16 bytes = 32 hex chars.
-        assert_eq!(parts[1].len(), 32);
-        // Hash is 32 bytes = 64 hex chars.
-        assert_eq!(parts[2].len(), 64);
+        assert!(
+            hash.starts_with("$argon2id$v=19$"),
+            "expected a PHC-encoded Argon2id hash, got: {hash}"
+        );
+        assert!(
+            hash.contains(&format!(
+                "m={PASSWORD_M_COST_KIB},t={PASSWORD_T_COST},p={PASSWORD_P_COST}"
+            )),
+            "the PHC string must carry the cost parameters: {hash}"
+        );
+        assert!(verify_password("test", &hash));
+        assert!(!verify_password("wrong", &hash));
+        assert!(
+            !password_hash_needs_upgrade(&hash),
+            "a freshly minted hash must not be flagged for upgrade"
+        );
+    }
+
+    #[test]
+    fn legacy_password_hashes_still_verify_and_upgrade_on_login() {
+        // Records written by the retired in-tree KDF must keep verifying —
+        // otherwise the upgrade locks every existing account out — and must
+        // be re-hashed with the real KDF once the plaintext is in hand.
+        let legacy = {
+            let salt = random_bytes(16);
+            let hash = derive_key(b"hunter2", &salt, &auth_argon2_params());
+            format!("argon2id${}${}", hex::encode(&salt), hex::encode(&hash))
+        };
+        assert!(verify_password("hunter2", &legacy));
+        assert!(!verify_password("wrong", &legacy));
+        assert!(password_hash_needs_upgrade(&legacy));
+
+        let store = AuthStore::new(test_config());
+        store
+            .create_user("erin", "placeholder", Role::Write)
+            .unwrap();
+        {
+            let mut users = store.users.write().unwrap();
+            users
+                .get_mut(&UserId::platform("erin"))
+                .unwrap()
+                .password_hash = legacy.clone();
+        }
+
+        store
+            .authenticate("erin", "hunter2")
+            .expect("a legacy hash must still authenticate");
+
+        let stored = store
+            .users
+            .read()
+            .unwrap()
+            .get(&UserId::platform("erin"))
+            .unwrap()
+            .password_hash
+            .clone();
+        assert!(
+            stored.starts_with("$argon2id$v=19$"),
+            "a successful login must upgrade the stored hash, got: {stored}"
+        );
+        assert!(store.authenticate("erin", "hunter2").is_ok());
     }
 
     #[test]
@@ -5439,4 +5964,97 @@ mod tests {
             &enforcement_eval_ctx(Role::Admin),
         ));
     }
+
+    #[test]
+    fn disabling_a_user_invalidates_its_api_keys_and_sessions() {
+        let store = AuthStore::new(test_config());
+        store.create_user("carol", "pw", Role::Write).unwrap();
+        let key = store
+            .create_api_key("carol", "ci", Role::Write)
+            .unwrap()
+            .key;
+        let session = store.authenticate("carol", "pw").unwrap();
+        assert!(store.validate_token(&key).is_some());
+        assert!(store.validate_token(&session.token).is_some());
+
+        let uid = UserId::platform("carol");
+        store.set_user_enabled(&uid, false).unwrap();
+
+        // API keys resolved straight from the index and never consulted the
+        // user record, so a disabled (or offboarded) account kept a working
+        // credential forever.
+        assert!(
+            store.validate_token(&key).is_none(),
+            "an API key must stop working the moment its owner is disabled"
+        );
+        assert!(
+            store.validate_token(&session.token).is_none(),
+            "live sessions must not survive disabling the account"
+        );
+        assert!(
+            store.lookup_scram_verifier(&uid).is_none(),
+            "SCRAM must not authenticate a disabled account"
+        );
+    }
+
+    #[test]
+    fn admin_password_reset_applies_and_revokes_sessions() {
+        let store = AuthStore::new(test_config());
+        store.create_user("dave", "old", Role::Write).unwrap();
+        let session = store.authenticate("dave", "old").unwrap();
+
+        store
+            .set_password_by_admin(&UserId::platform("dave"), "rotated")
+            .expect("admin reset");
+
+        assert!(
+            store.authenticate("dave", "old").is_err(),
+            "the old password must stop working after a reset"
+        );
+        assert!(
+            store.authenticate("dave", "rotated").is_ok(),
+            "the new password must work after a reset"
+        );
+        assert!(
+            store.validate_token(&session.token).is_none(),
+            "a password rotation must revoke live sessions"
+        );
+    }
+}
+
+/// Hand the operator the vault certificate minted by an env bootstrap.
+///
+/// It used to be printed to stderr unconditionally, which in a container
+/// means the log aggregator now holds the one secret that unseals the
+/// vault. With `REDDB_BOOTSTRAP_CERT_OUT` set it is written there
+/// (owner-only, thanks to the boot umask) and only the path is logged;
+/// without it, stderr remains the delivery channel, with a warning that
+/// says so.
+fn deliver_bootstrap_certificate(cert: &str) {
+    if let Some(path) = crate::utils::env_with_file_fallback("REDDB_BOOTSTRAP_CERT_OUT") {
+        match std::fs::write(&path, format!("{cert}\n")) {
+            Ok(()) => {
+                tracing::warn!(
+                    target: "reddb::security",
+                    path = %path,
+                    "vault certificate written — save it: the ONLY way to unseal after a restart"
+                );
+                return;
+            }
+            Err(err) => {
+                tracing::error!(
+                    target: "reddb::security",
+                    path = %path,
+                    error = %err,
+                    "could not write the vault certificate; falling back to stderr"
+                );
+            }
+        }
+    }
+    eprintln!("[reddb] CERTIFICATE: {cert}");
+    tracing::warn!(
+        target: "reddb::security",
+        "vault certificate issued on stderr — save it (ONLY way to unseal after restart); \
+         set REDDB_BOOTSTRAP_CERT_OUT to receive it as a file instead of a log line"
+    );
 }

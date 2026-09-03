@@ -32,7 +32,17 @@ pub fn local_backend_atomic_upload(
         let _ = fs::remove_file(&temp);
         return Err(err);
     }
-    if let Err(err) = fs::File::open(&temp).and_then(|file| file.sync_all()) {
+    // Re-open for *write* before syncing: `File::open` is read-only, and
+    // while POSIX permits `fsync` on a read-only descriptor, Windows'
+    // `FlushFileBuffers` requires write access and fails with
+    // `ERROR_ACCESS_DENIED`. That made every local-backend upload fail on
+    // Windows — the durability barrier is the whole point of this step, so it
+    // cannot simply be ignored.
+    if let Err(err) = fs::OpenOptions::new()
+        .write(true)
+        .open(&temp)
+        .and_then(|file| file.sync_all())
+    {
         let _ = fs::remove_file(&temp);
         return Err(err);
     }
@@ -41,6 +51,9 @@ pub fn local_backend_atomic_upload(
         return Err(err);
     }
     if let Some(parent) = dest.parent() {
+        // POSIX-only: see `Vfs::sync_dir`. Already best-effort, but on
+        // Windows it can only ever fail, so do not pretend to try.
+        #[cfg(not(windows))]
         let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
     }
     Ok(())

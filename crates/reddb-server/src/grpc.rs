@@ -66,7 +66,7 @@ use proto::{
 };
 
 pub(crate) mod catalog_dispatch;
-mod control_support;
+pub(crate) mod control_support;
 mod entity_ops;
 mod input_support;
 pub(crate) mod scan_json;
@@ -119,6 +119,32 @@ impl GrpcTlsOptions {
         }
         Ok(cfg)
     }
+}
+
+/// Per-connection ceiling on concurrent HTTP/2 streams. tonic's default is
+/// unbounded, so one connection could open arbitrarily many RPCs.
+const GRPC_MAX_CONCURRENT_STREAMS: u32 = 256;
+
+/// Ceiling on concurrent in-flight requests per connection, mirroring the
+/// HTTP edge's in-flight cap.
+const GRPC_CONCURRENCY_LIMIT_PER_CONNECTION: usize = 256;
+
+/// Keepalive ping cadence and reply grace. Without these a half-open
+/// connection is only reclaimed when the OS notices.
+const GRPC_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const GRPC_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The gRPC listener had no timeouts and no concurrency ceiling: a peer could
+/// open a connection, never finish a request, and hold server resources
+/// indefinitely, or open unbounded concurrent streams on one connection.
+/// Every `serve*` entry point builds through here so the three of them cannot
+/// drift apart.
+fn configured_transport_builder() -> tonic::transport::Server {
+    tonic::transport::Server::builder()
+        .max_concurrent_streams(Some(GRPC_MAX_CONCURRENT_STREAMS))
+        .concurrency_limit_per_connection(GRPC_CONCURRENCY_LIMIT_PER_CONNECTION)
+        .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
 }
 
 impl Default for GrpcServerOptions {
@@ -237,7 +263,7 @@ impl RedDBGrpcServer {
 
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error>> {
         let addr = self.options.bind_addr.parse()?;
-        let mut builder = tonic::transport::Server::builder();
+        let mut builder = configured_transport_builder();
         if let Some(tls) = &self.options.tls {
             // Constant-time SHA256 fingerprint logged for ops triage —
             // never the bytes of cert/key themselves.
@@ -258,7 +284,7 @@ impl RedDBGrpcServer {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let incoming = TcpListenerStream::new(listener);
-        let mut builder = tonic::transport::Server::builder();
+        let mut builder = configured_transport_builder();
         if let Some(tls) = &self.options.tls {
             log_grpc_tls_identity(tls);
             builder = builder.tls_config(tls.to_tonic_config()?)?;
@@ -282,7 +308,7 @@ impl RedDBGrpcServer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use tokio_stream::StreamExt;
         let incoming = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, std::io::Error>);
-        let mut builder = tonic::transport::Server::builder();
+        let mut builder = configured_transport_builder();
         if let Some(tls) = &self.options.tls {
             log_grpc_tls_identity(tls);
             builder = builder.tls_config(tls.to_tonic_config()?)?;
@@ -294,14 +320,29 @@ impl RedDBGrpcServer {
         Ok(())
     }
 
+    /// Largest gRPC message accepted on the way in or produced on the way
+    /// out. Bulk inserts ride on this, so it is generous, but it is no longer
+    /// 256 MiB: that let one request pin a quarter gigabyte of decoded
+    /// protobuf per stream before any handler ran. Override with
+    /// `REDDB_GRPC_MAX_MESSAGE_BYTES`; a malformed value keeps the default.
+    fn max_message_bytes() -> usize {
+        const DEFAULT: usize = 32 * 1024 * 1024;
+        std::env::var("REDDB_GRPC_MAX_MESSAGE_BYTES")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT)
+    }
+
     fn configured_service(runtime: GrpcRuntime) -> GrpcCatalogService {
         // Advertise zstd + gzip so clients can opt in. Server compresses
         // outbound replies with zstd; sticking to a single send codec keeps
         // CPU predictable while still accepting either on inbound.
         use tonic::codec::CompressionEncoding;
+        let max_message = Self::max_message_bytes();
         let service = RedDbServer::new(runtime.clone())
-            .max_decoding_message_size(256 * 1024 * 1024)
-            .max_encoding_message_size(256 * 1024 * 1024)
+            .max_decoding_message_size(max_message)
+            .max_encoding_message_size(max_message)
             .accept_compressed(CompressionEncoding::Zstd)
             .accept_compressed(CompressionEncoding::Gzip)
             .send_compressed(CompressionEncoding::Zstd);
@@ -372,9 +413,82 @@ fn grpc_query_value_to_param_value(value: QueryValue) -> Result<ParamValue, Stat
     }
 }
 
+/// RAII guard scoping the runtime's thread-local identity to one gRPC SQL
+/// call. The catalog interceptor resolves the principal (`tenant/user` or
+/// `user`) but the runtime gates read a thread-local; without installing it
+/// every `Query`/`BatchQuery`/`ExecutePrepared` ran with enforcement off.
+/// The executor is synchronous, so the thread-local holds for the call.
+struct GrpcIdentityGuard {
+    previous_identity: Option<(String, crate::auth::Role)>,
+    previous_tenant: Option<String>,
+}
+
+impl GrpcIdentityGuard {
+    fn install(identity: Option<(crate::auth::UserId, crate::auth::Role)>) -> Self {
+        use crate::runtime::execution_context as ctx;
+        let previous_identity = ctx::current_auth_identity_for_audit();
+        let previous_tenant = ctx::current_tenant();
+        match identity {
+            Some((id, role)) => {
+                match id.tenant {
+                    Some(tenant) => ctx::set_current_tenant(tenant),
+                    None => ctx::clear_current_tenant(),
+                }
+                ctx::set_current_auth_identity(id.username, role);
+            }
+            None => {
+                ctx::clear_current_auth_identity();
+                ctx::clear_current_tenant();
+            }
+        }
+        Self {
+            previous_identity,
+            previous_tenant,
+        }
+    }
+}
+
+impl Drop for GrpcIdentityGuard {
+    fn drop(&mut self) {
+        use crate::runtime::execution_context as ctx;
+        match self.previous_identity.take() {
+            Some((username, role)) => ctx::set_current_auth_identity(username, role),
+            None => ctx::clear_current_auth_identity(),
+        }
+        match self.previous_tenant.take() {
+            Some(tenant) => ctx::set_current_tenant(tenant),
+            None => ctx::clear_current_tenant(),
+        }
+    }
+}
+
+/// Resolve the `(UserId, Role)` a gRPC request executes as, from the
+/// dispatch context the catalog interceptor attached plus the metadata
+/// bearer (for the role).
+fn grpc_request_identity<T>(
+    runtime: &GrpcRuntime,
+    request: &Request<T>,
+) -> Option<(crate::auth::UserId, crate::auth::Role)> {
+    let principal = request
+        .extensions()
+        .get::<catalog_dispatch::GrpcDispatchContext>()
+        .and_then(|context| context.principal.clone())?;
+    let role = match runtime.resolve_auth(request.metadata()) {
+        crate::auth::middleware::AuthResult::Authenticated { role, .. } => role,
+        _ => return None,
+    };
+    let (tenant, username) = principal
+        .split_once('/')
+        .map_or((None, principal.as_str()), |(tenant, username)| {
+            (Some(tenant), username)
+        });
+    Some((crate::auth::UserId::from_parts(tenant, username), role))
+}
+
 fn execute_grpc_query_request(
     runtime: &RedDBRuntime,
     prepared: &PreparedRegistry,
+    identity: Option<(crate::auth::UserId, crate::auth::Role)>,
     query: String,
     params: Vec<QueryValue>,
     commit_policy: Option<crate::replication::CommitPolicy>,
@@ -382,6 +496,7 @@ fn execute_grpc_query_request(
     if query.trim().is_empty() {
         return Err(Status::invalid_argument("query field cannot be empty"));
     }
+    let _identity = GrpcIdentityGuard::install(identity);
 
     let params = params
         .into_iter()
@@ -550,9 +665,15 @@ mod grpc_query_value_tests {
         let runtime =
             RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
         let prepared = PreparedRegistry::new();
-        let err =
-            execute_grpc_query_request(&runtime, &prepared, "  ".to_string(), Vec::new(), None)
-                .expect_err("empty query should fail");
+        let err = execute_grpc_query_request(
+            &runtime,
+            &prepared,
+            None,
+            "  ".to_string(),
+            Vec::new(),
+            None,
+        )
+        .expect_err("empty query should fail");
 
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert_eq!(err.message(), "query field cannot be empty");
@@ -568,6 +689,7 @@ mod grpc_query_value_tests {
         let result = execute_grpc_query_request(
             &runtime,
             &prepared,
+            None,
             "SELECT id, name FROM p WHERE id = $1 AND name = $2".to_string(),
             grpc_param_values(),
             None,
@@ -598,6 +720,7 @@ mod grpc_query_value_tests {
         let err = execute_grpc_query_request(
             &runtime,
             &prepared,
+            None,
             "INSERT INTO grpc_ack_items (id, name) VALUES (1, 'alpha')".to_string(),
             Vec::new(),
             None,

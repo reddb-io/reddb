@@ -175,6 +175,18 @@ impl<'a> KvAtomicOps<'a> {
         if_not_exists: bool,
         mut metadata: Vec<(String, MetadataValue)>,
     ) -> RedDBResult<(bool, crate::storage::EntityId)> {
+        // `if_not_exists` reads the key, decides, then conditionally writes —
+        // a read-modify-write, exactly like `incr`, and it needs the same
+        // per-key lock. Without it two concurrent `PUT ... IF NOT EXISTS` on
+        // one key can both observe "absent" and both report having inserted,
+        // which defeats the only thing the flag exists to guarantee (it is
+        // the primitive callers build locks and once-only initialisation on).
+        // Unconditional puts are last-writer-wins by definition and take no
+        // lock, so the hot path is unchanged.
+        let rmw_lock =
+            if_not_exists.then(|| self.runtime.inner.rmw_locks.lock_for(collection, key));
+        let _rmw_guard = rmw_lock.as_ref().map(|lock| lock.lock());
+
         self.ensure_keyed_collection(model, collection)?;
 
         if model == crate::catalog::CollectionModel::Vault {
@@ -470,6 +482,29 @@ impl<'a> KvAtomicOps<'a> {
         Ok(())
     }
 
+    /// The `_ttl_ms` currently recorded for `key`, if it has one.
+    ///
+    /// Used to carry an existing expiry across the delete-then-create that
+    /// non-versioned KV updates go through, so an operation that does not
+    /// mention TTL does not silently clear it.
+    fn existing_ttl_ms(&self, collection: &str, key: &str) -> Option<u64> {
+        let entity = self
+            .get_entity(crate::catalog::CollectionModel::Kv, collection, key)
+            .ok()
+            .flatten()?;
+        let metadata = self
+            .runtime
+            .inner
+            .db
+            .store()
+            .get_metadata(collection, entity.id)?;
+        match metadata.get("_ttl_ms")? {
+            MetadataValue::Int(ms) if *ms >= 0 => Some(*ms as u64),
+            MetadataValue::Timestamp(ms) => Some(*ms),
+            _ => None,
+        }
+    }
+
     /// Atomically increment (or decrement) a counter key. Returns the new value.
     ///
     /// - Missing key initialises at `by` (Redis-compat).
@@ -507,14 +542,35 @@ impl<'a> KvAtomicOps<'a> {
             .checked_add(by)
             .ok_or_else(|| RedDBError::Internal(format!("INCR overflow: {current} + {by}")))?;
 
+        // `KV INCR key [BY n] [EXPIRE dur]` has no TAGS clause, and EXPIRE is
+        // optional, so the command cannot restate either. Non-versioned KV
+        // updates by delete-then-create (that is how a TTL gets refreshed),
+        // which drops whatever the previous version carried — so a plain
+        // INCR silently made an expiring key permanent and cleared its tags.
+        // Carry both forward unless the caller asked to change them.
+        let carried_tags = self
+            .runtime
+            .inner
+            .kv_tag_index
+            .tags_for_key(collection, key);
+        let carried_ttl_ms = if ttl_ms.is_none() {
+            self.existing_ttl_ms(collection, key)
+        } else {
+            None
+        };
+
         // Delete then re-create so TTL is refreshed.
         if existing.is_some() {
             self.runtime.delete_kv(collection, key)?;
         }
 
-        let meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> = ttl_metadata(ttl_ms)
-            .map(|m| m.fields.into_iter().collect())
-            .unwrap_or_default();
+        let mut meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> =
+            ttl_metadata(ttl_ms.or(carried_ttl_ms))
+                .map(|m| m.fields.into_iter().collect())
+                .unwrap_or_default();
+        if let Some(tags_metadata) = kv_tags_metadata(&carried_tags) {
+            meta_vec.push(tags_metadata);
+        }
 
         let output = self
             .runtime
@@ -527,7 +583,7 @@ impl<'a> KvAtomicOps<'a> {
         self.runtime
             .inner
             .kv_tag_index
-            .replace(collection, key, output.id, &[]);
+            .replace(collection, key, output.id, &carried_tags);
 
         self.runtime.record_kv_watch_event(
             if existing.is_some() {
@@ -587,14 +643,33 @@ impl<'a> KvAtomicOps<'a> {
             return Ok((false, current));
         }
 
+        // `KV CAS key EXPECT <v> SET <v> [EXPIRE dur]` has no TAGS clause and
+        // an optional EXPIRE, so — exactly as with INCR — the delete-then-
+        // create below would drop a TTL and tags the caller never asked to
+        // change. Carry both across the swap.
+        let carried_tags = self
+            .runtime
+            .inner
+            .kv_tag_index
+            .tags_for_key(collection, key);
+        let carried_ttl_ms = if ttl_ms.is_none() {
+            self.existing_ttl_ms(collection, key)
+        } else {
+            None
+        };
+
         // Swap: delete old entry (if present), write new one.
         if current.is_some() {
             self.runtime.delete_kv(collection, key)?;
         }
 
-        let meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> = ttl_metadata(ttl_ms)
-            .map(|m| m.fields.into_iter().collect())
-            .unwrap_or_default();
+        let mut meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> =
+            ttl_metadata(ttl_ms.or(carried_ttl_ms))
+                .map(|m| m.fields.into_iter().collect())
+                .unwrap_or_default();
+        if let Some(tags_metadata) = kv_tags_metadata(&carried_tags) {
+            meta_vec.push(tags_metadata);
+        }
 
         let output = self
             .runtime
@@ -607,7 +682,7 @@ impl<'a> KvAtomicOps<'a> {
         self.runtime
             .inner
             .kv_tag_index
-            .replace(collection, key, output.id, &[]);
+            .replace(collection, key, output.id, &carried_tags);
 
         self.runtime.record_kv_watch_event(
             if current.is_some() {
@@ -2955,6 +3030,56 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_put_if_not_exists_has_exactly_one_winner() {
+        // `IF NOT EXISTS` is the primitive callers build locks and once-only
+        // initialisation on, so "did I insert it?" must be true for exactly
+        // one racer. It reads the key, decides, then writes — the same
+        // read-modify-write shape as `incr`, and it needs the same per-key
+        // lock; without one, every thread could observe "absent" and claim
+        // the insert.
+        const THREADS: usize = 8;
+
+        let runtime = std::sync::Arc::new(rt());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let winners = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for i in 0..THREADS {
+            let runtime = std::sync::Arc::clone(&runtime);
+            let barrier = std::sync::Arc::clone(&barrier);
+            let winners = std::sync::Arc::clone(&winners);
+            handles.push(std::thread::spawn(move || {
+                let ops = super::KvAtomicOps::new(&runtime);
+                barrier.wait();
+                let (inserted, _) = ops
+                    .set_with_tags_and_metadata_for_model(
+                        CollectionModel::Kv,
+                        "kv_default",
+                        "once",
+                        reddb_types::Value::Integer(i as i64),
+                        None,
+                        &[],
+                        true,
+                        Vec::new(),
+                    )
+                    .expect("put should succeed");
+                if inserted {
+                    winners.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker should finish");
+        }
+
+        assert_eq!(
+            winners.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "exactly one racer may report having inserted the key"
+        );
+    }
+
+    #[test]
     fn incr_missing_key_initialises_at_by() {
         let r = rt();
         let ops = super::KvAtomicOps::new(&r);
@@ -3074,6 +3199,107 @@ mod tests {
         }
 
         assert_eq!(r.stats().kv.watch_streams_active, 0);
+    }
+
+    #[test]
+    fn incr_preserves_ttl_and_tags_it_was_not_asked_to_change() {
+        // `KV INCR key [BY n] [EXPIRE dur]` has no TAGS clause and EXPIRE is
+        // optional, so a plain INCR cannot restate either. It is implemented
+        // as delete-then-create (that is how non-versioned KV refreshes TTL),
+        // which drops whatever the previous version carried — so an INCR
+        // silently made an expiring key permanent and cleared its tags.
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+
+        ops.set_with_tags_and_metadata_for_model(
+            CollectionModel::Kv,
+            "kv_default",
+            "hits",
+            reddb_types::Value::Integer(1),
+            Some(60_000),
+            &["daily".to_string()],
+            false,
+            Vec::new(),
+        )
+        .expect("seed put");
+
+        ops.incr(CollectionModel::Kv, "kv_default", "hits", 1, None)
+            .expect("incr");
+
+        assert_eq!(
+            r.inner.kv_tag_index.tags_for_key("kv_default", "hits"),
+            vec!["daily".to_string()],
+            "INCR must not drop the key's tags"
+        );
+        let entity = ops
+            .get_entity(CollectionModel::Kv, "kv_default", "hits")
+            .expect("lookup")
+            .expect("key still present");
+        let metadata = r
+            .inner
+            .db
+            .store()
+            .get_metadata("kv_default", entity.id)
+            .expect("kv entry carries metadata");
+        assert!(
+            metadata.get("_ttl_ms").is_some(),
+            "INCR without EXPIRE must not make an expiring key permanent; metadata was {:?}",
+            metadata
+        );
+    }
+
+    #[test]
+    fn cas_preserves_ttl_and_tags_it_was_not_asked_to_change() {
+        // `KV CAS key EXPECT <v> SET <v> [EXPIRE dur]` has the same shape as
+        // INCR — no TAGS clause, optional EXPIRE — and the same
+        // delete-then-create underneath, so it had the same defect.
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+
+        ops.set_with_tags_and_metadata_for_model(
+            CollectionModel::Kv,
+            "kv_default",
+            "flag",
+            reddb_types::Value::Integer(1),
+            Some(60_000),
+            &["daily".to_string()],
+            false,
+            Vec::new(),
+        )
+        .expect("seed put");
+
+        let (swapped, _) = ops
+            .cas(
+                CollectionModel::Kv,
+                "kv_default",
+                "flag",
+                Some(&reddb_types::Value::Integer(1)),
+                reddb_types::Value::Integer(2),
+                None,
+            )
+            .expect("cas");
+        assert!(swapped, "expected value matched, so the swap must apply");
+
+        assert_eq!(
+            r.inner.kv_tag_index.tags_for_key("kv_default", "flag"),
+            vec!["daily".to_string()],
+            "CAS must not drop the key's tags"
+        );
+        let entity = ops
+            .get_entity(CollectionModel::Kv, "kv_default", "flag")
+            .expect("lookup")
+            .expect("key still present");
+        let metadata = r
+            .inner
+            .db
+            .store()
+            .get_metadata("kv_default", entity.id)
+            .expect("kv entry carries metadata");
+        assert!(
+            metadata.get("_ttl_ms").is_some(),
+            "CAS without EXPIRE must not make an expiring key permanent; metadata was {:?}",
+            metadata
+        );
     }
 
     #[test]

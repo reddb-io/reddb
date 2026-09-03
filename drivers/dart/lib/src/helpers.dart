@@ -495,7 +495,7 @@ String kvPath(String collection, String key) {
 
 String _kvKeySegment(String value) {
   if (value.isNotEmpty && _allIdentChars(value)) return value;
-  return "'${value.replaceAll("'", "''")}'";
+  return "'${value.replaceAll('\\', '\\\\').replaceAll("'", "''")}'";
 }
 
 String _kvValueLiteral(Object? value) {
@@ -503,20 +503,20 @@ String _kvValueLiteral(Object? value) {
   if (value is bool) return value ? 'true' : 'false';
   if (value is num) return value.toString();
   if (value is String) {
-    return "'${value.replaceAll("'", "''")}'";
+    return "'${value.replaceAll('\\', '\\\\').replaceAll("'", "''")}'";
   }
   final s = jsonEncode(value);
-  return "'${s.replaceAll("'", "''")}'";
+  return "'${s.replaceAll('\\', '\\\\').replaceAll("'", "''")}'";
 }
 
-String _kvTagLiteral(String tag) => "'${tag.replaceAll("'", "''")}'";
+String _kvTagLiteral(String tag) => "'${tag.replaceAll('\\', '\\\\').replaceAll("'", "''")}'";
 
 String _queueValueLiteral(Object? value) {
   if (value == null) return 'NULL';
   if (value is bool) return value ? 'true' : 'false';
   if (value is num) return value.toString();
   if (value is String) {
-    return "'${value.replaceAll("'", "''")}'";
+    return "'${value.replaceAll('\\', '\\\\').replaceAll("'", "''")}'";
   }
   return jsonEncode(value);
 }

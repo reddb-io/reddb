@@ -120,16 +120,16 @@ function kvIdentifier(value) {
 function kvKeySegment(value) {
   const key = String(value)
   if (/^[A-Za-z0-9_]+$/.test(key)) return key
-  return `'${key.replace(/'/g, "''")}'`
+  return `'${key.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }
 
 function kvValueLiteral(value) {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (value == null) return 'NULL'
-  if (typeof value === 'object') return `'${JSON.stringify(value).replace(/'/g, "''")}'`
-  return `'${String(value).replace(/'/g, "''")}'`
+  if (typeof value === 'object') return `'${JSON.stringify(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
+  return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }
 
 function kvTagLiteral(value) {
-  return `'${String(value).replace(/'/g, "''")}'`
+  return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }

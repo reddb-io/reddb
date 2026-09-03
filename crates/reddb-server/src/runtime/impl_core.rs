@@ -618,7 +618,9 @@ impl RedDBRuntime {
         }
 
         if let Some(command) = parse_runtime_vcs_command(query) {
-            return self.execute_vcs_command(query, detect_mode(query), command?);
+            let command = command?;
+            self.check_vcs_command_privilege(&command)?;
+            return self.execute_vcs_command(query, detect_mode(query), command);
         }
 
         if let Some(create_source) = super::analytics_source_catalog::parse_create_statement(query)?
@@ -1120,9 +1122,14 @@ impl RedDBRuntime {
                 // (old `default.*` provider/model and per-alias base_url shape)
                 // with a didactic error naming the replacement key.
                 crate::ai::validate_ai_config_key_on_write(key)?;
+                // The managed-config guardrail runs first: it owns the
+                // didactic error and the `config:write` control event for
+                // registry-managed keys. The generic capability gate below
+                // then covers every other key.
                 match self.check_managed_config_write_for_set_config(key) {
                     Err(err) => Err(err),
                     Ok(()) => {
+                        self.check_config_write_privilege(key)?;
                         let store = self.inner.db.store();
                         let json_val = match value {
                             Value::Text(s) => crate::serde_json::Value::String(s.to_string()),
@@ -1153,6 +1160,7 @@ impl RedDBRuntime {
                         "red.config.* is reserved for config; use SET CONFIG".to_string(),
                     ));
                 }
+                reject_engine_internal_vault_key(key)?;
                 let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
                     RedDBError::Query("SET SECRET requires an enabled, unsealed vault".to_string())
                 })?;
@@ -1183,6 +1191,7 @@ impl RedDBRuntime {
             }
             // DELETE SECRET key
             QueryExpr::DeleteSecret { ref key } => {
+                reject_engine_internal_vault_key(key)?;
                 let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
                     RedDBError::Query(
                         "DELETE SECRET requires an enabled, unsealed vault".to_string(),
@@ -1306,6 +1315,7 @@ impl RedDBRuntime {
                 ref prefix,
                 as_json,
             } => {
+                self.check_config_read_privilege()?;
                 let store = self.inner.db.store();
                 let all_collections = store.list_collections();
                 if !all_collections.contains(&"red_config".to_string()) {
@@ -1399,6 +1409,7 @@ impl RedDBRuntime {
             // the thread-local; SHOW TENANT returns it. Paired with the
             // CURRENT_TENANT() scalar for use in RLS policies.
             QueryExpr::SetTenant(ref value) => {
+                self.check_set_tenant_privilege(value.as_deref())?;
                 match value {
                     Some(id) => set_current_tenant(id.clone()),
                     None => clear_current_tenant(),
@@ -2166,6 +2177,8 @@ impl RedDBRuntime {
             // VACUUM/ANALYZE afterwards is up to the caller.
             QueryExpr::CopyFrom(ref q) => {
                 use crate::storage::import::{CsvConfig, CsvImporter};
+                self.check_copy_from_privilege(&q.table)?;
+                confine_copy_from_path(&q.path)?;
                 let store = self.inner.db.store();
                 let cfg = CsvConfig {
                     collection: q.table.clone(),
@@ -3144,6 +3157,18 @@ impl RedDBRuntime {
         reverted
     }
 
+    /// `EXPLAIN` is peeled off the statement text before parsing, so the
+    /// planner ran on the inner statement with no privilege check at all:
+    /// a read-only principal could plan any write and read the table's
+    /// column list and row estimate back out of the plan. The plan needs
+    /// exactly the privilege the statement it describes needs.
+    fn check_explain_target_privilege(&self, inner_sql: &str) -> RedDBResult<()> {
+        let parsed =
+            reddb_rql::parser::parse(inner_sql).map_err(|e| RedDBError::Query(e.to_string()))?;
+        self.check_query_privilege(&parsed.query)
+            .map_err(|err| RedDBError::Query(format!("permission denied: {err}")))
+    }
+
     /// Wrap the planner's `RuntimeQueryExplain` as rows on a
     /// `RuntimeQueryResult` so callers over the SQL interface see the
     /// plan tree in the same shape a SELECT produces.
@@ -3152,6 +3177,7 @@ impl RedDBRuntime {
     /// Nodes are walked depth-first; `depth` counts from 0 at the
     /// root so a text renderer can indent without re-walking.
     fn explain_as_rows(&self, raw_query: &str, inner_sql: &str) -> RedDBResult<RuntimeQueryResult> {
+        self.check_explain_target_privilege(inner_sql)?;
         let explain = self.explain_query(inner_sql)?;
 
         let columns = vec![
@@ -3213,6 +3239,7 @@ impl RedDBRuntime {
             ));
         }
 
+        self.check_explain_target_privilege(inner_sql)?;
         let explain = self.explain_query(inner_sql)?;
         let conn_id = current_connection_id();
         if self.inner.transaction_state.in_transaction(conn_id) {
@@ -3420,5 +3447,307 @@ mod inline_graph_tvf_tests {
                 ("c".to_string(), 1),
             ]
         );
+    }
+}
+
+/// Vault keys the engine itself owns. `SET SECRET` / `DELETE SECRET` share
+/// the vault KV space with the IAM policy blobs, the attachment tables and
+/// the `SECRET()` column master key; letting a principal with `secret:write`
+/// overwrite them is an escalation (allow-all policy after restart) or a
+/// permanent data loss (rotated AES key). Provider credentials under
+/// `red.secret.ai.*` stay writable — that is the documented use.
+fn reject_engine_internal_vault_key(key: &str) -> RedDBResult<()> {
+    let lowered = key.to_ascii_lowercase();
+    let internal = lowered == "red.secret.aes_key"
+        || lowered.starts_with("red.iam.")
+        || lowered.starts_with("red.acl.")
+        || lowered.starts_with("red.vault.");
+    if internal {
+        return Err(RedDBError::Query(format!(
+            "`{key}` is an engine-internal vault key and cannot be set or deleted through SET/DELETE SECRET"
+        )));
+    }
+    Ok(())
+}
+
+/// Optional confinement for `COPY … FROM '<path>'`. When
+/// `REDDB_COPY_IMPORT_ROOT` is set, the (canonicalised) source path must live
+/// under that directory; otherwise the statement is refused. Unset keeps the
+/// historical behaviour (any readable file, admin-only via the privilege
+/// gate).
+fn confine_copy_from_path(path: &str) -> RedDBResult<()> {
+    let Ok(root) = std::env::var("REDDB_COPY_IMPORT_ROOT") else {
+        return Ok(());
+    };
+    let root = std::fs::canonicalize(&root).map_err(|e| {
+        RedDBError::Query(format!(
+            "REDDB_COPY_IMPORT_ROOT `{root}` is not usable: {e}"
+        ))
+    })?;
+    let resolved = std::fs::canonicalize(path)
+        .map_err(|e| RedDBError::Query(format!("COPY FROM `{path}`: {e}")))?;
+    if !resolved.starts_with(&root) || !resolved.is_file() {
+        return Err(RedDBError::Query(format!(
+            "COPY FROM `{path}` is outside the configured import root"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod security_gate_tests {
+    use super::*;
+    use crate::auth::store::AuthStore;
+    use crate::auth::{AuthConfig, Role};
+
+    /// Clears the thread-local identity on drop so one test's principal
+    /// never leaks into the next on a shared thread.
+    struct IdentityGuard;
+
+    impl IdentityGuard {
+        fn install(username: &str, role: Role) -> Self {
+            set_current_auth_identity(username.to_string(), role);
+            Self
+        }
+    }
+
+    impl Drop for IdentityGuard {
+        fn drop(&mut self) {
+            clear_current_auth_identity();
+        }
+    }
+
+    fn runtime_with_user(username: &str, role: Role) -> RedDBRuntime {
+        let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            session_ttl_secs: 60,
+            require_auth: true,
+            auto_encrypt_storage: false,
+            vault_enabled: false,
+            cert: Default::default(),
+            oauth: Default::default(),
+        }));
+        store.create_user(username, "pw", role).expect("user");
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.set_auth_store(store);
+        runtime
+    }
+
+    fn runtime_with_store(username: &str, role: Role) -> (RedDBRuntime, std::sync::Arc<AuthStore>) {
+        let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            session_ttl_secs: 60,
+            require_auth: true,
+            auto_encrypt_storage: false,
+            vault_enabled: false,
+            cert: Default::default(),
+            oauth: Default::default(),
+        }));
+        store.create_user(username, "pw", role).expect("user");
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.set_auth_store(std::sync::Arc::clone(&store));
+        (runtime, store)
+    }
+
+    #[test]
+    fn nested_reads_need_select_on_the_inner_table() {
+        use crate::auth::privileges::{Action, GrantPrincipal, Resource};
+        use crate::auth::UserId;
+        let (runtime, store) = runtime_with_store("ro", Role::Read);
+        runtime
+            .execute_query("CREATE TABLE gate_open (a INTEGER)")
+            .expect("create");
+        runtime
+            .execute_query("CREATE TABLE gate_closed (b INTEGER)")
+            .expect("create");
+        // One explicit grant switches the legacy fallback off, so `ro`
+        // may read exactly `gate_open`.
+        store
+            .grant(
+                &UserId::from_parts(None, "admin"),
+                Role::Admin,
+                GrantPrincipal::User(UserId::from_parts(None, "ro")),
+                Resource::table_from_name("gate_open"),
+                vec![Action::Select],
+                false,
+                None,
+            )
+            .expect("grant");
+        let _identity = IdentityGuard::install("ro", Role::Read);
+        runtime
+            .execute_query("SELECT * FROM (SELECT a FROM gate_open) s")
+            .expect("derived table over a granted table is fine");
+        // The outer statement names only the synthetic subquery table, so
+        // the inner table used to be read with no check at all.
+        for sql in [
+            "SELECT * FROM (SELECT b FROM gate_closed) s",
+            "SELECT a FROM gate_open WHERE a IN (SELECT b FROM gate_closed)",
+        ] {
+            let err = runtime
+                .execute_query(sql)
+                .expect_err("nested read of an ungranted table must be refused");
+            assert!(
+                err.to_string().contains("permission denied"),
+                "{sql}: unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_listings_are_self_or_policy_management() {
+        let (runtime, store) = runtime_with_store("ro", Role::Read);
+        store.create_user("other", "pw", Role::Read).expect("user");
+        let _identity = IdentityGuard::install("ro", Role::Read);
+        runtime
+            .execute_query("SHOW EFFECTIVE PERMISSIONS FOR ro")
+            .expect("a principal may inspect its own permissions");
+        let err = runtime
+            .execute_query("SHOW EFFECTIVE PERMISSIONS FOR other")
+            .expect_err("inspecting another principal is policy management");
+        assert!(
+            err.to_string().contains("permission denied"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn secret_columns_stay_masked_for_readers_without_secret_read() {
+        use reddb_types::Value;
+        let (runtime, store) = runtime_with_store("ro", Role::Read);
+        store.create_user("root", "pw", Role::Admin).expect("admin");
+        store.ensure_vault_secret_key();
+        runtime
+            .execute_query(
+                "INSERT INTO creds_gate (name, token) VALUES ('stripe', SECRET('sk_live_abc'))",
+            )
+            .expect("insert");
+
+        let token_for = |username: &str, role: Role| {
+            let _identity = IdentityGuard::install(username, role);
+            let result = runtime
+                .execute_query("SELECT name, token FROM creds_gate")
+                .expect("select");
+            result.result.records[0]
+                .get("token")
+                .cloned()
+                .expect("token column")
+        };
+        // Any table reader used to get the plaintext; now only an admin or
+        // a principal with an explicit `secret:read` allow does.
+        assert!(
+            matches!(token_for("ro", Role::Read), Value::Secret(_)),
+            "a read-role principal must see the column masked"
+        );
+        assert_eq!(
+            token_for("root", Role::Admin),
+            Value::text("sk_live_abc".to_string())
+        );
+    }
+
+    #[test]
+    fn store_wide_operations_need_the_admin_tier() {
+        let runtime = runtime_with_user("bob", Role::Write);
+        let _identity = IdentityGuard::install("bob", Role::Write);
+        // These fell through the gate's wildcard arm, so a write-role
+        // principal could scrub or vacuum the store and list every secret.
+        for sql in ["VACUUM", "SCRUB", "SHOW SECRETS"] {
+            let err = runtime
+                .execute_query(sql)
+                .expect_err("store-wide operation must be refused for a non-admin");
+            assert!(
+                err.to_string().contains("permission denied"),
+                "{sql}: unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn explain_needs_the_privilege_of_the_statement_it_plans() {
+        let runtime = runtime_with_user("ro", Role::Read);
+        let _identity = IdentityGuard::install("ro", Role::Read);
+        runtime
+            .execute_query("EXPLAIN SELECT 1 AS one")
+            .expect("planning a read is a read");
+        // EXPLAIN used to bypass the gate entirely, so a read-only
+        // principal could plan any write and read the schema back.
+        let err = runtime
+            .execute_query("EXPLAIN INSERT INTO gate_t (a) VALUES (1)")
+            .expect_err("planning a write needs the write privilege");
+        assert!(
+            err.to_string().contains("permission denied"),
+            "unexpected EXPLAIN error: {err}"
+        );
+    }
+
+    #[test]
+    fn copy_from_a_server_path_is_admin_only() {
+        let runtime = runtime_with_user("bob", Role::Write);
+        let _identity = IdentityGuard::install("bob", Role::Write);
+        // `COPY … FROM '<path>'` opens a file on the *server*, so a
+        // write-role principal used to be able to read /proc/self/environ
+        // (admin token, vault certificate, cloud keys) into a table.
+        let err = runtime
+            .execute_query("COPY leak FROM '/etc/hostname'")
+            .expect_err("COPY FROM must be refused for a non-admin");
+        assert!(
+            err.to_string().contains("permission denied"),
+            "unexpected COPY error: {err}"
+        );
+    }
+
+    #[test]
+    fn vcs_history_rewrites_are_admin_only() {
+        let runtime = runtime_with_user("bob", Role::Write);
+        let _identity = IdentityGuard::install("bob", Role::Write);
+        // VCS commands were dispatched before the statement frame was built,
+        // so `RESET HARD TO` ran with no privilege check at all.
+        let err = runtime
+            .execute_query("RESET HARD TO 'deadbeef'")
+            .expect_err("RESET must be refused for a non-admin");
+        assert!(
+            err.to_string().contains("permission denied"),
+            "unexpected RESET error: {err}"
+        );
+    }
+
+    #[test]
+    fn ai_provider_config_writes_are_admin_only() {
+        let runtime = runtime_with_user("bob", Role::Write);
+        let _identity = IdentityGuard::install("bob", Role::Write);
+        // This namespace decides which vault secret is sent, as a bearer, to
+        // which host — the exfiltration primitive behind the SET CONFIG gap.
+        let err = runtime
+            .execute_query(
+                "SET CONFIG red.config.ai.providers.openai.tokens.default.secret_ref = 'red.secret.aes_key'",
+            )
+            .expect_err("AI provider config must be refused for a non-admin");
+        assert!(
+            err.to_string().contains("permission denied"),
+            "unexpected SET CONFIG error: {err}"
+        );
+    }
+
+    #[test]
+    fn engine_internal_vault_keys_are_not_writable_through_set_secret() {
+        let runtime = runtime_with_user("root", Role::Admin);
+        let _identity = IdentityGuard::install("root", Role::Admin);
+        // Even an admin must not overwrite the IAM policy blob (an allow-all
+        // policy would survive a restart) or the `SECRET()` master key
+        // (rotating it destroys every encrypted column value).
+        for key in [
+            "red.iam.policies",
+            "red.iam.attachments.users",
+            "red.secret.aes_key",
+        ] {
+            let err = runtime
+                .execute_query(&format!("SET SECRET {key} = 'x'"))
+                .expect_err("engine-internal vault key must be refused");
+            assert!(
+                err.to_string().contains("engine-internal"),
+                "unexpected error for {key}: {err}"
+            );
+        }
     }
 }

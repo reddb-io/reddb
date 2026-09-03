@@ -51,7 +51,7 @@ fn read_snapshot_sidecar(path: &std::path::Path) -> Result<Option<Vec<u8>>, Stat
     }
     std::fs::read(path)
         .map(Some)
-        .map_err(|e| Status::internal(e.to_string()))
+        .map_err(|e| crate::grpc::control_support::internal_status(&e))
 }
 
 fn attach_basebackup_snapshot_fields(
@@ -85,10 +85,10 @@ fn attach_basebackup_snapshot_fields(
         .find(|part| part.snapshot_offset == snapshot_offset as u64)
     {
         let bytes = std::fs::read(parts_root.join(&part.relative_path))
-            .map_err(|err| Status::internal(err.to_string()))?;
+            .map_err(|err| crate::grpc::control_support::internal_status(&err))?;
         manifest
             .verify_chunk_bytes(part, &bytes)
-            .map_err(|err| Status::internal(err.to_string()))?;
+            .map_err(|err| crate::grpc::control_support::internal_status(&err))?;
         chunk.basebackup_chunk_ordinal = Some(part.ordinal);
         chunk.basebackup_chunk = Some(bytes);
     }
@@ -1689,11 +1689,13 @@ impl RedDb for GrpcRuntime {
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
+        let identity = grpc_request_identity(self, &request);
         let request = request.into_inner();
         let (entity_types, capabilities) = grpc_parse_query_filters(&request)?;
         let result = execute_grpc_query_request(
             &self.runtime,
             &self.prepared_registry,
+            identity,
             request.query,
             request.params,
             commit_policy,
@@ -1710,6 +1712,7 @@ impl RedDb for GrpcRuntime {
         request: Request<BatchQueryRequest>,
     ) -> Result<Response<BatchQueryReply>, Status> {
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
+        let identity = grpc_request_identity(self, &request);
         let queries = request.into_inner().queries;
         let no_filter: Option<Vec<String>> = None;
         let mut results = Vec::with_capacity(queries.len());
@@ -1717,6 +1720,7 @@ impl RedDb for GrpcRuntime {
             let result = execute_grpc_query_request(
                 &self.runtime,
                 &self.prepared_registry,
+                identity.clone(),
                 sql,
                 Vec::new(),
                 commit_policy,
@@ -1746,6 +1750,7 @@ impl RedDb for GrpcRuntime {
         request: Request<ExecutePreparedRequest>,
     ) -> Result<Response<QueryReply>, Status> {
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
+        let identity = grpc_request_identity(self, &request);
         let inner = request.into_inner();
         let params = inner
             .bind_json
@@ -1757,6 +1762,7 @@ impl RedDb for GrpcRuntime {
         if let Some(commit_policy) = commit_policy {
             request = request.with_commit_policy(commit_policy);
         }
+        let _identity = GrpcIdentityGuard::install(identity);
         let result = QueryRequestExecutor::new(&self.runtime, &self.prepared_registry)
             .execute(request)
             .map_err(grpc_query_request_error)?;
@@ -2298,7 +2304,7 @@ impl RedDb for GrpcRuntime {
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || create_row_reply(&rt, request))
             .await
-            .map_err(|e| Status::internal(e.to_string()))??;
+            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2311,7 +2317,7 @@ impl RedDb for GrpcRuntime {
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || create_node_reply(&rt, request))
             .await
-            .map_err(|e| Status::internal(e.to_string()))??;
+            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2324,7 +2330,7 @@ impl RedDb for GrpcRuntime {
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || create_edge_reply(&rt, request))
             .await
-            .map_err(|e| Status::internal(e.to_string()))??;
+            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2337,7 +2343,7 @@ impl RedDb for GrpcRuntime {
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || create_vector_reply(&rt, request))
             .await
-            .map_err(|e| Status::internal(e.to_string()))??;
+            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2373,7 +2379,7 @@ impl RedDb for GrpcRuntime {
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || bulk_create_rows_fast(&rt, request))
             .await
-            .map_err(|e| Status::internal(e.to_string()))??;
+            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2386,7 +2392,7 @@ impl RedDb for GrpcRuntime {
         let rt = self.clone();
         let reply = tokio::task::spawn_blocking(move || bulk_insert_binary(&rt, request))
             .await
-            .map_err(|e| Status::internal(e.to_string()))??;
+            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2463,7 +2469,7 @@ impl RedDb for GrpcRuntime {
             )
         })
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(|e| crate::grpc::control_support::internal_status(&e))?;
 
         self.enforce_commit_policy_after_write()?;
         grpc_batch_outcome_to_reply(outcome)
@@ -2478,7 +2484,7 @@ impl RedDb for GrpcRuntime {
         let reply =
             tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_node_reply))
                 .await
-                .map_err(|e| Status::internal(e.to_string()))??;
+                .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2492,7 +2498,7 @@ impl RedDb for GrpcRuntime {
         let reply =
             tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_edge_reply))
                 .await
-                .map_err(|e| Status::internal(e.to_string()))??;
+                .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2507,7 +2513,7 @@ impl RedDb for GrpcRuntime {
             bulk_create_reply(&rt, request, create_vector_reply)
         })
         .await
-        .map_err(|e| Status::internal(e.to_string()))??;
+        .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2522,7 +2528,7 @@ impl RedDb for GrpcRuntime {
             bulk_create_reply(&rt, request, create_document_reply)
         })
         .await
-        .map_err(|e| Status::internal(e.to_string()))??;
+        .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2537,7 +2543,7 @@ impl RedDb for GrpcRuntime {
                 .map_err(to_status)
         })
         .await
-        .map_err(|e| Status::internal(e.to_string()))??;
+        .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         Ok(Response::new(ask_reply_from_runtime_result(&result)?))
     }
 
@@ -2554,7 +2560,7 @@ impl RedDb for GrpcRuntime {
             ask_stream_events_from_runtime_result(&result)
         })
         .await
-        .map_err(|e| Status::internal(e.to_string()))??;
+        .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         let stream = tokio_stream::iter(events.into_iter().map(Ok));
         Ok(Response::new(Box::pin(stream) as Self::AskStreamStream))
     }
@@ -2941,7 +2947,7 @@ impl RedDb for GrpcRuntime {
         );
         match fence
             .admit_stream_handshake(&handshake)
-            .map_err(|err| Status::internal(err.to_string()))?
+            .map_err(|err| crate::grpc::control_support::internal_status(&err))?
         {
             crate::replication::FenceVerdict::Fenced(err) => {
                 return Err(Status::failed_precondition(err.to_string()));
@@ -3042,7 +3048,7 @@ impl RedDb for GrpcRuntime {
         {
             spool
                 .read_since(since_lsn, max_count)
-                .map_err(|err| Status::internal(err.to_string()))?
+                .map_err(|err| crate::grpc::control_support::internal_status(&err))?
                 .into_iter()
                 .map(|(lsn, data)| (lsn, std::sync::Arc::from(data.into_boxed_slice())))
                 .collect()
@@ -3164,7 +3170,7 @@ impl RedDb for GrpcRuntime {
         let slot_restart_lsn = repl.register_replica(replica_id.clone());
 
         // Trigger a checkpoint first to ensure data is flushed
-        db.flush().map_err(|e| Status::internal(e.to_string()))?;
+        db.flush().map_err(|e| crate::grpc::control_support::internal_status(&e))?;
 
         let snapshot_lsn = repl
             .logical_wal_spool
@@ -3217,7 +3223,7 @@ impl RedDb for GrpcRuntime {
             }
         }
         if let Some(path) = db.path() {
-            let bytes = std::fs::read(path).map_err(|e| Status::internal(e.to_string()))?;
+            let bytes = std::fs::read(path).map_err(|e| crate::grpc::control_support::internal_status(&e))?;
             // A resumable snapshot token is keyed to the replica, the pinned
             // snapshot LSN, and the total size so a resuming caller is matched
             // to the same byte stream it started.
@@ -3293,6 +3299,16 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
+        let presented = request
+            .metadata()
+            .get("x-reddb-bootstrap-token")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        if !crate::server::handlers_auth::bootstrap_token_matches(presented.as_deref()) {
+            return Err(Status::permission_denied(
+                "bootstrap requires the token configured in REDDB_BOOTSTRAP_TOKEN",
+            ));
+        }
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
             .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
@@ -3548,7 +3564,7 @@ impl RedDb for GrpcRuntime {
         let api_key = self
             .auth_store
             .create_api_key(&username, &name, role)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| crate::grpc::control_support::internal_status(&e))?;
 
         let mut map = Map::new();
         map.insert("key".into(), JsonValue::String(api_key.key));
@@ -3707,7 +3723,7 @@ impl RedDb for GrpcRuntime {
             .db()
             .store()
             .create_collection(&name)
-            .map_err(|e| Status::internal(format!("{e:?}")))?;
+            .map_err(|e| crate::grpc::control_support::internal_status(format!("{e:?}")))?;
         if let Some(default_ttl_ms) = default_ttl_ms {
             self.runtime
                 .db()
@@ -3716,7 +3732,7 @@ impl RedDb for GrpcRuntime {
         self.runtime
             .db()
             .persist_metadata()
-            .map_err(|err| Status::internal(err.to_string()))?;
+            .map_err(|err| crate::grpc::control_support::internal_status(&err))?;
 
         let mut map = Map::new();
         map.insert("ok".into(), JsonValue::Bool(true));
@@ -3748,12 +3764,12 @@ impl RedDb for GrpcRuntime {
             .db()
             .store()
             .drop_collection(&name)
-            .map_err(|e| Status::internal(format!("{e:?}")))?;
+            .map_err(|e| crate::grpc::control_support::internal_status(format!("{e:?}")))?;
         self.runtime.db().clear_collection_default_ttl_ms(&name);
         self.runtime
             .db()
             .persist_metadata()
-            .map_err(|err| Status::internal(err.to_string()))?;
+            .map_err(|err| crate::grpc::control_support::internal_status(&err))?;
 
         Ok(Response::new(OperationReply {
             ok: true,

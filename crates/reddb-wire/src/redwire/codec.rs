@@ -4,6 +4,37 @@
 
 use super::frame::{Flags, Frame, MessageKind, FRAME_HEADER_SIZE, MAX_FRAME_SIZE};
 
+/// Upper bound on the inflated size of a COMPRESSED payload. Four times
+/// the on-wire frame cap: enough headroom for compression to be useful,
+/// small enough that a hostile peer cannot exhaust memory with one frame.
+pub const MAX_DECOMPRESSED_PAYLOAD: usize = 4 * (MAX_FRAME_SIZE as usize);
+
+fn decompress_bounded(on_wire: &[u8], payload_len: usize) -> Result<Vec<u8>, FrameError> {
+    use std::io::Read;
+    let limit = MAX_DECOMPRESSED_PAYLOAD as u64;
+    let unparseable = |e: std::io::Error| FrameError::PayloadTruncated {
+        // Reuse PayloadTruncated for "decompression failed" rather than
+        // introduce a new variant — the wire-layer outcome is the same:
+        // the body is unparseable, drop the connection.
+        expected: payload_len as u32,
+        available: e.to_string().len() as u32,
+    };
+    let decoder = zstd::stream::Decoder::new(on_wire).map_err(unparseable)?;
+    let mut plain = Vec::new();
+    // Read one byte past the limit so an exactly-at-limit payload is
+    // accepted while anything larger is detected without buffering it.
+    decoder
+        .take(limit + 1)
+        .read_to_end(&mut plain)
+        .map_err(unparseable)?;
+    if plain.len() as u64 > limit {
+        return Err(FrameError::DecompressedTooLarge {
+            limit: MAX_DECOMPRESSED_PAYLOAD as u32,
+        });
+    }
+    Ok(plain)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
     Truncated,
@@ -18,6 +49,10 @@ pub enum FrameError {
     /// not in `MessageKind::allowed_flags()` for this kind. The wire
     /// catalog is the single source of truth for which bits a kind
     /// may carry — see `frame.rs::MessageKind::allowed_flags`.
+    /// A COMPRESSED payload inflated past [`MAX_DECOMPRESSED_PAYLOAD`].
+    DecompressedTooLarge {
+        limit: u32,
+    },
     FlagsNotAllowedForKind {
         kind: u8,
         flags: u8,
@@ -38,6 +73,9 @@ impl std::fmt::Display for FrameError {
             ),
             Self::UnknownKind(byte) => write!(f, "unknown message kind 0x{byte:02x}"),
             Self::UnknownFlags(byte) => write!(f, "unknown flag bits 0x{byte:02x}"),
+            Self::DecompressedTooLarge { limit } => {
+                write!(f, "compressed payload inflates past the {limit}-byte limit")
+            }
             Self::FlagsNotAllowedForKind { kind, flags } => write!(
                 f,
                 "flag bits 0x{flags:02x} not allowed on kind 0x{kind:02x}"
@@ -164,19 +202,10 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(Frame, usize), FrameError> {
     let payload = if flags.contains(Flags::COMPRESSED) {
         // Decompress on read so the rest of the dispatch loop
         // sees plaintext bytes regardless of how they arrived.
-        match zstd::stream::decode_all(on_wire) {
-            Ok(plain) => plain,
-            Err(e) => {
-                return Err(FrameError::PayloadTruncated {
-                    // Reuse PayloadTruncated for "decompression
-                    // failed" rather than introduce a new variant
-                    // — the wire-layer outcome is the same: the
-                    // body is unparseable, drop the connection.
-                    expected: payload_len as u32,
-                    available: e.to_string().len() as u32,
-                });
-            }
-        }
+        // `MAX_FRAME_SIZE` only bounds the *compressed* bytes; a
+        // streaming decoder capped at `MAX_DECOMPRESSED_PAYLOAD` keeps a
+        // 16 MiB zstd bomb from inflating into gigabytes of heap.
+        decompress_bounded(on_wire, payload_len)?
     } else {
         on_wire.to_vec()
     };
@@ -498,5 +527,34 @@ mod tests {
         let (decoded, _) = decode_frame(&bytes).unwrap();
         assert_eq!(decoded.payload, payload);
         assert!(!decoded.flags.contains(Flags::COMPRESSED));
+    }
+
+    #[test]
+    fn compressed_payload_that_inflates_past_the_cap_is_refused() {
+        // MAX_FRAME_SIZE bounds only the *compressed* bytes. A highly
+        // compressible payload therefore lets a peer turn a small frame into
+        // a multi-gigabyte allocation unless the decoder is bounded.
+        let plain = vec![0u8; MAX_DECOMPRESSED_PAYLOAD + 1024];
+        let compressed = zstd::stream::encode_all(plain.as_slice(), 1).expect("compress");
+        assert!(
+            compressed.len() < MAX_FRAME_SIZE as usize,
+            "the bomb must fit in one legal frame to be a realistic attack"
+        );
+
+        let total = (FRAME_HEADER_SIZE + compressed.len()) as u32;
+        let mut bytes = Vec::with_capacity(total as usize);
+        bytes.extend_from_slice(&total.to_le_bytes());
+        bytes.push(MessageKind::Query as u8);
+        bytes.push(Flags::COMPRESSED.bits());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&compressed);
+
+        match decode_frame(&bytes) {
+            Err(FrameError::DecompressedTooLarge { limit }) => {
+                assert_eq!(limit as usize, MAX_DECOMPRESSED_PAYLOAD);
+            }
+            other => panic!("expected DecompressedTooLarge, got {other:?}"),
+        }
     }
 }

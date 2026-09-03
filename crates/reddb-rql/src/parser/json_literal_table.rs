@@ -457,10 +457,14 @@ fn dos_recursion_depth_exceeded() {
     let sql = format!("INSERT INTO t (body) VALUES ({})", s);
     let r = parse(&sql);
     let err = r.expect_err("expected depth-limit error");
+    // The bound is now enforced by the parser itself rather than by the
+    // post-parse walk, which could only ever reject a document the recursive
+    // descent had already built. Assert the limit was hit, not which layer
+    // phrased the message.
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("JSON_LITERAL_MAX_DEPTH"),
-        "expected depth error, got: {}",
-        err
+        message.contains("depth") && message.contains("128"),
+        "expected a nesting-depth error naming the limit, got: {message}"
     );
 }
 

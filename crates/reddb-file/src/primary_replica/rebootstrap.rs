@@ -115,6 +115,9 @@ pub fn promote_rebootstrap_pending_database(data_path: impl AsRef<Path>) -> RdbF
 
 fn fsync_parent_dir(path: &Path) {
     if let Some(parent) = path.parent() {
+        // POSIX-only: see `Vfs::sync_dir`. Already best-effort, but on
+        // Windows it can only ever fail, so do not pretend to try.
+        #[cfg(not(windows))]
         let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
     }
 }

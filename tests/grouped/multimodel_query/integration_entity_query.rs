@@ -2136,9 +2136,13 @@ fn test_password_hash_and_verify() {
         // that would leak the hash or plaintext through formatters).
         match pw_value {
             Value::Password(h) => {
+                // PHC string: `$argon2id$v=19$m=...,t=...,p=...$salt$hash`.
+                // The previous in-tree KDF stored a bare
+                // `argon2id$<salt>$<hash>` with no parameters, which is why
+                // its cost could never be raised without a format change.
                 assert!(
-                    h.starts_with("argon2id$"),
-                    "stored password must be an argon2id hash, got: {h}"
+                    h.starts_with("$argon2id$v=19$"),
+                    "stored password must be a PHC-encoded argon2id hash, got: {h}"
                 );
                 assert!(
                     !h.contains("MyP@ss123"),
@@ -2187,7 +2191,7 @@ fn test_password_hash_and_verify() {
         .expect("raw SELECT of updated password should succeed");
     match raw_after_update.result.records[0].get("pw") {
         Some(Value::Password(h)) => {
-            assert!(h.starts_with("argon2id$"));
+            assert!(h.starts_with("$argon2id$v=19$"), "{h}");
             assert!(!h.contains("NewP@ss456"));
         }
         other => panic!("expected updated Value::Password, got {other:?}"),

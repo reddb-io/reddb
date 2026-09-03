@@ -140,21 +140,77 @@ pub(crate) struct HttpResponse {
 /// NDJSON), and the async axum edge ([`super::axum_edge`], buffered
 /// responses). Streaming/SSE heads carry these inline and the axum edge
 /// forwards them verbatim, so the choke point stays singular.
-pub(crate) const CORS_HEADER_PAIRS: [(&str, &str); 4] = [
-    ("Access-Control-Allow-Origin", "*"),
-    (
-        "Access-Control-Allow-Methods",
-        "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-    ),
-    ("Access-Control-Allow-Headers", "*"),
-    ("Access-Control-Max-Age", "86400"),
-];
+/// CORS response headers, resolved from `RED_HTTP_CORS_ORIGINS`.
+///
+/// `Access-Control-Allow-Origin` used to be a hardcoded `*`. No
+/// `Allow-Credentials` rides with it, so a browser cannot replay a cookie —
+/// but a token-authenticated (or, on a default install, unauthenticated)
+/// database was still readable and writable cross-origin by any page the
+/// operator's browser happened to load. The value is now operator-controlled:
+///
+///   * unset — `*`, preserving today's behaviour for local development and
+///     for deployments that front RedDB with their own CORS policy;
+///   * `none` — omit the CORS headers entirely, so browsers refuse
+///     cross-origin reads;
+///   * a single origin — emit exactly that origin.
+///
+/// A comma-separated allowlist would need the request's `Origin` echoed back
+/// per response, which these serialization choke points do not see; rather
+/// than silently accept a value it cannot honour, a multi-origin setting
+/// fails closed (no CORS headers) and warns once.
+pub(crate) fn cors_header_pairs() -> Vec<(&'static str, String)> {
+    let Some(origin) = cors_allow_origin() else {
+        return Vec::new();
+    };
+    vec![
+        ("Access-Control-Allow-Origin", origin),
+        (
+            "Access-Control-Allow-Methods",
+            "GET, POST, PUT, PATCH, DELETE, OPTIONS".to_string(),
+        ),
+        ("Access-Control-Allow-Headers", "*".to_string()),
+        ("Access-Control-Max-Age", "86400".to_string()),
+    ]
+}
+
+/// Resolve the configured `Access-Control-Allow-Origin`, or `None` to send no
+/// CORS headers at all. See [`cors_header_pairs`].
+fn cors_allow_origin() -> Option<String> {
+    let Ok(configured) = std::env::var("RED_HTTP_CORS_ORIGINS") else {
+        return Some("*".to_string());
+    };
+    let configured = configured.trim();
+    if configured.is_empty() || configured.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    if configured == "*" {
+        return Some("*".to_string());
+    }
+    let mut origins = configured
+        .split(',')
+        .map(str::trim)
+        .filter(|o| !o.is_empty());
+    let first = origins.next()?;
+    if origins.next().is_some() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                target: "reddb::security",
+                "RED_HTTP_CORS_ORIGINS lists multiple origins, which requires echoing the \
+                 request Origin per response and is not supported; sending no CORS headers. \
+                 Use a single origin, `*`, or `none`."
+            );
+        });
+        return None;
+    }
+    Some(first.to_string())
+}
 
 impl HttpResponse {
     pub(crate) fn to_http_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         // Permissive CORS rides on every response through this single
-        // serialization choke point (see `CORS_HEADER_PAIRS`) so browser
+        // serialization choke point (see `cors_header_pairs`) so browser
         // clients can call the HTTP API cross-origin without a reverse
         // proxy. The OPTIONS preflight is answered in `routing::route`
         // before auth.
@@ -166,7 +222,7 @@ impl HttpResponse {
             self.body.len()
         );
         bytes.extend_from_slice(header.as_bytes());
-        for (name, value) in CORS_HEADER_PAIRS {
+        for (name, value) in cors_header_pairs() {
             bytes.extend_from_slice(name.as_bytes());
             bytes.extend_from_slice(b": ");
             bytes.extend_from_slice(value.as_bytes());

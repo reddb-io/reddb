@@ -2069,6 +2069,7 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
         other => {
             // Treat as custom provider if it looks like a URL
             if other.starts_with("http://") || other.starts_with("https://") {
+                validate_custom_provider_url(other)?;
                 Ok(AiProvider::Custom(other.to_string()))
             } else {
                 Err(crate::RedDBError::Query(format!(
@@ -2514,7 +2515,19 @@ where
         }
         // 2. Vault token reachable through a configured indirection ref.
         if let Some(secret_ref) = kv_getter(&ai_api_secret_ref_config_key(provider, alias))? {
-            if let Some(key) = kv_getter(secret_ref.trim())? {
+            let secret_ref = secret_ref.trim();
+            // The indirection may only name an AI provider credential.
+            // Pointing it at `red.secret.aes_key` or an IAM blob would send
+            // engine-internal key material as a bearer to the provider URL.
+            if !secret_ref
+                .to_ascii_lowercase()
+                .starts_with("red.secret.ai.")
+            {
+                return Err(crate::RedDBError::Query(format!(
+                    "secret_ref '{secret_ref}' must reference a vault key under red.secret.ai.*"
+                )));
+            }
+            if let Some(key) = kv_getter(secret_ref)? {
                 if !key.trim().is_empty() {
                     return Ok(key);
                 }
@@ -3488,4 +3501,67 @@ pub fn provider_mode_to_provider(mode: AiProviderMode) -> AiProvider {
         AiProviderMode::AnthropicNative => AiProvider::Anthropic,
         AiProviderMode::OpenAiCompat => AiProvider::Custom(String::new()),
     }
+}
+
+/// Egress policy for `AiProvider::Custom` base URLs. The server sends the
+/// resolved provider credential as a bearer to this host, so an arbitrary
+/// URL is a credential-exfiltration / SSRF primitive. Rules:
+///   * plaintext `http://` only for loopback hosts (local OpenAI-compatible
+///     servers), `https://` everywhere else;
+///   * literal private / link-local / multicast IP addresses are refused.
+///
+/// `REDDB_AI_ALLOW_PRIVATE_PROVIDERS=1` lifts both restrictions for
+/// deployments that run providers on a private network.
+pub(crate) fn validate_custom_provider_url(url: &str) -> crate::RedDBResult<()> {
+    if std::env::var("REDDB_AI_ALLOW_PRIVATE_PROVIDERS")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let (plaintext, rest) = match url.strip_prefix("https://") {
+        Some(rest) => (false, rest),
+        None => (true, url.strip_prefix("http://").unwrap_or(url)),
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(stripped) = host_port.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or(stripped)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    let host_lower = host.to_ascii_lowercase();
+    let literal_ip = host.parse::<std::net::IpAddr>().ok();
+    let loopback = host_lower == "localhost"
+        || host_lower.ends_with(".localhost")
+        || literal_ip.is_some_and(|ip| ip.is_loopback());
+    if plaintext && !loopback {
+        return Err(crate::RedDBError::Query(format!(
+            "custom AI provider '{url}' must use https:// (plaintext http is only allowed for loopback hosts)"
+        )));
+    }
+    if let Some(ip) = literal_ip {
+        let private = match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_broadcast()
+                    || v4.is_multicast()
+                    || v4.is_unspecified()
+                    || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_multicast()
+                    || v6.is_unspecified()
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+            }
+        };
+        if private && !loopback {
+            return Err(crate::RedDBError::Query(format!(
+                "custom AI provider '{url}' targets a private or link-local address; set REDDB_AI_ALLOW_PRIVATE_PROVIDERS=1 to allow"
+            )));
+        }
+    }
+    Ok(())
 }

@@ -269,7 +269,7 @@ pub(crate) fn entity_error_to_status(err: crate::api::RedDBError) -> Status {
         | crate::api::RedDBError::InvalidOperation(msg)
         | crate::api::RedDBError::Catalog(msg)
         | crate::api::RedDBError::Query(msg) => Status::invalid_argument(msg),
-        other => Status::internal(other.to_string()),
+        other => super::control_support::redacted_internal(other),
     }
 }
 

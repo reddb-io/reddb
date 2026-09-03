@@ -527,3 +527,162 @@ fn embedded_snapshot_crash_injection_preserves_published_snapshot() {
         );
     }
 }
+
+/// Issues #2265 / #2266 — the writer path must use one handle, not several.
+///
+/// `fs2` maps onto `LockFileEx` on Windows, whose byte-range locks are
+/// mandatory and scoped to the handle that took them. The writer used to lock
+/// the `.rdb` and then open two more handles to it, so every subsequent open
+/// was denied with `ERROR_LOCK_VIOLATION` and *all* embedded writes failed —
+/// reported, misleadingly, as `superblock zone ... failed validation` on a
+/// perfectly intact file.
+///
+/// The fix threads the locked handle through the read and write helpers
+/// instead of adding a lock sidecar, which would have broken the single-file
+/// store the embedded format exists to provide. This test pins the property
+/// portably: a write must succeed and leave exactly one file behind.
+#[test]
+fn embedded_writes_use_a_single_handle_and_leave_one_file() {
+    let dir = temp_dir("writer_single_handle");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
+
+    EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"first".to_vec()]).expect("append");
+    EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(&path, b"RDST-snapshot", 64 * 1024)
+        .expect("checkpoint");
+    EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"second".to_vec()]).expect("append again");
+
+    assert_eq!(
+        artifact_names(dir.path()),
+        vec!["data.rdb"],
+        "the embedded store is a single file: the writer lock must not add a sidecar"
+    );
+
+    let artifact = EmbeddedRdbArtifact::open(&path).expect("open");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&artifact).expect("read wal"),
+        vec![b"second".to_vec()],
+        "the checkpoint truncated the WAL and the later append survived"
+    );
+    assert_eq!(
+        EmbeddedRdbArtifact::read_snapshot(&artifact).expect("read snapshot"),
+        Some(b"RDST-snapshot".to_vec())
+    );
+}
+
+/// Issues #2265 / #2266 — an unreadable superblock is an I/O error, not a
+/// corruption verdict.
+///
+/// `read_superblock_copy` discarded read failures with `.ok()?`, so a byte
+/// range the process simply could not read looked identical to a zone that had
+/// failed validation. Operators were told their intact database was damaged
+/// and pointed at `red salvage`. Truncating the file so the superblock cannot
+/// be read reproduces the "cannot read" half portably.
+#[test]
+fn unreadable_superblock_bytes_report_io_not_corruption() {
+    let dir = temp_dir("superblock_unreadable");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
+
+    // Truncate mid-superblock: the bytes are not *invalid*, they are absent.
+    let file = OpenOptions::new().write(true).open(&path).expect("open");
+    file.set_len(16).expect("truncate");
+    drop(file);
+
+    let err = EmbeddedRdbArtifact::open(&path).expect_err("a truncated read must fail the open");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("io error"),
+        "expected an I/O error rather than a corruption verdict, got: {msg}"
+    );
+    assert!(
+        !msg.contains("failed validation"),
+        "an unreadable zone must not be reported as a failed-validation corruption: {msg}"
+    );
+}
+
+/// The recovery guidance must name commands that exist. `red scrub` was never
+/// a subcommand, so the message sent operators looking for a tool the binary
+/// does not ship (issue #2265, observation 4).
+#[test]
+fn zone_failure_guidance_names_real_commands() {
+    let dir = temp_dir("zone_guidance");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create embedded rdb");
+
+    // Corrupt both superblock copies so the zone genuinely fails validation.
+    let mut file = OpenOptions::new().write(true).open(&path).expect("open");
+    for offset in [
+        EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
+        EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
+    ] {
+        file.seek(SeekFrom::Start(offset)).expect("seek");
+        file.write_all(&[0xAA; 64]).expect("scribble");
+    }
+    file.sync_all().expect("sync");
+    drop(file);
+
+    let msg = EmbeddedRdbArtifact::open(&path)
+        .expect_err("a corrupted superblock zone must fail the open")
+        .to_string();
+    assert!(msg.contains("failed validation"), "{msg}");
+    assert!(
+        msg.contains("`SCRUB` statement") && msg.contains("red salvage"),
+        "guidance must be invocable as written: {msg}"
+    );
+    assert!(
+        !msg.contains("Run scrub "),
+        "`scrub` is a SQL statement, not a bare command: {msg}"
+    );
+}
+
+/// Issues #2265 / #2266 — the writer path must hold exactly one handle to the
+/// data file while its exclusive lock is held.
+///
+/// The behaviour this guards is Windows-only and cannot be reproduced here:
+/// `fs2` maps onto `LockFileEx`, whose byte-range locks are mandatory and
+/// scoped to the handle that took them, so a second `File::open` of a locked
+/// path is denied with `ERROR_LOCK_VIOLATION`. POSIX `flock` is advisory, so
+/// on Linux the buggy code passes every runtime test — which is exactly why
+/// this shipped. The invariant is therefore asserted structurally, in the
+/// style of the layout-authority tests: inside a locked region the module
+/// opens the data path once and threads that handle through.
+#[test]
+fn writer_paths_open_the_data_file_exactly_once_under_the_lock() {
+    let source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/embedded.rs"))
+            .expect("read embedded.rs");
+    let source = source.split("#[cfg(test)]").next().unwrap_or(&source);
+
+    for function in [
+        "pub fn write_snapshot_with_wal_capacity(",
+        "pub fn append_wal_payloads(",
+    ] {
+        let start = source
+            .find(function)
+            .unwrap_or_else(|| panic!("{function} must exist"));
+        // Up to the next `pub fn` at the same indentation.
+        let body = &source[start..];
+        let end = body[1..]
+            .find("\n    pub fn ")
+            .map(|offset| offset + 1)
+            .unwrap_or(body.len());
+        let body = &body[..end];
+
+        let opens = body.matches("open(path)?").count();
+        assert_eq!(
+            opens, 1,
+            "{function} opens the data path {opens} times; while its exclusive lock is held \
+             every extra handle is denied on Windows (ERROR_LOCK_VIOLATION), which failed \
+             every embedded write there. Thread the locked handle through instead."
+        );
+        assert!(
+            !body.contains("File::open("),
+            "{function} must not take a second read handle to the locked file"
+        );
+        assert!(
+            body.contains("open_inner_with_file(") && body.contains("scan_wal_with_file("),
+            "{function} must read through the locked handle"
+        );
+    }
+}

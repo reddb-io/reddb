@@ -9,6 +9,20 @@ function read(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
 
+/**
+ * Regex source matching `uses: <repo>@<tag>` in either of the forms the
+ * workflows may use: the bare tag, or a commit SHA pinned with the tag kept in
+ * a trailing comment (`@<sha> # <tag>`). Actions are SHA-pinned so a
+ * retagged release cannot swap the code a workflow runs; Dependabot keeps the
+ * SHA and the comment in step. The assertions below care about *which*
+ * release is used, not how it is spelled.
+ */
+function actionRef(repo, tag) {
+  const r = repo.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  const t = tag.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  return `${r}@(?:${t}|[0-9a-f]{40} # ${t})`;
+}
+
 function workflowJob(workflow, name) {
   const job = workflow.match(new RegExp(`\\n  ${name}:[\\s\\S]*?(?=\\n  [a-zA-Z0-9_-]+:|\\n$)`));
   return job?.[0] ?? "";
@@ -83,8 +97,8 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
 
   const publishDocker = releaseWorkflow.match(/publish-docker:[\s\S]*?(?=\n  publish-client-image:)/)?.[0] ?? "";
   const publishClient = releaseWorkflow.match(/publish-client-image:[\s\S]*?(?=\n  publish-python-wheels:)/)?.[0] ?? "";
-  assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-x86_64/);
-  assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-aarch64/);
+  assert.match(publishDocker, new RegExp(`${actionRef("actions/download-artifact", "v8")}[\\s\\S]*name: linux-x86_64`));
+  assert.match(publishDocker, new RegExp(`${actionRef("actions/download-artifact", "v8")}[\\s\\S]*name: linux-aarch64`));
   assert.match(publishDocker, /file: docker\/Dockerfile\.release/);
 
   for (const [jobName, job, imagePattern] of [
@@ -92,8 +106,8 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
     ["publish-client-image", publishClient, /IMAGE: ghcr\.io\/\$\{\{ github\.repository \}\}-client/],
   ]) {
     assert.match(job, /id-token: write/, `${jobName} must allow keyless signing`);
-    assert.match(job, /uses: sigstore\/cosign-installer@v4\.1\.2/, `${jobName} installs Cosign`);
-    assert.match(job, /id: build[\s\S]*uses: docker\/build-push-action@v7/, `${jobName} exposes build digest`);
+    assert.match(job, new RegExp(`uses: ${actionRef("sigstore/cosign-installer", "v4.1.2")}`), `${jobName} installs Cosign`);
+    assert.match(job, new RegExp(`id: build[\\s\\S]*uses: ${actionRef("docker/build-push-action", "v7")}`), `${jobName} exposes build digest`);
     assert.match(job, imagePattern, `${jobName} signs the expected GHCR image`);
     assert.match(job, /DIGEST: \$\{\{ steps\.build\.outputs\.digest \}\}/, `${jobName} signs by digest`);
     assert.match(job, /cosign sign --yes "\$\{IMAGE\}@\$\{DIGEST\}"/, `${jobName} signs with Cosign`);
@@ -169,7 +183,7 @@ test("release workflows publish aggregate checksum manifests for installers", ()
 
   for (const workflow of [releaseWorkflow, rcWorkflow]) {
     assert.match(workflow, /name: Generate checksum manifest/);
-    assert.match(workflow, /uses: anchore\/sbom-action\/download-syft@v0\.24\.0/);
+    assert.match(workflow, new RegExp(`uses: ${actionRef("anchore/sbom-action/download-syft", "v0.24.0")}`));
     assert.match(workflow, /syft-version: v1\.46\.0/);
     assert.match(workflow, /name: Generate source SBOMs/);
     assert.match(workflow, /--exclude '\.\/\.git\/\*\*'/);
@@ -212,7 +226,7 @@ test("nightly DR drill workflow uses the current-shell runner and public make ta
 
 test("changesets checkout uses the default token before release PAT handoff", () => {
   const workflow = read(".github/workflows/changesets.yml");
-  const checkoutStep = workflow.match(/- uses: actions\/checkout@v\d+[\s\S]*?(?=\n\n      - uses: pnpm\/action-setup@v\d+)/)?.[0] ?? "";
+  const checkoutStep = workflow.match(new RegExp(`- uses: actions/checkout@(?:v\\d+|[0-9a-f]{40} # v\\d+)[\\s\\S]*?(?=\\n\\n      - uses: pnpm/action-setup@(?:v[\\d.]+|[0-9a-f]{40} # v[\\d.]+))`))?.[0] ?? "";
 
   assert.match(checkoutStep, /fetch-depth: 0/);
   assert.doesNotMatch(checkoutStep, /\n\s+token:/);
@@ -233,7 +247,7 @@ test("parser fuzz nightly installs protoc before fuzz builds", () => {
   assert.match(workflow, /uses: \.\/\.github\/actions\/install-protoc[\s\S]*version: '28\.3'/);
   assert.match(
     workflow,
-    /uses: dtolnay\/rust-toolchain@nightly[\s\S]*uses: \.\/\.github\/actions\/install-protoc[\s\S]*name: Run \$\{\{ matrix\.target \}\}/,
+    new RegExp(`uses: ${actionRef("dtolnay/rust-toolchain", "nightly")}[\\s\\S]*uses: \\./\\.github/actions/install-protoc[\\s\\S]*name: Run \\$\\{\\{ matrix\\.target \\}\\}`),
   );
 });
 
@@ -278,7 +292,12 @@ test("on-demand parser fuzz runs as one bounded smoke check", () => {
   assert.equal(workflowJob(workflow, "fuzz-targets"), "", "fuzz smoke must not fan out into separate runners");
   assert.match(fuzzParsers, /name: Fuzz Parsers/);
   assert.match(fuzzParsers, /needs: gate/);
-  assert.match(fuzzParsers, /if: github\.event_name == 'workflow_dispatch' && inputs\.full_ci/);
+  // The job also sits behind the `run_heavy` gate; the contract this test
+  // pins is that it stays dispatch-only and opt-in, not the exact prefix.
+  assert.match(
+    fuzzParsers,
+    /if:[^\n]*github\.event_name == 'workflow_dispatch' && inputs\.full_ci/,
+  );
   assert.match(fuzzParsers, /timeout-minutes: 15/);
   assert.match(fuzzParsers, /FUZZ_PR_TIME_SECONDS: 30/);
   assert.match(fuzzParsers, /shared-key: ubuntu-fuzz-pr-smoke/);
@@ -304,4 +323,56 @@ test("weekly parser fuzz keeps bounded coverage for every smoke target", () => {
     assert.match(fuzz, new RegExp(`- ${target}`));
   }
   assert.match(fuzz, /cargo \+nightly fuzz run \$\{\{ matrix\.target \}\} --[\s\S]*-max_total_time="\$\{FUZZ_DURATION_SECONDS\}"/);
+});
+
+
+test("vendored asset-fetcher copies match the source package byte for byte", () => {
+  // `packages/internal-asset-fetcher` is workspace-private, so each
+  // publishable package carries its own copy. Nothing enforced that they
+  // stayed in sync, and this is the code that downloads a binary which
+  // postinstall then executes — a copy missing a hardening change is a copy
+  // that installs an unverified binary. Compare rather than trust.
+  const sourceDir = "packages/internal-asset-fetcher/src";
+  const vendored = [
+    "drivers/js/src/internal/asset-fetcher",
+    "drivers/js-client/src/internal/asset-fetcher",
+    "packages/mcp/src/internal/asset-fetcher",
+  ];
+  const files = ["index.js", "download.js", "checksum.js", "asset-name.js"];
+
+  for (const dir of vendored) {
+    for (const file of files) {
+      const vendoredPath = path.join(repoRoot, dir, file);
+      if (!fs.existsSync(vendoredPath)) continue;
+      assert.equal(
+        read(`${dir}/${file}`),
+        read(`${sourceDir}/${file}`),
+        `${dir}/${file} has drifted from ${sourceDir}/${file}`,
+      );
+    }
+  }
+});
+
+
+test("the Helm chart's appVersion is synced, not hand-maintained", () => {
+  // `appVersion` is the image tag `helm install` pulls. It was absent from
+  // sync-version.js and had drifted to 0.1.2 — a tag that does not exist on
+  // ghcr — so a fresh install pulled a missing image or silently fell back to
+  // `latest`. Bumping it once only resets the clock; being a sync target is
+  // what stops it drifting again.
+  const sync = read("scripts/sync-version.js");
+  assert.match(sync, /charts\/reddb\/Chart\.yaml/, "the chart must be a sync target");
+  assert.match(sync, /type: 'helm-chart'/, "the chart needs its own target type");
+  assert.match(sync, /\^appVersion: "/, "the helm-chart type must rewrite appVersion");
+
+  const chart = read("charts/reddb/Chart.yaml");
+  const workspace = read("Cargo.toml");
+  const appVersion = chart.match(/^appVersion: "(.+?)"/m)?.[1];
+  const version = workspace.match(/^version = "(.+?)"/m)?.[1];
+  assert.ok(appVersion, "Chart.yaml must declare appVersion");
+  assert.equal(
+    appVersion,
+    version,
+    "Chart.yaml appVersion must match the workspace version, or helm pulls a tag that was never published",
+  );
 });

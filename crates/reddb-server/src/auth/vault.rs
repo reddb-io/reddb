@@ -201,16 +201,9 @@ impl KeyPair {
     }
 }
 
-/// Constant-time byte comparison to avoid timing side-channels.
+/// Constant-time byte comparison — one implementation for the crate.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    crate::crypto::constant_time_eq(a, b)
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +266,7 @@ fn decode_certificate_hex(certificate_hex: &str) -> Result<Vec<u8>, VaultError> 
 /// Serializable snapshot of all auth state (users, api keys, bootstrap seal,
 /// the master secret for the certificate-based seal, and a key-value store
 /// for arbitrary encrypted secrets).
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct VaultState {
     pub users: Vec<User>,
     /// `(owner UserId, api_key)` pairs. The owner carries tenant scope
@@ -289,6 +282,21 @@ pub struct VaultState {
     /// Keys use dot-notation with `red.secret.*` prefix (e.g., "red.secret.aes_key").
     /// Values are hex-encoded bytes or UTF-8 strings.
     pub kv: std::collections::HashMap<String, String>,
+}
+
+impl std::fmt::Debug for VaultState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultState")
+            .field("users", &self.users.len())
+            .field("api_keys", &self.api_keys.len())
+            .field("bootstrapped", &self.bootstrapped)
+            .field(
+                "master_secret",
+                &self.master_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("kv", &self.kv.len())
+            .finish()
+    }
 }
 
 impl VaultState {
@@ -341,19 +349,25 @@ impl VaultState {
             ));
         }
 
-        // API keys: `KEY:<username>\t<key>\t<name>\t<role>\t<created_at>\t<tenant_id?>`.
+        // API keys: `KEY:<username>\t<key_id>\t<name>\t<role>\t<created_at>\t<tenant_id?>\t<expires_at?>`.
         // The 6th tenant field is empty for platform users and disambiguates
-        // owners when the same username appears under multiple tenants.
+        // owners when the same username appears under multiple tenants; the
+        // 7th is empty for keys that never expire.
         for (owner, key) in &self.api_keys {
             let tenant_field = owner.tenant.clone().unwrap_or_default();
+            let expires_field = key
+                .expires_at
+                .map(|deadline| deadline.to_string())
+                .unwrap_or_default();
             out.push_str(&format!(
-                "KEY:{}\t{}\t{}\t{}\t{}\t{}\n",
+                "KEY:{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 owner.username,
                 key.key,
                 key.name,
                 key.role.as_str(),
                 key.created_at,
                 tenant_field,
+                expires_field,
             ));
         }
 
@@ -433,10 +447,10 @@ impl VaultState {
                 });
             } else if let Some(rest) = line.strip_prefix("KEY:") {
                 let parts: Vec<&str> = rest.split('\t').collect();
-                // 5 fields = pre-tenant; 6 fields = with tenant id.
-                if parts.len() != 5 && parts.len() != 6 {
+                // 5 fields = pre-tenant; 6 = with tenant id; 7 = with expiry.
+                if !(5..=7).contains(&parts.len()) {
                     return Err(VaultError::Corrupt(format!(
-                        "KEY line has {} fields, expected 5 or 6",
+                        "KEY line has {} fields, expected 5 to 7",
                         parts.len()
                     )));
                 }
@@ -461,6 +475,11 @@ impl VaultState {
                         name: parts[2].to_string(),
                         role,
                         created_at,
+                        expires_at: parts
+                            .get(6)
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .and_then(|s| s.parse::<u128>().ok()),
                     },
                 ));
             } else if let Some(rest) = line.strip_prefix("KV:") {
@@ -1203,6 +1222,7 @@ mod tests {
                         name: "ci-token".into(),
                         role: Role::Write,
                         created_at: now,
+                        expires_at: None,
                     }],
                     created_at: now,
                     updated_at: now,
@@ -1227,6 +1247,7 @@ mod tests {
                     name: "ci-token".into(),
                     role: Role::Write,
                     created_at: now,
+                    expires_at: None,
                 },
             )],
             bootstrapped: true,
@@ -1800,6 +1821,7 @@ mod tests {
                         name: "deploy".into(),
                         role: Role::Write,
                         created_at: now,
+                        expires_at: None,
                     },
                 ),
                 (
@@ -1809,6 +1831,7 @@ mod tests {
                         name: "ci".into(),
                         role: Role::Read,
                         created_at: now,
+                        expires_at: None,
                     },
                 ),
             ],

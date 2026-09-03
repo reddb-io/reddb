@@ -692,7 +692,7 @@ func kvKeySegment(value string) string {
 	if value != "" && allIdentChars(value) {
 		return value
 	}
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(value, "\\", "\\\\"), "'", "''") + "'"
 }
 
 func kvValueLiteral(value any) (string, error) {
@@ -705,7 +705,7 @@ func kvValueLiteral(value any) (string, error) {
 		}
 		return "false", nil
 	case string:
-		return "'" + strings.ReplaceAll(v, "'", "''") + "'", nil
+		return "'" + strings.ReplaceAll(strings.ReplaceAll(v, "\\", "\\\\"), "'", "''") + "'", nil
 	case int, int8, int16, int32, int64:
 		return fmt.Sprintf("%d", v), nil
 	case uint, uint8, uint16, uint32, uint64:
@@ -717,11 +717,11 @@ func kvValueLiteral(value any) (string, error) {
 	if err != nil {
 		return "", NewError(CodeInvalidArgument, err.Error())
 	}
-	return "'" + strings.ReplaceAll(string(bs), "'", "''") + "'", nil
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(string(bs), "\\", "\\\\"), "'", "''") + "'", nil
 }
 
 func kvTagLiteral(tag string) string {
-	return "'" + strings.ReplaceAll(tag, "'", "''") + "'"
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(tag, "\\", "\\\\"), "'", "''") + "'"
 }
 
 func queueValueLiteral(value any) (string, error) {
@@ -734,7 +734,7 @@ func queueValueLiteral(value any) (string, error) {
 		}
 		return "false", nil
 	case string:
-		return "'" + strings.ReplaceAll(v, "'", "''") + "'", nil
+		return "'" + strings.ReplaceAll(strings.ReplaceAll(v, "\\", "\\\\"), "'", "''") + "'", nil
 	case int, int8, int16, int32, int64:
 		return fmt.Sprintf("%d", v), nil
 	case uint, uint8, uint16, uint32, uint64:

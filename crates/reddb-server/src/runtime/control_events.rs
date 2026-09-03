@@ -65,6 +65,14 @@ pub enum EventKind {
     /// triggers the [`crate::auth::self_lock_guard`] recovery path —
     /// see issue #713.
     PolicyBreakGlass,
+    /// A password login succeeded.
+    AuthLogin,
+    /// A password login was refused (unknown principal, disabled account,
+    /// wrong password). The reason stays generic on purpose.
+    AuthLoginFailed,
+    /// The server booted with authentication disabled (`--no-auth` /
+    /// `--dev`).
+    AuthDisabled,
 }
 
 impl EventKind {
@@ -97,6 +105,9 @@ impl EventKind {
             Self::ReplicationSafety => "replication.safety",
             Self::EvidenceExport => "evidence.export",
             Self::PolicyBreakGlass => "policy.break_glass",
+            Self::AuthLogin => "auth.login",
+            Self::AuthLoginFailed => "auth.login_failed",
+            Self::AuthDisabled => "auth.disabled",
         }
     }
 }

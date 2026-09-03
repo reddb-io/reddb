@@ -133,6 +133,15 @@ const targets = [
     type: 'package-json',
   },
   {
+    // The chart's `appVersion` is the image tag `helm install` pulls. It was
+    // not synced, drifted to 0.1.2 — a tag that does not exist on ghcr — and
+    // installs fell back to `latest` or failed outright. Bumping it by hand
+    // only resets the clock; syncing it is what stops the drift.
+    label: 'charts/reddb/Chart.yaml (appVersion)',
+    file: path.join(root, 'charts', 'reddb', 'Chart.yaml'),
+    type: 'helm-chart',
+  },
+  {
     // Lane T (#136) introduces drivers/js-client/. Until that lane
     // merges, the file may not exist on this branch — `optional: true`
     // makes the sync step a no-op skip instead of failing the version
@@ -236,6 +245,7 @@ const stageList = [
   'packages/internal-bin-resolver/package.json',
   'packages/internal-version-compare/package.json',
   'packages/mcp/package.json',
+  'charts/reddb/Chart.yaml',
   // drivers/js-client/package.json comes from Lane T (#136); the
   // .filter() below drops it from the stage list when absent.
   'drivers/js-client/package.json',
@@ -287,6 +297,11 @@ function apply(target) {
       }
     }
     updated = JSON.stringify(json, null, 2) + '\n'
+  } else if (target.type === 'helm-chart') {
+    const match = original.match(/^appVersion: "(.+?)"/m)
+    if (!match) throw new Error(`no appVersion line`)
+    before = match[1]
+    updated = original.replace(/^appVersion: ".*"/m, `appVersion: "${version}"`)
   } else if (target.type === 'pyproject-toml') {
     const match = original.match(/^version = "(.+?)"/m)
     if (!match) throw new Error(`no top-level version line in [project]`)

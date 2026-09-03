@@ -232,6 +232,19 @@ impl RedWireClient {
     }
 
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult> {
+        // The server answers a bare `Query` (0x01) frame with the pinned
+        // *summary* payload — statement type and affected rows, no records;
+        // `QueryWithParams` (0x28) is the frame that carries records back.
+        // This method used to send `Query` and then decode the reply as a
+        // full envelope, so every parameterless `SELECT` over red:// came
+        // back with zero rows, and so did every helper built on it
+        // (`documents.list`, transactions, ...). Send the envelope-bearing
+        // frame — with an empty parameter list — whenever the server can
+        // speak it, and keep the summary frame only for servers that cannot,
+        // where records are genuinely unavailable on this path.
+        if self.server_features & FEATURE_PARAMS != 0 {
+            return self.query_envelope(sql, &[]).await;
+        }
         let raw = self.query_raw(sql).await?;
         let value = decode_query_result_payload(raw.as_bytes())
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode result: {e}")))?;
@@ -255,9 +268,6 @@ impl RedWireClient {
         sql: &str,
         params: &[crate::params::Value],
     ) -> Result<QueryResult> {
-        if params.is_empty() {
-            return self.query(sql).await;
-        }
         if self.server_features & FEATURE_PARAMS == 0 {
             return Err(ClientError::new(
                 ErrorCode::ParamsUnsupported,
@@ -265,6 +275,17 @@ impl RedWireClient {
             ));
         }
 
+        self.query_envelope(sql, params).await
+    }
+
+    /// Send `sql` on the `QueryWithParams` frame — the one whose reply is
+    /// the full result envelope with records — and decode it. Shared by
+    /// [`Self::query`] (empty `params`) and [`Self::query_with`].
+    async fn query_envelope(
+        &mut self,
+        sql: &str,
+        params: &[crate::params::Value],
+    ) -> Result<QueryResult> {
         let wire_params = params.iter().map(param_to_redwire).collect::<Vec<_>>();
         let payload = encode_query_with_params(sql, &wire_params)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode params: {e}")))?;

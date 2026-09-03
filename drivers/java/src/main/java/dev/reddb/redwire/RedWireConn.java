@@ -536,6 +536,10 @@ public final class RedWireConn implements Conn {
         SSLParameters params = sock.getSSLParameters();
         params.setApplicationProtocols(new String[]{"redwire/1"});
         params.setServerNames(Collections.singletonList(new SNIHostName(host)));
+        // Without this, SSLSocket validates the certificate chain but not the
+        // name on it: any certificate a trusted CA ever issued, for any host,
+        // would be accepted for `reds://`. SNI alone does not verify.
+        params.setEndpointIdentificationAlgorithm("HTTPS");
         sock.setSSLParameters(params);
         sock.startHandshake();
         return sock;

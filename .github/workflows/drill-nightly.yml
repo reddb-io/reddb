@@ -22,14 +22,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.11
-      - uses: Swatinem/rust-cache@v2
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: ubuntu-drill-rust-1.91.0
           cache-on-failure: "true"
@@ -38,13 +38,13 @@ jobs:
         run: make drill-nightly
       - name: Upload drill history
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: drill-history
           path: docs/release/drill-history.md
       - name: Open issue on drill failure
         if: failure()
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const title = `Nightly DR drill failed: ${new Date().toISOString().slice(0, 10)}`;

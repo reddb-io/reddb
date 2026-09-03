@@ -140,6 +140,7 @@ serde = { version = "1", features = ["derive"] }
 # paths (#630) so partial group state never carries HashMap's
 # randomized iteration order into the merge or sort step.
 indexmap = "2"
+argon2 = "0.6.0"
 
 [features]
 default = []

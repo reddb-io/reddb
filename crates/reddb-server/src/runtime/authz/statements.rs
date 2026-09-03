@@ -142,9 +142,10 @@ impl RedDBRuntime {
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
 
-        let (_gname, grole) = current_auth_identity().ok_or_else(|| {
+        let (gname, grole) = current_auth_identity().ok_or_else(|| {
             RedDBError::Query("REVOKE requires an authenticated principal".to_string())
         })?;
+        let granter = UserId::from_parts(current_tenant().as_deref(), &gname);
         let granter_role = grole;
 
         let actions: Vec<Action> = if stmt.all {
@@ -179,7 +180,7 @@ impl RedDBRuntime {
                     }
                 };
                 let removed = auth_store
-                    .revoke(granter_role, &p, &resource, &actions)
+                    .revoke(&granter, granter_role, &p, &resource, &actions)
                     .map_err(|e| RedDBError::Query(e.to_string()))?;
                 let _removed_policies =
                     auth_store.delete_synthetic_grant_policies(&p, &resource, &actions);
@@ -286,6 +287,7 @@ impl RedDBRuntime {
         // record, mutates the relevant field, writes back.
         let mut attrs = auth_store.user_attributes(&target);
         let mut enable_change: Option<bool> = None;
+        let mut new_password_change: Option<String> = None;
 
         for a in &stmt.attributes {
             match a {
@@ -320,10 +322,8 @@ impl RedDBRuntime {
                 }
                 AlterUserAttribute::Enable => enable_change = Some(true),
                 AlterUserAttribute::Disable => enable_change = Some(false),
-                AlterUserAttribute::Password(_) => {
-                    // Out of scope — accept the AST but no-op so the
-                    // parser stays compatible with future password
-                    // rotation work.
+                AlterUserAttribute::Password(new_password) => {
+                    new_password_change = Some(new_password.clone());
                 }
             }
         }
@@ -336,6 +336,21 @@ impl RedDBRuntime {
                 .set_user_enabled(&target, en)
                 .map_err(|e| RedDBError::Query(e.to_string()))?;
         }
+        if let Some(new_password) = &new_password_change {
+            auth_store
+                .set_password_by_admin(&target, new_password)
+                .map_err(|e| RedDBError::Query(e.to_string()))?;
+        }
+        // Disabling the account, or rotating its password, must also take
+        // back the browser refresh cookie: it lives 30 days and the store
+        // that mints it is separate from the session table these calls
+        // clear. The refresh endpoint re-checks the principal too, so this
+        // is defence in depth for the window before its next refresh.
+        if enable_change == Some(false) || new_password_change.is_some() {
+            if let Some(authority) = self.browser_token_authority() {
+                authority.revoke_all_for(&target.username, target.tenant.as_deref());
+            }
+        }
         self.invalidate_result_cache();
         tracing::info!(
             target: "audit",
@@ -344,8 +359,13 @@ impl RedDBRuntime {
             "ALTER USER applied"
         );
 
+        let echoed_query = if new_password_change.is_some() {
+            format!("ALTER USER {} PASSWORD '***'", target)
+        } else {
+            query.to_string()
+        };
         Ok(RuntimeQueryResult::ok_message(
-            query.to_string(),
+            echoed_query,
             &format!("ALTER USER {} applied", target),
             "alter_user",
         ))

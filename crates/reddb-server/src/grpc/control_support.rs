@@ -82,10 +82,11 @@ impl GrpcRuntime {
                 if let Some((username, role)) = self.auth_store.validate_token(token) {
                     return AuthResult::password(username, role);
                 }
-                // Token was provided but invalid -- if require_auth is on, deny.
-                if self.auth_store.config().require_auth {
-                    return AuthResult::Denied("invalid or expired token".into());
-                }
+                // A presented-but-invalid credential is always a hard
+                // reject: degrading a revoked or forged token to
+                // `Anonymous` (which may read *and* write when
+                // `require_auth` is off) would let it keep working.
+                return AuthResult::Denied("invalid or expired token".into());
             } else if self.auth_store.config().require_auth {
                 return AuthResult::Denied("authentication required".into());
             }
@@ -172,8 +173,28 @@ pub(crate) fn to_status(err: crate::api::RedDBError) -> Status {
         crate::api::RedDBError::ReadOnly(msg) => Status::failed_precondition(msg),
         crate::api::RedDBError::FeatureNotEnabled(msg) => Status::failed_precondition(msg),
         crate::api::RedDBError::Validation { message, .. } => Status::invalid_argument(message),
-        other => Status::internal(other.to_string()),
+        other => redacted_internal(other),
     }
+}
+
+/// `Status::internal` for a runtime error, showing the peer only what
+/// [`crate::api::client_facing_message`] allows: statement-level messages
+/// verbatim (clients act on them), `Io` / `Internal` detail to the log.
+pub(crate) fn redacted_internal(err: crate::api::RedDBError) -> Status {
+    let shown = crate::api::client_facing_message(&err);
+    if shown != err.to_string() {
+        tracing::error!(target: "reddb::grpc", detail = %err, "internal error");
+    }
+    Status::internal(shown)
+}
+
+/// Map an unexpected failure to `Status::internal` without handing the
+/// caller the internal message: those carry filesystem paths, storage
+/// invariants and `Debug` dumps. The detail goes to the server log, the
+/// peer gets a stable generic text.
+pub(crate) fn internal_status(detail: impl std::fmt::Display) -> Status {
+    tracing::error!(target: "reddb::grpc", detail = %detail, "internal error");
+    Status::internal("internal error; see the server log")
 }
 
 pub(crate) fn grpc_token(metadata: &MetadataMap) -> Option<&str> {

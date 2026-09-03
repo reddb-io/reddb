@@ -115,7 +115,10 @@ replication:
 auth:
   enabled: false
   username: admin
-  # Plain password — only used when existingSecret is empty.
+  # Plain password — only used when existingSecret is empty. Leave empty to
+  # have the chart generate a 32-character password on first install and reuse
+  # it on subsequent upgrades (read back from the cluster), which is stronger
+  # than most hand-picked values.
   # Strongly recommend using existingSecret for production.
   password: ""
   # Reference an existing Secret. Must contain keys: username, password
@@ -460,7 +463,10 @@ pdb:
 networkPolicy:
   enabled: false
   # Allow primary <-> replica traffic automatically (always added when enabled).
-  # Additional ingress sources for client traffic:
+  # Additional ingress sources for client traffic. When left empty, ingress is
+  # restricted to the release namespace rather than left open: a rule that
+  # lists ports with no `from` selector allows them from anywhere, which is not
+  # what enabling a NetworkPolicy is meant to do.
   ingressFrom: []
   # Example:
   # ingressFrom:

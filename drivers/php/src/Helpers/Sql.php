@@ -30,7 +30,7 @@ final class Sql
     public static function kvKeySegment(string $value): string
     {
         if ($value !== '' && self::allIdentChars($value)) return $value;
-        return "'" . str_replace("'", "''", $value) . "'";
+        return "'" . str_replace(["\\", "'"], ["\\\\", "''"], $value) . "'";
     }
 
     public static function kvValueLiteral(mixed $value): string
@@ -42,17 +42,17 @@ final class Sql
             // Force . decimal separator regardless of locale.
             return is_int($value) ? (string)$value : self::floatStr($value);
         }
-        if (is_string($value)) return "'" . str_replace("'", "''", $value) . "'";
+        if (is_string($value)) return "'" . str_replace(["\\", "'"], ["\\\\", "''"], $value) . "'";
         $encoded = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         if ($encoded === false) {
             throw new InvalidArgument('failed to JSON-encode value: ' . json_last_error_msg());
         }
-        return "'" . str_replace("'", "''", $encoded) . "'";
+        return "'" . str_replace(["\\", "'"], ["\\\\", "''"], $encoded) . "'";
     }
 
     public static function kvTagLiteral(string $tag): string
     {
-        return "'" . str_replace("'", "''", $tag) . "'";
+        return "'" . str_replace(["\\", "'"], ["\\\\", "''"], $tag) . "'";
     }
 
     public static function queueValueLiteral(mixed $value): string
@@ -62,7 +62,7 @@ final class Sql
         if ($value === false) return 'false';
         if (is_int($value)) return (string)$value;
         if (is_float($value)) return self::floatStr($value);
-        if (is_string($value)) return "'" . str_replace("'", "''", $value) . "'";
+        if (is_string($value)) return "'" . str_replace(["\\", "'"], ["\\\\", "''"], $value) . "'";
         $encoded = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         if ($encoded === false) {
             throw new InvalidArgument('failed to JSON-encode value: ' . json_last_error_msg());
@@ -81,7 +81,7 @@ final class Sql
         if ($encoded === false) {
             throw new InvalidArgument('failed to JSON-encode value: ' . json_last_error_msg());
         }
-        return "'" . str_replace("'", "''", $encoded) . "'";
+        return "'" . str_replace(["\\", "'"], ["\\\\", "''"], $encoded) . "'";
     }
 
     /**

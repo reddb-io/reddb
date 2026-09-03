@@ -108,12 +108,30 @@ impl RedDBRuntime {
             return Ok(());
         };
 
-        let columns = self.resolved_table_projection_columns(table)?;
+        // Resolve the projection after deciding whether the principal may
+        // read the table at all: resolving first turned "no such table" into
+        // an existence oracle for principals with no grant on it.
+        let columns = match self.resolved_table_projection_columns(table) {
+            Ok(columns) => columns,
+            Err(resolve_err) => {
+                let probe = ColumnAccessRequest::select(table.table.clone(), Vec::<String>::new());
+                let principal = UserId::from_parts(frame.effective_scope(), username);
+                let ctx = runtime_iam_context(role, frame.effective_scope());
+                let outcome = auth_store.check_column_projection_authz(&principal, &probe, &ctx);
+                if outcome.allowed() || legacy_role_fallback_allows(&auth_store, role, &outcome) {
+                    return Err(resolve_err);
+                }
+                return Err(RedDBError::Query(format!(
+                    "permission denied: principal=`{username}` cannot select table `{}`",
+                    table.table
+                )));
+            }
+        };
         let request = ColumnAccessRequest::select(table.table.clone(), columns);
         let principal = UserId::from_parts(frame.effective_scope(), username);
         let ctx = runtime_iam_context(role, frame.effective_scope());
         let outcome = auth_store.check_column_projection_authz(&principal, &request, &ctx);
-        if outcome.allowed() {
+        if outcome.allowed() || legacy_role_fallback_allows(&auth_store, role, &outcome) {
             return Ok(());
         }
 
@@ -246,4 +264,30 @@ impl RedDBRuntime {
             })
             .unwrap_or_default())
     }
+}
+
+/// In `LegacyRbac` mode the primary privilege gate lets a principal with no
+/// matching policy through on its role (`legacy_rbac_decision`); the column
+/// gate had no such fallback, so the moment any policy existed — the
+/// admin's own allow-all is enough — every read-role principal was denied
+/// on column projection while the statement gate had just allowed it.
+/// Mirror the fallback: a `DefaultDeny` table with no explicit column
+/// `Deny` is allowed exactly when the role would be. `PolicyOnly` mode is
+/// untouched.
+fn legacy_role_fallback_allows(
+    auth_store: &crate::auth::store::AuthStore,
+    role: crate::auth::Role,
+    outcome: &crate::auth::column_policy_gate::ColumnPolicyOutcome,
+) -> bool {
+    use crate::auth::enforcement_mode::{legacy_rbac_decision, PolicyEnforcementMode};
+    use crate::auth::policies::Decision;
+    matches!(
+        auth_store.enforcement_mode(),
+        PolicyEnforcementMode::LegacyRbac
+    ) && matches!(outcome.table_decision, Decision::DefaultDeny)
+        && outcome
+            .columns
+            .iter()
+            .all(|column| !matches!(column.raw_decision, Decision::Deny { .. }))
+        && legacy_rbac_decision(role, "select")
 }

@@ -1325,16 +1325,22 @@ fn json_error(command: &str, error: &str) -> ! {
 }
 
 fn main() {
-    // PLAN.md Phase 6.4 — expand `*_FILE` env companions before any
-    // other env reads. Containerised deployments mount tmpfs secrets
-    // at /run/secrets/x and point e.g. `REDDB_PASSWORD_FILE` at the
-    // mount; we read the file, place the contents in `REDDB_PASSWORD`,
-    // and strip the `_FILE` var so it can't leak into `env` dumps.
-    // No threads are alive yet, so the unsafe `set_var` is sound.
-    if let Some((name, err)) = reddb::utils::expand_all_reddb_secrets().into_iter().next() {
-        eprintln!("error: failed to expand {name}_FILE: {err}");
+    // `*_FILE` secret companions (`REDDB_PASSWORD_FILE`, …) are read at
+    // the point of use via `env_with_file_fallback`; they are no longer
+    // copied into the process environment, where they showed up in
+    // `/proc/<pid>/environ` and in every child process. A secret given
+    // both ways is still a refusal, not a silent precedence.
+    if let Some(name) = reddb::utils::conflicting_secret_env() {
+        eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
         std::process::exit(2);
     }
+
+    // Owner-only permissions for everything created from here on: the .rdb,
+    // WAL segments, the audit log, exports and backups all inherited the
+    // process umask (typically world-readable) because only a handful of
+    // call sites set an explicit mode. Done before any file is created, and
+    // before threads exist, so the process-global change races nothing.
+    reddb::utils::file_mode::restrict_new_file_permissions();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -1806,7 +1812,15 @@ fn main() {
                 )
                 .unwrap(),
             };
-            let mut server = reddb::mcp::server::McpServer::new(runtime);
+            let capability = reddb::mcp::capability::McpCapability::from_flags(
+                flag_bool(&result.flags, "allow-write"),
+                flag_bool(&result.flags, "allow-admin"),
+            );
+            if capability != reddb::mcp::capability::McpCapability::ReadOnly {
+                eprintln!("[reddb] MCP session capability: {capability}");
+            }
+            let mut server =
+                reddb::mcp::server::McpServer::new(runtime).with_capability(capability);
             server.run_stdio();
         }
 

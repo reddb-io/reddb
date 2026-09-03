@@ -225,7 +225,24 @@ impl Vfs for StdVfs {
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-        std::fs::File::open(dir).and_then(|directory| directory.sync_all())
+        // Fsyncing a directory is how POSIX makes a rename durable: the entry
+        // is only guaranteed on disk once the *directory* is synced.
+        //
+        // Windows has no equivalent and no need for one — `File::open` on a
+        // directory fails outright with `ERROR_ACCESS_DENIED`, and
+        // `MoveFileEx` metadata is committed by the filesystem rather than
+        // being flushed by the caller. Returning that error would fail every
+        // rename-durability barrier on Windows for an operation that is not
+        // required there, so it is a documented no-op instead.
+        #[cfg(windows)]
+        {
+            let _ = dir;
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::File::open(dir).and_then(|directory| directory.sync_all())
+        }
     }
 
     fn create_dir_all(&self, dir: &Path) -> io::Result<()> {

@@ -54,5 +54,5 @@ function keyedValueLiteral(value) {
 }
 
 function keyedStringLiteral(value) {
-  return `'${String(value).replace(/'/g, "''")}'`
+  return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }

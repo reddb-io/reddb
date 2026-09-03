@@ -4,8 +4,9 @@
 # no fleet, no admin-merge in CI. The PR is the deliverable; the merge decision
 # stays human. Delegates triggers + trust gate to the published reusable.
 #
-# Auth: org-level secrets are inherited (`secrets: inherit`); the reusable picks
-# up MINIMAX_API_KEY (case-insensitive match to its `minimax_api_key` input).
+# Auth: only the model-provider key is forwarded. `secrets: inherit` would
+# hand every publish token (npm, crates.io, PyPI, RELEASE_PAT) to a job that
+# runs an LLM over untrusted issue text.
 #
 # Dispatch-only by design: the reusable's `issues: labeled` auto-trigger is off
 # upstream, so issues are processed via the Actions UI or:
@@ -39,7 +40,7 @@ permissions:
 
 jobs:
   attempt:
-    uses: reddb-io/red-skills/.github/workflows/reusable-afk-attempt.yml@v3.12.5
+    uses: reddb-io/red-skills/.github/workflows/reusable-afk-attempt.yml@d560e20c2fa0cc625d2c2bc0643a6a468221a433 # v3.12.5
     with:
       issue_number: ${{ inputs.issue_number }}
       runner: ${{ inputs.runner }}
@@ -47,4 +48,5 @@ jobs:
       enforce_trust_gate: "true"
       allowlist_authors: "filipeforattini"
       allowlist_label_actors: "filipeforattini"
-    secrets: inherit
+    secrets:
+      minimax_api_key: ${{ secrets.MINIMAX_API_KEY }}

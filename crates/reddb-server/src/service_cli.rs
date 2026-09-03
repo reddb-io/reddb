@@ -474,7 +474,22 @@ impl ServerCommandConfig {
 /// Honors the `<NAME>_FILE` convention. Re-exports the shared
 /// `crate::utils::env_with_file_fallback` helper so call sites in
 /// this module can keep their short local name.
+/// A non-empty env value, also honouring the `<NAME>_FILE` companion for
+/// mounted secrets. Reads the file on demand instead of copying its
+/// contents into the process environment, so the secret never appears in
+/// `/proc/<pid>/environ` or in a child's inherited env.
 fn env_nonempty(name: &str) -> Option<String> {
+    if let Some(value) = crate::utils::env_with_file_fallback(name) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+        return None;
+    }
+    env_nonempty_plain(name)
+}
+
+fn env_nonempty_plain(name: &str) -> Option<String> {
     crate::utils::env_with_file_fallback(name)
 }
 
@@ -591,38 +606,6 @@ impl BootstrapConfig {
             &self.customer_admin_password,
             "REDDB_CUSTOMER_ADMIN_PASSWORD",
         )
-    }
-
-    fn secret_env_vars_to_expand(&self, preset: &str) -> Vec<&'static str> {
-        let mut vars = Vec::new();
-        match preset {
-            PRESET_PRODUCTION => {
-                if Self::explicit_value(&self.admin_username).is_none() {
-                    vars.push("REDDB_USERNAME");
-                }
-                if Self::explicit_value(&self.admin_password).is_none() {
-                    vars.push("REDDB_PASSWORD");
-                }
-            }
-            PRESET_CLOUD => {
-                if Self::explicit_value(&self.cloud_head_admin).is_none()
-                    && Self::explicit_value(&self.admin_username).is_none()
-                {
-                    vars.push("REDDB_USERNAME");
-                }
-                if Self::explicit_value(&self.cloud_head_admin_password).is_none()
-                    && Self::explicit_value(&self.admin_password).is_none()
-                {
-                    vars.push("REDDB_CLOUD_HEAD_ADMIN_PASSWORD");
-                    vars.push("REDDB_PASSWORD");
-                }
-                if Self::explicit_value(&self.customer_admin_password).is_none() {
-                    vars.push("REDDB_CUSTOMER_ADMIN_PASSWORD");
-                }
-            }
-            _ => {}
-        }
-        vars
     }
 }
 
@@ -1588,26 +1571,6 @@ fn resolve_pg_wire_tls(config: &ServerCommandConfig) -> Option<crate::wire::Wire
 /// every client to present a chain that anchors at one of the CAs
 /// in the bundle.
 fn resolve_grpc_tls_options(config: &ServerCommandConfig) -> Result<crate::GrpcTlsOptions, String> {
-    use crate::utils::secret_file::expand_file_env;
-
-    // Best-effort *_FILE expansion for every TLS env knob. Errors here
-    // surface as warnings; the fallback path (explicit cert paths) will
-    // cover the common case.
-    for var in [
-        "REDDB_GRPC_TLS_CERT",
-        "REDDB_GRPC_TLS_KEY",
-        "REDDB_GRPC_TLS_CLIENT_CA",
-    ] {
-        if let Err(err) = expand_file_env(var) {
-            tracing::warn!(
-                target: "reddb::secrets",
-                env = %var,
-                err = %err,
-                "could not expand *_FILE companion for gRPC TLS"
-            );
-        }
-    }
-
     let (cert_pem, key_pem) = match (&config.grpc_tls_cert, &config.grpc_tls_key) {
         (Some(cert), Some(key)) => {
             let cert_pem = std::fs::read(cert)
@@ -2029,14 +1992,6 @@ fn apply_preset_from_config(
     }
 
     let preset = bootstrap.resolved_preset();
-
-    // `_FILE` companion expansion for k8s secret mounts. Only expand
-    // vars that this selected preset may read from env; explicit CLI
-    // credentials have already won and should not be blocked by an
-    // unrelated env-file misconfiguration.
-    for var in bootstrap.secret_env_vars_to_expand(&preset) {
-        crate::utils::expand_file_env(var).map_err(|err| format!("expand {var}_FILE: {err}"))?;
-    }
 
     if let Some(path) = bootstrap.selected_manifest() {
         if let Some(manifest_bootstrap) =

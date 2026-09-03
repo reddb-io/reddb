@@ -28,6 +28,26 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 # Surface the slowest tests so the e2e shards can be rebalanced over time.
 final-status-level = "slow"
 
+# Building a 200-table persistent catalog is intentionally CPU- and I/O-heavy:
+# it needs ~114s of a whole machine, against the 120s ceiling above, so under
+# any parallel load it is killed as a timeout. The `ci` profile already grants
+# it exclusive access and a larger budget; without the same override here a
+# local `cargo nextest run` reports a failure CI never sees, which trains
+# people to ignore local runs.
+#
+# `column_policy_conformance_corpus_covers_required_surface` walks the whole
+# column-policy corpus and needs ~42s alone. CI shards the e2e lane four ways
+# so it has headroom there; locally the full suite runs on one machine, so it
+# gets the same larger budget rather than a spurious timeout.
+[[profile.default.overrides]]
+filter = 'test(massive_catalog_forces_meta_overflow_chain)'
+threads-required = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.default.overrides]]
+filter = 'test(column_policy_conformance_corpus_covers_required_surface)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
 # CI profile: same hard per-test timeout, plus a single retry to absorb
 # genuinely flaky integration tests, and a JUnit report the runner can ingest.
 [profile.ci]

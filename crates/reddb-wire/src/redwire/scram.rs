@@ -628,12 +628,14 @@ pub fn verify_server_signature(
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
+    // No early return on a length mismatch: the loop covers the longer
+    // input and the length difference is folded into the result.
+    let len = left.len().max(right.len());
+    let mut difference = u8::from(left.len() != right.len());
+    for i in 0..len {
+        let l = left.get(i).copied().unwrap_or(0);
+        let r = right.get(i).copied().unwrap_or(0);
+        difference |= l ^ r;
     }
-    let mut difference = 0u8;
-    for (left_byte, right_byte) in left.iter().zip(right) {
-        difference |= left_byte ^ right_byte;
-    }
-    difference == 0
+    std::hint::black_box(difference) == 0
 }

@@ -53,6 +53,12 @@ ENV REDDB_WIRE_BIND_ADDR=0.0.0.0:5050
 ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:55055
 ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:5000
 ENV REDDB_VAULT=false
+# All listeners bind every interface, so the image requires authentication
+# by default: bootstrap the first admin with `POST /auth/bootstrap` (or
+# REDDB_USERNAME / REDDB_PASSWORD). Set REDDB_NO_AUTH=true to opt out for a
+# throwaway local container — never for anything reachable from a network.
+ENV REDDB_AUTH=true
+ENV REDDB_REQUIRE_AUTH=true
 ENV RUST_MIN_STACK=8388608
 
 # Perf-parity config overlay — see docs/engine/perf-bench.md.

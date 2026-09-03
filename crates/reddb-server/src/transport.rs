@@ -130,3 +130,19 @@ impl TransportReadiness {
         });
     }
 }
+
+/// Whether `bind_addr` ("host:port", "[v6]:port" or "localhost:port")
+/// names a loopback host. Shared by the PG-wire trust-auth rule and the
+/// plaintext-listener warning at boot.
+pub(crate) fn is_loopback_bind(bind_addr: &str) -> bool {
+    let host = bind_addr
+        .rsplit_once(':')
+        .map(|(host, _)| host.trim_matches(['[', ']']))
+        .unwrap_or(bind_addr);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|addr| addr.is_loopback())
+        .unwrap_or(false)
+}

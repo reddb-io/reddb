@@ -158,6 +158,7 @@ fn auth_store_grant_revoke_roundtrip() {
 
     let removed = store
         .revoke(
+            &reddb::auth::UserId::from_parts(None, "platform-admin"),
             Role::Admin,
             &GrantPrincipal::User(alice_id.clone()),
             &Resource::table_from_name("orders"),

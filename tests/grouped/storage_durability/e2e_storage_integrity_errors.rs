@@ -54,8 +54,11 @@ fn assert_integrity_error(err: RedDBError, zone: &str, id: &str, collection: Opt
     assert_eq!(integrity.collection.as_deref(), collection);
     let rendered = integrity.to_string();
     assert!(rendered.contains("refused to serve unverified bytes"));
-    assert!(rendered.contains("scrub"));
-    assert!(rendered.contains("salvage"));
+    // The guidance must be invocable as written. `SCRUB` is a SQL statement,
+    // not a `red` subcommand — issue #2265 caught operators searching
+    // `red --help` for a `scrub` command that has never existed.
+    assert!(rendered.contains("`SCRUB` statement"), "{rendered}");
+    assert!(rendered.contains("red salvage"), "{rendered}");
 }
 
 fn expect_runtime_open_err(result: Result<RedDBRuntime, RedDBError>) -> RedDBError {

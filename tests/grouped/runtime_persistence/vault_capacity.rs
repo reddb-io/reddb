@@ -68,6 +68,7 @@ fn synth_state(n: usize) -> VaultState {
                 name: format!("token-{i}"),
                 role: Role::Write,
                 created_at: now,
+                expires_at: None,
             },
         ));
     }

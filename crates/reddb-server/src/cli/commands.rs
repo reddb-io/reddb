@@ -838,6 +838,14 @@ fn mcp_flags() -> Vec<FlagSchema> {
             .with_description("Remote or embedded MCP connection URI; overrides REDDB_MCP_URI"),
         FlagSchema::new("token")
             .with_description("Bearer token fallback when --url has no userinfo"),
+        // MCP tools are driven by a model reading rows, documents and error
+        // strings other people wrote, so the tool list is the security
+        // boundary. Mutating and credential-bearing tools are therefore
+        // opt-in rather than on by default.
+        FlagSchema::boolean("allow-write")
+            .with_description("Permit tools and statements that modify data or schema"),
+        FlagSchema::boolean("allow-admin")
+            .with_description("Permit vault and auth tools (implies --allow-write)"),
     ]
 }
 

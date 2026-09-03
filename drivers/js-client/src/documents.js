@@ -127,5 +127,5 @@ function sqlValueLiteral(value) {
 }
 
 function sqlString(value) {
-  return `'${String(value).replace(/'/g, "''")}'`
+  return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }

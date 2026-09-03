@@ -105,6 +105,33 @@ Image reference.
 {{/*
 Auth secret name.
 */}}
+{{/*
+Resolve the auth password.
+
+Order matters. An explicit `auth.password` always wins. Otherwise the password
+already stored in the cluster is reused, so `helm upgrade` does not silently
+rotate the credential out from under a running deployment. Only a first install
+with no value set generates one.
+
+Generating beats requiring: a chart that demands `auth.password` pushes
+operators toward short, memorable, reused passwords, and the pod annotation
+below publishes a hash of it to anyone with `pods get`. 32 random characters
+make that hash useless as an oracle.
+*/}}
+{{- define "reddb.authPassword" -}}
+{{- if .Values.auth.password -}}
+{{- .Values.auth.password -}}
+{{- else -}}
+{{- $name := printf "%s-auth" (include "reddb.fullname" .) -}}
+{{- $existing := (lookup "v1" "Secret" .Release.Namespace $name) -}}
+{{- if and $existing $existing.data (index $existing.data "password") -}}
+{{- index $existing.data "password" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 32 -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "reddb.authSecretName" -}}
 {{- if .Values.auth.existingSecret -}}
 {{- .Values.auth.existingSecret -}}
