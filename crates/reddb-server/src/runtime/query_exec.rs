@@ -120,15 +120,16 @@ fn execute_runtime_table_query_materialized(
         && effective_having.is_none()
     {
         let source = UnifiedRecord::new();
-        let filter_matches = effective_filter.as_ref().is_none_or(|filter| {
-            super::join_filter::evaluate_runtime_filter_with_db(
+        let filter_matches = match effective_filter.as_ref() {
+            Some(filter) => super::join_filter::evaluate_runtime_filter_result_with_db(
                 Some(db),
                 &source,
                 filter,
                 None,
                 None,
-            )
-        });
+            )?,
+            None => true,
+        };
         let mut records = if filter_matches {
             vec![project_scalar_via_evaluator(
                 Some(db),
