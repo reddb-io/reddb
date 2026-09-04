@@ -466,24 +466,7 @@ fn ask_json(records: &[UnifiedRecord]) -> Option<JsonValue> {
 
 fn empty_ask_json() -> JsonValue {
     crate::runtime::ai::ask_response_envelope::build(
-        &crate::runtime::ai::ask_response_envelope::AskResult {
-            answer: String::new(),
-            sources_flat: Vec::new(),
-            citations: Vec::new(),
-            validation: crate::runtime::ai::ask_response_envelope::Validation {
-                ok: true,
-                warnings: Vec::new(),
-                errors: Vec::new(),
-            },
-            cache_hit: false,
-            provider: String::new(),
-            model: String::new(),
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cost_usd: 0.0,
-            effective_mode: crate::runtime::ai::ask_response_envelope::Mode::Strict,
-            retry_count: 0,
-        },
+        &crate::runtime::ai::ask_response_envelope::AskResult::default(),
     )
 }
 
@@ -719,12 +702,39 @@ mod tests {
 
     fn ask_fixture() -> RuntimeQueryResult {
         let result = result_with(
-            &["answer", "provider", "model", "citations"],
+            &[
+                "answer",
+                "sources_flat",
+                "citations",
+                "validation",
+                "cache_hit",
+                "provider",
+                "model",
+                "prompt_tokens",
+                "completion_tokens",
+                "cost_usd",
+                "mode",
+                "retry_count",
+            ],
             vec![
                 Value::text("Deploy failed [^1]."),
+                Value::Json(
+                    br#"[{"payload":"{\"status\":\"failed\"}","urn":"urn:reddb:row:d:1"}]"#
+                        .to_vec(),
+                ),
+                Value::Json(br#"[{"marker":1,"urn":"urn:reddb:row:d:1"}]"#.to_vec()),
+                Value::Json(
+                    br#"{"errors":[{"detail":"missing source","kind":"out_of_range"}],"ok":false,"warnings":[{"detail":"provider fallback","kind":"mode_fallback"}]}"#
+                        .to_vec(),
+                ),
+                Value::Boolean(true),
                 Value::text("acme"),
                 Value::text("m-1"),
-                Value::Json(br#"[{"marker":1,"urn":"urn:reddb:row:d:1"}]"#.to_vec()),
+                Value::UnsignedInteger(41),
+                Value::UnsignedInteger(17),
+                Value::Float(0.125),
+                Value::text("lenient"),
+                Value::UnsignedInteger(1),
             ],
         );
         RuntimeQueryResult {
@@ -893,6 +903,44 @@ mod tests {
             "ASK must not be row-wrapped, got {}",
             reply.result_json
         );
+    }
+
+    #[test]
+    fn ask_grounding_envelope_is_identical_over_http_grpc_and_stdio() {
+        let expected = concat!(
+            r#"{"answer":"Deploy failed [^1].","cache_hit":true,"#,
+            r#""citations":[{"marker":1,"urn":"urn:reddb:row:d:1"}],"#,
+            r#""completion_tokens":17,"cost_usd":0.125,"mode":"lenient","#,
+            r#""model":"m-1","prompt_tokens":41,"provider":"acme","retry_count":1,"#,
+            r#""sources_flat":[{"payload":"{\"status\":\"failed\"}","urn":"urn:reddb:row:d:1"}],"#,
+            r#""validation":{"errors":[{"detail":"missing source","kind":"out_of_range"}],"#,
+            r#""ok":false,"warnings":[{"detail":"provider fallback","kind":"mode_fallback"}]}}"#,
+        );
+
+        let http = json(&ask_fixture(), &None, &None);
+        let http_record = http
+            .get("result")
+            .and_then(|result| result.get("records"))
+            .and_then(JsonValue::as_array)
+            .and_then(|records| records.first())
+            .expect("HTTP ASK result has one grounding record")
+            .to_string_compact();
+        let grpc = proto_reply(ask_fixture(), &None, &None).result_json;
+        let stdio = tagged_summary(&ask_fixture()).to_string_compact();
+
+        assert_eq!(http_record, expected);
+        assert_eq!(grpc, expected);
+        assert_eq!(stdio, expected);
+    }
+
+    #[test]
+    fn ask_grounding_envelope_has_one_presentation_assembly_site() {
+        let presentation = include_str!("query_result.rs");
+        let postgres = include_str!("../wire/postgres/server.rs");
+        let assembly = concat!("AskResult ", "{");
+
+        assert_eq!(presentation.matches(assembly).count(), 1);
+        assert!(!postgres.contains(assembly));
     }
 
     /// The pre-serialized scan fast path hands its string straight to the
