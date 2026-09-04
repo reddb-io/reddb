@@ -188,6 +188,34 @@ jobs:
       - name: Docs-shim ⇔ required-checks ⇔ ci.yml lock-step (#1307)
         run: node --test scripts/ci-docs-shim-contract.test.mjs
 
+  driver-wire-conformance:
+    # Issue #2162 — the SDK helper contract must traverse RedWire on every PR.
+    # This stays on the free correctness lane; broader cross-driver matrices
+    # remain release-adjacent and opt in through full_ci.
+    name: Driver Wire Conformance
+    needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - name: Reject silent conformance skips
+        run: |
+          if grep -nE 'RED_SMOKE|return;' crates/reddb-client/tests/conformance.rs; then
+            echo 'driver conformance must fail explicitly, never return green without running'
+            exit 1
+          fi
+      - name: Build RedWire server
+        run: cargo build --locked --bin red
+      - name: Run Rust driver conformance over RedWire
+        env:
+          RED_BIN: ${{ github.workspace }}/target/debug/red
+        run: cargo test --locked -p reddb-io-client --features redwire --test conformance redwire
+
   docs-matrix:
     # Issue #568 — public docs (README, docs/query/*.md, driver READMEs) are
     # checked against the contract matrix. The matrix is the source of truth;
@@ -616,16 +644,6 @@ jobs:
           python-version: '3.x'
       - name: Build red (embedded engine for the JS SDK)
         run: cargo build --locked --bin red
-      - name: Rust client transport conformance over RedWire (red://)
-        # The `redwire` feature is not in the client's default set, so a plain
-        # `cargo test` exercises the embedded path only and the wire path goes
-        # silently untested. Spec #2112 requires wire-path cases to execute on
-        # every PR, so run them here against the `red` binary this job already
-        # built. Without RED_SMOKE=1 + RED_BIN the suite self-skips.
-        env:
-          RED_SMOKE: '1'
-          RED_BIN: ${{ github.workspace }}/target/debug/red
-        run: cargo test -p reddb-io-client --features redwire --test conformance client_transport
       - name: JS SDK runnable README examples
         working-directory: drivers/js
         env:
