@@ -921,6 +921,15 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
                 .map_err(|_| UserParamError::UnsupportedShape)?;
             new_values.push(folded);
         }
+        if let Some(reddb_rql::ast::OnConflictClause {
+            action: reddb_rql::ast::OnConflictAction::DoUpdate { assignments },
+            ..
+        }) = &mut bound.on_conflict
+        {
+            for (_, assignment) in assignments {
+                *assignment = substitute_params_in_expr(assignment.clone(), params)?;
+            }
+        }
         bound.value_exprs = new_exprs;
         bound.values = new_values;
         return Ok(QueryExpr::Insert(bound));
@@ -1119,6 +1128,15 @@ fn visit_query_expr<F: FnMut(&Expr)>(expr: &QueryExpr, visit: &mut F) {
             for row in &q.value_exprs {
                 for e in row {
                     visit_expr(e, visit);
+                }
+            }
+            if let Some(reddb_rql::ast::OnConflictClause {
+                action: reddb_rql::ast::OnConflictAction::DoUpdate { assignments },
+                ..
+            }) = &q.on_conflict
+            {
+                for (_, expression) in assignments {
+                    visit_expr(expression, visit);
                 }
             }
         }
@@ -2007,6 +2025,39 @@ mod tests {
                 value: Value::Vector(_),
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn bind_insert_on_conflict_update_assignment_param() {
+        let query = parse(
+            "INSERT INTO users (email, name) VALUES ($1, $2) \
+             ON CONFLICT (email) DO UPDATE SET name = $3",
+        );
+        let bound = bind(
+            &query,
+            &[
+                Value::text("ada@example.com"),
+                Value::text("Ada"),
+                Value::text("Grace"),
+            ],
+        )
+        .expect("all INSERT conflict parameters should bind");
+        let QueryExpr::Insert(insert) = bound else {
+            panic!("expected insert");
+        };
+        let Some(reddb_rql::ast::OnConflictClause {
+            action: reddb_rql::ast::OnConflictAction::DoUpdate { assignments },
+            ..
+        }) = insert.on_conflict
+        else {
+            panic!("expected conflict update");
+        };
+
+        assert!(matches!(
+            assignments.as_slice(),
+            [(column, Expr::Literal { value: Value::Text(value), .. })]
+                if column == "name" && value.as_ref() == "Grace"
         ));
     }
 

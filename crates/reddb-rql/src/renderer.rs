@@ -72,12 +72,34 @@ fn render_insert(iq: &InsertQuery) -> String {
             format!("({})", vals)
         })
         .collect();
-    format!(
+    let mut sql = format!(
         "INSERT INTO {} ({}) VALUES {}",
         iq.table,
         cols,
         rows.join(", ")
-    )
+    );
+    if let Some(clause) = &iq.on_conflict {
+        sql.push_str(" ON CONFLICT");
+        if let Some(columns) = &clause.target {
+            sql.push_str(" (");
+            sql.push_str(&columns.join(", "));
+            sql.push(')');
+        }
+        match &clause.action {
+            crate::ast::OnConflictAction::DoNothing => sql.push_str(" DO NOTHING"),
+            crate::ast::OnConflictAction::DoUpdate { assignments } => {
+                sql.push_str(" DO UPDATE SET ");
+                sql.push_str(
+                    &assignments
+                        .iter()
+                        .map(|(column, expr)| format!("{column} = {}", render_expr_sql(expr)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+        }
+    }
+    sql
 }
 
 fn render_update(uq: &UpdateQuery) -> String {
@@ -270,5 +292,18 @@ pub fn render_value_sql(v: &Value) -> String {
             format!("[{}]", rendered.join(", "))
         }
         _ => "NULL".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+
+    #[test]
+    fn insert_on_conflict_round_trips_through_the_canonical_renderer() {
+        let sql = "INSERT INTO counters (name, value) VALUES ('jobs', 3) ON CONFLICT (name) DO UPDATE SET value = value + EXCLUDED.value";
+        let parsed = crate::parser::parse(sql).expect("ON CONFLICT should parse");
+
+        assert_eq!(render(&parsed.query), sql);
     }
 }

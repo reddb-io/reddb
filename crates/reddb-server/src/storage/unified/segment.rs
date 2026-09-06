@@ -616,16 +616,21 @@ impl GrowingSegment {
     ) -> Result<UpdateIndexSnapshot, SegmentError> {
         if self.use_flat {
             let raw = entity.id.raw();
-            if raw < self.base_entity_id {
-                return Err(SegmentError::NotFound(entity.id));
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if let Some(slot) = self
+                    .flat_entities
+                    .get_mut(idx)
+                    .filter(|slot| slot.id == entity.id)
+                {
+                    let snapshot = UpdateIndexSnapshot::from_entity(slot);
+                    slot.clone_from(entity);
+                    return Ok(snapshot);
+                }
             }
-            let idx = (raw - self.base_entity_id) as usize;
-            let Some(slot) = self.flat_entities.get_mut(idx) else {
+            let Some(slot) = self.entities.get_mut(&entity.id) else {
                 return Err(SegmentError::NotFound(entity.id));
             };
-            if slot.id != entity.id {
-                return Err(SegmentError::NotFound(entity.id));
-            }
             let snapshot = UpdateIndexSnapshot::from_entity(slot);
             slot.clone_from(entity);
             Ok(snapshot)

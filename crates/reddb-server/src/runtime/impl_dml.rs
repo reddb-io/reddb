@@ -25,7 +25,10 @@ use crate::storage::query::unified::{
 };
 use crate::storage::unified::MetadataValue;
 use crate::storage::Metadata;
-use reddb_rql::ast::{BinOp, Expr, FieldRef, ReturningItem, UpdateTarget};
+use reddb_rql::ast::{
+    BinOp, CompareOp, Expr, FieldRef, Filter, OnConflictAction, ReturningItem, UpdateQuery,
+    UpdateTarget,
+};
 use reddb_rql::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
@@ -79,7 +82,262 @@ pub(super) struct MaterializedUpdateAssignments {
     pub(super) dynamic_metadata_assignments: Vec<(String, MetadataValue)>,
 }
 
+fn resolve_excluded_assignment(
+    expr: &Expr,
+    excluded_fields: &[(String, Value)],
+) -> RedDBResult<Expr> {
+    match expr {
+        Expr::Column {
+            field: FieldRef::TableColumn { table, column },
+            span,
+        } if table.eq_ignore_ascii_case("excluded") => {
+            let value = excluded_fields
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(column))
+                .map(|(_, value)| value.clone())
+                .ok_or_else(|| {
+                    RedDBError::Query(format!(
+                        "ON CONFLICT EXCLUDED references unknown insert column '{column}'"
+                    ))
+                })?;
+            Ok(Expr::Literal { value, span: *span })
+        }
+        Expr::BinaryOp { op, lhs, rhs, span } => Ok(Expr::BinaryOp {
+            op: *op,
+            lhs: Box::new(resolve_excluded_assignment(lhs, excluded_fields)?),
+            rhs: Box::new(resolve_excluded_assignment(rhs, excluded_fields)?),
+            span: *span,
+        }),
+        _ => Ok(expr.clone()),
+    }
+}
+
+fn conflict_columns_match(index_columns: &[String], target_columns: &[String]) -> bool {
+    index_columns.len() == target_columns.len()
+        && index_columns.iter().all(|index_column| {
+            target_columns
+                .iter()
+                .any(|target_column| target_column.eq_ignore_ascii_case(index_column))
+        })
+}
+
+fn conflict_index_key(fields: &[(String, Value)], columns: &[String]) -> Option<Vec<Value>> {
+    columns
+        .iter()
+        .map(|column| {
+            super::index_store::index_field_value(fields, column)
+                .filter(|value| !matches!(value.as_ref(), Value::Null))
+                .map(|value| value.into_owned())
+        })
+        .collect()
+}
+
+fn document_on_conflict_fields(
+    stored_fields: &[(String, Value)],
+    body: &crate::json::Value,
+) -> RedDBResult<Vec<(String, Value)>> {
+    let mut fields = stored_fields.to_vec();
+    if let crate::json::Value::Object(object) = body {
+        for (name, value) in object {
+            fields.push((
+                name.clone(),
+                crate::application::entity::json_to_storage_value(value)?,
+            ));
+        }
+    }
+    Ok(fields)
+}
+
 impl RedDBRuntime {
+    fn conflict_unique_indexes(
+        &self,
+        collection: &str,
+        target: Option<&[String]>,
+    ) -> RedDBResult<Vec<super::index_store::RegisteredIndex>> {
+        let mut indexes = self
+            .index_store_ref()
+            .list_indices(collection)
+            .into_iter()
+            .filter(|index| index.unique)
+            .collect::<Vec<_>>();
+        if let Some(target) = target {
+            indexes.retain(|index| conflict_columns_match(&index.columns, target));
+            if indexes.is_empty() {
+                return Err(RedDBError::Query(format!(
+                    "no unique index on collection '{}' matches ON CONFLICT ({})",
+                    collection,
+                    target.join(", ")
+                )));
+            }
+        }
+        Ok(indexes)
+    }
+
+    fn unique_index_conflict_id(
+        &self,
+        collection: &str,
+        fields: &[(String, Value)],
+        target: Option<&[String]>,
+    ) -> RedDBResult<Option<EntityId>> {
+        let indexes = self.conflict_unique_indexes(collection, target)?;
+        let Some(manager) = self.inner.db.store().get_collection(collection) else {
+            return Ok(None);
+        };
+        for index in indexes {
+            let Some(proposed_key) = conflict_index_key(fields, &index.columns) else {
+                continue;
+            };
+            for entity in manager.query_all(|_| true) {
+                let Some(record) = runtime_any_record_from_entity_ref(&entity) else {
+                    continue;
+                };
+                let existing_fields = record
+                    .iter_fields()
+                    .map(|(name, value)| (name.as_ref().to_string(), value.clone()))
+                    .collect::<Vec<_>>();
+                if self.snapshot_manager().is_aborted(entity.xmin) {
+                    self.index_store_ref()
+                        .index_entity_delete(collection, entity.id, &existing_fields)
+                        .map_err(RedDBError::Internal)?;
+                    continue;
+                }
+                if conflict_index_key(&existing_fields, &index.columns)
+                    .is_some_and(|existing_key| existing_key == proposed_key)
+                {
+                    let conflicting_xid = entity.xmin;
+                    if self.snapshot_manager().is_active(conflicting_xid)
+                        && self.current_xid() != Some(conflicting_xid)
+                    {
+                        return Err(RedDBError::Query(format!(
+                            "serialization conflict: ON CONFLICT key in '{collection}' is owned by active transaction {conflicting_xid}; retry the statement after that transaction resolves"
+                        )));
+                    }
+                    return Ok(Some(entity.id));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn on_conflict_unique_index_conflict_id(
+        &self,
+        collection: &str,
+        fields: &[(String, Value)],
+        target: Option<&[String]>,
+    ) -> RedDBResult<Option<EntityId>> {
+        let selected = self.unique_index_conflict_id(collection, fields, target)?;
+        if selected.is_some() || target.is_none() {
+            return Ok(selected);
+        }
+        if self
+            .unique_index_conflict_id(collection, fields, None)?
+            .is_some()
+        {
+            return Err(RedDBError::Query(format!(
+                "unique index conflict on collection '{collection}' is not covered by ON CONFLICT ({})",
+                target.unwrap_or_default().join(", ")
+            )));
+        }
+        Ok(None)
+    }
+
+    fn has_unique_index_conflict_with_fields(
+        &self,
+        collection: &str,
+        fields: &[(String, Value)],
+        existing_fields: &[Vec<(String, Value)>],
+        target: Option<&[String]>,
+    ) -> RedDBResult<bool> {
+        for index in self.conflict_unique_indexes(collection, target)? {
+            let Some(proposed_key) = conflict_index_key(fields, &index.columns) else {
+                continue;
+            };
+            if existing_fields.iter().any(|existing| {
+                conflict_index_key(existing, &index.columns)
+                    .is_some_and(|existing_key| existing_key == proposed_key)
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn has_on_conflict_unique_index_conflict_with_fields(
+        &self,
+        collection: &str,
+        fields: &[(String, Value)],
+        existing_fields: &[Vec<(String, Value)>],
+        target: Option<&[String]>,
+    ) -> RedDBResult<bool> {
+        let selected = self.has_unique_index_conflict_with_fields(
+            collection,
+            fields,
+            existing_fields,
+            target,
+        )?;
+        if selected || target.is_none() {
+            return Ok(selected);
+        }
+        if self.has_unique_index_conflict_with_fields(collection, fields, existing_fields, None)? {
+            return Err(RedDBError::Query(format!(
+                "unique index conflict on collection '{collection}' is not covered by ON CONFLICT ({})",
+                target.unwrap_or_default().join(", ")
+            )));
+        }
+        Ok(false)
+    }
+
+    fn execute_unique_index_conflict_update(
+        &self,
+        raw_query: &str,
+        insert: &InsertQuery,
+        conflict_id: EntityId,
+        target: UpdateTarget,
+        excluded_fields: &[(String, Value)],
+        assignments: &[(String, Expr)],
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let assignment_exprs = assignments
+            .iter()
+            .map(|(column, expr)| {
+                Ok((
+                    column.clone(),
+                    resolve_excluded_assignment(expr, excluded_fields)?,
+                ))
+            })
+            .collect::<RedDBResult<Vec<_>>>()?;
+        let literal_assignments = assignment_exprs
+            .iter()
+            .filter_map(|(column, expr)| {
+                fold_expr_to_value(expr.clone())
+                    .ok()
+                    .map(|value| (column.clone(), value))
+            })
+            .collect();
+        let update = UpdateQuery {
+            table: insert.table.clone(),
+            target,
+            compound_assignment_ops: vec![None; assignment_exprs.len()],
+            assignment_exprs,
+            assignments: literal_assignments,
+            where_expr: None,
+            filter: Some(Filter::Compare {
+                field: FieldRef::column("", "rid"),
+                op: CompareOp::Eq,
+                value: Value::UnsignedInteger(conflict_id.raw()),
+            }),
+            ttl_ms: None,
+            expires_at_ms: None,
+            with_metadata: Vec::new(),
+            returning: insert.returning.clone(),
+            claim_limit: None,
+            claim_exact: false,
+            order_by: Vec::new(),
+            limit: None,
+            suppress_events: insert.suppress_events,
+        };
+        self.execute_update(raw_query, &update)
+    }
+
     /// ADR 0067 (#1710): resolve the model of an unmarked bare-VALUES
     /// INSERT from the catalog, making the marker rule real — *a model
     /// marker exists only where it disambiguates what the catalog cannot
@@ -226,6 +484,20 @@ impl RedDBRuntime {
             }
             None => query,
         };
+        if query.on_conflict.is_some()
+            && !matches!(
+                query.entity_type,
+                InsertEntityType::Row
+                    | InsertEntityType::Document
+                    | InsertEntityType::Node
+                    | InsertEntityType::Edge
+            )
+        {
+            return Err(RedDBError::InvalidOperation(
+                "ON CONFLICT is supported for table rows, documents, graph nodes, and graph edges"
+                    .to_string(),
+            ));
+        }
         self.check_insert_column_policy(query)?;
         if let Some(ref embed_config) = query.auto_embed {
             // Empty provider → resolve via the embeddings task pointer
@@ -264,6 +536,17 @@ impl RedDBRuntime {
         let mut inserted_count: u64 = 0;
         let effective_rows =
             effective_insert_rows(query).map_err(|msg| RedDBError::Query(msg.to_string()))?;
+        if effective_rows.len() > 1
+            && matches!(
+                query.on_conflict.as_ref().map(|clause| &clause.action),
+                Some(OnConflictAction::DoUpdate { .. })
+            )
+        {
+            return Err(RedDBError::InvalidOperation(
+                "multi-row ON CONFLICT DO UPDATE is not supported atomically; execute one proposed row per statement"
+                    .to_string(),
+            ));
+        }
 
         // Ensure the collection exists (auto-create on first insert).
         let store = self.inner.db.store();
@@ -272,6 +555,27 @@ impl RedDBRuntime {
             .db()
             .collection_contract_arc(&query.table)
             .map(|contract| contract.declared_model);
+        if query.on_conflict.is_some()
+            && matches!(
+                declared_model,
+                Some(crate::catalog::CollectionModel::TimeSeries)
+            )
+        {
+            return Err(RedDBError::InvalidOperation(
+                "ON CONFLICT is not supported for time-series collections".to_string(),
+            ));
+        }
+
+        // One collection-scoped acquisition per upsert statement. Conflict
+        // discovery currently scans the collection, so the lock is not the
+        // dominant cost; it closes the check-then-insert race for every model
+        // until unique indexes become the atomic arbiter themselves.
+        let conflict_rmw_lock = query.on_conflict.as_ref().map(|_| {
+            self.inner
+                .rmw_locks
+                .lock_for(&query.table, "__collection_on_conflict_insert__")
+        });
+        let _conflict_rmw_guard = conflict_rmw_lock.as_ref().map(|lock| lock.lock());
 
         let mut returning_snapshots: Option<Vec<Vec<(String, Value)>>> =
             if query.returning.is_some() {
@@ -280,6 +584,7 @@ impl RedDBRuntime {
                 None
             };
         let mut returning_result: Option<UnifiedResult> = None;
+        let mut conflict_returning_records: Vec<UnifiedRecord> = Vec::new();
 
         if matches!(query.entity_type, InsertEntityType::Row)
             && !matches!(
@@ -336,6 +641,7 @@ impl RedDBRuntime {
                 };
 
             let mut rows = Vec::with_capacity(effective_rows.len());
+            let mut accepted_row_fields: Vec<Vec<(String, Value)>> = Vec::new();
             for row_values in &effective_rows {
                 if row_values.len() != query.columns.len() {
                     return Err(RedDBError::Query(format!(
@@ -346,6 +652,103 @@ impl RedDBRuntime {
                 }
                 let (mut fields, mut metadata) =
                     split_insert_metadata(self, &query.columns, row_values)?;
+                if query
+                    .on_conflict
+                    .as_ref()
+                    .is_some_and(|clause| clause.target.is_none())
+                {
+                    fields = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(
+                        &self.db(),
+                        &query.table,
+                    )
+                    .normalize_insert_fields(fields)?;
+                }
+                if let Some(clause) = &query.on_conflict {
+                    let conflict_id = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(
+                        &self.db(),
+                        &query.table,
+                    )
+                    .row_uniqueness_conflict_id(&fields, clause.target.as_deref())?
+                    .filter(|conflict_id| {
+                        store.get(&query.table, *conflict_id).is_some_and(|entity| {
+                            !self.snapshot_manager().is_aborted(entity.xmin)
+                        })
+                    });
+                    if let Some(conflict_id) = conflict_id {
+                        if let Some(conflicting) = store.get(&query.table, conflict_id) {
+                            let conflicting_xid = conflicting.xmin;
+                            if self.snapshot_manager().is_active(conflicting_xid)
+                                && self.current_xid() != Some(conflicting_xid)
+                            {
+                                return Err(RedDBError::Query(format!(
+                                    "serialization conflict: ON CONFLICT key in '{}' is owned by active transaction {conflicting_xid}; retry the statement after that transaction resolves",
+                                    query.table
+                                )));
+                            }
+                        }
+                        match &clause.action {
+                            OnConflictAction::DoNothing => continue,
+                            OnConflictAction::DoUpdate { assignments } => {
+                                let assignment_exprs = assignments
+                                    .iter()
+                                    .map(|(column, expr)| {
+                                        Ok((
+                                            column.clone(),
+                                            resolve_excluded_assignment(expr, &fields)?,
+                                        ))
+                                    })
+                                    .collect::<RedDBResult<Vec<_>>>()?;
+                                let literal_assignments = assignment_exprs
+                                    .iter()
+                                    .filter_map(|(column, expr)| {
+                                        fold_expr_to_value(expr.clone())
+                                            .ok()
+                                            .map(|value| (column.clone(), value))
+                                    })
+                                    .collect();
+                                let update = UpdateQuery {
+                                    table: query.table.clone(),
+                                    target: UpdateTarget::Rows,
+                                    compound_assignment_ops: vec![None; assignment_exprs.len()],
+                                    assignment_exprs,
+                                    assignments: literal_assignments,
+                                    where_expr: None,
+                                    filter: Some(Filter::Compare {
+                                        field: FieldRef::column("", "rid"),
+                                        op: CompareOp::Eq,
+                                        value: Value::UnsignedInteger(conflict_id.raw()),
+                                    }),
+                                    ttl_ms: None,
+                                    expires_at_ms: None,
+                                    with_metadata: Vec::new(),
+                                    returning: query.returning.clone(),
+                                    claim_limit: None,
+                                    claim_exact: false,
+                                    order_by: Vec::new(),
+                                    limit: None,
+                                    suppress_events: query.suppress_events,
+                                };
+                                let updated = self.execute_update(raw_query, &update)?;
+                                inserted_count += updated.affected_rows;
+                                conflict_returning_records.extend(updated.result.records);
+                                continue;
+                            }
+                        }
+                    }
+                    if matches!(&clause.action, OnConflictAction::DoNothing)
+                        && crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(
+                            &self.db(),
+                            &query.table,
+                        )
+                        .has_row_uniqueness_conflict_with_rows(
+                            &fields,
+                            &accepted_row_fields,
+                            clause.target.as_deref(),
+                        )?
+                    {
+                        continue;
+                    }
+                }
                 if chain_mode {
                     use crate::runtime::blockchain_kind::{
                         chain_conflict_error, COL_BLOCK_HEIGHT, COL_HASH, COL_PREV_HASH,
@@ -556,6 +959,7 @@ impl RedDBRuntime {
                 if let Some(snaps) = returning_snapshots.as_mut() {
                     snaps.push(fields.clone());
                 }
+                accepted_row_fields.push(fields.clone());
                 rows.push(CreateRowInput {
                     collection: query.table.clone(),
                     fields,
@@ -564,12 +968,21 @@ impl RedDBRuntime {
                     vector_links: Vec::new(),
                 });
             }
-            let outputs = self.create_rows_batch(CreateRowsBatchInput {
+            let batch = CreateRowsBatchInput {
                 collection: query.table.clone(),
                 rows,
                 suppress_events: query.suppress_events,
-            })?;
-            inserted_count = outputs.len() as u64;
+            };
+            let outputs = if query
+                .on_conflict
+                .as_ref()
+                .is_some_and(|clause| clause.target.is_none())
+            {
+                self.create_rows_batch_prevalidated_with_outputs(batch)?
+            } else {
+                self.create_rows_batch(batch)?
+            };
+            inserted_count += outputs.len() as u64;
 
             // Chain mode: commit the new tip to the in-memory cache only after
             // the batch persisted successfully. If the batch threw mid-way the
@@ -610,7 +1023,11 @@ impl RedDBRuntime {
                 (query.returning.as_ref(), returning_snapshots.take())
             {
                 let snaps = row_insert_returning_snapshots(&outputs, snaps);
-                returning_result = Some(build_returning_result(items, &snaps, Some(&outputs)));
+                let mut result = build_returning_result(items, &snaps, Some(&outputs));
+                result
+                    .records
+                    .splice(0..0, conflict_returning_records.drain(..));
+                returning_result = Some(result);
             }
         } else {
             // Issue #419: surface the inserted entity id on every INSERT path.
@@ -643,6 +1060,7 @@ impl RedDBRuntime {
                 }
 
                 let mut prepared = Vec::with_capacity(effective_rows.len());
+                let mut accepted_graph_fields: Vec<Vec<(String, Value)>> = Vec::new();
                 for row_values in &effective_rows {
                     if row_values.len() != query.columns.len() {
                         return Err(RedDBError::Query(format!(
@@ -656,6 +1074,44 @@ impl RedDBRuntime {
                         InsertEntityType::Node => {
                             let (node_values, mut metadata) =
                                 split_insert_metadata(self, &query.columns, row_values)?;
+                            if let Some(clause) = &query.on_conflict {
+                                if let Some(conflict_id) = self
+                                    .on_conflict_unique_index_conflict_id(
+                                        &query.table,
+                                        &node_values,
+                                        clause.target.as_deref(),
+                                    )?
+                                {
+                                    match &clause.action {
+                                        OnConflictAction::DoNothing => continue,
+                                        OnConflictAction::DoUpdate { assignments } => {
+                                            let updated = self
+                                                .execute_unique_index_conflict_update(
+                                                    raw_query,
+                                                    query,
+                                                    conflict_id,
+                                                    UpdateTarget::Nodes,
+                                                    &node_values,
+                                                    assignments,
+                                                )?;
+                                            inserted_count += updated.affected_rows;
+                                            conflict_returning_records
+                                                .extend(updated.result.records);
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if matches!(&clause.action, OnConflictAction::DoNothing)
+                                    && self.has_on_conflict_unique_index_conflict_with_fields(
+                                        &query.table,
+                                        &node_values,
+                                        &accepted_graph_fields,
+                                        clause.target.as_deref(),
+                                    )?
+                                {
+                                    continue;
+                                }
+                            }
                             merge_with_clauses(
                                 &mut metadata,
                                 query.ttl_ms,
@@ -681,6 +1137,7 @@ impl RedDBRuntime {
                                 properties.iter().map(|(key, _)| key.as_str()),
                                 &format!("node '{}'", query.table),
                             )?;
+                            accepted_graph_fields.push(node_values.clone());
                             prepared.push(PreparedGraphInsert::Node {
                                 fields: node_values,
                                 input: CreateNodeInput {
@@ -698,6 +1155,44 @@ impl RedDBRuntime {
                         InsertEntityType::Edge => {
                             let (edge_values, mut metadata) =
                                 split_insert_metadata(self, &query.columns, row_values)?;
+                            if let Some(clause) = &query.on_conflict {
+                                if let Some(conflict_id) = self
+                                    .on_conflict_unique_index_conflict_id(
+                                        &query.table,
+                                        &edge_values,
+                                        clause.target.as_deref(),
+                                    )?
+                                {
+                                    match &clause.action {
+                                        OnConflictAction::DoNothing => continue,
+                                        OnConflictAction::DoUpdate { assignments } => {
+                                            let updated = self
+                                                .execute_unique_index_conflict_update(
+                                                    raw_query,
+                                                    query,
+                                                    conflict_id,
+                                                    UpdateTarget::Edges,
+                                                    &edge_values,
+                                                    assignments,
+                                                )?;
+                                            inserted_count += updated.affected_rows;
+                                            conflict_returning_records
+                                                .extend(updated.result.records);
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if matches!(&clause.action, OnConflictAction::DoNothing)
+                                    && self.has_on_conflict_unique_index_conflict_with_fields(
+                                        &query.table,
+                                        &edge_values,
+                                        &accepted_graph_fields,
+                                        clause.target.as_deref(),
+                                    )?
+                                {
+                                    continue;
+                                }
+                            }
                             merge_with_clauses(
                                 &mut metadata,
                                 query.ttl_ms,
@@ -737,6 +1232,7 @@ impl RedDBRuntime {
                                 properties.iter().map(|(key, _)| key.as_str()),
                                 &format!("edge '{}'", query.table),
                             )?;
+                            accepted_graph_fields.push(edge_values.clone());
                             prepared.push(PreparedGraphInsert::Edge {
                                 fields: edge_values,
                                 input: CreateEdgeInput {
@@ -828,7 +1324,7 @@ impl RedDBRuntime {
                         entity: store.get(&query.table, *id),
                     }
                 }));
-                inserted_count = ids.len() as u64;
+                inserted_count += ids.len() as u64;
             } else {
                 for row_values in &effective_rows {
                     if row_values.len() != query.columns.len() {
@@ -894,14 +1390,44 @@ impl RedDBRuntime {
                         InsertEntityType::Document => {
                             let (document_values, mut metadata) =
                                 split_insert_metadata(self, &query.columns, row_values)?;
+                            let (columns, values) = pairwise_columns_values(&document_values);
+                            let body = find_document_body_json(&columns, &values)?;
+                            let conflict_fields =
+                                document_on_conflict_fields(&document_values, &body)?;
+                            if let Some(clause) = &query.on_conflict {
+                                if let Some(conflict_id) = self
+                                    .on_conflict_unique_index_conflict_id(
+                                        &query.table,
+                                        &conflict_fields,
+                                        clause.target.as_deref(),
+                                    )?
+                                {
+                                    match &clause.action {
+                                        OnConflictAction::DoNothing => continue,
+                                        OnConflictAction::DoUpdate { assignments } => {
+                                            let updated = self
+                                                .execute_unique_index_conflict_update(
+                                                    raw_query,
+                                                    query,
+                                                    conflict_id,
+                                                    UpdateTarget::Documents,
+                                                    &conflict_fields,
+                                                    assignments,
+                                                )?;
+                                            inserted_count += updated.affected_rows;
+                                            conflict_returning_records
+                                                .extend(updated.result.records);
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
                             merge_with_clauses(
                                 &mut metadata,
                                 query.ttl_ms,
                                 query.expires_at_ms,
                                 &query.with_metadata,
                             );
-                            let (columns, values) = pairwise_columns_values(&document_values);
-                            let body = find_document_body_json(&columns, &values)?;
                             let input = CreateDocumentInput {
                                 collection: query.table.clone(),
                                 body,
@@ -951,13 +1477,12 @@ impl RedDBRuntime {
             }
 
             if let Some(items) = query.returning.as_ref() {
-                if !entity_outputs.is_empty() {
-                    returning_result = Some(build_returning_result(
-                        items,
-                        &returning_field_snaps,
-                        Some(&entity_outputs),
-                    ));
-                }
+                let mut result =
+                    build_returning_result(items, &returning_field_snaps, Some(&entity_outputs));
+                result
+                    .records
+                    .splice(0..0, conflict_returning_records.drain(..));
+                returning_result = Some(result);
             }
         }
 

@@ -2478,8 +2478,15 @@ mod tests {
             (
                 "runtime/impl_dml.rs",
                 include_str!("../../runtime/impl_dml.rs"),
-                0,
-                "fully migrated by batch 2",
+                1,
+                "documented exception: ON CONFLICT resolves a unique key against \
+                 physical versions on purpose. A snapshot scan cannot see a row an \
+                 uncommitted concurrent writer already holds the key for, which is \
+                 exactly the case that must raise a serialization conflict rather \
+                 than insert a duplicate; the same pass reaps index entries left by \
+                 aborted writers. \
+                 TODO(#2263 follow-up): narrow the candidates through the unique \
+                 index instead of walking the collection",
             ),
             (
                 "runtime/dml_target_scan.rs",
