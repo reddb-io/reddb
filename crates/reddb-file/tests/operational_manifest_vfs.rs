@@ -59,25 +59,6 @@ impl VfsFile for RecordingFile {
         self.vfs.record(format!("sync_file:{}", self.path));
         self.file.sync_all()
     }
-
-    // Delegated to the real file: this fixture records *ordering* of the
-    // calls the manifest makes, not their semantics, so anything it does not
-    // record simply passes through.
-    fn try_clone(&self) -> io::Result<Self> {
-        Ok(RecordingFile {
-            file: self.file.try_clone()?,
-            path: self.path.clone(),
-            vfs: self.vfs.clone(),
-        })
-    }
-
-    fn file_len(&self) -> io::Result<u64> {
-        self.file.file_len()
-    }
-
-    fn set_len(&self, len: u64) -> io::Result<()> {
-        self.file.set_len(len)
-    }
 }
 
 impl Vfs for RecordingVfs {
