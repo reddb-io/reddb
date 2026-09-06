@@ -394,6 +394,33 @@ fn insert_on_conflict_do_update_preserves_excluded_assignments() {
 }
 
 #[test]
+fn insert_on_conflict_do_update_accepts_a_bound_parameter() {
+    // A client that generates SQL binds the new value rather than naming
+    // EXCLUDED: `... DO UPDATE SET payload = ?`. The assignment is a general
+    // expression, so the placeholder has to survive into the AST for the
+    // executor to fill from the statement's parameters.
+    let query = parse(
+        "INSERT INTO messages (id, payload) VALUES (?, ?) \
+         ON CONFLICT (id) DO UPDATE SET payload = ?",
+    )
+    .expect("ON CONFLICT DO UPDATE with a bound parameter should parse");
+    let QueryExpr::Insert(insert) = query else {
+        panic!("expected insert query");
+    };
+    let Some(crate::ast::OnConflictClause {
+        target: Some(target),
+        action: crate::ast::OnConflictAction::DoUpdate { assignments },
+    }) = insert.on_conflict
+    else {
+        panic!("expected DO UPDATE conflict clause");
+    };
+
+    assert_eq!(target, ["id"]);
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].0, "payload");
+}
+
+#[test]
 fn insert_on_conflict_do_update_requires_a_conflict_target() {
     let error = parse(
         "INSERT INTO users (email, name) VALUES ('a@example.com', 'Ada') \
