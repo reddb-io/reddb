@@ -393,6 +393,28 @@ impl SnapshotManager {
         self.state.read().active.contains(&xid)
     }
 
+    /// Unique-key admission uses current transaction outcomes, not the
+    /// reader's snapshot. An invisible active/newly committed writer still
+    /// reserves its key; an aborted creator or completed replacement does not.
+    pub(crate) fn row_reserves_unique_key(
+        &self,
+        xmin: Xid,
+        xmax: Xid,
+        own_xids: &HashSet<Xid>,
+    ) -> bool {
+        let state = self.state.read();
+        if state.aborted.contains(&xmin) {
+            return false;
+        }
+        if state.active.contains(&xmin) && !own_xids.contains(&xmin) {
+            return true;
+        }
+        if xmax == 0 || state.aborted.contains(&xmax) {
+            return true;
+        }
+        !own_xids.contains(&xmax) && state.active.contains(&xmax)
+    }
+
     /// Snapshot of every still-active xid (for VACUUM oldest-active-xid
     /// calculation — any row with `xmax < min(active)` is reclaimable).
     pub fn oldest_active_xid(&self) -> Option<Xid> {

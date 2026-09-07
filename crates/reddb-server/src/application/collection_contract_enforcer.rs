@@ -315,16 +315,22 @@ mod write_adapter {
     use super::*;
 
     pub(crate) struct CollectionContractWriteEnforcer<'a> {
+        runtime: &'a crate::RedDBRuntime,
         db: &'a crate::storage::unified::devx::RedDB,
         collection: &'a str,
     }
 
     impl<'a> CollectionContractWriteEnforcer<'a> {
         pub(crate) fn new(
+            runtime: &'a crate::RedDBRuntime,
             db: &'a crate::storage::unified::devx::RedDB,
             collection: &'a str,
         ) -> Self {
-            Self { db, collection }
+            Self {
+                runtime,
+                db,
+                collection,
+            }
         }
 
         pub(crate) fn ensure_model(
@@ -381,7 +387,7 @@ mod write_adapter {
             fields: &[(String, Value)],
             exclude_id: Option<crate::storage::EntityId>,
         ) -> RedDBResult<()> {
-            enforce_row_uniqueness(self.db, self.collection, fields, exclude_id)
+            enforce_row_uniqueness(self.runtime, self.db, self.collection, fields, exclude_id)
         }
 
         pub(crate) fn row_uniqueness_conflict_id(
@@ -389,8 +395,15 @@ mod write_adapter {
             fields: &[(String, Value)],
             target: Option<&[String]>,
         ) -> RedDBResult<Option<crate::storage::EntityId>> {
-            find_row_uniqueness_conflict(self.db, self.collection, fields, target, None)
-                .map(|conflict| conflict.map(|conflict| conflict.entity_id))
+            find_row_uniqueness_conflict(
+                self.runtime,
+                self.db,
+                self.collection,
+                fields,
+                target,
+                None,
+            )
+            .map(|conflict| conflict.map(|conflict| conflict.entity_id))
         }
 
         pub(crate) fn has_row_uniqueness_conflict_with_rows(
@@ -596,13 +609,35 @@ fn current_unix_ms_u64() -> u64 {
         .unwrap_or(0)
 }
 
+/// Hold across validation and installation, not for the transaction lifetime.
+/// Unconstrained collections do not acquire this gate. Pending rows themselves
+/// reserve keys until their creator/deleter's outcome is known.
+pub(crate) fn row_constraint_lock(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+) -> Option<std::sync::Arc<parking_lot::ReentrantMutex<()>>> {
+    let contract = db.collection_contract_arc(collection)?;
+    if !matches!(
+        contract.declared_model,
+        crate::catalog::CollectionModel::Table | crate::catalog::CollectionModel::Mixed
+    ) || resolved_uniqueness_rules(&contract).is_empty()
+    {
+        return None;
+    }
+    db.store()
+        .get_collection(collection)
+        .map(|manager| manager.row_constraint_lock())
+}
+
 fn enforce_row_uniqueness(
+    runtime: &crate::RedDBRuntime,
     db: &crate::storage::unified::devx::RedDB,
     collection: &str,
     fields: &[(String, Value)],
     exclude_id: Option<crate::storage::EntityId>,
 ) -> RedDBResult<()> {
-    if let Some(conflict) = find_row_uniqueness_conflict(db, collection, fields, None, exclude_id)?
+    if let Some(conflict) =
+        find_row_uniqueness_conflict(runtime, db, collection, fields, None, exclude_id)?
     {
         return Err(row_uniqueness_error(&conflict.rule, collection));
     }
@@ -610,6 +645,7 @@ fn enforce_row_uniqueness(
 }
 
 fn find_row_uniqueness_conflict(
+    runtime: &crate::RedDBRuntime,
     db: &crate::storage::unified::devx::RedDB,
     collection: &str,
     fields: &[(String, Value)],
@@ -644,6 +680,11 @@ fn find_row_uniqueness_conflict(
         .iter()
         .map(|(name, value)| (name.as_str(), value))
         .collect();
+    let snapshot_manager = runtime.snapshot_manager();
+    let own_xids = runtime.own_transaction_xids();
+    let reserves_key = |entity: &crate::storage::UnifiedEntity| {
+        snapshot_manager.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids)
+    };
     for rule in rules {
         let mut expected = Vec::new();
         let mut skip_rule = false;
@@ -670,9 +711,12 @@ fn find_row_uniqueness_conflict(
                 .into_iter()
                 .map(|(_, _, signature)| signature)
                 .collect();
-            if let Some(entity_id) =
-                manager.find_primary_key_conflict(&rule.columns, &signatures, exclude_id)
-            {
+            if let Some(entity_id) = manager.find_primary_key_conflict(
+                &rule.columns,
+                &signatures,
+                exclude_id,
+                &reserves_key,
+            ) {
                 return Ok(Some(UniquenessConflict { rule, entity_id }));
             }
             continue;
@@ -690,7 +734,7 @@ fn find_row_uniqueness_conflict(
             let duplicate = expected.iter().all(|(column, expected, signature)| {
                 row.get_field(column)
                     .is_some_and(|value| uniqueness_value_matches(value, expected, signature))
-            });
+            }) && reserves_key(entity);
             if duplicate {
                 conflict_id = Some(entity.id);
             }

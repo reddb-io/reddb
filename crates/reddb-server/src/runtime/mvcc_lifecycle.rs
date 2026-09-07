@@ -697,6 +697,12 @@ impl RedDBRuntime {
             .writer_xid(current_connection_id())
     }
 
+    pub(crate) fn own_transaction_xids(&self) -> std::collections::HashSet<u64> {
+        self.inner
+            .transaction_state
+            .own_xids(current_connection_id())
+    }
+
     /// `true` when the given connection id has an open `BEGIN`. Issue
     /// #760 — `OpenStream` consults this to refuse output streams that
     /// would otherwise collide with an interactive transaction (see

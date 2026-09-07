@@ -568,6 +568,16 @@ impl RedDBRuntime {
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime.rehydrate_snapshot_xid_floor();
+        assert!(
+            runtime
+                .inner
+                .db
+                .store()
+                .snapshot_manager
+                .set(runtime.snapshot_manager())
+                .is_ok(),
+            "a new runtime owns the store transaction outcomes"
+        );
         runtime
             .bootstrap_system_keyed_collections()
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;

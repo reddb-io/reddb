@@ -380,6 +380,10 @@ pub struct UnifiedStore {
     /// (e.g. `kv`) survives a restart instead of being re-inferred as a table.
     /// The store treats the bytes as opaque; only RedDB interprets them.
     pub(crate) aux_metadata: RwLock<Vec<u8>>,
+    /// Retain transaction outcomes through embedded snapshot-on-drop. Without
+    /// this, aborted physical versions are reopened as committed rows.
+    pub(crate) snapshot_manager:
+        std::sync::OnceLock<Arc<crate::storage::transaction::snapshot::SnapshotManager>>,
 }
 
 mod builder;

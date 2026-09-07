@@ -718,7 +718,7 @@ impl RedDBRuntime {
                 }
 
                 if !modified_columns.is_empty() || row_contract_timestamps {
-                    let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+                    let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
                     let current_fields = if let Some(named) = row.named.take() {
                         named.into_iter().collect::<Vec<_>>()
                     } else if let Some(schema) = row.schema.as_ref() {
@@ -1276,7 +1276,7 @@ impl RedDBRuntime {
         }
 
         if !modified_columns.is_empty() || row_contract_timestamps {
-            let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+            let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
             if row_contract_timestamps {
                 context_index_dirty = true;
                 set_row_field(row, "updated_at", contract.managed_timestamp_value());
@@ -1659,7 +1659,7 @@ impl RedDBRuntime {
         input: CreateNodeInput,
     ) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Graph)?;
         let mut metadata = input.metadata;
         contract.apply_default_ttl(&mut metadata);
@@ -1715,7 +1715,7 @@ impl RedDBRuntime {
         input: CreateEdgeInput,
     ) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Graph)?;
         let mut metadata = input.metadata;
         contract.apply_default_ttl(&mut metadata);
@@ -1774,7 +1774,7 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     runtime.check_db_size()?;
 
     let db = runtime.db();
-    let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+    let contract = CollectionContractWriteEnforcer::new(runtime, &db, &collection);
     contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
     let store = db.store();
@@ -1844,6 +1844,11 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
 impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            &self.db(),
+            &input.collection,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         let db = self.db();
         let CreateRowInput {
             collection,
@@ -1852,7 +1857,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             node_links,
             vector_links,
         } = input;
-        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
         contract.ensure_model(crate::catalog::CollectionModel::Table)?;
         let mut metadata = input_metadata;
         contract.apply_default_ttl(&mut metadata);
@@ -1884,6 +1889,11 @@ impl RuntimeEntityPort for RedDBRuntime {
         &self,
         input: CreateRowsBatchInput,
     ) -> RedDBResult<Vec<CreateEntityOutput>> {
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            &self.db(),
+            &input.collection,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         if input.rows.is_empty() {
             return Ok(Vec::new());
         }
@@ -1893,7 +1903,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         let db = self.db();
         let collection = input.collection;
         let suppress_events = input.suppress_events;
-        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
         contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
         let mut prepared_rows = Vec::with_capacity(input.rows.len());
@@ -1986,7 +1996,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         self.check_db_size()?;
 
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
         contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
         // Fast path: when the collection carries no contract (or the
@@ -2071,7 +2081,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // rows at it — this one-off check is O(1), independent of
         // ncols, and catches schema-kind mismatches that the client
         // can't always see.
-        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
         contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
         // Hoist the per-collection default TTL lookup out of the
@@ -2147,7 +2157,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Vector)?;
         contract.ensure_vector_dimension(input.dense.len())?;
         let mut metadata = input.metadata;
@@ -2225,7 +2235,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Document)?;
 
         if let JsonValue::Object(ref map) = input.body {
@@ -2284,7 +2294,7 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         let declared_model = db
             .collection_contract(&input.collection)
             .map(|contract| contract.declared_model);
@@ -2322,7 +2332,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     ) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::TimeSeries)?;
 
         let mut fields = vec![
@@ -2418,6 +2428,11 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn patch_entity(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            &self.db(),
+            &input.collection,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         let PatchEntityInput {
             collection,
             id,
@@ -2442,6 +2457,11 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            &self.db(),
+            &input.collection,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         let store = self.db().store();
         // Snapshot row fields before delete so we can mirror the removal
         // into every secondary index. The fetch is best-effort: if the

@@ -206,7 +206,7 @@ impl RedDBRuntime {
                 {
                     let conflicting_xid = entity.xmin;
                     if self.snapshot_manager().is_active(conflicting_xid)
-                        && self.current_xid() != Some(conflicting_xid)
+                        && !self.own_transaction_xids().contains(&conflicting_xid)
                     {
                         return Err(RedDBError::Query(format!(
                             "serialization conflict: ON CONFLICT key in '{collection}' is owned by active transaction {conflicting_xid}; retry the statement after that transaction resolves"
@@ -442,6 +442,11 @@ impl RedDBRuntime {
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            &self.db(),
+            &query.table,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         // CollectionContract gate (#49): single entry point for the
         // operator's collection-level write rules. Today this is a
         // no-op for INSERT (APPEND ONLY permits insert); routing
@@ -658,6 +663,7 @@ impl RedDBRuntime {
                     .is_some_and(|clause| clause.target.is_none())
                 {
                     fields = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(
+                        self,
                         &self.db(),
                         &query.table,
                     )
@@ -665,6 +671,7 @@ impl RedDBRuntime {
                 }
                 if let Some(clause) = &query.on_conflict {
                     let conflict_id = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(
+                        self,
                         &self.db(),
                         &query.table,
                     )
@@ -678,7 +685,7 @@ impl RedDBRuntime {
                         if let Some(conflicting) = store.get(&query.table, conflict_id) {
                             let conflicting_xid = conflicting.xmin;
                             if self.snapshot_manager().is_active(conflicting_xid)
-                                && self.current_xid() != Some(conflicting_xid)
+                                && !self.own_transaction_xids().contains(&conflicting_xid)
                             {
                                 return Err(RedDBError::Query(format!(
                                     "serialization conflict: ON CONFLICT key in '{}' is owned by active transaction {conflicting_xid}; retry the statement after that transaction resolves",
@@ -737,6 +744,7 @@ impl RedDBRuntime {
                     }
                     if matches!(&clause.action, OnConflictAction::DoNothing)
                         && crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(
+                            self,
                             &self.db(),
                             &query.table,
                         )
@@ -1861,6 +1869,11 @@ impl RedDBRuntime {
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            &self.db(),
+            &query.table,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         // Issue #523 — blockchain collections are immutable. Reject before
         // RLS / RETURNING work so the operator sees a clean 409-mapped
         // error instead of a partially-applied mutation surface.
@@ -2572,6 +2585,11 @@ impl RedDBRuntime {
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            &self.db(),
+            &query.table,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         // Issue #523 — blockchain collections are immutable; see
         // execute_update for the same gate.
         if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {

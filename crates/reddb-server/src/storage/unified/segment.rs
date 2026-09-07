@@ -1113,10 +1113,11 @@ impl GrowingSegment {
         columns: &[String],
         signatures: &[String],
         exclude_id: Option<EntityId>,
+        reserves_key: &impl Fn(&UnifiedEntity) -> bool,
     ) -> Option<EntityId> {
         let cached = self.primary_key_lookup.read();
         if let Some(index) = cached.as_ref().filter(|index| index.columns == columns) {
-            return self.find_primary_key_candidate(index, signatures, exclude_id);
+            return self.find_primary_key_candidate(index, signatures, exclude_id, reserves_key);
         }
         drop(cached);
         let mut cached = self.primary_key_lookup.write();
@@ -1136,6 +1137,7 @@ impl GrowingSegment {
                 .expect("primary-key lookup initialized above"),
             signatures,
             exclude_id,
+            reserves_key,
         )
     }
 
@@ -1144,15 +1146,18 @@ impl GrowingSegment {
         index: &SegmentPrimaryKey,
         signatures: &[String],
         exclude_id: Option<EntityId>,
+        reserves_key: &impl Fn(&UnifiedEntity) -> bool,
     ) -> Option<EntityId> {
         index.candidates(signatures).iter().copied().find(|id| {
             if Some(*id) == exclude_id {
                 return false;
             }
-            let Some(UnifiedEntity {
-                data: EntityData::Row(row),
-                ..
-            }) = self.get(*id)
+            let Some(
+                entity @ UnifiedEntity {
+                    data: EntityData::Row(row),
+                    ..
+                },
+            ) = self.get(*id)
             else {
                 return false;
             };
@@ -1164,6 +1169,7 @@ impl GrowingSegment {
                     row.get_field(column)
                         .is_some_and(|value| format!("{value:?}") == *signature)
                 })
+                && reserves_key(entity)
         })
     }
 
@@ -1953,7 +1959,12 @@ mod tests {
         key: Value,
         exclude: Option<EntityId>,
     ) -> Option<EntityId> {
-        segment.find_primary_key_conflict(&["primary".into()], &[format!("{key:?}")], exclude)
+        segment.find_primary_key_conflict(
+            &["primary".into()],
+            &[format!("{key:?}")],
+            exclude,
+            &|_| true,
+        )
     }
 
     #[test]

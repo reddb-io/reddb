@@ -179,6 +179,9 @@ struct SourceProgress {
 
 /// Segment manager for a collection
 pub struct SegmentManager {
+    /// Statement-scoped constraint admission. Reentrant because SQL upserts
+    /// invoke the same typed mutation APIs while holding this collection gate.
+    row_constraint_lock: Arc<parking_lot::ReentrantMutex<()>>,
     /// Collection name
     collection: String,
     /// Configuration
@@ -228,6 +231,7 @@ impl SegmentManager {
     /// Create with custom configuration
     pub fn with_config(collection: impl Into<String>, config: ManagerConfig) -> Self {
         Self {
+            row_constraint_lock: Arc::new(parking_lot::ReentrantMutex::new(())),
             collection: collection.into(),
             config,
             next_segment_id: AtomicU64::new(1),
@@ -244,6 +248,10 @@ impl SegmentManager {
             events: RwLock::new(Vec::new()),
             visibility_map: VisibilityMap::new(),
         }
+    }
+
+    pub(crate) fn row_constraint_lock(&self) -> Arc<parking_lot::ReentrantMutex<()>> {
+        Arc::clone(&self.row_constraint_lock)
     }
 
     /// Get or create the shared column schema from first row's named fields.
@@ -1213,20 +1221,25 @@ impl SegmentManager {
         columns: &[String],
         signatures: &[String],
         exclude_id: Option<EntityId>,
+        reserves_key: &impl Fn(&UnifiedEntity) -> bool,
     ) -> Option<EntityId> {
         if let Some(growing) = self.growing.read().as_ref() {
-            if let Some(id) = growing
-                .read()
-                .find_primary_key_conflict(columns, signatures, exclude_id)
-            {
+            if let Some(id) = growing.read().find_primary_key_conflict(
+                columns,
+                signatures,
+                exclude_id,
+                reserves_key,
+            ) {
                 return Some(id);
             }
         }
         for segment in self.sealed.read().iter() {
-            if let Some(id) = segment
-                .read()
-                .find_primary_key_conflict(columns, signatures, exclude_id)
-            {
+            if let Some(id) = segment.read().find_primary_key_conflict(
+                columns,
+                signatures,
+                exclude_id,
+                reserves_key,
+            ) {
                 return Some(id);
             }
         }

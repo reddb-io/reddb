@@ -186,12 +186,28 @@ impl UnifiedStore {
         let fv = STORE_VERSION_CURRENT;
         for (name, manager) in collections.iter() {
             // Get all entities from this collection
-            let entities = manager.query_all(|_| true);
+            let entities = manager.query_all(|entity| {
+                !matches!(entity.data, EntityData::Row(_))
+                    || !self
+                        .snapshot_manager
+                        .get()
+                        .is_some_and(|manager| manager.is_aborted(entity.xmin))
+            });
             reddb_file::encode_native_dump_collection_header(&mut buf, name, entities.len() as u32);
 
             // V7+: serialize entity+metadata as a length-prefixed record.
             // Each record: [u32 len][serialize_entity_record bytes]
-            for entity in entities {
+            for mut entity in entities {
+                // Rolled-back deletions must not become committed tombstones
+                // when a new runtime reconstructs its xid floor from the dump.
+                if matches!(entity.data, EntityData::Row(_))
+                    && self
+                        .snapshot_manager
+                        .get()
+                        .is_some_and(|manager| manager.is_aborted(entity.xmax))
+                {
+                    entity.xmax = 0;
+                }
                 let metadata = manager.get_metadata(entity.id);
                 let record = Self::serialize_entity_record(&entity, metadata.as_ref(), fv);
                 reddb_file::encode_native_dump_entity_record(&mut buf, &record);
