@@ -18,6 +18,79 @@ fn temp_dir(label: &str) -> tempfile::TempDir {
         .expect("temp dir")
 }
 
+#[test]
+fn append_tail_survives_external_writer_checkpoint_and_replacement() {
+    const CHILD_PATH: &str = "REDDB_APPEND_TAIL_CHILD_PATH";
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        EmbeddedRdbArtifact::append_wal_payloads(path, &[b"external".to_vec()])
+            .expect("external append");
+        return;
+    }
+    let dir = temp_dir("append-tail");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create");
+    EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"first".to_vec()]).expect("append");
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "append_tail_survives_external_writer_checkpoint_and_replacement",
+        ])
+        .env(CHILD_PATH, &path)
+        .output()
+        .expect("external writer");
+    assert!(child.status.success(), "{child:?}");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"last".to_vec()])
+        .expect("append after external writer");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"first".to_vec(), b"external".to_vec(), b"last".to_vec()]
+    );
+
+    EmbeddedRdbArtifact::write_snapshot(&path, b"RDST-snapshot").expect("checkpoint");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"after checkpoint".to_vec()])
+        .expect("append after checkpoint");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"after checkpoint".to_vec()]
+    );
+
+    // Replacing the pathname must discard the previous inode's tail.
+    let replacement = dir.path().join("replacement.rdb");
+    EmbeddedRdbArtifact::create(&replacement).expect("create replacement");
+    EmbeddedRdbArtifact::append_wal_payloads(&replacement, &[b"replacement".to_vec()])
+        .expect("replacement append");
+    std::fs::rename(&replacement, &path).expect("replace file");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"final".to_vec()])
+        .expect("append after replacement");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"replacement".to_vec(), b"final".to_vec()]
+    );
+}
+
+#[test]
+fn append_refuses_an_externally_corrupted_published_tail() {
+    let dir = temp_dir("append-corrupt-tail");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"durable".to_vec()])
+        .expect("append and populate tail");
+    let offset = open.manifest.wal_recovery_boundary - 1;
+    rot_bit(&path, offset);
+    let error = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"unreachable".to_vec()])
+        .expect_err("never acknowledge a write beyond corrupt published WAL");
+    assert!(error.to_string().contains("wal zone"), "{error}");
+    // Repair our injected fault. The failed append must leave no cached tail
+    // or published frame, so a fresh scan can safely extend the original.
+    rot_bit(&path, offset);
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"after repair".to_vec()])
+        .expect("append after repair");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"durable".to_vec(), b"after repair".to_vec()]
+    );
+}
+
 fn artifact_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()

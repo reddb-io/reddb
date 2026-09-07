@@ -43,12 +43,11 @@ SEARCH SPATIAL RADIUS 48.8566 2.3522 5.0 COLLECTION places COLUMN loc;
 SEARCH SPATIAL NEAREST 48.8566 2.3522 K 2 COLLECTION places COLUMN loc;
 ```
 
-```text
- name         | distance_km
---------------+------------
- Louvre       | 1.2
- Sacre-Coeur  | 3.4
-```
+The nearest query returns `entity_id` and `distance_km`, ordered by distance.
+The two matches are the Louvre (about 1.16 km) and Sacre-Coeur (about 3.41 km).
+`entity_id` is an engine-assigned identifier, so its numeric value depends on
+the database; it is not the `id` column inserted above. The search does not
+project `name`. The radius query also includes the Eiffel Tower (about 4.23 km).
 
 ## Where to go next
 

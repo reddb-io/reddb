@@ -144,15 +144,18 @@ export class RedDBConnection {
   async query(sql: string, ...params: unknown[]): Promise<string> {
     const wireParams = normalizeQueryParams(params)
     const hasParams = wireParams.length > 0
-    if (hasParams && !this.supportsParams()) {
+    const fullResult = this.supportsParams()
+    if (hasParams && !fullResult) {
       throw new RedDBError(
         'PARAMS_UNSUPPORTED',
         'server did not advertise FEATURE_PARAMS; upgrade the server',
       )
     }
+    // Legacy Query returns a summary only. Capable servers return rows via
+    // QueryWithParams even when the parameter vector is empty.
     const resp = await this._send(
-      hasParams ? MSG_QUERY_WITH_PARAMS : MSG_QUERY,
-      hasParams
+      fullResult ? MSG_QUERY_WITH_PARAMS : MSG_QUERY,
+      fullResult
         ? encodeQueryWithParams(sql, wireParams)
         : Buffer.from(sql, 'utf8'),
     )
