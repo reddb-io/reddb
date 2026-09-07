@@ -163,7 +163,9 @@ fn read_bytes<'a>(input: &mut &'a [u8]) -> Option<&'a [u8]> {
 
 fn encode_result_cache_payload(entry: &RuntimeResultCacheEntry) -> Option<Vec<u8>> {
     let result = &entry.result;
-    if result.result.pre_serialized_json.is_some()
+    // Execution measurements must not survive as a persisted cached execution.
+    if result.result.stats.vector.is_some()
+        || result.result.pre_serialized_json.is_some()
         || result_cache_static_str(result.statement).is_none()
         || result_cache_static_str(result.engine).is_none()
         || result_cache_static_str(result.statement_type).is_none()
@@ -244,6 +246,7 @@ fn decode_result_cache_payload(mut input: &[u8]) -> Option<(RuntimeQueryResult, 
         segments_scanned: read_u64(&mut input)?,
         segments_pruned: read_u64(&mut input)?,
         exec_time_us: read_u64(&mut input)?,
+        vector: None,
     };
 
     let mut records = Vec::new();

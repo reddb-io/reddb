@@ -648,6 +648,22 @@ pub struct QueryStats {
     pub segments_pruned: u64,
     /// Execution time in microseconds
     pub exec_time_us: u64,
+    /// Measurements from the runtime VECTOR SEARCH pipeline, when executed.
+    pub vector: Option<VectorQueryStats>,
+}
+
+/// Counters collected by execution, not inferred from the logical plan.
+#[derive(Debug, Clone, Default)]
+pub struct VectorQueryStats {
+    /// True when these measurements describe the cached computation.
+    pub cache_hit: bool,
+    pub access_path: String,
+    pub index_used: bool,
+    pub candidates_examined: u64,
+    pub metadata_rejected: u64,
+    pub visibility_rejected: u64,
+    pub exact_distance_evaluations: u64,
+    pub rows_returned: u64,
 }
 
 #[cfg(test)]

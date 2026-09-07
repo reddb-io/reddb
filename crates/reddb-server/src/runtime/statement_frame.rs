@@ -534,7 +534,14 @@ impl StatementExecutionFrame {
 
     pub(super) fn read_result_cache(&self, runtime: &RedDBRuntime) -> Option<RuntimeQueryResult> {
         if self.can_read_result_cache() {
-            runtime.get_result_cache_entry(self.cache_key())
+            runtime
+                .get_result_cache_entry(self.cache_key())
+                .map(|mut result| {
+                    if let Some(vector) = result.result.stats.vector.as_mut() {
+                        vector.cache_hit = true;
+                    }
+                    result
+                })
         } else {
             None
         }

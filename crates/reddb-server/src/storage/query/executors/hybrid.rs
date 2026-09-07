@@ -537,6 +537,7 @@ impl QueryStats {
             segments_scanned: a.segments_scanned + b.segments_scanned,
             segments_pruned: a.segments_pruned + b.segments_pruned,
             exec_time_us: a.exec_time_us + b.exec_time_us,
+            vector: None, // One vector pipeline cannot describe a merged hybrid execution.
         }
     }
 }
