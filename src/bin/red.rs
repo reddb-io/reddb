@@ -1314,8 +1314,8 @@ fn emit_data_result(
 
 // DATA COMMANDS END (issue #2124)
 
-// Identifiers cannot be bound. Accept only the unquoted path vocabulary until
-// RQL supports quoted identifiers consistently; never interpolate import SQL.
+// Keep logical imports within the supported identifier vocabulary. The typed
+// INSERT preserves these names without interpreting them as SQL tokens.
 fn restore_identifier_is_safe(name: &str) -> bool {
     name.split('.').all(|part| {
         let mut chars = part.chars();
@@ -2301,7 +2301,7 @@ fn main() {
                         continue;
                     }
                 };
-                // Bind values rather than round-tripping them through SQL literals.
+                // Preserve field names and decoded values through the typed runtime entry.
                 let obj = match fields {
                     reddb::json::Value::Object(m) => m,
                     _ => {
@@ -2310,8 +2310,7 @@ fn main() {
                     }
                 };
                 let mut cols = Vec::new();
-                let mut vals = Vec::new();
-                let mut params = Vec::new();
+                let mut values = Vec::new();
                 let mut invalid = false;
                 if !restore_identifier_is_safe(&collection) {
                     errors += 1;
@@ -2325,14 +2324,13 @@ fn main() {
                     }
                     cols.push(k.clone());
                     match reddb::runtime::query_request::ParamValue::decode_json(v) {
-                        Ok(value) => params.push(value.into()),
+                        Ok(value) => values.push(value.into()),
                         Err(err) => {
                             eprintln!("line {}: {}", line_no + 1, err);
                             invalid = true;
                             break;
                         }
                     }
-                    vals.push(format!("${}", params.len()));
                 }
                 if invalid || cols.is_empty() {
                     errors += 1;
@@ -2342,13 +2340,21 @@ fn main() {
                     );
                     continue;
                 }
-                let sql = format!(
-                    "INSERT INTO {} ({}) VALUES ({})",
-                    collection,
-                    cols.join(", "),
-                    vals.join(", ")
-                );
-                match rt.execute_query_with_params(&sql, &params) {
+                let insert = reddb_rql::ast::InsertQuery {
+                    table: collection,
+                    entity_type: reddb_rql::ast::InsertEntityType::Row,
+                    columns: cols,
+                    value_exprs: Vec::new(),
+                    values: vec![values],
+                    on_conflict: None,
+                    returning: None,
+                    ttl_ms: None,
+                    expires_at_ms: None,
+                    with_metadata: Vec::new(),
+                    auto_embed: None,
+                    suppress_events: false,
+                };
+                match rt.execute_query_expr(reddb_rql::ast::QueryExpr::Insert(insert)) {
                     Ok(_) => restored += 1,
                     Err(e) => {
                         errors += 1;
@@ -2356,7 +2362,10 @@ fn main() {
                     }
                 }
             }
-            checkpoint_local_runtime(&rt);
+            if let Err(err) = rt.checkpoint() {
+                errors += 1;
+                eprintln!("restore checkpoint failed: {err}");
+            }
 
             if errors > 0 && json_mode {
                 json_error(

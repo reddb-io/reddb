@@ -1,0 +1,3 @@
+dumped 134 rows from 13 collection(s), 1 secret key(s) to /tmp/reddb-competitive-audit/vault-final-mwbq1nbx/dump.jsonl
+restored 134 rows, 1 secret key(s) (0 errors)
+vault and config restored after reopen

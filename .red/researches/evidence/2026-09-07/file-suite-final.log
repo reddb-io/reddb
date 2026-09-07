@@ -1,0 +1,580 @@
+   Compiling reddb-io-file v1.23.2 (/home/cyber/Work/reddb.io/reddb-competitive-fixes/crates/reddb-file)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 52.69s
+     Running unittests src/lib.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/reddb_file-04a50f32987742ba)
+
+running 318 tests
+test ai_model_cache::tests::ai_model_cache_manifest_round_trips ... ok
+test ai_model_cache::tests::ai_model_cache_paths_are_canonical ... ok
+test audit_log::tests::rotate_audit_log_compresses_and_removes_plaintext ... ok
+test backup_manifest::tests::archived_logical_wal_records_decode_skips_entries_without_data ... ok
+test backup_manifest::tests::archived_logical_wal_records_json_round_trip ... ok
+test backup_manifest::tests::backup_artifact_keys_and_prefixes_are_canonical ... ok
+test backup_manifest::tests::backup_json_artifacts_pair_keys_with_encoded_bodies ... ok
+test backup_manifest::tests::backup_manifest_json_round_trips ... ok
+test backup_manifest::tests::unified_manifest_json_prefixes_checksums_on_wire ... ok
+test backup_manifest::tests::wal_segment_manifest_json_round_trips ... ok
+test backup_temp::tests::same_lsn_range_stagings_get_distinct_paths ... ok
+test backup_temp::tests::temp_json_cleanup_tolerates_missing_file ... ok
+test backup_temp::tests::temp_json_constructors_use_distinct_prefixes_and_cleanup_on_drop ... ok
+test backup_temp::tests::temp_json_file_uses_canonical_layout_and_roundtrips_bytes ... ok
+test blob_cache::tests::blob_cache_control_path_uses_stable_sidecar_extension ... ok
+test blob_cache::tests::control_round_trips ... ok
+test blob_cache::tests::record_round_trips_and_keeps_legacy_format_default ... ok
+test blob_cache::tests::v2_frame_round_trips_raw_and_zstd_payloads ... ok
+test bloom_segment::tests::bloom_segment_frame_rejects_bad_inputs ... ok
+test bloom_segment::tests::bloom_segment_frame_round_trips_v2_header ... ok
+test btree_value_layout::tests::inline_compressed_cell_round_trips_shape ... ok
+test btree_value_layout::tests::inline_raw_cell_round_trips ... ok
+test btree_value_layout::tests::malformed_pointer_has_no_head ... ok
+test btree_value_layout::tests::pointer_cell_round_trips_little_endian_payload ... ok
+test btree_value_layout::tests::projected_len_matches_inline_and_pointer_cases ... ok
+test column_block::tests::frame_rejects_checksum_mismatch ... ok
+test column_block::tests::frame_round_trips_header_directory_and_slices ... ok
+test column_block::tests::granule_bloom_blob_slices_each_bloom_payload ... ok
+test column_block::tests::granule_index_blob_round_trips ... ok
+test control_store::tests::last_vote_round_trips_and_defaults ... ok
+test control_store::tests::term_round_trips_and_defaults ... ok
+test dst::tests::a_misdirected_write_lands_a_whole_number_of_sectors_away ... ok
+test dst::tests::a_torn_write_crossing_a_sector_is_cut_at_a_sector_boundary ... ok
+test dst::tests::a_torn_write_inside_one_sector_is_cut_at_a_strict_byte_prefix ... ok
+test dst::tests::bit_rot_targets_a_byte_inside_the_read_region ... ok
+test dst::tests::buggify_can_fire_at_named_crash_boundary ... ok
+test dst::tests::each_class_is_individually_triggerable_by_name_and_ppm ... ok
+test dst::tests::every_fault_class_is_off_by_default ... ok
+test dst::tests::fault_classes_compose_with_the_crash_knob_deterministically ... ok
+test dst::tests::fault_classes_round_trip_through_their_names ... ok
+test dst::tests::no_fault_fires_without_an_installed_context ... ok
+test dst::tests::same_seed_produces_an_identical_fault_schedule ... ok
+test dst::tests::same_seed_produces_byte_identical_buggify_trace ... ok
+test dst::tests::the_fault_log_records_class_file_offset_and_length ... ok
+test dst::tests::the_fault_macro_is_release_inert ... ok
+test file_format::tests::a_misdirected_slot_copy_is_rejected_not_read_as_an_older_generation ... ok
+test file_format::tests::bit_rot_anywhere_in_the_slot_payload_fails_the_crc ... ok
+test file_format::tests::both_copies_invalid_yields_no_selection ... ok
+test file_format::tests::database_header_field_helpers_preserve_page_zero_offsets ... ok
+test file_format::tests::database_header_rejects_newer_versions ... ok
+test file_format::tests::database_header_round_trips_page_zero_contract ... ok
+test file_format::tests::paged_cell_helpers_round_trip_pointer_and_payload ... ok
+test file_format::tests::paged_dwb_frame_round_trips_entries_and_validates_checksum ... ok
+test file_format::tests::paged_encryption_header_round_trips_marker_and_raw_bytes ... ok
+test file_format::tests::paged_page_header_accessors_update_expected_offsets ... ok
+test file_format::tests::paged_page_header_round_trips_raw_layout ... ok
+test file_format::tests::sealed_slot_round_trips_generation_and_keeps_the_header_readable ... ok
+test file_format::tests::selection_prefers_the_newest_valid_copy_and_survives_one_torn_slot ... ok
+test file_format::tests::superblock_zone_fits_two_sector_aligned_slots_before_page_one ... ok
+test file_format::tests::the_next_copy_to_write_is_always_the_stale_one ... ok
+test graph_label_registry::tests::registry_frame_rejects_truncated_input ... ok
+test graph_label_registry::tests::registry_frame_round_trips ... ok
+test graph_record::tests::graph_edge_v2_round_trips ... ok
+test graph_record::tests::graph_node_v2_round_trips_with_refs ... ok
+test graph_record::tests::graph_table_ref_round_trips ... ok
+test graph_record::tests::legacy_records_decode_shape ... ok
+test graph_store::tests::graph_store_frame_rejects_truncated_input ... ok
+test graph_store::tests::graph_store_v1_frame_has_no_registry ... ok
+test graph_store::tests::graph_store_v2_frame_round_trips ... ok
+test graph_table_index::tests::graph_table_index_frame_rejects_invalid_utf8_node_id ... ok
+test graph_table_index::tests::graph_table_index_frame_rejects_truncated_input ... ok
+test graph_table_index::tests::graph_table_index_frame_round_trips ... ok
+test layout::tests::derives_dedicated_support_sidecars ... ok
+test layout::tests::derives_primary_replica_segment_names ... ok
+test layout::tests::derives_standard_sidecars_next_to_database ... ok
+test layout::tests::retired_phase1_and_phase3_names_stay_reachable_only_for_migration_and_refusal ... ok
+test layout::tests::the_live_pager_sidecar_set_is_empty_after_phase3 ... ok
+test local_backend::tests::local_backend_atomic_upload_cleans_temp_when_copy_fails ... ok
+test local_backend::tests::local_backend_atomic_upload_creates_parent_and_replaces_destination ... ok
+test local_backend::tests::local_backend_download_reports_missing_or_copies_existing_file ... ok
+test logical_wal::tests::checksum_and_implausible_payload_are_repaired_away ... ok
+test logical_wal::tests::corruption_modes_truncate_to_last_good_record ... ok
+test logical_wal::tests::missing_paths_read_as_empty_wal ... ok
+test logical_wal::tests::mixed_v2_v3_readback_surfaces_framing_term_and_epoch ... ok
+test logical_wal::tests::read_from_seek_index_and_rewrite_round_trip_many_entries ... ok
+test logical_wal::tests::repair_truncates_torn_tail_to_last_valid_record ... ok
+test logical_wal::tests::v1_legacy_frame_decodes_with_zero_term_and_timestamp ... ok
+test logical_wal::tests::v2_compat_roundtrip_marks_missing_framing_term ... ok
+test logical_wal::tests::v3_roundtrip_preserves_framing_term_and_timestamp ... ok
+test native_index_artifact::tests::native_artifacts_do_not_preallocate_untrusted_counts ... ok
+test native_index_artifact::tests::native_artifacts_reject_bad_magic ... ok
+test native_index_artifact::tests::rddp_entity_id_is_fixed_u64 ... ok
+test native_index_artifact::tests::rddp_rejects_total_entries_mismatch ... ok
+test native_index_artifact::tests::rddp_round_trips_and_validates_total ... ok
+test native_index_artifact::tests::rdft_round_trips_and_pins_layout ... ok
+test native_index_artifact::tests::rdga_round_trips_and_pins_layout ... ok
+test native_store::tests::native_collection_roots_decode_tolerates_partial_tail_and_rejects_bad_utf8 ... ok
+test native_store::tests::native_collection_roots_page_round_trips ... ok
+test native_store::tests::native_dump_envelope_round_trips ... ok
+test native_store::tests::native_entity_record_frame_handles_empty_metadata_and_legacy_payloads ... ok
+test native_store::tests::native_entity_record_frame_rejects_truncated_payloads ... ok
+test native_store::tests::native_entity_record_frame_round_trips_payloads ... ok
+test native_store::tests::native_len_prefixed_string_and_bytes_round_trip ... ok
+test native_store::tests::native_low_level_decoders_reject_invalid_utf8_and_varints ... ok
+test native_store::tests::native_manifest_summary_covers_all_kinds_none_and_unknown_snapshot_flags ... ok
+test native_store::tests::native_manifest_summary_page_round_trips_sample ... ok
+test native_store::tests::native_metadata_overflow_headers_reject_short_buffers ... ok
+test native_store::tests::native_metadata_overflow_headers_round_trip ... ok
+test native_store::tests::native_paged_collection_root_round_trips ... ok
+test native_store::tests::native_paged_cross_ref_round_trips ... ok
+test native_store::tests::native_paged_metadata_header_round_trips_and_skips_legacy_payloads ... ok
+test native_store::tests::native_recovery_catalog_metadata_blob_and_vector_pages_round_trip ... ok
+test native_store::tests::native_registry_summary_round_trips_full_samples ... ok
+test native_store::tests::native_store_dump_header_and_crc_footer_are_canonical ... ok
+test native_store::tests::native_store_header_and_crc_reject_bad_inputs ... ok
+test native_store::tests::native_store_magic_matcher_is_canonical ... ok
+test native_store::tests::native_summary_decoders_tolerate_partial_samples_without_panics ... ok
+test operational_manifest::tests::checksum_rejects_corruption ... ok
+test operational_manifest::tests::create_and_drop_collection_are_idempotent_and_escape_names ... ok
+test operational_manifest::tests::detach_fork_hydrates_and_survives_parent_removal ... ok
+test operational_manifest::tests::detach_fork_releases_parent_retention_pin ... ok
+test operational_manifest::tests::detach_fork_resumes_after_move_before_origin_clear ... ok
+test operational_manifest::tests::drop_fork_removes_private_files_and_leaves_parent_intact ... ok
+test operational_manifest::tests::dropping_last_referencing_fork_releases_parent_file_to_retention ... ok
+test operational_manifest::tests::fork_create_is_metadata_only_and_copies_no_data ... ok
+test operational_manifest::tests::fork_creation_rejects_duplicate_and_missing_parent ... ok
+test operational_manifest::tests::fork_recovery_quarantines_partial_hydration_artifact ... ok
+test operational_manifest::tests::fork_writes_are_invisible_to_parent ... ok
+test operational_manifest::tests::manifest_parser_rejects_malformed_shapes ... ok
+test operational_manifest::tests::manifest_round_trip_validates_checksum ... ok
+test operational_manifest::tests::next_manifest_helper_writes_next_file_without_publishing ... ok
+test operational_manifest::tests::parent_recovery_retains_dropped_collection_file_referenced_by_live_fork ... ok
+test operational_manifest::tests::parent_writes_after_fork_are_invisible_to_fork ... ok
+test operational_manifest::tests::promote_fork_replaces_primary_and_archives_parent ... ok
+test operational_manifest::tests::promotion_recovery_resumes_after_fork_moves_to_staging ... ok
+test operational_manifest::tests::recover_removes_pending_drop_and_quarantines_orphans ... ok
+test operational_manifest::tests::recovery_rejects_manifest_referencing_missing_artifact ... ok
+test operational_manifest::tests::unique_quarantine_path_adds_suffix_when_needed ... ok
+test physical_metadata::tests::physical_analytical_storage_round_trips ... ok
+test physical_metadata::tests::physical_analytics_view_descriptor_round_trips ... ok
+test physical_metadata::tests::physical_catalog_snapshot_round_trips ... ok
+test physical_metadata::tests::physical_collection_contract_round_trips ... ok
+test physical_metadata::tests::physical_collection_contract_with_ai_policy_round_trips ... ok
+test physical_metadata::tests::physical_declared_column_contract_round_trips ... ok
+test physical_metadata::tests::physical_metadata_core_contracts_round_trip ... ok
+test physical_metadata::tests::physical_metadata_document_decode_rejects_invalid_json ... ok
+test physical_metadata::tests::physical_metadata_document_root_envelope_round_trips ... ok
+test physical_metadata::tests::physical_metadata_documents_validate_json_before_publish ... ok
+test physical_metadata::tests::physical_metadata_journal_paths_are_listed_and_pruned_by_file_contract ... ok
+test physical_metadata::tests::physical_schema_manifest_round_trips ... ok
+test physical_metadata::tests::physical_subscription_descriptor_round_trips ... ok
+test physical_metadata_policy::tests::env_flags_and_explicit_overrides_drive_sidecar_policies ... ok
+test physical_metadata_policy::tests::journal_and_fold_policy_overrides_are_independent ... ok
+test physical_metadata_policy::tests::seqn_journal_retention_prefers_override_then_env_then_default ... ok
+test primary_replica::rebootstrap::tests::cleanup_rebootstrap_artifacts_removes_all_sidecars ... ok
+test primary_replica::rebootstrap::tests::promote_rebootstrap_pending_database_swaps_pending_and_cleans_ready_state ... ok
+test primary_replica::rebootstrap::tests::rebootstrap_ready_marker_file_round_trips_and_validates_pending_path ... ok
+test primary_replica::rebootstrap::tests::rebootstrap_ready_marker_json_round_trips ... ok
+test primary_replica::tests::basebackup_chunk_validation_catches_corrupt_part ... ok
+test primary_replica::tests::basebackup_list_reads_manifests_sorted_by_checkpoint_lsn ... ok
+test primary_replica::tests::basebackup_manifest_ignores_leftover_tmp_file_after_crash ... ok
+test primary_replica::tests::basebackup_manifest_rejects_incomplete_snapshot_parts ... ok
+test primary_replica::tests::basebackup_manifest_round_trips_with_checksum ... ok
+test primary_replica::tests::basebackup_manifest_writes_and_reads_from_disk ... ok
+test primary_replica::tests::basebackup_names_include_start_and_checkpoint_lsn ... ok
+test primary_replica::tests::basebackup_staged_chunk_parts_recover_and_prune_corruption ... ok
+test primary_replica::tests::basebackup_writes_chunked_snapshot_parts_and_validates_them ... ok
+test primary_replica::tests::catchup_mode_uses_basebackup_or_reclone_when_wal_gap_exists ... ok
+test primary_replica::tests::catchup_mode_uses_retention_floor ... ok
+test primary_replica::tests::file_plan_appends_logical_wal_records_to_existing_segment ... ok
+test primary_replica::tests::promotion_candidate_selects_most_applied_replica ... ok
+test primary_replica::tests::promotion_history_forks_from_candidate_apply_lsn ... ok
+test primary_replica::tests::rejoin_decision_handles_rewind_follow_and_reclone ... ok
+test primary_replica::tests::rejoin_decision_targets_current_timeline_across_multiple_promotions ... ok
+test primary_replica::tests::relay_and_timeline_manifests_ignore_leftover_tmp_files_after_crash ... ok
+test primary_replica::tests::relay_log_manifest_round_trips_and_builds_ack ... ok
+test primary_replica::tests::relay_log_manifest_writes_and_reads_from_disk ... ok
+test primary_replica::tests::relay_log_segment_round_trips_and_checksums_payloads ... ok
+test primary_replica::tests::relay_manifest_validates_referenced_segments ... ok
+test primary_replica::tests::replication_durability_requires_selected_ack_stage ... ok
+test primary_replica::tests::replication_slot_catalog_ignores_leftover_tmp_file_after_crash ... ok
+test primary_replica::tests::replication_slot_catalog_reads_and_writes_legacy_json_store ... ok
+test primary_replica::tests::replication_slot_catalog_round_trips_and_tracks_retention_floor ... ok
+test primary_replica::tests::replication_slot_catalog_writes_and_reads_from_disk ... ok
+test primary_replica::tests::timeline_history_rejects_semantically_invalid_but_checksummed_payloads ... ok
+test primary_replica::tests::timeline_history_returns_descendant_chain_after_multiple_promotions ... ok
+test primary_replica::tests::timeline_history_round_trips_and_tracks_forks ... ok
+test primary_replica::tests::timeline_history_writes_and_reads_from_disk ... ok
+test primary_replica::tests::wal_retention_keeps_segments_needed_by_slowest_replica ... ok
+test primary_replica::tests::wal_retention_max_bytes_prunes_slot_released_segments_inside_min_window ... ok
+test primary_replica::tests::wal_retention_prunes_segments_below_slot_floor_and_keeps_min_segments ... ok
+test primary_replica::tests::wal_segment_accepts_logical_lsn_sequence_independent_of_payload_size ... ok
+test primary_replica::tests::wal_segment_paths_are_timeline_scoped ... ok
+test primary_replica::tests::wal_segment_rejects_non_monotonic_sequence ... ok
+test primary_replica::tests::wal_segment_round_trips_with_crc_chain ... ok
+test primary_replica::tests::wal_segment_writes_and_reads_from_disk ... ok
+test primary_replica::wal::tests::wal_retention_floor_accounts_for_live_fork_lsns ... ok
+test profile::tests::artifact_kinds_render_canonical_labels ... ok
+test profile::tests::file_profiles_render_canonical_labels ... ok
+test serverless::lease::clock_skew_tests::clock_skew_does_not_extend_lease ... ok
+test serverless::lease::clock_skew_tests::deposed_primary_fails_closed_via_term_fence ... ok
+test serverless::lease::clock_skew_tests::simclock_is_reproducible_by_seed ... ok
+test serverless::lease::clock_skew_tests::simclock_set_ms_models_timezone_shift ... ok
+test serverless::tests::boot_index_round_trips_and_preserves_coldstart_order ... ok
+test serverless::tests::cache_eviction_prefers_cold_old_entries ... ok
+test serverless::tests::cached_hydration_enforces_max_hot_bytes_after_writes ... ok
+test serverless::tests::cold_start_fetches_manifest_boot_snapshot_then_wal_tail ... ok
+test serverless::tests::collection_data_extent_ref_uses_canonical_pack_path ... ok
+test serverless::tests::extent_index_finds_key_ranges_and_hot_prefetch_paths ... ok
+test serverless::tests::extent_index_writes_and_reads_from_disk ... ok
+test serverless::tests::file_plan_derives_cache_generation_and_hot_boot_paths ... ok
+test serverless::tests::generation_pointer_round_trips_and_points_to_immutable_manifest ... ok
+test serverless::tests::hydrate_local_plan_cached_populates_multiple_range_entries ... ok
+test serverless::tests::hydrate_local_plan_reads_only_requested_byte_ranges ... ok
+test serverless::tests::hydrate_local_plan_rejects_corrupt_or_out_of_bounds_ranges ... ok
+test serverless::tests::hydrate_local_request_cached_validates_and_repairs_corrupt_cache ... ok
+test serverless::tests::hydration_plan_for_range_uses_overlapping_extents ... ok
+test serverless::tests::hydration_plan_uses_only_matching_extents ... ok
+test serverless::tests::incomplete_generation_publish_preserves_existing_current_pointer ... ok
+test serverless::tests::manifest_and_boot_index_write_and_read_from_disk ... ok
+test serverless::tests::manifest_rejects_trailing_payload_bytes ... ok
+test serverless::tests::manifest_round_trips_with_crc_checked_binary_codec ... ok
+test serverless::tests::prefetch_hot_extents_cached_populates_only_hot_cache_entries ... ok
+test serverless::tests::prefetch_hot_extents_hydrates_only_hot_ranges ... ok
+test serverless::tests::publish_core_generation_writes_required_packs_before_current_pointer ... ok
+test serverless::tests::publish_generation_pointer_rejects_manifest_identity_mismatch ... ok
+test serverless::tests::publish_pointer_rejects_incomplete_or_corrupt_generation ... ok
+test serverless::tests::secondary_index_round_trips_and_builds_collection_hydration_plan ... ok
+test serverless::tests::serverless_paths_are_generation_scoped_and_deterministic ... ok
+test serverless::tests::validate_complete_generation_rejects_pack_and_manifest_metadata_mismatch ... ok
+test serverless::tests::verified_current_pointer_rejects_manifest_hash_mismatch ... ok
+test serverless::tests::verified_current_pointer_rejects_missing_or_corrupt_generation ... ok
+test serverless::tests::verified_current_pointer_rejects_pointer_shape_and_manifest_identity ... ok
+test serverless::tests::writer_lease_artifact_names_are_deterministic ... ok
+test serverless::tests::writer_lease_json_decodes_legacy_missing_term_as_base_term ... ok
+test serverless::tests::writer_lease_json_round_trips_and_preserves_fencing_token ... ok
+test serverless::tests::writer_lease_temp_file_round_trips_and_cleans_up ... ok
+test shm::tests::shm_file_helpers_initialize_and_rewrite_header ... ok
+test shm::tests::shm_header_rejects_checksum_mismatch ... ok
+test shm::tests::shm_header_round_trips ... ok
+test spill::tests::reads_legacy_v1_checksum ... ok
+test spill::tests::rejects_byte_permutation ... ok
+test spill::tests::rejects_single_byte_mutation ... ok
+test spill::tests::v2_round_trip ... ok
+test store_wal::tests::store_wal_action_frames_preserve_legacy_errors ... ok
+test store_wal::tests::store_wal_action_frames_round_trip ... ok
+test table_def::tests::table_def_does_not_preallocate_untrusted_counts ... ok
+test table_def::tests::table_def_rejects_bad_input ... ok
+test transaction_wal::tests::transaction_wal_entry_payload_rejects_truncated_insert ... ok
+test transaction_wal::tests::transaction_wal_entry_payload_round_trips ... ok
+test transaction_wal::tests::transaction_wal_record_frame_rejects_checksum_mismatch ... ok
+test transaction_wal::tests::transaction_wal_record_frame_round_trips ... ok
+test turboquant_snapshot::tests::read_detects_body_crc_corruption ... ok
+test turboquant_snapshot::tests::read_rejects_bad_magic ... ok
+test turboquant_snapshot::tests::read_rejects_dimension_mismatch ... ok
+test turboquant_snapshot::tests::round_trip_preserves_vectors_in_order ... ok
+test ui_bundle_cache::tests::promote_ui_bundle_staging_rolls_back_existing_version_on_failure ... ok
+test ui_bundle_cache::tests::ui_bundle_cache_paths_are_canonical ... ok
+test ui_bundle_cache::tests::ui_bundle_manifest_rejects_invalid_json_and_missing_fields ... ok
+test ui_bundle_cache::tests::ui_bundle_manifest_round_trips ... ok
+test ui_bundle_cache::tests::ui_bundle_manifest_write_and_promote_staging_are_atomic ... ok
+test vault_export_envelope::tests::decodes_pinned_legacy_blob ... ok
+test vault_export_envelope::tests::encode_lays_out_frozen_header ... ok
+test vault_export_envelope::tests::rejects_bad_hex ... ok
+test vault_export_envelope::tests::rejects_bad_magic ... ok
+test vault_export_envelope::tests::rejects_short_blob ... ok
+test vault_export_envelope::tests::rejects_unsupported_version ... ok
+test vault_export_envelope::tests::round_trip_is_byte_identical ... ok
+test vector_btree_page_format::tests::all_four_leaf_cell_shapes_round_trip ... ok
+test vector_btree_page_format::tests::decode_leaf_cell_rejects_truncation ... ok
+test vector_btree_page_format::tests::decode_leaf_cell_unknown_version_rejected ... ok
+test vector_btree_page_format::tests::encoded_v2_cell_has_flag_byte_then_v1_layout ... ok
+test vector_btree_page_format::tests::format_version_constant_is_v2 ... ok
+test vector_btree_page_format::tests::freshly_created_page_writes_v2_header ... ok
+test vector_btree_page_format::tests::leaf_cell_flags_byte_round_trip ... ok
+test vector_btree_page_format::tests::leaf_cell_flags_reject_reserved_bits ... ok
+test vector_btree_page_format::tests::page_header_decode_rejects_short_buffer ... ok
+test vector_btree_page_format::tests::page_header_rejects_unknown_type_byte ... ok
+test vector_btree_page_format::tests::page_header_rejects_version_newer_than_known ... ok
+test vector_btree_page_format::tests::page_header_rejects_version_zero ... ok
+test vector_btree_page_format::tests::page_header_round_trips_every_type ... ok
+test vector_btree_page_format::tests::page_header_round_trips_overflow_type ... ok
+test vector_btree_page_format::tests::page_type_byte_values_are_stable ... ok
+test vector_btree_page_format::tests::v1_cell_reads_as_inline_raw ... ok
+test vector_btree_page_format::tests::v1_page_still_reads_after_partial_rewrites_in_place ... ok
+test vector_btree_page_format::tests::v1_stream_of_cells_decodes_byte_identically ... ok
+test vector_hnsw_index::tests::hnsw_index_frame_does_not_preallocate_untrusted_counts ... ok
+test vector_hnsw_index::tests::hnsw_index_frame_encodes_missing_entry_point_as_sentinel ... ok
+test vector_hnsw_index::tests::hnsw_index_frame_pins_byte_layout ... ok
+test vector_hnsw_index::tests::hnsw_index_frame_rejects_bad_input ... ok
+test vector_hnsw_index::tests::hnsw_index_frame_round_trips ... ok
+test vector_ivf_index::tests::ivf_index_frame_does_not_preallocate_untrusted_counts ... ok
+test vector_ivf_index::tests::ivf_index_frame_pins_byte_layout ... ok
+test vector_ivf_index::tests::ivf_index_frame_rejects_bad_input ... ok
+test vector_ivf_index::tests::ivf_index_frame_round_trips ... ok
+test vector_value_codec::tests::decode_rejects_truncated_lz4_header ... ok
+test vector_value_codec::tests::decode_rejects_unknown_flag_byte ... ok
+test vector_value_codec::tests::empty_input_round_trips_as_raw ... ok
+test vector_value_codec::tests::exact_threshold_falls_back_to_raw ... ok
+test vector_value_codec::tests::flag_byte_round_trips ... ok
+test vector_value_codec::tests::flag_distinguishes_compressed_and_raw ... ok
+test vector_value_codec::tests::round_trip_compressible_text ... ok
+test vector_value_codec::tests::round_trip_incompressible_random ... ok
+test vector_value_codec::tests::would_encode_to_decouples_from_spill_decision ... ok
+test vector_value_codec::tests::would_encode_to_matches_actual_encode ... ok
+test wal_header::tests::main_wal_segment_boundary_rounds_strictly_above_position ... ok
+test wal_header::tests::wal_file_header_accepts_legacy_v2 ... ok
+test wal_header::tests::wal_file_header_encodes_current_version ... ok
+test wal_header::tests::wal_file_header_rejects_bad_magic_and_version ... ok
+test wal_record::tests::main_wal_record_accepts_legacy_v2_without_term ... ok
+test wal_record::tests::main_wal_record_compresses_and_decompresses_page_writes ... ok
+test wal_record::tests::main_wal_record_detects_checksum_mismatch ... ok
+test wal_record::tests::main_wal_record_rejects_implausible_count_before_allocating ... ok
+test wal_record::tests::main_wal_record_rejects_implausible_payload_before_allocating ... ok
+test wal_record::tests::main_wal_record_round_trip_current_format_authority_epoch ... ok
+test wal_record::tests::main_wal_record_types_are_stable ... ok
+test wal_record::tests::main_wal_records_round_trip_current_format ... ok
+test zone_map::tests::zone_map_sidecar_round_trips ... ok
+
+test result: ok. 318 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s
+
+     Running tests/append_only_segment.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/append_only_segment-4199b7bad657e2e3)
+
+running 4 tests
+test append_only_segment_frame_round_trips_metadata_and_checksums ... ok
+test interrupted_append_only_segment_retirement_recovers_without_orphaning_live_segments ... ok
+test operational_manifest_publishes_closed_append_only_segment_once ... ok
+test unpublished_append_only_segment_files_are_quarantined_on_recover ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/embedded_rdb_artifact.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/embedded_rdb_artifact-744437f70761089b)
+
+running 20 tests
+test a_checkpoint_publishes_the_manifest_into_the_inactive_slot ... ok
+test a_superblock_naming_a_manifest_outside_the_zone_is_refused ... ok
+test append_invalidates_replacement_with_identical_superblocks ... ok
+test append_refuses_an_externally_corrupted_published_tail ... ok
+test append_tail_survives_external_writer_checkpoint_and_replacement ... ok
+test create_open_embedded_rdb_uses_one_required_artifact ... ok
+test embedded_open_skips_newer_superblock_when_snapshot_checksum_fails ... ok
+test embedded_snapshot_checkpoint_is_copy_on_write_until_superblock_publish ... ok
+test embedded_snapshot_crash_injection_preserves_published_snapshot ... ok
+test embedded_wal_checkpoint_fence_allows_wrap_after_quiescing_region ... ok
+test embedded_wal_crash_injection_preserves_last_published_prefix ... ok
+test embedded_wal_frames_are_versioned_ordered_and_chained ... ok
+test embedded_wal_recovery_ignores_corrupt_or_truncated_tail_frame ... ok
+test embedded_wal_serializes_concurrent_appenders ... ok
+test embedded_writes_use_a_single_handle_and_leave_one_file ... ok
+test manifest_bit_rot_fails_the_open_didactically_instead_of_falling_back ... ok
+test open_falls_back_to_older_superblock_when_newer_copy_is_invalid ... ok
+test unreadable_superblock_bytes_report_io_not_corruption ... ok
+test writer_paths_open_the_data_file_exactly_once_under_the_lock ... ok
+test zone_failure_guidance_names_real_commands ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.13s
+
+     Running tests/layout_authority.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/layout_authority-af638f71dc2b23b1)
+
+running 54 tests
+test backup::server_does_not_own_backup_or_wal_archive_manifest_codecs ... ok
+test boundary::context_declares_file_and_protocol_authority_boundary ... ok
+test boundary::replication_slot_contract_lives_only_in_reddb_file ... ok
+test native_artifacts::reddb_file_owns_native_artifact_codecs ... ok
+test native_artifacts::server_does_not_redeclare_native_artifact_payload_formats ... ok
+test physical::server_does_not_own_physical_manifest_block_reference_contract ... ok
+test physical::server_does_not_own_physical_metadata_document_codec ... ok
+test physical::server_does_not_own_spill_file_format ... ok
+test physical::server_does_not_redeclare_physical_metadata_core_json_format ... ok
+test physical::server_does_not_redeclare_shm_file_format ... ok
+test physical::server_uses_reddb_file_for_physical_metadata_paths ... ok
+test runtime::primary_replica_crash_contract_tests_live_in_reddb_file ... ok
+test runtime::server_ai_model_cache_uses_file_owned_manifest_contract ... ok
+test runtime::server_does_not_own_serverless_writer_lease_artifact ... ok
+test runtime::server_does_not_redeclare_blob_cache_l2_file_format ... ok
+test runtime::server_does_not_redeclare_election_or_fence_file_stores ... ok
+test runtime::server_does_not_redeclare_logical_wal_spool_format ... ok
+test runtime::server_does_not_redeclare_replication_slot_file_contracts ... ok
+test runtime::server_does_not_redeclare_turboquant_snapshot_format ... ok
+test runtime::server_does_not_redeclare_zone_map_file_format ... ok
+test runtime::server_operational_manifest_is_runtime_alias_only ... ok
+test runtime::server_primary_replica_wal_segments_are_file_owned ... ok
+test runtime::server_uses_reddb_file_for_backup_temp_json_names ... ok
+test runtime::server_uses_reddb_file_for_local_backend_temp_names ... ok
+test runtime::server_uses_reddb_file_for_logical_wal_spool_paths ... ok
+test runtime::server_uses_reddb_file_for_primary_replica_slot_paths ... ok
+test runtime::server_uses_reddb_file_for_relay_segment_names ... ok
+test runtime::server_uses_reddb_file_for_replica_basebackup_chunk_files ... ok
+test runtime::server_uses_reddb_file_for_replica_rebootstrap_lifecycle ... ok
+test runtime::server_uses_reddb_file_for_replica_rebootstrap_paths ... ok
+test runtime::server_uses_reddb_file_for_serverless_roots_and_cache ... ok
+test storage::database_open_restores_dwb_zone_before_wal_replay ... ok
+test storage::embedded_rdb_artifact_contract_tests_live_in_reddb_file ... ok
+test storage::native_artifact_payload_codecs_live_only_in_reddb_file ... ok
+test storage::reddb_file_source_modules_stay_under_two_thousand_lines ... ok
+test storage::server_checkpoint_tests_do_not_assert_wal_physical_sizes ... ok
+test storage::server_does_not_own_main_wal_file_header ... ok
+test storage::server_does_not_own_main_wal_record_frame ... ok
+test storage::server_does_not_own_native_store_atomic_publish ... ok
+test storage::server_does_not_own_transaction_wal_record_envelope ... ok
+test storage::server_does_not_own_unified_store_wal_action_frame ... ok
+test storage::server_does_not_redeclare_core_file_format_constants ... ok
+test storage::server_does_not_redeclare_native_store_file_contracts ... ok
+test storage::server_does_not_redeclare_physical_metadata_core_contracts ... ok
+test storage::server_does_not_redeclare_tiered_layout_contracts ... ok
+test storage::server_runtime_uses_file_owned_default_database_path ... ok
+test storage::server_source_does_not_embed_owned_file_suffixes ... ok
+test storage::server_uses_reddb_file_for_audit_log_paths ... ok
+test storage::server_uses_reddb_file_for_pager_shadow_sidecar_groups ... ok
+test storage::server_uses_reddb_file_for_slow_query_log_paths ... ok
+test storage::server_uses_reddb_file_for_unified_wal_paths ... ok
+test storage::server_wal_record_tests_do_not_assert_physical_tags ... ok
+test storage::server_wal_tests_use_reddb_file_temp_wal_names ... ok
+test storage::tiered_layout_matrix_lives_in_reddb_file_tests ... ok
+
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.35s
+
+     Running tests/operational_manifest_vfs.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/operational_manifest_vfs-2722df5ed8aee677)
+
+running 3 tests
+test collection_create_orders_physical_durability_before_manifest_publication ... ok
+test collection_drop_publishes_pending_before_removing_the_physical_file ... ok
+test manifest_write_path_has_one_file_owned_ordering_site ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/primary_replica_basebackup_crash.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/primary_replica_basebackup_crash-8cb321925db22fb5)
+
+running 4 tests
+test basebackup_manifest_publish_survives_atomic_crash_points ... 
+running 1 test
+test primary_replica_basebackup_crash_child ... 
+running 1 test
+test primary_replica_basebackup_crash_child ... 
+running 1 test
+test primary_replica_basebackup_crash_child ... 
+running 1 test
+test primary_replica_basebackup_crash_child ... ok
+test basebackup_parts_publish_survives_crash_without_manifest ... 
+running 1 test
+test primary_replica_basebackup_crash_child ... 
+running 1 test
+test primary_replica_basebackup_crash_child ... 
+running 1 test
+test primary_replica_basebackup_crash_child ... 
+running 1 test
+test primary_replica_basebackup_crash_child ... 
+running 1 test
+test primary_replica_basebackup_crash_child ... ok
+test basebackup_retry_crash_preserves_existing_parts ... ok
+test primary_replica_basebackup_crash_child ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/primary_replica_relay_timeline_crash.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/primary_replica_relay_timeline_crash-eb850271189b1eff)
+
+running 4 tests
+test primary_replica_atomic_crash_child ... ok
+test relay_manifest_write_survives_atomic_crash_points ... 
+running 1 test
+test primary_replica_atomic_crash_child ... 
+running 1 test
+test primary_replica_atomic_crash_child ... 
+running 1 test
+test primary_replica_atomic_crash_child ... 
+running 1 test
+test primary_replica_atomic_crash_child ... ok
+test relay_segment_write_survives_atomic_crash_points ... 
+running 1 test
+test primary_replica_atomic_crash_child ... 
+running 1 test
+test primary_replica_atomic_crash_child ... 
+running 1 test
+test primary_replica_atomic_crash_child ... 
+running 1 test
+test primary_replica_atomic_crash_child ... ok
+test timeline_history_write_survives_atomic_crash_points ... 
+running 1 test
+test primary_replica_atomic_crash_child ... 
+running 1 test
+test primary_replica_atomic_crash_child ... 
+running 1 test
+test primary_replica_atomic_crash_child ... 
+running 1 test
+test primary_replica_atomic_crash_child ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/primary_replica_slot_catalog_crash.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/primary_replica_slot_catalog_crash-1e34e899ea4c7537)
+
+running 2 tests
+test primary_replica_slot_catalog_crash_child ... ok
+test slot_catalog_write_survives_atomic_crash_points ... 
+running 1 test
+test primary_replica_slot_catalog_crash_child ... 
+running 1 test
+test primary_replica_slot_catalog_crash_child ... 
+running 1 test
+test primary_replica_slot_catalog_crash_child ... 
+running 1 test
+test primary_replica_slot_catalog_crash_child ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/salvage_embedded_rdb.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/salvage_embedded_rdb-a11af55bc0d4c619)
+
+running 3 tests
+test salvage_carves_snapshot_when_superblocks_and_manifest_are_destroyed ... ok
+test salvage_healthy_store_copies_verified_payloads_into_fresh_store_without_source_writes ... ok
+test salvage_skips_checksum_failed_snapshot_and_still_writes_fresh_store ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/serverless_current_pointer_crash.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/serverless_current_pointer_crash-6880bf1cee3f29a2)
+
+running 3 tests
+test current_pointer_publish_survives_crash_points ... 
+running 1 test
+test serverless_current_pointer_crash_child ... 
+running 1 test
+test serverless_current_pointer_crash_child ... 
+running 1 test
+test serverless_current_pointer_crash_child ... 
+running 1 test
+test serverless_current_pointer_crash_child ... ok
+test generation_pack_publish_does_not_advance_current_on_crash ... 
+running 1 test
+test serverless_current_pointer_crash_child ... 
+running 1 test
+test serverless_current_pointer_crash_child ... 
+running 1 test
+test serverless_current_pointer_crash_child ... 
+running 1 test
+test serverless_current_pointer_crash_child ... ok
+test serverless_current_pointer_crash_child ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+
+     Running tests/storage_layout.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/storage_layout-3ae705803d2ee556)
+
+running 10 tests
+test layout_presets_expand_to_deterministic_toggles ... ok
+test log_routing_overrides_replace_tier_defaults ... ok
+test max_layout_places_every_tier_under_support_dir ... ok
+test minimal_layout_keeps_optional_tier_dirs_disabled ... ok
+test override_can_force_stderr_on_performance_tier ... ok
+test overrides_apply_after_preset_expansion ... ok
+test performance_layout_routes_audit_and_slow_logs_under_support_dir ... ok
+test serde_config_defaults_to_standard_and_accepts_overrides ... ok
+test standard_layout_defaults_logs_to_stderr ... ok
+test standard_layout_is_default_and_derives_stable_sidecar_paths ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/table_def_codec.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/table_def_codec-12bfae2fd437d023)
+
+running 2 tests
+test fixture_corpus_is_byte_identical_to_legacy_codec ... ok
+test keystone_table_defs_round_trip ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vfs.rs (/tmp/reddb-competitive-audit/cargo-target/debug/deps/vfs-ae3b01449a7e5d08)
+
+running 1 test
+test std_vfs_preserves_file_and_directory_operations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests reddb_file
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -1,0 +1,22 @@
+{
+  "scope": "competitive foundations; local validation, not full workspace CI",
+  "red_binary_sha256": "f2e8cdb57e86ec4c10e61621cb84bb86fec0c76e2965a33543abcd0d48c1e5da",
+  "baseline_binary_sha256": "3c86ef158b511848e084d5d7b153065def5cada9f6277bbf3e8e369115556862",
+  "baseline_revision": "85153296d8beba3bfa5ded2dfa719f416f50393d",
+  "checks": {
+    "cargo_check": 0,
+    "release_build": 0,
+    "file_crate_tests": 428,
+    "thin_client_tests": 84,
+    "cli_regressions": 5,
+    "bun_programs": 3,
+    "quality_cases": 10,
+    "functional_failures": [],
+    "vault_smoke": "encrypted vault and config retained through CLI dump/restore/reopen; fixture plaintext absent from dump"
+  },
+  "limits": [
+    "SIGKILL is not power loss",
+    "scalar logical export is not full multimodel/schema/auth backup",
+    "quality oracle does not certify ANN recall, graph composition, concurrent isolation or record-level RLS"
+  ]
+}

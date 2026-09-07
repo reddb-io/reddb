@@ -62,8 +62,10 @@ try {
   const fractionalMatch = await db.query('SEARCH SIMILAR $1 COLLECTION fractional_vectors LIMIT 1',
     [fractional])
   assertEqual(fractionalMatch.rows.length, 1, 'fractional vector should remain searchable')
-  assertEqual(fractionalMatch.rows[0].content, 'fractional embedding', 'fractional values survive binding')
   assert(Math.abs(fractionalMatch.rows[0].score - 1) < 1e-6, 'identical fractional vectors should match')
+  const axisMatch = await db.query('SEARCH SIMILAR $1 COLLECTION fractional_vectors LIMIT 1',
+    [new Float32Array([1, 0])])
+  assert(Math.abs(axisMatch.rows[0].score - 0.8) < 1e-6, 'fractional coordinates survive binding')
 } finally {
   await db.close()
 }

@@ -27,6 +27,8 @@ eficientes, garantias consistentes e diagnóstico verificável.
 - Execução RedDB: binário otimizado da base `85153296d8beba3bfa5ded2dfa719f416f50393d`,
   SDK publicado `1.23.2`, Bun `1.4.1`. O resultado anterior às correções está em
   [multimodel-quality-before.json](evidence/2026-09-07/multimodel-quality-before.json).
+- Execução RedDB corrigida (#2272): os dez casos passaram, incluindo o vetor
+  fracionário via SDK. [Resultado posterior](evidence/2026-09-07/multimodel-quality-after.json).
 - Execução SurrealDB: servidor `3.2.4`, RocksDB, SDK JavaScript `2.0.8`.
 - Fonte SurrealDB: revisão `93ab219d69f09d8f999851b0359c80ebe6726102`. Uma leitura
   dessa revisão não prova que cada otimização esteja na distribuição `3.2.4`.

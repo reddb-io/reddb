@@ -169,6 +169,7 @@ reddb-client = { workspace = true, features = ["http"] }
 reddb-server = { workspace = true }
 reddb-file = { workspace = true }
 reddb-types = { workspace = true }
+reddb-rql = { workspace = true }
 # `red` bin spins up its own multi-thread tokio runtime (server
 # subcommand needs explicit Builder configuration with custom
 # stack size). All other reddb modules pull tokio transitively
@@ -194,10 +195,8 @@ redwire = ["reddb-client/redwire"]
 # the tests need.
 reddb-client = { workspace = true, features = ["embedded", "redwire"] }
 reddb-file = { workspace = true }
-# Workspace-level RQL conformance drivers execute the corpus owned by
-# `crates/reddb-rql` against the current in-server engine. Keeping these deps
-# here preserves the pure `reddb-io-rql -> reddb-io-types` crate graph.
-reddb-rql = { workspace = true }
+# Workspace-level RQL conformance drivers execute the parser corpus against
+# the current in-server engine.
 sqllogictest = "0.29"
 # Differential RQL-vs-SQLite conformance (issue #1353): the standard-SQL corpus
 # slice is replayed against a live in-memory SQLite oracle so divergence from
