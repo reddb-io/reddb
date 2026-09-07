@@ -1,5 +1,10 @@
 # Qualidade multimodelo: RedDB e SurrealDB
 
+> Atualização: o rótulo vetorial abaixo é o plano anunciado na base, não prova
+> do algoritmo executado. CREATE VECTOR já usa TurboQuant por padrão. A
+> [validação seguinte](2026-09-07-execution-validation.md) corrige o plano e
+> acrescenta contadores de execução reais.
+
 Data: 2026-09-07. Complemento à auditoria #2271 e às correções #2272.
 
 ## Julgamento

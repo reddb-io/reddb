@@ -1,0 +1,553 @@
+{
+  "kind": "quality-only",
+  "complete": true,
+  "redBinary": "/tmp/reddb-competitive-audit/cargo-target/release/red",
+  "corpus": [
+    {
+      "name": "near_a",
+      "vector": [
+        0.8,
+        0.6
+      ],
+      "lat": 48.8566,
+      "lon": 2.3522,
+      "category": "bistro"
+    },
+    {
+      "name": "near_b",
+      "vector": [
+        0.6,
+        0.8
+      ],
+      "lat": 48.8576,
+      "lon": 2.3532,
+      "category": "bistro"
+    },
+    {
+      "name": "wrong_city",
+      "vector": [
+        1,
+        0
+      ],
+      "lat": 40.7128,
+      "lon": -74.006,
+      "category": "bistro"
+    },
+    {
+      "name": "wrong_category",
+      "vector": [
+        0.99,
+        0.01
+      ],
+      "lat": 48.8566,
+      "lon": 2.3522,
+      "category": "cafe"
+    },
+    {
+      "name": "missing_location",
+      "vector": [
+        1,
+        0
+      ],
+      "category": "bistro"
+    }
+  ],
+  "oracle": [
+    "near_a",
+    "near_b"
+  ],
+  "cases": [
+    {
+      "engine": "reddb",
+      "name": "sdk_fractional_vector_parameter",
+      "valid": true,
+      "result": {
+        "affected": 1,
+        "columns": [],
+        "rows": [],
+        "statement": "insert"
+      }
+    },
+    {
+      "engine": "reddb",
+      "name": "filtered_top_1",
+      "valid": true,
+      "result": {
+        "affected": 0,
+        "columns": [
+          "_distance",
+          "_score",
+          "collection",
+          "content",
+          "created_at",
+          "dimension",
+          "distance",
+          "entity_id",
+          "final_score",
+          "red_capabilities",
+          "red_collection",
+          "red_entity_type",
+          "red_kind",
+          "red_sequence_id",
+          "rid",
+          "score",
+          "updated_at",
+          "vector_distance",
+          "vector_score",
+          "vector_similarity"
+        ],
+        "rows": [
+          {
+            "_distance": 0.19999998807907104,
+            "_score": 0.800000011920929,
+            "collection": "quality_places",
+            "content": "near_a",
+            "created_at": 1788783856,
+            "dimension": 2,
+            "distance": 0.19999998807907104,
+            "entity_id": 1028,
+            "final_score": 0.800000011920929,
+            "red_capabilities": "embedding,similarity,vector",
+            "red_collection": "quality_places",
+            "red_entity_type": "vector",
+            "red_kind": "vector",
+            "red_sequence_id": 0,
+            "rid": 1028,
+            "score": 0.800000011920929,
+            "updated_at": 1788783856,
+            "vector_distance": 0.19999998807907104,
+            "vector_score": 0.800000011920929,
+            "vector_similarity": 0.800000011920929
+          }
+        ],
+        "statement": "select"
+      }
+    },
+    {
+      "engine": "reddb",
+      "name": "filtered_top_2",
+      "valid": true,
+      "result": {
+        "affected": 0,
+        "columns": [
+          "_distance",
+          "_score",
+          "collection",
+          "content",
+          "created_at",
+          "dimension",
+          "distance",
+          "entity_id",
+          "final_score",
+          "red_capabilities",
+          "red_collection",
+          "red_entity_type",
+          "red_kind",
+          "red_sequence_id",
+          "rid",
+          "score",
+          "updated_at",
+          "vector_distance",
+          "vector_score",
+          "vector_similarity"
+        ],
+        "rows": [
+          {
+            "_distance": 0.19999998807907104,
+            "_score": 0.800000011920929,
+            "collection": "quality_places",
+            "content": "near_a",
+            "created_at": 1788783856,
+            "dimension": 2,
+            "distance": 0.19999998807907104,
+            "entity_id": 1028,
+            "final_score": 0.800000011920929,
+            "red_capabilities": "embedding,similarity,vector",
+            "red_collection": "quality_places",
+            "red_entity_type": "vector",
+            "red_kind": "vector",
+            "red_sequence_id": 0,
+            "rid": 1028,
+            "score": 0.800000011920929,
+            "updated_at": 1788783856,
+            "vector_distance": 0.19999998807907104,
+            "vector_score": 0.800000011920929,
+            "vector_similarity": 0.800000011920929
+          },
+          {
+            "_distance": 0.3999999761581421,
+            "_score": 0.6000000238418579,
+            "collection": "quality_places",
+            "content": "near_b",
+            "created_at": 1788783856,
+            "dimension": 2,
+            "distance": 0.3999999761581421,
+            "entity_id": 1029,
+            "final_score": 0.6000000238418579,
+            "red_capabilities": "embedding,similarity,vector",
+            "red_collection": "quality_places",
+            "red_entity_type": "vector",
+            "red_kind": "vector",
+            "red_sequence_id": 1,
+            "rid": 1029,
+            "score": 0.6000000238418579,
+            "updated_at": 1788783856,
+            "vector_distance": 0.3999999761581421,
+            "vector_score": 0.6000000238418579,
+            "vector_similarity": 0.6000000238418579
+          }
+        ],
+        "statement": "select"
+      }
+    },
+    {
+      "engine": "reddb",
+      "name": "filtered_top_3",
+      "valid": true,
+      "result": {
+        "affected": 0,
+        "columns": [
+          "_distance",
+          "_score",
+          "collection",
+          "content",
+          "created_at",
+          "dimension",
+          "distance",
+          "entity_id",
+          "final_score",
+          "red_capabilities",
+          "red_collection",
+          "red_entity_type",
+          "red_kind",
+          "red_sequence_id",
+          "rid",
+          "score",
+          "updated_at",
+          "vector_distance",
+          "vector_score",
+          "vector_similarity"
+        ],
+        "rows": [
+          {
+            "_distance": 0.19999998807907104,
+            "_score": 0.800000011920929,
+            "collection": "quality_places",
+            "content": "near_a",
+            "created_at": 1788783856,
+            "dimension": 2,
+            "distance": 0.19999998807907104,
+            "entity_id": 1028,
+            "final_score": 0.800000011920929,
+            "red_capabilities": "embedding,similarity,vector",
+            "red_collection": "quality_places",
+            "red_entity_type": "vector",
+            "red_kind": "vector",
+            "red_sequence_id": 0,
+            "rid": 1028,
+            "score": 0.800000011920929,
+            "updated_at": 1788783856,
+            "vector_distance": 0.19999998807907104,
+            "vector_score": 0.800000011920929,
+            "vector_similarity": 0.800000011920929
+          },
+          {
+            "_distance": 0.3999999761581421,
+            "_score": 0.6000000238418579,
+            "collection": "quality_places",
+            "content": "near_b",
+            "created_at": 1788783856,
+            "dimension": 2,
+            "distance": 0.3999999761581421,
+            "entity_id": 1029,
+            "final_score": 0.6000000238418579,
+            "red_capabilities": "embedding,similarity,vector",
+            "red_collection": "quality_places",
+            "red_entity_type": "vector",
+            "red_kind": "vector",
+            "red_sequence_id": 1,
+            "rid": 1029,
+            "score": 0.6000000238418579,
+            "updated_at": 1788783856,
+            "vector_distance": 0.3999999761581421,
+            "vector_score": 0.6000000238418579,
+            "vector_similarity": 0.6000000238418579
+          }
+        ],
+        "statement": "select"
+      }
+    },
+    {
+      "engine": "reddb",
+      "name": "h3_index_keeps_answer",
+      "valid": true,
+      "result": {
+        "affected": 0,
+        "columns": [
+          "_distance",
+          "_score",
+          "collection",
+          "content",
+          "created_at",
+          "dimension",
+          "distance",
+          "entity_id",
+          "final_score",
+          "red_capabilities",
+          "red_collection",
+          "red_entity_type",
+          "red_kind",
+          "red_sequence_id",
+          "rid",
+          "score",
+          "updated_at",
+          "vector_distance",
+          "vector_score",
+          "vector_similarity"
+        ],
+        "rows": [
+          {
+            "_distance": 0.19999998807907104,
+            "_score": 0.800000011920929,
+            "collection": "quality_places",
+            "content": "near_a",
+            "created_at": 1788783856,
+            "dimension": 2,
+            "distance": 0.19999998807907104,
+            "entity_id": 1028,
+            "final_score": 0.800000011920929,
+            "red_capabilities": "embedding,similarity,vector",
+            "red_collection": "quality_places",
+            "red_entity_type": "vector",
+            "red_kind": "vector",
+            "red_sequence_id": 0,
+            "rid": 1028,
+            "score": 0.800000011920929,
+            "updated_at": 1788783856,
+            "vector_distance": 0.19999998807907104,
+            "vector_score": 0.800000011920929,
+            "vector_similarity": 0.800000011920929
+          },
+          {
+            "_distance": 0.3999999761581421,
+            "_score": 0.6000000238418579,
+            "collection": "quality_places",
+            "content": "near_b",
+            "created_at": 1788783856,
+            "dimension": 2,
+            "distance": 0.3999999761581421,
+            "entity_id": 1029,
+            "final_score": 0.6000000238418579,
+            "red_capabilities": "embedding,similarity,vector",
+            "red_collection": "quality_places",
+            "red_entity_type": "vector",
+            "red_kind": "vector",
+            "red_sequence_id": 1,
+            "rid": 1029,
+            "score": 0.6000000238418579,
+            "updated_at": 1788783856,
+            "vector_distance": 0.3999999761581421,
+            "vector_score": 0.6000000238418579,
+            "vector_similarity": 0.6000000238418579
+          }
+        ],
+        "statement": "select"
+      }
+    },
+    {
+      "engine": "reddb",
+      "name": "explain_composed_query",
+      "valid": true,
+      "result": {
+        "affected": 0,
+        "columns": [
+          "access_path_reason",
+          "depth",
+          "estimated_cost",
+          "estimated_rows",
+          "index_hint",
+          "op",
+          "source"
+        ],
+        "rows": [
+          {
+            "access_path_reason": null,
+            "depth": 0,
+            "estimated_cost": 0.28,
+            "estimated_rows": 2,
+            "index_hint": null,
+            "op": "topk",
+            "source": null
+          },
+          {
+            "access_path_reason": null,
+            "depth": 1,
+            "estimated_cost": 0.75,
+            "estimated_rows": 2.5,
+            "index_hint": null,
+            "op": "metadata_filter",
+            "source": null
+          },
+          {
+            "access_path_reason": "runtime uses TurboQuant candidates followed by exact reranking",
+            "depth": 2,
+            "estimated_cost": 2.5,
+            "estimated_rows": 5,
+            "index_hint": null,
+            "op": "vector_turbo_search",
+            "source": "quality_places"
+          }
+        ],
+        "statement": "select"
+      }
+    },
+    {
+      "engine": "surrealdb",
+      "name": "filtered_top_1",
+      "valid": true,
+      "result": [
+        [
+          {
+            "name": "near_a",
+            "score": 0.8
+          }
+        ]
+      ]
+    },
+    {
+      "engine": "surrealdb",
+      "name": "filtered_top_2",
+      "valid": true,
+      "result": [
+        [
+          {
+            "name": "near_a",
+            "score": 0.8
+          },
+          {
+            "name": "near_b",
+            "score": 0.6
+          }
+        ]
+      ]
+    },
+    {
+      "engine": "surrealdb",
+      "name": "filtered_top_3",
+      "valid": true,
+      "result": [
+        [
+          {
+            "name": "near_a",
+            "score": 0.8
+          },
+          {
+            "name": "near_b",
+            "score": 0.6
+          }
+        ]
+      ]
+    },
+    {
+      "engine": "surrealdb",
+      "name": "explain_composed_query",
+      "valid": true,
+      "result": [
+        {
+          "attributes": {
+            "projections": "name, score"
+          },
+          "children": [
+            {
+              "attributes": {
+                "limit": "2"
+              },
+              "children": [
+                {
+                  "attributes": {
+                    "limit": "2",
+                    "sort_keys": "score DESC"
+                  },
+                  "children": [
+                    {
+                      "attributes": {
+                        "fields": "score = vector::similarity::cosine(...)"
+                      },
+                      "children": [
+                        {
+                          "attributes": {
+                            "direction": "Forward",
+                            "pre_decode_filter": "no (unsupported predicate)",
+                            "predicate": "category = 'bistro' AND location != NONE AND geo::distance(...) <= 2000",
+                            "table": "places",
+                            "topk_pushdown": "no (unsupported order)"
+                          },
+                          "context": "Db",
+                          "metrics": {
+                            "elapsed_ns": 203928,
+                            "output_batches": 1,
+                            "output_rows": 2
+                          },
+                          "operator": "TableScan"
+                        }
+                      ],
+                      "context": "Db",
+                      "expressions": [
+                        {
+                          "role": "score",
+                          "sql": "vector::similarity::cosine(...)"
+                        }
+                      ],
+                      "metrics": {
+                        "elapsed_ns": 27468,
+                        "output_batches": 1,
+                        "output_rows": 2
+                      },
+                      "operator": "Compute"
+                    }
+                  ],
+                  "context": "Db",
+                  "metrics": {
+                    "elapsed_ns": 12857,
+                    "output_batches": 1,
+                    "output_rows": 2
+                  },
+                  "operator": "SortTopKByKey"
+                }
+              ],
+              "context": "Db",
+              "expressions": [
+                {
+                  "role": "limit",
+                  "sql": "2"
+                }
+              ],
+              "metrics": {
+                "elapsed_ns": 24379,
+                "output_batches": 1,
+                "output_rows": 2
+              },
+              "operator": "Limit"
+            }
+          ],
+          "context": "Db",
+          "metrics": {
+            "elapsed_ns": 7609,
+            "output_batches": 1,
+            "output_rows": 2
+          },
+          "operator": "SelectProject",
+          "total_rows": 2
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Five records: no scale or ANN recall claim.",
+    "Category is a data predicate, not an RLS test.",
+    "No graph, concurrent transaction or crash guarantee inferred from this probe."
+  ],
+  "surrealVersion": {
+    "version": "surrealdb-3.2.4+20260803.93ab219"
+  }
+}
