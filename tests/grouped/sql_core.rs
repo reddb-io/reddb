@@ -107,3 +107,6 @@ mod integration_entity_query;
 
 #[path = "locking_concurrency/unit_locking.rs"]
 mod unit_locking;
+
+#[path = "schema_query_core/e2e_uniqueness_comparison.rs"]
+mod e2e_uniqueness_comparison;

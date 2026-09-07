@@ -659,7 +659,7 @@ fn find_row_uniqueness_conflict(
                     skip_rule = true;
                     break;
                 }
-                Some(value) => expected.push((column, value_signature(value))),
+                Some(value) => expected.push((column, value, value_signature(value))),
             }
         }
         if skip_rule {
@@ -675,9 +675,9 @@ fn find_row_uniqueness_conflict(
             let crate::storage::EntityData::Row(row) = &entity.data else {
                 return true;
             };
-            let duplicate = expected.iter().all(|(column, signature)| {
+            let duplicate = expected.iter().all(|(column, expected, signature)| {
                 row.get_field(column)
-                    .is_some_and(|value| value_signature(value) == *signature)
+                    .is_some_and(|value| uniqueness_value_matches(value, expected, signature))
             });
             if duplicate {
                 conflict_id = Some(entity.id);
@@ -1106,6 +1106,19 @@ fn resolved_uniqueness_rules(
 
 fn value_signature(value: &Value) -> String {
     format!("{value:?}")
+}
+
+fn uniqueness_value_matches(value: &Value, expected: &Value, expected_signature: &str) -> bool {
+    // Compare common schema-normalized keys without formatting every stored
+    // row. Keep the existing signature semantics for other kinds, including
+    // floating-point NaNs and signed zero; Value equality differs there.
+    match (value, expected) {
+        (Value::Integer(left), Value::Integer(right)) => left == right,
+        (Value::UnsignedInteger(left), Value::UnsignedInteger(right)) => left == right,
+        (Value::Text(left), Value::Text(right)) => left == right,
+        (Value::Boolean(left), Value::Boolean(right)) => left == right,
+        _ => value_signature(value) == expected_signature,
+    }
 }
 
 fn normalize_contract_value(
