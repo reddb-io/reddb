@@ -1,0 +1,63 @@
+{
+  "scope": "child syscalls during 200 INSERTs; traced timings excluded from performance table",
+  "runs": {
+    "before": {
+      "binary": "/tmp/reddb-competitive-audit/bin/red-before-foundations",
+      "insert_syscall_calls": {
+        "openat": 403,
+        "read": 1828,
+        "write": 604,
+        "fdatasync": 202,
+        "fsync": 201,
+        "futex": 405
+      },
+      "completed_read_bytes_all_fds": 17027149,
+      "readback": "all ids and payloads verified",
+      "exit": 0,
+      "trace_sha256": "4c2e7b5fee7c9239d7e4649588c61f6bf2194475c31098f002764c34e57a9964",
+      "phase_unix_ns": {
+        "version": [
+          1788767347139060190,
+          1788767347187077925
+        ],
+        "select_constant": [
+          1788767347187081927,
+          1788767347290677602
+        ],
+        "insert": [
+          1788767347290680413,
+          1788767348623253411
+        ]
+      }
+    },
+    "after": {
+      "binary": "/tmp/reddb-competitive-audit/cargo-target/release/red",
+      "insert_syscall_calls": {
+        "openat": 203,
+        "read": 1520,
+        "write": 604,
+        "fdatasync": 202,
+        "fsync": 201,
+        "futex": 405
+      },
+      "completed_read_bytes_all_fds": 10149758,
+      "readback": "all ids and payloads verified",
+      "exit": 0,
+      "trace_sha256": "2ecb7f8ed491a63db541e6df2d02a9972774490dfc6ea3699cb7263e6a708b6b",
+      "phase_unix_ns": {
+        "version": [
+          1788767349290370834,
+          1788767349355618810
+        ],
+        "select_constant": [
+          1788767349355621800,
+          1788767349444967187
+        ],
+        "insert": [
+          1788767349444969318,
+          1788767350700537543
+        ]
+      }
+    }
+  }
+}
