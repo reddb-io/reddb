@@ -535,14 +535,19 @@ pub(super) fn compare_runtime_ranked_records(
 }
 
 pub(super) fn execute_runtime_canonical_expr_node(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     expr: &QueryExpr,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let db = &runtime.inner.db;
     match expr {
         QueryExpr::Table(table) => {
-            if matches!(table.source, Some(reddb_rql::ast::TableSource::Subquery(_))) {
-                return execute_runtime_canonical_table_query_indexed(db, table, None);
+            if runtime.is_rls_enabled(&table.table)
+                || matches!(table.source, Some(reddb_rql::ast::TableSource::Subquery(_)))
+            {
+                // HYBRID's structured lane and vector-source subqueries must
+                // not bypass the relational authorization entry point.
+                return Ok(runtime.execute_query_expr(expr.clone())?.result.records);
             }
             let table_name = table.table.as_str();
             let table_alias = table.alias.as_deref().unwrap_or(table_name);
@@ -554,9 +559,7 @@ pub(super) fn execute_runtime_canonical_expr_node(
             execute_runtime_canonical_table_node(db, node, &context)
         }
         QueryExpr::Graph(_) | QueryExpr::Path(_) => {
-            let graph = materialize_graph(db.store().as_ref())?;
-            let node_properties = materialize_graph_node_properties(db.store().as_ref())?;
-            let edge_properties = materialize_graph_edge_properties(db.store().as_ref())?;
+            let (graph, node_properties, edge_properties) = runtime.materialize_graph_with_rls()?;
             let result =
                 crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties(
                     &graph,
@@ -567,9 +570,9 @@ pub(super) fn execute_runtime_canonical_expr_node(
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
             Ok(result.records)
         }
-        QueryExpr::Vector(vector) => Ok(execute_runtime_vector_query(db, vector)?.records),
-        QueryExpr::Hybrid(hybrid) => Ok(execute_runtime_hybrid_query(db, hybrid)?.records),
-        QueryExpr::Join(join) => join::execute_runtime_canonical_join_node(db, node, join),
+        QueryExpr::Vector(vector) => Ok(execute_runtime_vector_query(runtime, vector)?.records),
+        QueryExpr::Hybrid(hybrid) => Ok(execute_runtime_hybrid_query(runtime, hybrid)?.records),
+        QueryExpr::Join(join) => join::execute_runtime_canonical_join_node(runtime, node, join),
         other => Err(RedDBError::Query(format!(
             "canonical join execution does not yet support {} child expressions",
             query_expr_name(other)

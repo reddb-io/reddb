@@ -9,11 +9,12 @@
 use super::*;
 
 pub(crate) fn execute_runtime_hybrid_query(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     query: &HybridQuery,
 ) -> RedDBResult<UnifiedResult> {
+    let db = &runtime.inner.db;
     let plan = CanonicalPlanner::new(db).build(&QueryExpr::Hybrid(query.clone()));
-    let mut records = execute_runtime_canonical_hybrid_node(db, &plan.root, query)?;
+    let mut records = execute_runtime_canonical_hybrid_node(runtime, &plan.root, query)?;
     if let Some(limit) = query.limit {
         records.truncate(limit);
     }
@@ -27,14 +28,14 @@ pub(crate) fn execute_runtime_hybrid_query(
 }
 
 pub(crate) fn execute_runtime_canonical_hybrid_node(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &HybridQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     match node.operator.as_str() {
-        "entity_search" => execute_runtime_canonical_hybrid_child(db, node, query),
+        "entity_search" => execute_runtime_canonical_hybrid_child(runtime, node, query),
         "entity_topk" => {
-            let mut records = execute_runtime_canonical_hybrid_child(db, node, query)?;
+            let mut records = execute_runtime_canonical_hybrid_child(runtime, node, query)?;
             records.sort_by(compare_runtime_ranked_records);
             let limit = node
                 .details
@@ -46,7 +47,7 @@ pub(crate) fn execute_runtime_canonical_hybrid_node(
                 None => records,
             })
         }
-        "hybrid_fusion" => execute_runtime_canonical_hybrid_fusion(db, node, query),
+        "hybrid_fusion" => execute_runtime_canonical_hybrid_fusion(runtime, node, query),
         other => Err(RedDBError::Query(format!(
             "unsupported canonical hybrid operator {other}"
         ))),
@@ -54,7 +55,7 @@ pub(crate) fn execute_runtime_canonical_hybrid_node(
 }
 
 pub(crate) fn execute_runtime_canonical_hybrid_child(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &HybridQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
@@ -64,11 +65,11 @@ pub(crate) fn execute_runtime_canonical_hybrid_child(
             node.operator
         ))
     })?;
-    execute_runtime_canonical_hybrid_node(db, child, query)
+    execute_runtime_canonical_hybrid_node(runtime, child, query)
 }
 
 pub(crate) fn execute_runtime_canonical_hybrid_fusion(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &HybridQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
@@ -79,9 +80,9 @@ pub(crate) fn execute_runtime_canonical_hybrid_fusion(
     }
 
     let structured =
-        execute_runtime_canonical_expr_node(db, &node.children[0], query.structured.as_ref())?;
+        execute_runtime_canonical_expr_node(runtime, &node.children[0], query.structured.as_ref())?;
     let vector_expr = QueryExpr::Vector(query.vector.clone());
-    let vector = execute_runtime_canonical_expr_node(db, &node.children[1], &vector_expr)?;
+    let vector = execute_runtime_canonical_expr_node(runtime, &node.children[1], &vector_expr)?;
 
     let mut structured_map = HashMap::new();
     let mut structured_rank = HashMap::new();

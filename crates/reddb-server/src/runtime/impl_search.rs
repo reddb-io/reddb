@@ -331,11 +331,27 @@ impl RedDBRuntime {
             collection,
             crate::catalog::CollectionModel::Vector,
         )?;
-        let mut results = self.inner.db.similar(collection, vector, k.max(1));
+        let rls_enabled = self.is_rls_enabled(collection);
+        let candidate_count = if rls_enabled {
+            self.inner
+                .db
+                .store()
+                .get_collection(collection)
+                .map_or(k.max(1), |manager| manager.count().max(1))
+        } else {
+            k.max(1)
+        };
+        let mut results = self.inner.db.similar(collection, vector, candidate_count);
         if results.is_empty() && self.inner.db.store().get_collection(collection).is_none() {
             return Err(RedDBError::NotFound(collection.to_string()));
         }
-        results.retain(|result| result.score >= min_score);
+        let mut rls_cache = HashMap::new();
+        results.retain(|result| {
+            result.score >= min_score
+                && super::impl_core::entity_visible_under_current_snapshot(&result.entity)
+                && (!rls_enabled
+                    || self.search_entity_rls_allowed(collection, &result.entity, &mut rls_cache))
+        });
         results.sort_by(|left, right| {
             right
                 .score
@@ -343,6 +359,7 @@ impl RedDBRuntime {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| left.entity_id.raw().cmp(&right.entity_id.raw()))
         });
+        results.truncate(k.max(1));
         Ok(results)
     }
 
@@ -364,10 +381,15 @@ impl RedDBRuntime {
             .get_collection(collection)
             .ok_or_else(|| RedDBError::NotFound(collection.to_string()))?;
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+        let rls_enabled = self.is_rls_enabled(collection);
+        let mut rls_cache = HashMap::new();
 
         let vectors: Vec<(u64, Vec<f32>)> = manager
             .scan(snapshot.as_ref(), |_| true)
             .into_iter()
+            .filter(|entity| {
+                !rls_enabled || self.search_entity_rls_allowed(collection, entity, &mut rls_cache)
+            })
             .filter_map(|entity| match &entity.data {
                 EntityData::Vector(data) if !data.dense.is_empty() => {
                     Some((entity.id.raw(), data.dense.clone()))
@@ -957,6 +979,30 @@ impl RedDBRuntime {
             // RLS on but no policy matches this role/action ⇒ deny.
             return false;
         };
+        if matches!(entity.kind, EntityKind::Vector { .. }) {
+            // Vector metadata lives beside the entity, not inside VectorData.
+            // Hydrate that namespace before evaluating policy expressions;
+            // the generic entity record contains only dimension and content.
+            let Some(mut record) = super::record_search::runtime_any_record_from_entity_ref(entity)
+            else {
+                return false;
+            };
+            let metadata = self
+                .inner
+                .db
+                .store()
+                .get_metadata(collection, entity.id)
+                .unwrap_or_default();
+            let metadata = crate::application::entity::metadata_to_json(&metadata);
+            record.set("metadata", Value::Json(metadata.to_string().into_bytes()));
+            return super::join_filter::evaluate_runtime_filter_with_db(
+                Some(&self.inner.db),
+                &record,
+                filter,
+                Some(collection),
+                Some(collection),
+            );
+        }
         super::query_exec::evaluate_entity_filter_with_db(
             Some(&self.inner.db),
             entity,

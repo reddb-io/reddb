@@ -1428,18 +1428,25 @@ pub(super) fn runtime_entity_type_and_capabilities(
 }
 
 pub(super) fn resolve_runtime_vector_source(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     source: &VectorSource,
 ) -> RedDBResult<Vec<f32>> {
+    let db = &runtime.inner.db;
     match source {
         VectorSource::Literal(vector) => Ok(vector.clone()),
         VectorSource::Reference {
-            collection: _,
+            collection,
             vector_id,
         } => {
             let entity = db
                 .get(EntityId::new(*vector_id))
                 .ok_or_else(|| RedDBError::NotFound(format!("vector:{vector_id}")))?;
+            if entity.kind.collection() != collection
+                || !super::impl_core::entity_visible_under_current_snapshot(&entity)
+                || !runtime.search_entity_rls_allowed(collection, &entity, &mut HashMap::new())
+            {
+                return Err(RedDBError::NotFound(format!("vector:{vector_id}")));
+            }
             match entity.data {
                 EntityData::Vector(data) => Ok(data.dense),
                 _ => Err(RedDBError::Query(format!(
@@ -1451,7 +1458,7 @@ pub(super) fn resolve_runtime_vector_source(
             eprintln!("DEBUG resolve_runtime_vector_source Text({text:?})");
             embed_runtime_vector_text(db, text)
         }
-        VectorSource::Subquery(expr) => resolve_runtime_vector_subquery(db, expr.as_ref()),
+        VectorSource::Subquery(expr) => resolve_runtime_vector_subquery(runtime, expr.as_ref()),
     }
 }
 
@@ -1511,13 +1518,16 @@ fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
         .ok_or_else(|| RedDBError::Query("embedding API returned no vectors".to_string()))
 }
 
-fn resolve_runtime_vector_subquery(db: &RedDB, expr: &QueryExpr) -> RedDBResult<Vec<f32>> {
-    let records = execute_runtime_vector_subquery_records(db, expr)?;
+fn resolve_runtime_vector_subquery(
+    runtime: &RedDBRuntime,
+    expr: &QueryExpr,
+) -> RedDBResult<Vec<f32>> {
+    let records = execute_runtime_vector_subquery_records(runtime, expr)?;
     let record = records
         .first()
         .ok_or_else(|| RedDBError::Query("vector source subquery returned no rows".to_string()))?;
 
-    extract_runtime_vector_from_record(db, record)?.ok_or_else(|| {
+    extract_runtime_vector_from_record(runtime, record)?.ok_or_else(|| {
         RedDBError::Query(
             "vector source subquery must return a vector value, vector reference, or vector entity id"
                 .to_string(),
@@ -1526,18 +1536,17 @@ fn resolve_runtime_vector_subquery(db: &RedDB, expr: &QueryExpr) -> RedDBResult<
 }
 
 fn execute_runtime_vector_subquery_records(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     expr: &QueryExpr,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     match expr {
-        QueryExpr::Table(query) => Ok(execute_runtime_table_query(db, query, None)?.records),
         QueryExpr::Graph(_) | QueryExpr::Path(_) => {
-            let plan = CanonicalPlanner::new(db).build(expr);
-            execute_runtime_canonical_expr_node(db, &plan.root, expr)
+            let plan = CanonicalPlanner::new(&runtime.inner.db).build(expr);
+            execute_runtime_canonical_expr_node(runtime, &plan.root, expr)
         }
-        QueryExpr::Join(query) => Ok(execute_runtime_join_query(db, query)?.records),
-        QueryExpr::Vector(query) => Ok(execute_runtime_vector_query(db, query)?.records),
-        QueryExpr::Hybrid(query) => Ok(execute_runtime_hybrid_query(db, query)?.records),
+        QueryExpr::Table(_) | QueryExpr::Join(_) | QueryExpr::Vector(_) | QueryExpr::Hybrid(_) => {
+            Ok(runtime.execute_query_expr(expr.clone())?.result.records)
+        }
         other => Err(RedDBError::Query(format!(
             "vector source subqueries do not support {} statements",
             query_expr_name(other)
@@ -1546,12 +1555,12 @@ fn execute_runtime_vector_subquery_records(
 }
 
 fn extract_runtime_vector_from_record(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     record: &UnifiedRecord,
 ) -> RedDBResult<Option<Vec<f32>>> {
     for key in ["dense", "vector", "embedding", "query_vector"] {
         if let Some(value) = record.get(key) {
-            if let Some(vector) = resolve_runtime_vector_value(db, value)? {
+            if let Some(vector) = resolve_runtime_vector_value(runtime, value)? {
                 return Ok(Some(vector));
             }
         }
@@ -1559,7 +1568,7 @@ fn extract_runtime_vector_from_record(
 
     for key in ["rid", "entity_id", "vector_id", "id"] {
         if let Some(value) = record.get(key) {
-            if let Some(vector) = resolve_runtime_vector_entity_value(db, value)? {
+            if let Some(vector) = resolve_runtime_vector_entity_value(runtime, value)? {
                 return Ok(Some(vector));
             }
         }
@@ -1567,7 +1576,7 @@ fn extract_runtime_vector_from_record(
 
     if record.field_count() == 1 {
         if let Some((_, value)) = record.iter_fields().next() {
-            if let Some(vector) = resolve_runtime_vector_value(db, value)? {
+            if let Some(vector) = resolve_runtime_vector_value(runtime, value)? {
                 return Ok(Some(vector));
             }
         }
@@ -1577,7 +1586,7 @@ fn extract_runtime_vector_from_record(
         match value {
             Value::Vector(vector) => return Ok(Some(vector.clone())),
             Value::VectorRef(_, vector_id) => {
-                if let Some(vector) = runtime_vector_entity_by_id(db, *vector_id)? {
+                if let Some(vector) = runtime_vector_entity_by_id(runtime, *vector_id)? {
                     return Ok(Some(vector));
                 }
             }
@@ -1588,35 +1597,54 @@ fn extract_runtime_vector_from_record(
     Ok(None)
 }
 
-fn resolve_runtime_vector_value(db: &RedDB, value: &Value) -> RedDBResult<Option<Vec<f32>>> {
+fn resolve_runtime_vector_value(
+    runtime: &RedDBRuntime,
+    value: &Value,
+) -> RedDBResult<Option<Vec<f32>>> {
     match value {
         Value::Vector(vector) => Ok(Some(vector.clone())),
         Value::Array(values) => Ok(Some(runtime_value_array_to_vector(values)?)),
         Value::Json(bytes) => Ok(Some(runtime_json_bytes_to_vector(bytes)?)),
-        Value::VectorRef(_, vector_id) => runtime_vector_entity_by_id(db, *vector_id),
-        Value::UnsignedInteger(vector_id) => runtime_vector_entity_by_id(db, *vector_id),
+        Value::VectorRef(_, vector_id) => runtime_vector_entity_by_id(runtime, *vector_id),
+        Value::UnsignedInteger(vector_id) => runtime_vector_entity_by_id(runtime, *vector_id),
         Value::Integer(vector_id) if *vector_id >= 0 => {
-            runtime_vector_entity_by_id(db, *vector_id as u64)
+            runtime_vector_entity_by_id(runtime, *vector_id as u64)
         }
         _ => Ok(None),
     }
 }
 
-fn resolve_runtime_vector_entity_value(db: &RedDB, value: &Value) -> RedDBResult<Option<Vec<f32>>> {
+fn resolve_runtime_vector_entity_value(
+    runtime: &RedDBRuntime,
+    value: &Value,
+) -> RedDBResult<Option<Vec<f32>>> {
     match value {
-        Value::UnsignedInteger(vector_id) => runtime_vector_entity_by_id(db, *vector_id),
+        Value::UnsignedInteger(vector_id) => runtime_vector_entity_by_id(runtime, *vector_id),
         Value::Integer(vector_id) if *vector_id >= 0 => {
-            runtime_vector_entity_by_id(db, *vector_id as u64)
+            runtime_vector_entity_by_id(runtime, *vector_id as u64)
         }
-        Value::VectorRef(_, vector_id) => runtime_vector_entity_by_id(db, *vector_id),
+        Value::VectorRef(_, vector_id) => runtime_vector_entity_by_id(runtime, *vector_id),
         _ => Ok(None),
     }
 }
 
-fn runtime_vector_entity_by_id(db: &RedDB, vector_id: u64) -> RedDBResult<Option<Vec<f32>>> {
+fn runtime_vector_entity_by_id(
+    runtime: &RedDBRuntime,
+    vector_id: u64,
+) -> RedDBResult<Option<Vec<f32>>> {
+    let db = &runtime.inner.db;
     let Some(entity) = db.get(EntityId::new(vector_id)) else {
         return Ok(None);
     };
+    if !super::impl_core::entity_visible_under_current_snapshot(&entity)
+        || !runtime.search_entity_rls_allowed(
+            entity.kind.collection(),
+            &entity,
+            &mut HashMap::new(),
+        )
+    {
+        return Ok(None);
+    }
 
     match entity.data {
         EntityData::Vector(vector) => Ok(Some(vector.dense)),
