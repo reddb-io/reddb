@@ -43,6 +43,12 @@ try {
   assert.deepEqual((await db.queryParsed('SELECT id,name FROM wire_rows', [])).result.records.map((record: any) => record.values), bound.result.records.map((record: any) => record.values))
   assert.deepEqual((await db.queryParsed('SELECT id FROM wire_rows WHERE id=2')).result.records, [])
   await assert.rejects(db.query('SELECT * FROM absent_wire_table'))
+  const cli = Bun.spawnSync([binary, 'query', '--bind', endpoint, '--json',
+    "INSERT INTO wire_rows (id,name) VALUES (2,'CLI')"])
+  assert.equal(cli.exitCode, 0, cli.stderr.toString())
+  const insertedByCli = JSON.parse(cli.stdout.toString()).data
+  assert.equal(insertedByCli.affected, 1)
+  assert.equal(insertedByCli.statement, 'insert')
   console.log('ok Bun wire bound/unbound result contract')
 } finally {
   db?.close()

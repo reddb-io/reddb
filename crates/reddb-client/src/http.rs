@@ -422,8 +422,14 @@ async fn decode_envelope(response: reqwest::Response) -> Result<Value> {
                 .to_string();
             return Err(ClientError::new(ErrorCode::Engine, msg));
         }
-        if let Some(result) = map.get("result") {
-            return Ok(result.clone());
+        // A canonical query keeps affected_rows and statement_type beside
+        // result. Unwrapping it loses DML feedback even though the write ran.
+        let canonical_query =
+            map.contains_key("query") && map.contains_key("mode") && map.contains_key("statement");
+        if !canonical_query {
+            if let Some(result) = map.get("result") {
+                return Ok(result.clone());
+            }
         }
     }
     Ok(body.unwrap_or(Value::Null))

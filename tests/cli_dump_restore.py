@@ -70,6 +70,18 @@ class DumpRestore(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsupported collection identifier", result.stderr)
 
+    def test_restore_exact_number_envelopes(self):
+        fields = {"signed": {"$int": "9223372036854775807"},
+                  "unsigned": {"$uint": "18446744073709551615"},
+                  "amount": {"$decimal": "1234567890.123456789"}}
+        source = self.root / "numbers.jsonl"
+        source.write_text(json.dumps({"collection": "exact_numbers", "fields": fields}) + "\n")
+        target = self.root / "numbers.rdb"
+        self.cli("restore", "--path", target, "-i", source)
+        _, records = self.dump(target, "numbers-restored.jsonl")
+        self.assertEqual([r["fields"] for r in records if r.get("collection") == "exact_numbers"],
+                         [fields])
+
     def test_selected_collection_retains_config_and_override_preserves_it(self):
         source = self.root / "config-source.rdb"
         self.cli("query", "--path", source, "SET CONFIG red.config.demo.enabled = true")
