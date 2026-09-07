@@ -110,3 +110,6 @@ mod unit_locking;
 
 #[path = "schema_query_core/e2e_uniqueness_comparison.rs"]
 mod e2e_uniqueness_comparison;
+
+#[path = "schema_query_core/e2e_primary_key_lookup.rs"]
+mod e2e_primary_key_lookup;

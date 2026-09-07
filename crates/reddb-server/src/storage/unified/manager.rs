@@ -1205,6 +1205,34 @@ impl SegmentManager {
         self.visibility_map.mark_range_visible(start_page, end_page);
     }
 
+    /// Probe the primary-key lookup of each segment under the same entity
+    /// locks used by scans and writes. Lookup state is rebuilt lazily after
+    /// recovery, consolidation, or a key-changing mutation.
+    pub(crate) fn find_primary_key_conflict(
+        &self,
+        columns: &[String],
+        signatures: &[String],
+        exclude_id: Option<EntityId>,
+    ) -> Option<EntityId> {
+        if let Some(growing) = self.growing.read().as_ref() {
+            if let Some(id) = growing
+                .read()
+                .find_primary_key_conflict(columns, signatures, exclude_id)
+            {
+                return Some(id);
+            }
+        }
+        for segment in self.sealed.read().iter() {
+            if let Some(id) = segment
+                .read()
+                .find_primary_key_conflict(columns, signatures, exclude_id)
+            {
+                return Some(id);
+            }
+        }
+        None
+    }
+
     /// Iterate over all entities in-place without collecting into a Vec.
     ///
     /// The callback receives a reference to each entity. Return `true` to

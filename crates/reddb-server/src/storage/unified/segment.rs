@@ -34,6 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::metadata::{Metadata, MetadataStorage};
+use super::segment_primary_key::SegmentPrimaryKey;
 use crate::storage::query::value_compare::partial_compare_values;
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
@@ -454,6 +455,10 @@ pub struct GrowingSegment {
 
     /// Primary key index: (collection, pk_value) → EntityId
     pk_index: BTreeMap<(String, String), EntityId>,
+    /// Lazy schema-aware primary-key lookup, independent of the legacy
+    /// first-column index. Protected by the owning segment's entity lock.
+    primary_key_lookup: parking_lot::RwLock<Option<SegmentPrimaryKey>>,
+    primary_key_lookup_bytes: AtomicU64,
     /// Type index: kind → EntityIds
     kind_index: HashMap<String, HashSet<EntityId>>,
     /// Cross-reference index: source → Vec<(target, ref_type)>
@@ -568,6 +573,8 @@ impl GrowingSegment {
             deleted: HashSet::new(),
             metadata: MetadataStorage::new(),
             pk_index: BTreeMap::new(),
+            primary_key_lookup: parking_lot::RwLock::new(None),
+            primary_key_lookup_bytes: AtomicU64::new(0),
             kind_index: HashMap::new(),
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
@@ -614,6 +621,7 @@ impl GrowingSegment {
         &mut self,
         entity: &UnifiedEntity,
     ) -> Result<UpdateIndexSnapshot, SegmentError> {
+        self.invalidate_primary_key_lookup();
         if self.use_flat {
             let raw = entity.id.raw();
             if raw >= self.base_entity_id {
@@ -707,6 +715,7 @@ impl GrowingSegment {
     ///
     /// Returns `false` when the entity was already tombstoned.
     fn tombstone_flat_entity(&mut self, idx: usize, id: EntityId) -> bool {
+        self.invalidate_primary_key_lookup();
         if !self.deleted.insert(id) {
             return false;
         }
@@ -722,6 +731,7 @@ impl GrowingSegment {
     ///
     /// Returns `false` when the entity is not present.
     fn remove_hashmap_entity(&mut self, id: EntityId) -> bool {
+        self.invalidate_primary_key_lookup();
         let Some(entity) = self.entities.remove(&id) else {
             return false;
         };
@@ -786,6 +796,7 @@ impl GrowingSegment {
     /// does not pay `O(entities)` to observe memory.
     pub fn memory_bytes(&self) -> u64 {
         self.memory_bytes.load(Ordering::Relaxed)
+            + self.primary_key_lookup_bytes.load(Ordering::Relaxed)
     }
 
     /// Release a resident entity's payload from the memory estimate. Only for
@@ -826,8 +837,7 @@ impl GrowingSegment {
     /// Approximate bytes this segment holds: resident entity payloads plus the
     /// tombstone set.
     pub(crate) fn resident_bytes(&self) -> u64 {
-        self.memory_bytes.load(Ordering::Relaxed)
-            + self.deleted.len() as u64 * TOMBSTONE_ENTRY_BYTES
+        self.memory_bytes() + self.deleted.len() as u64 * TOMBSTONE_ENTRY_BYTES
     }
 
     /// Bytes a consolidation of this segment would return to the budget: the
@@ -885,6 +895,7 @@ impl GrowingSegment {
     /// segment, when the swap discovers a copied row was deleted from its
     /// source mid-consolidation. A tombstone here would defeat the whole point.
     pub(crate) fn evict_entity(&mut self, id: EntityId) -> bool {
+        self.invalidate_primary_key_lookup();
         let Some(entity) = self.entities.remove(&id) else {
             return false;
         };
@@ -1058,6 +1069,11 @@ impl GrowingSegment {
 
     /// Index an entity
     fn index_entity(&mut self, entity: &UnifiedEntity) {
+        if let Some(index) = self.primary_key_lookup.get_mut().as_mut() {
+            index.insert(entity);
+            self.primary_key_lookup_bytes
+                .store(index.memory_bytes() as u64, Ordering::Relaxed);
+        }
         // Kind index
         let kind_key = entity.kind.storage_type().to_string();
         self.kind_index
@@ -1086,6 +1102,74 @@ impl GrowingSegment {
                 .or_default()
                 .push((cross_ref.source, cross_ref.ref_type));
         }
+    }
+
+    /// Find a physical row by the declared primary-key columns. The same
+    /// physical rows participate as in `for_each_fast`; MVCC conflict policy
+    /// belongs to the caller. Build once, then maintain on append. Mutations
+    /// that can replace or remove keys discard this derived structure.
+    pub(crate) fn find_primary_key_conflict(
+        &self,
+        columns: &[String],
+        signatures: &[String],
+        exclude_id: Option<EntityId>,
+    ) -> Option<EntityId> {
+        let cached = self.primary_key_lookup.read();
+        if let Some(index) = cached.as_ref().filter(|index| index.columns == columns) {
+            return self.find_primary_key_candidate(index, signatures, exclude_id);
+        }
+        drop(cached);
+        let mut cached = self.primary_key_lookup.write();
+        if cached.as_ref().is_none_or(|index| index.columns != columns) {
+            let mut index = SegmentPrimaryKey::new(columns);
+            self.for_each_fast(|entity| {
+                index.insert(entity);
+                true
+            });
+            self.primary_key_lookup_bytes
+                .store(index.memory_bytes() as u64, Ordering::Relaxed);
+            *cached = Some(index);
+        }
+        self.find_primary_key_candidate(
+            cached
+                .as_ref()
+                .expect("primary-key lookup initialized above"),
+            signatures,
+            exclude_id,
+        )
+    }
+
+    fn find_primary_key_candidate(
+        &self,
+        index: &SegmentPrimaryKey,
+        signatures: &[String],
+        exclude_id: Option<EntityId>,
+    ) -> Option<EntityId> {
+        index.candidates(signatures).iter().copied().find(|id| {
+            if Some(*id) == exclude_id {
+                return false;
+            }
+            let Some(UnifiedEntity {
+                data: EntityData::Row(row),
+                ..
+            }) = self.get(*id)
+            else {
+                return false;
+            };
+            index
+                .columns
+                .iter()
+                .zip(signatures)
+                .all(|(column, signature)| {
+                    row.get_field(column)
+                        .is_some_and(|value| format!("{value:?}") == *signature)
+                })
+        })
+    }
+
+    fn invalidate_primary_key_lookup(&mut self) {
+        *self.primary_key_lookup.get_mut() = None;
+        self.primary_key_lookup_bytes.store(0, Ordering::Relaxed);
     }
 
     /// Check whether an early-exit probe key exists in this segment.
@@ -1244,6 +1328,14 @@ impl GrowingSegment {
     ) -> Result<Vec<EntityId>, SegmentError> {
         if !self.state.is_writable() {
             return Err(SegmentError::NotWritable);
+        }
+
+        if let Some(index) = self.primary_key_lookup.get_mut().as_mut() {
+            for entity in &entities {
+                index.insert(entity);
+            }
+            self.primary_key_lookup_bytes
+                .store(index.memory_bytes() as u64, Ordering::Relaxed);
         }
 
         let n = entities.len();
@@ -1514,6 +1606,7 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity> {
+        self.invalidate_primary_key_lookup();
         if self.deleted.contains(&id) || !self.state.is_writable() {
             return None;
         }
@@ -1840,6 +1933,139 @@ mod tests {
     use crate::storage::unified::entity::RowData;
     use crate::storage::unified::MetadataValue;
     use reddb_types::Value;
+
+    fn primary_key_row(id: u64, key: Value) -> UnifiedEntity {
+        UnifiedEntity::new(
+            EntityId::new(id),
+            EntityKind::TableRow {
+                table: "keys".into(),
+                row_id: id,
+            },
+            EntityData::Row(RowData::with_names(
+                vec![Value::text("payload"), key],
+                vec!["payload".into(), "primary".into()],
+            )),
+        )
+    }
+
+    fn primary_key_probe(
+        segment: &GrowingSegment,
+        key: Value,
+        exclude: Option<EntityId>,
+    ) -> Option<EntityId> {
+        segment.find_primary_key_conflict(&["primary".into()], &[format!("{key:?}")], exclude)
+    }
+
+    #[test]
+    fn primary_key_lookup_follows_segment_mutations_and_sealing() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(vec![primary_key_row(1, Value::Integer(10))])
+            .expect("bulk row");
+        let payload_bytes = segment.memory_bytes();
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(10), None),
+            Some(EntityId::new(1))
+        );
+        assert!(segment.memory_bytes() > payload_bytes);
+        segment
+            .insert(primary_key_row(3, Value::Integer(30)))
+            .expect("hashmap fallback row");
+        segment
+            .bulk_insert(vec![primary_key_row(4, Value::Integer(40))])
+            .expect("bulk gap row");
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(40), None),
+            Some(EntityId::new(4))
+        );
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(30), None),
+            Some(EntityId::new(3))
+        );
+        segment
+            .update_hot(primary_key_row(1, Value::Integer(11)), &["primary".into()])
+            .expect("replace flat key");
+        assert_eq!(segment.primary_key_lookup_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(primary_key_probe(&segment, Value::Integer(10), None), None);
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(11), None),
+            Some(EntityId::new(1))
+        );
+        segment
+            .delete_batch(&[EntityId::new(1), EntityId::new(3)])
+            .expect("delete flat and map");
+        assert_eq!(primary_key_probe(&segment, Value::Integer(11), None), None);
+        assert_eq!(primary_key_probe(&segment, Value::Integer(30), None), None);
+        segment.seal().expect("seal");
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(40), None),
+            Some(EntityId::new(4))
+        );
+        segment
+            .force_update_with_metadata(
+                &primary_key_row(4, Value::Integer(41)),
+                &["primary".into()],
+                None,
+            )
+            .expect("sealed update");
+        assert_eq!(primary_key_probe(&segment, Value::Integer(40), None), None);
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(41), None),
+            Some(EntityId::new(4))
+        );
+        assert!(segment.force_delete(EntityId::new(4)));
+        assert_eq!(primary_key_probe(&segment, Value::Integer(41), None), None);
+    }
+
+    #[test]
+    fn primary_key_lookup_preserves_signature_semantics_and_exclusion() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        let values = [
+            Value::Float(f64::NAN),
+            Value::Float(-0.0),
+            Value::Float(0.0),
+            Value::Integer(1),
+            Value::UnsignedInteger(1),
+            Value::text("1"),
+        ];
+        for (offset, value) in values.iter().enumerate() {
+            let id = offset as u64 + 1;
+            segment
+                .insert(primary_key_row(id, value.clone()))
+                .expect("distinct physical row");
+            assert_eq!(
+                primary_key_probe(&segment, value.clone(), None),
+                Some(EntityId::new(id))
+            );
+            assert_eq!(
+                primary_key_probe(&segment, value.clone(), Some(EntityId::new(id))),
+                None
+            );
+        }
+        segment
+            .insert(primary_key_row(20, Value::Integer(1)))
+            .expect("duplicate physical key");
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(1), Some(EntityId::new(4))),
+            Some(EntityId::new(20))
+        );
+        // Candidate fingerprints are not equality proof: simulate a stale or
+        // colliding entry by changing its row without the normal invalidation.
+        segment
+            .entities
+            .insert(EntityId::new(4), primary_key_row(4, Value::Integer(99)));
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(1), Some(EntityId::new(20))),
+            None
+        );
+        // Public mutable access must invalidate before handing out the row.
+        let entity = segment.get_mut(EntityId::new(4)).expect("mutable row");
+        *entity = primary_key_row(4, Value::Integer(100));
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(100), None),
+            Some(EntityId::new(4))
+        );
+    }
 
     #[test]
     fn test_growing_segment_basic() {

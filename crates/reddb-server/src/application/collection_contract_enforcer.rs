@@ -665,6 +665,18 @@ fn find_row_uniqueness_conflict(
         if skip_rule {
             continue;
         }
+        if rule.primary_key {
+            let signatures: Vec<String> = expected
+                .into_iter()
+                .map(|(_, _, signature)| signature)
+                .collect();
+            if let Some(entity_id) =
+                manager.find_primary_key_conflict(&rule.columns, &signatures, exclude_id)
+            {
+                return Ok(Some(UniquenessConflict { rule, entity_id }));
+            }
+            continue;
+        }
         let mut conflict_id = None;
         // Borrow rows under the manager's existing read locks. Checking a key
         // must not clone every entity and every unrelated payload in the table.
