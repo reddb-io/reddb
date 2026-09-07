@@ -1,0 +1,116 @@
+{
+  "reddb-ext4.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 5933.195880000003,
+    "median_run_p95_call_us": 9244.559999999183,
+    "median_run_throughput_rows_s": 168.5450454852362
+  },
+  "reddb-tmpfs.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 3492.7458099999994,
+    "median_run_p95_call_us": 5455.161999999973,
+    "median_run_throughput_rows_s": 286.36743076215987
+  },
+  "sqlite-full-disk.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 1699.2404224999996,
+    "median_run_p95_call_us": 3224.205500000153,
+    "median_run_throughput_rows_s": 588.7820923769988
+  },
+  "sqlite-normal-disk.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 38.34261749999996,
+    "median_run_p95_call_us": 70.80349999998248,
+    "median_run_throughput_rows_s": 26084.4079232261
+  },
+  "surreal-small.json": {
+    "runs": 1,
+    "median_run_mean_us_per_row": 12770.608700000003,
+    "median_run_p95_call_us": 32452.04300000023,
+    "median_run_throughput_rows_s": 78.30480312187467
+  },
+  "main-sdk-tmpfs.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 578.8182975000001,
+    "median_run_p95_call_us": 967.1319999999355,
+    "median_run_throughput_rows_s": 1727.7392280511076
+  },
+  "main-sdk-disk.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 2051.1456125000004,
+    "median_run_p95_call_us": 2840.7835000007253,
+    "median_run_throughput_rows_s": 487.53520852061206
+  },
+  "expanded--reddb-disk-select_point.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 1160.4119575000004,
+    "median_run_p95_call_us": 2102.625999999873,
+    "median_run_throughput_rows_s": 862.0321745418573
+  },
+  "expanded--sqlite-full-disk-insert_bulk.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 12.269127499999968,
+    "median_run_p95_call_us": 2441.5709999999817,
+    "median_run_throughput_rows_s": 81512.61663980971
+  },
+  "expanded--reddb-disk-insert_bulk.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 139.98441249999814,
+    "median_run_p95_call_us": 27983.37099999935,
+    "median_run_throughput_rows_s": 7146.966056503894
+  },
+  "expanded--sqlite-full-disk-select_point.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 10.240270000000038,
+    "median_run_p95_call_us": 18.348500000001877,
+    "median_run_throughput_rows_s": 97965.64403183362
+  },
+  "expanded--sqlite-full-disk-insert_sequential.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 1356.4057999999995,
+    "median_run_p95_call_us": 1864.58250000004,
+    "median_run_throughput_rows_s": 737.2588426036662
+  },
+  "expanded--reddb-disk-insert_sequential.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 4727.278347499996,
+    "median_run_p95_call_us": 6222.415999999839,
+    "median_run_throughput_rows_s": 211.54191124602949
+  },
+  "updates--reddb-disk-update_random.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 5368.247727500002,
+    "median_run_p95_call_us": 9424.60100000062,
+    "median_run_throughput_rows_s": 186.42605693017452
+  },
+  "updates--sqlite-full-disk-update_random.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 1569.1958949999998,
+    "median_run_p95_call_us": 2285.725500000126,
+    "median_run_throughput_rows_s": 637.3233615738043
+  },
+  "final-release--reddb-tmpfs-insert_sequential.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 1375.5541349999999,
+    "median_run_p95_call_us": 2116.757000000007,
+    "median_run_throughput_rows_s": 726.9802689808814
+  },
+  "final-release--sqlite-full-disk-insert_sequential.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 956.4490900000004,
+    "median_run_p95_call_us": 1435.7719999999858,
+    "median_run_throughput_rows_s": 1045.566503579245
+  },
+  "final-release--sqlite-full-tmpfs-insert_sequential.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 16.499607499999982,
+    "median_run_p95_call_us": 25.6650000000036,
+    "median_run_throughput_rows_s": 60608.139612312014
+  },
+  "final-release--reddb-disk-insert_sequential.json": {
+    "runs": 10,
+    "median_run_mean_us_per_row": 2816.6876224999987,
+    "median_run_p95_call_us": 3691.371999999319,
+    "median_run_throughput_rows_s": 355.0917612967186
+  }
+}

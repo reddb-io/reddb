@@ -1,0 +1,286 @@
+{
+  "policy": "ADR 0076",
+  "date": "2026-09-07",
+  "classification_note": "Performance comparisons remain inconclusive under unmatched guarantees/shared host; behind here identifies executed product-contract gaps. Unmeasured means no qualifying equivalent comparison, not absence of either capability. Invalid native subcells are retained in suite artifacts.",
+  "cells": [
+    {
+      "id": "F01",
+      "cell": "Sequential durable writes",
+      "state": "inconclusive",
+      "reddb_evidence": "E: SDK ext4/tmpfs/FULL comparison above",
+      "surreal_evidence": "E: native small persistent fixture; remote server available; larger native reopen cells can time out",
+      "acceptance_experiment": "Same ACK durability, 10 runs at 200/50k/1m keys, native/SDK/remote separately, p99 and resource tree",
+      "priority": "P0/P1"
+    },
+    {
+      "id": "F02",
+      "cell": "Batch and concurrent commit",
+      "state": "inconclusive",
+      "reddb_evidence": "S: WAL group coordinator; bulk API; executable writer sweep",
+      "surreal_evidence": "S: RocksDB sync Every and group policy; native bulk API",
+      "acceptance_experiment": "Atomic batch semantics, 1/2/4/8/16 connections, syncs/commit and conflict rate",
+      "priority": "P1"
+    },
+    {
+      "id": "F03",
+      "cell": "Isolation and anomalies",
+      "state": "unmeasured",
+      "reddb_evidence": "E: SDK own-write/rollback; D: table-row-first history MVCC, partial predicate SSI",
+      "surreal_evidence": "E: cancelled transaction leaves no row; S: transactional storage abstraction",
+      "acceptance_experiment": "Lost update, write skew, phantom, rollback/savepoint and conflict-history checker per model/backend",
+      "priority": "P3"
+    },
+    {
+      "id": "F04",
+      "cell": "WAL/crash/corruption",
+      "state": "unmeasured",
+      "reddb_evidence": "S/D: ADR 0074, seeded torn/lost/misdirected/bitrot fault lane",
+      "surreal_evidence": "S/D: backend-dependent persistence and sync policy",
+      "acceptance_experiment": "Process kill smoke plus acknowledged-commit oracle under seeded power-cut/fault schedule; retain minimized counterexamples",
+      "priority": "P3"
+    },
+    {
+      "id": "F05",
+      "cell": "Backup/restore/PITR",
+      "state": "behind",
+      "reddb_evidence": "E: process-kill passes; logical restore changes string values",
+      "surreal_evidence": "E: process-kill and logical restore pass for 200 keys; D: export is not implicit PITR",
+      "acceptance_experiment": "Fresh-machine restoration, schema/index/auth fidelity, RPO=0 for acknowledged durable writes, measured RTO by size",
+      "priority": "P4"
+    },
+    {
+      "id": "F06",
+      "cell": "Planning and execution",
+      "state": "unmeasured",
+      "reddb_evidence": "S: RedDB EXPLAIN and ADR 0071 prohibits committing analysis",
+      "surreal_evidence": "E: indexed EXPLAIN; S: batch-stream execution and metrics",
+      "acceptance_experiment": "EXPLAIN ANALYZE per-operator rows/time/memory, estimate accuracy, scan\u2192index/compound/range/OR decisions; zero write side effects",
+      "priority": "P5"
+    },
+    {
+      "id": "F07",
+      "cell": "Index lifecycle",
+      "state": "unmeasured",
+      "reddb_evidence": "D/S: index kinds, current-index MVCC recheck; historical index limitation",
+      "surreal_evidence": "S/D: compound/range analysis, concurrent indexes, HNSW/BM25",
+      "acceptance_experiment": "Build concurrent with writes; cancellation/restart/recovery; stale index and schema-change correctness before speed",
+      "priority": "P5/P7"
+    },
+    {
+      "id": "F08",
+      "cell": "Resource boundedness",
+      "state": "unmeasured",
+      "reddb_evidence": "S: STYLE resource-cost requirement, server surfaces",
+      "surreal_evidence": "S: stream/batch executor; metrics opt-in",
+      "acceptance_experiment": "Cardinality \u00d7 value width \u00d7 concurrency memory model; cancellation/backpressure; OOM and slow-reader tests",
+      "priority": "P5"
+    },
+    {
+      "id": "F09",
+      "cell": "CI/upgrade assurance",
+      "state": "unmeasured",
+      "reddb_evidence": "S/D: grouped tests and DST nightly",
+      "surreal_evidence": "S: language corpus, storage/SDK/upgrade lanes; PR quick benchmark vs nightly baseline",
+      "acceptance_experiment": "Real packaged SDK golden corpus + old-store upgrade/downgrade policy + reproducible fault artifacts",
+      "priority": "P0/P3"
+    },
+    {
+      "id": "F10",
+      "cell": "Replication/distribution",
+      "state": "unmeasured",
+      "reddb_evidence": "D: sharding foundations; docs deny production automatic placement and distributed transactions",
+      "surreal_evidence": "D: deployment/backend distinctions; LIVE SELECT currently single-node",
+      "acceptance_experiment": "Partition/leader failover/replica lag tests, ACK provenance, fencing, routing and tenant isolation; edition/backend declared",
+      "priority": "P9"
+    },
+    {
+      "id": "F11",
+      "cell": "Observability/operator journeys",
+      "state": "unmeasured",
+      "reddb_evidence": "D: doctor, inspect, diagnostics",
+      "surreal_evidence": "S/D: query metrics and backup runbook",
+      "acceptance_experiment": "Operator can diagnose slow query, blocked writer, disk-full and restore without reading engine source",
+      "priority": "P4/P5"
+    },
+    {
+      "id": "D01",
+      "cell": "Install\u2192first durable write\u2192reopen",
+      "state": "unmeasured",
+      "reddb_evidence": "E: embedded succeeds; released remote CLI misroutes",
+      "surreal_evidence": "E: server HTTP and native small reopen succeed",
+      "acceptance_experiment": "Automated clean-machine journeys on Linux/macOS/Windows with exact packaged bits and file checksum",
+      "priority": "P2/P6"
+    },
+    {
+      "id": "D02",
+      "cell": "SDK return contracts",
+      "state": "behind",
+      "reddb_evidence": "E: SDK `.rows`; wire summary-vs-full mismatch",
+      "surreal_evidence": "E: structured JS query results and native engine selection",
+      "acceptance_experiment": "Same typed result and error code for empty/nonempty/bound/unbound query over every advertised transport",
+      "priority": "P2"
+    },
+    {
+      "id": "D03",
+      "cell": "Embedded architecture",
+      "state": "inconclusive",
+      "reddb_evidence": "E: JS child/stdio boundary",
+      "surreal_evidence": "E: native Node engine addon; actual embedded version differs from server",
+      "acceptance_experiment": "Measure native binding prototype only after native/stdio floor evidence; lifecycle/threading/cancellation/version support included",
+      "priority": "P1/P6"
+    },
+    {
+      "id": "D04",
+      "cell": "Generated SQL and identifiers",
+      "state": "unmeasured",
+      "reddb_evidence": "E: double quotes and reserved `data` fail",
+      "surreal_evidence": "D: SurrealQL is its own language; PostgreSQL syntax parity not assumed",
+      "acceptance_experiment": "Explicit supported dialect; quoting/escaping/params and ORM contract fixtures; avoid marketing SQL compatibility beyond tested scope",
+      "priority": "P2"
+    },
+    {
+      "id": "D05",
+      "cell": "Schema, migrations, types/errors",
+      "state": "unmeasured",
+      "reddb_evidence": "S/D: typed schemas and multiple adapters",
+      "surreal_evidence": "D/S: schemafull/schema-less, record IDs and functions",
+      "acceptance_experiment": "Versioned migration workflow with rollback, detailed spans, lossless decimal/time/bytes/int64 codec matrix",
+      "priority": "P2/P6"
+    },
+    {
+      "id": "D06",
+      "cell": "Docs correctness",
+      "state": "unmeasured",
+      "reddb_evidence": "E: seven quickstart answers pass, spatial projection diverges; stale perf claims",
+      "surreal_evidence": "D/S: rich reference and executable language corpus; README/workflow quick-run discrepancy exists",
+      "acceptance_experiment": "Generate or execute every promised output against each release; broken-link/API/version checks",
+      "priority": "P6"
+    },
+    {
+      "id": "D07",
+      "cell": "UI completion",
+      "state": "unmeasured",
+      "reddb_evidence": "E: released asset 404; local host collection error",
+      "surreal_evidence": "E: Studio login only; authenticated workspace U",
+      "acceptance_experiment": "Timed install/connect/schema/query/explain/export/error recovery with local mode and no source patching",
+      "priority": "P6"
+    },
+    {
+      "id": "D08",
+      "cell": "Auth, tenancy and RLS UX",
+      "state": "unmeasured",
+      "reddb_evidence": "D/S: documented constraints and surface parity matrix; no adversarial run here",
+      "surreal_evidence": "D/S: namespaces/databases, record access/permissions",
+      "acceptance_experiment": "Unprivileged two-tenant workload across SQL/graph/vector/live/export; denied records never leak through count/rank/timing/result",
+      "priority": "P3/P8"
+    },
+    {
+      "id": "D09",
+      "cell": "APIs/functions/events",
+      "state": "unmeasured",
+      "reddb_evidence": "S/D: RedDB HTTP/MCP/driver surfaces",
+      "surreal_evidence": "D: DEFINE API middleware/permissions; E: live single-node delivery",
+      "acceptance_experiment": "Equivalent application endpoint with auth, validation, cancellation and event after commit; steps/LOC and failure recovery measured",
+      "priority": "P8"
+    },
+    {
+      "id": "D10",
+      "cell": "Language/runtime/platform coverage",
+      "state": "unmeasured",
+      "reddb_evidence": "S: advertised public-surface matrix has gaps; old Bun runner delegates Rust",
+      "surreal_evidence": "E: Bun with JS SDK/native addon; other SDKs U",
+      "acceptance_experiment": "Each supported runtime executes its own client; capability/version matrix generated from conformance tests",
+      "priority": "P0/P6"
+    },
+    {
+      "id": "M01",
+      "cell": "Relational/filter/aggregate",
+      "state": "unmeasured",
+      "reddb_evidence": "E: quickstart grouped results",
+      "surreal_evidence": "E: filtered documents; S: index executor",
+      "acceptance_experiment": "Equivalent schema, null/numeric semantics, aggregate/join results, indexed and scan plans at scale",
+      "priority": "P5/P7"
+    },
+    {
+      "id": "M02",
+      "cell": "Documents/nesting",
+      "state": "unmeasured",
+      "reddb_evidence": "E: document quickstart expected record",
+      "surreal_evidence": "E: create/filter fixture",
+      "acceptance_experiment": "Nested projection, partial update, type coercion, indexes and atomic concurrent changes",
+      "priority": "P7"
+    },
+    {
+      "id": "M03",
+      "cell": "Graph paths/traversals",
+      "state": "unmeasured",
+      "reddb_evidence": "E: shortest-path quickstart weight/hops",
+      "surreal_evidence": "E: graph edge composition returns Bob",
+      "acceptance_experiment": "Same directed weighted graph, cycles/depth bounds, permission filters, path semantics and degree distribution",
+      "priority": "P7"
+    },
+    {
+      "id": "M04",
+      "cell": "Vector exact/ANN/hybrid",
+      "state": "unmeasured",
+      "reddb_evidence": "E: vector quickstart ordering; no recall evaluation",
+      "surreal_evidence": "E: exact distance; D: HNSW/BM25",
+      "acceptance_experiment": "Recall@k at fixed ground truth, filtered/tenant top-k, hybrid quality, insertion/deletion/rebuild, latency at equal recall",
+      "priority": "P7/P3"
+    },
+    {
+      "id": "M05",
+      "cell": "Spatial",
+      "state": "unmeasured",
+      "reddb_evidence": "E: H3 radius/KNN IDs and distances; docs result shape mismatch",
+      "surreal_evidence": "D: geometry capability; comparable geo fixture U",
+      "acceptance_experiment": "Coordinate ordering, units, antimeridian/poles/boundaries, result hydration and selectivity; correctness before index timing",
+      "priority": "P2/P7"
+    },
+    {
+      "id": "M06",
+      "cell": "Key/value, TTL and types",
+      "state": "unmeasured",
+      "reddb_evidence": "E: bool/int quickstart values",
+      "surreal_evidence": "D: records/functions can model KV; dedicated Redis-equivalent semantics not assumed",
+      "acceptance_experiment": "Atomic compare/update, expiration/restart clocks, type fidelity; identify any application emulation explicitly",
+      "priority": "P7"
+    },
+    {
+      "id": "M07",
+      "cell": "Time series/windows",
+      "state": "unmeasured",
+      "reddb_evidence": "E: buckets return 15/2 and 30/1",
+      "surreal_evidence": "D: time-series positioning; matching window/retention fixture U",
+      "acceptance_experiment": "Out-of-order ingest, window edges, late data, retention/rollup recovery; storage growth and query cost",
+      "priority": "P7"
+    },
+    {
+      "id": "M08",
+      "cell": "Queues and delivery",
+      "state": "unmeasured",
+      "reddb_evidence": "E: first job quickstart",
+      "surreal_evidence": "U: no certified equivalent durable queue contract",
+      "acceptance_experiment": "Reserve/ACK/NACK/visibility timeout/dead-letter and duplicate delivery under crash; unsupported is a capability gap, not infinite performance win",
+      "priority": "P7/P8"
+    },
+    {
+      "id": "M09",
+      "cell": "Cross-model transaction",
+      "state": "unmeasured",
+      "reddb_evidence": "D: RedDB table-row-first caveats; tiny journeys are independent",
+      "surreal_evidence": "E: graph+document query; full graph/vector txn failure matrix U",
+      "acceptance_experiment": "One transaction changes document, edge and vector: old/new snapshots, rollback, index visibility, crash and tenant boundaries",
+      "priority": "P3/P7"
+    },
+    {
+      "id": "M10",
+      "cell": "Composed application journey",
+      "state": "unmeasured",
+      "reddb_evidence": "U: graph\u2192vector\u2192document\u2192live under RLS not certified",
+      "surreal_evidence": "E: individual composition/live primitives; complete journey U",
+      "acceptance_experiment": "Same recommendation/retrieval app, equal relevance, no extra database, end-to-end latency/steps/application code",
+      "priority": "P7/P8"
+    }
+  ]
+}
