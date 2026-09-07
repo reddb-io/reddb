@@ -665,10 +665,13 @@ fn find_row_uniqueness_conflict(
     let Some(manager) = db.store().get_collection(collection) else {
         return Ok(None);
     };
-    let mut rules = resolved_uniqueness_rules(&contract);
+    let rules = resolved_uniqueness_rules(&contract);
+    let columns: Vec<Vec<String>> = rules.iter().map(|rule| rule.columns.clone()).collect();
     if let Some(target) = target {
-        rules.retain(|rule| uniqueness_columns_match(&rule.columns, target));
-        if rules.is_empty() {
+        if !rules
+            .iter()
+            .any(|rule| uniqueness_columns_match(&rule.columns, target))
+        {
             return Err(crate::RedDBError::Query(format!(
                 "no unique or primary-key constraint on collection '{}' matches ON CONFLICT ({})",
                 collection,
@@ -685,8 +688,11 @@ fn find_row_uniqueness_conflict(
     let reserves_key = |entity: &crate::storage::UnifiedEntity| {
         snapshot_manager.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids)
     };
-    for rule in rules {
-        let mut expected = Vec::new();
+    for (key_index, rule) in rules.into_iter().enumerate() {
+        if target.is_some_and(|target| !uniqueness_columns_match(&rule.columns, target)) {
+            continue;
+        }
+        let mut signatures = Vec::new();
         let mut skip_rule = false;
         for column in &rule.columns {
             match input_fields.get(column.as_str()).copied() {
@@ -700,47 +706,19 @@ fn find_row_uniqueness_conflict(
                     skip_rule = true;
                     break;
                 }
-                Some(value) => expected.push((column, value, value_signature(value))),
+                Some(value) => signatures.push(value_signature(value)),
             }
         }
         if skip_rule {
             continue;
         }
-        if rule.primary_key {
-            let signatures: Vec<String> = expected
-                .into_iter()
-                .map(|(_, _, signature)| signature)
-                .collect();
-            if let Some(entity_id) = manager.find_primary_key_conflict(
-                &rule.columns,
-                &signatures,
-                exclude_id,
-                &reserves_key,
-            ) {
-                return Ok(Some(UniquenessConflict { rule, entity_id }));
-            }
-            continue;
-        }
-        let mut conflict_id = None;
-        // Borrow rows under the manager's existing read locks. Checking a key
-        // must not clone every entity and every unrelated payload in the table.
-        manager.for_each_entity(|entity| {
-            if exclude_id == Some(entity.id) {
-                return true;
-            }
-            let crate::storage::EntityData::Row(row) = &entity.data else {
-                return true;
-            };
-            let duplicate = expected.iter().all(|(column, expected, signature)| {
-                row.get_field(column)
-                    .is_some_and(|value| uniqueness_value_matches(value, expected, signature))
-            }) && reserves_key(entity);
-            if duplicate {
-                conflict_id = Some(entity.id);
-            }
-            !duplicate
-        });
-        if let Some(entity_id) = conflict_id {
+        if let Some(entity_id) = manager.find_unique_key_conflict(
+            &columns,
+            key_index,
+            &signatures,
+            exclude_id,
+            &reserves_key,
+        ) {
             return Ok(Some(UniquenessConflict { rule, entity_id }));
         }
     }
@@ -1162,19 +1140,6 @@ fn resolved_uniqueness_rules(
 
 fn value_signature(value: &Value) -> String {
     format!("{value:?}")
-}
-
-fn uniqueness_value_matches(value: &Value, expected: &Value, expected_signature: &str) -> bool {
-    // Compare common schema-normalized keys without formatting every stored
-    // row. Keep the existing signature semantics for other kinds, including
-    // floating-point NaNs and signed zero; Value equality differs there.
-    match (value, expected) {
-        (Value::Integer(left), Value::Integer(right)) => left == right,
-        (Value::UnsignedInteger(left), Value::UnsignedInteger(right)) => left == right,
-        (Value::Text(left), Value::Text(right)) => left == right,
-        (Value::Boolean(left), Value::Boolean(right)) => left == right,
-        _ => value_signature(value) == expected_signature,
-    }
 }
 
 fn normalize_contract_value(

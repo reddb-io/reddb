@@ -116,3 +116,6 @@ mod e2e_primary_key_lookup;
 
 #[path = "mvcc_transactions/e2e_mvcc_key_reuse.rs"]
 mod e2e_mvcc_key_reuse;
+
+#[path = "schema_query_core/e2e_unique_key_lookup.rs"]
+mod e2e_unique_key_lookup;

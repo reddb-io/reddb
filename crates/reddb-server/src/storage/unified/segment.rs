@@ -34,7 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::metadata::{Metadata, MetadataStorage};
-use super::segment_primary_key::SegmentPrimaryKey;
+use super::segment_unique_key::SegmentUniqueKey;
 use crate::storage::query::value_compare::partial_compare_values;
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
@@ -455,10 +455,10 @@ pub struct GrowingSegment {
 
     /// Primary key index: (collection, pk_value) → EntityId
     pk_index: BTreeMap<(String, String), EntityId>,
-    /// Lazy schema-aware primary-key lookup, independent of the legacy
+    /// Lazy schema-aware unique-key lookups, independent of the legacy
     /// first-column index. Protected by the owning segment's entity lock.
-    primary_key_lookup: parking_lot::RwLock<Option<SegmentPrimaryKey>>,
-    primary_key_lookup_bytes: AtomicU64,
+    unique_key_lookup: parking_lot::RwLock<Vec<SegmentUniqueKey>>,
+    unique_key_lookup_bytes: AtomicU64,
     /// Type index: kind → EntityIds
     kind_index: HashMap<String, HashSet<EntityId>>,
     /// Cross-reference index: source → Vec<(target, ref_type)>
@@ -573,8 +573,8 @@ impl GrowingSegment {
             deleted: HashSet::new(),
             metadata: MetadataStorage::new(),
             pk_index: BTreeMap::new(),
-            primary_key_lookup: parking_lot::RwLock::new(None),
-            primary_key_lookup_bytes: AtomicU64::new(0),
+            unique_key_lookup: parking_lot::RwLock::new(Vec::new()),
+            unique_key_lookup_bytes: AtomicU64::new(0),
             kind_index: HashMap::new(),
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
@@ -621,7 +621,7 @@ impl GrowingSegment {
         &mut self,
         entity: &UnifiedEntity,
     ) -> Result<UpdateIndexSnapshot, SegmentError> {
-        self.invalidate_primary_key_lookup();
+        self.invalidate_unique_key_lookup();
         if self.use_flat {
             let raw = entity.id.raw();
             if raw >= self.base_entity_id {
@@ -715,7 +715,7 @@ impl GrowingSegment {
     ///
     /// Returns `false` when the entity was already tombstoned.
     fn tombstone_flat_entity(&mut self, idx: usize, id: EntityId) -> bool {
-        self.invalidate_primary_key_lookup();
+        self.invalidate_unique_key_lookup();
         if !self.deleted.insert(id) {
             return false;
         }
@@ -731,7 +731,7 @@ impl GrowingSegment {
     ///
     /// Returns `false` when the entity is not present.
     fn remove_hashmap_entity(&mut self, id: EntityId) -> bool {
-        self.invalidate_primary_key_lookup();
+        self.invalidate_unique_key_lookup();
         let Some(entity) = self.entities.remove(&id) else {
             return false;
         };
@@ -796,7 +796,7 @@ impl GrowingSegment {
     /// does not pay `O(entities)` to observe memory.
     pub fn memory_bytes(&self) -> u64 {
         self.memory_bytes.load(Ordering::Relaxed)
-            + self.primary_key_lookup_bytes.load(Ordering::Relaxed)
+            + self.unique_key_lookup_bytes.load(Ordering::Relaxed)
     }
 
     /// Release a resident entity's payload from the memory estimate. Only for
@@ -895,7 +895,7 @@ impl GrowingSegment {
     /// segment, when the swap discovers a copied row was deleted from its
     /// source mid-consolidation. A tombstone here would defeat the whole point.
     pub(crate) fn evict_entity(&mut self, id: EntityId) -> bool {
-        self.invalidate_primary_key_lookup();
+        self.invalidate_unique_key_lookup();
         let Some(entity) = self.entities.remove(&id) else {
             return false;
         };
@@ -1069,11 +1069,17 @@ impl GrowingSegment {
 
     /// Index an entity
     fn index_entity(&mut self, entity: &UnifiedEntity) {
-        if let Some(index) = self.primary_key_lookup.get_mut().as_mut() {
+        let indexes = self.unique_key_lookup.get_mut();
+        for index in indexes.iter_mut() {
             index.insert(entity);
-            self.primary_key_lookup_bytes
-                .store(index.memory_bytes() as u64, Ordering::Relaxed);
         }
+        self.unique_key_lookup_bytes.store(
+            indexes
+                .iter()
+                .map(|index| index.memory_bytes() as u64)
+                .sum(),
+            Ordering::Relaxed,
+        );
         // Kind index
         let kind_key = entity.kind.storage_type().to_string();
         self.kind_index
@@ -1104,46 +1110,59 @@ impl GrowingSegment {
         }
     }
 
-    /// Find a physical row by the declared primary-key columns. The same
-    /// physical rows participate as in `for_each_fast`; MVCC conflict policy
-    /// belongs to the caller. Build once, then maintain on append. Mutations
-    /// that can replace or remove keys discard this derived structure.
-    pub(crate) fn find_primary_key_conflict(
+    /// Probe one declared UNIQUE/PRIMARY KEY against physical rows. Cache all
+    /// current definitions together so alternating constraints never rebuilds
+    /// the same segment. Schema changes replace the set; mutations invalidate it.
+    /// The caller owns MVCC conflict policy and null-key admission.
+    pub(crate) fn find_unique_key_conflict(
         &self,
-        columns: &[String],
+        columns: &[Vec<String>],
+        key_index: usize,
         signatures: &[String],
         exclude_id: Option<EntityId>,
         reserves_key: &impl Fn(&UnifiedEntity) -> bool,
     ) -> Option<EntityId> {
-        let cached = self.primary_key_lookup.read();
-        if let Some(index) = cached.as_ref().filter(|index| index.columns == columns) {
-            return self.find_primary_key_candidate(index, signatures, exclude_id, reserves_key);
+        assert!(
+            key_index < columns.len(),
+            "constraint index belongs to current schema"
+        );
+        let cached = self.unique_key_lookup.read();
+        if cached.iter().map(|index| &index.columns).eq(columns.iter()) {
+            return self.find_unique_key_candidate(
+                &cached[key_index],
+                signatures,
+                exclude_id,
+                reserves_key,
+            );
         }
         drop(cached);
-        let mut cached = self.primary_key_lookup.write();
-        if cached.as_ref().is_none_or(|index| index.columns != columns) {
-            let mut index = SegmentPrimaryKey::new(columns);
+        let mut cached = self.unique_key_lookup.write();
+        if !cached.iter().map(|index| &index.columns).eq(columns.iter()) {
+            let mut indexes: Vec<_> = columns
+                .iter()
+                .map(|columns| SegmentUniqueKey::new(columns))
+                .collect();
             self.for_each_fast(|entity| {
-                index.insert(entity);
+                for index in &mut indexes {
+                    index.insert(entity);
+                }
                 true
             });
-            self.primary_key_lookup_bytes
-                .store(index.memory_bytes() as u64, Ordering::Relaxed);
-            *cached = Some(index);
+            self.unique_key_lookup_bytes.store(
+                indexes
+                    .iter()
+                    .map(|index| index.memory_bytes() as u64)
+                    .sum(),
+                Ordering::Relaxed,
+            );
+            *cached = indexes;
         }
-        self.find_primary_key_candidate(
-            cached
-                .as_ref()
-                .expect("primary-key lookup initialized above"),
-            signatures,
-            exclude_id,
-            reserves_key,
-        )
+        self.find_unique_key_candidate(&cached[key_index], signatures, exclude_id, reserves_key)
     }
 
-    fn find_primary_key_candidate(
+    fn find_unique_key_candidate(
         &self,
-        index: &SegmentPrimaryKey,
+        index: &SegmentUniqueKey,
         signatures: &[String],
         exclude_id: Option<EntityId>,
         reserves_key: &impl Fn(&UnifiedEntity) -> bool,
@@ -1173,9 +1192,9 @@ impl GrowingSegment {
         })
     }
 
-    fn invalidate_primary_key_lookup(&mut self) {
-        *self.primary_key_lookup.get_mut() = None;
-        self.primary_key_lookup_bytes.store(0, Ordering::Relaxed);
+    fn invalidate_unique_key_lookup(&mut self) {
+        *self.unique_key_lookup.get_mut() = Vec::new();
+        self.unique_key_lookup_bytes.store(0, Ordering::Relaxed);
     }
 
     /// Check whether an early-exit probe key exists in this segment.
@@ -1336,13 +1355,19 @@ impl GrowingSegment {
             return Err(SegmentError::NotWritable);
         }
 
-        if let Some(index) = self.primary_key_lookup.get_mut().as_mut() {
+        let indexes = self.unique_key_lookup.get_mut();
+        for index in indexes.iter_mut() {
             for entity in &entities {
                 index.insert(entity);
             }
-            self.primary_key_lookup_bytes
-                .store(index.memory_bytes() as u64, Ordering::Relaxed);
         }
+        self.unique_key_lookup_bytes.store(
+            indexes
+                .iter()
+                .map(|index| index.memory_bytes() as u64)
+                .sum(),
+            Ordering::Relaxed,
+        );
 
         let n = entities.len();
 
@@ -1612,7 +1637,7 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity> {
-        self.invalidate_primary_key_lookup();
+        self.invalidate_unique_key_lookup();
         if self.deleted.contains(&id) || !self.state.is_writable() {
             return None;
         }
@@ -1959,8 +1984,9 @@ mod tests {
         key: Value,
         exclude: Option<EntityId>,
     ) -> Option<EntityId> {
-        segment.find_primary_key_conflict(
-            &["primary".into()],
+        segment.find_unique_key_conflict(
+            &[vec!["primary".into()]],
+            0,
             &[format!("{key:?}")],
             exclude,
             &|_| true,
@@ -1968,7 +1994,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_key_lookup_follows_segment_mutations_and_sealing() {
+    fn unique_key_lookup_follows_segment_mutations_and_sealing() {
         let mut segment = GrowingSegment::new(1, "keys");
         segment
             .bulk_insert(vec![primary_key_row(1, Value::Integer(10))])
@@ -1996,7 +2022,7 @@ mod tests {
         segment
             .update_hot(primary_key_row(1, Value::Integer(11)), &["primary".into()])
             .expect("replace flat key");
-        assert_eq!(segment.primary_key_lookup_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(segment.unique_key_lookup_bytes.load(Ordering::Relaxed), 0);
         assert_eq!(primary_key_probe(&segment, Value::Integer(10), None), None);
         assert_eq!(
             primary_key_probe(&segment, Value::Integer(11), None),
@@ -2029,7 +2055,71 @@ mod tests {
     }
 
     #[test]
-    fn primary_key_lookup_preserves_signature_semantics_and_exclusion() {
+    fn unique_lookup_retains_all_current_definitions_and_rechecks_candidates() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(vec![
+                primary_key_row(1, Value::Integer(10)),
+                primary_key_row(2, Value::Integer(20)),
+            ])
+            .expect("initial rows");
+        let definitions = vec![
+            vec!["primary".into()],
+            vec!["payload".into()],
+            vec!["primary".into(), "payload".into()],
+        ];
+        let payload = format!("{:?}", Value::text("payload"));
+        assert_eq!(
+            segment.find_unique_key_conflict(
+                &definitions,
+                1,
+                &[payload.clone()],
+                None,
+                &|entity| entity.id != EntityId::new(1)
+            ),
+            Some(EntityId::new(2))
+        );
+        assert_eq!(segment.unique_key_lookup.read().len(), 3);
+        segment
+            .insert(primary_key_row(3, Value::Integer(30)))
+            .expect("append");
+        assert_eq!(
+            segment.find_unique_key_conflict(
+                &definitions,
+                2,
+                &[format!("{:?}", Value::Integer(30)), payload.clone()],
+                None,
+                &|_| true
+            ),
+            Some(EntityId::new(3))
+        );
+        let bytes = segment.unique_key_lookup_bytes.load(Ordering::Relaxed);
+        assert_eq!(
+            segment.find_unique_key_conflict(
+                &definitions,
+                0,
+                &[format!("{:?}", Value::Integer(20))],
+                None,
+                &|_| true
+            ),
+            Some(EntityId::new(2))
+        );
+        assert_eq!(segment.unique_key_lookup.read().len(), 3);
+        assert_eq!(
+            segment.unique_key_lookup_bytes.load(Ordering::Relaxed),
+            bytes
+        );
+        let reduced = vec![vec!["payload".into()]];
+        assert_eq!(
+            segment.find_unique_key_conflict(&reduced, 0, &[payload], None, &|_| true),
+            Some(EntityId::new(1))
+        );
+        assert_eq!(segment.unique_key_lookup.read().len(), 1);
+        assert!(segment.unique_key_lookup_bytes.load(Ordering::Relaxed) < bytes);
+    }
+
+    #[test]
+    fn unique_key_lookup_preserves_signature_semantics_and_exclusion() {
         let mut segment = GrowingSegment::new(1, "keys");
         let values = [
             Value::Float(f64::NAN),

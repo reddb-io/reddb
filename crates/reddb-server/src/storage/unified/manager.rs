@@ -1213,19 +1213,21 @@ impl SegmentManager {
         self.visibility_map.mark_range_visible(start_page, end_page);
     }
 
-    /// Probe the primary-key lookup of each segment under the same entity
+    /// Probe a unique-key lookup in each segment under the same entity
     /// locks used by scans and writes. Lookup state is rebuilt lazily after
     /// recovery, consolidation, or a key-changing mutation.
-    pub(crate) fn find_primary_key_conflict(
+    pub(crate) fn find_unique_key_conflict(
         &self,
-        columns: &[String],
+        columns: &[Vec<String>],
+        key_index: usize,
         signatures: &[String],
         exclude_id: Option<EntityId>,
         reserves_key: &impl Fn(&UnifiedEntity) -> bool,
     ) -> Option<EntityId> {
         if let Some(growing) = self.growing.read().as_ref() {
-            if let Some(id) = growing.read().find_primary_key_conflict(
+            if let Some(id) = growing.read().find_unique_key_conflict(
                 columns,
+                key_index,
                 signatures,
                 exclude_id,
                 reserves_key,
@@ -1234,8 +1236,9 @@ impl SegmentManager {
             }
         }
         for segment in self.sealed.read().iter() {
-            if let Some(id) = segment.read().find_primary_key_conflict(
+            if let Some(id) = segment.read().find_unique_key_conflict(
                 columns,
+                key_index,
                 signatures,
                 exclude_id,
                 reserves_key,

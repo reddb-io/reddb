@@ -1,17 +1,17 @@
-//! Disposable primary-key lookup for a segment. Fingerprints only narrow the
+//! Disposable unique-key lookup for a segment. Fingerprints only narrow the
 //! candidate set; the caller checks the complete key before accepting a match.
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 
 use super::entity::{EntityData, EntityId, UnifiedEntity};
 
-pub(super) struct SegmentPrimaryKey {
+pub(super) struct SegmentUniqueKey {
     pub columns: Vec<String>,
     entries: HashMap<u64, Vec<EntityId>>,
     ids_bytes: usize,
 }
 
-impl SegmentPrimaryKey {
+impl SegmentUniqueKey {
     pub fn new(columns: &[String]) -> Self {
         Self {
             columns: columns.to_vec(),
