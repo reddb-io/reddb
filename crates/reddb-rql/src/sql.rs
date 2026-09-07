@@ -3223,6 +3223,7 @@ impl<'a> Parser<'a> {
                 use crate::ast::PolicyTargetKind;
                 let kw = match self.peek() {
                     Token::Ident(s) => Some(s.to_ascii_uppercase()),
+                    Token::Vectors => Some("VECTORS".to_string()),
                     _ => None,
                 };
                 let kind = kw.as_deref().and_then(|k| match k {
