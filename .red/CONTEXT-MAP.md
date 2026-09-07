@@ -25,4 +25,4 @@ Reusable vocabulary for code, docs, and architecture decisions, sharded by topic
 
 ## Performance gate
 
-- **Scenario-specific gate** — per ADR 0009, RedDB does not commit to "20% faster than every competitor on every scenario". Instead, it commits to winning where the unified-engine architecture structurally outperforms (typed_insert, disk_usage, cross-model queries) and to parity-or-close-gap elsewhere.
+- **Competitive leadership gate** — per [ADR 0076](adr/0076-competitive-leadership-evidence-gate.md), the target is leadership throughout the comparable SurrealDB matrix and equivalent SQLite embedded scenarios, across foundations, product experience and multimodel capabilities. Performance cells require at least 20% lower latency or 20% higher throughput on their preselected primary metric, with equivalent correctness and guarantees and qualifying confidence intervals. Unmeasured, invalid and unfavorable cells remain visible. This is a target, not a claim about the current release. Read ADR 0076 when designing comparisons or making public performance claims.
