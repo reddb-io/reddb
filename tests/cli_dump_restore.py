@@ -61,6 +61,37 @@ class DumpRestore(unittest.TestCase):
             if flags:
                 self.assertFalse(json.loads(result.stderr.splitlines()[-1])["ok"])
 
+    def test_restore_rejects_identifiers_containing_sql(self):
+        source = self.root / "identifiers.jsonl"
+        source.write_text(json.dumps({"collection": "rows; DROP TABLE protected",
+                                      "fields": {"id": 1}}) + "\n")
+        result = self.cli("restore", "--path", self.root / "identifiers.rdb", "-i", source,
+                          success=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported collection identifier", result.stderr)
+
+    def test_selected_collection_retains_config_and_override_preserves_it(self):
+        source = self.root / "config-source.rdb"
+        self.cli("query", "--path", source, "SET CONFIG red.config.demo.enabled = true")
+        self.cli("query", "--path", source, "SET CONFIG red.config.demo.enabled = false")
+        self.cli("query", "--path", source, "INSERT INTO original (id) VALUES (1)")
+        dump = self.root / "selected.jsonl"
+        self.cli("dump", "--path", source, "--collection", "original", "-o", dump)
+        records = [json.loads(line) for line in dump.read_text().splitlines()]
+        self.assertEqual({r.get("collection") for r in records}, {"original", "red_config"})
+        target = self.root / "config-target.rdb"
+        self.cli("restore", "--path", target, "--collection", "renamed", "-i", dump)
+        _, restored = self.dump(target, "config-restored.jsonl")
+        def custom_config(records):
+            return [r for r in records if r.get("collection") == "red_config"
+                    and r["fields"].get("key") == "red.config.demo.enabled"]
+        self.assertEqual(custom_config(restored), custom_config(records))
+        query = self.cli("query", "--path", target, "--json",
+                         "SELECT $red.config.demo.enabled AS enabled")
+        self.assertFalse(json.loads(query.stdout)["data"]["rows"][0]["enabled"])
+        self.assertEqual([r["fields"] for r in restored if r.get("collection") == "renamed"],
+                         [{"id": 1}])
+
 
 if __name__ == "__main__":
     unittest.main()

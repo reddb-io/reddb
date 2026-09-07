@@ -91,6 +91,52 @@ fn append_refuses_an_externally_corrupted_published_tail() {
     );
 }
 
+#[test]
+fn append_invalidates_replacement_with_identical_superblocks() {
+    let dir = temp_dir("append-same-headers");
+    let path = dir.path().join("data.rdb");
+    let replacement = dir.path().join("replacement.rdb");
+    let donor = dir.path().join("donor.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"original".to_vec()])
+        .expect("populate original tail");
+    std::fs::copy(&path, &replacement).expect("copy original headers");
+    EmbeddedRdbArtifact::create(&donor).expect("create donor");
+    let donor_open = EmbeddedRdbArtifact::append_wal_payloads(&donor, &[b"replaced".to_vec()])
+        .expect("encode different same-length tail");
+    assert_eq!(
+        open.manifest.wal_live_bytes,
+        donor_open.manifest.wal_live_bytes
+    );
+    let mut frame = vec![0; usize::try_from(open.manifest.wal_live_bytes).expect("frame length")];
+    let mut file = std::fs::File::open(&donor).expect("read donor");
+    file.seek(SeekFrom::Start(donor_open.manifest.wal_region_offset))
+        .expect("seek");
+    file.read_exact(&mut frame).expect("read donor frame");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(&replacement)
+        .expect("open replacement");
+    file.seek(SeekFrom::Start(open.manifest.wal_region_offset))
+        .expect("seek");
+    file.write_all(&frame).expect("replace WAL only");
+    file.sync_all().expect("sync");
+    drop(file);
+    assert_eq!(
+        EmbeddedRdbArtifact::open(&replacement)
+            .expect("open replacement")
+            .selected_superblock,
+        open.selected_superblock
+    );
+    std::fs::rename(&replacement, &path).expect("replace pathname");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"last".to_vec()])
+        .expect("extend new CRC chain");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"replaced".to_vec(), b"last".to_vec()]
+    );
+}
+
 fn artifact_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()

@@ -616,6 +616,18 @@ jobs:
           python-version: '3.x'
       - name: Build red (embedded engine for the JS SDK)
         run: cargo build --locked --bin red
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.1'
+      - name: Bun SDK and actual RedWire client regressions
+        working-directory: drivers/bun
+        env:
+          REDDB_BINARY_PATH: ${{ github.workspace }}/target/debug/red
+        run: bun run test
+      - name: CLI logical dump and restore regressions
+        env:
+          REDDB_BINARY_PATH: ${{ github.workspace }}/target/debug/red
+        run: python3 tests/cli_dump_restore.py
       - name: Rust client transport conformance over RedWire (red://)
         # The `redwire` feature is not in the client's default set, so a plain
         # `cargo test` exercises the embedded path only and the wire path goes

@@ -2052,7 +2052,11 @@ fn main() {
                     Some(m) => m,
                     None => continue,
                 };
-                for entity in manager.query_all(|_| true) {
+                // Config resolves repeated keys by newest entity id. Preserve
+                // that insertion order when restore assigns fresh entity ids.
+                let mut entities = manager.query_all(|_| true);
+                entities.sort_unstable_by_key(|entity| entity.id.raw());
+                for entity in entities {
                     let mut row_obj = reddb::json::Map::new();
                     if let reddb::storage::EntityData::Row(ref row) = entity.data {
                         if let Some(named) = &row.named {
