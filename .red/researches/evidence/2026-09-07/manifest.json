@@ -281,6 +281,11 @@
       "file": "final-release--reddb-disk-insert_sequential.json",
       "sha256": "83ab41a586c0b07daa2e18bd77e976b8a30529477689583d18d601ab64ebd84a",
       "bytes": 52144
+    },
+    {
+      "file": "ui-release-launch.log",
+      "sha256": "2bdcc3305b2cea7d04b1febdbf814d14c4fa7cf8741a59466fbf1366c9c05eab",
+      "bytes": 363
     }
   ],
   "final_runner_source_hashes": {

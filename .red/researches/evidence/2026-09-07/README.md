@@ -64,6 +64,8 @@ and expanded runs therefore remain exploratory, even with ten repetitions.
   202 fdatasync and 201 fsync starts, with zero in version/constant phases.
 - `native-reopen-{node,bun}.json`: minimized 200-row native lifecycle case;
   Node exits 13 and Bun times out while awaiting reopen, after close returned.
+- `ui-release-launch.log`: fresh released `red ui` launch fails downloading
+  the v0.0.0-dev bundle with HTTP 404.
 - `studio-browser.json`: observed official login page; ephemeral auth state
   removed. Authenticated editing was not evaluated. Red UI release bundle
   fetch failed with a v0.0.0-dev 404; local embed-host override is not a released
