@@ -198,7 +198,7 @@ fn expressions_native_insert_patch_and_bulk_share_contract() {
     api.patch(PatchEntityInput {
         collection: "orders".into(),
         id: created.id,
-        payload: json!({"fields":{"quantity":3}}),
+        payload: json!({"fields": json!({"quantity": 3})}),
         operations: Vec::new(),
     })
     .expect("native patch");
