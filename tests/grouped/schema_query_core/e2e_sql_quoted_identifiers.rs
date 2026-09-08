@@ -81,3 +81,31 @@ fn sql_quoted_columns_do_not_share_cached_literal_plans() {
         );
     }
 }
+
+#[test]
+fn unfiltered_projection_keeps_retention_filtering() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    for sql in [
+        "CREATE TABLE retention_items (id INT, ts TIMESTAMP)",
+        "INSERT INTO retention_items (id,ts) VALUES (1,1)",
+        "ALTER COLLECTION retention_items SET RETENTION 1 s",
+    ] {
+        rt.execute_query(sql).expect(sql);
+    }
+    let query = r#"SELECT "id" AS "visible id" FROM retention_items"#;
+    assert!(rt
+        .execute_query(query)
+        .expect("retained projection")
+        .result
+        .records
+        .is_empty());
+    rt.execute_query("ALTER COLLECTION retention_items UNSET RETENTION")
+        .expect("unset retention");
+    let result = rt.execute_query(query).expect("projection");
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(
+        result.result.records[0].get("visible id"),
+        Some(&Value::Integer(1))
+    );
+    assert_eq!(result.result.records[0].column_names(), ["visible id"]);
+}

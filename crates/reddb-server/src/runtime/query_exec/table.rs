@@ -1772,6 +1772,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if query.sessionize.is_none()
             && !matches!(effective_projections.as_slice(), [Projection::All])
         {
+            crate::runtime::retention_filter::apply(
+                &mut records,
+                db.collection_contract(query.table.as_str()).as_ref(),
+            );
             return records
                 .iter()
                 .map(|record| {
