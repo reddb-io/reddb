@@ -258,3 +258,56 @@ fn vector_exact_snapshot_hides_vectors_during_transactional_insert() {
         "fresh reads see the 16 committed inserts and hide rollbacks"
     );
 }
+
+#[test]
+fn vector_rolled_back_inserts_stay_hidden_after_reopen() {
+    let directory = tempfile::tempdir().expect("database directory");
+    let path = directory.path().join("vectors.rdb");
+    let query = "VECTOR SEARCH rollback_snapshot SIMILAR TO [1,0] MODE EXACT LIMIT 10";
+    {
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
+        for sql in [
+            "CREATE VECTOR rollback_snapshot DIM 2 METRIC cosine",
+            "BEGIN",
+            "INSERT INTO rollback_snapshot VECTOR (dense,content) VALUES ([1,0],'committed')",
+            "SAVEPOINT inner_write",
+            "INSERT INTO rollback_snapshot VECTOR (dense,content) VALUES ([1,0],'savepoint_rollback')",
+            "ROLLBACK TO SAVEPOINT inner_write",
+            "COMMIT",
+            "BEGIN",
+            "INSERT INTO rollback_snapshot VECTOR (dense,content) VALUES ([1,0],'rollback')",
+            "ROLLBACK",
+        ] {
+            rt.execute_query(sql).expect("transaction setup");
+        }
+        assert_eq!(
+            rt.execute_query(query)
+                .expect("live view")
+                .result
+                .records
+                .len(),
+            1
+        );
+        rt.flush().expect("persist completed transactions");
+    }
+    let reopened = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+    let result = reopened.execute_query(query).expect("reopened view");
+    assert_eq!(
+        result.result.records.len(),
+        1,
+        "rolled-back vectors must not resurrect"
+    );
+    assert_eq!(
+        result.result.records[0].get("content"),
+        Some(&Value::text("committed"))
+    );
+    assert_eq!(
+        result
+            .result
+            .stats
+            .vector
+            .expect("stats")
+            .exact_distance_evaluations,
+        1
+    );
+}

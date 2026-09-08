@@ -187,7 +187,7 @@ impl UnifiedStore {
         for (name, manager) in collections.iter() {
             // Get all entities from this collection
             let entities = manager.query_all(|entity| {
-                !matches!(entity.data, EntityData::Row(_))
+                !matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
                     || !self
                         .snapshot_manager
                         .get()
