@@ -1483,6 +1483,24 @@ impl IndexStore {
             .collect()
     }
 
+    pub(crate) fn unique_hash_indexes(&self, collection: &str) -> Vec<RegisteredIndex> {
+        read_unpoisoned(&self.registry)
+            .values()
+            .filter(|index| {
+                index.collection == collection
+                    && index.unique
+                    && index.method == IndexMethodKind::Hash
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn has_unique_hash_index(&self, collection: &str) -> bool {
+        read_unpoisoned(&self.registry).values().any(|index| {
+            index.collection == collection && index.unique && index.method == IndexMethodKind::Hash
+        })
+    }
+
     pub fn entries_indexed(&self, index: &RegisteredIndex) -> u64 {
         match index.method {
             IndexMethodKind::Hash => self
@@ -2142,7 +2160,7 @@ fn derive_h3_cell_entities(
 }
 
 /// Convert a Value to bytes for index key
-fn value_to_bytes(value: &Value) -> Vec<u8> {
+pub(crate) fn value_to_bytes(value: &Value) -> Vec<u8> {
     match value {
         Value::Text(s) => s.as_bytes().to_vec(),
         Value::Integer(n) => n.to_le_bytes().to_vec(),

@@ -443,7 +443,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
-            &self.db(),
+            self,
             &query.table,
         );
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
@@ -1872,7 +1872,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
-            &self.db(),
+            self,
             &query.table,
         );
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
@@ -2588,7 +2588,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
-            &self.db(),
+            self,
             &query.table,
         );
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());

@@ -89,6 +89,12 @@ impl<'rt> MutationEngine<'rt> {
         self.runtime
             .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
 
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            self.runtime,
+            &collection,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
+
         // Synchronous content-moderation gate (#1274, ADR 0057). For a
         // collection that declares a `MODERATE (... sync = true)` policy,
         // every declared text field of every row is screened BEFORE the
@@ -100,6 +106,8 @@ impl<'rt> MutationEngine<'rt> {
         // the entity build in the kernels.
         self.runtime
             .apply_sync_moderation_gate(&collection, &mut rows)?;
+
+        self.runtime.enforce_unique_hash_rows(&collection, &rows)?;
 
         let growth_bytes = rows
             .iter()

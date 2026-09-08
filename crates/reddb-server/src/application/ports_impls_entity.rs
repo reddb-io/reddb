@@ -1769,6 +1769,11 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
+    // Schema prevalidation does not admit standalone index keys. Route these
+    // collections through the guarded row kernel before installing any row.
+    if runtime.index_store_ref().has_unique_hash_index(&collection) {
+        return runtime.create_rows_batch_columnar_with_outputs(collection, column_names, rows);
+    }
     runtime.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
     runtime.check_batch_size(rows.len())?;
     runtime.check_db_size()?;
@@ -1845,7 +1850,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
-            &self.db(),
+            self,
             &input.collection,
         );
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
@@ -1890,7 +1895,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         input: CreateRowsBatchInput,
     ) -> RedDBResult<Vec<CreateEntityOutput>> {
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
-            &self.db(),
+            self,
             &input.collection,
         );
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
@@ -2008,17 +2013,18 @@ impl RuntimeEntityPort for RedDBRuntime {
         // without the wasted (String, Value) clones. This is the
         // bench `bench_users` shape (no contract declared by the
         // adapter's `setup_schema`).
-        let needs_normalisation = match db.collection_contract(&collection) {
-            Some(c) => {
-                c.declared_model == crate::catalog::CollectionModel::Table
-                    && (!c.declared_columns.is_empty()
-                        || c.table_def
-                            .as_ref()
-                            .map(|t| !t.columns.is_empty())
-                            .unwrap_or(false))
-            }
-            None => false,
-        };
+        let needs_normalisation = self.index_store_ref().has_unique_hash_index(&collection)
+            || match db.collection_contract(&collection) {
+                Some(c) => {
+                    c.declared_model == crate::catalog::CollectionModel::Table
+                        && (!c.declared_columns.is_empty()
+                            || c.table_def
+                                .as_ref()
+                                .map(|t| !t.columns.is_empty())
+                                .unwrap_or(false))
+                }
+                None => false,
+            };
         if !needs_normalisation {
             return create_rows_batch_prevalidated_columnar_with_outputs(
                 self,
@@ -2429,7 +2435,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn patch_entity(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
-            &self.db(),
+            self,
             &input.collection,
         );
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
@@ -2458,7 +2464,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
-            &self.db(),
+            self,
             &input.collection,
         );
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());

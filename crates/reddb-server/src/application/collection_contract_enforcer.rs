@@ -395,15 +395,19 @@ mod write_adapter {
             fields: &[(String, Value)],
             target: Option<&[String]>,
         ) -> RedDBResult<Option<crate::storage::EntityId>> {
-            find_row_uniqueness_conflict(
+            let conflict = find_row_uniqueness_conflict(
                 self.runtime,
                 self.db,
                 self.collection,
                 fields,
                 target,
                 None,
-            )
-            .map(|conflict| conflict.map(|conflict| conflict.entity_id))
+            )?;
+            if let Some(conflict) = conflict {
+                return Ok(Some(conflict.entity_id));
+            }
+            self.runtime
+                .unique_hash_conflict_id(self.collection, fields, target)
         }
 
         pub(crate) fn has_row_uniqueness_conflict_with_rows(
@@ -412,9 +416,25 @@ mod write_adapter {
             existing_fields: &[Vec<(String, Value)>],
             target: Option<&[String]>,
         ) -> RedDBResult<bool> {
+            if self.runtime.has_unique_hash_batch_conflict(
+                self.collection,
+                fields,
+                existing_fields,
+                target,
+            ) {
+                return Ok(true);
+            }
             let Some(contract) = self.db.collection_contract(self.collection) else {
                 return Ok(false);
             };
+            if target.is_some_and(|target| {
+                self.runtime.has_unique_hash_target(self.collection, target)
+                    && !resolved_uniqueness_rules(&contract)
+                        .iter()
+                        .any(|rule| uniqueness_columns_match(&rule.columns, target))
+            }) {
+                return Ok(false);
+            }
             let existing_rows = existing_fields
                 .iter()
                 .enumerate()
@@ -613,15 +633,19 @@ fn current_unix_ms_u64() -> u64 {
 /// Unconstrained collections do not acquire this gate. Pending rows themselves
 /// reserve keys until their creator/deleter's outcome is known.
 pub(crate) fn row_constraint_lock(
-    db: &crate::storage::unified::devx::RedDB,
+    runtime: &crate::RedDBRuntime,
     collection: &str,
 ) -> Option<std::sync::Arc<parking_lot::ReentrantMutex<()>>> {
-    let contract = db.collection_contract_arc(collection)?;
-    if !matches!(
-        contract.declared_model,
-        crate::catalog::CollectionModel::Table | crate::catalog::CollectionModel::Mixed
-    ) || resolved_uniqueness_rules(&contract).is_empty()
-    {
+    let db = runtime.db();
+    let constrained = db
+        .collection_contract_arc(collection)
+        .is_some_and(|contract| {
+            matches!(
+                contract.declared_model,
+                crate::catalog::CollectionModel::Table | crate::catalog::CollectionModel::Mixed
+            ) && !resolved_uniqueness_rules(&contract).is_empty()
+        });
+    if !constrained && !runtime.index_store_ref().has_unique_hash_index(collection) {
         return None;
     }
     db.store()
@@ -671,6 +695,7 @@ fn find_row_uniqueness_conflict(
         if !rules
             .iter()
             .any(|rule| uniqueness_columns_match(&rule.columns, target))
+            && !runtime.has_unique_hash_target(collection, target)
         {
             return Err(crate::RedDBError::Query(format!(
                 "no unique or primary-key constraint on collection '{}' matches ON CONFLICT ({})",
