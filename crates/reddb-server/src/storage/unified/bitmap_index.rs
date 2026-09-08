@@ -57,6 +57,8 @@ pub struct BitmapColumnIndex {
     pub column: String,
     /// Next available offset
     next_offset: u32,
+    /// Estimated keys, serialized bitmaps and map-entry bytes.
+    bitmap_memory_bytes: usize,
 }
 
 impl BitmapColumnIndex {
@@ -68,6 +70,7 @@ impl BitmapColumnIndex {
             offset_to_id: Vec::new(),
             column: column.into(),
             next_offset: 0,
+            bitmap_memory_bytes: 0,
         }
     }
 
@@ -79,20 +82,30 @@ impl BitmapColumnIndex {
             self.offset_to_id.push(entity_id);
             off
         });
-        self.bitmaps
-            .entry(value.to_vec())
-            .or_default()
-            .insert(offset);
+        let bitmap = self.bitmaps.entry(value.to_vec()).or_default();
+        let before = bitmap.serialized_size();
+        if bitmap.is_empty() {
+            self.bitmap_memory_bytes += value.len() + before + 48;
+        }
+        bitmap.insert(offset);
+        self.bitmap_memory_bytes = self.bitmap_memory_bytes - before + bitmap.serialized_size();
     }
 
     /// Remove an entity from the index (removes from all value bitmaps)
     pub fn remove(&mut self, entity_id: EntityId) {
         if let Some(offset) = self.id_to_offset.remove(&entity_id) {
-            for bitmap in self.bitmaps.values_mut() {
+            self.bitmaps.retain(|key, bitmap| {
+                let before = bitmap.serialized_size();
                 bitmap.remove(offset);
-            }
-            // Clean up empty bitmaps
-            self.bitmaps.retain(|_, bm| !bm.is_empty());
+                self.bitmap_memory_bytes -= before;
+                if bitmap.is_empty() {
+                    self.bitmap_memory_bytes -= key.len() + 48;
+                    false
+                } else {
+                    self.bitmap_memory_bytes += bitmap.serialized_size();
+                    true
+                }
+            });
         }
     }
 
@@ -138,13 +151,10 @@ impl BitmapColumnIndex {
 
     /// Approximate memory usage in bytes
     pub fn memory_bytes(&self) -> usize {
-        let mut size = std::mem::size_of::<Self>();
-        for (key, bm) in &self.bitmaps {
-            size += key.len() + bm.serialized_size() + 48;
-        }
-        size += self.id_to_offset.len() * 16; // HashMap overhead
-        size += self.offset_to_id.len() * 8; // Vec<EntityId>
-        size
+        std::mem::size_of::<Self>()
+            + self.bitmap_memory_bytes
+            + self.id_to_offset.len() * 16
+            + self.offset_to_id.len() * 8
     }
 }
 
@@ -350,6 +360,48 @@ pub struct BitmapIndexStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_memory_accounting(index: &BitmapColumnIndex) {
+        let recomputed = std::mem::size_of::<BitmapColumnIndex>()
+            + index
+                .bitmaps
+                .iter()
+                .map(|(key, bitmap)| key.len() + bitmap.serialized_size() + 48)
+                .sum::<usize>()
+            + index.id_to_offset.len() * 16
+            + index.offset_to_id.len() * 8;
+        assert_eq!(index.memory_bytes(), recomputed);
+    }
+
+    #[test]
+    fn memory_accounting_tracks_bitmap_transitions_and_reinsertion() {
+        let mut index = BitmapColumnIndex::new("state");
+        assert_memory_accounting(&index);
+        for id in 0..70_000 {
+            index.insert(EntityId::new(id), b"common");
+            if id % 4096 == 0 {
+                assert_memory_accounting(&index);
+            }
+        }
+        assert_memory_accounting(&index);
+        for id in 0..128 {
+            index.insert(EntityId::new(id), b"common");
+            index.insert(EntityId::new(id), &id.to_le_bytes());
+            assert_memory_accounting(&index);
+        }
+        for id in 0..70_000 {
+            index.remove(EntityId::new(id));
+            if id % 4096 == 0 {
+                assert_memory_accounting(&index);
+            }
+        }
+        assert_memory_accounting(&index);
+        assert_eq!(index.cardinality(), 0);
+        index.insert(EntityId::new(1), b"again");
+        assert_memory_accounting(&index);
+        index.remove(EntityId::new(1));
+        assert_memory_accounting(&index);
+    }
 
     #[test]
     fn test_bitmap_basic() {

@@ -73,6 +73,7 @@ fn btree_entry_bytes<'a>(
 pub struct SortedColumnIndex {
     /// Sorted entries: canonical key → entity IDs
     entries: BTreeMap<CanonicalKey, Vec<EntityId>>,
+    entry_memory_bytes: usize,
     /// Family seen in this index. Mixed families keep exact lookup safe but
     /// disable range pushdown.
     range_family: Option<CanonicalKeyFamily>,
@@ -84,6 +85,7 @@ impl SortedColumnIndex {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            entry_memory_bytes: 0,
             range_family: None,
             has_mixed_families: false,
             families: BTreeSet::new(),
@@ -97,7 +99,12 @@ impl SortedColumnIndex {
             None => self.range_family = Some(key.family()),
             _ => {}
         }
-        self.entries.entry(key).or_default().push(entity_id);
+        let entry = self.entries.entry(key);
+        if let std::collections::btree_map::Entry::Vacant(ref entry) = entry {
+            self.entry_memory_bytes += btree_entry_bytes(std::iter::once(entry.key()), 0);
+        }
+        self.entry_memory_bytes += std::mem::size_of::<EntityId>();
+        entry.or_default().push(entity_id);
     }
 
     fn range_enabled(&self, family: CanonicalKeyFamily) -> bool {
@@ -165,12 +172,7 @@ impl SortedColumnIndex {
     /// Approximate resident bytes (ADR 0073 §2). Same shape as the hash and
     /// bitmap estimators: keys plus posting lists plus a per-node constant.
     pub fn memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self
-                .entries
-                .iter()
-                .map(|(key, ids)| btree_entry_bytes(std::iter::once(key), ids.len()))
-                .sum::<usize>()
+        std::mem::size_of::<Self>() + self.entry_memory_bytes
     }
 
     /// Range scan with early stop at `limit` entity IDs.
@@ -420,17 +422,24 @@ impl SortedColumnIndex {
 /// + trailing-range queries.
 pub struct SortedCompositeIndex {
     entries: BTreeMap<Vec<CanonicalKey>, Vec<EntityId>>,
+    entry_memory_bytes: usize,
 }
 
 impl SortedCompositeIndex {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            entry_memory_bytes: 0,
         }
     }
 
     pub fn insert(&mut self, key: Vec<CanonicalKey>, entity_id: EntityId) {
-        self.entries.entry(key).or_default().push(entity_id);
+        let entry = self.entries.entry(key);
+        if let std::collections::btree_map::Entry::Vacant(ref entry) = entry {
+            self.entry_memory_bytes += btree_entry_bytes(entry.key().iter(), 0);
+        }
+        self.entry_memory_bytes += std::mem::size_of::<EntityId>();
+        entry.or_default().push(entity_id);
     }
 
     pub fn len(&self) -> usize {
@@ -440,12 +449,7 @@ impl SortedCompositeIndex {
     /// Approximate resident bytes (ADR 0073 §2). Every column of the composite
     /// key is charged, so a wide index costs what it weighs.
     pub fn memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self
-                .entries
-                .iter()
-                .map(|(key, ids)| btree_entry_bytes(key.iter(), ids.len()))
-                .sum::<usize>()
+        std::mem::size_of::<Self>() + self.entry_memory_bytes
     }
 
     /// Range scan with an exact prefix on the first `prefix.len()` columns
@@ -639,8 +643,11 @@ impl SortedIndexManager {
         };
         if let Some(old) = old_tuple {
             if let Some(ids) = idx.entries.get_mut(&old) {
+                let before = ids.len();
                 ids.retain(|id| *id != entity_id);
+                idx.entry_memory_bytes -= (before - ids.len()) * std::mem::size_of::<EntityId>();
                 if ids.is_empty() {
+                    idx.entry_memory_bytes -= btree_entry_bytes(old.iter(), 0);
                     idx.entries.remove(&old);
                 }
             }
@@ -1143,8 +1150,12 @@ impl SortedIndexManager {
                 return;
             };
             if let Some(bucket) = index.entries.get_mut(&key) {
+                let before = bucket.len();
                 bucket.retain(|id| *id != entity_id);
+                index.entry_memory_bytes -=
+                    (before - bucket.len()) * std::mem::size_of::<EntityId>();
                 if bucket.is_empty() {
+                    index.entry_memory_bytes -= btree_entry_bytes(std::iter::once(&key), 0);
                     index.entries.remove(&key);
                 }
             }
@@ -2148,6 +2159,76 @@ mod tests {
 
     fn ids(values: &[EntityId]) -> Vec<u64> {
         values.iter().map(|id| id.raw()).collect()
+    }
+
+    fn assert_memory_accounting(manager: &SortedIndexManager) {
+        let single = manager
+            .indices
+            .read()
+            .values()
+            .map(|index| {
+                std::mem::size_of::<SortedColumnIndex>()
+                    + index
+                        .entries
+                        .iter()
+                        .map(|(key, ids)| btree_entry_bytes(std::iter::once(key), ids.len()))
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        let composite = manager
+            .composite
+            .read()
+            .values()
+            .map(|index| {
+                std::mem::size_of::<SortedCompositeIndex>()
+                    + index
+                        .entries
+                        .iter()
+                        .map(|(key, ids)| btree_entry_bytes(key.iter(), ids.len()))
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        assert_eq!(manager.memory_bytes(), (single + composite) as u64);
+    }
+
+    #[test]
+    fn memory_accounting_tracks_sorted_updates_deletes_and_rebuilds() {
+        let manager = SortedIndexManager::new();
+        manager
+            .indices
+            .write()
+            .insert(("items".into(), "key".into()), SortedColumnIndex::new());
+        let columns = vec!["key".to_string(), "group".to_string()];
+        let mut entities = Vec::new();
+        for id in 0..128 {
+            let value = Value::text(format!("key-{}", id % 13));
+            manager.insert_one("items", "key", &value, EntityId::new(id));
+            manager.insert_one("items", "key", &value, EntityId::new(id));
+            entities.push((
+                EntityId::new(id),
+                vec![("key".into(), value), ("group".into(), Value::Integer(1))],
+            ));
+            assert_memory_accounting(&manager);
+        }
+        manager.build_composite("items", &columns, &entities);
+        assert_memory_accounting(&manager);
+        for (id, fields) in &entities {
+            manager.delete_one("items", "key", &fields[0].1, *id);
+            manager.delete_one("items", "key", &fields[0].1, *id);
+            let updated = vec![
+                ("key".into(), Value::text("updated")),
+                ("group".into(), Value::Integer(2)),
+            ];
+            manager.composite_entity_update("items", &columns, *id, fields, &updated);
+            assert_memory_accounting(&manager);
+            manager.composite_entity_update("items", &columns, *id, &updated, &[]);
+            assert_memory_accounting(&manager);
+        }
+        manager.build_composite("items", &columns, &entities);
+        assert_memory_accounting(&manager);
+        manager.composite.write().clear();
+        manager.indices.write().clear();
+        assert_eq!(manager.memory_bytes(), 0);
     }
 
     #[test]
