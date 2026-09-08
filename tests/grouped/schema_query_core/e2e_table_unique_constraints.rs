@@ -18,18 +18,33 @@ fn duplicate(rt: &RedDBRuntime, query: &str) {
 fn table_unique_constraints_enforce_tuples_nulls_updates_and_savepoints() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
     execute(&rt, "CREATE TABLE pairs (id INT PRIMARY KEY, left_key INT, right_key TEXT, CONSTRAINT pair_key UNIQUE (left_key, right_key))");
-    execute(&rt, "INSERT INTO pairs VALUES (1,1,'a'),(2,1,'b'),(3,2,'a'),(4,NULL,'a'),(5,NULL,'a'),(6,1,NULL),(7,1,NULL)");
-    duplicate(&rt, "INSERT INTO pairs VALUES (8,1,'a')");
+    execute(&rt, "INSERT INTO pairs (id,left_key,right_key) VALUES (1,1,'a'),(2,1,'b'),(3,2,'a'),(4,NULL,'a'),(5,NULL,'a'),(6,1,NULL),(7,1,NULL)");
+    duplicate(
+        &rt,
+        "INSERT INTO pairs (id,left_key,right_key) VALUES (8,1,'a')",
+    );
     duplicate(&rt, "UPDATE pairs SET right_key='a' WHERE id=2");
     execute(&rt, "BEGIN");
     execute(&rt, "SAVEPOINT probe");
-    execute(&rt, "INSERT INTO pairs VALUES (8,3,'a')");
-    duplicate(&rt, "INSERT INTO pairs VALUES (9,3,'a')");
+    execute(
+        &rt,
+        "INSERT INTO pairs (id,left_key,right_key) VALUES (8,3,'a')",
+    );
+    duplicate(
+        &rt,
+        "INSERT INTO pairs (id,left_key,right_key) VALUES (9,3,'a')",
+    );
     execute(&rt, "ROLLBACK TO SAVEPOINT probe");
-    execute(&rt, "INSERT INTO pairs VALUES (8,3,'a')");
+    execute(
+        &rt,
+        "INSERT INTO pairs (id,left_key,right_key) VALUES (8,3,'a')",
+    );
     execute(&rt, "COMMIT");
     execute(&rt, "DELETE FROM pairs WHERE id=1");
-    execute(&rt, "INSERT INTO pairs VALUES (9,1,'a')");
+    execute(
+        &rt,
+        "INSERT INTO pairs (id,left_key,right_key) VALUES (9,1,'a')",
+    );
     let result = rt
         .execute_query("SELECT id FROM pairs WHERE left_key=1 AND right_key='b'")
         .expect("failed update is atomic");
@@ -65,7 +80,10 @@ fn table_unique_constraints_survive_reopen_and_show_create_roundtrip() {
     {
         let rt = RedDBRuntime::with_options(options.clone()).expect("runtime");
         execute(&rt, "CREATE TABLE pairs (id INT PRIMARY KEY, left_key INT, right_key TEXT, UNIQUE (left_key, right_key), CONSTRAINT uniq_left_key_right_key UNIQUE (right_key, left_key))");
-        execute(&rt, "INSERT INTO pairs VALUES (1,1,'a')");
+        execute(
+            &rt,
+            "INSERT INTO pairs (id,left_key,right_key) VALUES (1,1,'a')",
+        );
         let result = rt.execute_query("SHOW CREATE TABLE pairs").expect("DDL");
         let Some(Value::Text(value)) = result.result.records[0].get("ddl") else {
             panic!("DDL text")
@@ -81,7 +99,10 @@ fn table_unique_constraints_survive_reopen_and_show_create_roundtrip() {
         );
     }
     let reopened = RedDBRuntime::with_options(options).expect("reopen");
-    duplicate(&reopened, "INSERT INTO pairs VALUES (2,1,'a')");
+    duplicate(
+        &reopened,
+        "INSERT INTO pairs (id,left_key,right_key) VALUES (2,1,'a')",
+    );
     let fresh = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("fresh");
     for statement in ddl
         .split(';')
@@ -90,8 +111,14 @@ fn table_unique_constraints_survive_reopen_and_show_create_roundtrip() {
     {
         execute(&fresh, statement);
     }
-    execute(&fresh, "INSERT INTO pairs VALUES (1,1,'a')");
-    duplicate(&fresh, "INSERT INTO pairs VALUES (2,1,'a')");
+    execute(
+        &fresh,
+        "INSERT INTO pairs (id,left_key,right_key) VALUES (1,1,'a')",
+    );
+    duplicate(
+        &fresh,
+        "INSERT INTO pairs (id,left_key,right_key) VALUES (2,1,'a')",
+    );
 }
 
 #[test]
