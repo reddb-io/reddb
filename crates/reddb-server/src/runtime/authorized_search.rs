@@ -723,4 +723,37 @@ mod frame_regression_tests {
             },
         );
     }
+    #[test]
+    fn search_scope_preserves_own_savepoint_writes_and_aborts() {
+        use crate::runtime::statement_frame::{StatementExecutionFrame, StatementIdentity};
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        for sql in [
+            "CREATE TABLE docs (id INT, body TEXT)",
+            "BEGIN",
+            "INSERT INTO docs (id,body) VALUES (1,'needle parent')",
+            "SAVEPOINT child",
+            "INSERT INTO docs (id,body) VALUES (2,'needle child')",
+        ] {
+            rt.execute_query(sql).expect(sql);
+        }
+        let scope = {
+            let frame = StatementExecutionFrame::build(
+                &rt,
+                StatementIdentity::Text("SEARCH TEXT 'needle' IN docs"),
+            )
+            .expect("frame");
+            let _installed = frame.install(&rt);
+            let mut scope = rt.ai_scope();
+            scope.visible_collections = Some(["docs".into()].into_iter().collect());
+            scope
+        };
+        let mut rows = text(&rt, &scope, 10);
+        rows.sort();
+        assert_eq!(rows, ["needle child", "needle parent"]);
+        rt.execute_query("ROLLBACK TO SAVEPOINT child")
+            .expect("rollback child");
+        assert_eq!(text(&rt, &scope, 10), ["needle parent"]);
+        rt.execute_query("ROLLBACK").expect("rollback parent");
+        assert!(text(&rt, &scope, 10).is_empty());
+    }
 }
