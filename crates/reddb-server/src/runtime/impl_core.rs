@@ -426,7 +426,7 @@ impl RedDBRuntime {
         query: &str,
         params: &[Value],
     ) -> RedDBResult<RuntimeQueryResult> {
-        let parsed = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+        let parsed = self.parameterized_query_ast(query)?;
         let bound = crate::storage::query::user_params::bind(&parsed, params).map_err(|err| {
             RedDBError::Validation {
                 message: err.to_string(),
@@ -437,6 +437,32 @@ impl RedDBRuntime {
             }
         })?;
         self.execute_bound_query_expr_in_frame(query, bound)
+    }
+
+    /// Cache only the unbound parser output. Binding, views, authorization,
+    /// configuration and snapshots are resolved anew for every execution.
+    fn parameterized_query_ast(&self, query: &str) -> RedDBResult<QueryExpr> {
+        use crate::storage::query::planner::{CachedPlan, QueryPlan};
+
+        // Keep exact parameterized statements separate from normalized plans.
+        let key = format!("\0parameters\0{query}");
+        if let Some(parsed) = self
+            .inner
+            .query_cache
+            .read()
+            .peek(&key)
+            .filter(|entry| entry.matches_exact_query(query))
+            .map(|entry| entry.plan.original.clone())
+        {
+            return Ok(parsed);
+        }
+        let parsed = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+        let plan = QueryPlan::new(parsed.clone(), parsed.clone(), Default::default());
+        self.inner
+            .query_cache
+            .write()
+            .insert(key, CachedPlan::new(plan).with_exact_query(query));
+        Ok(parsed)
     }
 
     fn execute_bound_query_expr_in_frame(
