@@ -731,6 +731,16 @@ impl RedDBRuntime {
                         Vec::new()
                     };
                     let normalized_fields = contract.normalize_update_fields(current_fields)?;
+                    if let Some(schema) = db.collection_contract_arc(&collection) {
+                        for column in schema
+                            .declared_columns
+                            .iter()
+                            .filter(|column| column.generated.is_some())
+                        {
+                            modified_columns.push(column.name.clone());
+                            context_index_dirty = true;
+                        }
+                    }
                     if row_contract_timestamps {
                         modified_columns.push("updated_at".to_string());
                         context_index_dirty = true;
@@ -1282,7 +1292,24 @@ impl RedDBRuntime {
                 set_row_field(row, "updated_at", contract.managed_timestamp_value());
                 modified_columns.push("updated_at".to_string());
             }
-            if row_touches_unique_columns {
+            let expression_contract = db.collection_contract_arc(&collection).filter(|contract| {
+                crate::application::collection_contract_enforcer::has_contract_expressions(contract)
+            });
+            if let Some(schema) = &expression_contract {
+                let normalized = contract.normalize_update_fields(collect_row_fields(row))?;
+                for column in schema
+                    .declared_columns
+                    .iter()
+                    .filter(|column| column.generated.is_some())
+                {
+                    modified_columns.push(column.name.clone());
+                }
+                for (name, value) in normalized {
+                    set_row_field(row, &name, value);
+                }
+                context_index_dirty = true;
+            }
+            if row_touches_unique_columns || expression_contract.is_some() {
                 let current_fields = collect_row_fields(row);
                 contract.enforce_row_uniqueness(&current_fields, Some(id))?;
             }

@@ -175,6 +175,8 @@ mod tests {
             sql_type: SqlTypeName::parse_declared(declared),
             not_null: false,
             default: None,
+            generated: None,
+            check: None,
             compress: None,
             unique: false,
             primary_key: false,

@@ -60,6 +60,15 @@ impl RedDBRuntime {
         query: &CreateTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         if query.collection_model != CollectionModel::Table {
+            if query
+                .columns
+                .iter()
+                .any(|column| column.generated.is_some() || column.check.is_some())
+            {
+                return Err(RedDBError::Query(
+                    "schema expressions currently require TABLE collections".to_string(),
+                ));
+            }
             return self.execute_create_keyed_collection(raw_query, query);
         }
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
@@ -94,6 +103,7 @@ impl RedDBRuntime {
         // Build and validate the contract before mutating storage so invalid
         // SQL types / duplicate columns do not leave partial side effects.
         let contract = collection_contract_from_create_table(query)?;
+        crate::application::collection_contract_enforcer::validate_contract_expressions(&contract)?;
         validate_event_subscriptions(self, &query.name, &contract.subscriptions)?;
         // Create the collection.
         store
@@ -927,6 +937,26 @@ impl RedDBRuntime {
         query: &AlterTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let expression_contract =
+            self.db()
+                .collection_contract(&query.name)
+                .is_some_and(|contract| {
+                    crate::application::collection_contract_enforcer::has_contract_expressions(
+                        &contract,
+                    )
+                });
+        if query.operations.iter().any(|operation| match operation {
+            AlterOperation::AddColumn(column) => {
+                expression_contract || column.generated.is_some() || column.check.is_some()
+            }
+            AlterOperation::DropColumn(_) | AlterOperation::RenameColumn { .. } => {
+                expression_contract
+            }
+            _ => false,
+        }) {
+            return Err(RedDBError::Query("ALTER of expression schemas requires validated backfill; create a new collection and import explicitly".to_string()));
+        }
+
         let store = self.inner.db.store();
 
         // Verify the table exists.
@@ -2033,6 +2063,8 @@ fn collection_contract_from_create_table(
             sql_type: Some(reddb_types::SqlTypeName::simple("BIGINT")),
             not_null: true,
             default: None,
+            generated: None,
+            check: None,
             compress: None,
             unique: false,
             primary_key: false,
@@ -2046,6 +2078,8 @@ fn collection_contract_from_create_table(
             sql_type: Some(reddb_types::SqlTypeName::simple("BIGINT")),
             not_null: true,
             default: None,
+            generated: None,
+            check: None,
             compress: None,
             unique: false,
             primary_key: false,
@@ -2242,6 +2276,8 @@ fn declared_column_contract_from_ddl(
         sql_type: Some(column.sql_type.clone()),
         not_null: column.not_null,
         default: column.default.clone(),
+        generated: column.generated.clone(),
+        check: column.check.clone(),
         compress: column.compress,
         unique: column.unique,
         primary_key: column.primary_key,

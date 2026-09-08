@@ -227,6 +227,8 @@ fn physical_declared_column_contract_round_trips() {
         }),
         not_null: true,
         default: Some("0".to_string()),
+        generated: None,
+        check: None,
         compress: Some(3),
         unique: false,
         primary_key: false,
@@ -266,6 +268,8 @@ fn physical_collection_contract_round_trips() {
             }),
             not_null: true,
             default: None,
+            generated: None,
+            check: None,
             compress: None,
             unique: true,
             primary_key: true,
@@ -593,4 +597,28 @@ fn physical_metadata_core_contracts_round_trip() {
         })
     );
     assert!(decoded_hypertable.chunks[0].columnar_derived);
+}
+
+#[test]
+fn physical_column_expressions_roundtrip_and_legacy_absence() {
+    let column = PhysicalDeclaredColumnContract {
+        name: "total".into(),
+        data_type: "INTEGER".into(),
+        generated: Some("price * quantity".into()),
+        check: Some("total < 100".into()),
+        ..Default::default()
+    };
+    let encoded =
+        encode_physical_declared_column_contract_json(&column).expect("encode expressions");
+    assert_eq!(
+        decode_physical_declared_column_contract_json(&encoded).expect("decode expressions"),
+        column
+    );
+    let mut legacy: serde_json::Value = serde_json::from_str(&encoded).expect("metadata object");
+    let object = legacy.as_object_mut().expect("object");
+    object.remove("generated");
+    object.remove("check");
+    let decoded = decode_physical_declared_column_contract_json(&legacy.to_string())
+        .expect("legacy metadata");
+    assert!(decoded.generated.is_none() && decoded.check.is_none());
 }

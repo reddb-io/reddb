@@ -169,6 +169,8 @@ fn startup_rejects_persisted_table_contract_reserved_columns() {
             sql_type: Some(reddb_types::SqlTypeName::simple("TEXT")),
             not_null: false,
             default: None,
+            generated: None,
+            check: None,
             compress: None,
             unique: false,
             primary_key: false,

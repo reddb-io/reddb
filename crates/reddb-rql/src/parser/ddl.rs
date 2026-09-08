@@ -1223,6 +1223,8 @@ impl<'a> Parser<'a> {
             sql_type: sql_type.clone(),
             not_null: false,
             default: None,
+            generated: None,
+            check: None,
             compress: None,
             unique: false,
             primary_key: false,
@@ -1245,18 +1247,76 @@ impl<'a> Parser<'a> {
                 def.unique = true;
             } else if self.match_primary_key()? {
                 def.primary_key = true;
-            } else if matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("GENERATED"))
-            {
-                // Didactic (#1704): `… GENERATED ALWAYS AS (…) STORED` is a
-                // Postgres-ism. Document body fields already auto-flatten into
-                // queryable columns, so teach that instead of the generic error.
-                return Err(ParseError::generated_column_unneeded(self.position()));
+            } else if self.consume_ident_ci("GENERATED")? {
+                if def.generated.is_some() || !self.consume_ident_ci("ALWAYS")? {
+                    return Err(ParseError::new(
+                        "expected GENERATED ALWAYS AS (...) STORED",
+                        self.position(),
+                    ));
+                }
+                self.expect(Token::As)?;
+                def.generated = Some(self.parse_schema_expression()?);
+                if !self.consume_ident_ci("STORED")? {
+                    return Err(ParseError::new(
+                        "generated columns currently require STORED",
+                        self.position(),
+                    ));
+                }
+            } else if self.consume_ident_ci("CHECK")? {
+                if def.check.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate CHECK; combine predicates with AND",
+                        self.position(),
+                    ));
+                }
+                def.check = Some(self.parse_schema_expression()?);
             } else {
                 break;
             }
         }
 
         Ok(def)
+    }
+
+    fn parse_schema_expression(
+        &mut self,
+    ) -> Result<crate::schema_expression::SchemaExpression, ParseError> {
+        self.expect(Token::LParen)?;
+        let start = self.current.start.offset as usize;
+        let mut depth = 1usize;
+        let mut tokens = 0usize;
+        loop {
+            match self.peek() {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Token::Eof => {
+                    return Err(ParseError::new(
+                        "unterminated schema expression",
+                        self.position(),
+                    ))
+                }
+                _ => {}
+            }
+            tokens += 1;
+            if depth > 64 || tokens > 1024 {
+                return Err(ParseError::new(
+                    "schema expression exceeds depth or token limit",
+                    self.position(),
+                ));
+            }
+            self.advance()?;
+        }
+        let end = self.current.start.offset as usize;
+        self.expect(Token::RParen)?;
+        crate::schema_expression::SchemaExpression::parse(
+            self.lexer.source()[start..end].to_string(),
+        )
+        .map_err(|error| ParseError::new(error, self.position()))
     }
 
     /// Parse column type: TEXT, INTEGER, EMAIL, ENUM('a','b','c'), ARRAY(TEXT), DECIMAL(2)

@@ -20,6 +20,8 @@ fn to_create_column_def(
         sql_type,
         not_null: column.not_null,
         default: column.default,
+        generated: None,
+        check: None,
         compress: column.compress,
         unique: column.unique,
         primary_key: column.primary_key,

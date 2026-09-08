@@ -57,6 +57,7 @@ pub mod optimizer;
 pub mod parser;
 pub mod planner;
 pub mod renderer;
+pub mod schema_expression;
 pub mod sql;
 pub mod sql_lowering;
 

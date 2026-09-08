@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+#[path = "collection_contract_expressions.rs"]
+mod expressions;
+pub(crate) use expressions::{has_contract_expressions, validate_contract_expressions};
+
 use crate::application::entity::{RowUpdateColumnRule, RowUpdateContractPlan};
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::physical::CollectionContract;
@@ -557,8 +561,19 @@ fn normalize_row_fields_for_contract_at(
         )));
     }
     let mut normalized = Vec::new();
+    let generated_names: std::collections::BTreeSet<&str> = contract
+        .declared_columns
+        .iter()
+        .filter(|column| column.generated.is_some())
+        .map(|column| column.name.as_str())
+        .collect();
 
     for column in &resolved_columns {
+        if generated_names.contains(column.name.as_str()) {
+            // A derived value is never trusted, including one carried forward by UPDATE.
+            provided.remove(&column.name);
+            continue;
+        }
         match provided.remove(&column.name) {
             Some(value) => {
                 // Runtime-managed columns on Update: always overwrite
@@ -619,6 +634,7 @@ fn normalize_row_fields_for_contract_at(
         }
     }
 
+    expressions::apply_contract_expressions(contract, &resolved_columns, &mut normalized)?;
     Ok(normalized)
 }
 

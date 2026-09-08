@@ -130,6 +130,10 @@ pub struct DeclaredColumnContract {
     pub sql_type: Option<reddb_types::SqlTypeName>,
     pub not_null: bool,
     pub default: Option<String>,
+    /// Persisted, deterministic expression for a stored generated field.
+    pub generated: Option<reddb_rql::schema_expression::SchemaExpression>,
+    /// SQL CHECK: FALSE rejects, TRUE or NULL accepts.
+    pub check: Option<reddb_rql::schema_expression::SchemaExpression>,
     pub compress: Option<u8>,
     pub unique: bool,
     pub primary_key: bool,

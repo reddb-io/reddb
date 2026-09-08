@@ -1055,6 +1055,11 @@ fn declared_column_contract_json_value(
             .map(serde_json::Value::String)
             .unwrap_or(serde_json::Value::Null),
     );
+    for (name, expression) in [("generated", &column.generated), ("check", &column.check)] {
+        if let Some(source) = expression {
+            object.insert(name.to_string(), serde_json::Value::String(source.clone()));
+        }
+    }
     object.insert("compress".to_string(), optional_u8_json(column.compress));
     object.insert("unique".to_string(), serde_json::Value::Bool(column.unique));
     object.insert(
@@ -1090,6 +1095,8 @@ fn declared_column_contract_from_json_value(
         sql_type: optional_sql_type_name_from_json_value(object.get("sql_type"))?,
         not_null: json_bool_required(object, "not_null")?,
         default: optional_string_field(object, "default")?,
+        generated: optional_string_field(object, "generated")?,
+        check: optional_string_field(object, "check")?,
         compress: optional_u8_field(object, "compress")?,
         unique: json_bool_required(object, "unique")?,
         primary_key: json_bool_required(object, "primary_key")?,

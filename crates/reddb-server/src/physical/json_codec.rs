@@ -275,7 +275,7 @@ fn collection_contract_from_persisted(
         None => None,
     };
 
-    Ok(CollectionContract {
+    let decoded = CollectionContract {
         name: contract.name,
         declared_model: collection_model_from_str(&contract.declared_model)?,
         schema_mode: schema_mode_from_str(&contract.schema_mode)?,
@@ -295,7 +295,7 @@ fn collection_contract_from_persisted(
             .declared_columns
             .into_iter()
             .map(declared_column_contract_from_persisted)
-            .collect(),
+            .collect::<io::Result<Vec<_>>>()?,
         table_def,
         timestamps_enabled: contract.timestamps_enabled,
         context_index_enabled: contract.context_index_enabled,
@@ -321,7 +321,12 @@ fn collection_contract_from_persisted(
             .analytical_storage
             .map(analytical_storage_from_persisted),
         ai_policy: contract.ai_policy.map(ai_policy_from_persisted),
-    })
+    };
+    if crate::application::collection_contract_enforcer::has_contract_expressions(&decoded) {
+        crate::application::collection_contract_enforcer::validate_contract_expressions(&decoded)
+            .map_err(|error| invalid_data(error.to_string()))?;
+    }
+    Ok(decoded)
 }
 
 fn analytical_storage_to_json(cfg: &crate::catalog::AnalyticalStorageConfig) -> JsonValue {
@@ -565,6 +570,14 @@ fn declared_column_contract_to_persisted(
         sql_type: column.sql_type.as_ref().map(sql_type_name_to_persisted),
         not_null: column.not_null,
         default: column.default.clone(),
+        generated: column
+            .generated
+            .as_ref()
+            .map(|expression| expression.source().to_string()),
+        check: column
+            .check
+            .as_ref()
+            .map(|expression| expression.source().to_string()),
         compress: column.compress,
         unique: column.unique,
         primary_key: column.primary_key,
@@ -576,24 +589,34 @@ fn declared_column_contract_to_persisted(
 
 fn declared_column_contract_from_persisted(
     column: reddb_file::PhysicalDeclaredColumnContract,
-) -> DeclaredColumnContract {
+) -> io::Result<DeclaredColumnContract> {
     let sql_type = column
         .sql_type
         .map(sql_type_name_from_persisted)
         .or_else(|| Some(reddb_types::SqlTypeName::parse_declared(&column.data_type)));
-    DeclaredColumnContract {
+    Ok(DeclaredColumnContract {
         name: column.name,
         data_type: column.data_type,
         sql_type,
         not_null: column.not_null,
         default: column.default,
+        generated: column
+            .generated
+            .map(reddb_rql::schema_expression::SchemaExpression::parse)
+            .transpose()
+            .map_err(invalid_data)?,
+        check: column
+            .check
+            .map(reddb_rql::schema_expression::SchemaExpression::parse)
+            .transpose()
+            .map_err(invalid_data)?,
         compress: column.compress,
         unique: column.unique,
         primary_key: column.primary_key,
         enum_variants: column.enum_variants,
         array_element: column.array_element,
         decimal_precision: column.decimal_precision,
-    }
+    })
 }
 
 fn declared_column_contract_from_json(value: &JsonValue) -> io::Result<DeclaredColumnContract> {
@@ -602,7 +625,7 @@ fn declared_column_contract_from_json(value: &JsonValue) -> io::Result<DeclaredC
             .map_err(|err| {
                 invalid_data(format!("decode physical declared column contract: {err}"))
             })?;
-    Ok(declared_column_contract_from_persisted(column))
+    declared_column_contract_from_persisted(column)
 }
 
 fn sql_type_name_to_persisted(

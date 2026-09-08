@@ -189,22 +189,6 @@ impl ParseError {
         }
     }
 
-    /// Didactic (#1704): a document-model newcomer reached for a Postgres
-    /// `GENERATED ALWAYS AS (…) STORED` column. In the document model,
-    /// top-level body fields already auto-flatten into queryable columns.
-    pub fn generated_column_unneeded(position: Position) -> Self {
-        Self {
-            message: "top-level document body fields auto-flatten into queryable \
-                      columns, so no generated column is needed: drop the \
-                      `GENERATED ALWAYS AS (…) STORED` clause and query the field by \
-                      its dotted path (e.g. `body.details.ip`)"
-                .to_string(),
-            position,
-            expected: Vec::new(),
-            kind: ParseErrorKind::Syntax,
-        }
-    }
-
     /// Didactic (#1704): a document-model newcomer used the Postgres JSON
     /// operators `->` / `->>` in a query. The native idiom is the dotted
     /// path. (Graph-mode `->` / `<-` traversal is parsed elsewhere and is

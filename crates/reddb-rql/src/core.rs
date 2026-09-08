@@ -2239,6 +2239,10 @@ pub struct CreateColumnDef {
     pub not_null: bool,
     /// DEFAULT value expression
     pub default: Option<String>,
+    /// Persisted, deterministic expression for a stored generated field.
+    pub generated: Option<crate::schema_expression::SchemaExpression>,
+    /// SQL CHECK: FALSE rejects, TRUE or NULL accepts.
+    pub check: Option<crate::schema_expression::SchemaExpression>,
     /// Compression level (COMPRESS:N)
     pub compress: Option<u8>,
     /// UNIQUE constraint

@@ -285,6 +285,10 @@ pub struct PhysicalDeclaredColumnContract {
     pub sql_type: Option<PhysicalSqlTypeName>,
     pub not_null: bool,
     pub default: Option<String>,
+    /// Persisted, deterministic expression for a stored generated field.
+    pub generated: Option<String>,
+    /// SQL CHECK: FALSE rejects, TRUE or NULL accepts.
+    pub check: Option<String>,
     pub compress: Option<u8>,
     pub unique: bool,
     pub primary_key: bool,
