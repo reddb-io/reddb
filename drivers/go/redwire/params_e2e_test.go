@@ -106,9 +106,9 @@ func TestQuery_WithParams_UnsupportedServer(t *testing.T) {
 	}
 }
 
-// Empty params keeps emitting the legacy Query frame even when the server
-// supports parameterized queries — guards the byte-for-byte backwards path.
-func TestQuery_NoParams_EmitsLegacyQueryFrame(t *testing.T) {
+// The full-envelope frame returns records even with an empty parameter list.
+// TestQuery_RoundTrip separately covers servers without FeatureParams.
+func TestQuery_NoParams_RequestsFullEnvelope(t *testing.T) {
 	srv, cli := newFakeServerPair(t)
 	defer srv.close()
 
@@ -127,8 +127,12 @@ func TestQuery_NoParams_EmitsLegacyQueryFrame(t *testing.T) {
 		srv.writeFrame(NewFrame(KindAuthOk, 1, ok))
 
 		q := srv.readFrame()
-		if q.Kind != KindQuery {
-			t.Errorf("expected KindQuery (0x01), got 0x%02x", q.Kind)
+		if q.Kind != KindQueryWithParams {
+			t.Errorf("expected KindQueryWithParams (0x28), got 0x%02x", q.Kind)
+		}
+		expected, err := EncodeQueryWithParams("SELECT 1", nil)
+		if err != nil || string(q.Payload) != string(expected) {
+			t.Errorf("unexpected zero-parameter payload: %x", q.Payload)
 		}
 		srv.writeFrame(NewFrame(KindResult, q.CorrelationID, []byte("{}")))
 	}()

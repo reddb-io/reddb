@@ -311,3 +311,10 @@ SQL double quotes delimit identifiers; single quotes delimit text. For example,
 Bind application values as parameters. JSON object/array strings keep double
 quotes. See the [SQL quotation migration guide](../../docs/query/sql-quoting.md)
 before upgrading applications that used double-quoted SQL text literals.
+
+
+`Query` requests the full result envelope when the server advertises parameter
+support, including queries without parameters. Rich helpers read canonical
+`result.records` and legacy `rows` responses, preserve exact integers, and expose
+only projected columns when the envelope declares them. Older servers without
+parameter support retain the legacy summary response for unparameterized SQL.

@@ -458,3 +458,29 @@ func TestAffectedFromBody_HandlesNestedResult(t *testing.T) {
 		t.Fatalf("nested affected")
 	}
 }
+
+func TestCanonicalRecordRowsPreserveProjectionAndExactValues(t *testing.T) {
+	body := []byte(`{"result":{"columns":["text value","rid"],"records":[{"values":{"text value":"hello","unselected":"hidden"},"meta":{"rid":{"$uint":"18446744073709551615"},"tenant":"secret"}}]}}`)
+	rows, err := allRows(body)
+	if err != nil || len(rows) != 1 || len(rows[0]) != 2 {
+		t.Fatalf("canonical projection: %#v %v", rows, err)
+	}
+	if rows[0]["text value"] != "hello" || rows[0]["rid"] != uint64(18446744073709551615) {
+		t.Fatalf("canonical values: %#v", rows[0])
+	}
+	first, _, err := firstRow(body)
+	if err != nil || first["rid"] != rows[0]["rid"] {
+		t.Fatalf("canonical first row: %#v %v", first, err)
+	}
+}
+
+func TestLegacyRowsKeepValuesNamedPayload(t *testing.T) {
+	body := []byte(`{"rows":[{"values":{"nested":true},"meta":"user data"}]}`)
+	rows, err := allRows(body)
+	if err != nil || len(rows) != 1 || rows[0]["meta"] != "user data" {
+		t.Fatalf("legacy row: %#v %v", rows, err)
+	}
+	if _, ok := rows[0]["values"].(map[string]any); !ok {
+		t.Fatalf("values field must remain nested: %#v", rows[0])
+	}
+}
