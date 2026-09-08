@@ -1779,7 +1779,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             return records
                 .iter()
                 .map(|record| {
-                    project_runtime_record_with_db(
+                    let mut projected = project_runtime_record_with_db(
                         Some(db),
                         record,
                         &effective_projections,
@@ -1787,7 +1787,24 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         Some(table_alias),
                         false,
                         false,
-                    )
+                    )?;
+                    // Keep the system envelope for wire metadata and stream
+                    // resume; result.columns still describes only the SELECT.
+                    for key in [
+                        "rid",
+                        "collection",
+                        "kind",
+                        "tenant",
+                        "created_at",
+                        "updated_at",
+                    ] {
+                        if projected.get(key).is_none() {
+                            if let Some(value) = record.get(key) {
+                                projected.set(key, value.clone());
+                            }
+                        }
+                    }
+                    Ok(projected)
                 })
                 .collect();
         }

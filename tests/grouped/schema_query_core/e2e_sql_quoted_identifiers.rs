@@ -107,5 +107,55 @@ fn unfiltered_projection_keeps_retention_filtering() {
         result.result.records[0].get("visible id"),
         Some(&Value::Integer(1))
     );
-    assert_eq!(result.result.records[0].column_names(), ["visible id"]);
+    assert_eq!(result.result.columns, ["visible id"]);
+    assert!(result.result.records[0].get("rid").is_some());
+}
+
+#[test]
+fn signed_vector_insert_matches_parameter_and_exact_search() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    rt.execute_query("CREATE VECTOR signed_embeddings DIM 2 METRIC cosine")
+        .expect("vector");
+    rt.execute_query(
+        "INSERT INTO signed_embeddings VECTOR (dense,content) VALUES ([-0.25,0.5],'literal')",
+    )
+    .expect("signed literal");
+    rt.execute_query_with_params(
+        "INSERT INTO signed_embeddings VECTOR (dense,content) VALUES ($1,$2)",
+        &[Value::Vector(vec![-0.25, 0.5]), Value::text("parameter")],
+    )
+    .expect("signed parameter");
+    let result = rt
+        .execute_query("VECTOR SEARCH signed_embeddings SIMILAR TO [-0.25,0.5] LIMIT 2")
+        .expect("search");
+    assert_eq!(result.result.records.len(), 2);
+    let mut contents = Vec::new();
+    for row in &result.result.records {
+        let Some(Value::Float(score)) = row.get("score") else {
+            panic!("score")
+        };
+        assert!((score - 1.0).abs() < 1e-5);
+        let Some(Value::Text(content)) = row.get("content") else {
+            panic!("content")
+        };
+        contents.push(content.to_string());
+    }
+    contents.sort();
+    assert_eq!(contents, ["literal", "parameter"]);
+}
+
+#[test]
+fn quoted_identifier_metacharacters_do_not_execute_statements() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    rt.execute_query("CREATE TABLE protected_rows (id INT)")
+        .expect("protected table");
+    rt.execute_query("INSERT INTO protected_rows (id) VALUES (7)")
+        .expect("protected value");
+    rt.execute_query(r#"CREATE TABLE "users; DROP TABLE protected_rows" (id INT)"#)
+        .expect("opaque name");
+    let result = rt
+        .execute_query("SELECT id FROM protected_rows")
+        .expect("protected table survives");
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(7)));
 }

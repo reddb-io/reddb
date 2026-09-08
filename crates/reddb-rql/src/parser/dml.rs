@@ -1023,6 +1023,32 @@ impl<'a> Parser<'a> {
                 })?;
                 Ok(Value::Json(bytes))
             }
+            Token::Minus | Token::Dash | Token::Plus => {
+                let negative = !matches!(self.peek(), Token::Plus);
+                self.advance()?;
+                match self.peek().clone() {
+                    Token::Integer(n) => {
+                        self.advance()?;
+                        let value = if negative {
+                            n.checked_neg().ok_or_else(|| {
+                                ParseError::new("integer negation overflow", self.position())
+                            })?
+                        } else {
+                            n
+                        };
+                        Ok(Value::Integer(value))
+                    }
+                    Token::Float(n) => {
+                        self.advance()?;
+                        Ok(Value::Float(if negative { -n } else { n }))
+                    }
+                    ref other => Err(ParseError::expected(
+                        vec!["number after sign"],
+                        other,
+                        self.position(),
+                    )),
+                }
+            }
             Token::Integer(n) => {
                 self.advance()?;
                 Ok(Value::Integer(n))
@@ -1779,6 +1805,23 @@ mod tests {
             parser.parse_literal_value().expect("json object"),
             Value::Json(_)
         ));
+    }
+
+    #[test]
+    fn signed_array_literals_preserve_numeric_types() {
+        let mut parser = make_parser("[-9007199254740993, -0.25, +2, [-2.5e-3]]");
+        assert_eq!(
+            parser.parse_literal_value().expect("signed nested array"),
+            Value::Array(vec![
+                Value::Integer(-9007199254740993),
+                Value::Float(-0.25),
+                Value::Integer(2),
+                Value::Array(vec![Value::Float(-0.0025)]),
+            ])
+        );
+        for input in ["[-true]", "[-'text']", "[-[]]", "[+]", "[-]"] {
+            assert!(make_parser(input).parse_literal_value().is_err(), "{input}");
+        }
     }
 
     #[test]

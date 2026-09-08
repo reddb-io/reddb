@@ -84,32 +84,20 @@ fn prepared_bound_string_is_treated_as_literal_not_sql() {
     );
 }
 
-/// V2 — a quoted string in identifier position fails at parse time. The
-/// lexer emits `Token::String` (not `Token::Ident`), so `expect_ident`
-/// in `parse_create_table_query` rejects the input before any engine
-/// sees it.
+/// V2 — quoted identifiers keep SQL metacharacters opaque. Single-quoted
+/// strings are still rejected in identifier positions.
 #[test]
-fn identifier_with_sql_metacharacters_is_rejected_at_parse() {
-    // Double-quoted form: lexer routes to scan_string → Token::String.
-    let result = parser::parse(r#"CREATE TABLE "users; DROP TABLE x" (id INT)"#);
-    let err = result.expect_err("must be a parse error");
-    let msg = err.to_string().to_lowercase();
-    assert!(
-        msg.contains("ident") || msg.contains("identifier") || msg.contains("expected"),
-        "error must point at the identifier rule, got: {}",
-        err
-    );
-
-    // Single-quoted form: same path.
-    let result = parser::parse("CREATE TABLE 'evil; DROP TABLE x' (id INT)");
-    assert!(
-        result.is_err(),
-        "single-quoted identifier must also be rejected"
-    );
-
-    // Sanity: a normal table name still parses.
-    let ok = parser::parse("CREATE TABLE legit_users (id INT)");
-    assert!(ok.is_ok(), "non-injection identifier must parse: {:?}", ok);
+fn quoted_identifier_with_sql_metacharacters_is_one_identifier() {
+    let parsed =
+        parse_multi(r#"CREATE TABLE "users; DROP TABLE x" (id INT)"#).expect("quoted identifier");
+    let QueryExpr::CreateTable(table) = parsed else {
+        panic!("expected exactly one CREATE TABLE");
+    };
+    assert_eq!(table.name, "users; DROP TABLE x");
+    assert_eq!(table.columns.len(), 1);
+    assert_eq!(table.columns[0].name, "id");
+    assert!(parser::parse("CREATE TABLE 'evil; DROP TABLE x' (id INT)").is_err());
+    assert!(parser::parse("CREATE TABLE legit_users (id INT)").is_ok());
 }
 
 /// V3 — a CREATE POLICY USING (...) body whose string-literal value
