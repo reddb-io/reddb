@@ -1292,9 +1292,12 @@ impl RedDBRuntime {
                 set_row_field(row, "updated_at", contract.managed_timestamp_value());
                 modified_columns.push("updated_at".to_string());
             }
-            let expression_contract = db.collection_contract_arc(&collection).filter(|contract| {
-                crate::application::collection_contract_enforcer::has_contract_expressions(contract)
-            });
+            let expression_contract = if row_contract_plan.is_some_and(|plan| plan.has_expressions)
+            {
+                db.collection_contract_arc(&collection)
+            } else {
+                None
+            };
             if let Some(schema) = &expression_contract {
                 let normalized = contract.normalize_update_fields(collect_row_fields(row))?;
                 for column in schema

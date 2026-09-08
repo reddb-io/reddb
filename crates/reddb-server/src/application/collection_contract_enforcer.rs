@@ -1053,6 +1053,7 @@ fn build_row_update_contract_plan_for_contract(
     };
 
     Ok(RowUpdateContractPlan {
+        has_expressions: has_contract_expressions(contract),
         timestamps_enabled: contract.timestamps_enabled,
         strict_schema: matches!(contract.schema_mode, crate::catalog::SchemaMode::Strict),
         declared_rules,

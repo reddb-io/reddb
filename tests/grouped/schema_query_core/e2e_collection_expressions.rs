@@ -237,9 +237,9 @@ fn expressions_upsert_recomputes_final_record() {
 #[test]
 fn expressions_public_example_schemas_execute() {
     let examples = [
-        include_str!("../../../../examples/collection-expressions/commerce.rql"),
-        include_str!("../../../../examples/collection-expressions/fraud-events.rql"),
-        include_str!("../../../../examples/collection-expressions/agent-knowledge.rql"),
+        include_str!("../../../examples/collection-expressions/commerce.rql"),
+        include_str!("../../../examples/collection-expressions/fraud-events.rql"),
+        include_str!("../../../examples/collection-expressions/agent-knowledge.rql"),
     ];
     for source in examples {
         let runtime = RedDBRuntime::in_memory().expect("runtime");
