@@ -22,11 +22,7 @@ fn vector_exact_default_matches_full_precision_oracle_beyond_rerank_window() {
         ("inner_product", "METRIC INNER_PRODUCT"),
     ] {
         for filtered in [false, true] {
-            let filter = if filtered {
-                "WHERE metadata.eligible=true"
-            } else {
-                ""
-            };
+            let filter = if filtered { "WHERE eligible=true" } else { "" };
             let mut oracle = vectors
                 .iter()
                 .filter(|(_, _, eligible)| !filtered || *eligible)
