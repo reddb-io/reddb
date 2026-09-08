@@ -181,7 +181,11 @@ func TestConformance_generic_query_quoted_identifiers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), `"text value"`) || !strings.Contains(string(body), `"hello"`) {
+	rows, err := allRows(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 || rows[0]["text value"] != "hello" {
 		t.Fatalf("quoted result: %s", body)
 	}
 }
