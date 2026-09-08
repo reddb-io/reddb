@@ -318,26 +318,18 @@ pub(crate) fn runtime_vector_matches(
         }
         top.consider(entity, score, distance);
     };
-    if !rls_enabled && filter.is_none() {
-        // With no predicates that can re-enter storage, score borrowed
-        // vectors in place. Retain only top-k payloads, not N ids or batches
-        // of cloned vectors. Segment read locks remain held during scoring.
-        manager.scan_for_each(snapshot.as_ref(), |entity| {
-            consider(entity);
-            true
-        });
-    } else {
-        // RLS expressions and metadata lookups may re-enter storage. Collect
-        // ids under read locks, then release them before evaluating predicates.
-        let mut ids = Vec::new();
-        manager.scan_for_each(snapshot.as_ref(), |entity| {
-            ids.push(entity.id);
-            true
-        });
-        for batch in ids.chunks(256) {
-            for entity in manager.get_many(batch).into_iter().flatten() {
-                consider(&entity);
-            }
+    // Keep distance calculation and top-k payload cloning outside segment
+    // locks. Borrowed scoring held the growing segment for the entire scan
+    // and regressed concurrent writes. The ID list is O(N); payload copies
+    // remain bounded to one batch. Predicates may also re-enter storage.
+    let mut ids = Vec::new();
+    manager.scan_for_each(snapshot.as_ref(), |entity| {
+        ids.push(entity.id);
+        true
+    });
+    for batch in ids.chunks(256) {
+        for entity in manager.get_many(batch).into_iter().flatten() {
+            consider(&entity);
         }
     }
     stats.peak_topk_entries = top.len() as u64;
