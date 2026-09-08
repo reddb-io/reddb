@@ -433,6 +433,7 @@ impl RedDBRuntime {
             collection_model: model,
             name: query.name.clone(),
             columns: Vec::new(),
+            unique_constraints: Vec::new(),
             if_not_exists: query.if_not_exists,
             default_ttl_ms: None,
             metrics_rollup_policies: Vec::new(),
@@ -1481,9 +1482,40 @@ impl RedDBRuntime {
         // Validate the target CREATE TABLE body so syntactically valid
         // but semantically broken targets (bad SQL types, duplicate
         // columns) are caught here rather than inside the diff engine.
-        analyze_create_table(&query.target).map_err(|err| RedDBError::Query(err.to_string()))?;
+        let analyzed = analyze_create_table(&query.target)
+            .map_err(|err| RedDBError::Query(err.to_string()))?;
 
         let current_contract = self.inner.db.collection_contract(&query.target.name);
+
+        // The column-diff planner cannot emit ADD/DROP CONSTRAINT. Do not
+        // silently report a complete migration when table-level UNIQUE changes.
+        let current_unique = current_contract
+            .as_ref()
+            .map(|contract| {
+                contract
+                    .table_def
+                    .iter()
+                    .flat_map(|table| &table.constraints)
+                    .filter(|constraint| {
+                        constraint.constraint_type == reddb_types::ConstraintType::Unique
+                            && !contract.declared_columns.iter().any(|column| {
+                                column.unique
+                                    && constraint.columns == [column.name.clone()]
+                                    && constraint.name == format!("uniq_{}", column.name)
+                            })
+                    })
+                    .map(|constraint| (constraint.name.clone(), constraint.columns.clone()))
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let target_unique = analyzed
+            .unique_constraints
+            .into_iter()
+            .map(|constraint| (constraint.name, constraint.columns))
+            .collect::<BTreeSet<_>>();
+        if current_unique != target_unique {
+            return Err(RedDBError::Query("NOT_YET_SUPPORTED: EXPLAIN ALTER cannot plan changes to table-level UNIQUE constraints".to_string()));
+        }
 
         let current_columns: Vec<crate::physical::DeclaredColumnContract> = current_contract
             .as_ref()
@@ -2821,6 +2853,11 @@ fn build_table_def_from_create_table(
         }
         table.columns.push(column_def_from_ddl(column)?);
     }
+    table.constraints.extend(
+        analyze_create_table(query)
+            .map_err(|err| RedDBError::Query(err.to_string()))?
+            .unique_constraints,
+    );
     // WITH timestamps = true: append the two runtime-managed columns
     // to the schema so resolved_contract_columns exposes them to the
     // normalize/validate path. Declared as UnsignedInteger (unix-ms),
