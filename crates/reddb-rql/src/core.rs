@@ -11,6 +11,8 @@ pub use reddb_types::vector_metadata::MetadataFilter;
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum QueryExpr {
+    /// Persisted function definition, invocation or catalog inspection.
+    Function(Box<crate::stored_function::FunctionCommand>),
     /// Pure table query: SELECT ... FROM ...
     Table(TableQuery),
     /// Pure graph query: MATCH ... RETURN ...

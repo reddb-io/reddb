@@ -1184,6 +1184,25 @@ fn value_signature(value: &Value) -> String {
     format!("{value:?}")
 }
 
+pub(crate) fn normalize_declared_value(
+    context: &str,
+    name: &str,
+    sql_type: &reddb_types::SqlTypeName,
+    value: Value,
+) -> RedDBResult<Value> {
+    let data_type = DataType::from_sql_type_name(sql_type)
+        .ok_or_else(|| crate::RedDBError::Query(format!("unknown declared type '{sql_type}'")))?;
+    let rule = ResolvedColumnRule {
+        name: name.to_string(),
+        data_type,
+        data_type_name: sql_type.to_string(),
+        not_null: false,
+        default: None,
+        enum_variants: sql_type.enum_variants().unwrap_or_default(),
+    };
+    normalize_contract_value(context, &rule, value)
+}
+
 fn normalize_contract_value(
     collection: &str,
     column: &ResolvedColumnRule,

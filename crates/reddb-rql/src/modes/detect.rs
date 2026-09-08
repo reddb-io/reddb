@@ -58,7 +58,8 @@ pub fn detect_mode(input: &str) -> QueryMode {
     let first_token = lower.split_whitespace().next().unwrap_or("");
     if matches!(
         first_token,
-        "begin"
+        "call"
+            | "begin"
             | "start"
             | "commit"
             | "rollback"
@@ -141,6 +142,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("set kv ")
         || lower.starts_with("set tenant")
         || lower.starts_with("show create ")
+        || lower.starts_with("show function")
         || lower.starts_with("show config")
         || lower.starts_with("show collections")
         || lower.starts_with("show tables")

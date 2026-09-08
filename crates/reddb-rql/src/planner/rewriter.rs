@@ -275,6 +275,7 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::RollbackMigration(_)
             | QueryExpr::ExplainMigration(_)
             | QueryExpr::EventsBackfill(_)
+            | QueryExpr::Function(_)
             | QueryExpr::EventsBackfillStatus { .. }) => other,
         }
     }
@@ -422,6 +423,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::RollbackMigration(_)
             | QueryExpr::ExplainMigration(_)
             | QueryExpr::EventsBackfill(_)
+            | QueryExpr::Function(_)
             | QueryExpr::EventsBackfillStatus { .. }) => other,
         }
     }
@@ -525,6 +527,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::RollbackMigration(_)
             | QueryExpr::ExplainMigration(_)
             | QueryExpr::EventsBackfill(_)
+            | QueryExpr::Function(_)
             | QueryExpr::EventsBackfillStatus { .. } => false,
         }
     }

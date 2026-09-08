@@ -247,6 +247,9 @@ impl RedDBRuntime {
         let no_auth_boot = crate::service_cli::no_auth_active(&options);
         let runtime = Self {
             inner: Arc::new(RuntimeInner {
+                functions: parking_lot::RwLock::new(
+                    super::function_catalog::FunctionCatalog::load(&db)?,
+                ),
                 db: db.clone(),
                 layout: PhysicalLayout::from_options(&options),
                 embedded_single_file,

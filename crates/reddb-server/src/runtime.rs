@@ -1058,6 +1058,7 @@ impl ScrubRuntimeState {
 }
 
 struct RuntimeInner {
+    functions: parking_lot::RwLock<function_catalog::FunctionCatalog>,
     db: Arc<RedDB>,
     layout: PhysicalLayout,
     embedded_single_file: bool,
@@ -1522,6 +1523,9 @@ pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
 #[cfg(test)]
 mod evaluator_differential;
+pub(crate) mod function_catalog;
+mod function_execution;
+mod function_validation;
 mod impl_scrub;
 mod impl_search;
 mod impl_serverless;

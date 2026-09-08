@@ -373,6 +373,7 @@ impl JoinReorderingPass {
             | QueryExpr::RollbackMigration(_)
             | QueryExpr::ExplainMigration(_)
             | QueryExpr::EventsBackfill(_)
+            | QueryExpr::Function(_)
             | QueryExpr::EventsBackfillStatus { .. } => 1.0,
         }
     }

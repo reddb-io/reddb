@@ -133,3 +133,6 @@ mod e2e_sql_quoted_identifiers;
 
 #[path = "schema_query_core/e2e_collection_expressions.rs"]
 mod e2e_collection_expressions;
+
+#[path = "schema_query_core/e2e_rql_functions.rs"]
+mod e2e_rql_functions;

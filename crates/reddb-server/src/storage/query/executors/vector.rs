@@ -575,6 +575,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::Insert(_) => "insert",
         QueryExpr::Update(_) => "update",
         QueryExpr::Delete(_) => "delete",
+        QueryExpr::Function(_) => "function",
         QueryExpr::CreateTable(_) => "create_table",
         QueryExpr::CreateCollection(_) => "create_collection",
         QueryExpr::CreateVector(_) => "create_vector",

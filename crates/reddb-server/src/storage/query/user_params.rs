@@ -393,9 +393,42 @@ pub fn validate(indices: &[usize], param_count: usize) -> Result<(), UserParamEr
 pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamError> {
     let indices = collect_indices(expr);
     validate(&indices, params.len())?;
+    bind_available_parameters(expr, params)
+}
+
+/// A stored-function statement may use only a subset of its function's arguments.
+/// The function signature owns arity; individual references still need bounds checks.
+pub(crate) fn bind_available_parameters(
+    expr: &QueryExpr,
+    params: &[Value],
+) -> Result<QueryExpr, UserParamError> {
+    let indices = collect_indices(expr);
+    if let Some(index) = indices.iter().find(|index| **index >= params.len()) {
+        return Err(UserParamError::Arity {
+            expected: index + 1,
+            got: params.len(),
+        });
+    }
 
     if indices.is_empty() {
         return Ok(expr.clone());
+    }
+
+    if let QueryExpr::Function(command) = expr {
+        if let reddb_rql::stored_function::FunctionCommand::Call { name, arguments } =
+            command.as_ref()
+        {
+            return Ok(QueryExpr::Function(Box::new(
+                reddb_rql::stored_function::FunctionCommand::Call {
+                    name: name.clone(),
+                    arguments: arguments
+                        .iter()
+                        .cloned()
+                        .map(|argument| substitute_params_in_expr(argument, params))
+                        .collect::<Result<_, _>>()?,
+                },
+            )));
+        }
     }
 
     // SEARCH SIMILAR $N has its parameter slot outside the `Expr`
@@ -959,6 +992,13 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             .map(|expr| substitute_params_in_expr(expr, params))
             .transpose()?;
         let filter = where_expr.as_ref().map(expr_to_filter);
+        for clause in &mut bound.order_by {
+            clause.expr = clause
+                .expr
+                .take()
+                .map(|expression| substitute_params_in_expr(expression, params))
+                .transpose()?;
+        }
         bound.assignment_exprs = assignment_exprs;
         bound.assignments = assignments;
         bound.where_expr = where_expr;
@@ -1091,8 +1131,49 @@ fn value_variant_name(value: &Value) -> &'static str {
     }
 }
 
+fn visit_projection_parameters<F: FnMut(&Expr)>(
+    projection: &reddb_rql::ast::Projection,
+    visit: &mut F,
+) {
+    use reddb_rql::ast::{Projection, Span};
+    match projection {
+        Projection::Column(column) | Projection::Alias(column, _)
+            if column.starts_with(reddb_rql::sql_lowering::PARAMETER_PROJECTION_PREFIX) =>
+        {
+            if let Some(index) = column
+                .strip_prefix(reddb_rql::sql_lowering::PARAMETER_PROJECTION_PREFIX)
+                .and_then(|index| index.parse().ok())
+            {
+                visit(&Expr::Parameter {
+                    index,
+                    span: Span::synthetic(),
+                });
+            }
+        }
+        Projection::Function(_, arguments) => {
+            for argument in arguments {
+                visit_projection_parameters(argument, visit);
+            }
+        }
+        _ => {
+            if let Some((expression, _)) = reddb_rql::sql_lowering::projection_to_expr(projection) {
+                visit_expr(&expression, visit);
+            }
+        }
+    }
+}
+
 fn visit_query_expr<F: FnMut(&Expr)>(expr: &QueryExpr, visit: &mut F) {
     match expr {
+        QueryExpr::Function(command) => {
+            if let reddb_rql::stored_function::FunctionCommand::Call { arguments, .. } =
+                command.as_ref()
+            {
+                for argument in arguments {
+                    visit_expr(argument, visit);
+                }
+            }
+        }
         QueryExpr::Table(q) => {
             for item in &q.select_items {
                 if let reddb_rql::ast::SelectItem::Expr { expr, .. } = item {
@@ -1117,9 +1198,33 @@ fn visit_query_expr<F: FnMut(&Expr)>(expr: &QueryExpr, visit: &mut F) {
                 visit_query_expr(inner, visit);
             }
         }
+        QueryExpr::Graph(q) => {
+            for projection in &q.return_ {
+                visit_projection_parameters(projection, visit);
+            }
+            if let Some(filter) = &q.filter {
+                visit_expr(&reddb_rql::sql_lowering::filter_to_expr(filter), visit);
+            }
+        }
         QueryExpr::Join(q) => {
             visit_query_expr(&q.left, visit);
             visit_query_expr(&q.right, visit);
+            for item in &q.return_items {
+                if let reddb_rql::ast::SelectItem::Expr { expr, .. } = item {
+                    visit_expr(expr, visit);
+                }
+            }
+            for projection in &q.return_ {
+                visit_projection_parameters(projection, visit);
+            }
+            if let Some(filter) = &q.filter {
+                visit_expr(&reddb_rql::sql_lowering::filter_to_expr(filter), visit);
+            }
+            for clause in &q.order_by {
+                if let Some(expression) = &clause.expr {
+                    visit_expr(expression, visit);
+                }
+            }
         }
         QueryExpr::Hybrid(q) => {
             visit_query_expr(&q.structured, visit);
@@ -1141,6 +1246,11 @@ fn visit_query_expr<F: FnMut(&Expr)>(expr: &QueryExpr, visit: &mut F) {
             }
         }
         QueryExpr::Update(q) => {
+            for clause in &q.order_by {
+                if let Some(expression) = &clause.expr {
+                    visit_expr(expression, visit);
+                }
+            }
             for (_, e) in &q.assignment_exprs {
                 visit_expr(e, visit);
             }

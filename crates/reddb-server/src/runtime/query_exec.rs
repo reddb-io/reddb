@@ -357,6 +357,14 @@ pub(crate) fn table_query_is_implicit_scalar_select(query: &TableQuery) -> bool 
             .all(select_item_is_source_free_scalar)
 }
 
+/// Exact storage-free branch used by scalar evaluation and authorization.
+pub(crate) fn table_query_is_storage_free(query: &TableQuery) -> bool {
+    table_query_is_implicit_scalar_select(query)
+        && !has_aggregate_projections(&effective_table_projections(query))
+        && effective_table_group_by_exprs(query).is_empty()
+        && effective_table_having_filter(query).is_none()
+}
+
 fn select_item_is_source_free_scalar(item: &SelectItem) -> bool {
     match item {
         SelectItem::Wildcard => false,

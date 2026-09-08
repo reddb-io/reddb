@@ -431,6 +431,7 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         QueryExpr::Insert(_)
         | QueryExpr::Update(_)
         | QueryExpr::Delete(_)
+        | QueryExpr::Function(_)
         | QueryExpr::CreateTable(_)
         | QueryExpr::CreateCollection(_)
         | QueryExpr::CreateVector(_)
@@ -835,6 +836,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::Insert(_) => "insert",
         QueryExpr::Update(_) => "update",
         QueryExpr::Delete(_) => "delete",
+        QueryExpr::Function(_) => "function",
         QueryExpr::CreateTable(_) => "create_table",
         QueryExpr::CreateCollection(_) => "create_collection",
         QueryExpr::CreateVector(_) => "create_vector",

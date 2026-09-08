@@ -1320,7 +1320,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse column type: TEXT, INTEGER, EMAIL, ENUM('a','b','c'), ARRAY(TEXT), DECIMAL(2)
-    fn parse_column_type(&mut self) -> Result<SqlTypeName, ParseError> {
+    pub(crate) fn parse_column_type(&mut self) -> Result<SqlTypeName, ParseError> {
         let type_name = self.expect_ident_or_keyword()?;
         if self.consume(&Token::LParen)? {
             let inner = self.parse_type_params()?;

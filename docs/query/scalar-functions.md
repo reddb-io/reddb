@@ -2,6 +2,8 @@
 
 Scalar functions operate on individual values and can be used in SELECT projections. They evaluate once per row, unlike aggregate functions (COUNT, SUM, AVG) which operate across rows.
 
+For persisted operations authored by applications, see [Stored RQL Functions](/query/stored-functions.md). Those definitions are invoked with `CALL`.
+
 ---
 
 ## Geographic Functions

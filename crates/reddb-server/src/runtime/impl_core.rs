@@ -742,36 +742,9 @@ impl RedDBRuntime {
         let query_audit_started = std::time::Instant::now();
 
         let query_result = match expr {
+            QueryExpr::Function(ref command) => self.execute_function(query, command),
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
-                // Apply MVCC visibility + RLS gate while materialising the
-                // graph: every node entity is screened against the source
-                // collection's policy chain (basic and `Nodes`-targeted)
-                // and dropped when the caller's tenant / role doesn't
-                // admit it. Edges are pruned automatically because the
-                // graph builder skips edges whose endpoints aren't in
-                // `allowed_nodes`.
-                let (graph, node_properties, edge_properties) =
-                    self.materialize_graph_with_rls()?;
-                let result =
-                    crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties(
-                        &graph,
-                        &expr,
-                        node_properties,
-                        edge_properties,
-                    )
-                        .map_err(|err| RedDBError::Query(err.to_string()))?;
-
-                Ok(RuntimeQueryResult {
-                    query: query.to_string(),
-                    mode,
-                    statement,
-                    engine: "materialized-graph",
-                    result,
-                    affected_rows: 0,
-                    statement_type: "select",
-                    bookmark: None,
-                    notice: None,
-                })
+                self.execute_materialized_graph(query, mode, statement, &expr)
             }
             QueryExpr::Table(table) => {
                 let table = self.resolve_table_expr_subqueries(
@@ -1380,6 +1353,9 @@ impl RedDBRuntime {
                                 Value::Text(s) => s.as_ref(),
                                 _ => continue,
                             };
+                            if key_str == super::function_catalog::REGISTRY_KEY {
+                                continue;
+                            }
                             if let Some(ref pfx) = prefix {
                                 if !key_str.starts_with(pfx.as_str()) {
                                     continue;
@@ -2902,6 +2878,43 @@ impl RedDBRuntime {
         first_column_values(result)
     }
 
+    fn execute_materialized_graph(
+        &self,
+        query: &str,
+        mode: QueryMode,
+        statement: &'static str,
+        expr: &QueryExpr,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        // Apply MVCC visibility + RLS gate while materialising the
+        // graph: every node entity is screened against the source
+        // collection's policy chain (basic and `Nodes`-targeted)
+        // and dropped when the caller's tenant / role doesn't
+        // admit it. Edges are pruned automatically because the
+        // graph builder skips edges whose endpoints aren't in
+        // `allowed_nodes`.
+        let (graph, node_properties, edge_properties) = self.materialize_graph_with_rls()?;
+        let result =
+            crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties(
+                &graph,
+                expr,
+                node_properties,
+                edge_properties,
+            )
+            .map_err(|err| RedDBError::Query(err.to_string()))?;
+
+        Ok(RuntimeQueryResult {
+            query: query.to_string(),
+            mode,
+            statement,
+            engine: "materialized-graph",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+            notice: None,
+        })
+    }
+
     fn dispatch_expr(
         &self,
         expr: QueryExpr,
@@ -2910,11 +2923,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         let statement = query_expr_name(&expr);
         match expr {
+            QueryExpr::Function(command) => self.execute_function(query_str, &command),
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
-                // Graph queries are not cacheable as prepared statements.
-                Err(RedDBError::Query(
-                    "graph queries cannot be used as prepared statements".to_string(),
-                ))
+                self.execute_materialized_graph(query_str, mode, statement, &expr)
             }
             QueryExpr::Table(table) => {
                 let scope = self.ai_scope();
@@ -3118,6 +3129,10 @@ impl RedDBRuntime {
                 .with_deferred_store_wal_for_dml(self.delete_may_emit_events(delete), || {
                     self.execute_delete(query_str, delete)
                 }),
+            QueryExpr::QueueCommand(ref cmd) => self.with_deferred_store_wal_if_transaction(|| {
+                self.execute_queue_command(query_str, cmd)
+            }),
+            QueryExpr::KvCommand(ref cmd) => self.execute_kv_command(query_str, cmd),
             QueryExpr::SearchCommand(ref cmd) => self.execute_search_command(query_str, cmd),
             QueryExpr::Ask(ref ask) => self.execute_ask(query_str, ask),
             _ => Err(RedDBError::Query(format!(
