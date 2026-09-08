@@ -35,7 +35,8 @@ use crate::storage::unified::entity::EntityId;
 /// many xids in a single `fetch_add` so back-to-back autocommit inserts
 /// share one atomic op instead of paying it per row. Sized small to
 /// keep a pristine `peek_next_xid()` close to the truth — VACUUM and
-/// diagnostics treat reserved-but-unused xids as already-committed.
+/// diagnostics observe the allocator high-water mark. Snapshots exclude
+/// reserved-but-unused slots from visibility until a later snapshot.
 pub(crate) const AUTOCOMMIT_POOL_BATCH: u64 = 16;
 
 /// A transaction identifier. Monotonic across the lifetime of the process.
@@ -55,7 +56,7 @@ pub struct Snapshot {
     /// The snapshot's xid — every row with `xmin <= xid` created before
     /// the snapshot is visible (assuming `xmax` hasn't passed).
     pub xid: Xid,
-    /// Transactions that were still active when the snapshot was taken.
+    /// Active transactions and reserved-but-unissued pool xids at capture.
     /// Their writes must be *hidden* even when `xmin <= xid`, because
     /// the writer hadn't committed yet from this snapshot's point of view.
     pub in_progress: HashSet<Xid>,
@@ -227,8 +228,14 @@ impl SnapshotManager {
     /// committed row version rather than a pinned statement snapshot.
     pub fn fresh_read_snapshot(&self) -> Snapshot {
         let state = self.state.read();
-        let xid = self.next_xid.load(Ordering::Relaxed);
-        let in_progress: HashSet<Xid> = state.active.iter().copied().collect();
+        let pool = self.autocommit_pool.lock();
+        // Visibility uses an inclusive bound. The allocator points at the
+        // next, not the last, xid; including it admits the next future writer.
+        let xid = self.next_xid.load(Ordering::Relaxed).saturating_sub(1);
+        let mut in_progress: HashSet<Xid> = state.active.iter().copied().collect();
+        // Reserved-but-unissued pool slots are future writers even though
+        // their numbers can be below this snapshot's high-water mark.
+        in_progress.extend(pool.next..pool.end);
         Snapshot { xid, in_progress }
     }
 
@@ -238,8 +245,10 @@ impl SnapshotManager {
     pub fn snapshot(&self, xid: Xid) -> Snapshot {
         let state = self.state.read();
         // Active xids other than our own appear as "in-progress" to us.
-        let in_progress: HashSet<Xid> =
+        let pool = self.autocommit_pool.lock();
+        let mut in_progress: HashSet<Xid> =
             state.active.iter().copied().filter(|&x| x != xid).collect();
+        in_progress.extend(pool.next..pool.end);
         Snapshot { xid, in_progress }
     }
 
@@ -710,5 +719,37 @@ mod tests {
         assert_eq!(m.oldest_active_xid(), Some(b));
         m.commit(b);
         assert_eq!(m.oldest_active_xid(), None);
+    }
+    #[test]
+    fn read_snapshot_excludes_first_future_writer_and_deleter() {
+        let manager = SnapshotManager::new();
+        let old = manager.begin();
+        manager.commit(old);
+        let snapshot = manager.fresh_read_snapshot();
+        let future = manager.begin();
+        manager.commit(future);
+        assert!(!snapshot.sees(future, XID_NONE));
+        assert!(snapshot.sees(old, future));
+        let fresh = manager.fresh_read_snapshot();
+        assert!(fresh.sees(future, XID_NONE));
+        assert!(!fresh.sees(old, future));
+    }
+
+    #[test]
+    fn snapshots_exclude_unissued_pool_slots_even_below_reader_xid() {
+        let manager = SnapshotManager::new();
+        let old = manager.allocate_committed_xid();
+        let reader = manager.begin();
+        let transaction_snapshot = manager.snapshot(reader);
+        let statement_snapshot = manager.fresh_read_snapshot();
+        let future = manager.allocate_committed_xid();
+        assert!(future < reader, "fixture must exercise the reserved range");
+        for snapshot in [transaction_snapshot, statement_snapshot] {
+            assert!(snapshot.sees(old, XID_NONE));
+            assert!(!snapshot.sees(future, XID_NONE));
+            assert!(snapshot.sees(old, future));
+        }
+        assert!(manager.fresh_read_snapshot().sees(future, XID_NONE));
+        manager.rollback(reader);
     }
 }

@@ -168,13 +168,11 @@ impl TransactionState {
     pub(crate) fn current_snapshot(&self, connection_id: u64) -> Snapshot {
         if let Some(context) = self.context(connection_id) {
             if context.isolation == IsolationLevel::ReadCommitted {
-                let high_water = self.snapshot_manager.peek_next_xid();
-                return self.snapshot_manager.snapshot(high_water);
+                return self.snapshot_manager.fresh_read_snapshot();
             }
             return context.snapshot;
         }
-        let high_water = self.snapshot_manager.peek_next_xid();
-        self.snapshot_manager.snapshot(high_water)
+        self.snapshot_manager.fresh_read_snapshot()
     }
 
     pub(crate) fn writer_xid(&self, connection_id: u64) -> Option<Xid> {

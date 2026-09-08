@@ -331,36 +331,21 @@ impl RedDBRuntime {
             collection,
             crate::catalog::CollectionModel::Vector,
         )?;
-        let rls_enabled = self.is_rls_enabled(collection);
-        let candidate_count = if rls_enabled {
-            self.inner
-                .db
-                .store()
-                .get_collection(collection)
-                .map_or(k.max(1), |manager| manager.count().max(1))
-        } else {
-            k.max(1)
-        };
-        let mut results = self.inner.db.similar(collection, vector, candidate_count);
-        if results.is_empty() && self.inner.db.store().get_collection(collection).is_none() {
-            return Err(RedDBError::NotFound(collection.to_string()));
-        }
-        let mut rls_cache = HashMap::new();
-        results.retain(|result| {
-            result.score >= min_score
-                && super::impl_core::entity_visible_under_current_snapshot(&result.entity)
-                && (!rls_enabled
-                    || self.search_entity_rls_allowed(collection, &result.entity, &mut rls_cache))
-        });
-        results.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.entity_id.raw().cmp(&right.entity_id.raw()))
-        });
-        results.truncate(k.max(1));
-        Ok(results)
+        // SEARCH SIMILAR and ASK use the same exact, policy-before-top-k
+        // executor as VECTOR SEARCH. Preserve this API's cosine score contract.
+        let mut query = reddb_rql::ast::VectorQuery::new(
+            collection,
+            reddb_rql::ast::VectorSource::Literal(vector.to_vec()),
+        )
+        .limit(k);
+        query.metric = Some(reddb_rql::ast::DistanceMetric::Cosine);
+        query.threshold = Some(min_score);
+        super::query_exec::runtime_vector_matches(
+            self,
+            &query,
+            vector,
+            &mut crate::storage::query::unified::VectorQueryStats::default(),
+        )
     }
 
     pub fn search_ivf(
@@ -904,8 +889,17 @@ impl RedDBRuntime {
             builder = builder.fuzzy();
         }
 
+        let snapshot = super::execution_context::capture_current_snapshot();
+        let mut rls_cache = HashMap::new();
         let mut result = builder
-            .execute(&self.inner.db.store())
+            .execute_filtered(&self.inner.db.store(), snapshot.as_ref(), |entity| {
+                self.search_entity_allowed(
+                    entity.kind.collection(),
+                    entity,
+                    snapshot.as_ref(),
+                    &mut rls_cache,
+                )
+            })
             .map_err(|err| RedDBError::Query(err.to_string()))?;
         for item in &mut result.matches {
             item.components.text_relevance = Some(item.score);

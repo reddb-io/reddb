@@ -66,7 +66,9 @@ impl AuthorizedSearch {
             )));
         }
         debug!(target: "authorized_search", "scope-checked, dispatching");
-        runtime.search_similar(collection, vector, k, min_score)
+        with_read_frame(runtime, scope, || {
+            runtime.search_similar(collection, vector, k, min_score)
+        })
     }
 
     /// Authorized SEARCH TEXT. The underlying executor accepts an
@@ -105,15 +107,17 @@ impl AuthorizedSearch {
                 ));
             }
         }
-        runtime.search_text(
-            query,
-            constrained,
-            entity_types,
-            capabilities,
-            fields,
-            limit,
-            fuzzy,
-        )
+        with_read_frame(runtime, scope, || {
+            runtime.search_text(
+                query,
+                constrained,
+                entity_types,
+                capabilities,
+                fields,
+                limit,
+                fuzzy,
+            )
+        })
     }
 
     /// Authorized SEARCH CONTEXT. Pre-filters the input collection list
@@ -154,10 +158,23 @@ impl AuthorizedSearch {
             input.collections = Some(bounded);
         }
 
-        let mut result = runtime.search_context(input)?;
+        let mut result = with_read_frame(runtime, scope, || runtime.search_context(input))?;
         post_filter_context_result(&mut result, visible);
         Ok(result)
     }
+}
+
+/// Bridge legacy search executors to the frame without re-resolving identity,
+/// tenant or transaction state. The existing guard restores all three on unwind.
+fn with_read_frame<R>(runtime: &RedDBRuntime, frame: &dyn ReadFrame, run: impl FnOnce() -> R) -> R {
+    let bundle = super::execution_context::SnapshotBundle {
+        snapshot: Some(frame.snapshot_context(runtime)),
+        auth: frame
+            .identity()
+            .map(|(name, role)| (name.to_string(), role)),
+        tenant: frame.effective_scope().map(str::to_string),
+    };
+    super::execution_context::with_snapshot_bundle(&bundle, run)
 }
 
 /// Defence-in-depth pass run after `search_context` returns. The
@@ -228,18 +245,17 @@ fn require_visible<'a>(
     }
 }
 
-/// Intersect a caller-supplied collection list with the visible set.
-/// `None` (no caller list) means "every collection" — we pass `None`
-/// through unchanged so the caller's existing default of "scan the
-/// whole DB" reads as "scan everything visible to the scope". The
-/// caller is expected to substitute the visible set explicitly when it
-/// needs a bounded global-scan corpus.
+/// Restrict both explicit and global requests to the frame's allow-list.
 fn constrain_collections(
     requested: Option<Vec<String>>,
     visible: &HashSet<String>,
 ) -> Option<Vec<String>> {
     match requested {
-        None => None,
+        None => {
+            let mut bounded: Vec<_> = visible.iter().cloned().collect();
+            bounded.sort();
+            Some(bounded)
+        }
         Some(list) => {
             let filtered: Vec<String> = list.into_iter().filter(|c| visible.contains(c)).collect();
             Some(filtered)
@@ -313,8 +329,10 @@ mod tests {
         let visible = set(&["a", "b"]);
         let got = constrain_collections(Some(vec!["a".into(), "c".into()]), &visible);
         assert_eq!(got, Some(vec!["a".into()]));
-        // None -> None passthrough.
-        assert!(constrain_collections(None, &visible).is_none());
+        assert_eq!(
+            constrain_collections(None, &visible),
+            Some(vec!["a".into(), "b".into()])
+        );
         // Touch `Role` so the import isn't dropped if test fixtures grow.
         let _ = Role::Read;
     }
@@ -570,5 +588,172 @@ mod tests {
             !bob.contains("orders"),
             "bob must not reuse alice's visible-collections cache entry"
         );
+    }
+}
+
+#[cfg(test)]
+mod frame_regression_tests {
+    use super::*;
+    use crate::api::RedDBOptions;
+    use crate::auth::Role;
+    use crate::runtime::execution_context::{
+        snapshot_bundle, with_snapshot_bundle, SnapshotBundle,
+    };
+    use crate::runtime::statement_frame::test_support::FakeReadFrame;
+    use crate::storage::unified::entity::EntityData;
+    use reddb_types::Value;
+
+    fn text(runtime: &RedDBRuntime, frame: &dyn ReadFrame, limit: usize) -> Vec<String> {
+        let result = AuthorizedSearch::execute_text(
+            runtime,
+            frame,
+            "needle".into(),
+            None,
+            None,
+            None,
+            None,
+            Some(limit),
+            false,
+        )
+        .expect("text search");
+        result
+            .matches
+            .into_iter()
+            .map(|hit| {
+                let EntityData::Row(row) = hit.entity.data else {
+                    panic!("row")
+                };
+                let Some(Value::Text(value)) = row.get_field("body") else {
+                    panic!("text")
+                };
+                value.to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn search_text_uses_frame_allowlist_and_identity_before_limit() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        for sql in [
+            "CREATE TABLE docs (owner TEXT, body TEXT)",
+            "CREATE TABLE secrets (owner TEXT, body TEXT)",
+            "INSERT INTO docs (owner,body) VALUES ('bob','needle denied'),('alice','needle visible')",
+            "INSERT INTO secrets (owner,body) VALUES ('alice','needle secret')",
+            "CREATE POLICY own ON docs FOR SELECT TO read USING (owner=CURRENT_USER())",
+            "ALTER TABLE docs ENABLE ROW LEVEL SECURITY",
+        ] { rt.execute_query(sql).expect(sql); }
+        let mut frame = FakeReadFrame::with_visible(["docs".into()].into_iter().collect());
+        frame.snapshot = rt.current_snapshot();
+        let outer = SnapshotBundle {
+            auth: Some(("bob".into(), Role::Admin)),
+            tenant: Some("other".into()),
+            snapshot: None,
+        };
+        with_snapshot_bundle(&outer, || {
+            assert_eq!(text(&rt, &frame, 1), ["needle visible"]);
+            assert_eq!(text(&rt, &frame, 10), ["needle visible"]);
+            let restored = snapshot_bundle();
+            assert_eq!(restored.auth, outer.auth);
+            assert_eq!(restored.tenant, outer.tenant);
+            assert!(restored.snapshot.is_none());
+        });
+        frame.visible = Some(HashSet::new());
+        assert!(AuthorizedSearch::execute_text(
+            &rt,
+            &frame,
+            "needle".into(),
+            None,
+            None,
+            None,
+            None,
+            Some(10),
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn search_text_reads_frame_snapshot_even_after_committed_update() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        rt.execute_query("CREATE TABLE docs (id INT PRIMARY KEY, body TEXT)")
+            .expect("table");
+        rt.execute_query("INSERT INTO docs (id,body) VALUES (1,'needle old')")
+            .expect("row");
+        let mut frame = FakeReadFrame::with_visible(["docs".into()].into_iter().collect());
+        frame.snapshot = rt.current_snapshot();
+        rt.execute_query("UPDATE docs SET body='needle new' WHERE id=1")
+            .expect("update");
+        assert_eq!(text(&rt, &frame, 10), ["needle old"]);
+        frame.snapshot = rt.current_snapshot();
+        assert_eq!(text(&rt, &frame, 10), ["needle new"]);
+    }
+
+    #[test]
+    fn search_similar_filters_policy_before_topk_and_uses_frame_identity() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        for sql in [
+            "CREATE VECTOR embeddings DIM 2 METRIC cosine",
+            "INSERT INTO embeddings VECTOR (dense,content) VALUES ([1.0,0.0],'denied') WITH METADATA (owner='bob')",
+            "INSERT INTO embeddings VECTOR (dense,content) VALUES ([0.8,0.6],'visible') WITH METADATA (owner='alice')",
+            "CREATE POLICY own ON VECTORS OF embeddings FOR SELECT TO read USING (metadata.owner=CURRENT_USER())",
+            "ALTER TABLE embeddings ENABLE ROW LEVEL SECURITY",
+        ] { rt.execute_query(sql).expect(sql); }
+        let mut frame = FakeReadFrame::with_visible(["embeddings".into()].into_iter().collect());
+        frame.snapshot = rt.current_snapshot();
+        with_snapshot_bundle(
+            &SnapshotBundle {
+                auth: Some(("bob".into(), Role::Admin)),
+                ..Default::default()
+            },
+            || {
+                let hits = AuthorizedSearch::execute_similar(
+                    &rt,
+                    &frame,
+                    "embeddings",
+                    &[1.0, 0.0],
+                    1,
+                    0.0,
+                )
+                .expect("similar");
+                assert_eq!(hits.len(), 1);
+                let EntityData::Vector(data) = &hits[0].entity.data else {
+                    panic!("vector")
+                };
+                assert_eq!(data.content.as_deref(), Some("visible"));
+            },
+        );
+    }
+    #[test]
+    fn search_scope_preserves_own_savepoint_writes_and_aborts() {
+        use crate::runtime::statement_frame::{StatementExecutionFrame, StatementIdentity};
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        for sql in [
+            "CREATE TABLE docs (id INT, body TEXT)",
+            "BEGIN",
+            "INSERT INTO docs (id,body) VALUES (1,'needle parent')",
+            "SAVEPOINT child",
+            "INSERT INTO docs (id,body) VALUES (2,'needle child')",
+        ] {
+            rt.execute_query(sql).expect(sql);
+        }
+        let scope = {
+            let frame = StatementExecutionFrame::build(
+                &rt,
+                StatementIdentity::Text("SEARCH TEXT 'needle' IN docs"),
+            )
+            .expect("frame");
+            let _installed = frame.install(&rt);
+            let mut scope = rt.ai_scope();
+            scope.visible_collections = Some(["docs".into()].into_iter().collect());
+            scope
+        };
+        let mut rows = text(&rt, &scope, 10);
+        rows.sort();
+        assert_eq!(rows, ["needle child", "needle parent"]);
+        rt.execute_query("ROLLBACK TO SAVEPOINT child")
+            .expect("rollback child");
+        assert_eq!(text(&rt, &scope, 10), ["needle parent"]);
+        rt.execute_query("ROLLBACK").expect("rollback parent");
+        assert!(text(&rt, &scope, 10).is_empty());
     }
 }

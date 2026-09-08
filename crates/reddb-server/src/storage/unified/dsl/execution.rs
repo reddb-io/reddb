@@ -423,6 +423,15 @@ pub fn execute_text_query(
     query: TextSearchBuilder,
     store: &Arc<UnifiedStore>,
 ) -> Result<QueryResult, ExecutionError> {
+    execute_text_query_filtered(query, store, None, |_| true)
+}
+
+pub(crate) fn execute_text_query_filtered(
+    query: TextSearchBuilder,
+    store: &Arc<UnifiedStore>,
+    snapshot: Option<&crate::runtime::execution_context::SnapshotContext>,
+    mut allowed: impl FnMut(&UnifiedEntity) -> bool,
+) -> Result<QueryResult, ExecutionError> {
     let start = Instant::now();
     let mut matches = Vec::new();
     let mut scanned = 0;
@@ -436,9 +445,14 @@ pub fn execute_text_query(
 
     for col_name in &collections {
         if let Some(manager) = store.get_collection(col_name) {
-            let entities = manager.query_all(|_| true);
+            let entities = manager.scan(snapshot, |_| true);
             for entity in entities {
                 scanned += 1;
+
+                // Evaluate policy outside segment locks and before scoring/limiting.
+                if !allowed(&entity) {
+                    continue;
+                }
 
                 // Extract searchable text from entity
                 let text = extract_searchable_text(&entity);
