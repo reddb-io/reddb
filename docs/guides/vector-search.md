@@ -173,3 +173,14 @@ caller transaction.
 - **Normalization**: Cosine similarity works best with normalized vectors
 - **Metadata filtering**: Use metadata to filter results by category, date, or author
 - **Hybrid search**: Combines the semantic understanding of vectors with the precision of keyword matching
+
+
+### Measured operator work
+
+Vector execution statistics and `EXPLAIN ANALYZE VECTOR SEARCH` include an
+`operators` array in child-before-parent order. Each entry reports the executed
+operator, input/output rows and `inclusive_time_us`. Time includes descendants;
+do not add entries to estimate total query time. The scan owns pushed-down
+visibility, RLS, metadata filtering and bounded top-k, so later logical filter
+nodes can legitimately reject zero rows. Cache hits retain the original
+measurements and set `cache_hit`; EXPLAIN ANALYZE performs a fresh execution.

@@ -430,6 +430,23 @@ pub(crate) fn query_stats_json(stats: &QueryStats) -> JsonValue {
     );
     if let Some(vector) = &stats.vector {
         let mut metrics = Map::new();
+        metrics.insert("operators".into(), vector.operators_json());
+        metrics.insert(
+            "mode_requested".into(),
+            JsonValue::String(vector.mode_requested.clone()),
+        );
+        metrics.insert(
+            "mode_executed".into(),
+            JsonValue::String(vector.mode_executed.clone()),
+        );
+        metrics.insert(
+            "fallback_reason".into(),
+            vector
+                .fallback_reason
+                .as_ref()
+                .map_or(JsonValue::Null, |reason| JsonValue::String(reason.clone())),
+        );
+
         metrics.insert("cache_hit".to_string(), JsonValue::Bool(vector.cache_hit));
         metrics.insert(
             "access_path".to_string(),
@@ -437,6 +454,11 @@ pub(crate) fn query_stats_json(stats: &QueryStats) -> JsonValue {
         );
         metrics.insert("index_used".to_string(), JsonValue::Bool(vector.index_used));
         for (name, value) in [
+            (
+                "approximate_distance_evaluations",
+                vector.approximate_distance_evaluations,
+            ),
+            ("peak_topk_entries", vector.peak_topk_entries),
             ("candidates_examined", vector.candidates_examined),
             ("metadata_rejected", vector.metadata_rejected),
             ("rls_rejected", vector.rls_rejected),

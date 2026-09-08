@@ -3322,6 +3322,10 @@ impl RedDBRuntime {
                 Value::Float(stats.exec_time_us as f64 / 1000.0),
             ),
             ("metrics_scope", Value::text("vector_pipeline")),
+            (
+                "operators",
+                Value::Json(vector.operators_json().to_string().into_bytes()),
+            ),
         ];
         let columns = fields.iter().map(|(name, _)| name.to_string()).collect();
         let mut record = crate::storage::query::unified::UnifiedRecord::default();

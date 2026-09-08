@@ -652,9 +652,20 @@ pub struct QueryStats {
     pub vector: Option<VectorQueryStats>,
 }
 
+/// One executed canonical vector operator, recorded after its child completes.
+/// Inclusive time includes children and must not be summed across the tree.
+#[derive(Debug, Clone, Default)]
+pub struct VectorOperatorStats {
+    pub operator: String,
+    pub input_rows: u64,
+    pub output_rows: u64,
+    pub inclusive_time_us: u64,
+}
+
 /// Counters collected by execution, not inferred from the logical plan.
 #[derive(Debug, Clone, Default)]
 pub struct VectorQueryStats {
+    pub operators: Vec<VectorOperatorStats>,
     pub mode_requested: String,
     pub mode_executed: String,
     pub fallback_reason: Option<String>,
@@ -670,6 +681,32 @@ pub struct VectorQueryStats {
     pub visibility_rejected: u64,
     pub exact_distance_evaluations: u64,
     pub rows_returned: u64,
+}
+
+impl VectorQueryStats {
+    pub(crate) fn operators_json(&self) -> crate::json::Value {
+        use crate::json::{Map, Value as JsonValue};
+        JsonValue::Array(
+            self.operators
+                .iter()
+                .map(|operator| {
+                    let mut fields = Map::new();
+                    fields.insert(
+                        "operator".into(),
+                        JsonValue::String(operator.operator.clone()),
+                    );
+                    for (name, value) in [
+                        ("input_rows", operator.input_rows),
+                        ("output_rows", operator.output_rows),
+                        ("inclusive_time_us", operator.inclusive_time_us),
+                    ] {
+                        fields.insert(name.into(), Value::UnsignedInteger(value).to_json());
+                    }
+                    JsonValue::Object(fields)
+                })
+                .collect(),
+        )
+    }
 }
 
 #[cfg(test)]
