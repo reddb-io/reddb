@@ -469,16 +469,19 @@ impl RedDBRuntime {
         };
 
         let store = self.inner.db.store();
-        for (collection, old_id, new_id, xid, previous_xmax) in pending {
+        // Undo newest versions first so repeated writes restore the original chain.
+        for (collection, old_id, new_id, xid, previous_xmax) in pending.into_iter().rev() {
+            let _ = store.delete_batch(&collection, &[new_id]);
             if let Some(manager) = store.get_collection(&collection) {
                 if let Some(mut old) = manager.get(old_id) {
                     if old.xmax == xid {
                         old.set_xmax(previous_xmax);
-                        let _ = manager.update(old);
+                        if manager.update(old.clone()).is_ok() {
+                            store.context_index().index_entity(&collection, &old);
+                        }
                     }
                 }
             }
-            let _ = store.delete_batch(&collection, &[new_id]);
         }
     }
 

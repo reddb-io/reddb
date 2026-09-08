@@ -429,9 +429,15 @@ fn ai_policy_from_persisted(policy: reddb_file::PhysicalAiPolicy) -> crate::cata
 }
 
 pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<CollectionContract> {
+    let decode_error = |message: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            CollectionContractDecodeError(message),
+        )
+    };
     let contract = reddb_file::decode_physical_collection_contract_json(&value.to_string_compact())
-        .map_err(|err| invalid_data(format!("decode physical collection contract: {err}")))?;
-    collection_contract_from_persisted(contract)
+        .map_err(|error| decode_error(error.to_string()))?;
+    collection_contract_from_persisted(contract).map_err(|error| decode_error(error.to_string()))
 }
 
 fn subscription_descriptor_to_json(

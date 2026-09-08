@@ -3163,22 +3163,26 @@ impl RedDBRuntime {
 
         let store = self.inner.db.store();
         let mut reverted = 0usize;
+        pending.reverse();
         pending.retain(|(collection, old_id, new_id, xid, previous_xmax)| {
             if *xid < stamper_xid {
                 return true;
             }
+            let _ = store.delete_batch(collection, &[*new_id]);
             if let Some(manager) = store.get_collection(collection) {
                 if let Some(mut old) = manager.get(*old_id) {
                     if old.xmax == *xid {
                         old.set_xmax(*previous_xmax);
-                        let _ = manager.update(old);
+                        if manager.update(old.clone()).is_ok() {
+                            store.context_index().index_entity(collection, &old);
+                        }
                     }
                 }
             }
-            let _ = store.delete_batch(collection, &[*new_id]);
             reverted += 1;
             false
         });
+        pending.reverse();
         if pending.is_empty() {
             guard.remove(&conn_id);
         }

@@ -724,7 +724,14 @@ impl RedDBRuntime {
                                     filter: Some(Filter::Compare {
                                         field: FieldRef::column("", "rid"),
                                         op: CompareOp::Eq,
-                                        value: Value::UnsignedInteger(conflict_id.raw()),
+                                        // Uniqueness locates a physical version; RQL rid is
+                                        // the stable logical identity across updates.
+                                        value: Value::UnsignedInteger(
+                                            store
+                                                .get(&query.table, conflict_id)
+                                                .map(|entity| entity.logical_id().raw())
+                                                .unwrap_or(conflict_id.raw()),
+                                        ),
                                     }),
                                     ttl_ms: None,
                                     expires_at_ms: None,

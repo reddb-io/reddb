@@ -123,6 +123,24 @@ impl ContractOrigin {
     }
 }
 
+/// A decoded contract is authoritative; it cannot be repaired from row contents.
+#[derive(Debug)]
+pub(crate) struct CollectionContractDecodeError(pub String);
+
+impl std::fmt::Display for CollectionContractDecodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invalid collection contract: {}", self.0)
+    }
+}
+
+impl std::error::Error for CollectionContractDecodeError {}
+
+pub(crate) fn is_collection_contract_decode_error(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<CollectionContractDecodeError>())
+}
+
 #[derive(Debug, Clone)]
 pub struct DeclaredColumnContract {
     pub name: String,

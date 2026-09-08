@@ -233,15 +233,12 @@ impl RedDB {
     /// blob (single-file artifact). Called on open so a collection's declared
     /// model survives a restart. Does nothing when the blob is absent (older
     /// V9 dumps) or empty.
-    pub(crate) fn seed_contract_cache_from_store_aux(&self) {
+    pub(crate) fn seed_contract_cache_from_store_aux(&self) -> std::io::Result<()> {
         let bytes = self.store().aux_metadata();
         if bytes.is_empty() {
-            return;
+            return Ok(());
         }
-        let contracts = match crate::physical::deserialize_collection_contracts(&bytes) {
-            Ok(contracts) => contracts,
-            Err(_) => return,
-        };
+        let contracts = crate::physical::deserialize_collection_contracts(&bytes)?;
         let map: std::collections::HashMap<_, _> = contracts
             .into_iter()
             .map(|contract| (contract.name.clone(), std::sync::Arc::new(contract)))
@@ -262,6 +259,7 @@ impl RedDB {
         if let Ok(mut guard) = self.collection_contract_cache.write() {
             *guard = Some(std::sync::Arc::new(map));
         }
+        Ok(())
     }
 
     pub fn save_collection_contract(

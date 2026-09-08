@@ -118,15 +118,22 @@ impl PhysicalMetadataFile {
                 Ok(metadata) => {
                     return Ok((metadata, PhysicalMetadataSource::Binary));
                 }
+                Err(error) if is_collection_contract_decode_error(&error) => return Err(error),
                 Err(_) => {
                     let mut journal_paths = Self::journal_paths_for_data_path(data_path)?;
                     journal_paths.reverse();
                     for journal_path in journal_paths {
-                        if let Ok(metadata) = Self::load_from_binary_path(&journal_path) {
-                            let healed =
-                                metadata.mark_recovery(PhysicalMetadataSource::BinaryJournal);
-                            let _ = healed.heal_primary_metadata_for_data_path(data_path);
-                            return Ok((healed, PhysicalMetadataSource::BinaryJournal));
+                        match Self::load_from_binary_path(&journal_path) {
+                            Ok(metadata) => {
+                                let healed =
+                                    metadata.mark_recovery(PhysicalMetadataSource::BinaryJournal);
+                                let _ = healed.heal_primary_metadata_for_data_path(data_path);
+                                return Ok((healed, PhysicalMetadataSource::BinaryJournal));
+                            }
+                            Err(error) if is_collection_contract_decode_error(&error) => {
+                                return Err(error)
+                            }
+                            Err(_) => {}
                         }
                     }
                 }

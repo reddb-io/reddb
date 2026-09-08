@@ -7,14 +7,20 @@ fn schema(runtime: &RedDBRuntime) {
 }
 
 fn value(runtime: &RedDBRuntime, field: &str) -> Value {
-    runtime
+    let result = runtime
         .execute_query("SELECT * FROM orders WHERE id = 1")
-        .expect("read")
-        .result
-        .records[0]
-        .get(field)
-        .expect("field")
-        .clone()
+        .expect("read");
+    let Some(row) = result.result.records.first() else {
+        panic!(
+            "missing indexed row; full scan: {:?}",
+            runtime
+                .execute_query("SELECT * FROM orders")
+                .expect("diagnostic scan")
+                .result
+                .records
+        );
+    };
+    row.get(field).expect("field").clone()
 }
 
 #[test]
@@ -341,4 +347,50 @@ fn expressions_invalid_operational_contract_cannot_fall_back_to_old_schema() {
         .err()
         .expect("must not heal away invalid constraints");
     assert!(error.to_string().contains("column"), "{error}");
+}
+
+#[test]
+fn expressions_savepoint_restores_repeated_versions_and_index_candidates() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    schema(&runtime);
+    runtime
+        .execute_query("INSERT INTO orders (id, quantity) VALUES (1, 2)")
+        .expect("seed");
+    runtime
+        .execute_query("CREATE INDEX rollback_total ON orders (total) USING HASH")
+        .expect("index");
+    runtime.execute_query("BEGIN").expect("begin");
+    runtime
+        .execute_query("UPDATE orders SET quantity = 3 WHERE id = 1")
+        .expect("outer update");
+    runtime
+        .execute_query("SAVEPOINT inner_write")
+        .expect("savepoint");
+    runtime
+        .execute_query("UPDATE orders SET quantity = 4 WHERE id = 1")
+        .expect("inner update");
+    runtime
+        .execute_query("UPDATE orders SET price = 6 WHERE id = 1")
+        .expect("second inner update");
+    runtime
+        .execute_query("ROLLBACK TO SAVEPOINT inner_write")
+        .expect("rollback savepoint");
+    assert_eq!(value(&runtime, "total"), Value::Integer(15));
+    assert_eq!(
+        runtime
+            .execute_query("SELECT * FROM orders WHERE total = 15")
+            .expect("index candidates restored")
+            .result
+            .records
+            .len(),
+        1
+    );
+    assert!(runtime
+        .execute_query("SELECT * FROM orders WHERE total = 24")
+        .expect("aborted index candidates hidden")
+        .result
+        .records
+        .is_empty());
+    runtime.execute_query("ROLLBACK").expect("rollback outer");
+    assert_eq!(value(&runtime, "total"), Value::Integer(10));
 }
