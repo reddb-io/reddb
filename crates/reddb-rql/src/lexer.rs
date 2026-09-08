@@ -246,6 +246,8 @@ pub enum Token {
 
     // Identifiers
     Ident(String),
+    /// SQL double-quoted identifier; kept distinct from contextual keywords.
+    QuotedIdent(String),
 
     // Operators
     Eq,      // =
@@ -477,6 +479,7 @@ impl fmt::Display for Token {
             Token::Float(n) => write!(f, "{}", n),
             Token::JsonLiteral(s) => write!(f, "{}", s),
             Token::Ident(s) => write!(f, "{}", s),
+            Token::QuotedIdent(s) => write!(f, "\"{}\"", s.replace('"', "\"\"")),
             Token::Eq => write!(f, "="),
             Token::Ne => write!(f, "<>"),
             Token::Lt => write!(f, "<"),
@@ -792,7 +795,13 @@ impl<'a> Lexer<'a> {
         // Dispatch based on first character
         let token = match ch {
             // String literals
-            '\'' | '"' => self.scan_string()?,
+            '\'' => self.scan_string()?,
+            '"' => {
+                let Token::String(name) = self.scan_string()? else {
+                    unreachable!("string scanner returns a string token");
+                };
+                Token::QuotedIdent(name)
+            }
 
             // Numbers
             '0'..='9' => self.scan_number()?,
@@ -1583,7 +1592,7 @@ mod tests {
             tokens,
             vec![
                 Token::String("hello".into()),
-                Token::String("world".into()),
+                Token::QuotedIdent("world".into()),
                 Token::String("it's".into()),
                 Token::Eof
             ]
@@ -2336,7 +2345,7 @@ mod tests {
                 Token::String("tab\tstop".into()),
                 Token::String("slash\\".into()),
                 Token::String("quote'".into()),
-                Token::String("dq\"".into()),
+                Token::QuotedIdent("dq\"".into()),
                 Token::String(r"raw\z".into()),
                 Token::Eof
             ]

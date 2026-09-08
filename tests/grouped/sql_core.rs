@@ -122,3 +122,6 @@ mod e2e_unique_key_lookup;
 
 #[path = "schema_query_core/e2e_table_unique_constraints.rs"]
 mod e2e_table_unique_constraints;
+
+#[path = "schema_query_core/e2e_sql_quoted_identifiers.rs"]
+mod e2e_sql_quoted_identifiers;

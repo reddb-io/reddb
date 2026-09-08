@@ -262,3 +262,5 @@ counters such as `actual_rows` and `actual_ms`. RedDB never commits under
 > Row results include the public RedDB ID envelope fields `rid`, `collection`,
 > `kind`, `tenant`, `created_at`, and `updated_at`. For ordinary table rows,
 > `kind` is `row`.
+
+See [SQL quotation rules and migration](sql-quoting.md) for double-quoted identifiers, single-quoted text, and unchanged JSON quoting.

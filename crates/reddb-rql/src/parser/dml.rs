@@ -937,6 +937,16 @@ impl<'a> Parser<'a> {
         result
     }
 
+    // Double quotes remain string delimiters inside JSON arrays and objects.
+    // At a SQL expression boundary the same token denotes a column identifier.
+    fn parse_nested_json_value(&mut self) -> Result<Value, ParseError> {
+        if let Token::QuotedIdent(value) = self.peek().clone() {
+            self.advance()?;
+            return Ok(Value::text(value));
+        }
+        self.parse_literal_value()
+    }
+
     fn parse_literal_value_inner(&mut self) -> Result<Value, ParseError> {
         // Recognize PASSWORD('plaintext') and SECRET('plaintext') as
         // typed literal constructors. The parser stores them as
@@ -1048,7 +1058,7 @@ impl<'a> Parser<'a> {
                 let mut items = Vec::new();
                 if !self.check(&Token::RBracket) {
                     loop {
-                        items.push(self.parse_literal_value()?);
+                        items.push(self.parse_nested_json_value()?);
                         if !self.consume(&Token::Comma)? {
                             break;
                         }
@@ -1074,7 +1084,7 @@ impl<'a> Parser<'a> {
                                 self.advance()?;
                                 s
                             }
-                            Token::Ident(s) => {
+                            Token::Ident(s) | Token::QuotedIdent(s) => {
                                 self.advance()?;
                                 s
                             }
@@ -1085,7 +1095,7 @@ impl<'a> Parser<'a> {
                             self.expect(Token::Eq)?;
                         }
                         // Value: recursive
-                        let val = self.parse_literal_value()?;
+                        let val = self.parse_nested_json_value()?;
                         map.insert(key, literal_value_to_json(&val));
                         if !self.consume(&Token::Comma)? {
                             break;

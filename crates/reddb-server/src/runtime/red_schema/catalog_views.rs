@@ -427,7 +427,7 @@ fn render_index_method_for_ddl(method: super::index_store::IndexMethodKind) -> &
 }
 
 fn render_sql_identifier(identifier: &str) -> String {
-    identifier.to_string()
+    reddb_rql::renderer::render_identifier(identifier)
 }
 
 pub(super) fn collections_snapshot(
