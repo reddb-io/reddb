@@ -71,6 +71,10 @@ fn sql_quoted_columns_do_not_share_cached_literal_plans() {
             "first_label",
         ),
         (r#"SELECT "first_label" AS value FROM labels"#, "left"),
+        (
+            r#"SELECT "first_label" AS value FROM labels WHERE first_label='left'"#,
+            "left",
+        ),
     ] {
         let result = rt.execute_query(sql).expect("distinct cached query");
         assert_eq!(

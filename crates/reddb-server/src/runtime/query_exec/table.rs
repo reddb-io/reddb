@@ -474,8 +474,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let effective_filter = effective_table_filter(query);
     let effective_group_by = effective_table_group_by_exprs(query);
     let effective_having = effective_table_having_filter(query);
+    // Filtered/index-only shortcuts materialize source column names. An
+    // alias needs the canonical projection node to rename the result.
     let requires_runtime_projection =
-        projections_require_runtime_projection(&effective_projections);
+        projections_require_runtime_projection(&effective_projections)
+            || (effective_filter.is_some()
+                && effective_projections
+                    .iter()
+                    .any(|p| matches!(p, Projection::Alias(_, _))));
     let uses_document_projection =
         runtime_projections_use_document_path(&effective_projections, query);
 
