@@ -51,6 +51,15 @@ pub fn render_identifier(identifier: &str) -> String {
     }
 }
 
+// Dotted AST names denote paths; literal dots in delimited names are rejected
+// by the parser because this AST does not retain segment quoting provenance.
+fn render_identifier_path(path: &str) -> String {
+    path.split('.')
+        .map(render_identifier)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn render_explain(inner: &QueryExpr) -> String {
     let rendered = render(inner);
     if rendered.is_empty() {
@@ -70,7 +79,7 @@ fn render_table(tq: &TableQuery) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let mut sql = format!("SELECT {} FROM {}", cols, render_identifier(&tq.table));
+    let mut sql = format!("SELECT {} FROM {}", cols, render_identifier_path(&tq.table));
     if let Some(filter) = &tq.filter {
         sql.push_str(" WHERE ");
         sql.push_str(&render_filter(filter));
@@ -99,7 +108,7 @@ fn render_insert(iq: &InsertQuery) -> String {
         .collect();
     let mut sql = format!(
         "INSERT INTO {} ({}) VALUES {}",
-        render_identifier(&iq.table),
+        render_identifier_path(&iq.table),
         cols,
         rows.join(", ")
     );
@@ -136,7 +145,7 @@ fn render_insert(iq: &InsertQuery) -> String {
 }
 
 fn render_update(uq: &UpdateQuery) -> String {
-    let mut sql = format!("UPDATE {}", render_identifier(&uq.table));
+    let mut sql = format!("UPDATE {}", render_identifier_path(&uq.table));
     if let Some(target) = render_update_target(uq.target) {
         sql.push(' ');
         sql.push_str(target);
@@ -156,7 +165,7 @@ fn render_update(uq: &UpdateQuery) -> String {
                 .unwrap_or("=");
             format!(
                 "{} {} {}",
-                render_identifier(column),
+                render_identifier_path(column),
                 op,
                 render_expr_sql(expr)
             )
@@ -180,7 +189,7 @@ fn render_update(uq: &UpdateQuery) -> String {
 }
 
 fn render_delete(dq: &DeleteQuery) -> String {
-    let mut sql = format!("DELETE FROM {}", render_identifier(&dq.table));
+    let mut sql = format!("DELETE FROM {}", render_identifier_path(&dq.table));
     if let Some(filter) = &dq.filter {
         sql.push_str(" WHERE ");
         sql.push_str(&render_filter(filter));
@@ -277,9 +286,15 @@ fn render_projection(p: &Projection) -> String {
 
 pub(crate) fn render_field_ref(f: &FieldRef) -> String {
     match f {
-        FieldRef::TableColumn { table, column } if table.is_empty() => render_identifier(column),
+        FieldRef::TableColumn { table, column } if table.is_empty() => {
+            render_identifier_path(column)
+        }
         FieldRef::TableColumn { table, column } => {
-            format!("{}.{}", render_identifier(table), render_identifier(column))
+            format!(
+                "{}.{}",
+                render_identifier_path(table),
+                render_identifier_path(column)
+            )
         }
         _ => "field".to_string(),
     }

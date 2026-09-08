@@ -174,3 +174,14 @@ fn quoted_write_names_survive_rendering() {
         assert_eq!(rendered, sql);
     }
 }
+
+#[test]
+fn quoted_paths_keep_separators_outside_delimiters() {
+    let sql = r#"UPDATE docs SET "profile name".city = 'Lisbon' WHERE name = 'ada'"#;
+    let parsed = Parser::new(sql).expect("lexer").parse().expect("path");
+    assert_eq!(reddb_rql::renderer::render(&parsed), sql);
+    assert!(Parser::new(r#"SELECT "literal.dot" FROM docs"#)
+        .expect("lexer")
+        .parse()
+        .is_err());
+}

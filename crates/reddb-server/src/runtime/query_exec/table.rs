@@ -1765,6 +1765,25 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             records.truncate(limit as usize);
         }
 
+        // Explicit column names and aliases must be projected on the fast
+        // scan too. Returning raw records silently turns SELECT col AS alias
+        // into SELECT *, including when the name is quoted.
+        if !matches!(effective_projections.as_slice(), [Projection::All]) {
+            return records
+                .iter()
+                .map(|record| {
+                    project_runtime_record_with_db(
+                        Some(db),
+                        record,
+                        &effective_projections,
+                        Some(table_name),
+                        Some(table_alias),
+                        false,
+                        false,
+                    )
+                })
+                .collect();
+        }
         return Ok(records);
     }
 

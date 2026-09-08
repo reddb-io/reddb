@@ -63,6 +63,7 @@ fn sql_quoted_columns_do_not_share_cached_literal_plans() {
     rt.execute_query("INSERT INTO labels (first_label,second_label) VALUES ('left','right')")
         .expect("values");
     for (sql, expected) in [
+        ("SELECT first_label AS value FROM labels", "left"),
         (r#"SELECT "first_label" AS value FROM labels"#, "left"),
         (r#"SELECT "second_label" AS value FROM labels"#, "right"),
         (
@@ -74,7 +75,9 @@ fn sql_quoted_columns_do_not_share_cached_literal_plans() {
         let result = rt.execute_query(sql).expect("distinct cached query");
         assert_eq!(
             result.result.records[0].get("value"),
-            Some(&Value::text(expected))
+            Some(&Value::text(expected)),
+            "{sql}: {:?}",
+            result.result.records
         );
     }
 }

@@ -10,7 +10,10 @@ SELECT "text value" FROM "select" WHERE "key name" = 1;
 
 An identifier may name a table, column, alias, or constraint. Double an embedded
 quote: `"a""b"` names the column `a"b`. Ordinary unquoted identifiers continue to
-work. Quoted keywords such as `"CASE"` and `"current_user"` are column names,
+work. Paths keep their dots outside the quotes, for example
+`"profile name"."city"`. Literal dots inside a single quoted identifier are
+currently rejected because the query AST cannot distinguish them from paths.
+Quoted keywords such as `"CASE"` and `"current_user"` are column names,
 not expressions with special behavior.
 
 For text, double an embedded single quote: `'it''s ready'`. Prefer query

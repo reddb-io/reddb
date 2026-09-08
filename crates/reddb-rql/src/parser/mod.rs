@@ -224,6 +224,12 @@ impl<'a> Parser<'a> {
                         self.position(),
                     ));
                 }
+                if matches!(self.peek(), Token::QuotedIdent(_)) && name.contains('.') {
+                    return Err(ParseError::new(
+                        "literal dots in quoted identifiers are not supported; quote each path segment separately".to_string(),
+                        self.position(),
+                    ));
+                }
                 let name = name.clone();
                 self.advance()?;
                 Ok(name)
