@@ -217,7 +217,19 @@ impl<'a> Parser<'a> {
     /// Consume an identifier and return its value
     pub fn expect_ident(&mut self) -> Result<String, ParseError> {
         match &self.current.token {
-            Token::Ident(name) => {
+            Token::Ident(name) | Token::QuotedIdent(name) => {
+                if name.is_empty() || name.contains('\0') {
+                    return Err(ParseError::new(
+                        "SQL identifiers must be nonempty and contain no NUL".to_string(),
+                        self.position(),
+                    ));
+                }
+                if matches!(self.peek(), Token::QuotedIdent(_)) && name.contains('.') {
+                    return Err(ParseError::new(
+                        "literal dots in quoted identifiers are not supported; quote each path segment separately".to_string(),
+                        self.position(),
+                    ));
+                }
                 let name = name.clone();
                 self.advance()?;
                 Ok(name)
@@ -233,8 +245,11 @@ impl<'a> Parser<'a> {
     /// Consume an identifier or aggregate keyword when the grammar expects
     /// a user-defined column name.
     pub fn expect_column_ident(&mut self) -> Result<String, ParseError> {
+        if matches!(self.peek(), Token::Ident(_) | Token::QuotedIdent(_)) {
+            return self.expect_ident();
+        }
         let name = match &self.current.token {
-            Token::Ident(name) => name.clone(),
+            Token::Ident(name) | Token::QuotedIdent(name) => name.clone(),
             Token::Count => "count".to_string(),
             Token::Sum => "sum".to_string(),
             Token::Avg => "avg".to_string(),
@@ -255,9 +270,12 @@ impl<'a> Parser<'a> {
 
     /// Consume an identifier or keyword (for type names where keywords are valid)
     pub fn expect_ident_or_keyword(&mut self) -> Result<String, ParseError> {
+        if matches!(self.peek(), Token::Ident(_) | Token::QuotedIdent(_)) {
+            return self.expect_ident();
+        }
         // Get the string representation of the current token
         let name = match &self.current.token {
-            Token::Ident(name) => name.clone(),
+            Token::Ident(name) | Token::QuotedIdent(name) => name.clone(),
             Token::Count => "count".to_string(),
             Token::Sum => "sum".to_string(),
             Token::Avg => "avg".to_string(),
@@ -278,7 +296,7 @@ impl<'a> Parser<'a> {
         // Only advance for valid type-name-like tokens
         match &self.current.token {
             // Identifiers are always valid
-            Token::Ident(_) => {
+            Token::Ident(_) | Token::QuotedIdent(_) => {
                 self.advance()?;
                 Ok(name)
             }

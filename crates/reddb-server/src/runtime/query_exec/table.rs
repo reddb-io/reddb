@@ -1765,6 +1765,49 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             records.truncate(limit as usize);
         }
 
+        // Explicit column names and aliases must be projected on the fast
+        // scan too. Returning raw records silently turns SELECT col AS alias
+        // into SELECT *, including when the name is quoted.
+        // SESSIONIZE consumes its key/time inputs in the outer executor.
+        if query.sessionize.is_none()
+            && !matches!(effective_projections.as_slice(), [Projection::All])
+        {
+            crate::runtime::retention_filter::apply(
+                &mut records,
+                db.collection_contract(query.table.as_str()).as_ref(),
+            );
+            return records
+                .iter()
+                .map(|record| {
+                    let mut projected = project_runtime_record_with_db(
+                        Some(db),
+                        record,
+                        &effective_projections,
+                        Some(table_name),
+                        Some(table_alias),
+                        false,
+                        false,
+                    )?;
+                    // Keep the system envelope for wire metadata and stream
+                    // resume; result.columns still describes only the SELECT.
+                    for key in [
+                        "rid",
+                        "collection",
+                        "kind",
+                        "tenant",
+                        "created_at",
+                        "updated_at",
+                    ] {
+                        if projected.get(key).is_none() {
+                            if let Some(value) = record.get(key) {
+                                projected.set(key, value.clone());
+                            }
+                        }
+                    }
+                    Ok(projected)
+                })
+                .collect();
+        }
         return Ok(records);
     }
 

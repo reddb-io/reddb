@@ -31,6 +31,35 @@ pub fn render(expr: &QueryExpr) -> String {
     }
 }
 
+/// Preserve ordinary names; quote keywords and names requiring delimiters.
+pub fn render_identifier(identifier: &str) -> String {
+    let mut lexer = crate::lexer::Lexer::new(identifier);
+    let contextual_keyword = matches!(
+        identifier.to_ascii_uppercase().as_str(),
+        "CASE" | "CONSTRAINT" | "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME"
+    );
+    let plain = !contextual_keyword
+        && matches!(lexer.next_token(), Ok(token) if token.token == crate::lexer::Token::Ident(identifier.to_string()))
+        && matches!(lexer.next_token(), Ok(token) if token.token == crate::lexer::Token::Eof);
+    if plain {
+        identifier.to_string()
+    } else {
+        format!(
+            "\"{}\"",
+            identifier.replace('\\', "\\\\").replace('"', "\"\"")
+        )
+    }
+}
+
+// Dotted AST names denote paths; literal dots in delimited names are rejected
+// by the parser because this AST does not retain segment quoting provenance.
+fn render_identifier_path(path: &str) -> String {
+    path.split('.')
+        .map(render_identifier)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn render_explain(inner: &QueryExpr) -> String {
     let rendered = render(inner);
     if rendered.is_empty() {
@@ -50,7 +79,7 @@ fn render_table(tq: &TableQuery) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let mut sql = format!("SELECT {} FROM {}", cols, tq.table);
+    let mut sql = format!("SELECT {} FROM {}", cols, render_identifier_path(&tq.table));
     if let Some(filter) = &tq.filter {
         sql.push_str(" WHERE ");
         sql.push_str(&render_filter(filter));
@@ -59,7 +88,12 @@ fn render_table(tq: &TableQuery) -> String {
 }
 
 fn render_insert(iq: &InsertQuery) -> String {
-    let cols = iq.columns.join(", ");
+    let cols = iq
+        .columns
+        .iter()
+        .map(|name| render_identifier(name))
+        .collect::<Vec<_>>()
+        .join(", ");
     let rows: Vec<String> = iq
         .values
         .iter()
@@ -74,7 +108,7 @@ fn render_insert(iq: &InsertQuery) -> String {
         .collect();
     let mut sql = format!(
         "INSERT INTO {} ({}) VALUES {}",
-        iq.table,
+        render_identifier_path(&iq.table),
         cols,
         rows.join(", ")
     );
@@ -82,7 +116,13 @@ fn render_insert(iq: &InsertQuery) -> String {
         sql.push_str(" ON CONFLICT");
         if let Some(columns) = &clause.target {
             sql.push_str(" (");
-            sql.push_str(&columns.join(", "));
+            sql.push_str(
+                &columns
+                    .iter()
+                    .map(|column| render_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
             sql.push(')');
         }
         match &clause.action {
@@ -92,7 +132,9 @@ fn render_insert(iq: &InsertQuery) -> String {
                 sql.push_str(
                     &assignments
                         .iter()
-                        .map(|(column, expr)| format!("{column} = {}", render_expr_sql(expr)))
+                        .map(|(column, expr)| {
+                            format!("{} = {}", render_identifier(column), render_expr_sql(expr))
+                        })
                         .collect::<Vec<_>>()
                         .join(", "),
                 );
@@ -103,7 +145,7 @@ fn render_insert(iq: &InsertQuery) -> String {
 }
 
 fn render_update(uq: &UpdateQuery) -> String {
-    let mut sql = format!("UPDATE {}", uq.table);
+    let mut sql = format!("UPDATE {}", render_identifier_path(&uq.table));
     if let Some(target) = render_update_target(uq.target) {
         sql.push(' ');
         sql.push_str(target);
@@ -121,7 +163,12 @@ fn render_update(uq: &UpdateQuery) -> String {
                 .flatten()
                 .map(render_compound_assignment_op)
                 .unwrap_or("=");
-            format!("{} {} {}", column, op, render_expr_sql(expr))
+            format!(
+                "{} {} {}",
+                render_identifier_path(column),
+                op,
+                render_expr_sql(expr)
+            )
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -142,7 +189,7 @@ fn render_update(uq: &UpdateQuery) -> String {
 }
 
 fn render_delete(dq: &DeleteQuery) -> String {
-    let mut sql = format!("DELETE FROM {}", dq.table);
+    let mut sql = format!("DELETE FROM {}", render_identifier_path(&dq.table));
     if let Some(filter) = &dq.filter {
         sql.push_str(" WHERE ");
         sql.push_str(&render_filter(filter));
@@ -176,7 +223,11 @@ fn render_compound_assignment_op(op: BinOp) -> &'static str {
 fn render_queue_command(qc: &QueueCommand) -> String {
     match qc {
         QueueCommand::Push { queue, value, .. } => {
-            format!("QUEUE PUSH {} {}", queue, render_value_sql(value))
+            format!(
+                "QUEUE PUSH {} {}",
+                render_identifier(queue),
+                render_value_sql(value)
+            )
         }
         _ => String::new(),
     }
@@ -218,12 +269,14 @@ fn render_bin_op(op: BinOp) -> &'static str {
 fn render_projection(p: &Projection) -> String {
     match p {
         Projection::All => "*".to_string(),
-        Projection::Column(col) => col.clone(),
-        Projection::Alias(col, alias) => format!("{} AS {}", col, alias),
+        Projection::Column(col) => render_identifier(col),
+        Projection::Alias(col, alias) => {
+            format!("{} AS {}", render_identifier(col), render_identifier(alias))
+        }
         Projection::Field(field, alias) => {
             let col = render_field_ref(field);
             match alias {
-                Some(a) => format!("{} AS {}", col, a),
+                Some(a) => format!("{} AS {}", col, render_identifier(a)),
                 None => col,
             }
         }
@@ -233,8 +286,16 @@ fn render_projection(p: &Projection) -> String {
 
 pub(crate) fn render_field_ref(f: &FieldRef) -> String {
     match f {
-        FieldRef::TableColumn { table, column } if table.is_empty() => column.clone(),
-        FieldRef::TableColumn { table, column } => format!("{}.{}", table, column),
+        FieldRef::TableColumn { table, column } if table.is_empty() => {
+            render_identifier_path(column)
+        }
+        FieldRef::TableColumn { table, column } => {
+            format!(
+                "{}.{}",
+                render_identifier_path(table),
+                render_identifier_path(column)
+            )
+        }
         _ => "field".to_string(),
     }
 }

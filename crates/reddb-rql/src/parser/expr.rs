@@ -445,7 +445,8 @@ impl<'a> Parser<'a> {
         // two-token lookahead on the parser. If the next token is `(`
         // it's a function call; if `.` it's a qualified column ref;
         // otherwise it's a bare column ref.
-        if let Token::Ident(ref name) = *self.peek() {
+        if let Token::Ident(ref name) | Token::QuotedIdent(ref name) = *self.peek() {
+            let quoted = matches!(self.peek(), Token::QuotedIdent(_));
             let name_upper = name.to_uppercase();
 
             // CAST(expr AS type) — must test before consuming because
@@ -457,19 +458,21 @@ impl<'a> Parser<'a> {
             // uppercased name is CAST and the next token is `(`,
             // switch to the CAST form; otherwise the saved name
             // becomes the first segment of a column ref.
-            if name_upper == "CASE" {
+            if !quoted && name_upper == "CASE" {
                 return self.parse_case_expr(start);
             }
 
-            let saved_name = name.clone();
-            self.advance()?; // consume the identifier unconditionally
+            let saved_name = self.expect_ident()?;
 
             // Function call / CAST: IDENT (
             if matches!(self.peek(), Token::LParen) {
                 return self.parse_function_call_expr_with_name(start, saved_name);
             }
 
-            if let Some(function_name) = bare_zero_arg_function_name(&saved_name) {
+            if let Some(function_name) = (!quoted)
+                .then(|| bare_zero_arg_function_name(&saved_name))
+                .flatten()
+            {
                 let end = self.position();
                 return Ok(Expr::FunctionCall {
                     name: function_name.to_string(),

@@ -450,7 +450,8 @@ impl<'a> Parser<'a> {
             if !has_from || (self.check(&Token::As) && matches!(self.peek_next()?, Token::Of)) {
                 None
             } else if self.consume(&Token::As)?
-                || (self.check(&Token::Ident("".into())) && !self.is_clause_keyword())
+                || (matches!(self.peek(), Token::Ident(_) | Token::QuotedIdent(_))
+                    && !self.is_clause_keyword())
             {
                 Some(self.expect_ident()?)
             } else {

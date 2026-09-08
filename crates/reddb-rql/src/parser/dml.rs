@@ -937,6 +937,16 @@ impl<'a> Parser<'a> {
         result
     }
 
+    // Double quotes remain string delimiters inside JSON arrays and objects.
+    // At a SQL expression boundary the same token denotes a column identifier.
+    fn parse_nested_json_value(&mut self) -> Result<Value, ParseError> {
+        if let Token::QuotedIdent(value) = self.peek().clone() {
+            self.advance()?;
+            return Ok(Value::text(value));
+        }
+        self.parse_literal_value()
+    }
+
     fn parse_literal_value_inner(&mut self) -> Result<Value, ParseError> {
         // Recognize PASSWORD('plaintext') and SECRET('plaintext') as
         // typed literal constructors. The parser stores them as
@@ -1013,6 +1023,32 @@ impl<'a> Parser<'a> {
                 })?;
                 Ok(Value::Json(bytes))
             }
+            Token::Minus | Token::Dash | Token::Plus => {
+                let negative = !matches!(self.peek(), Token::Plus);
+                self.advance()?;
+                match self.peek().clone() {
+                    Token::Integer(n) => {
+                        self.advance()?;
+                        let value = if negative {
+                            n.checked_neg().ok_or_else(|| {
+                                ParseError::new("integer negation overflow", self.position())
+                            })?
+                        } else {
+                            n
+                        };
+                        Ok(Value::Integer(value))
+                    }
+                    Token::Float(n) => {
+                        self.advance()?;
+                        Ok(Value::Float(if negative { -n } else { n }))
+                    }
+                    ref other => Err(ParseError::expected(
+                        vec!["number after sign"],
+                        other,
+                        self.position(),
+                    )),
+                }
+            }
             Token::Integer(n) => {
                 self.advance()?;
                 Ok(Value::Integer(n))
@@ -1048,7 +1084,7 @@ impl<'a> Parser<'a> {
                 let mut items = Vec::new();
                 if !self.check(&Token::RBracket) {
                     loop {
-                        items.push(self.parse_literal_value()?);
+                        items.push(self.parse_nested_json_value()?);
                         if !self.consume(&Token::Comma)? {
                             break;
                         }
@@ -1074,7 +1110,7 @@ impl<'a> Parser<'a> {
                                 self.advance()?;
                                 s
                             }
-                            Token::Ident(s) => {
+                            Token::Ident(s) | Token::QuotedIdent(s) => {
                                 self.advance()?;
                                 s
                             }
@@ -1085,7 +1121,7 @@ impl<'a> Parser<'a> {
                             self.expect(Token::Eq)?;
                         }
                         // Value: recursive
-                        let val = self.parse_literal_value()?;
+                        let val = self.parse_nested_json_value()?;
                         map.insert(key, literal_value_to_json(&val));
                         if !self.consume(&Token::Comma)? {
                             break;
@@ -1769,6 +1805,23 @@ mod tests {
             parser.parse_literal_value().expect("json object"),
             Value::Json(_)
         ));
+    }
+
+    #[test]
+    fn signed_array_literals_preserve_numeric_types() {
+        let mut parser = make_parser("[-9007199254740993, -0.25, +2, [-2.5e-3]]");
+        assert_eq!(
+            parser.parse_literal_value().expect("signed nested array"),
+            Value::Array(vec![
+                Value::Integer(-9007199254740993),
+                Value::Float(-0.25),
+                Value::Integer(2),
+                Value::Array(vec![Value::Float(-0.0025)]),
+            ])
+        );
+        for input in ["[-true]", "[-'text']", "[-[]]", "[+]", "[-]"] {
+            assert!(make_parser(input).parse_literal_value().is_err(), "{input}");
+        }
     }
 
     #[test]

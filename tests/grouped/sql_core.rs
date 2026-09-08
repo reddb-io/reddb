@@ -125,3 +125,6 @@ mod e2e_parameter_ast_cache;
 
 #[path = "schema_query_core/e2e_table_unique_constraints.rs"]
 mod e2e_table_unique_constraints;
+
+#[path = "schema_query_core/e2e_sql_quoted_identifiers.rs"]
+mod e2e_sql_quoted_identifiers;

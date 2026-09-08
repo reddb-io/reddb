@@ -275,6 +275,7 @@ fn recognized_keyword_name(token: &Token) -> Option<String> {
         | Token::Float(_)
         | Token::JsonLiteral(_)
         | Token::Ident(_)
+        | Token::QuotedIdent(_)
         | Token::Eq
         | Token::Ne
         | Token::Lt
@@ -344,7 +345,7 @@ impl fmt::Display for SafeTokenDisplay<'_> {
             // User-controlled byte payloads. Render via `escape_debug`
             // so embedded CR / LF / NUL / quote bytes do not reach
             // downstream serialization sinks unescaped.
-            Token::Ident(s) => write_escaped(f, s),
+            Token::Ident(s) | Token::QuotedIdent(s) => write_escaped(f, s),
             Token::String(s) => {
                 f.write_str("'")?;
                 write_escaped(f, s)?;
