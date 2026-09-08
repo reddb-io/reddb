@@ -48,7 +48,7 @@ pub(crate) fn execute_runtime_canonical_vector_node(
     let db = &runtime.inner.db;
     let started = std::time::Instant::now();
     let input_rows;
-    let records = match node.operator.as_str() {
+    let records: RedDBResult<Vec<UnifiedRecord>> = match node.operator.as_str() {
         "vector_turbo_search" | "vector_exact_scan" => {
             let vector = resolve_runtime_vector_source(runtime, &query.query_vector)?;
             let before = stats.candidates_examined;
@@ -96,7 +96,8 @@ pub(crate) fn execute_runtime_canonical_vector_node(
                 "unsupported canonical vector operator {other}"
             )))
         }
-    }?;
+    };
+    let records = records?;
     stats
         .operators
         .push(crate::storage::query::unified::VectorOperatorStats {
