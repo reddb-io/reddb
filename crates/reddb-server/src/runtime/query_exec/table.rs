@@ -1966,7 +1966,15 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 let table_alias = context.table_alias;
                 let limit = context.query.limit.unwrap_or(10000) as usize;
 
-                let select_cols = extract_select_column_names(&effective_projections);
+                // The canonical parent still evaluates WHERE and ORDER BY
+                // before applying aliases. Keep its source fields available.
+                let select_cols = if effective_projections.iter().any(|p| {
+                    matches!(p, Projection::Alias(_, _) | Projection::Field(_, Some(_)))
+                }) {
+                    Vec::new()
+                } else {
+                    extract_select_column_names(&effective_projections)
+                };
                 let schema_arc = manager.column_schema();
                 let compiled = match schema_arc.as_ref() {
                     Some(schema) => {
