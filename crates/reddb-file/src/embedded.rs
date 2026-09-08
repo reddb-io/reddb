@@ -151,6 +151,8 @@ struct EmbeddedPathState {
 }
 
 struct CachedWalTail {
+    // Published only after validating this generation's snapshot, or after
+    // appending to an unchanged file with an already validated snapshot.
     stamp: FileMutationStamp,
     superblock: EmbeddedRdbSuperblock,
     next_sequence: u64,
@@ -533,9 +535,11 @@ impl EmbeddedRdbArtifact {
 
         let open = Self::open_inner_with_file(&mut file, path, false)?;
         let stamp = file_mutation_stamp(&file)?;
-        let wal_scan = match cached_tail.filter(|tail| {
+        let cached_tail = cached_tail.filter(|tail| {
             stamp.as_ref() == Some(&tail.stamp) && tail.superblock == open.selected_superblock
-        }) {
+        });
+        let snapshot_validated = cached_tail.is_some();
+        let wal_scan = match cached_tail {
             Some(tail) => WalScan {
                 next_sequence: tail.next_sequence,
                 previous_frame_crc: tail.previous_frame_crc,
@@ -605,7 +609,13 @@ impl EmbeddedRdbArtifact {
         Self::write_superblock_copy(&mut file, &next_superblock)?;
         crash_inject("wal_after_superblock_write");
         file.sync_all()?;
-        let next_open = Self::open_inner_with_file(&mut file, path, true)?;
+        // A warm append writes only WAL bytes and the alternate superblock:
+        // it does not change the snapshot. The matching identity/mutation
+        // stamp above proves no intervening file edit since its validation.
+        // Cache misses (including unsupported platforms) retain the full
+        // checksum pass. Normal open/read/scrub always verify snapshot bytes;
+        // this reuse is not a substitute for detecting bit rot on read.
+        let next_open = Self::open_inner_with_file(&mut file, path, !snapshot_validated)?;
         let next_stamp = file_mutation_stamp(&file)?;
         FileExt::unlock(&file)?;
         if let Some(stamp) = next_stamp

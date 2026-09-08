@@ -18,6 +18,132 @@ fn temp_dir(label: &str) -> tempfile::TempDir {
         .expect("temp dir")
 }
 
+// Count actual bytes read by this thread, independently of disk/page-cache
+// latency. A warm append should read roots, not the whole immutable snapshot.
+#[cfg(target_os = "linux")]
+#[test]
+fn warm_append_reads_bounded_metadata_for_large_snapshot() {
+    fn bytes_read() -> u64 {
+        fs::read_to_string("/proc/thread-self/io")
+            .expect("thread I/O counters")
+            .lines()
+            .find_map(|line| line.strip_prefix("rchar: "))
+            .expect("rchar counter")
+            .trim()
+            .parse()
+            .expect("numeric rchar")
+    }
+    let dir = temp_dir("append-snapshot-read-budget");
+    let path = dir.path().join("data.rdb");
+    let mut snapshot = vec![0x42; 4 * 1024 * 1024];
+    snapshot[..4].copy_from_slice(b"RDST");
+    EmbeddedRdbArtifact::create_with_snapshot(&path, &snapshot).expect("create snapshot");
+    EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"first".to_vec()])
+        .expect("validate snapshot and populate cache");
+    let before = bytes_read();
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"second".to_vec()])
+        .expect("warm append");
+    let read_bytes = bytes_read() - before;
+    assert!(
+        read_bytes < 128 * 1024,
+        "warm append read {read_bytes} bytes"
+    );
+    assert_eq!(
+        EmbeddedRdbArtifact::read_snapshot(&open).expect("checked snapshot read"),
+        Some(snapshot)
+    );
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read WAL"),
+        [b"first".to_vec(), b"second".to_vec()]
+    );
+}
+
+#[test]
+fn append_revalidates_snapshot_after_external_corruption() {
+    let dir = temp_dir("append-snapshot-corruption");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-original").expect("create");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"first".to_vec()])
+        .expect("populate cache");
+    rot_bit(&path, open.manifest.snapshot_offset + 5);
+    let error = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"second".to_vec()])
+        .expect_err("changed file must trigger snapshot checksum validation");
+    assert!(error.to_string().contains("snapshot zone"), "{error}");
+    assert!(EmbeddedRdbArtifact::read_snapshot(&open).is_err());
+    assert!(EmbeddedRdbArtifact::open(&path).is_err());
+    rot_bit(&path, open.manifest.snapshot_offset + 5);
+    let repaired = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"repaired".to_vec()])
+        .expect("failed append must invalidate cache");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_snapshot(&repaired).expect("read repaired snapshot"),
+        Some(b"RDST-original".to_vec())
+    );
+}
+
+#[test]
+fn append_revalidates_replacement_snapshot_with_identical_roots() {
+    let dir = temp_dir("append-replacement-snapshot");
+    let path = dir.path().join("data.rdb");
+    let replacement = dir.path().join("replacement.rdb");
+    EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-original").expect("create");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"first".to_vec()])
+        .expect("populate cache");
+    fs::copy(&path, &replacement).expect("copy identical roots");
+    rot_bit(&replacement, open.manifest.snapshot_offset + 5);
+    fs::rename(&replacement, &path).expect("replace inode");
+    let error = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"second".to_vec()])
+        .expect_err("new inode must trigger snapshot checksum validation");
+    assert!(error.to_string().contains("snapshot zone"), "{error}");
+}
+
+#[test]
+fn warm_append_crash_preserves_snapshot_and_published_wal() {
+    const TEST_NAME: &str = "warm_append_crash_preserves_snapshot_and_published_wal";
+    if std::env::var("REDDB_EMBEDDED_RDB_CRASH_CHILD_OP").as_deref() == Ok("warm-wal") {
+        let path = PathBuf::from(
+            std::env::var_os("REDDB_EMBEDDED_RDB_CRASH_CHILD_PATH").expect("child path"),
+        );
+        let point = std::env::var_os("REDDB_EMBEDDED_RDB_CRASH_AT").expect("crash point");
+        // Only this isolated child changes its environment. Populate the cache
+        // first so the crash interrupts an append that reuses validation.
+        std::env::remove_var("REDDB_EMBEDDED_RDB_CRASH_AT");
+        EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"warm".to_vec()])
+            .expect("warm child cache");
+        std::env::set_var("REDDB_EMBEDDED_RDB_CRASH_AT", point);
+        EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"crash".to_vec()])
+            .expect("crash append");
+        panic!("crash injection did not exit");
+    }
+    let dir = temp_dir("warm-append-crash");
+    for point in [
+        "wal_after_frame_write",
+        "wal_after_frame_sync",
+        "wal_after_superblock_write",
+    ] {
+        let path = dir.path().join(format!("{point}.rdb"));
+        EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-original").expect("create");
+        run_crash_child(TEST_NAME, &path, "warm-wal", point);
+        let open = EmbeddedRdbArtifact::open(&path).expect("recover");
+        assert_eq!(
+            EmbeddedRdbArtifact::read_snapshot(&open).expect("snapshot"),
+            Some(b"RDST-original".to_vec())
+        );
+        let recovered = EmbeddedRdbArtifact::read_wal_payloads(&open).expect("WAL");
+        assert!(
+            recovered == [b"warm".to_vec()] || recovered == [b"warm".to_vec(), b"crash".to_vec()],
+            "unexpected recovered WAL at {point}: {recovered:?}"
+        );
+        let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"after".to_vec()])
+            .expect("append after recovery");
+        let mut expected = recovered;
+        expected.push(b"after".to_vec());
+        assert_eq!(
+            EmbeddedRdbArtifact::read_wal_payloads(&open).expect("WAL"),
+            expected
+        );
+    }
+}
+
 #[test]
 fn append_tail_survives_external_writer_checkpoint_and_replacement() {
     const CHILD_PATH: &str = "REDDB_APPEND_TAIL_CHILD_PATH";
