@@ -655,6 +655,11 @@ pub struct QueryStats {
 /// Counters collected by execution, not inferred from the logical plan.
 #[derive(Debug, Clone, Default)]
 pub struct VectorQueryStats {
+    pub mode_requested: String,
+    pub mode_executed: String,
+    pub fallback_reason: Option<String>,
+    pub approximate_distance_evaluations: u64,
+    pub peak_topk_entries: u64,
     /// True when these measurements describe the cached computation.
     pub cache_hit: bool,
     pub access_path: String,

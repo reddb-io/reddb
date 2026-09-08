@@ -3282,6 +3282,23 @@ impl RedDBRuntime {
             ("op", Value::text(vector.access_path.clone())),
             ("source", Value::text(source)),
             ("index_used", Value::Boolean(vector.index_used)),
+            ("mode_requested", Value::text(vector.mode_requested.clone())),
+            ("mode_executed", Value::text(vector.mode_executed.clone())),
+            (
+                "fallback_reason",
+                vector
+                    .fallback_reason
+                    .as_ref()
+                    .map_or(Value::Null, |reason| Value::text(reason.clone())),
+            ),
+            (
+                "approximate_distance_evaluations",
+                Value::UnsignedInteger(vector.approximate_distance_evaluations),
+            ),
+            (
+                "peak_topk_entries",
+                Value::UnsignedInteger(vector.peak_topk_entries),
+            ),
             (
                 "candidates_examined",
                 Value::UnsignedInteger(vector.candidates_examined),

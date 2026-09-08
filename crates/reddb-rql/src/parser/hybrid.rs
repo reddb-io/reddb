@@ -62,7 +62,13 @@ impl<'a> Parser<'a> {
             None
         };
 
+        let mode = if self.consume(&Token::Mode)? {
+            self.parse_vector_search_mode()?
+        } else {
+            Default::default()
+        };
         let vector = VectorQuery {
+            mode,
             alias: None,
             collection,
             query_vector,

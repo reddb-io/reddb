@@ -800,6 +800,7 @@ mod tests {
         executor.add_vector("hosts", 3, vec![0.99, 0.0], Some(3)); // Closest to query
 
         let query = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "hosts".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
@@ -845,6 +846,7 @@ mod tests {
         executor.add_vector("hosts", 4, vec![0.9, 0.0], Some(4));
 
         let query = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "hosts".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
@@ -888,6 +890,7 @@ mod tests {
         }
 
         let query = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "hosts".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),

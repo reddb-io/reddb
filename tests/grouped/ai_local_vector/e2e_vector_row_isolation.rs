@@ -77,22 +77,25 @@ fn vector_rls_precedes_topk_on_turbo_and_legacy() {
         clear_current_auth_identity();
         let (_directory, runtime) = fixture(turbo);
         let collection = if turbo { "embeddings" } else { "legacy" };
-        set_current_auth_identity("alice".into(), Role::Read);
-        let sql = format!("VECTOR SEARCH {collection} SIMILAR TO [1.0,0.0] LIMIT 1");
-        assert_eq!(
-            contents(&runtime, &sql, "content"),
-            ["alice"],
-            "turbo={turbo}"
-        );
-        assert_eq!(contents(&runtime, &sql, "content"), ["alice"], "repeat");
-        set_current_auth_identity("nobody".into(), Role::Read);
-        assert!(contents(&runtime, &sql, "content").is_empty());
-        set_current_auth_identity("alice".into(), Role::Read);
-        assert_eq!(
-            contents(&runtime, &sql, "content"),
-            ["alice"],
-            "identity switch"
-        );
+        for mode in ["EXACT", "APPROXIMATE"] {
+            set_current_auth_identity("alice".into(), Role::Read);
+            let sql =
+                format!("VECTOR SEARCH {collection} SIMILAR TO [1.0,0.0] MODE {mode} LIMIT 1");
+            assert_eq!(
+                contents(&runtime, &sql, "content"),
+                ["alice"],
+                "turbo={turbo}"
+            );
+            assert_eq!(contents(&runtime, &sql, "content"), ["alice"], "repeat");
+            set_current_auth_identity("nobody".into(), Role::Read);
+            assert!(contents(&runtime, &sql, "content").is_empty());
+            set_current_auth_identity("alice".into(), Role::Read);
+            assert_eq!(
+                contents(&runtime, &sql, "content"),
+                ["alice"],
+                "identity switch"
+            );
+        }
     }
 }
 
