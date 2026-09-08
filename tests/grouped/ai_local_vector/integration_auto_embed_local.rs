@@ -443,8 +443,10 @@ fn auto_embed_uses_only_inserted_rows_and_skips_conflicts() {
     }));
     let rt = rt();
     register_installed_local_model(&rt, "mini", 2);
-    exec(&rt, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT)");
+    // Implicit collections admit both rows and attached vectors; an explicit
+    // CREATE TABLE correctly forbids vector writes under its model contract.
     exec(&rt, "INSERT INTO docs (id,body) VALUES (1,'existing')");
+    exec(&rt, "CREATE UNIQUE INDEX docs_key ON docs (id) USING HASH");
     exec(&rt, "INSERT INTO docs (id,body) VALUES (2,'alpha'),(3,'beta') WITH AUTO EMBED (body) USING local MODEL 'mini'");
     exec(&rt, "INSERT INTO docs (id,body) VALUES (1,'skipped') WITH AUTO EMBED (body) USING local MODEL 'mini' ON CONFLICT DO NOTHING");
     assert_eq!(
