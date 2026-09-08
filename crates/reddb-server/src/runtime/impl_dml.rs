@@ -1539,18 +1539,16 @@ impl RedDBRuntime {
                 .enumerate()
                 .filter_map(|(i, entity)| {
                     if let EntityData::Row(ref row) = entity.data {
-                        if let Some(ref named) = row.named {
-                            let texts: Vec<String> = embed_config
-                                .fields
-                                .iter()
-                                .filter_map(|field| match named.get(field) {
-                                    Some(Value::Text(t)) if !t.is_empty() => Some(t.to_string()),
-                                    _ => None,
-                                })
-                                .collect();
-                            if !texts.is_empty() {
-                                return Some((i, texts.join(" ")));
-                            }
+                        let texts: Vec<String> = embed_config
+                            .fields
+                            .iter()
+                            .filter_map(|field| match row.get_field(field) {
+                                Some(Value::Text(t)) if !t.is_empty() => Some(t.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        if !texts.is_empty() {
+                            return Some((i, texts.join(" ")));
                         }
                     }
                     None

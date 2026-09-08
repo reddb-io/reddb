@@ -274,6 +274,15 @@ impl RedDBRuntime {
                     .rmw_locks
                     .lock_for(queue, "__queue_group_read__");
                 let _read_guard = read_lock.lock();
+                // WAIT is an autocommit live subscription: each retry must see
+                // commits since the previous probe. Keep identity/tenant fixed
+                // and restore the enclosing statement snapshot after the read.
+                let _snapshot_guard = wait_ms
+                    .and_then(|_| crate::runtime::impl_core::capture_current_snapshot())
+                    .map(|mut context| {
+                        context.snapshot = context.manager.fresh_read_snapshot();
+                        crate::runtime::execution_context::CurrentSnapshotGuard::install(context)
+                    });
                 let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
                 lifecycle
                     .group_read(&txn, queue, group, consumer, count)
