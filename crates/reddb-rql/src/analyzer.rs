@@ -7,6 +7,7 @@ use reddb_types::types::{DataType, SqlTypeName};
 pub enum AnalysisError {
     DuplicateColumn(String),
     UnsupportedType(String),
+    InvalidUniqueConstraint(String),
 }
 
 impl std::fmt::Display for AnalysisError {
@@ -14,6 +15,9 @@ impl std::fmt::Display for AnalysisError {
         match self {
             Self::DuplicateColumn(name) => write!(f, "duplicate column name: {name}"),
             Self::UnsupportedType(name) => write!(f, "unsupported SQL type: {name}"),
+            Self::InvalidUniqueConstraint(message) => {
+                write!(f, "invalid UNIQUE constraint: {message}")
+            }
         }
     }
 }
@@ -24,6 +28,7 @@ impl std::error::Error for AnalysisError {}
 pub struct AnalyzedCreateTableQuery {
     pub name: String,
     pub columns: Vec<AnalyzedColumnDef>,
+    pub unique_constraints: Vec<reddb_types::Constraint>,
     pub if_not_exists: bool,
     pub default_ttl_ms: Option<u64>,
     pub context_index_fields: Vec<String>,
@@ -66,11 +71,86 @@ pub fn analyze_create_table(
     Ok(AnalyzedCreateTableQuery {
         name: query.name.clone(),
         columns,
+        unique_constraints: analyze_unique_constraints(query)?,
         if_not_exists: query.if_not_exists,
         default_ttl_ms: query.default_ttl_ms,
         context_index_fields: query.context_index_fields.clone(),
         timestamps: query.timestamps,
     })
+}
+
+fn analyze_unique_constraints(
+    query: &CreateTableQuery,
+) -> Result<Vec<reddb_types::Constraint>, AnalysisError> {
+    let invalid = AnalysisError::InvalidUniqueConstraint;
+    let mut names = HashSet::new();
+    for column in &query.columns {
+        for (enabled, prefix) in [
+            (column.primary_key, "pk"),
+            (column.unique, "uniq"),
+            (column.not_null, "not_null"),
+        ] {
+            if enabled {
+                names.insert(format!("{prefix}_{}", column.name).to_ascii_lowercase());
+            }
+        }
+    }
+    if query.timestamps {
+        names.extend([
+            "not_null_created_at".to_string(),
+            "not_null_updated_at".to_string(),
+        ]);
+    }
+    // Reserve every explicit name before generating anonymous names, so declaration
+    // order cannot make an otherwise valid user-chosen name collide.
+    for constraint in &query.unique_constraints {
+        if let Some(name) = &constraint.name {
+            if name.is_empty() || !names.insert(name.to_ascii_lowercase()) {
+                return Err(invalid(format!(
+                    "duplicate or empty constraint name '{name}'"
+                )));
+            }
+        }
+    }
+    let mut resolved = Vec::with_capacity(query.unique_constraints.len());
+    for constraint in &query.unique_constraints {
+        if constraint.columns.is_empty() {
+            return Err(invalid("at least one column is required".to_string()));
+        }
+        let mut seen = HashSet::new();
+        let mut columns = Vec::with_capacity(constraint.columns.len());
+        for name in &constraint.columns {
+            let Some(column) = query
+                .columns
+                .iter()
+                .find(|column| column.name.eq_ignore_ascii_case(name))
+            else {
+                return Err(invalid(format!("unknown column '{name}'")));
+            };
+            if !seen.insert(column.name.to_ascii_lowercase()) {
+                return Err(invalid(format!("repeated column '{name}'")));
+            }
+            columns.push(column.name.clone());
+        }
+        let name = match &constraint.name {
+            Some(name) => name.clone(),
+            None => {
+                let base = format!("uniq_{}", columns.join("_"));
+                let mut name = base.clone();
+                let mut suffix = 2;
+                while !names.insert(name.to_ascii_lowercase()) {
+                    name = format!("{base}_{suffix}");
+                    suffix += 1;
+                }
+                name
+            }
+        };
+        resolved.push(
+            reddb_types::Constraint::new(name, reddb_types::ConstraintType::Unique)
+                .on_columns(columns),
+        );
+    }
+    Ok(resolved)
 }
 
 pub fn resolve_declared_data_type(declared: &str) -> Result<DataType, AnalysisError> {
@@ -109,6 +189,7 @@ mod tests {
             collection_model: CollectionModel::Table,
             name: "orders".to_string(),
             columns,
+            unique_constraints: Vec::new(),
             if_not_exists: true,
             default_ttl_ms: Some(60_000),
             metrics_rollup_policies: Vec::new(),
@@ -122,6 +203,42 @@ mod tests {
             analytics_config: Vec::new(),
             vault_own_master_key: false,
             ai_policy: None,
+        }
+    }
+
+    #[test]
+    fn table_unique_constraints_validate_references_and_generate_stable_names() {
+        use crate::ast::CreateUniqueConstraint;
+        let mut query = create_table(vec![column("LeftKey", "INT"), column("RightKey", "TEXT")]);
+        query.unique_constraints = vec![
+            CreateUniqueConstraint {
+                name: None,
+                columns: vec!["leftkey".into(), "RIGHTKEY".into()],
+            },
+            CreateUniqueConstraint {
+                name: Some("uniq_LeftKey_RightKey".into()),
+                columns: vec!["RightKey".into(), "LeftKey".into()],
+            },
+        ];
+        let analyzed = analyze_create_table(&query).expect("constraints");
+        assert_eq!(
+            analyzed.unique_constraints[0].name,
+            "uniq_LeftKey_RightKey_2"
+        );
+        assert_eq!(
+            analyzed.unique_constraints[0].columns,
+            ["LeftKey", "RightKey"]
+        );
+        for columns in [
+            vec![],
+            vec!["absent".into()],
+            vec!["LeftKey".into(), "leftkey".into()],
+        ] {
+            query.unique_constraints[0].columns = columns;
+            assert!(matches!(
+                analyze_create_table(&query),
+                Err(AnalysisError::InvalidUniqueConstraint(_))
+            ));
         }
     }
 

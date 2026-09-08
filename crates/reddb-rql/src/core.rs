@@ -2038,6 +2038,13 @@ pub struct DeleteQuery {
     pub suppress_events: bool,
 }
 
+/// A table-level UNIQUE declaration; unnamed constraints receive a stable catalog name.
+#[derive(Debug, Clone)]
+pub struct CreateUniqueConstraint {
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+}
+
 /// CREATE TABLE name (columns) or CREATE {KV|CONFIG|VAULT} name
 #[derive(Debug, Clone)]
 pub struct CreateTableQuery {
@@ -2047,6 +2054,8 @@ pub struct CreateTableQuery {
     pub name: String,
     /// Column definitions
     pub columns: Vec<CreateColumnDef>,
+    /// Table-level UNIQUE constraints, including composite keys.
+    pub unique_constraints: Vec<CreateUniqueConstraint>,
     /// IF NOT EXISTS flag
     pub if_not_exists: bool,
     /// Optional default TTL applied to newly inserted items in this collection.
