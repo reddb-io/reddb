@@ -1768,7 +1768,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // Explicit column names and aliases must be projected on the fast
         // scan too. Returning raw records silently turns SELECT col AS alias
         // into SELECT *, including when the name is quoted.
-        if !matches!(effective_projections.as_slice(), [Projection::All]) {
+        // SESSIONIZE consumes its key/time inputs in the outer executor.
+        if query.sessionize.is_none()
+            && !matches!(effective_projections.as_slice(), [Projection::All])
+        {
             return records
                 .iter()
                 .map(|record| {
