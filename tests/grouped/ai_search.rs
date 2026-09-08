@@ -78,5 +78,7 @@ mod e2e_vector_execution_observability;
 #[path = "ai_local_vector/e2e_vector_row_isolation.rs"]
 mod e2e_vector_row_isolation;
 
+#[path = "ai_local_vector/e2e_vector_exact_allocations.rs"]
+mod e2e_vector_exact_allocations;
 #[path = "ai_local_vector/e2e_vector_search_modes.rs"]
 mod e2e_vector_search_modes;

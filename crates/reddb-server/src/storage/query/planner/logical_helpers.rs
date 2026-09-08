@@ -50,11 +50,12 @@ pub(crate) fn estimate_cardinality(expr: &QueryExpr) -> CardinalityEstimate {
 }
 
 pub(crate) fn base_collection_cardinality(db: &RedDB, collection: &str) -> CardinalityEstimate {
+    // Cardinality needs the live counter, not a catalog cross-reference scan
+    // that clones every entity in every collection. Both use the same counter.
     let rows = db
-        .catalog_snapshot()
-        .stats_by_collection
-        .get(collection)
-        .map(|stats| stats.entities as f64)
+        .store()
+        .get_collection(collection)
+        .map(|manager| manager.count() as f64)
         .unwrap_or(1000.0);
     CardinalityEstimate {
         rows,

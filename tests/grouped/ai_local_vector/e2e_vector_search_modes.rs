@@ -94,3 +94,80 @@ fn vector_exact_ties_and_threshold_are_stable() {
         .expect("threshold");
     assert!(result.result.records.is_empty());
 }
+
+#[test]
+fn vector_exact_stream_preserves_snapshot_across_sealed_and_growing_segments() {
+    use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+    struct ConnectionGuard;
+    impl Drop for ConnectionGuard {
+        fn drop(&mut self) {
+            clear_current_connection_id();
+        }
+    }
+    let _connection = ConnectionGuard;
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    set_current_connection_id(99810);
+    rt.execute_query("CREATE VECTOR stream_snapshot DIM 2 METRIC cosine")
+        .expect("collection");
+    rt.execute_query("INSERT INTO stream_snapshot VECTOR (dense,content) VALUES ([0,1],'base')")
+        .expect("base vector");
+    rt.db()
+        .store()
+        .get_collection("stream_snapshot")
+        .expect("manager")
+        .force_seal()
+        .expect("seal base segment");
+    rt.execute_query("BEGIN ISOLATION LEVEL SNAPSHOT")
+        .expect("begin reader");
+    let query = "VECTOR SEARCH stream_snapshot SIMILAR TO [1,0] MODE EXACT LIMIT 3";
+    assert_eq!(
+        rt.execute_query(query)
+            .expect("initial read")
+            .result
+            .records
+            .len(),
+        1
+    );
+
+    set_current_connection_id(99811);
+    rt.execute_query("BEGIN").expect("begin writer");
+    rt.execute_query("INSERT INTO stream_snapshot VECTOR (dense,content) VALUES ([1,0],'later')")
+        .expect("new vector in growing segment");
+    rt.execute_query("COMMIT").expect("commit writer");
+
+    set_current_connection_id(99810);
+    // A distinct cache key exercises the scan under the original snapshot.
+    let result = rt
+        .execute_query("VECTOR SEARCH stream_snapshot SIMILAR TO [1,0] MODE EXACT LIMIT 4")
+        .expect("old snapshot read");
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(
+        result.result.records[0].get("content"),
+        Some(&Value::text("base"))
+    );
+    assert_eq!(
+        result
+            .result
+            .stats
+            .vector
+            .expect("stats")
+            .exact_distance_evaluations,
+        1
+    );
+    rt.execute_query("COMMIT").expect("close reader");
+    let result = rt.execute_query(query).expect("fresh snapshot");
+    assert_eq!(result.result.records.len(), 2);
+    assert_eq!(
+        result.result.records[0].get("content"),
+        Some(&Value::text("later"))
+    );
+    assert_eq!(
+        result
+            .result
+            .stats
+            .vector
+            .expect("stats")
+            .exact_distance_evaluations,
+        2
+    );
+}

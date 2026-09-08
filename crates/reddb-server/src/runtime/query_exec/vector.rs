@@ -278,57 +278,66 @@ pub(crate) fn runtime_vector_matches(
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let filter = effective_vector_filter(query);
     let mut top = VectorTopK::new(query.k.max(1));
-    // Collect only ids while holding segment read locks. RLS expressions and
-    // metadata lookups may re-enter storage, so evaluate them after releasing
-    // those locks. Vector payloads are materialized one bounded batch at a time.
-    let mut ids = Vec::new();
-    manager.scan_for_each(snapshot.as_ref(), |entity| {
-        ids.push(entity.id);
-        true
-    });
-    for batch in ids.chunks(256) {
-        for entity in manager.get_many(batch).into_iter().flatten() {
-            stats.candidates_examined += 1;
-            if (snapshot.is_none() && entity.xmax != 0)
-                || !crate::runtime::impl_core::entity_visible_with_context(
-                    snapshot.as_ref(),
-                    &entity,
-                )
-            {
-                stats.visibility_rejected += 1;
-                continue;
+    let mut consider = |entity: &UnifiedEntity| {
+        stats.candidates_examined += 1;
+        if (snapshot.is_none() && entity.xmax != 0)
+            || !crate::runtime::impl_core::entity_visible_with_context(snapshot.as_ref(), entity)
+        {
+            stats.visibility_rejected += 1;
+            return;
+        }
+        if rls_enabled
+            && !runtime.search_entity_rls_allowed(&query.collection, entity, &mut rls_cache)
+        {
+            stats.rls_rejected += 1;
+            return;
+        }
+        if filter.as_ref().is_some_and(|filter| {
+            !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter)
+        }) {
+            stats.metadata_rejected += 1;
+            return;
+        }
+        let EntityData::Vector(data) = &entity.data else {
+            return;
+        };
+        if data.dense.len() != vector.len() {
+            return;
+        }
+        stats.exact_distance_evaluations += 1;
+        let distance = crate::storage::engine::distance::distance(vector, &data.dense, metric);
+        let score = match metric {
+            DistanceMetric::Cosine => 1.0 - distance,
+            DistanceMetric::InnerProduct | DistanceMetric::L2 => -distance,
+        };
+        if query.threshold.is_some_and(|threshold| match metric {
+            DistanceMetric::L2 => distance > threshold,
+            DistanceMetric::Cosine | DistanceMetric::InnerProduct => score < threshold,
+        }) {
+            return;
+        }
+        top.consider(entity, score, distance);
+    };
+    if !rls_enabled && filter.is_none() {
+        // With no predicates that can re-enter storage, score borrowed
+        // vectors in place. Retain only top-k payloads, not N ids or batches
+        // of cloned vectors. Segment read locks remain held during scoring.
+        manager.scan_for_each(snapshot.as_ref(), |entity| {
+            consider(entity);
+            true
+        });
+    } else {
+        // RLS expressions and metadata lookups may re-enter storage. Collect
+        // ids under read locks, then release them before evaluating predicates.
+        let mut ids = Vec::new();
+        manager.scan_for_each(snapshot.as_ref(), |entity| {
+            ids.push(entity.id);
+            true
+        });
+        for batch in ids.chunks(256) {
+            for entity in manager.get_many(batch).into_iter().flatten() {
+                consider(&entity);
             }
-            if rls_enabled
-                && !runtime.search_entity_rls_allowed(&query.collection, &entity, &mut rls_cache)
-            {
-                stats.rls_rejected += 1;
-                continue;
-            }
-            if filter.as_ref().is_some_and(|filter| {
-                !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter)
-            }) {
-                stats.metadata_rejected += 1;
-                continue;
-            }
-            let EntityData::Vector(data) = &entity.data else {
-                continue;
-            };
-            if data.dense.len() != vector.len() {
-                continue;
-            }
-            stats.exact_distance_evaluations += 1;
-            let distance = crate::storage::engine::distance::distance(vector, &data.dense, metric);
-            let score = match metric {
-                DistanceMetric::Cosine => 1.0 - distance,
-                DistanceMetric::InnerProduct | DistanceMetric::L2 => -distance,
-            };
-            if query.threshold.is_some_and(|threshold| match metric {
-                DistanceMetric::L2 => distance > threshold,
-                DistanceMetric::Cosine | DistanceMetric::InnerProduct => score < threshold,
-            }) {
-                continue;
-            }
-            top.consider(&entity, score, distance);
         }
     }
     stats.peak_topk_entries = top.len() as u64;
