@@ -38,7 +38,7 @@
 //! by character and emits a canonical form:
 //!
 //! - Integers / floats: emit `?`
-//! - Quoted strings (single + double): emit `?`
+//! - Single-quoted strings: emit `?`; double-quoted identifiers stay verbatim.
 //! - `TRUE` / `FALSE` / `NULL` keywords (case-insensitive,
 //!   word-bounded): emit `?`
 //! - Everything else: copy verbatim.
@@ -105,13 +105,7 @@ pub fn normalize_cache_key(sql: &str) -> String {
         // case-sensitive so we emit them verbatim).
         if b == b'"' {
             let start = i;
-            i += 1;
-            while i < bytes.len() && bytes[i] != b'"' {
-                i += 1;
-            }
-            if i < bytes.len() {
-                i += 1;
-            }
+            i = quoted_identifier_end(bytes, i);
             out.push_str(&sql[start..i]);
             last_was_space = false;
             continue;
@@ -270,13 +264,7 @@ pub fn normalize_and_extract(sql: &str) -> (String, Vec<Value>) {
 
         if b == b'"' {
             let start = i;
-            i += 1;
-            while i < bytes.len() && bytes[i] != b'"' {
-                i += 1;
-            }
-            if i < bytes.len() {
-                i += 1;
-            }
+            i = quoted_identifier_end(bytes, i);
             out.push_str(&sql[start..i]);
             last_was_space = false;
             continue;
@@ -605,5 +593,44 @@ mod tests {
             extract_literal_bindings("SELECT * FROM t WHERE age = 18 AND active = true LIMIT 10")
                 .unwrap();
         assert_eq!(binds, vec![Value::Integer(18), Value::Boolean(true)]);
+    }
+}
+
+// Match lexer escapes without normalizing anything inside the identifier.
+fn quoted_identifier_end(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i = (i + 2).min(bytes.len());
+        } else if bytes[i] == b'"' {
+            if bytes.get(i + 1) == Some(&b'"') {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+#[cfg(test)]
+mod quoted_identifier_tests {
+    use super::*;
+
+    #[test]
+    fn escaped_identifier_digits_are_not_literal_parameters() {
+        for name in [r#""a\"1""#, r#""a""1""#, r#""back\\slash 12""#] {
+            let query = format!("SELECT {name} FROM t WHERE v = 7");
+            let (key, binds) = normalize_and_extract(&query);
+            assert_eq!(key, format!("SELECT {name} FROM t WHERE v = ?"));
+            assert_eq!(key, normalize_cache_key(&query));
+            assert_eq!(binds, vec![Value::Integer(7)]);
+        }
+        assert_ne!(
+            normalize_and_extract(r#"SELECT "a\"1" FROM t WHERE v=7"#).0,
+            normalize_and_extract(r#"SELECT "a\"2" FROM t WHERE v=7"#).0,
+        );
     }
 }
