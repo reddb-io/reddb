@@ -614,9 +614,19 @@ impl LogicalChangeApplier {
                         "replication refresh record missing refresh_records payload".to_string(),
                     )
                 })?;
+                let mut replayed_xid = 0;
+                for bytes in &records {
+                    let (entity, _) =
+                        UnifiedStore::deserialize_entity_record(bytes, store.format_version())
+                            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                    replayed_xid = replayed_xid.max(entity.xmin).max(entity.xmax);
+                }
                 store
                     .refresh_collection_from_records(&record.collection, records)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                if let Some(manager) = store.snapshot_manager.get() {
+                    manager.observe_committed_xid(replayed_xid);
+                }
             }
             ChangeOperation::Insert | ChangeOperation::Update => {
                 let Some(bytes) = &record.entity_bytes else {
@@ -693,6 +703,12 @@ impl LogicalChangeApplier {
                 store
                     .context_index()
                     .index_entity(&record.collection, &entity);
+                // The runtime owns the read snapshot allocator. Logical
+                // replay preserves source xids, so publish their floor only
+                // after the entity and its metadata have been installed.
+                if let Some(manager) = store.snapshot_manager.get() {
+                    manager.observe_committed_xid(entity.xmin.max(entity.xmax));
+                }
             }
         }
         // Issue #1242 — only reached on successful apply (all early `return

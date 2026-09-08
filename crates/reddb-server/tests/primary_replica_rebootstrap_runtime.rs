@@ -108,6 +108,7 @@ fn runtime_promotes_ready_rebootstrap_pending_file_on_restart() {
     );
     let applier = LogicalChangeApplier::new(checkpoint_lsn);
     let promoted_db = promoted.db();
+    let before_replay = promoted.current_snapshot();
     let mut last_applied = checkpoint_lsn;
     for (lsn, data) in post_checkpoint_records {
         let record = ChangeRecord::decode(&data).expect("decode post-checkpoint logical WAL");
@@ -138,6 +139,18 @@ fn runtime_promotes_ready_rebootstrap_pending_file_on_restart() {
         1,
         "post-checkpoint WAL row should be visible after replay"
     );
+    let replayed = promoted_db
+        .store()
+        .get_collection("new_items")
+        .expect("replicated collection")
+        .query_all(|entity| entity.xmin > before_replay.xid);
+    assert!(!replayed.is_empty(), "fixture must replay a future xid");
+    let after_replay = promoted.current_snapshot();
+    for entity in replayed {
+        assert!(!before_replay.sees(entity.xmin, entity.xmax));
+        assert!(after_replay.sees(entity.xmin, entity.xmax));
+        assert!(promoted.snapshot_manager().peek_next_xid() > entity.xmin);
+    }
     let _ = fs::remove_file(reddb_file::layout::rebootstrap_previous_path(&data_path));
     primary_replica_file::cleanup(&data_path);
     primary_replica_file::cleanup(&source_path);

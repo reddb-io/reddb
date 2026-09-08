@@ -449,7 +449,13 @@ impl SnapshotManager {
         if xid == XID_NONE {
             return;
         }
+        // Replay can import an xid from our still-unused reservation range.
+        // Retire those slots before publishing the floor: they must neither
+        // hide the recovered row in fresh snapshots nor be allocated again.
+        // Captured snapshots retain their original exclusions.
+        let mut pool = self.autocommit_pool.lock();
         let target = xid.saturating_add(1);
+        pool.next = pool.next.max(target.min(pool.end));
         let mut current = self.next_xid.load(Ordering::Relaxed);
         while current < target {
             match self.next_xid.compare_exchange(
@@ -751,5 +757,24 @@ mod tests {
         }
         assert!(manager.fresh_read_snapshot().sees(future, XID_NONE));
         manager.rollback(reader);
+    }
+
+    #[test]
+    fn replay_retires_reserved_xids_without_changing_captured_snapshots() {
+        let manager = SnapshotManager::new();
+        let first = manager.allocate_committed_xid();
+        let captured = manager.fresh_read_snapshot();
+        let replayed = first + 2;
+        manager.observe_committed_xid(replayed);
+        assert!(!captured.sees(replayed, XID_NONE));
+        assert!(manager.fresh_read_snapshot().sees(replayed, XID_NONE));
+        assert!(manager.allocate_committed_xid() > replayed);
+
+        let beyond_pool = manager.peek_next_xid() + 10;
+        let captured = manager.fresh_read_snapshot();
+        manager.observe_committed_xid(beyond_pool);
+        assert!(!captured.sees(beyond_pool, XID_NONE));
+        assert!(manager.fresh_read_snapshot().sees(beyond_pool, XID_NONE));
+        assert!(manager.allocate_committed_xid() > beyond_pool);
     }
 }
