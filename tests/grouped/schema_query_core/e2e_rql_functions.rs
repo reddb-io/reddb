@@ -457,7 +457,11 @@ fn function_reads_follow_row_policies_and_schema_qualified_grants() {
     store
         .create_user("alice", "test-password", Role::Read)
         .expect("user");
+    store
+        .create_user("admin", "test-password", Role::Admin)
+        .expect("admin");
     runtime.set_auth_store(store);
+    set_current_auth_identity("admin".to_string(), Role::Admin);
     execute(
         &runtime,
         "GRANT EXECUTE ON FUNCTION public.visible_accounts TO alice",

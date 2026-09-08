@@ -393,7 +393,7 @@ pub fn validate(indices: &[usize], param_count: usize) -> Result<(), UserParamEr
 pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamError> {
     let indices = collect_indices(expr);
     validate(&indices, params.len())?;
-    bind_available_parameters(expr, params)
+    bind_validated_parameters(expr, params, !indices.is_empty())
 }
 
 /// A stored-function statement may use only a subset of its function's arguments.
@@ -410,7 +410,15 @@ pub(crate) fn bind_available_parameters(
         });
     }
 
-    if indices.is_empty() {
+    bind_validated_parameters(expr, params, !indices.is_empty())
+}
+
+fn bind_validated_parameters(
+    expr: &QueryExpr,
+    params: &[Value],
+    has_parameters: bool,
+) -> Result<QueryExpr, UserParamError> {
+    if !has_parameters {
         return Ok(expr.clone());
     }
 
