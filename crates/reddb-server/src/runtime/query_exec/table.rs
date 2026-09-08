@@ -481,7 +481,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             || (effective_filter.is_some()
                 && effective_projections
                     .iter()
-                    .any(|p| matches!(p, Projection::Alias(_, _))));
+                    .any(|p| matches!(p, Projection::Alias(_, _) | Projection::Field(_, Some(_)))));
     let uses_document_projection =
         runtime_projections_use_document_path(&effective_projections, query);
 
