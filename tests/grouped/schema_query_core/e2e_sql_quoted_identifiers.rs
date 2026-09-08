@@ -64,7 +64,11 @@ fn sql_quoted_identifiers_persist_and_roundtrip_schema() {
         Some(&Value::text("replacement"))
     );
     let fresh = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("fresh");
-    fresh.execute_query(&ddl).expect("reconstruct schema");
+    // SHOW CREATE emits a script; execute_query accepts one statement.
+    // This fixture contains no semicolons inside its quoted identifiers.
+    for statement in ddl.split(';').map(str::trim).filter(|sql| !sql.is_empty()) {
+        fresh.execute_query(statement).expect("reconstruct schema");
+    }
 }
 
 #[test]
