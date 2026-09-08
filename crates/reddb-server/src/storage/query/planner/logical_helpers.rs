@@ -558,7 +558,19 @@ pub(crate) fn hybrid_ranking_mode(fusion: &FusionStrategy) -> String {
     }
 }
 
-pub(crate) fn vector_access_path_hint(db: &RedDB, collection: &str) -> AccessPathDecision {
+pub(crate) fn vector_access_path_hint(
+    db: &RedDB,
+    query: &reddb_rql::ast::VectorQuery,
+) -> AccessPathDecision {
+    let collection = query.collection.as_str();
+    if query.mode == reddb_rql::ast::VectorSearchMode::Exact {
+        return AccessPathDecision {
+            path: "vector_exact_scan",
+            index_hint: None,
+            reason: "MODE EXACT evaluates eligible vectors at full precision".to_string(),
+            warning: None,
+        };
+    }
     let all_indexes = db.index_statuses();
     let indexes = all_indexes
         .clone()

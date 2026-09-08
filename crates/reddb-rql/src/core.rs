@@ -1658,6 +1658,14 @@ impl NodeSelector {
 // Vector Query
 // ============================================================================
 
+/// Accuracy contract for vector retrieval. Approximation requires explicit opt-in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VectorSearchMode {
+    #[default]
+    Exact,
+    Approximate,
+}
+
 /// Vector similarity search query
 ///
 /// ```text
@@ -1668,6 +1676,8 @@ impl NodeSelector {
 /// ```
 #[derive(Debug, Clone)]
 pub struct VectorQuery {
+    /// Exact full-precision search by default.
+    pub mode: VectorSearchMode,
     /// Optional outer alias when used as a join source
     pub alias: Option<String>,
     /// Collection name to search
@@ -1692,6 +1702,7 @@ impl VectorQuery {
     /// Create a new vector query
     pub fn new(collection: &str, query: VectorSource) -> Self {
         Self {
+            mode: VectorSearchMode::Exact,
             alias: None,
             collection: collection.to_string(),
             query_vector: query,

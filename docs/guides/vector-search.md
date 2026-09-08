@@ -120,28 +120,47 @@ SIMILAR TO [0.15,0.42,0.75,0.20,0.58,0.85,0.30,0.65]
 WHERE category = 'tutorial' LIMIT 5;
 ```
 
-`vector_turbo_search` means TurboQuant candidates followed by exact reranking.
-New collections created with `CREATE VECTOR` use this route. Legacy collections
-without the TurboQuant marker use `vector_exact_scan`. The plan's
-`access_path_reason` explains the choice, including registered HNSW/IVF indexes
-that this runtime route does not use. These names describe `VECTOR SEARCH`;
-other vector endpoints may have different execution paths.
+`VECTOR SEARCH` defaults to `MODE EXACT`, including collections created with
+`CREATE VECTOR`. Exact search evaluates every eligible vector at full precision,
+applying visibility, row policies, and metadata filters before selecting the best
+`k` results. Equal scores prefer the smaller entity id.
+
+Use `MODE APPROXIMATE` to opt into TurboQuant candidate selection followed by
+full-precision reranking:
+
+```sql
+VECTOR SEARCH articles SIMILAR TO [0.15,0.42,0.75,0.20,0.58,0.85,0.30,0.65]
+MODE APPROXIMATE LIMIT 5;
+```
+
+Approximate candidate selection can miss a true nearest neighbor. Its packed
+scorer still visits the entire index; a small reranking candidate count does not
+prove sublinear search. Without an operational TurboQuant route, execution falls
+back to exact search and reports why. Registered HNSW/IVF indexes do not change
+this runtime route.
+
+Exact selection retains at most `k` results. It gathers visible entity ids and
+fetches vector payloads in batches of 256 before evaluating policies, so the
+working set includes O(N) ids, one payload batch, and O(k) retained results.
 
 ANALYZE returns one measured row with `metrics_scope = vector_pipeline`:
 
 | Field | Meaning |
 | --- | --- |
+| `mode_requested`, `mode_executed` | Requested accuracy and actual execution mode |
+| `fallback_reason` | Why approximation fell back to exact, or NULL |
 | `index_used` | Whether the pipeline used the TurboQuant index |
-| `candidates_examined` | Visible scan entities or returned TurboQuant hits visited by the pipeline |
-| `metadata_rejected` | Candidates rejected by the effective predicate |
-| `visibility_rejected` | TurboQuant hits missing or invisible in the statement snapshot |
+| `candidates_examined` | Scan entities or returned TurboQuant hits visited by the pipeline |
+| `approximate_distance_evaluations` | Vectors scored by the packed index |
+| `metadata_rejected`, `rls_rejected` | Candidates rejected by predicates or row policies |
+| `visibility_rejected` | Candidates missing or invisible in the statement snapshot |
 | `exact_distance_evaluations` | Exact distance calls, including reranking |
+| `peak_topk_entries` | Maximum retained selection entries, bounded by k |
 | `actual_rows` | Rows returned after filtering and top-k |
-| `actual_ms` | Vector pipeline time, excluding the surrounding authorization/frame overhead |
+| `actual_ms` | Vector pipeline time, excluding surrounding authorization/frame overhead |
 
-These counters do not measure approximate scoring inside the index or each
-logical operator separately. A filtered TurboQuant query can still visit the
-whole collection. A small candidate count alone does not prove low index cost.
+These measurements describe the vector pipeline, not individual logical operator
+timings. Other vector endpoints may have different execution paths.
 
 Ordinary queries expose optional `stats.vector` measurements. `cache_hit=true`
 means those measurements describe the cached computation. ANALYZE always runs

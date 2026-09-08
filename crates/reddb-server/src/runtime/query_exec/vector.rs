@@ -1,6 +1,6 @@
 //! Vector similarity search executor.
 //!
-//! Handles `Vector` query expressions — ANN search over a collection's
+//! Handles `Vector` query expressions — exact or explicitly approximate search over a collection's
 //! registered vector index with optional metadata pre/post-filters.
 //! Split out of `query_exec.rs` to keep the main executor focused on
 //! table-scan paths.
@@ -8,9 +8,10 @@
 //! Uses `use super::*;` to inherit the parent executor's imports.
 
 use super::*;
-use crate::runtime::vector_index::{BruteForceVectorIndex, VectorIndexEntry};
+use crate::runtime::vector_index::VectorTopK;
 use crate::storage::engine::distance::DistanceMetric;
 use crate::storage::query::unified::{QueryStats, VectorQueryStats};
+use reddb_rql::ast::VectorSearchMode;
 use reddb_rql::sql_lowering::effective_vector_filter;
 
 pub(crate) fn execute_runtime_vector_query(
@@ -121,7 +122,16 @@ pub(crate) fn runtime_vector_matches(
     // `select_scorer()` (scalar / AVX2 / AVX-512BW / NEON, runtime
     // selected). Legacy `vector` collections continue on the
     // brute-force path below.
-    if let Some(state) = db.turbo_state(&query.collection) {
+    stats.mode_requested = match query.mode {
+        VectorSearchMode::Exact => "exact",
+        VectorSearchMode::Approximate => "approximate",
+    }
+    .to_string();
+    let turbo = (query.mode == VectorSearchMode::Approximate)
+        .then(|| db.turbo_state(&query.collection))
+        .flatten();
+    if let Some(state) = turbo {
+        stats.mode_executed = "approximate".to_string();
         stats.access_path = "vector_turbo_search".to_string();
         stats.index_used = true;
         // Issue #673 — wait briefly for the background rebuild to
@@ -152,8 +162,8 @@ pub(crate) fn runtime_vector_matches(
         // low-dimensional collections the quantisation collapses the scores
         // and the approximate order is wrong (#1372). Over-fetch a generous
         // candidate set from the index, then re-rank with full-precision
-        // exact distances so metric ordering is correct. The index still
-        // prunes the candidate set on large collections.
+        // exact distances. Packed scoring still visits the entire collection;
+        // only the full-precision reranking candidate set is reduced.
         const RERANK_OVERFETCH: usize = 32;
         let k = query.k.max(1);
         let collection_count = manager.count().max(1);
@@ -167,9 +177,10 @@ pub(crate) fn runtime_vector_matches(
         };
         let raw = {
             let index = state.index.lock();
+            stats.approximate_distance_evaluations = index.len() as u64;
             index.search(vector, search_k, metric)
         };
-        let mut results = Vec::with_capacity(raw.len());
+        let mut top = VectorTopK::new(k);
         let filter = effective_vector_filter(query);
         for hit in raw {
             stats.candidates_examined += 1;
@@ -230,63 +241,75 @@ pub(crate) fn runtime_vector_matches(
                     continue;
                 }
             }
-            results.push(SimilarResult {
-                entity_id: hit.entity_id,
-                score,
-                distance,
-                entity,
-            });
+            top.consider(&entity, score, distance);
         }
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.entity_id.raw().cmp(&b.entity_id.raw()))
-        });
-        results.truncate(k);
-        return Ok(results);
+        stats.peak_topk_entries = top.len() as u64;
+        return Ok(top.finish());
     }
 
     stats.access_path = "vector_exact_scan".to_string();
-    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-    let mut index = BruteForceVectorIndex::default();
+    stats.mode_executed = "exact".to_string();
+    if query.mode == VectorSearchMode::Approximate {
+        stats.fallback_reason = Some("no operational approximate index".to_string());
+    }
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let filter = effective_vector_filter(query);
-    let search_k = if effective_vector_filter(query).is_some() {
-        manager.count().max(1)
-    } else {
-        query.k.max(1)
-    };
-
-    for entity in manager.scan(snap_ctx.as_ref(), |_| true) {
-        stats.candidates_examined += 1;
-        if rls_enabled
-            && !runtime.search_entity_rls_allowed(&query.collection, &entity, &mut rls_cache)
-        {
-            stats.rls_rejected += 1;
-            continue;
-        }
-        if let Some(filter) = filter.as_ref() {
-            if !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter) {
+    let mut top = VectorTopK::new(query.k.max(1));
+    // Collect only ids while holding segment read locks. RLS expressions and
+    // metadata lookups may re-enter storage, so evaluate them after releasing
+    // those locks. Vector payloads are materialized one bounded batch at a time.
+    let mut ids = Vec::new();
+    manager.scan_for_each(snapshot.as_ref(), |entity| {
+        ids.push(entity.id);
+        true
+    });
+    for batch in ids.chunks(256) {
+        for entity in manager.get_many(batch).into_iter().flatten() {
+            stats.candidates_examined += 1;
+            if (snapshot.is_none() && entity.xmax != 0)
+                || !crate::runtime::impl_core::entity_visible_with_context(
+                    snapshot.as_ref(),
+                    &entity,
+                )
+            {
+                stats.visibility_rejected += 1;
+                continue;
+            }
+            if rls_enabled
+                && !runtime.search_entity_rls_allowed(&query.collection, &entity, &mut rls_cache)
+            {
+                stats.rls_rejected += 1;
+                continue;
+            }
+            if filter.as_ref().is_some_and(|filter| {
+                !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter)
+            }) {
                 stats.metadata_rejected += 1;
                 continue;
             }
-        }
-        if let EntityData::Vector(data) = &entity.data {
-            index.upsert(VectorIndexEntry {
-                entity_id: entity.id,
-                vector: data.dense.clone(),
-                entity,
-            });
+            let EntityData::Vector(data) = &entity.data else {
+                continue;
+            };
+            if data.dense.len() != vector.len() {
+                continue;
+            }
+            stats.exact_distance_evaluations += 1;
+            let distance = crate::storage::engine::distance::distance(vector, &data.dense, metric);
+            let score = match metric {
+                DistanceMetric::Cosine => 1.0 - distance,
+                DistanceMetric::InnerProduct | DistanceMetric::L2 => -distance,
+            };
+            if query.threshold.is_some_and(|threshold| match metric {
+                DistanceMetric::L2 => distance > threshold,
+                DistanceMetric::Cosine | DistanceMetric::InnerProduct => score < threshold,
+            }) {
+                continue;
+            }
+            top.consider(&entity, score, distance);
         }
     }
-
-    Ok(index.search(
-        vector,
-        search_k,
-        metric,
-        query.threshold,
-        &mut stats.exact_distance_evaluations,
-    ))
+    stats.peak_topk_entries = top.len() as u64;
+    Ok(top.finish())
 }
 
 pub(crate) fn runtime_vector_record_matches_filter(
