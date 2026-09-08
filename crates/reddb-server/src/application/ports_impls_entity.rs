@@ -2186,14 +2186,13 @@ impl RuntimeEntityPort for RedDBRuntime {
             builder = builder.link_to_node(link_node);
         }
 
-        let id = builder.save()?;
+        // The transaction stamp must be present on the first published version.
+        // Stamping after save exposed an xmin=0 vector to concurrent snapshots.
+        let id = builder.save_with_xmin(self.current_xid())?;
         let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
             Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
             _ => None,
         };
-        // Phase 1.1 MVCC universal: stamp xmin on the vector so
-        // concurrent ANN scans hide it until the transaction commits.
-        self.stamp_xmin_if_in_txn(&input.collection, id);
         refresh_context_index(&db, &input.collection, id)?;
         // Issue #693 — vector.turbo write path. Order matters and
         // matches the write sequence the next slice (#673) will

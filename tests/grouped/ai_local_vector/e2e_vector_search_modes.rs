@@ -171,3 +171,90 @@ fn vector_exact_stream_preserves_snapshot_across_sealed_and_growing_segments() {
         2
     );
 }
+
+#[test]
+fn vector_exact_snapshot_hides_vectors_during_transactional_insert() {
+    use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+    use reddb::storage::UnifiedEntity;
+    use std::sync::Barrier;
+
+    struct ConnectionGuard;
+    impl Drop for ConnectionGuard {
+        fn drop(&mut self) {
+            clear_current_connection_id();
+        }
+    }
+    let _connection = ConnectionGuard;
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    rt.execute_query("CREATE VECTOR publication_snapshot DIM 8 METRIC cosine")
+        .expect("collection");
+    let store = rt.db().store();
+    let mut dense = vec![0.0f32; 8];
+    dense[0] = 1.0;
+    for _ in 0..32 {
+        let id = store.next_entity_id();
+        store
+            .insert(
+                "publication_snapshot",
+                UnifiedEntity::vector(id, "publication_snapshot", dense.clone()),
+            )
+            .expect("fixture vector");
+    }
+    let query_for = |value: f32| {
+        let mut vector = dense.clone();
+        vector[7] = value;
+        format!("VECTOR SEARCH publication_snapshot SIMILAR TO {vector:?} MODE EXACT LIMIT 3")
+    };
+    rt.execute_query(&query_for(-0.5)).expect("warm planner");
+    set_current_connection_id(99820);
+    rt.execute_query("BEGIN ISOLATION LEVEL SNAPSHOT")
+        .expect("reader snapshot");
+    let barrier = Barrier::new(2);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let _connection = ConnectionGuard;
+            set_current_connection_id(99821);
+            // A substantial content payload widens the old save/get/stamp
+            // window. No timing assertion: every read must retain its view.
+            let content = "w".repeat(65_536);
+            let sql = format!("INSERT INTO publication_snapshot VECTOR (dense,content) VALUES ([0,1,0,0,0,0,0,0],'{content}')");
+            barrier.wait();
+            for i in 0..32 {
+                rt.execute_query("BEGIN").expect("writer begin");
+                rt.execute_query(&sql).expect("writer insert");
+                rt.execute_query(if i % 2 == 0 { "COMMIT" } else { "ROLLBACK" })
+                    .expect("writer finish");
+            }
+        });
+        barrier.wait();
+        for i in 1..=512 {
+            // A new vector each time prevents a cached result hiding a leak.
+            let result = rt
+                .execute_query(&query_for(i as f32 / 100.0))
+                .expect("snapshot query");
+            assert_eq!(result.result.records.len(), 3);
+            assert_eq!(
+                result
+                    .result
+                    .stats
+                    .vector
+                    .expect("vector stats")
+                    .exact_distance_evaluations,
+                32,
+                "a vector published after the snapshot became visible"
+            );
+        }
+    });
+    rt.execute_query("COMMIT").expect("reader finish");
+    let result = rt.execute_query(&query_for(-0.25)).expect("fresh view");
+    assert_eq!(
+        result
+            .result
+            .stats
+            .vector
+            .expect("vector stats")
+            .exact_distance_evaluations,
+        48,
+        "fresh reads see the 16 committed inserts and hide rollbacks"
+    );
+}

@@ -437,8 +437,13 @@ impl VectorBuilder {
         self
     }
 
-    /// Save the vector
+    /// Save the vector.
     pub fn save(self) -> Result<EntityId, DevXError> {
+        self.save_with_xmin(None)
+    }
+
+    /// Stamp a runtime transaction before the vector becomes visible in storage.
+    pub(crate) fn save_with_xmin(self, xmin: Option<u64>) -> Result<EntityId, DevXError> {
         let dense = self
             .dense
             .ok_or_else(|| DevXError::Validation("Vector requires dense data".into()))?;
@@ -476,6 +481,9 @@ impl VectorBuilder {
             entity.add_cross_ref(CrossRef::new(id, target, target_collection, ref_type));
         }
         run_preprocessors(&self.preprocessors, &mut entity)?;
+        if let Some(xmin) = xmin {
+            entity.set_xmin(xmin);
+        }
 
         let id = self
             .store

@@ -598,7 +598,7 @@ impl RedDBRuntime {
 
     /// Phase 1.1 MVCC universal: post-save hook that stamps `xmin` on a
     /// freshly-inserted entity when the current connection holds an
-    /// open transaction. Used by graph / vector / queue / timeseries
+    /// open transaction. Used by graph / queue / timeseries
     /// write paths that go through the DevX builder API (`db.node(...)
     /// .save()` and friends) — those live in the storage crate and
     /// can't reach `current_xid()` without crossing layers, so the
