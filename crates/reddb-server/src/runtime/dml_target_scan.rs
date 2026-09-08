@@ -27,6 +27,7 @@ pub(super) struct DmlTargetScan<'a> {
     target: Option<UpdateTarget>,
     table_row_resolver: TableRowMvccReadResolver,
     live_table_rows: bool,
+    declared_table: bool,
 }
 
 impl<'a> DmlTargetScan<'a> {
@@ -44,6 +45,7 @@ impl<'a> DmlTargetScan<'a> {
             target: None,
             table_row_resolver: TableRowMvccReadResolver::current_statement(),
             live_table_rows: false,
+            declared_table: false,
         }
     }
 
@@ -62,6 +64,12 @@ impl<'a> DmlTargetScan<'a> {
             target: Some(target),
             table_row_resolver: TableRowMvccReadResolver::current_statement(),
             live_table_rows: false,
+            declared_table: runtime
+                .db()
+                .collection_contract_arc(table)
+                .is_some_and(|contract| {
+                    contract.declared_model == crate::catalog::CollectionModel::Table
+                }),
         }
     }
 
@@ -346,6 +354,11 @@ impl<'a> DmlTargetScan<'a> {
             return true;
         };
         match target {
+            // A declared SQL table may contain JSON/BLOB columns or columns
+            // named key/value. Their payload shape does not change its model.
+            UpdateTarget::Rows if self.declared_table => {
+                matches!(entity.kind, EntityKind::TableRow { .. })
+            }
             UpdateTarget::Rows => matches!(row_item_kind(entity), Some(RowItemKind::Row)),
             UpdateTarget::Documents => matches!(row_item_kind(entity), Some(RowItemKind::Document)),
             UpdateTarget::Kv => matches!(row_item_kind(entity), Some(RowItemKind::Kv)),

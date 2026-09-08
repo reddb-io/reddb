@@ -32,8 +32,20 @@ fn sql_quoted_identifiers_persist_and_roundtrip_schema() {
             result.result.records[0].get("CASE"),
             Some(&Value::Integer(7))
         );
-        rt.execute_query(r#"UPDATE "select" SET "a""b"='replacement' WHERE "key name"=1"#)
+        let updated = rt
+            .execute_query(r#"UPDATE "select" SET "a""b"='replacement' WHERE "key name"=1"#)
             .expect("update");
+        assert_eq!(
+            updated.affected_rows, 1,
+            "JSON column must not hide a table row"
+        );
+        let updated = rt
+            .execute_query(r#"SELECT "a""b" FROM "select" WHERE "key name"=1"#)
+            .expect("updated column before reopen");
+        assert_eq!(
+            updated.result.records[0].get("a\"b"),
+            Some(&Value::text("replacement"))
+        );
         let result = rt
             .execute_query(r#"SHOW CREATE TABLE "select""#)
             .expect("DDL");
@@ -162,4 +174,24 @@ fn quoted_identifier_metacharacters_do_not_execute_statements() {
         .expect("protected table survives");
     assert_eq!(result.result.records.len(), 1);
     assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(7)));
+}
+
+#[test]
+fn declared_table_key_value_columns_remain_updateable_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    rt.execute_query(r#"CREATE TABLE table_pairs ("key" INT, "value" TEXT)"#)
+        .expect("table");
+    rt.execute_query(r#"INSERT INTO table_pairs ("key","value") VALUES (1,'before')"#)
+        .expect("insert");
+    let result = rt
+        .execute_query(r#"UPDATE table_pairs SET "value"='after' WHERE "key"=1"#)
+        .expect("update table with KV-shaped columns");
+    assert_eq!(result.affected_rows, 1);
+    let result = rt
+        .execute_query(r#"SELECT "value" FROM table_pairs WHERE "key"=1"#)
+        .expect("read updated table");
+    assert_eq!(
+        result.result.records[0].get("value"),
+        Some(&Value::text("after"))
+    );
 }
