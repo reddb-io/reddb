@@ -14,13 +14,15 @@ use crate::storage::query::unified::{QueryStats, VectorQueryStats};
 use reddb_rql::sql_lowering::effective_vector_filter;
 
 pub(crate) fn execute_runtime_vector_query(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     query: &VectorQuery,
 ) -> RedDBResult<UnifiedResult> {
+    let db = &runtime.inner.db;
     let started = std::time::Instant::now();
     let mut vector_stats = VectorQueryStats::default();
     let plan = CanonicalPlanner::new(db).build(&QueryExpr::Vector(query.clone()));
-    let records = execute_runtime_canonical_vector_node(db, &plan.root, query, &mut vector_stats)?;
+    let records =
+        execute_runtime_canonical_vector_node(runtime, &plan.root, query, &mut vector_stats)?;
 
     vector_stats.rows_returned = records.len() as u64;
     Ok(UnifiedResult {
@@ -37,22 +39,23 @@ pub(crate) fn execute_runtime_vector_query(
 }
 
 pub(crate) fn execute_runtime_canonical_vector_node(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &VectorQuery,
     stats: &mut VectorQueryStats,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let db = &runtime.inner.db;
     match node.operator.as_str() {
         "vector_turbo_search" | "vector_exact_scan" => {
-            let vector = resolve_runtime_vector_source(db, &query.query_vector)?;
-            let matches = runtime_vector_matches(db, query, &vector, stats)?;
+            let vector = resolve_runtime_vector_source(runtime, &query.query_vector)?;
+            let matches = runtime_vector_matches(runtime, query, &vector, stats)?;
             Ok(matches
                 .into_iter()
                 .map(runtime_vector_record_from_match)
                 .collect())
         }
         "metadata_filter" => {
-            let mut records = execute_runtime_canonical_vector_child(db, node, query, stats)?;
+            let mut records = execute_runtime_canonical_vector_child(runtime, node, query, stats)?;
             if let Some(filter) = effective_vector_filter(query).as_ref() {
                 records.retain(|record| {
                     runtime_vector_record_matches_filter(db, &query.collection, record, filter)
@@ -61,7 +64,7 @@ pub(crate) fn execute_runtime_canonical_vector_node(
             Ok(records)
         }
         "similarity_threshold" => {
-            let mut records = execute_runtime_canonical_vector_child(db, node, query, stats)?;
+            let mut records = execute_runtime_canonical_vector_child(runtime, node, query, stats)?;
             if let Some(threshold) = query.threshold {
                 let metric = runtime_vector_metric(db, query);
                 records.retain(|record| {
@@ -71,11 +74,11 @@ pub(crate) fn execute_runtime_canonical_vector_node(
             Ok(records)
         }
         "topk" => {
-            let mut records = execute_runtime_canonical_vector_child(db, node, query, stats)?;
+            let mut records = execute_runtime_canonical_vector_child(runtime, node, query, stats)?;
             records.sort_by(compare_runtime_ranked_records);
             Ok(records.into_iter().take(query.k.max(1)).collect())
         }
-        "projection" => execute_runtime_canonical_vector_child(db, node, query, stats),
+        "projection" => execute_runtime_canonical_vector_child(runtime, node, query, stats),
         other => Err(RedDBError::Query(format!(
             "unsupported canonical vector operator {other}"
         ))),
@@ -83,7 +86,7 @@ pub(crate) fn execute_runtime_canonical_vector_node(
 }
 
 pub(crate) fn execute_runtime_canonical_vector_child(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &VectorQuery,
     stats: &mut VectorQueryStats,
@@ -94,17 +97,20 @@ pub(crate) fn execute_runtime_canonical_vector_child(
             node.operator
         ))
     })?;
-    execute_runtime_canonical_vector_node(db, child, query, stats)
+    execute_runtime_canonical_vector_node(runtime, child, query, stats)
 }
 
 pub(crate) fn runtime_vector_matches(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     query: &VectorQuery,
     vector: &[f32],
     stats: &mut VectorQueryStats,
 ) -> RedDBResult<Vec<SimilarResult>> {
+    let db = &runtime.inner.db;
     validate_vector_query_shape(db, query, vector)?;
     let metric = runtime_vector_metric(db, query);
+    let rls_enabled = runtime.is_rls_enabled(&query.collection);
+    let mut rls_cache = HashMap::new();
     let manager = db
         .store()
         .get_collection(&query.collection)
@@ -151,7 +157,10 @@ pub(crate) fn runtime_vector_matches(
         const RERANK_OVERFETCH: usize = 32;
         let k = query.k.max(1);
         let collection_count = manager.count().max(1);
-        let search_k = if effective_vector_filter(query).is_some() {
+        // An RLS predicate can reject every normally overfetched candidate.
+        // Consider the whole index before authorizing and exact ranking;
+        // limiting first would lose lower-scoring records the caller may read.
+        let search_k = if rls_enabled || effective_vector_filter(query).is_some() {
             collection_count
         } else {
             k.saturating_mul(RERANK_OVERFETCH).min(collection_count)
@@ -177,6 +186,12 @@ pub(crate) fn runtime_vector_matches(
             // version-superseded vector never reaches the results.
             if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
                 stats.visibility_rejected += 1;
+                continue;
+            }
+            if rls_enabled
+                && !runtime.search_entity_rls_allowed(&query.collection, &entity, &mut rls_cache)
+            {
+                stats.rls_rejected += 1;
                 continue;
             }
             if let Some(filter) = filter.as_ref() {
@@ -244,6 +259,12 @@ pub(crate) fn runtime_vector_matches(
 
     for entity in manager.scan(snap_ctx.as_ref(), |_| true) {
         stats.candidates_examined += 1;
+        if rls_enabled
+            && !runtime.search_entity_rls_allowed(&query.collection, &entity, &mut rls_cache)
+        {
+            stats.rls_rejected += 1;
+            continue;
+        }
         if let Some(filter) = filter.as_ref() {
             if !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter) {
                 stats.metadata_rejected += 1;

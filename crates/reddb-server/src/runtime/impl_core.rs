@@ -985,7 +985,7 @@ impl RedDBRuntime {
                     mode,
                     statement,
                     engine: "runtime-join",
-                    result: execute_runtime_join_query(&self.inner.db, &join_with_rls)?,
+                    result: execute_runtime_join_query(self, &join_with_rls)?,
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
@@ -997,7 +997,7 @@ impl RedDBRuntime {
                 mode,
                 statement,
                 engine: "runtime-vector",
-                result: execute_runtime_vector_query(&self.inner.db, &vector)?,
+                result: execute_runtime_vector_query(self, &vector)?,
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
@@ -1008,7 +1008,7 @@ impl RedDBRuntime {
                 mode,
                 statement,
                 engine: "runtime-hybrid",
-                result: execute_runtime_hybrid_query(&self.inner.db, &hybrid)?,
+                result: execute_runtime_hybrid_query(self, &hybrid)?,
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
@@ -2011,6 +2011,7 @@ impl RedDBRuntime {
                     .write()
                     .insert(key, Arc::new(q.clone()));
                 self.invalidate_plan_cache();
+                self.invalidate_result_cache();
                 // Issue #120 — surface policy names in the
                 // schema-vocabulary so AskPipeline (#121) can resolve
                 // a policy reference back to its table.
@@ -2040,6 +2041,7 @@ impl RedDBRuntime {
                     )));
                 }
                 self.invalidate_plan_cache();
+                self.invalidate_result_cache();
                 // Issue #120 — keep the schema-vocabulary policy
                 // entry in sync.
                 self.schema_vocabulary_apply(
@@ -2858,7 +2860,7 @@ impl RedDBRuntime {
             QueryExpr::Table(table) => {
                 execute_runtime_table_query(&self.inner.db, &table, Some(&self.inner.index_store))?
             }
-            QueryExpr::Join(join) => execute_runtime_join_query(&self.inner.db, &join)?,
+            QueryExpr::Join(join) => execute_runtime_join_query(self, &join)?,
             other => {
                 return Err(RedDBError::Query(format!(
                     "expression subquery must be a SELECT query, got {}",
@@ -3029,7 +3031,7 @@ impl RedDBRuntime {
                     mode,
                     statement,
                     engine: "runtime-join",
-                    result: execute_runtime_join_query(&self.inner.db, &join_with_rls)?,
+                    result: execute_runtime_join_query(self, &join_with_rls)?,
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
@@ -3041,7 +3043,7 @@ impl RedDBRuntime {
                 mode,
                 statement,
                 engine: "runtime-vector",
-                result: execute_runtime_vector_query(&self.inner.db, &vector)?,
+                result: execute_runtime_vector_query(self, &vector)?,
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
@@ -3052,7 +3054,7 @@ impl RedDBRuntime {
                 mode,
                 statement,
                 engine: "runtime-hybrid",
-                result: execute_runtime_hybrid_query(&self.inner.db, &hybrid)?,
+                result: execute_runtime_hybrid_query(self, &hybrid)?,
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
@@ -3262,6 +3264,7 @@ impl RedDBRuntime {
                 "metadata_rejected",
                 Value::UnsignedInteger(vector.metadata_rejected),
             ),
+            ("rls_rejected", Value::UnsignedInteger(vector.rls_rejected)),
             (
                 "visibility_rejected",
                 Value::UnsignedInteger(vector.visibility_rejected),

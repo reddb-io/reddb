@@ -661,6 +661,7 @@ pub struct VectorQueryStats {
     pub index_used: bool,
     pub candidates_examined: u64,
     pub metadata_rejected: u64,
+    pub rls_rejected: u64,
     pub visibility_rejected: u64,
     pub exact_distance_evaluations: u64,
     pub rows_returned: u64,

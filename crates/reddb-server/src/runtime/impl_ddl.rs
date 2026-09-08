@@ -1009,6 +1009,7 @@ impl RedDBRuntime {
                     );
                     self.invalidate_plan_cache();
                     messages.push(format!("row level security enabled on '{}'", query.name));
+                    self.invalidate_result_cache();
                 }
                 AlterOperation::DisableRowLevelSecurity => {
                     self.inner.rls_enabled_tables.write().remove(&query.name);
@@ -1018,6 +1019,7 @@ impl RedDBRuntime {
                     );
                     self.invalidate_plan_cache();
                     messages.push(format!("row level security disabled on '{}'", query.name));
+                    self.invalidate_result_cache();
                 }
                 // Phase 2.5.4: retrofit tenancy onto an existing table.
                 AlterOperation::EnableTenancy { column } => {

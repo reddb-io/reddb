@@ -439,6 +439,7 @@ pub(crate) fn query_stats_json(stats: &QueryStats) -> JsonValue {
         for (name, value) in [
             ("candidates_examined", vector.candidates_examined),
             ("metadata_rejected", vector.metadata_rejected),
+            ("rls_rejected", vector.rls_rejected),
             ("visibility_rejected", vector.visibility_rejected),
             (
                 "exact_distance_evaluations",

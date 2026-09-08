@@ -184,13 +184,12 @@ pub(crate) fn inject_rls_filters(
     frame: &dyn super::statement_frame::ReadFrame,
     mut table: reddb_rql::ast::TableQuery,
 ) -> Option<reddb_rql::ast::TableQuery> {
-    use reddb_rql::ast::{Filter, PolicyAction};
+    use reddb_rql::ast::Filter;
 
     // `None` role falls through to policies with no `TO role` clause.
     let role = frame.identity().map(|(_, role)| role);
     let role_str = role.map(|r| r.as_str().to_string());
-    let policies =
-        runtime.matching_rls_policies(&table.table, role_str.as_deref(), PolicyAction::Select);
+    let policies = runtime.matching_select_rls_policies(&table.table, role_str.as_deref());
 
     if policies.is_empty() {
         // RLS enabled + no policy match = deny everything. Signal the
@@ -282,7 +281,7 @@ fn collect_join_side_policy(
     expr: &reddb_rql::ast::QueryExpr,
     out: &mut Vec<reddb_rql::ast::Filter>,
 ) -> bool {
-    use reddb_rql::ast::{Filter, PolicyAction, QueryExpr};
+    use reddb_rql::ast::{Filter, QueryExpr};
     match expr {
         QueryExpr::Table(t) => {
             if !runtime.inner.rls_enabled_tables.read().contains(&t.table) {
@@ -290,8 +289,7 @@ fn collect_join_side_policy(
             }
             let role = frame.identity().map(|(_, role)| role);
             let role_str = role.map(|r| r.as_str().to_string());
-            let policies =
-                runtime.matching_rls_policies(&t.table, role_str.as_deref(), PolicyAction::Select);
+            let policies = runtime.matching_select_rls_policies(&t.table, role_str.as_deref());
             if policies.is_empty() {
                 return false;
             }
@@ -376,6 +374,28 @@ pub(crate) fn apply_foreign_table_filters(
 }
 
 impl RedDBRuntime {
+    /// SELECT and JOIN use the relational AST for both tables and documents.
+    /// Resolve the policy kind from the declared collection model.
+    fn matching_select_rls_policies(
+        &self,
+        table: &str,
+        role: Option<&str>,
+    ) -> Vec<reddb_rql::ast::Filter> {
+        use reddb_rql::ast::{PolicyAction, PolicyTargetKind};
+
+        let kind = if self
+            .db()
+            .collection_contract_arc(table)
+            .is_some_and(|contract| {
+                contract.declared_model == crate::catalog::CollectionModel::Document
+            }) {
+            PolicyTargetKind::Documents
+        } else {
+            PolicyTargetKind::Table
+        };
+        self.matching_rls_policies_for_kind(table, role, PolicyAction::Select, kind)
+    }
+
     /// Access the shared `ForeignTableRegistry` (Phase 3.2 PG parity).
     ///
     /// Callers use this to check whether a table name is a registered
