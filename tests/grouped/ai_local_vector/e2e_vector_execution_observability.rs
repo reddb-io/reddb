@@ -198,3 +198,29 @@ fn approximate_mode_reports_exact_fallback_without_a_turbo_route() {
     assert_eq!(stats.approximate_distance_evaluations, 0);
     assert!(!stats.index_used);
 }
+
+#[test]
+fn vector_operators_report_executed_counts_and_inclusive_times() {
+    let (_directory, rt) = fixture(false);
+    rt.execute_query("INSERT INTO embeddings VECTOR (dense) VALUES ([0.6,0.8]),([1.0,0.0])")
+        .expect("vectors");
+    let result = rt
+        .execute_query("EXPLAIN ANALYZE VECTOR SEARCH embeddings SIMILAR TO [1.0,0.0] LIMIT 1")
+        .expect("analysis");
+    let stats = result.result.stats.vector.as_ref().expect("vector stats");
+    let scan = stats
+        .operators
+        .iter()
+        .find(|op| op.operator == "vector_exact_scan")
+        .expect("measured scan");
+    assert_eq!(scan.input_rows, 3);
+    assert_eq!(scan.output_rows, 1);
+    let root = stats.operators.last().expect("root");
+    assert_eq!(root.output_rows, stats.rows_returned);
+    assert!(root.inclusive_time_us >= scan.inclusive_time_us);
+    assert!(result.result.stats.exec_time_us >= root.inclusive_time_us);
+    assert!(matches!(
+        result.result.records[0].get("operators"),
+        Some(Value::Json(_))
+    ));
+}

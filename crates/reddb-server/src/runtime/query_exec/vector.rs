@@ -46,10 +46,14 @@ pub(crate) fn execute_runtime_canonical_vector_node(
     stats: &mut VectorQueryStats,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let db = &runtime.inner.db;
-    match node.operator.as_str() {
+    let started = std::time::Instant::now();
+    let input_rows;
+    let records = match node.operator.as_str() {
         "vector_turbo_search" | "vector_exact_scan" => {
             let vector = resolve_runtime_vector_source(runtime, &query.query_vector)?;
+            let before = stats.candidates_examined;
             let matches = runtime_vector_matches(runtime, query, &vector, stats)?;
+            input_rows = stats.candidates_examined - before;
             Ok(matches
                 .into_iter()
                 .map(runtime_vector_record_from_match)
@@ -57,6 +61,7 @@ pub(crate) fn execute_runtime_canonical_vector_node(
         }
         "metadata_filter" => {
             let mut records = execute_runtime_canonical_vector_child(runtime, node, query, stats)?;
+            input_rows = records.len() as u64;
             if let Some(filter) = effective_vector_filter(query).as_ref() {
                 records.retain(|record| {
                     runtime_vector_record_matches_filter(db, &query.collection, record, filter)
@@ -66,6 +71,7 @@ pub(crate) fn execute_runtime_canonical_vector_node(
         }
         "similarity_threshold" => {
             let mut records = execute_runtime_canonical_vector_child(runtime, node, query, stats)?;
+            input_rows = records.len() as u64;
             if let Some(threshold) = query.threshold {
                 let metric = runtime_vector_metric(db, query);
                 records.retain(|record| {
@@ -76,14 +82,30 @@ pub(crate) fn execute_runtime_canonical_vector_node(
         }
         "topk" => {
             let mut records = execute_runtime_canonical_vector_child(runtime, node, query, stats)?;
+            input_rows = records.len() as u64;
             records.sort_by(compare_runtime_ranked_records);
             Ok(records.into_iter().take(query.k.max(1)).collect())
         }
-        "projection" => execute_runtime_canonical_vector_child(runtime, node, query, stats),
-        other => Err(RedDBError::Query(format!(
-            "unsupported canonical vector operator {other}"
-        ))),
-    }
+        "projection" => {
+            let records = execute_runtime_canonical_vector_child(runtime, node, query, stats)?;
+            input_rows = records.len() as u64;
+            Ok(records)
+        }
+        other => {
+            return Err(RedDBError::Query(format!(
+                "unsupported canonical vector operator {other}"
+            )))
+        }
+    }?;
+    stats
+        .operators
+        .push(crate::storage::query::unified::VectorOperatorStats {
+            operator: node.operator.clone(),
+            input_rows,
+            output_rows: records.len() as u64,
+            inclusive_time_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        });
+    Ok(records)
 }
 
 pub(crate) fn execute_runtime_canonical_vector_child(
