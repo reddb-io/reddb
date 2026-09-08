@@ -683,6 +683,32 @@ pub struct VectorQueryStats {
     pub rows_returned: u64,
 }
 
+impl VectorQueryStats {
+    pub(crate) fn operators_json(&self) -> crate::json::Value {
+        use crate::json::{Map, Value as JsonValue};
+        JsonValue::Array(
+            self.operators
+                .iter()
+                .map(|operator| {
+                    let mut fields = Map::new();
+                    fields.insert(
+                        "operator".into(),
+                        JsonValue::String(operator.operator.clone()),
+                    );
+                    for (name, value) in [
+                        ("input_rows", operator.input_rows),
+                        ("output_rows", operator.output_rows),
+                        ("inclusive_time_us", operator.inclusive_time_us),
+                    ] {
+                        fields.insert(name.into(), Value::UnsignedInteger(value).to_json());
+                    }
+                    JsonValue::Object(fields)
+                })
+                .collect(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod record_layout_tests {
     //! Property tests for the schema-shared `UnifiedRecord` layout

@@ -398,31 +398,6 @@ pub(crate) fn unified_result_json_with_records(
     JsonValue::Object(object)
 }
 
-pub(crate) fn vector_operators_json(
-    operators: &[crate::storage::query::unified::VectorOperatorStats],
-) -> JsonValue {
-    JsonValue::Array(
-        operators
-            .iter()
-            .map(|operator| {
-                let mut fields = Map::new();
-                fields.insert(
-                    "operator".into(),
-                    JsonValue::String(operator.operator.clone()),
-                );
-                for (name, value) in [
-                    ("input_rows", operator.input_rows),
-                    ("output_rows", operator.output_rows),
-                    ("inclusive_time_us", operator.inclusive_time_us),
-                ] {
-                    fields.insert(name.into(), StorageValue::UnsignedInteger(value).to_json());
-                }
-                JsonValue::Object(fields)
-            })
-            .collect(),
-    )
-}
-
 pub(crate) fn query_stats_json(stats: &QueryStats) -> JsonValue {
     let mut object = Map::new();
     object.insert(
@@ -455,7 +430,7 @@ pub(crate) fn query_stats_json(stats: &QueryStats) -> JsonValue {
     );
     if let Some(vector) = &stats.vector {
         let mut metrics = Map::new();
-        metrics.insert("operators".into(), vector_operators_json(&vector.operators));
+        metrics.insert("operators".into(), vector.operators_json());
         metrics.insert(
             "mode_requested".into(),
             JsonValue::String(vector.mode_requested.clone()),

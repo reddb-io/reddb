@@ -3324,13 +3324,7 @@ impl RedDBRuntime {
             ("metrics_scope", Value::text("vector_pipeline")),
             (
                 "operators",
-                Value::Json(
-                    crate::presentation::query_result_json::vector_operators_json(
-                        &vector.operators,
-                    )
-                    .to_string()
-                    .into_bytes(),
-                ),
+                Value::Json(vector.operators_json().to_string().into_bytes()),
             ),
         ];
         let columns = fields.iter().map(|(name, _)| name.to_string()).collect();
