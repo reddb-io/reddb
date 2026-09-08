@@ -1319,7 +1319,6 @@ mod tests {
     use crate::auth::Role;
     use crate::runtime::statement_frame::EffectiveScope;
     use crate::runtime::RedDBRuntime;
-    use crate::storage::transaction::snapshot::Snapshot;
     use crate::storage::unified::entity::{
         EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
     };

@@ -623,7 +623,7 @@ mod frame_regression_tests {
                 let EntityData::Row(row) = hit.entity.data else {
                     panic!("row")
                 };
-                let Some(Value::Text(value)) = row.get(1) else {
+                let Some(Value::Text(value)) = row.get_field("body") else {
                     panic!("text")
                 };
                 value.to_string()
@@ -692,13 +692,13 @@ mod frame_regression_tests {
     fn search_similar_filters_policy_before_topk_and_uses_frame_identity() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         for sql in [
-            "CREATE VECTOR vectors DIM 2 METRIC cosine",
-            "INSERT INTO vectors VECTOR (dense,content) VALUES ([1.0,0.0],'denied') WITH METADATA (owner='bob')",
-            "INSERT INTO vectors VECTOR (dense,content) VALUES ([0.8,0.6],'visible') WITH METADATA (owner='alice')",
-            "CREATE POLICY own ON VECTORS OF vectors FOR SELECT TO read USING (metadata.owner=CURRENT_USER())",
-            "ALTER TABLE vectors ENABLE ROW LEVEL SECURITY",
+            "CREATE VECTOR embeddings DIM 2 METRIC cosine",
+            "INSERT INTO embeddings VECTOR (dense,content) VALUES ([1.0,0.0],'denied') WITH METADATA (owner='bob')",
+            "INSERT INTO embeddings VECTOR (dense,content) VALUES ([0.8,0.6],'visible') WITH METADATA (owner='alice')",
+            "CREATE POLICY own ON VECTORS OF embeddings FOR SELECT TO read USING (metadata.owner=CURRENT_USER())",
+            "ALTER TABLE embeddings ENABLE ROW LEVEL SECURITY",
         ] { rt.execute_query(sql).expect(sql); }
-        let mut frame = FakeReadFrame::with_visible(["vectors".into()].into_iter().collect());
+        let mut frame = FakeReadFrame::with_visible(["embeddings".into()].into_iter().collect());
         frame.snapshot = rt.current_snapshot();
         with_snapshot_bundle(
             &SnapshotBundle {
@@ -706,9 +706,15 @@ mod frame_regression_tests {
                 ..Default::default()
             },
             || {
-                let hits =
-                    AuthorizedSearch::execute_similar(&rt, &frame, "vectors", &[1.0, 0.0], 1, 0.0)
-                        .expect("similar");
+                let hits = AuthorizedSearch::execute_similar(
+                    &rt,
+                    &frame,
+                    "embeddings",
+                    &[1.0, 0.0],
+                    1,
+                    0.0,
+                )
+                .expect("similar");
                 assert_eq!(hits.len(), 1);
                 let EntityData::Vector(data) = &hits[0].entity.data else {
                     panic!("vector")
