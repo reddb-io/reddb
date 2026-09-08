@@ -107,6 +107,17 @@ pub(crate) trait ReadFrame {
     /// historical xid.
     fn snapshot(&self) -> &Snapshot;
 
+    /// Complete visibility context, including the reader's savepoint writes.
+    fn snapshot_context(&self, runtime: &RedDBRuntime) -> SnapshotContext {
+        SnapshotContext {
+            snapshot: self.snapshot().clone(),
+            manager: runtime.inner.transaction_state.snapshot_manager(),
+            own_xids: HashSet::new(),
+            requires_index_fallback: true,
+            serializable_reader: None,
+        }
+    }
+
     /// AS OF xid floor when AS OF was applied for this statement,
     /// `None` for live reads. Useful for downstream callers that
     /// want to gate behaviour on historical-read mode without
@@ -811,6 +822,16 @@ impl StatementExecutionFrame {
 }
 
 impl ReadFrame for StatementExecutionFrame {
+    fn snapshot_context(&self, runtime: &RedDBRuntime) -> SnapshotContext {
+        SnapshotContext {
+            snapshot: self.snapshot.clone(),
+            manager: runtime.inner.transaction_state.snapshot_manager(),
+            own_xids: self.own_xids.clone(),
+            requires_index_fallback: self.requires_index_fallback,
+            serializable_reader: self.serializable_reader,
+        }
+    }
+
     fn effective_scope(&self) -> Option<&str> {
         self.effective_scope.as_deref()
     }
@@ -861,6 +882,7 @@ impl ReadFrame for StatementExecutionFrame {
 /// `StatementExecutionFrame::build` derives them) and resolves
 /// `visible_collections` via the `AuthStore` cache.
 pub struct EffectiveScope {
+    pub(crate) captured_snapshot: Option<SnapshotContext>,
     pub(crate) tenant: Option<String>,
     pub(crate) identity: Option<(String, Role)>,
     pub(crate) snapshot: Snapshot,
@@ -883,6 +905,18 @@ impl EffectiveScope {
 }
 
 impl ReadFrame for EffectiveScope {
+    fn snapshot_context(&self, runtime: &RedDBRuntime) -> SnapshotContext {
+        self.captured_snapshot
+            .clone()
+            .unwrap_or_else(|| SnapshotContext {
+                snapshot: self.snapshot.clone(),
+                manager: runtime.inner.transaction_state.snapshot_manager(),
+                own_xids: HashSet::new(),
+                requires_index_fallback: true,
+                serializable_reader: None,
+            })
+    }
+
     fn effective_scope(&self) -> Option<&str> {
         self.tenant.as_deref()
     }
@@ -937,7 +971,11 @@ impl RedDBRuntime {
     pub(crate) fn ai_scope(&self) -> EffectiveScope {
         let tenant = super::impl_core::current_tenant();
         let identity = super::impl_core::current_auth_identity();
-        let snapshot = self.current_snapshot();
+        let captured_snapshot = super::execution_context::capture_current_snapshot();
+        let snapshot = captured_snapshot.as_ref().map_or_else(
+            || self.current_snapshot(),
+            |context| context.snapshot.clone(),
+        );
         let visible_collections = match (self.inner.auth_store.read().clone(), identity.as_ref()) {
             (Some(store), Some((principal, role))) => {
                 let collections = self.inner.db.store().list_collections();
@@ -951,6 +989,7 @@ impl RedDBRuntime {
             _ => None,
         };
         EffectiveScope {
+            captured_snapshot,
             tenant,
             identity,
             snapshot,

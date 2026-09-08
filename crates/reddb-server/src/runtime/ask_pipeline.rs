@@ -483,7 +483,7 @@ pub fn text_search_bm25_scoped(
         return Vec::new();
     }
 
-    let _scope_guard = AskScopeGuard::install(scope);
+    let _scope_guard = AskScopeGuard::install(runtime, scope);
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     let mut rls_cache: HashMap<String, Option<reddb_rql::ast::Filter>> = HashMap::new();
     let store = runtime.inner.db.store();
@@ -880,7 +880,7 @@ pub fn vector_search_scoped(
     };
     let per_collection = top_k.max(1);
     let mut hits: Vec<VectorHit> = Vec::new();
-    let _scope_guard = AskScopeGuard::install(scope);
+    let _scope_guard = AskScopeGuard::install(runtime, scope);
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     let mut rls_cache: HashMap<String, Option<reddb_rql::ast::Filter>> = HashMap::new();
     let store = runtime.inner.db.store();
@@ -956,7 +956,7 @@ pub fn graph_search_scoped(
     let depth = graph_depth
         .unwrap_or(crate::runtime::ai::mcp_ask_tool::DEPTH_DEFAULT as usize)
         .max(1);
-    let _scope_guard = AskScopeGuard::install(scope);
+    let _scope_guard = AskScopeGuard::install(runtime, scope);
     let input = SearchContextInput {
         query: question.to_string(),
         field: None,
@@ -1071,7 +1071,7 @@ pub fn filter_values(
     let visible = scope.visible_collections();
     let store = runtime.inner.db.store();
     let mut out: Vec<FilteredRow> = Vec::new();
-    let _scope_guard = AskScopeGuard::install(scope);
+    let _scope_guard = AskScopeGuard::install(runtime, scope);
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     let mut rls_cache: HashMap<String, Option<reddb_rql::ast::Filter>> = HashMap::new();
 
@@ -1147,12 +1147,13 @@ fn ask_scanned_entity_allowed(
 }
 
 struct AskScopeGuard {
+    _snapshot: super::execution_context::CurrentSnapshotGuard,
     prev_tenant: Option<String>,
     prev_auth: Option<(String, crate::auth::Role)>,
 }
 
 impl AskScopeGuard {
-    fn install(scope: &EffectiveScope) -> Self {
+    fn install(runtime: &RedDBRuntime, scope: &EffectiveScope) -> Self {
         let prev_tenant = crate::runtime::impl_core::current_tenant();
         let prev_auth = crate::runtime::impl_core::current_auth_identity();
 
@@ -1168,6 +1169,9 @@ impl AskScopeGuard {
         }
 
         Self {
+            _snapshot: super::execution_context::CurrentSnapshotGuard::install(
+                scope.snapshot_context(runtime),
+            ),
             prev_tenant,
             prev_auth,
         }
@@ -1322,14 +1326,12 @@ mod tests {
     use reddb_types::Value;
     use std::sync::Arc;
 
-    fn make_scope(visible: HashSet<String>) -> EffectiveScope {
+    fn make_scope(rt: &RedDBRuntime, visible: HashSet<String>) -> EffectiveScope {
         EffectiveScope {
+            captured_snapshot: None,
             tenant: Some("acme".to_string()),
             identity: Some(("alice".to_string(), Role::Read)),
-            snapshot: Snapshot {
-                xid: 0,
-                in_progress: HashSet::new(),
-            },
+            snapshot: rt.current_snapshot(),
             visible_collections: Some(visible),
         }
     }
@@ -1481,7 +1483,7 @@ mod tests {
         )
         .expect("insert broad doc");
 
-        let scope = make_scope(["docs".to_string()].into_iter().collect());
+        let scope = make_scope(&rt, ["docs".to_string()].into_iter().collect());
         let candidates = CandidateCollections {
             collections: vec!["docs".to_string()],
             columns_by_collection: HashMap::new(),
@@ -1516,7 +1518,7 @@ mod tests {
             .expect("enable rls");
 
         let _tenant = TenantGuard::set("acme");
-        let scope = make_scope(["docs".to_string()].into_iter().collect());
+        let scope = make_scope(&rt, ["docs".to_string()].into_iter().collect());
         let candidates = CandidateCollections {
             collections: vec!["docs".to_string()],
             columns_by_collection: HashMap::new(),
@@ -1557,7 +1559,7 @@ mod tests {
             },
         );
 
-        let scope = make_scope(["docs".to_string()].into_iter().collect());
+        let scope = make_scope(&rt, ["docs".to_string()].into_iter().collect());
         let ctx = AskPipeline::execute_with_limit_and_min_score(
             &rt,
             &scope,
@@ -1598,7 +1600,7 @@ mod tests {
         )
         .expect("insert bob-carol edge");
 
-        let scope = make_scope(["tales".to_string()].into_iter().collect());
+        let scope = make_scope(&rt, ["tales".to_string()].into_iter().collect());
         let candidates = CandidateCollections {
             collections: vec!["tales".to_string()],
             columns_by_collection: HashMap::new(),
@@ -1635,7 +1637,7 @@ mod tests {
             .expect("enable rls");
 
         let _tenant = TenantGuard::set("acme");
-        let scope = make_scope(["docs".to_string()].into_iter().collect());
+        let scope = make_scope(&rt, ["docs".to_string()].into_iter().collect());
         let candidates = CandidateCollections {
             collections: vec!["docs".to_string()],
             columns_by_collection: HashMap::from([("docs".to_string(), vec!["body".to_string()])]),
@@ -1656,7 +1658,7 @@ mod tests {
     #[test]
     fn execute_refuses_empty_token_set() {
         let rt = fresh_runtime();
-        let scope = make_scope(HashSet::new());
+        let scope = make_scope(&rt, HashSet::new());
         let err = AskPipeline::execute(&rt, &scope, "??? ...")
             .expect_err("empty token set must short-circuit");
         let msg = format!("{err}");
@@ -1693,7 +1695,7 @@ mod tests {
             },
         );
         let visible: HashSet<String> = ["travel".to_string()].into_iter().collect();
-        let scope = make_scope(visible.clone());
+        let scope = make_scope(&rt, visible.clone());
         let tokens = TokenSet {
             keywords: vec!["passport".to_string()],
             literals: Vec::new(),
@@ -1755,7 +1757,7 @@ mod tests {
                 keywords: vec!["passport".to_string()],
                 literals,
             };
-            let scope = make_scope(visible.clone());
+            let scope = make_scope(&rt, visible.clone());
             let rows = filter_values(rt, &scope, &candidates, &tokens, DEFAULT_ROW_CAP);
             for row in &rows {
                 prop_assert!(
@@ -1803,7 +1805,7 @@ mod tests {
             .expect("seed secrets");
 
         let visible: HashSet<String> = ["travel".to_string()].into_iter().collect();
-        let scope = make_scope(visible);
+        let scope = make_scope(&rt, visible);
 
         let ctx = AskPipeline::execute(
             &rt,
@@ -1874,7 +1876,7 @@ mod tests {
     #[test]
     fn routed_default_backend_runs_heuristic() {
         let rt = fresh_runtime();
-        let scope = make_scope(HashSet::new());
+        let scope = make_scope(&rt, HashSet::new());
         let tokens = extract_tokens_routed(&rt, &scope, "passport FDD-12313")
             .expect("heuristic path is infallible");
         assert!(tokens.keywords.contains(&"passport".to_string()));
@@ -1888,7 +1890,7 @@ mod tests {
         let rt = fresh_runtime();
         write_config(&rt, "ai.ner.backend", "llm");
         write_config(&rt, "ai.ner.fallback", "use_heuristic");
-        let scope = make_scope(HashSet::new());
+        let scope = make_scope(&rt, HashSet::new());
         let tokens = tokio::task::spawn_blocking(move || {
             extract_tokens_routed(&rt, &scope, "passport FDD-12313")
         })
@@ -1906,7 +1908,7 @@ mod tests {
         let rt = fresh_runtime();
         write_config(&rt, "ai.ner.backend", "llm");
         write_config(&rt, "ai.ner.fallback", "empty_on_fail");
-        let scope = make_scope(HashSet::new());
+        let scope = make_scope(&rt, HashSet::new());
         let tokens = tokio::task::spawn_blocking(move || {
             extract_tokens_routed(&rt, &scope, "passport FDD-12313")
         })
@@ -1924,7 +1926,7 @@ mod tests {
         let rt = fresh_runtime();
         write_config(&rt, "ai.ner.backend", "llm");
         write_config(&rt, "ai.ner.fallback", "propagate");
-        let scope = make_scope(HashSet::new());
+        let scope = make_scope(&rt, HashSet::new());
         let err = tokio::task::spawn_blocking(move || {
             extract_tokens_routed(&rt, &scope, "passport FDD-12313")
         })
@@ -1955,7 +1957,7 @@ mod tests {
         )
         .expect("seed rows");
         let visible: HashSet<String> = ["travel".to_string()].into_iter().collect();
-        let scope = make_scope(visible);
+        let scope = make_scope(&rt, visible);
         let ctx = tokio::task::spawn_blocking(move || {
             AskPipeline::execute(&rt, &scope, "passport FDD-12313")
         })

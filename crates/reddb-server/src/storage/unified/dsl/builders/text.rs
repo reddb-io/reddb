@@ -61,4 +61,12 @@ impl TextSearchBuilder {
     pub fn execute(self, store: &Arc<UnifiedStore>) -> Result<QueryResult, ExecutionError> {
         execute_text_query(self, store)
     }
+    pub(crate) fn execute_filtered(
+        self,
+        store: &Arc<UnifiedStore>,
+        snapshot: Option<&crate::runtime::execution_context::SnapshotContext>,
+        allowed: impl FnMut(&super::super::super::entity::UnifiedEntity) -> bool,
+    ) -> Result<QueryResult, ExecutionError> {
+        super::super::execution::execute_text_query_filtered(self, store, snapshot, allowed)
+    }
 }
