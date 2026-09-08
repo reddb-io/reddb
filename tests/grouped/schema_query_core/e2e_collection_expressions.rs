@@ -281,3 +281,64 @@ fn expressions_generated_outputs_enforce_types_nullability_and_overflow() {
         Some(&Value::Integer(3))
     );
 }
+
+#[test]
+fn expressions_invalid_single_file_contract_refuses_reopen() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("invalid.rdb");
+    {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("open");
+        schema(&runtime);
+        runtime
+            .execute_query("INSERT INTO orders (id, quantity) VALUES (1, 2)")
+            .expect("seed");
+        let source = String::from_utf8(runtime.db().store().aux_metadata()).expect("contract JSON");
+        assert!(source.contains("price * quantity"));
+        runtime.db().store().set_aux_metadata(
+            source
+                .replace("price * quantity", "missing * quantity")
+                .into_bytes(),
+        );
+        runtime.db().flush().expect("persist fault injection");
+    }
+    let error = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        .err()
+        .expect("invalid persisted contract must refuse reopen");
+    assert!(error.to_string().contains("column"), "{error}");
+}
+
+#[test]
+fn expressions_invalid_operational_contract_cannot_fall_back_to_old_schema() {
+    use reddb::{PhysicalMetadataFile, StorageDeployPreset};
+    use reddb_rql::schema_expression::SchemaExpression;
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("operational.rdb");
+    let options = || {
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+            .expect("operational profile")
+    };
+    {
+        let runtime = RedDBRuntime::with_options(options()).expect("open");
+        schema(&runtime);
+        runtime
+            .execute_query("INSERT INTO orders (id, quantity) VALUES (1, 2)")
+            .expect("seed");
+    }
+    let mut metadata = PhysicalMetadataFile::load_for_data_path(&path).expect("metadata");
+    let contract = metadata
+        .collection_contracts
+        .iter_mut()
+        .find(|contract| contract.name == "orders")
+        .expect("orders contract");
+    contract.declared_columns[4].generated = Some(
+        SchemaExpression::parse("missing * quantity".into()).expect("syntactically valid fault"),
+    );
+    metadata
+        .save_for_data_path(&path)
+        .expect("persist invalid semantic contract");
+    let error = RedDBRuntime::with_options(options())
+        .err()
+        .expect("must not heal away invalid constraints");
+    assert!(error.to_string().contains("column"), "{error}");
+}
