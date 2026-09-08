@@ -1205,14 +1205,12 @@ mod tests {
         let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text("SELECT 1"))
             .expect("frame builds for SELECT 1");
 
-        // Live reads: no AS OF floor, snapshot bounded by the
-        // manager's `peek_next_xid` so committed tuples are visible.
+        // The inclusive bound excludes the next unallocated writer xid.
+        // A pristine manager therefore has a valid empty snapshot at zero.
         let f: &dyn ReadFrame = &frame;
         assert!(f.as_of_floor().is_none(), "live read has no AS OF floor");
-        assert!(
-            f.snapshot().xid >= 1,
-            "autocommit snapshot xid is bounded by peek_next_xid"
-        );
+        assert_eq!(f.snapshot().xid, rt.snapshot_manager().peek_next_xid() - 1);
+        assert!(!f.snapshot().sees(rt.snapshot_manager().peek_next_xid(), 0));
     }
 
     #[test]

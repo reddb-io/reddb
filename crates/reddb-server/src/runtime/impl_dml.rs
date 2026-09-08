@@ -590,6 +590,7 @@ impl RedDBRuntime {
             };
         let mut returning_result: Option<UnifiedResult> = None;
         let mut conflict_returning_records: Vec<UnifiedRecord> = Vec::new();
+        let mut auto_embed_ids = Vec::new();
 
         if matches!(query.entity_type, InsertEntityType::Row)
             && !matches!(
@@ -991,6 +992,9 @@ impl RedDBRuntime {
                 self.create_rows_batch(batch)?
             };
             inserted_count += outputs.len() as u64;
+            if query.auto_embed.is_some() {
+                auto_embed_ids.extend(outputs.iter().map(|output| output.id));
+            }
 
             // Chain mode: commit the new tip to the in-memory cache only after
             // the batch persisted successfully. If the batch threw mid-way the
@@ -1484,6 +1488,10 @@ impl RedDBRuntime {
                 }
             }
 
+            if query.auto_embed.is_some() {
+                auto_embed_ids.extend(entity_outputs.iter().map(|output| output.id));
+            }
+
             if let Some(items) = query.returning.as_ref() {
                 let mut result =
                     build_returning_result(items, &returning_field_snaps, Some(&entity_outputs));
@@ -1517,16 +1525,12 @@ impl RedDBRuntime {
                 embed_config.model.as_deref(),
             );
 
-            // Collect the just-inserted rows (most-recently appended, reversed back to insert order).
-            let manager = store
-                .get_collection(&query.table)
-                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-            let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-            let entities = manager.scan(snapshot.as_ref(), |_| true);
-            let recent: Vec<_> = entities
-                .into_iter()
-                .rev()
-                .take(effective_rows.len())
+            // Read only this INSERT's returned IDs. A pre-write statement
+            // snapshot correctly excludes newly committed rows; a fresh/global
+            // scan could instead pick another writer's rows or conflict skips.
+            let recent: Vec<_> = auto_embed_ids
+                .iter()
+                .filter_map(|id| store.get(&query.table, *id))
                 .collect();
 
             // Collector phase: (entity_index, combined_text) for rows that have non-empty fields.
