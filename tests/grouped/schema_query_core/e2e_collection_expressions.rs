@@ -252,3 +252,32 @@ fn expressions_public_example_schemas_execute() {
         }
     }
 }
+
+#[test]
+fn expressions_generated_outputs_enforce_types_nullability_and_overflow() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    schema(&runtime);
+    runtime
+        .execute_query("INSERT INTO orders (id, quantity, total) VALUES (1, 2, 999)")
+        .expect("derived input is recomputed");
+    assert_eq!(value(&runtime, "total"), Value::Integer(10));
+    assert!(runtime
+        .execute_query("UPDATE orders SET price = 9223372036854775807 WHERE id = 1")
+        .is_err());
+    assert_eq!(value(&runtime, "price"), Value::Integer(5));
+    runtime.execute_query("CREATE TABLE required_output (base INTEGER, derived INTEGER NOT NULL GENERATED ALWAYS AS (base + 1) STORED)").expect("schema");
+    assert!(runtime
+        .execute_query("INSERT INTO required_output (base) VALUES (NULL)")
+        .is_err());
+    runtime.execute_query("CREATE TABLE conditionals (base INTEGER, derived INTEGER GENERATED ALWAYS AS (CASE WHEN base BETWEEN 1 AND 3 THEN base + 1 ELSE 0 END) STORED CHECK (derived IN (0, 2, 3, 4)))").expect("conditional schema");
+    runtime
+        .execute_query("INSERT INTO conditionals (base) VALUES (2)")
+        .expect("conditional expression");
+    let rows = runtime
+        .execute_query("SELECT derived FROM conditionals")
+        .expect("read");
+    assert_eq!(
+        rows.result.records[0].get("derived"),
+        Some(&Value::Integer(3))
+    );
+}
