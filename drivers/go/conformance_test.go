@@ -594,8 +594,9 @@ func TestConformance_tx_commit_persists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select: %v", err)
 	}
-	if !strings.Contains(string(body), "keep") {
-		t.Fatalf("commit did not persist: %s", body)
+	rows, err := allRows(body)
+	if err != nil || len(rows) != 1 || rows[0]["name"] != "keep" {
+		t.Fatalf("commit did not persist: %s (%v)", body, err)
 	}
 }
 
@@ -622,8 +623,9 @@ func TestConformance_tx_rollback_discards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select: %v", err)
 	}
-	if strings.Contains(string(body), "drop") {
-		t.Fatalf("rollback did not discard: %s", body)
+	rows, err := allRows(body)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("rollback did not discard: %s (%v)", body, err)
 	}
 }
 
