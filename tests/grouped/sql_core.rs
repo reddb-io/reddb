@@ -119,3 +119,6 @@ mod e2e_mvcc_key_reuse;
 
 #[path = "schema_query_core/e2e_unique_key_lookup.rs"]
 mod e2e_unique_key_lookup;
+
+#[path = "schema_query_core/e2e_parameter_ast_cache.rs"]
+mod e2e_parameter_ast_cache;
