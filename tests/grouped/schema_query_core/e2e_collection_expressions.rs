@@ -10,17 +10,14 @@ fn value(runtime: &RedDBRuntime, field: &str) -> Value {
     let result = runtime
         .execute_query("SELECT * FROM orders WHERE id = 1")
         .expect("read");
-    let Some(row) = result.result.records.first() else {
-        panic!(
-            "missing indexed row; full scan: {:?}",
-            runtime
-                .execute_query("SELECT * FROM orders")
-                .expect("diagnostic scan")
-                .result
-                .records
-        );
-    };
-    row.get(field).expect("field").clone()
+    result
+        .result
+        .records
+        .first()
+        .expect("record remains queryable by its key")
+        .get(field)
+        .expect("field")
+        .clone()
 }
 
 #[test]
@@ -178,6 +175,26 @@ fn expressions_fail_closed_for_alter_without_backfill() {
             .execute_query(&format!("ALTER TABLE orders {operation}"))
             .is_err());
     }
+    runtime
+        .execute_query("CREATE TABLE plain (base INTEGER)")
+        .expect("plain schema");
+    for column in [
+        "derived INTEGER GENERATED ALWAYS AS (base * 2) STORED",
+        "checked INTEGER CHECK (checked > 0)",
+    ] {
+        assert!(runtime
+            .execute_query(&format!("ALTER TABLE plain ADD COLUMN {column}"))
+            .is_err());
+    }
+    assert_eq!(
+        runtime
+            .db()
+            .collection_contract("plain")
+            .expect("unchanged schema")
+            .declared_columns
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -393,4 +410,35 @@ fn expressions_savepoint_restores_repeated_versions_and_index_candidates() {
         .is_empty());
     runtime.execute_query("ROLLBACK").expect("rollback outer");
     assert_eq!(value(&runtime, "total"), Value::Integer(10));
+}
+
+#[test]
+fn expressions_show_create_roundtrips_the_enforced_contract() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    schema(&runtime);
+    let shown = runtime
+        .execute_query("SHOW CREATE TABLE orders")
+        .expect("show create");
+    let Value::Text(ddl) = shown.result.records[0].get("ddl").expect("DDL column") else {
+        panic!("DDL must be text");
+    };
+    assert!(ddl.contains("GENERATED ALWAYS AS (price * quantity) STORED"));
+    assert!(ddl.contains("CHECK (quantity > 0)"));
+    let imported = RedDBRuntime::in_memory().expect("destination");
+    for statement in ddl
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+    {
+        imported
+            .execute_query(statement)
+            .expect("import schema through public DDL");
+    }
+    imported
+        .execute_query("INSERT INTO orders (id, quantity) VALUES (1, 2)")
+        .expect("derived default");
+    assert_eq!(value(&imported, "total"), Value::Integer(10));
+    assert!(imported
+        .execute_query("INSERT INTO orders (id, quantity) VALUES (2, -1)")
+        .is_err());
 }

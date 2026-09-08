@@ -382,6 +382,15 @@ fn render_show_create_column(column: &crate::physical::DeclaredColumnContract) -
     if let Some(compress) = column.compress {
         parts.push(format!("COMPRESS:{compress}"));
     }
+    if let Some(expression) = &column.generated {
+        parts.push(format!(
+            "GENERATED ALWAYS AS ({}) STORED",
+            expression.source()
+        ));
+    }
+    if let Some(expression) = &column.check {
+        parts.push(format!("CHECK ({})", expression.source()));
+    }
     if column.unique {
         parts.push("UNIQUE".to_string());
     }

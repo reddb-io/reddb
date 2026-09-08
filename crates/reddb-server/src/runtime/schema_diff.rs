@@ -72,7 +72,7 @@ pub enum DiffOp {
     TypeChange {
         name: String,
         from: DeclaredColumnContract,
-        to: DeclaredColumnContract,
+        to: Box<DeclaredColumnContract>,
     },
 }
 
@@ -148,7 +148,7 @@ pub fn compute_column_diff(
                     operations.push(DiffOp::TypeChange {
                         name: name.to_string(),
                         from: (*c).clone(),
-                        to: declared_column_contract_from_create(t),
+                        to: Box::new(declared_column_contract_from_create(t)),
                     });
                 }
             }

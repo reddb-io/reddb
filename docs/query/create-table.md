@@ -52,6 +52,39 @@ and duplicate constraint names are rejected before the table is created.
 `EXPLAIN ALTER` currently rejects changes to table-level UNIQUE constraints
 because its column migration planner cannot emit `ADD/DROP CONSTRAINT`.
 
+## Stored generated columns and CHECK
+
+TABLE collections support deterministic expressions over their declared fields:
+
+```sql
+CREATE TABLE line_items (
+  quantity INTEGER NOT NULL CHECK (quantity > 0),
+  unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+  total_cents INTEGER GENERATED ALWAYS AS (quantity * unit_price_cents) STORED
+)
+```
+
+Base values and defaults normalize first. Generated fields then evaluate in
+dependency order, including forward references; cycles and unknown fields are
+rejected at CREATE time. The generated result must satisfy its declared type and
+NOT NULL constraint. CHECK evaluates the final record: FALSE rejects the write,
+while TRUE or NULL passes. Use NOT NULL when an absent value must be rejected.
+
+INSERT, UPDATE, PATCH, upsert and bulk writes use this contract. Generated values
+supplied by callers or carried from a previous version are recomputed. Definitions
+and stored values survive reopening the database. A semantically invalid persisted
+contract prevents reopening rather than silently removing validation.
+
+This first version supports local scalar operators, CAST, CASE, IN, BETWEEN and
+null predicates. Functions, parameters, subqueries, virtual fields and schemas for
+other models are not supported here. ALTER operations that change an
+expression-bearing column schema or add expressions require a future validated
+backfill implementation and currently fail explicitly. Older binaries must not
+write databases carrying these new expressions, because they do not enforce them.
+
+See the [examples](../../examples/collection-expressions/README.md) and
+[implementation ledger](../architecture/multimodel-building-block-program.md).
+
 ## Supported Column Types
 
 All 50 types from the [Type System](/types/overview.md) can be used as column types:

@@ -1514,12 +1514,13 @@ impl RedDBRuntime {
                                 &own_xids,
                                 ctx.isolation,
                             ) {
-                                self.revive_pending_versioned_updates(conn_id);
+                                let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.discard_pending_store_wal_actions(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                undo?;
                                 return Err(err);
                             }
                             if let Err(err) = self.check_queue_dedup_write_conflicts(
@@ -1527,23 +1528,25 @@ impl RedDBRuntime {
                                 &ctx.snapshot,
                                 &own_xids,
                             ) {
-                                self.revive_pending_versioned_updates(conn_id);
+                                let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_queue_dedup(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.discard_pending_store_wal_actions(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                undo?;
                                 return Err(err);
                             }
                             self.restore_pending_write_stamps(conn_id);
                             if let Err(err) = self.flush_pending_store_wal_actions(conn_id) {
-                                self.revive_pending_versioned_updates(conn_id);
+                                let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_queue_dedup(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                undo?;
                                 return Err(err);
                             }
                             Ok(())
@@ -1570,13 +1573,14 @@ impl RedDBRuntime {
                                 // Phase 2.3.2b: tuples that the txn had
                                 // xmax-stamped become live again — wipe xmax
                                 // back to 0 so later snapshots see them.
-                                self.revive_pending_versioned_updates(conn_id);
+                                let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_queue_dedup(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.discard_pending_store_wal_actions(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                undo?;
                                 ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
                             }
                             None => (
@@ -1629,6 +1633,7 @@ impl RedDBRuntime {
                                 );
                                 let revived =
                                     self.revive_tombstones_since(conn_id, rollback.savepoint_xid);
+                                let reverted_updates = reverted_updates?;
                                 (
                                     "rollback_to_savepoint",
                                     format!(
@@ -3155,38 +3160,27 @@ impl RedDBRuntime {
         self.dispatch_graph_algorithm(name, nodes, edges, named_args)
     }
 
-    pub(crate) fn revive_versioned_updates_since(&self, conn_id: u64, stamper_xid: u64) -> usize {
+    pub(crate) fn revive_versioned_updates_since(
+        &self,
+        conn_id: u64,
+        stamper_xid: u64,
+    ) -> RedDBResult<usize> {
         let mut guard = self.inner.pending_versioned_updates.write();
         let Some(pending) = guard.get_mut(&conn_id) else {
-            return 0;
+            return Ok(0);
         };
-
-        let store = self.inner.db.store();
         let mut reverted = 0usize;
-        pending.reverse();
-        pending.retain(|(collection, old_id, new_id, xid, previous_xmax)| {
-            if *xid < stamper_xid {
-                return true;
+        for (collection, old_id, new_id, xid, previous_xmax) in pending.iter().rev() {
+            if *xid >= stamper_xid {
+                self.revive_versioned_update(collection, *old_id, *new_id, *xid, *previous_xmax)?;
+                reverted += 1;
             }
-            let _ = store.delete_batch(collection, &[*new_id]);
-            if let Some(manager) = store.get_collection(collection) {
-                if let Some(mut old) = manager.get(*old_id) {
-                    if old.xmax == *xid {
-                        old.set_xmax(*previous_xmax);
-                        if manager.update(old.clone()).is_ok() {
-                            store.context_index().index_entity(collection, &old);
-                        }
-                    }
-                }
-            }
-            reverted += 1;
-            false
-        });
-        pending.reverse();
+        }
+        pending.retain(|(_, _, _, xid, _)| *xid < stamper_xid);
         if pending.is_empty() {
             guard.remove(&conn_id);
         }
-        reverted
+        Ok(reverted)
     }
 
     /// `EXPLAIN` is peeled off the statement text before parsing, so the

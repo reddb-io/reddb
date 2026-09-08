@@ -458,31 +458,56 @@ impl RedDBRuntime {
         }
     }
 
-    pub(crate) fn revive_pending_versioned_updates(&self, conn_id: u64) {
+    pub(crate) fn revive_pending_versioned_updates(&self, conn_id: u64) -> RedDBResult<()> {
         let Some(pending) = self
             .inner
             .pending_versioned_updates
             .write()
             .remove(&conn_id)
         else {
-            return;
+            return Ok(());
         };
-
-        let store = self.inner.db.store();
         // Undo newest versions first so repeated writes restore the original chain.
         for (collection, old_id, new_id, xid, previous_xmax) in pending.into_iter().rev() {
-            let _ = store.delete_batch(&collection, &[new_id]);
-            if let Some(manager) = store.get_collection(&collection) {
-                if let Some(mut old) = manager.get(old_id) {
-                    if old.xmax == xid {
-                        old.set_xmax(previous_xmax);
-                        if manager.update(old.clone()).is_ok() {
-                            store.context_index().index_entity(&collection, &old);
-                        }
-                    }
+            self.revive_versioned_update(&collection, old_id, new_id, xid, previous_xmax)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn revive_versioned_update(
+        &self,
+        collection: &str,
+        old_id: crate::storage::EntityId,
+        new_id: crate::storage::EntityId,
+        xid: u64,
+        previous_xmax: u64,
+    ) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        if let Some(new) = store.get(collection, new_id) {
+            let fields = crate::application::ports::entity_row_fields_snapshot(&new);
+            self.index_store_ref()
+                .index_entity_delete(collection, new_id, &fields)
+                .map_err(RedDBError::Internal)?;
+        }
+        store
+            .delete_batch(collection, &[new_id])
+            .map_err(|error| RedDBError::Internal(error.to_string()))?;
+        if let Some(manager) = store.get_collection(collection) {
+            if let Some(mut old) = manager.get(old_id) {
+                if old.xmax == xid {
+                    old.set_xmax(previous_xmax);
+                    manager
+                        .update(old.clone())
+                        .map_err(|error| RedDBError::Internal(error.to_string()))?;
+                    store.context_index().index_entity(collection, &old);
+                    let fields = crate::application::ports::entity_row_fields_snapshot(&old);
+                    self.index_store_ref()
+                        .index_entity_insert(collection, old_id, &fields)
+                        .map_err(RedDBError::Internal)?;
                 }
             }
         }
+        Ok(())
     }
 
     /// Flush tombstones on COMMIT. The xmax stamp is already the durable

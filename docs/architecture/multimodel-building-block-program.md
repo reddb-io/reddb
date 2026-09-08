@@ -21,7 +21,7 @@ rollback/reopen and scoring-lock corrections in draft PR #2295.
 | Collection rules | Pending | Named conditions/actions; synchronous source and derived writes in one transaction; asynchronous work enqueued durably in the same transaction; rollback/savepoint coverage |
 | Durable streams and change subscriptions | Existing in-process streams are insufficient | Committed event identity, disk log and offsets, public append/read/cursor/retention; explicit expired-cursor error; consistent bootstrap, filter/projection/cancel on one collection |
 | Declarative HTTP endpoints and SDK parity | Pending | Method/path/parameters bind to named function; GET read-only; common auth/transaction path; schemas/docs derived from definitions; CALL parity and definition export/import |
-| Transaction/WAL convergence | Preserve and extend the live optimistic engine | Common validate→WAL→durability→publication→ack path; synchronous durable defaults and snapshot isolation; indeterminate commit result; group commit; idempotent replay, checksums, consistent checkpoints and full-page-image tests |
+| Transaction/WAL convergence | Preserve and extend the live optimistic engine; restore context and secondary indexes on rollback/savepoints and use logical identity for repeated upserts | Common validate→WAL→durability→publication→ack path; synchronous durable defaults and snapshot isolation; indeterminate commit result; group commit; idempotent replay, checksums, consistent checkpoints and full-page-image tests |
 | Retention and corruption handling | Pending systematic audit | Incomplete WAL suffix versus internal corruption; readers/backups/PITR/replicas included in retention floor; optional long-term history separate from active MVCC |
 | Query performance | Prior vector improvements retained | Stable snapshot cursors without O(N) ID arrays or scoring locks; projection/filter pushdown; common multimodel snapshot/auth and bounded memory |
 | Three complete public examples | Pending; initial schema examples accompany expression slice | Agent knowledge, fraud/events, commerce; only public APIs; graph/vector/document composition and failure paths |
@@ -44,8 +44,10 @@ first capability through SQL and the public native application API:
 | TABLE | INSERT, PATCH, bulk | Native API | Same derived values and validation; invalid batch leaves no prefix |
 | TABLE | Bulk INSERT/UPDATE | RQL | Invalid input leaves no partially applied statement |
 | TABLE | Upsert | RQL | Conflict update recomputes derived fields and checks the final row |
-| TABLE | Explicit transaction | RQL | Read-own-write and rollback of derived data; generated UNIQUE conflict |
+| TABLE | Explicit transaction/savepoint | RQL | Read-own-write and reverse-order rollback of repeated updates; restore equality/index candidates; generated UNIQUE conflict |
 | TABLE | CREATE/ALTER | RQL | Invalid dependencies/types/effects leave no collection; unsupported backfill fails explicitly |
+| TABLE | SHOW CREATE/import | RQL | Exported definitions retain generated expressions and CHECK; imported schema enforces the same rules |
+| TABLE | Invalid persisted schema | Single-file and operational profiles | Refuse open on semantic contract errors; do not silently fall back to an older definition |
 | Other models | All | All | Pending, not inferred from TABLE coverage |
 | TABLE | All | HTTP/gRPC/SDK | Pending transport-specific execution, not inferred from native coverage |
 | All models | Process/power failure | Persistent | Pending literal child-process kill and fault-VFS validation; clean reopen is not a crash test |
@@ -74,6 +76,11 @@ order, result types/NOT NULL normalize next, then CHECK validates the final
 record. CHECK rejects FALSE; TRUE and NULL pass, per SQL semantics. Generated
 values supplied by a caller or carried from an older version are replaced by the
 expression result. All generated fields are currently recomputed on row mutation.
+Rollback/savepoint undo processes version chains newest first and restores context
+and secondary index candidates. Storage/index undo errors propagate after pending
+effect cleanup; this is not a claim of recovery from arbitrary I/O failure.
+Upsert translates the conflicting physical version into its
+logical record identity before executing the update.
 
 Cost sketch: no network round trips or additional fsyncs per expression; stored
 results add their encoded width to ordinary row/WAL writes; CPU is O(E) expression
