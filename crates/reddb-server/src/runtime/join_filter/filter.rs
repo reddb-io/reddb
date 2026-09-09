@@ -33,8 +33,19 @@ pub(in crate::runtime) fn evaluate_runtime_filter_with_db(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) -> bool {
+    evaluate_runtime_filter_result_with_db(db, record, filter, table_name, table_alias)
+        .unwrap_or(false)
+}
+
+pub(in crate::runtime) fn evaluate_runtime_filter_result_with_db(
+    db: Option<&RedDB>,
+    record: &UnifiedRecord,
+    filter: &Filter,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> crate::RedDBResult<bool> {
     match filter {
-        Filter::Compare { field, op, value } => {
+        Filter::Compare { field, op, value } => Ok({
             resolve_runtime_field(record, field, table_name, table_alias)
                 .as_ref()
                 .and_then(|candidate| evaluate_metadata_field_compare(field, candidate, *op, value))
@@ -44,61 +55,88 @@ pub(in crate::runtime) fn evaluate_runtime_filter_with_db(
                         .map(|candidate| compare_runtime_values(candidate, value, *op))
                 })
                 .unwrap_or(false)
-        }
+        }),
         Filter::CompareFields { left, op, right } => {
             let left_value = resolve_runtime_field(record, left, table_name, table_alias);
             let right_value = resolve_runtime_field(record, right, table_name, table_alias);
-            match (left_value, right_value) {
+            Ok(match (left_value, right_value) {
                 (Some(l), Some(r)) => compare_runtime_values(&l, &r, *op),
                 _ => false,
-            }
+            })
         }
         Filter::CompareExpr { lhs, op, rhs } => {
-            // Route through the typed evaluator (catalog-resolved
-            // operator / cast / function dispatch). Falls back to the
-            // untyped expr_eval walker for CONFIG / KV / ML_* and any
-            // other shape the evaluator does not cover yet.
+            // Route through the typed evaluator. Only unsupported runtime
+            // functions may use the db-aware walker; data and type errors
+            // are part of WHERE semantics and must reach the caller.
             let row = RecordRow {
                 record,
                 table_name,
                 table_alias,
             };
-            let eval_side = |expr| {
-                crate::storage::query::evaluator::evaluate(expr, &row)
-                    .ok()
-                    .or_else(|| {
-                        super::expr_eval::evaluate_runtime_expr_with_db(
-                            db,
-                            expr,
-                            record,
-                            table_name,
-                            table_alias,
-                        )
-                    })
+            let eval_side = |expr| -> crate::RedDBResult<Option<Value>> {
+                match crate::storage::query::evaluator::evaluate(expr, &row) {
+                    Ok(value) => Ok(Some(value)),
+                    Err(crate::storage::query::evaluator::EvalError::UnknownFunction {
+                        ..
+                    }) => Ok(super::expr_eval::evaluate_runtime_expr_with_db(
+                        db,
+                        expr,
+                        record,
+                        table_name,
+                        table_alias,
+                    )),
+                    Err(error) => Err(crate::RedDBError::Query(error.to_string())),
+                }
             };
-            match (eval_side(lhs), eval_side(rhs)) {
+            Ok(match (eval_side(lhs)?, eval_side(rhs)?) {
                 (Some(lv), Some(rv)) => compare_runtime_values(&lv, &rv, *op),
                 _ => false,
-            }
+            })
         }
         Filter::And(left, right) => {
-            evaluate_runtime_filter_with_db(db, record, left, table_name, table_alias)
-                && evaluate_runtime_filter_with_db(db, record, right, table_name, table_alias)
+            Ok(
+                evaluate_runtime_filter_result_with_db(db, record, left, table_name, table_alias)?
+                    && evaluate_runtime_filter_result_with_db(
+                        db,
+                        record,
+                        right,
+                        table_name,
+                        table_alias,
+                    )?,
+            )
         }
         Filter::Or(left, right) => {
-            evaluate_runtime_filter_with_db(db, record, left, table_name, table_alias)
-                || evaluate_runtime_filter_with_db(db, record, right, table_name, table_alias)
+            Ok(
+                evaluate_runtime_filter_result_with_db(db, record, left, table_name, table_alias)?
+                    || evaluate_runtime_filter_result_with_db(
+                        db,
+                        record,
+                        right,
+                        table_name,
+                        table_alias,
+                    )?,
+            )
         }
-        Filter::Not(inner) => {
-            !evaluate_runtime_filter_with_db(db, record, inner, table_name, table_alias)
+        Filter::Not(inner) => Ok(!evaluate_runtime_filter_result_with_db(
+            db,
+            record,
+            inner,
+            table_name,
+            table_alias,
+        )?),
+        Filter::IsNull(field) => Ok(
+            resolve_runtime_field(record, field, table_name, table_alias)
+                .map(|value| value == Value::Null)
+                .unwrap_or(true),
+        ),
+        Filter::IsNotNull(field) => {
+            Ok(
+                resolve_runtime_field(record, field, table_name, table_alias)
+                    .map(|value| value != Value::Null)
+                    .unwrap_or(false),
+            )
         }
-        Filter::IsNull(field) => resolve_runtime_field(record, field, table_name, table_alias)
-            .map(|value| value == Value::Null)
-            .unwrap_or(true),
-        Filter::IsNotNull(field) => resolve_runtime_field(record, field, table_name, table_alias)
-            .map(|value| value != Value::Null)
-            .unwrap_or(false),
-        Filter::In { field, values } => {
+        Filter::In { field, values } => Ok({
             resolve_runtime_field(record, field, table_name, table_alias)
                 .as_ref()
                 .is_some_and(|candidate| {
@@ -108,38 +146,38 @@ pub(in crate::runtime) fn evaluate_runtime_filter_with_db(
                             .any(|value| compare_runtime_values(candidate, value, CompareOp::Eq))
                     })
                 })
-        }
-        Filter::Between { field, low, high } => {
+        }),
+        Filter::Between { field, low, high } => Ok({
             resolve_runtime_field(record, field, table_name, table_alias)
                 .as_ref()
                 .is_some_and(|candidate| {
                     compare_runtime_values(candidate, low, CompareOp::Ge)
                         && compare_runtime_values(candidate, high, CompareOp::Le)
                 })
-        }
-        Filter::Like { field, pattern } => {
+        }),
+        Filter::Like { field, pattern } => Ok({
             resolve_runtime_field(record, field, table_name, table_alias)
                 .as_ref()
                 .and_then(runtime_value_text)
                 .is_some_and(|value| like_matches(&value, pattern))
-        }
-        Filter::StartsWith { field, prefix } => {
+        }),
+        Filter::StartsWith { field, prefix } => Ok({
             resolve_runtime_field(record, field, table_name, table_alias)
                 .as_ref()
                 .and_then(runtime_value_text)
                 .is_some_and(|value| value.starts_with(prefix))
-        }
-        Filter::EndsWith { field, suffix } => {
+        }),
+        Filter::EndsWith { field, suffix } => Ok({
             resolve_runtime_field(record, field, table_name, table_alias)
                 .as_ref()
                 .and_then(runtime_value_text)
                 .is_some_and(|value| value.ends_with(suffix))
-        }
-        Filter::Contains { field, substring } => {
+        }),
+        Filter::Contains { field, substring } => Ok({
             resolve_runtime_field(record, field, table_name, table_alias)
                 .as_ref()
                 .is_some_and(|value| runtime_value_contains(value, substring))
-        }
+        }),
     }
 }
 
