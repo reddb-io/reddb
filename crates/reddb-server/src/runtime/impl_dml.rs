@@ -2199,10 +2199,13 @@ impl RedDBRuntime {
             return Ok(result);
         }
 
-        let mut affected: u64 = 0;
+        // Keep topology fixed while reserving every post-image. No chunk is
+        // published until all targets fit; a later denial cannot leave earlier
+        // autocommit chunks visible. Prepared payload is bounded by admission.
+        let topology_guard = topology_lock.read();
+        let mut prepared = Vec::new();
+        let mut reservations = Vec::new();
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            let topology_guard = topology_lock.read();
-            let mut applied_chunk = Vec::with_capacity(chunk.len());
             for entity in manager.get_many(chunk).into_iter().flatten() {
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
@@ -2212,16 +2215,45 @@ impl RedDBRuntime {
                     &compiled_plan,
                     assignments,
                 )?;
+                reservations.push(self.admit_entity_mutation(&applied)?);
                 touched_ids.push(applied.id);
-                applied_chunk.push(applied);
-            }
-            self.persist_update_chunk(&applied_chunk)?;
-            affected += applied_chunk.len() as u64;
-            let lsns = self.flush_update_chunk(&applied_chunk, topology_guard)?;
-            if !query.suppress_events {
-                self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
+                prepared.push(applied);
             }
         }
+        let affected = prepared.len() as u64;
+        let mut published = 0;
+        let persistence = (|| -> RedDBResult<()> {
+            for chunk in prepared.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+                if compiled_plan.row_touches_unique_columns
+                    || compiled_plan
+                        .row_contract_plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.has_expressions)
+                {
+                    let db = self.db();
+                    let contract = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(self, &db, &query.table);
+                    for item in chunk {
+                        let fields =
+                            crate::application::ports::entity_row_fields_snapshot(&item.entity);
+                        let previous_id =
+                            item.replaced_entity.as_ref().map_or(item.id, |old| old.id);
+                        contract.enforce_row_uniqueness(&fields, Some(previous_id))?;
+                    }
+                }
+                self.persist_update_chunk(chunk)?;
+                published += chunk.len();
+            }
+            Ok(())
+        })();
+        // A later storage/constraint error must still finish index and CDC
+        // maintenance for earlier published chunks, as the chunked path did.
+        let published_mutations = &prepared[..published];
+        let lsns = self.flush_update_chunk(published_mutations, topology_guard)?;
+        if !query.suppress_events {
+            self.emit_update_events_for_collection(&query.table, published_mutations, &lsns)?;
+        }
+        persistence?;
+        drop(reservations);
 
         if affected > 0 {
             self.note_table_write(&query.table);
@@ -2313,6 +2345,7 @@ impl RedDBRuntime {
         let _rmw_guards: Vec<_> = lock_entries.iter().map(|entry| entry.2.lock()).collect();
 
         let mut applied_chunk = Vec::new();
+        let mut reservations = Vec::new();
         for (_, logical_id, _) in &lock_entries {
             let Some(entity) = resolve_update_entity_by_logical_id(self, &query.table, *logical_id)
             else {
@@ -2338,6 +2371,7 @@ impl RedDBRuntime {
                 compiled_plan,
                 assignments,
             )?;
+            reservations.push(self.admit_entity_mutation(&applied)?);
             touched_ids.push(applied.id);
             applied_chunk.push(applied);
         }

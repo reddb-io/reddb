@@ -1607,6 +1607,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<CreateEntityOutput> {
         let applied =
             self.apply_loaded_patch_entity_core(collection, entity, payload, operations)?;
+        let _reservation = self.admit_entity_mutation(&applied)?;
         self.persist_applied_entity_mutations(std::slice::from_ref(&applied))?;
         #[cfg(test)]
         self.index_store_ref().mutation_test_hook(
