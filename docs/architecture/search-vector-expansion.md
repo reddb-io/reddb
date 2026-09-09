@@ -28,6 +28,21 @@ reads. Additional context allocations must remain below 16 KiB, independent of
 selected vector width. Both paths must return the same IDs, dense values and
 scores (with the existing context decay).
 
+A standalone public-API probe on local debug builds returned the same single
+vector in both paths. It warmed direct exact search before measuring context
+expansion, with all other discovery stages inactive:
+
+| Dimensions | Lookup state | Parent context allocations | Reused-result allocations | Extra bytes over direct exact search, parent → reused |
+|---|---|---:|---:|---:|
+| 128 | Cold | 9,546 | 8,482 | 6,509 → 5,445 |
+| 128 | Warm | 9,014 | 8,482 | 5,977 → 5,445 |
+| 16,384 | Cold | 334,666 | 203,554 | 136,557 → 5,445 |
+| 16,384 | Warm | 269,110 | 203,554 | 71,001 → 5,445 |
+
+Units are cumulative calling-thread allocated bytes, not peak memory or timing.
+Cold means the first context lookup after direct search; warm means a repeated
+context call. The optimized path does not need either entity-cache lookup.
+
 Behavioral coverage checks RLS before top-k, deny-default, collection scope,
 transaction-local inserts/deletes, an older reader across a writer commit,
 savepoint and transaction rollback, and clean reopen. Clean reopen is not a
