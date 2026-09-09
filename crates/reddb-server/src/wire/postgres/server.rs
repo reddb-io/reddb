@@ -16,13 +16,14 @@ use super::protocol::{
     read_frame, read_startup, write_frame, write_raw_byte, BackendMessage, ColumnDescriptor,
     DescribeTarget, FrontendMessage, PgWireError, TransactionStatus,
 };
-use super::types::{pg_param_to_value, value_to_pg_wire_bytes, PgOid};
+use super::types::{pg_param_to_param_value, value_to_pg_wire_bytes, PgOid};
 use crate::auth::Role;
-use crate::runtime::ai::ask_response_envelope::{
-    AskResult, Citation, Mode, SourceRow, Validation, ValidationError, ValidationWarning,
+use crate::runtime::query_request::{
+    ParamValue, PreparedId, PreparedRegistry, QueryRequest, QueryRequestExecutor,
 };
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
+use reddb_rql::ast::QueryExpr;
 use reddb_types::Value;
 
 /// Startup-tuned configuration for the PG wire listener.
@@ -62,13 +63,15 @@ struct PgAuthContext {
 #[derive(Debug, Clone)]
 struct PgPreparedStatement {
     sql: String,
+    prepared_id: PreparedId,
     param_type_oids: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
 struct PgPortal {
     sql: String,
-    params: Vec<Value>,
+    prepared_id: PreparedId,
+    params: Vec<ParamValue>,
     #[allow(dead_code)]
     result_format_codes: Vec<i16>,
     row_description_sent: bool,
@@ -378,6 +381,7 @@ where
 
     let mut prepared: HashMap<String, PgPreparedStatement> = HashMap::new();
     let mut portals: HashMap<String, PgPortal> = HashMap::new();
+    let prepared_registry = PreparedRegistry::new();
 
     // Main query loop.
     loop {
@@ -392,16 +396,32 @@ where
                 handle_simple_query(&mut stream, &runtime, auth_context.as_ref(), &sql).await?;
             }
             FrontendMessage::Parse(msg) => {
-                handle_parse(&mut stream, &mut prepared, msg).await?;
+                handle_parse(
+                    &mut stream,
+                    &runtime,
+                    &prepared_registry,
+                    &mut prepared,
+                    &portals,
+                    msg,
+                )
+                .await?;
             }
             FrontendMessage::Bind(msg) => {
-                handle_bind(&mut stream, &prepared, &mut portals, msg).await?;
+                handle_bind(
+                    &mut stream,
+                    &prepared_registry,
+                    &prepared,
+                    &mut portals,
+                    msg,
+                )
+                .await?;
             }
             FrontendMessage::Describe(msg) => {
                 handle_describe(
                     &mut stream,
                     &runtime,
                     auth_context.as_ref(),
+                    &prepared_registry,
                     &prepared,
                     &mut portals,
                     msg,
@@ -413,13 +433,21 @@ where
                     &mut stream,
                     &runtime,
                     auth_context.as_ref(),
+                    &prepared_registry,
                     &mut portals,
                     msg,
                 )
                 .await?;
             }
             FrontendMessage::Close(msg) => {
-                handle_close(&mut stream, &mut prepared, &mut portals, msg).await?;
+                handle_close(
+                    &mut stream,
+                    &prepared_registry,
+                    &mut prepared,
+                    &mut portals,
+                    msg,
+                )
+                .await?;
             }
             FrontendMessage::Terminate => return Ok(()),
             FrontendMessage::Flush => {
@@ -470,7 +498,10 @@ where
 
 async fn handle_parse<S>(
     stream: &mut S,
+    runtime: &RedDBRuntime,
+    prepared_registry: &PreparedRegistry,
     prepared: &mut HashMap<String, PgPreparedStatement>,
+    portals: &HashMap<String, PgPortal>,
     msg: super::protocol::ParseMessage,
 ) -> Result<(), PgWireError>
 where
@@ -478,28 +509,16 @@ where
 {
     let inferred_param_type_oids = infer_pg_cast_param_type_oids(&msg.query);
     let sql = rewrite_pg_parameter_casts(&msg.query);
-    let parsed_param_count = match reddb_rql::modes::parse_multi(&sql) {
-        Ok(parsed) => Some(
-            crate::storage::query::user_params::scan_parameters(&parsed)
-                .into_iter()
-                .map(|param| param.index + 1)
-                .max()
-                .unwrap_or(0),
-        ),
+    let prepared_query = match prepared_registry.prepare(runtime, &sql) {
+        Ok(prepared_query) => prepared_query,
         Err(err) => {
-            if pg_scalar_select_param_index(&sql).is_none() {
-                send_error(stream, "42601", &err.to_string()).await?;
-                return Ok(());
-            }
-            None
+            send_error(stream, "42601", &err.to_string()).await?;
+            return Ok(());
         }
     };
     let mut param_type_oids = msg.param_type_oids;
     if param_type_oids.is_empty() {
-        let count = parsed_param_count
-            .or_else(|| pg_scalar_select_param_index(&sql).map(|idx| idx + 1))
-            .unwrap_or(0);
-        param_type_oids.resize(count, PgOid::Unknown.as_u32());
+        param_type_oids.resize(prepared_query.parameter_count, PgOid::Unknown.as_u32());
     }
     for (idx, oid) in inferred_param_type_oids {
         if idx >= param_type_oids.len() {
@@ -509,18 +528,28 @@ where
             param_type_oids[idx] = oid;
         }
     }
-    prepared.insert(
+    let replaced = prepared.insert(
         msg.statement,
         PgPreparedStatement {
             sql,
+            prepared_id: prepared_query.id,
             param_type_oids,
         },
     );
+    if let Some(replaced) = replaced {
+        release_prepared_if_unreferenced(
+            prepared_registry,
+            replaced.prepared_id,
+            prepared,
+            portals,
+        );
+    }
     write_frame(stream, &BackendMessage::ParseComplete).await
 }
 
 async fn handle_bind<S>(
     stream: &mut S,
+    prepared_registry: &PreparedRegistry,
     prepared: &HashMap<String, PgPreparedStatement>,
     portals: &mut HashMap<String, PgPortal>,
     msg: super::protocol::BindMessage,
@@ -544,10 +573,11 @@ where
             return Ok(());
         }
     };
-    portals.insert(
+    let replaced = portals.insert(
         msg.portal,
         PgPortal {
             sql: stmt.sql.clone(),
+            prepared_id: stmt.prepared_id,
             params,
             result_format_codes: msg.result_format_codes,
             row_description_sent: false,
@@ -555,6 +585,14 @@ where
             row_offset: 0,
         },
     );
+    if let Some(replaced) = replaced {
+        release_prepared_if_unreferenced(
+            prepared_registry,
+            replaced.prepared_id,
+            prepared,
+            portals,
+        );
+    }
     write_frame(stream, &BackendMessage::BindComplete).await
 }
 
@@ -562,6 +600,7 @@ async fn handle_describe<S>(
     stream: &mut S,
     runtime: &RedDBRuntime,
     auth_context: Option<&PgAuthContext>,
+    prepared_registry: &PreparedRegistry,
     prepared: &HashMap<String, PgPreparedStatement>,
     portals: &mut HashMap<String, PgPortal>,
     msg: super::protocol::DescribeMessage,
@@ -609,6 +648,8 @@ where
                 let result = match execute_pg_query_result(
                     runtime,
                     auth_context,
+                    prepared_registry,
+                    portal.prepared_id,
                     &portal.sql,
                     &portal.params,
                 ) {
@@ -635,6 +676,7 @@ async fn handle_execute<S>(
     stream: &mut S,
     runtime: &RedDBRuntime,
     auth_context: Option<&PgAuthContext>,
+    prepared_registry: &PreparedRegistry,
     portals: &mut HashMap<String, PgPortal>,
     msg: super::protocol::ExecuteMessage,
 ) -> Result<(), PgWireError>
@@ -650,8 +692,26 @@ where
         .await?;
         return Ok(());
     };
+    match prepared_registry.ddl_epoch(portal.prepared_id) {
+        Some(epoch) if epoch != runtime.ddl_epoch() => {
+            send_error(stream, "XX000", "prepared_needs_replan").await?;
+            return Ok(());
+        }
+        Some(_) => {}
+        None => {
+            send_error(stream, "26000", "prepared statement does not exist").await?;
+            return Ok(());
+        }
+    }
     if portal.result.is_none() {
-        match execute_pg_query_result(runtime, auth_context, &portal.sql, &portal.params) {
+        match execute_pg_query_result(
+            runtime,
+            auth_context,
+            prepared_registry,
+            portal.prepared_id,
+            &portal.sql,
+            &portal.params,
+        ) {
             Ok(result) => {
                 portal.result = Some(result);
                 portal.row_offset = 0;
@@ -694,6 +754,7 @@ where
 
 async fn handle_close<S>(
     stream: &mut S,
+    prepared_registry: &PreparedRegistry,
     prepared: &mut HashMap<String, PgPreparedStatement>,
     portals: &mut HashMap<String, PgPortal>,
     msg: super::protocol::CloseMessage,
@@ -701,21 +762,37 @@ async fn handle_close<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    match msg.target {
-        DescribeTarget::Statement => {
-            prepared.remove(&msg.name);
-        }
-        DescribeTarget::Portal => {
-            portals.remove(&msg.name);
-        }
+    let prepared_id = match msg.target {
+        DescribeTarget::Statement => prepared.remove(&msg.name).map(|stmt| stmt.prepared_id),
+        DescribeTarget::Portal => portals.remove(&msg.name).map(|portal| portal.prepared_id),
+    };
+    if let Some(prepared_id) = prepared_id {
+        release_prepared_if_unreferenced(prepared_registry, prepared_id, prepared, portals);
     }
     write_frame(stream, &BackendMessage::CloseComplete).await
+}
+
+fn release_prepared_if_unreferenced(
+    prepared_registry: &PreparedRegistry,
+    prepared_id: PreparedId,
+    prepared: &HashMap<String, PgPreparedStatement>,
+    portals: &HashMap<String, PgPortal>,
+) {
+    let statement_references_id = prepared
+        .values()
+        .any(|statement| statement.prepared_id == prepared_id);
+    let portal_references_id = portals
+        .values()
+        .any(|portal| portal.prepared_id == prepared_id);
+    if !statement_references_id && !portal_references_id {
+        prepared_registry.release(prepared_id);
+    }
 }
 
 fn bind_pg_params(
     stmt: &PgPreparedStatement,
     msg: &super::protocol::BindMessage,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<ParamValue>, String> {
     if !matches!(msg.param_format_codes.len(), 0 | 1)
         && msg.param_format_codes.len() != msg.params.len()
     {
@@ -735,7 +812,7 @@ fn bind_pg_params(
                 [format] => *format,
                 formats => formats[idx],
             };
-            pg_param_to_value(oid, format_code, param.as_deref())
+            pg_param_to_param_value(oid, format_code, param.as_deref())
         })
         .collect()
 }
@@ -743,11 +820,20 @@ fn bind_pg_params(
 fn execute_pg_query_result(
     runtime: &RedDBRuntime,
     auth_context: Option<&PgAuthContext>,
+    prepared_registry: &PreparedRegistry,
+    prepared_id: PreparedId,
     sql: &str,
-    params: &[Value],
+    params: &[ParamValue],
 ) -> Result<crate::runtime::RuntimeQueryResult, String> {
-    if let Some(result) = try_execute_pg_scalar_select(sql, params) {
-        return Ok(result);
+    let executor = QueryRequestExecutor::new(runtime, prepared_registry);
+    let bound = executor
+        .bind(QueryRequest::prepared(prepared_id, params.to_vec()))
+        .map_err(|err| err.to_string())?;
+    if pg_scalar_select_param_index(sql).is_some() {
+        let values = params.iter().cloned().map(Value::from).collect::<Vec<_>>();
+        if let Some(result) = try_execute_pg_scalar_select(sql, &values) {
+            return Ok(result);
+        }
     }
     if params.is_empty() {
         return match translate_pg_catalog_query(runtime, sql) {
@@ -763,7 +849,34 @@ fn execute_pg_query_result(
                 notice: None,
             }),
             Ok(None) => run_runtime_blocking(|| {
-                execute_with_pg_auth_context(auth_context, || runtime.execute_query(sql))
+                execute_with_pg_auth_context(auth_context, || {
+                    // Utility statements use the full dispatcher after registry validation.
+                    // Their zero-parameter SQL can be reparsed without losing bindings;
+                    // data queries retain the cached prepared shape on repeated Execute.
+                    if matches!(
+                        bound.prepared_expr(),
+                        Some(
+                            QueryExpr::Function(_)
+                                | QueryExpr::Table(_)
+                                | QueryExpr::Graph(_)
+                                | QueryExpr::Path(_)
+                                | QueryExpr::Join(_)
+                                | QueryExpr::Vector(_)
+                                | QueryExpr::Hybrid(_)
+                                | QueryExpr::Insert(_)
+                                | QueryExpr::Update(_)
+                                | QueryExpr::Delete(_)
+                                | QueryExpr::QueueCommand(_)
+                                | QueryExpr::KvCommand(_)
+                                | QueryExpr::SearchCommand(_)
+                                | QueryExpr::Ask(_)
+                        )
+                    ) {
+                        executor.execute_bound(bound)
+                    } else {
+                        runtime.execute_query(sql)
+                    }
+                })
             })
             .map_err(|err| err.to_string()),
             Err(err) => Err(err.to_string()),
@@ -771,9 +884,7 @@ fn execute_pg_query_result(
     }
 
     run_runtime_blocking(|| {
-        execute_with_pg_auth_context(auth_context, || {
-            runtime.execute_query_with_params(sql, params)
-        })
+        execute_with_pg_auth_context(auth_context, || executor.execute_bound(bound))
     })
     .map_err(|err| err.to_string())
 }
@@ -1486,173 +1597,9 @@ fn ask_query_result_to_pg_wire_row(
     if result.statement != "ask" {
         return None;
     }
-    let record = result.result.records.first()?;
-    let sources_flat_json =
-        json_field(record, "sources_flat").unwrap_or(crate::json::Value::Array(Vec::new()));
-    let citations_json =
-        json_field(record, "citations").unwrap_or(crate::json::Value::Array(Vec::new()));
-    let validation_json = json_field(record, "validation")
-        .unwrap_or_else(|| crate::json::Value::Object(Default::default()));
-
-    let effective_mode = match text_field(record, "mode").as_deref() {
-        Some("lenient") => Mode::Lenient,
-        _ => Mode::Strict,
-    };
-
-    let ask = AskResult {
-        answer: text_field(record, "answer")?,
-        sources_flat: ask_sources_flat(&sources_flat_json),
-        citations: ask_citations(&citations_json),
-        validation: ask_validation(&validation_json),
-        cache_hit: bool_field(record, "cache_hit").unwrap_or(false),
-        provider: text_field(record, "provider").unwrap_or_default(),
-        model: text_field(record, "model").unwrap_or_default(),
-        prompt_tokens: u32_field(record, "prompt_tokens").unwrap_or(0),
-        completion_tokens: u32_field(record, "completion_tokens").unwrap_or(0),
-        cost_usd: f64_field(record, "cost_usd").unwrap_or(0.0),
-        effective_mode,
-        retry_count: u32_field(record, "retry_count").unwrap_or(0),
-    };
+    let ask = crate::presentation::query_result::ask_result_from_unified_result(&result.result)?;
 
     Some(crate::runtime::ai::pg_wire_ask_row_encoder::encode(&ask))
-}
-
-fn record_field<'a>(record: &'a UnifiedRecord, key: &str) -> Option<&'a Value> {
-    record.iter_fields().find_map(|(name, value)| {
-        let name: &str = name;
-        (name == key).then_some(value)
-    })
-}
-
-fn text_field(record: &UnifiedRecord, key: &str) -> Option<String> {
-    match record_field(record, key)? {
-        Value::Text(s) => Some(s.to_string()),
-        Value::Email(s) | Value::Url(s) | Value::NodeRef(s) | Value::EdgeRef(s) => Some(s.clone()),
-        other => Some(other.to_string()),
-    }
-}
-
-fn bool_field(record: &UnifiedRecord, key: &str) -> Option<bool> {
-    match record_field(record, key)? {
-        Value::Boolean(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn u32_field(record: &UnifiedRecord, key: &str) -> Option<u32> {
-    match record_field(record, key)? {
-        Value::Integer(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
-        Value::UnsignedInteger(n) => Some((*n).min(u32::MAX as u64) as u32),
-        Value::BigInt(n)
-        | Value::TimestampMs(n)
-        | Value::Timestamp(n)
-        | Value::Duration(n)
-        | Value::Decimal(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
-        Value::Float(n) => (*n >= 0.0).then_some((*n).min(u32::MAX as f64) as u32),
-        _ => None,
-    }
-}
-
-fn f64_field(record: &UnifiedRecord, key: &str) -> Option<f64> {
-    match record_field(record, key)? {
-        Value::Integer(n) => Some(*n as f64),
-        Value::UnsignedInteger(n) => Some(*n as f64),
-        Value::BigInt(n)
-        | Value::TimestampMs(n)
-        | Value::Timestamp(n)
-        | Value::Duration(n)
-        | Value::Decimal(n) => Some(*n as f64),
-        Value::Float(n) => Some(*n),
-        _ => None,
-    }
-}
-
-fn json_field(record: &UnifiedRecord, key: &str) -> Option<crate::json::Value> {
-    match record_field(record, key)? {
-        // Decode the native binary document-body container (PRD-1398) if present.
-        Value::Json(bytes) => crate::document_body::decode_container_to_json(bytes)
-            .or_else(|| crate::json::from_slice(bytes).ok()),
-        Value::Text(text) => crate::json::from_str(text).ok(),
-        _ => None,
-    }
-}
-
-fn ask_sources_flat(value: &crate::json::Value) -> Vec<SourceRow> {
-    value
-        .as_array()
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|source| {
-            let urn = source
-                .get("urn")
-                .and_then(crate::json::Value::as_str)?
-                .to_string();
-            let payload = source
-                .get("payload")
-                .and_then(crate::json::Value::as_str)
-                .map(ToString::to_string)
-                .unwrap_or_else(|| source.to_string_compact());
-            Some(SourceRow { urn, payload })
-        })
-        .collect()
-}
-
-fn ask_citations(value: &crate::json::Value) -> Vec<Citation> {
-    value
-        .as_array()
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|citation| {
-            let marker = citation
-                .get("marker")
-                .and_then(crate::json::Value::as_u64)?;
-            let urn = citation
-                .get("urn")
-                .and_then(crate::json::Value::as_str)?
-                .to_string();
-            Some(Citation {
-                marker: marker.min(u32::MAX as u64) as u32,
-                urn,
-            })
-        })
-        .collect()
-}
-
-fn ask_validation(value: &crate::json::Value) -> Validation {
-    Validation {
-        ok: value
-            .get("ok")
-            .and_then(crate::json::Value::as_bool)
-            .unwrap_or(true),
-        warnings: validation_items(value, "warnings")
-            .into_iter()
-            .map(|(kind, detail)| ValidationWarning { kind, detail })
-            .collect(),
-        errors: validation_items(value, "errors")
-            .into_iter()
-            .map(|(kind, detail)| ValidationError { kind, detail })
-            .collect(),
-    }
-}
-
-fn validation_items(value: &crate::json::Value, key: &str) -> Vec<(String, String)> {
-    value
-        .get(key)
-        .and_then(crate::json::Value::as_array)
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|item| {
-            Some((
-                item.get("kind")
-                    .and_then(crate::json::Value::as_str)?
-                    .to_string(),
-                item.get("detail")
-                    .and_then(crate::json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-            ))
-        })
-        .collect()
 }
 
 /// Best-effort field lookup on a `UnifiedRecord`. The record API lives in
@@ -1855,6 +1802,105 @@ mod tests {
 
         write_frontend_frame(&mut client_io, b'X', Vec::new()).await;
         server.await.unwrap();
+    }
+
+    #[test]
+    fn prepared_pg_utility_statements_preserve_ddl_and_transactions() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let registry = PreparedRegistry::new();
+        let execute = |sql: &str, params: Vec<ParamValue>| {
+            let prepared = registry
+                .prepare(&runtime, sql)
+                .expect("prepare utility or DML");
+            execute_pg_query_result(&runtime, None, &registry, prepared.id, sql, &params)
+                .unwrap_or_else(|error| panic!("{sql}: {error}"))
+        };
+        execute("CREATE TABLE pg_utilities (id INT)", Vec::new());
+        execute("BEGIN", Vec::new());
+        execute(
+            "INSERT INTO pg_utilities (id) VALUES ($1)",
+            vec![ParamValue::Int64(1)],
+        );
+        execute("SAVEPOINT before_second", Vec::new());
+        execute(
+            "INSERT INTO pg_utilities (id) VALUES ($1)",
+            vec![ParamValue::Int64(2)],
+        );
+        execute("ROLLBACK TO SAVEPOINT before_second", Vec::new());
+        execute("COMMIT", Vec::new());
+        let result = execute("SELECT id FROM pg_utilities", Vec::new());
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(1)));
+        execute("DROP TABLE pg_utilities", Vec::new());
+        assert!(runtime
+            .db()
+            .store()
+            .get_collection("pg_utilities")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn extended_repeated_execute_parses_prepared_shape_once() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        runtime
+            .execute_query("CREATE TABLE pg_parse_once (id INT)")
+            .unwrap();
+        runtime
+            .execute_query("INSERT INTO pg_parse_once (id) VALUES (42)")
+            .unwrap();
+        let prepared_registry = PreparedRegistry::new();
+        let mut prepared = HashMap::new();
+        let mut portals = HashMap::new();
+        let (mut server_io, _client_io) = tokio::io::duplex(64 * 1024);
+
+        handle_parse(
+            &mut server_io,
+            &runtime,
+            &prepared_registry,
+            &mut prepared,
+            &portals,
+            super::super::protocol::ParseMessage {
+                statement: "parse_once_stmt".to_string(),
+                query: "SELECT id FROM pg_parse_once WHERE id = $1".to_string(),
+                param_type_oids: vec![PgOid::Int4.as_u32()],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared_registry.parse_count(), 1);
+
+        handle_bind(
+            &mut server_io,
+            &prepared_registry,
+            &prepared,
+            &mut portals,
+            super::super::protocol::BindMessage {
+                portal: "parse_once_portal".to_string(),
+                statement: "parse_once_stmt".to_string(),
+                param_format_codes: vec![0],
+                params: vec![Some(b"42".to_vec())],
+                result_format_codes: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            handle_execute(
+                &mut server_io,
+                &runtime,
+                None,
+                &prepared_registry,
+                &mut portals,
+                super::super::protocol::ExecuteMessage {
+                    portal: "parse_once_portal".to_string(),
+                    max_rows: 0,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(prepared_registry.parse_count(), 1);
     }
 
     #[tokio::test]

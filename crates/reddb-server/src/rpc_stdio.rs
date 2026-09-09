@@ -57,6 +57,127 @@ struct RemoteBackend<'a> {
 pub const PROTOCOL_VERSION: &str = "1.0";
 const STDIO_BULK_INSERT_CHUNK_ROWS: usize = 500;
 
+/// Remote behavior for one catalogued stdio method.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StdioRemoteDisposition {
+    Served,
+    Unsupported { error_code: &'static str },
+}
+
+/// One stdio JSON-RPC method mapped onto the canonical command vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StdioMethodCatalogEntry {
+    pub(crate) method: &'static str,
+    pub(crate) command_id: &'static str,
+    pub(crate) remote: StdioRemoteDisposition,
+}
+
+const fn stdio_method(
+    method: &'static str,
+    command_id: &'static str,
+    remote: StdioRemoteDisposition,
+) -> StdioMethodCatalogEntry {
+    StdioMethodCatalogEntry {
+        method,
+        command_id,
+        remote,
+    }
+}
+
+/// The complete non-auth stdio surface. Keeping the local command binding and
+/// remote disposition in one table makes a silent local-only method impossible:
+/// dispatch rejects any non-auth method absent from this catalog.
+const STDIO_METHOD_CATALOG: [StdioMethodCatalogEntry; 16] = [
+    stdio_method(
+        "tx.begin",
+        "query.execute",
+        StdioRemoteDisposition::Unsupported {
+            error_code: error_code::TX_NOT_SUPPORTED_REMOTE,
+        },
+    ),
+    stdio_method(
+        "tx.commit",
+        "query.execute",
+        StdioRemoteDisposition::Unsupported {
+            error_code: error_code::TX_NOT_SUPPORTED_REMOTE,
+        },
+    ),
+    stdio_method(
+        "query.open",
+        "streams.query.output",
+        StdioRemoteDisposition::Unsupported {
+            error_code: error_code::CURSOR_NOT_SUPPORTED_REMOTE,
+        },
+    ),
+    stdio_method(
+        "query.next",
+        "streams.query.output",
+        StdioRemoteDisposition::Unsupported {
+            error_code: error_code::CURSOR_NOT_SUPPORTED_REMOTE,
+        },
+    ),
+    stdio_method(
+        "query.close",
+        "streams.query.cancel",
+        StdioRemoteDisposition::Unsupported {
+            error_code: error_code::CURSOR_NOT_SUPPORTED_REMOTE,
+        },
+    ),
+    stdio_method(
+        "tx.rollback",
+        "query.execute",
+        StdioRemoteDisposition::Unsupported {
+            error_code: error_code::TX_NOT_SUPPORTED_REMOTE,
+        },
+    ),
+    stdio_method("version", "health.live", StdioRemoteDisposition::Served),
+    stdio_method(
+        "health",
+        "ops.health.aggregate",
+        StdioRemoteDisposition::Served,
+    ),
+    stdio_method("query", "query.execute", StdioRemoteDisposition::Served),
+    stdio_method(
+        "prepare",
+        "query.execute",
+        StdioRemoteDisposition::Unsupported {
+            error_code: error_code::PREPARED_NOT_SUPPORTED_REMOTE,
+        },
+    ),
+    stdio_method(
+        "execute_prepared",
+        "query.execute",
+        StdioRemoteDisposition::Unsupported {
+            error_code: error_code::PREPARED_NOT_SUPPORTED_REMOTE,
+        },
+    ),
+    stdio_method(
+        "insert",
+        "collections.rows.create",
+        StdioRemoteDisposition::Served,
+    ),
+    stdio_method(
+        "bulk_insert",
+        "collections.bulk.rows",
+        StdioRemoteDisposition::Served,
+    ),
+    stdio_method(
+        "get",
+        "collections.entities.get",
+        StdioRemoteDisposition::Served,
+    ),
+    stdio_method(
+        "delete",
+        "collections.entities.delete",
+        StdioRemoteDisposition::Served,
+    ),
+    stdio_method("close", "health.live", StdioRemoteDisposition::Served),
+];
+
+pub(crate) fn stdio_method_catalog() -> &'static [StdioMethodCatalogEntry] {
+    &STDIO_METHOD_CATALOG
+}
+
 /// Stable error codes. Drivers map these to idiomatic exceptions.
 pub mod error_code {
     pub const PARSE_ERROR: &str = "PARSE_ERROR";
@@ -77,6 +198,10 @@ pub mod error_code {
     pub const TX_REPLAY_FAILED: &str = "TX_REPLAY_FAILED";
     /// Transactions over the remote gRPC proxy are not supported yet.
     pub const TX_NOT_SUPPORTED_REMOTE: &str = "TX_NOT_SUPPORTED_REMOTE";
+    /// Cursors over the remote gRPC proxy are not supported yet.
+    pub const CURSOR_NOT_SUPPORTED_REMOTE: &str = "CURSOR_NOT_SUPPORTED_REMOTE";
+    /// Prepared statements over the remote gRPC proxy are not supported yet.
+    pub const PREPARED_NOT_SUPPORTED_REMOTE: &str = "PREPARED_NOT_SUPPORTED_REMOTE";
     /// `query.next` / `query.close` referenced an unknown cursor id.
     /// Either the cursor was never opened, already closed, or was
     /// automatically dropped when its rows were exhausted.
@@ -403,29 +528,42 @@ fn handle_line(backend: &Backend<'_>, session: &mut Session, line: &str) -> Stri
 
     let params = parsed.get("params").cloned().unwrap_or(Value::Null);
 
-    let dispatch = std::panic::catch_unwind(AssertUnwindSafe(|| match backend {
-        Backend::Local(rt) => dispatch_method(rt, session, &method, &params),
-        Backend::Remote(remote) => {
-            // Transactions are session-local and the remote path forwards
-            // each call independently — there is no place to park a tx
-            // handle across gRPC hops yet. Surface a clear error so
-            // drivers can fall back to per-call auto-commit.
-            if matches!(
-                method.as_str(),
-                "tx.begin"
-                    | "tx.commit"
-                    | "tx.rollback"
-                    | "query.open"
-                    | "query.next"
-                    | "query.close"
-            ) {
-                Err((
-                    error_code::TX_NOT_SUPPORTED_REMOTE,
-                    format!("{method} is not supported over remote gRPC yet"),
-                ))
-            } else {
-                dispatch_method_remote(&remote.client, remote.tokio_rt, &method, &params)
+    let dispatch = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let entry = stdio_method_catalog()
+            .iter()
+            .find(|entry| entry.method == method);
+        if !method.starts_with("auth.") && entry.is_none() {
+            return Err((
+                error_code::INVALID_REQUEST,
+                format!("unknown method: {method}"),
+            ));
+        }
+        if let Some(entry) = entry {
+            if crate::server::command_catalog()
+                .command(entry.command_id)
+                .is_none()
+            {
+                return Err((
+                    error_code::INTERNAL_ERROR,
+                    format!(
+                        "stdio method {method} names missing catalog command {}",
+                        entry.command_id
+                    ),
+                ));
             }
+        }
+
+        match backend {
+            Backend::Local(rt) => dispatch_method(rt, session, &method, &params),
+            Backend::Remote(remote) => match entry.map(|entry| entry.remote) {
+                Some(StdioRemoteDisposition::Unsupported { error_code }) => Err((
+                    error_code,
+                    format!("{method} is not supported over remote gRPC yet"),
+                )),
+                Some(StdioRemoteDisposition::Served) | None => {
+                    dispatch_method_remote(&remote.client, remote.tokio_rt, &method, &params)
+                }
+            },
         }
     }));
 

@@ -80,6 +80,7 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
                 // shapes the evaluator doesn't cover (CONFIG / KV / ML_* references).
                 if let Some((expr, _)) = reddb_rql::sql_lowering::projection_to_expr(projection) {
                     let row = RecordRow {
+                        db,
                         record: source,
                         table_name,
                         table_alias,
@@ -121,6 +122,7 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
                 // and any shape where argument resolution fails via evaluator.
                 if let Some((expr, _)) = reddb_rql::sql_lowering::projection_to_expr(projection) {
                     let row = RecordRow {
+                        db,
                         record: source,
                         table_name,
                         table_alias,

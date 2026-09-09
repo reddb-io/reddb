@@ -9,6 +9,7 @@
 //!
 //! Reference: PostgreSQL source `src/include/catalog/pg_type_d.h`.
 
+use crate::runtime::query_request::ParamValue;
 use reddb_types::Value;
 
 /// A subset of PG type OIDs that cover every case we need to encode.
@@ -95,13 +96,13 @@ impl PgOid {
     }
 }
 
-pub fn pg_param_to_value(
+pub fn pg_param_to_param_value(
     oid: u32,
     format_code: i16,
     bytes: Option<&[u8]>,
-) -> Result<Value, String> {
+) -> Result<ParamValue, String> {
     let Some(bytes) = bytes else {
-        return Ok(Value::Null);
+        return Ok(ParamValue::Null);
     };
     match format_code {
         0 => pg_text_param_to_value(PgOid::from_u32(oid), bytes),
@@ -110,73 +111,73 @@ pub fn pg_param_to_value(
     }
 }
 
-fn pg_text_param_to_value(oid: PgOid, bytes: &[u8]) -> Result<Value, String> {
+fn pg_text_param_to_value(oid: PgOid, bytes: &[u8]) -> Result<ParamValue, String> {
     let text = std::str::from_utf8(bytes).map_err(|e| format!("invalid UTF-8 parameter: {e}"))?;
     match oid {
         PgOid::Bool => match text.to_ascii_lowercase().as_str() {
-            "t" | "true" | "1" | "yes" | "on" => Ok(Value::Boolean(true)),
-            "f" | "false" | "0" | "no" | "off" => Ok(Value::Boolean(false)),
+            "t" | "true" | "1" | "yes" | "on" => Ok(ParamValue::Bool(true)),
+            "f" | "false" | "0" | "no" | "off" => Ok(ParamValue::Bool(false)),
             _ => Err(format!("invalid bool parameter {text:?}")),
         },
         PgOid::Int2 | PgOid::Int4 | PgOid::Int8 | PgOid::Oid => text
             .parse::<i64>()
-            .map(Value::Integer)
+            .map(ParamValue::Int64)
             .map_err(|e| format!("invalid integer parameter {text:?}: {e}")),
         PgOid::Float4 | PgOid::Float8 | PgOid::Numeric => text
             .parse::<f64>()
-            .map(Value::Float)
+            .map(ParamValue::Float64)
             .map_err(|e| format!("invalid float parameter {text:?}: {e}")),
-        PgOid::Bytea => parse_bytea_text(text).map(Value::Blob),
-        PgOid::Json | PgOid::Jsonb => Ok(Value::Json(bytes.to_vec())),
+        PgOid::Bytea => parse_bytea_text(text).map(ParamValue::Bytes),
+        PgOid::Json | PgOid::Jsonb => Ok(ParamValue::Json(bytes.to_vec())),
         PgOid::Timestamp | PgOid::TimestampTz => text
             .parse::<i64>()
-            .map(Value::Timestamp)
-            .or_else(|_| Ok(Value::Text(std::sync::Arc::from(text)))),
-        PgOid::Uuid => parse_uuid_text(text).map(Value::Uuid),
-        PgOid::Vector => parse_vector_text(text).map(Value::Vector),
+            .map(ParamValue::Timestamp)
+            .or_else(|_| Ok(ParamValue::Text(text.to_string()))),
+        PgOid::Uuid => parse_uuid_text(text).map(ParamValue::Uuid),
+        PgOid::Vector => parse_vector_text(text).map(ParamValue::Vector),
         PgOid::Text | PgOid::Varchar | PgOid::Unknown | PgOid::Date | PgOid::Time => {
-            Ok(Value::Text(std::sync::Arc::from(text)))
+            Ok(ParamValue::Text(text.to_string()))
         }
     }
 }
 
-fn pg_binary_param_to_value(oid: PgOid, bytes: &[u8]) -> Result<Value, String> {
+fn pg_binary_param_to_value(oid: PgOid, bytes: &[u8]) -> Result<ParamValue, String> {
     match oid {
-        PgOid::Bool if bytes.len() == 1 => Ok(Value::Boolean(bytes[0] != 0)),
+        PgOid::Bool if bytes.len() == 1 => Ok(ParamValue::Bool(bytes[0] != 0)),
         PgOid::Int2 if bytes.len() == 2 => {
-            Ok(Value::Integer(
+            Ok(ParamValue::Int64(
                 i16::from_be_bytes([bytes[0], bytes[1]]) as i64
             ))
         }
         PgOid::Int4 | PgOid::Oid if bytes.len() == 4 => {
-            Ok(Value::Integer(
+            Ok(ParamValue::Int64(
                 i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64,
             ))
         }
-        PgOid::Int8 if bytes.len() == 8 => Ok(Value::Integer(i64::from_be_bytes([
+        PgOid::Int8 if bytes.len() == 8 => Ok(ParamValue::Int64(i64::from_be_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))),
         PgOid::Float4 if bytes.len() == 4 => {
-            Ok(Value::Float(
+            Ok(ParamValue::Float64(
                 f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64,
             ))
         }
-        PgOid::Float8 if bytes.len() == 8 => Ok(Value::Float(f64::from_be_bytes([
+        PgOid::Float8 if bytes.len() == 8 => Ok(ParamValue::Float64(f64::from_be_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))),
-        PgOid::Bytea => Ok(Value::Blob(bytes.to_vec())),
-        PgOid::Json | PgOid::Jsonb => Ok(Value::Json(bytes.to_vec())),
+        PgOid::Bytea => Ok(ParamValue::Bytes(bytes.to_vec())),
+        PgOid::Json | PgOid::Jsonb => Ok(ParamValue::Json(bytes.to_vec())),
         PgOid::Uuid if bytes.len() == 16 => {
             let mut out = [0u8; 16];
             out.copy_from_slice(bytes);
-            Ok(Value::Uuid(out))
+            Ok(ParamValue::Uuid(out))
         }
-        PgOid::Timestamp | PgOid::TimestampTz if bytes.len() == 8 => Ok(Value::Timestamp(
+        PgOid::Timestamp | PgOid::TimestampTz if bytes.len() == 8 => Ok(ParamValue::Timestamp(
             pg_microseconds_to_unix_seconds(i64::from_be_bytes([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ])),
         )),
-        PgOid::Vector => parse_vector_binary(bytes).map(Value::Vector),
+        PgOid::Vector => parse_vector_binary(bytes).map(ParamValue::Vector),
         _ => Err(format!(
             "unsupported binary parameter for OID {} with {} bytes",
             oid.as_u32(),
@@ -308,33 +309,33 @@ mod tests {
     #[test]
     fn pg_text_params_decode_common_oids() {
         assert_eq!(
-            pg_param_to_value(PgOid::Bool.as_u32(), 0, Some(b"t")).unwrap(),
-            Value::Boolean(true)
+            pg_param_to_param_value(PgOid::Bool.as_u32(), 0, Some(b"t")).unwrap(),
+            ParamValue::Bool(true)
         );
         assert_eq!(
-            pg_param_to_value(PgOid::Int4.as_u32(), 0, Some(b"42")).unwrap(),
-            Value::Integer(42)
+            pg_param_to_param_value(PgOid::Int4.as_u32(), 0, Some(b"42")).unwrap(),
+            ParamValue::Int64(42)
         );
         assert_eq!(
-            pg_param_to_value(PgOid::Float8.as_u32(), 0, Some(b"1.5")).unwrap(),
-            Value::Float(1.5)
+            pg_param_to_param_value(PgOid::Float8.as_u32(), 0, Some(b"1.5")).unwrap(),
+            ParamValue::Float64(1.5)
         );
         assert_eq!(
-            pg_param_to_value(PgOid::Bytea.as_u32(), 0, Some(br"\xdeadbeef")).unwrap(),
-            Value::Blob(vec![0xde, 0xad, 0xbe, 0xef])
+            pg_param_to_param_value(PgOid::Bytea.as_u32(), 0, Some(br"\xdeadbeef")).unwrap(),
+            ParamValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef])
         );
         assert_eq!(
-            pg_param_to_value(PgOid::Jsonb.as_u32(), 0, Some(br#"{"a":1}"#)).unwrap(),
-            Value::Json(br#"{"a":1}"#.to_vec())
+            pg_param_to_param_value(PgOid::Jsonb.as_u32(), 0, Some(br#"{"a":1}"#)).unwrap(),
+            ParamValue::Json(br#"{"a":1}"#.to_vec())
         );
         assert_eq!(
-            pg_param_to_value(
+            pg_param_to_param_value(
                 PgOid::Uuid.as_u32(),
                 0,
                 Some(b"00112233-4455-6677-8899-aabbccddeeff")
             )
             .unwrap(),
-            Value::Uuid([
+            ParamValue::Uuid([
                 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
                 0xee, 0xff,
             ])
@@ -344,20 +345,21 @@ mod tests {
     #[test]
     fn pg_binary_params_decode_numeric_and_uuid_oids() {
         assert_eq!(
-            pg_param_to_value(PgOid::Int2.as_u32(), 1, Some(&7i16.to_be_bytes())).unwrap(),
-            Value::Integer(7)
+            pg_param_to_param_value(PgOid::Int2.as_u32(), 1, Some(&7i16.to_be_bytes())).unwrap(),
+            ParamValue::Int64(7)
         );
         assert_eq!(
-            pg_param_to_value(PgOid::Int8.as_u32(), 1, Some(&42i64.to_be_bytes())).unwrap(),
-            Value::Integer(42)
+            pg_param_to_param_value(PgOid::Int8.as_u32(), 1, Some(&42i64.to_be_bytes())).unwrap(),
+            ParamValue::Int64(42)
         );
         assert_eq!(
-            pg_param_to_value(PgOid::Float4.as_u32(), 1, Some(&1.5f32.to_be_bytes())).unwrap(),
-            Value::Float(1.5)
+            pg_param_to_param_value(PgOid::Float4.as_u32(), 1, Some(&1.5f32.to_be_bytes()))
+                .unwrap(),
+            ParamValue::Float64(1.5)
         );
         assert_eq!(
-            pg_param_to_value(PgOid::Uuid.as_u32(), 1, Some(&[0x11; 16])).unwrap(),
-            Value::Uuid([0x11; 16])
+            pg_param_to_param_value(PgOid::Uuid.as_u32(), 1, Some(&[0x11; 16])).unwrap(),
+            ParamValue::Uuid([0x11; 16])
         );
         let mut vector = Vec::new();
         vector.extend_from_slice(&2i16.to_be_bytes());
@@ -365,24 +367,24 @@ mod tests {
         vector.extend_from_slice(&1.0f32.to_be_bytes());
         vector.extend_from_slice(&(-0.5f32).to_be_bytes());
         assert_eq!(
-            pg_param_to_value(PgOid::Vector.as_u32(), 1, Some(&vector)).unwrap(),
-            Value::Vector(vec![1.0, -0.5])
+            pg_param_to_param_value(PgOid::Vector.as_u32(), 1, Some(&vector)).unwrap(),
+            ParamValue::Vector(vec![1.0, -0.5])
         );
     }
 
     #[test]
     fn pg_null_param_decodes_to_value_null() {
         assert_eq!(
-            pg_param_to_value(PgOid::Text.as_u32(), 0, None).unwrap(),
-            Value::Null
+            pg_param_to_param_value(PgOid::Text.as_u32(), 0, None).unwrap(),
+            ParamValue::Null
         );
     }
 
     #[test]
     fn pg_vector_text_param_decodes_json_array() {
         assert_eq!(
-            pg_param_to_value(PgOid::Vector.as_u32(), 0, Some(b"[1.0, -0.5]")).unwrap(),
-            Value::Vector(vec![1.0, -0.5])
+            pg_param_to_param_value(PgOid::Vector.as_u32(), 0, Some(b"[1.0, -0.5]")).unwrap(),
+            ParamValue::Vector(vec![1.0, -0.5])
         );
     }
 }

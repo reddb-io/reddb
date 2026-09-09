@@ -87,7 +87,16 @@ pub(crate) fn runtime_query_json(
     }
     object.insert(
         "result".to_string(),
-        unified_result_json_with_records(&result.result, &records),
+        if result.statement == "ask" {
+            unified_result_json_with_rendered_records(
+                &result.result,
+                super::query_result::ask_json(&records)
+                    .into_iter()
+                    .collect(),
+            )
+        } else {
+            unified_result_json_with_records(&result.result, &records)
+        },
     );
     object.insert(
         "descriptor".to_string(),
@@ -373,6 +382,19 @@ pub(crate) fn unified_result_json_with_records(
     result: &UnifiedResult,
     records: &[UnifiedRecord],
 ) -> JsonValue {
+    unified_result_json_with_rendered_records(
+        result,
+        records
+            .iter()
+            .map(|record| unified_record_json(record, &result.columns))
+            .collect(),
+    )
+}
+
+fn unified_result_json_with_rendered_records(
+    result: &UnifiedResult,
+    records: Vec<JsonValue>,
+) -> JsonValue {
     let mut object = Map::new();
     object.insert(
         "columns".to_string(),
@@ -385,15 +407,7 @@ pub(crate) fn unified_result_json_with_records(
                 .collect(),
         ),
     );
-    object.insert(
-        "records".to_string(),
-        JsonValue::Array(
-            records
-                .iter()
-                .map(|record| unified_record_json(record, &result.columns))
-                .collect(),
-        ),
-    );
+    object.insert("records".to_string(), JsonValue::Array(records));
     object.insert("stats".to_string(), query_stats_json(&result.stats));
     JsonValue::Object(object)
 }

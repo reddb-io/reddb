@@ -11,9 +11,9 @@
 //! - RedWire: the real `handle_session` dispatch arms, mapped through
 //!   `redwire_command_id` in
 //!   `crates/reddb-server/src/wire/redwire/session.rs`.
-//! - stdio: `crates/reddb-server/src/rpc_stdio.rs` declares no command ids at
-//!   all, so its inventory is the empty set and the matrix reports its dispatch
-//!   tables as an unjoined surface. See [`stdio_command_ids`].
+//! - stdio: the catalog-backed method table in
+//!   [`crate::rpc_stdio::stdio_method_catalog`], including each remote
+//!   disposition.
 
 use std::collections::BTreeSet;
 
@@ -50,11 +50,6 @@ const REDWIRE_DISPATCH_KINDS: [MessageKind; 19] = [
 /// the call: embedded stdio has no auth backend, so `auth.*` is excluded from
 /// the local-versus-remote comparison.
 pub(crate) const STDIO_AUTH_PREFIX: &str = "auth.";
-
-/// Tokens that would appear in `rpc_stdio.rs` if the stdio dispatcher were
-/// bound to the command catalog. [`stdio_command_ids`] is empty only while none
-/// of them is present.
-const STDIO_CATALOG_MARKERS: [&str; 3] = ["command_id", "CommandAuthorizer", "command_catalog"];
 
 /// Catalog commands reachable over gRPC.
 pub(crate) fn grpc_command_ids() -> BTreeSet<&'static str> {
@@ -97,15 +92,12 @@ fn redwire_frame_kinds() -> Vec<&'static str> {
     .collect()
 }
 
-/// Catalog commands reachable over stdio: none.
-///
-/// `rpc_stdio.rs` dispatches on bare JSON-RPC method names and never names a
-/// catalog command, so there is nothing to join and every stdio cell is an
-/// honest coverage gap. `stdio_is_unbound_to_the_command_catalog` fails the
-/// moment that stops being true, which forces the real join to be written
-/// rather than letting this empty set quietly under-report the surface.
+/// Catalog commands with an explicit stdio disposition.
 pub(crate) fn stdio_command_ids() -> BTreeSet<&'static str> {
-    BTreeSet::new()
+    crate::rpc_stdio::stdio_method_catalog()
+        .iter()
+        .map(|entry| entry.command_id)
+        .collect()
 }
 
 /// Slice `source` between the first `start` anchor and the first `end`
@@ -166,9 +158,39 @@ pub(crate) fn stdio_local_methods() -> Vec<&'static str> {
     stdio_methods("fn dispatch_method(")
 }
 
-/// stdio JSON-RPC methods served by the remote (`grpc://` proxy) backend.
+/// stdio JSON-RPC methods with a remote (`grpc://` proxy) disposition.
 pub(crate) fn stdio_remote_methods() -> Vec<&'static str> {
-    stdio_methods("fn dispatch_method_remote(")
+    crate::rpc_stdio::stdio_method_catalog()
+        .iter()
+        .map(|entry| entry.method)
+        .collect()
+}
+
+/// stdio JSON-RPC methods implemented by the remote backend.
+pub(crate) fn stdio_remote_served_methods() -> Vec<&'static str> {
+    crate::rpc_stdio::stdio_method_catalog()
+        .iter()
+        .filter_map(|entry| {
+            matches!(
+                entry.remote,
+                crate::rpc_stdio::StdioRemoteDisposition::Served
+            )
+            .then_some(entry.method)
+        })
+        .collect()
+}
+
+/// stdio JSON-RPC methods explicitly rejected by the remote backend.
+pub(crate) fn stdio_remote_unsupported_methods() -> Vec<(&'static str, &'static str)> {
+    crate::rpc_stdio::stdio_method_catalog()
+        .iter()
+        .filter_map(|entry| match entry.remote {
+            crate::rpc_stdio::StdioRemoteDisposition::Served => None,
+            crate::rpc_stdio::StdioRemoteDisposition::Unsupported { error_code } => {
+                Some((entry.method, error_code))
+            }
+        })
+        .collect()
 }
 
 /// Locally served stdio methods that have no remote-mode arm. `auth.*` is
@@ -185,6 +207,7 @@ pub(crate) fn stdio_remote_gap() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc_stdio::error_code;
 
     #[test]
     fn redwire_catalog_bindings_have_real_dispatch() {
@@ -238,40 +261,106 @@ mod tests {
         "auth.revoke_api_key",
     ];
 
-    /// The full stdio remote (gRPC proxy) table.
-    const STDIO_REMOTE_METHODS: [&str; 8] = [
-        "version",
-        "health",
-        "query",
-        "insert",
-        "bulk_insert",
-        "get",
-        "delete",
-        "close",
+    const STDIO_REMOTE_DISPOSITIONS: [(&str, &str, crate::rpc_stdio::StdioRemoteDisposition); 16] = [
+        (
+            "tx.begin",
+            "query.execute",
+            unsupported(error_code::TX_NOT_SUPPORTED_REMOTE),
+        ),
+        (
+            "tx.commit",
+            "query.execute",
+            unsupported(error_code::TX_NOT_SUPPORTED_REMOTE),
+        ),
+        (
+            "query.open",
+            "streams.query.output",
+            unsupported(error_code::CURSOR_NOT_SUPPORTED_REMOTE),
+        ),
+        (
+            "query.next",
+            "streams.query.output",
+            unsupported(error_code::CURSOR_NOT_SUPPORTED_REMOTE),
+        ),
+        (
+            "query.close",
+            "streams.query.cancel",
+            unsupported(error_code::CURSOR_NOT_SUPPORTED_REMOTE),
+        ),
+        (
+            "tx.rollback",
+            "query.execute",
+            unsupported(error_code::TX_NOT_SUPPORTED_REMOTE),
+        ),
+        (
+            "version",
+            "health.live",
+            crate::rpc_stdio::StdioRemoteDisposition::Served,
+        ),
+        (
+            "health",
+            "ops.health.aggregate",
+            crate::rpc_stdio::StdioRemoteDisposition::Served,
+        ),
+        (
+            "query",
+            "query.execute",
+            crate::rpc_stdio::StdioRemoteDisposition::Served,
+        ),
+        (
+            "prepare",
+            "query.execute",
+            unsupported(error_code::PREPARED_NOT_SUPPORTED_REMOTE),
+        ),
+        (
+            "execute_prepared",
+            "query.execute",
+            unsupported(error_code::PREPARED_NOT_SUPPORTED_REMOTE),
+        ),
+        (
+            "insert",
+            "collections.rows.create",
+            crate::rpc_stdio::StdioRemoteDisposition::Served,
+        ),
+        (
+            "bulk_insert",
+            "collections.bulk.rows",
+            crate::rpc_stdio::StdioRemoteDisposition::Served,
+        ),
+        (
+            "get",
+            "collections.entities.get",
+            crate::rpc_stdio::StdioRemoteDisposition::Served,
+        ),
+        (
+            "delete",
+            "collections.entities.delete",
+            crate::rpc_stdio::StdioRemoteDisposition::Served,
+        ),
+        (
+            "close",
+            "health.live",
+            crate::rpc_stdio::StdioRemoteDisposition::Served,
+        ),
     ];
 
-    /// The documented stdio remote gap: session-scoped transaction, cursor and
-    /// prepared-statement methods have no place to park state across a gRPC
-    /// hop, so 8 of the 16 non-auth local methods vanish in remote mode.
-    const STDIO_REMOTE_GAP: [&str; 8] = [
-        "tx.begin",
-        "tx.commit",
-        "query.open",
-        "query.next",
-        "query.close",
-        "tx.rollback",
-        "prepare",
-        "execute_prepared",
-    ];
+    const fn unsupported(error_code: &'static str) -> crate::rpc_stdio::StdioRemoteDisposition {
+        crate::rpc_stdio::StdioRemoteDisposition::Unsupported { error_code }
+    }
 
     #[test]
-    fn stdio_remote_mode_drops_exactly_the_documented_eight_methods() {
+    fn every_stdio_method_has_a_remote_disposition() {
         let local = stdio_local_methods();
         let remote = stdio_remote_methods();
+        let dispositions: Vec<_> = crate::rpc_stdio::stdio_method_catalog()
+            .iter()
+            .map(|entry| (entry.method, entry.command_id, entry.remote))
+            .collect();
 
         assert_eq!(local, STDIO_LOCAL_METHODS.to_vec());
-        assert_eq!(remote, STDIO_REMOTE_METHODS.to_vec());
-        assert_eq!(stdio_remote_gap(), STDIO_REMOTE_GAP.to_vec());
+        assert_eq!(dispositions, STDIO_REMOTE_DISPOSITIONS.to_vec());
+        assert_eq!(remote.len(), STDIO_REMOTE_DISPOSITIONS.len());
+        assert!(stdio_remote_gap().is_empty());
         assert!(
             remote.iter().all(|method| local.contains(method)),
             "remote mode serves a method the local table does not declare"
@@ -279,19 +368,8 @@ mod tests {
     }
 
     #[test]
-    fn stdio_is_unbound_to_the_command_catalog() {
-        let found: Vec<&str> = STDIO_CATALOG_MARKERS
-            .into_iter()
-            .filter(|marker| STDIO_SOURCE.contains(marker))
-            .collect();
-
-        assert_eq!(
-            found,
-            Vec::<&str>::new(),
-            "rpc_stdio.rs gained a command binding; stdio_command_ids must now \
-             report it instead of returning the empty set"
-        );
-        assert!(stdio_command_ids().is_empty());
+    fn stdio_is_bound_to_the_command_catalog() {
+        assert!(!stdio_command_ids().is_empty());
     }
 
     /// Every id an adapter claims to serve must exist in the catalog, or the
@@ -303,6 +381,7 @@ mod tests {
         let inventories = [
             ("gRPC", grpc_command_ids()),
             ("MCP", mcp_command_ids()),
+            ("stdio", stdio_command_ids()),
             ("RedWire", redwire_command_ids()),
         ];
 

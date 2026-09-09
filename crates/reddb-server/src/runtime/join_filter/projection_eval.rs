@@ -37,6 +37,7 @@ pub(in crate::runtime) fn eval_projection_value(
         Projection::Function(name, inner_args) => reddb_rql::sql_lowering::projection_to_expr(proj)
             .and_then(|(expr, _)| {
                 let row = RecordRow {
+                    db: None,
                     record: source,
                     table_name: None,
                     table_alias: None,
@@ -47,6 +48,7 @@ pub(in crate::runtime) fn eval_projection_value(
         Projection::Expression(filter, _) => reddb_rql::sql_lowering::projection_to_expr(proj)
             .and_then(|(expr, _)| {
                 let row = RecordRow {
+                    db: None,
                     record: source,
                     table_name: None,
                     table_alias: None,

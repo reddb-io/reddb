@@ -1635,9 +1635,9 @@ mod tests {
     /// shapes, but SQL parsing/binding must stay behind the runtime's
     /// statement entrypoint. This pins the deeper seam introduced for
     /// parameterized query execution. HTTP, JSON-RPC, RedWire, and gRPC hand
-    /// a `QueryRequest` to the Request module; PG wire calls
-    /// `RedDBRuntime::execute_query_with_params` directly. Both paths install
-    /// a real `StatementExecutionFrame` before dispatch.
+    /// a `QueryRequest` to the Request module, as does PG wire through the
+    /// shared prepared registry. All paths install a real
+    /// `StatementExecutionFrame` before dispatch.
     ///
     /// The Request transports reach the runtime entrypoint one layer deeper:
     /// `QueryRequestExecutor` calls `execute_query_with_params` on their
@@ -1651,7 +1651,7 @@ mod tests {
             ("src/server/handlers_query.rs", "QueryRequestExecutor"),
             ("src/rpc_stdio.rs", "QueryRequestExecutor"),
             ("src/wire/redwire/session.rs", "QueryRequestExecutor"),
-            ("src/wire/postgres/server.rs", "execute_query_with_params"),
+            ("src/wire/postgres/server.rs", "QueryRequestExecutor"),
             ("src/grpc.rs", "QueryRequestExecutor"),
         ];
 
