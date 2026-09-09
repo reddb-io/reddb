@@ -18,12 +18,12 @@ impl RedDBRuntime {
         let snapshot = capture_current_snapshot();
         let mut seeds: Vec<_> = scored
             .values()
-            .filter_map(|(entity, score, _, collection)| {
-                (matches!(entity.kind, EntityKind::GraphNode(_))
+            .filter(|(entity, _, _, collection)| {
+                matches!(entity.kind, EntityKind::GraphNode(_))
                     && scope.is_none_or(|scope| scope.contains(collection))
-                    && self.search_entity_allowed(collection, entity, snapshot.as_ref(), policies))
-                .then(|| (entity.logical_id().raw().to_string(), *score))
+                    && self.search_entity_allowed(collection, entity, snapshot.as_ref(), policies)
             })
+            .map(|(entity, score, _, _)| (entity.logical_id().raw().to_string(), *score))
             .collect();
         function_budget::charge(0)?;
         if seeds.is_empty() {
@@ -126,10 +126,8 @@ impl RedDBRuntime {
         // physical entity envelope used by the other context-search stages.
         let mut result_slots: HashMap<_, _> = scored
             .iter()
-            .filter_map(|(slot, (entity, _, _, _))| {
-                matches!(entity.kind, EntityKind::GraphNode(_))
-                    .then(|| (entity.logical_id().raw().to_string(), *slot))
-            })
+            .filter(|(_, (entity, _, _, _))| matches!(entity.kind, EntityKind::GraphNode(_)))
+            .map(|(slot, (entity, _, _, _))| (entity.logical_id().raw().to_string(), *slot))
             .collect();
         for (source, source_score) in seeds {
             let mut visited = HashSet::from([source.clone()]);
