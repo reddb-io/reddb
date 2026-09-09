@@ -130,8 +130,11 @@ Multimodel paths share that same counter. Exact vector search charges visible
 candidate-ID discovery and candidate processing before distance evaluation.
 TurboQuant charges the filled lanes before each block of up to 32 vectors, then
 charges candidate conversion and exact reranking. Graph materialization charges
-every visible candidate inspected in each of its two passes over all collections,
-including non-graph entities. It collects IDs and fetches/processes payloads only
+each segment consulted and every visible candidate inspected in each of its two
+passes over all collections. Conservative physical-kind summaries skip segments
+that cannot contain the requested graph kind. Non-graph items in unpruned mixed
+segments still count; skipped items do not, but consulting their segment does.
+It collects IDs and fetches/processes payloads only
 for the current pass's kind (nodes or edges), charging that processing separately.
 Pattern matching charges seed nodes, partial matches, edge candidates and projected
 matches. Hybrid fusion charges its input-map entries and fused candidates.

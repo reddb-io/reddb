@@ -163,3 +163,100 @@ fn graph_budget_still_counts_non_graph_scan_candidates() {
             .expect("ordinary query after failure"),
     );
 }
+
+#[test]
+fn graph_budget_skips_segments_without_graph_items() {
+    for same_collection in [false, true] {
+        for sealed in [false, true] {
+            let runtime = mixed_graph_fixture(false, 0);
+            runtime
+                .execute_query("SET CONFIG functions.execution.work_max = 512")
+                .expect("graph budget");
+            assert_graph_result(
+                &runtime
+                    .execute_query(GRAPH_CALL)
+                    .expect("graph-only control"),
+            );
+            let store = runtime.db().store();
+            store
+                .get_collection("mixed_graph")
+                .expect("graph")
+                .force_seal()
+                .expect("seal graph");
+            let collection = if same_collection {
+                "mixed_graph"
+            } else {
+                "embeddings"
+            };
+            let vectors = (0..1024)
+                .map(|_| UnifiedEntity::vector(store.next_entity_id(), collection, vec![1.0]))
+                .collect();
+            store
+                .bulk_insert(collection, vectors)
+                .expect("vector-only segment");
+            if sealed {
+                store
+                    .get_collection(collection)
+                    .expect("vectors")
+                    .force_seal()
+                    .expect("seal vectors");
+            }
+            assert_graph_result(
+                &runtime
+                    .execute_query(GRAPH_CALL)
+                    .expect("irrelevant segments must not consume entity work"),
+            );
+            assert_graph_result(
+                &runtime
+                    .execute_query(GRAPH_QUERY)
+                    .expect("ordinary graph read"),
+            );
+        }
+    }
+}
+
+#[test]
+fn graph_pruning_rebuilds_after_reopen_and_preserves_rollback() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("graph.rdb");
+    for reopening in [false, true] {
+        let runtime =
+            RedDBRuntime::with_options(reddb::RedDBOptions::persistent(&path)).expect("open");
+        runtime
+            .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+            .expect("disable cache");
+        if !reopening {
+            for query in [
+                "INSERT INTO mixed_graph NODE (label, name) VALUES ('alice', 'Alice')",
+                "INSERT INTO mixed_graph NODE (label, name) VALUES ('bob', 'Bob')",
+                "INSERT INTO mixed_graph EDGE (label, from, to) VALUES ('step', 'alice', 'bob')",
+            ] {
+                runtime.execute_query(query).expect("persistent graph");
+            }
+        }
+        runtime
+            .db()
+            .store()
+            .get_collection("mixed_graph")
+            .expect("graph")
+            .force_seal()
+            .expect("seal graph");
+        assert_graph_result(&runtime.execute_query(GRAPH_QUERY).expect("read graph"));
+        runtime.execute_query("BEGIN").expect("begin");
+        runtime
+            .execute_query("UPDATE mixed_graph NODES SET name = 'Changed' WHERE name = 'Bob'")
+            .expect("update node");
+        let changed = runtime.execute_query(GRAPH_QUERY).expect("read own write");
+        assert_eq!(changed.result.records.len(), 1);
+        assert_eq!(
+            changed.result.records[0].get("name"),
+            Some(&reddb_types::Value::text("Changed"))
+        );
+        runtime.execute_query("ROLLBACK").expect("rollback");
+        assert_graph_result(
+            &runtime
+                .execute_query(GRAPH_QUERY)
+                .expect("rolled back graph"),
+        );
+    }
+}

@@ -20,8 +20,8 @@ use std::sync::Arc;
 use super::entity::{EntityId, UnifiedEntity};
 use super::metadata::{Metadata, MetadataFilter};
 use super::segment::{
-    GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats,
-    UnifiedSegment, ZoneColPred, ZoneColPredKind,
+    GraphEntityKind, GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState,
+    SegmentStats, UnifiedSegment, ZoneColPred, ZoneColPredKind,
 };
 use super::visibility_map::VisibilityMap;
 use crate::runtime::mvcc::{entity_visible_with_context, SnapshotContext};
@@ -1254,20 +1254,34 @@ impl SegmentManager {
     /// The callback receives a reference to each entity. Return `true` to
     /// continue iteration, `false` to stop early (e.g. when a LIMIT is reached).
     /// This avoids the allocation and cloning overhead of `query_all`.
-    pub fn for_each_entity<F>(&self, mut callback: F)
+    pub fn for_each_entity<F>(&self, callback: F)
     where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        self.for_each_entity_in_segments(|_| true, || true, callback);
+    }
+
+    fn for_each_entity_in_segments<F>(
+        &self,
+        segment_filter: impl Fn(&GrowingSegment) -> bool,
+        mut before_segment: impl FnMut() -> bool,
+        mut callback: F,
+    ) where
         F: FnMut(&UnifiedEntity) -> bool,
     {
         // Growing segment — direct iteration (no Box<dyn>)
         // Try non-blocking read first; fall back to blocking only when a writer
         // is actively holding the write lock (rare in read-heavy workloads).
         if let Some(growing_arc) = self.growing.read().as_ref() {
+            if !before_segment() {
+                return;
+            }
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
                 growing_arc.read()
             };
-            if !growing.for_each_fast(&mut callback) {
+            if segment_filter(&growing) && !growing.for_each_fast(&mut callback) {
                 return;
             }
         }
@@ -1275,8 +1289,11 @@ impl SegmentManager {
         // Sealed segments
         let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
+            if !before_segment() {
+                return;
+            }
             let segment = segment_arc.read();
-            if !segment.for_each_fast(&mut callback) {
+            if segment_filter(&segment) && !segment.for_each_fast(&mut callback) {
                 return;
             }
         }
@@ -1549,6 +1566,38 @@ impl SegmentManager {
         self.query_all(|entity| Self::scan_entity_visible(snapshot, entity) && filter(entity))
     }
 
+    /// Collect visible graph items, pruning only under the segment read guard.
+    pub(crate) fn scan_graph_kind(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        kind: GraphEntityKind,
+    ) -> Vec<UnifiedEntity> {
+        self.query_all_in_segments(
+            |segment| segment.may_contain_graph_kind(kind),
+            |entity| Self::scan_entity_visible(snapshot, entity) && kind.matches(&entity.kind),
+        )
+    }
+
+    /// Visit visible candidates in segments that may contain the requested kind.
+    /// Non-graph items in those segments still reach the callback so work budgets
+    /// charge every inspected visible candidate. RLS must run outside this callback.
+    /// `before_segment` runs even for pruned segments; false stops the entire scan.
+    pub(crate) fn scan_graph_candidates_for_each<F>(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        kind: GraphEntityKind,
+        before_segment: impl FnMut() -> bool,
+        mut callback: F,
+    ) where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        self.for_each_entity_in_segments(
+            |segment| segment.may_contain_graph_kind(kind),
+            before_segment,
+            |entity| !Self::scan_entity_visible(snapshot, entity) || callback(entity),
+        );
+    }
+
     /// Visit every entity visible under an explicit MVCC snapshot.
     ///
     /// Returning `false` from `callback` stops the scan early. Hidden entities
@@ -1625,6 +1674,17 @@ impl SegmentManager {
     where
         F: Fn(&UnifiedEntity) -> bool + Sync,
     {
+        self.query_all_in_segments(|_| true, filter)
+    }
+
+    fn query_all_in_segments<F>(
+        &self,
+        segment_filter: impl Fn(&GrowingSegment) -> bool + Sync,
+        filter: F,
+    ) -> Vec<UnifiedEntity>
+    where
+        F: Fn(&UnifiedEntity) -> bool + Sync,
+    {
         let mut results = Vec::new();
 
         // Query growing segment — try non-blocking read first (avoids stalling
@@ -1635,7 +1695,9 @@ impl SegmentManager {
             } else {
                 growing_arc.read()
             };
-            results.extend(growing.iter().filter(|e| filter(e)).cloned());
+            if segment_filter(&growing) {
+                results.extend(growing.iter().filter(|e| filter(e)).cloned());
+            }
         }
 
         // Query sealed segments — parallel when multiple exist AND multi-core
@@ -1643,17 +1705,22 @@ impl SegmentManager {
         let use_parallel = sealed.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
         if use_parallel {
             let filter_ref = &filter;
+            let segment_filter_ref = &segment_filter;
             let segment_results: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
                 sealed
                     .iter()
                     .map(|segment| {
                         s.spawn(move || {
-                            segment
-                                .read()
-                                .iter()
-                                .filter(|e| filter_ref(e))
-                                .cloned()
-                                .collect::<Vec<_>>()
+                            let segment = segment.read();
+                            if segment_filter_ref(&segment) {
+                                segment
+                                    .iter()
+                                    .filter(|e| filter_ref(e))
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            } else {
+                                Vec::new()
+                            }
                         })
                     })
                     .collect::<Vec<_>>()
@@ -1667,7 +1734,9 @@ impl SegmentManager {
         } else {
             for segment in sealed.iter() {
                 let seg = segment.read();
-                results.extend(seg.iter().filter(|e| filter(e)).cloned());
+                if segment_filter(&seg) {
+                    results.extend(seg.iter().filter(|e| filter(e)).cloned());
+                }
             }
         }
 
@@ -2266,6 +2335,124 @@ mod tests {
         let id = manager.insert(entity).unwrap();
         assert!(manager.get(id).is_some());
         assert_eq!(manager.count(), 1);
+    }
+
+    #[test]
+    fn graph_pruning_preserves_physical_versions_and_charges_only_selected_segments() {
+        let manager = Arc::new(SegmentManager::new("mixed"));
+        manager
+            .bulk_insert(
+                (1..=128)
+                    .map(|id| UnifiedEntity::vector(EntityId::new(id), "mixed", vec![]))
+                    .collect(),
+            )
+            .expect("vector-only segment");
+        manager.force_seal().expect("seal vectors");
+        let mut old =
+            UnifiedEntity::graph_node(EntityId::new(200), "mixed", "person", Default::default());
+        old.set_xmin(3);
+        old.set_xmax(12);
+        let mut new =
+            UnifiedEntity::graph_node(EntityId::new(201), "mixed", "person", Default::default());
+        new.set_xmin(12);
+        let edge = UnifiedEntity::graph_edge(
+            EntityId::new(202),
+            "mixed",
+            "a",
+            "b",
+            1.0,
+            Default::default(),
+        );
+        manager
+            .bulk_insert(vec![old, new, edge])
+            .expect("physical graph versions");
+        manager.force_seal().expect("seal graph");
+        manager
+            .insert(UnifiedEntity::graph_node(
+                EntityId::new(203),
+                "mixed",
+                "person",
+                Default::default(),
+            ))
+            .expect("growing node");
+        let snapshot = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 10,
+                in_progress: HashSet::new(),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+        std::thread::spawn(move || {
+            for view in [None, Some(&snapshot)] {
+                for kind in [GraphEntityKind::Node, GraphEntityKind::Edge] {
+                    let expected: HashSet<_> = manager
+                        .scan(view, |item| kind.matches(&item.kind))
+                        .into_iter()
+                        .map(|item| item.id)
+                        .collect();
+                    let actual: HashSet<_> = manager
+                        .scan_graph_kind(view, kind)
+                        .into_iter()
+                        .map(|item| item.id)
+                        .collect();
+                    assert_eq!(actual, expected);
+                    let mut visited = 0;
+                    let mut candidates = HashSet::new();
+                    manager.scan_graph_candidates_for_each(
+                        view,
+                        kind,
+                        || true,
+                        |item| {
+                            visited += 1;
+                            if kind.matches(&item.kind) {
+                                candidates.insert(item.id);
+                            }
+                            true
+                        },
+                    );
+                    assert_eq!(candidates, expected);
+                    assert_eq!(
+                        visited,
+                        if matches!(kind, GraphEntityKind::Node) {
+                            3
+                        } else {
+                            2
+                        }
+                    );
+                }
+            }
+            let ids: HashSet<_> = manager
+                .scan_graph_kind(Some(&snapshot), GraphEntityKind::Node)
+                .into_iter()
+                .map(|item| item.id.raw())
+                .collect();
+            assert_eq!(ids, HashSet::from([200, 203]));
+            let ids: HashSet<_> = manager
+                .scan_graph_kind(None, GraphEntityKind::Node)
+                .into_iter()
+                .map(|item| item.id.raw())
+                .collect();
+            assert_eq!(ids, HashSet::from([201, 203]));
+            let mut visits = 0;
+            manager.scan_graph_candidates_for_each(
+                None,
+                GraphEntityKind::Node,
+                || true,
+                |_| {
+                    visits += 1;
+                    false
+                },
+            );
+            assert_eq!(
+                visits, 1,
+                "early termination must also stop subsequent segments"
+            );
+        })
+        .join()
+        .expect("snapshot worker");
     }
 
     #[test]

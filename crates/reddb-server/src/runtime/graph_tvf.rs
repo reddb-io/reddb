@@ -21,6 +21,7 @@ use super::authz::policy_columns::parse_positive_iterations;
 use super::execution_context::{capture_current_snapshot, current_auth_identity};
 use super::rls_injection::{edge_passes_rls, node_passes_rls};
 use super::*;
+use crate::storage::unified::segment::GraphEntityKind;
 
 /// The graph-analytics table-valued functions recognized in FROM position.
 /// Both the graph-collection form and the inline `nodes => / edges =>` form
@@ -766,7 +767,7 @@ impl RedDBRuntime {
             visit_graph_materialization_entities(
                 &manager,
                 snap_ctx.as_ref(),
-                |entity| matches!(entity.kind, EntityKind::GraphNode(_)),
+                GraphEntityKind::Node,
                 |entity| {
                     let EntityKind::GraphNode(ref node) = entity.kind else {
                         return Ok(());
@@ -801,7 +802,7 @@ impl RedDBRuntime {
             visit_graph_materialization_entities(
                 &manager,
                 snap_ctx.as_ref(),
-                |entity| matches!(entity.kind, EntityKind::GraphEdge(_)),
+                GraphEntityKind::Edge,
                 |entity| {
                     let EntityKind::GraphEdge(ref edge) = entity.kind else {
                         return Ok(());
@@ -848,27 +849,44 @@ impl RedDBRuntime {
 fn visit_graph_materialization_entities(
     manager: &crate::storage::unified::manager::SegmentManager,
     snapshot: Option<&super::impl_core::SnapshotContext>,
-    filter: impl Fn(&crate::storage::unified::entity::UnifiedEntity) -> bool + Sync,
+    kind: GraphEntityKind,
     mut visit: impl FnMut(crate::storage::unified::entity::UnifiedEntity) -> RedDBResult<()>,
 ) -> RedDBResult<()> {
     if !super::function_budget::active() {
-        for entity in manager.scan(snapshot, &filter) {
+        for entity in manager.scan_graph_kind(snapshot, kind) {
             visit(entity)?;
         }
         return Ok(());
     }
     let mut ids = Vec::new();
+    let mut segment_failure = None;
     super::function_budget::scan(
-        |callback| manager.scan_for_each(snapshot, callback),
+        |callback| {
+            manager.scan_graph_candidates_for_each(
+                snapshot,
+                kind,
+                || {
+                    if let Err(cause) = super::function_budget::charge(1) {
+                        segment_failure = Some(cause);
+                        return false;
+                    }
+                    true
+                },
+                callback,
+            )
+        },
         |entity| {
             // The scan charges every visible candidate, including rejected kinds.
             // Only the current graph pass's payloads need to leave the segment lock.
-            if filter(entity) {
+            if kind.matches(&entity.kind) {
                 ids.push(entity.id);
             }
             true
         },
     )?;
+    if let Some(cause) = segment_failure {
+        return Err(cause);
+    }
     for batch in ids.chunks(256) {
         super::function_budget::charge(0)?;
         for entity in manager.get_many(batch).into_iter().flatten() {
@@ -880,4 +898,35 @@ fn visit_graph_materialization_entities(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pruning_tests {
+    use super::*;
+    use crate::storage::{EntityId, SegmentManager, UnifiedEntity};
+
+    #[test]
+    fn skipped_graph_segments_still_consume_call_work() {
+        let manager = SegmentManager::new("vectors");
+        for id in 1..=3 {
+            manager
+                .bulk_insert(vec![UnifiedEntity::vector(
+                    EntityId::new(id),
+                    "vectors",
+                    vec![],
+                )])
+                .expect("vector segment");
+            manager.force_seal().expect("seal vectors");
+        }
+        let _budget = super::super::function_budget::Scope::enter(2, 60_000).expect("budget");
+        let error =
+            visit_graph_materialization_entities(&manager, None, GraphEntityKind::Node, |_| {
+                panic!("vector payload must not be visited")
+            })
+            .expect_err("three segments exceed two work units");
+        assert!(
+            error.to_string().contains("execution work_max exceeded"),
+            "{error}"
+        );
+    }
 }

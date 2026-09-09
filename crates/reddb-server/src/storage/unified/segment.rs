@@ -426,6 +426,29 @@ impl<'a> ZoneColPred<'a> {
     }
 }
 
+/// The two physical kinds used by graph materialization passes.
+#[derive(Clone, Copy)]
+pub(crate) enum GraphEntityKind {
+    Node,
+    Edge,
+}
+
+impl GraphEntityKind {
+    fn mask(self) -> u8 {
+        match self {
+            Self::Node => 1,
+            Self::Edge => 2,
+        }
+    }
+
+    pub(crate) fn matches(self, kind: &EntityKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Node, EntityKind::GraphNode(_)) | (Self::Edge, EntityKind::GraphEdge(_))
+        )
+    }
+}
+
 /// Growing segment implementation (in-memory, writable)
 pub struct GrowingSegment {
     /// Segment ID
@@ -461,6 +484,9 @@ pub struct GrowingSegment {
     unique_key_lookup_bytes: AtomicU64,
     /// Type index: kind → EntityIds
     kind_index: HashMap<String, HashSet<EntityId>>,
+    /// Conservative physical presence, independent of kind_index and MVCC.
+    /// Bits only accumulate; unrestricted mutable access sets both bits.
+    graph_kind_mask: u8,
     /// Cross-reference index: source → Vec<(target, ref_type)>
     cross_ref_forward: HashMap<EntityId, Vec<(EntityId, RefType)>>,
     /// Reverse cross-reference index: target → Vec<(source, ref_type)>
@@ -494,6 +520,18 @@ pub struct GrowingSegment {
 }
 
 impl GrowingSegment {
+    pub(crate) fn may_contain_graph_kind(&self, kind: GraphEntityKind) -> bool {
+        self.graph_kind_mask & kind.mask() != 0
+    }
+
+    fn observe_graph_kind(&mut self, kind: &EntityKind) {
+        self.graph_kind_mask |= match kind {
+            EntityKind::GraphNode(_) => GraphEntityKind::Node.mask(),
+            EntityKind::GraphEdge(_) => GraphEntityKind::Edge.mask(),
+            _ => 0,
+        };
+    }
+
     /// Direct iteration without Box<dyn> trait dispatch. Returns false to stop early.
     /// Uses concrete iterator types to avoid heap allocation per call.
     #[inline]
@@ -576,6 +614,7 @@ impl GrowingSegment {
             unique_key_lookup: parking_lot::RwLock::new(Vec::new()),
             unique_key_lookup_bytes: AtomicU64::new(0),
             kind_index: HashMap::new(),
+            graph_kind_mask: 0,
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
             col_zones: HashMap::new(),
@@ -622,6 +661,9 @@ impl GrowingSegment {
         entity: &UnifiedEntity,
     ) -> Result<UpdateIndexSnapshot, SegmentError> {
         self.invalidate_unique_key_lookup();
+        // Record before replacement, including forced sealed updates. Failed
+        // updates may leave a false positive, never a false negative.
+        self.observe_graph_kind(&entity.kind);
         if self.use_flat {
             let raw = entity.id.raw();
             if raw >= self.base_entity_id {
@@ -1069,6 +1111,7 @@ impl GrowingSegment {
 
     /// Index an entity
     fn index_entity(&mut self, entity: &UnifiedEntity) {
+        self.observe_graph_kind(&entity.kind);
         let indexes = self.unique_key_lookup.get_mut();
         for index in indexes.iter_mut() {
             index.insert(entity);
@@ -1381,6 +1424,7 @@ impl GrowingSegment {
             entities.chunk_by(|left, right| left.kind.storage_type() == right.kind.storage_type())
         {
             let kind = run[0].kind.storage_type();
+            self.observe_graph_kind(&run[0].kind);
             let kind_set = match self.kind_index.get_mut(kind) {
                 Some(ids) => ids,
                 None => self.kind_index.entry(kind.to_string()).or_default(),
@@ -1646,6 +1690,9 @@ impl UnifiedSegment for GrowingSegment {
         if self.deleted.contains(&id) || !self.state.is_writable() {
             return None;
         }
+        // The caller can replace the kind through this reference. Conservatively
+        // disable both graph pruning passes until a new segment is rebuilt.
+        self.graph_kind_mask = GraphEntityKind::Node.mask() | GraphEntityKind::Edge.mask();
         if self.use_flat {
             let raw = id.raw();
             if raw >= self.base_entity_id {
@@ -1971,6 +2018,96 @@ mod tests {
     use crate::storage::unified::entity::RowData;
     use crate::storage::unified::MetadataValue;
     use reddb_types::Value;
+
+    fn pruning_node(id: u64) -> UnifiedEntity {
+        UnifiedEntity::graph_node(EntityId::new(id), "mixed", "person", Default::default())
+    }
+
+    fn pruning_edge(id: u64) -> UnifiedEntity {
+        UnifiedEntity::graph_edge(
+            EntityId::new(id),
+            "mixed",
+            "a",
+            "b",
+            1.0,
+            Default::default(),
+        )
+    }
+
+    #[test]
+    fn graph_presence_covers_bulk_gaps_inserts_and_adoption() {
+        let mut segment = GrowingSegment::new(1, "mixed");
+        assert!(!segment.may_contain_graph_kind(GraphEntityKind::Node));
+        assert!(!segment.may_contain_graph_kind(GraphEntityKind::Edge));
+        segment
+            .bulk_insert(vec![
+                UnifiedEntity::vector(EntityId::new(1), "mixed", vec![]),
+                pruning_node(2),
+                pruning_edge(4),
+            ])
+            .expect("mixed bulk with gap");
+        assert!(segment.may_contain_graph_kind(GraphEntityKind::Node));
+        assert!(segment.may_contain_graph_kind(GraphEntityKind::Edge));
+        segment.seal().expect("seal");
+        assert!(segment.force_delete(EntityId::new(2)));
+        assert!(segment.force_delete(EntityId::new(4)));
+        // Deletion must not erase presence; reconstruction may safely tighten it.
+        assert!(segment.may_contain_graph_kind(GraphEntityKind::Node));
+        let mut rebuilt = GrowingSegment::new(2, "mixed");
+        for item in segment.iter() {
+            rebuilt.adopt_entity(item.clone(), None);
+        }
+        assert!(!rebuilt.may_contain_graph_kind(GraphEntityKind::Node));
+        assert!(!rebuilt.may_contain_graph_kind(GraphEntityKind::Edge));
+        rebuilt.adopt_entity(pruning_node(5), None);
+        assert!(rebuilt.may_contain_graph_kind(GraphEntityKind::Node));
+        rebuilt.insert(pruning_edge(6)).expect("single edge");
+        assert!(rebuilt.may_contain_graph_kind(GraphEntityKind::Edge));
+    }
+
+    #[test]
+    fn graph_presence_covers_replacement_and_unrestricted_mutation() {
+        for flat in [false, true] {
+            for operation in 0..4 {
+                let mut segment = GrowingSegment::new(1, "mixed");
+                let vector = UnifiedEntity::vector(EntityId::new(1), "mixed", vec![]);
+                if flat {
+                    segment.bulk_insert(vec![vector]).expect("flat vector");
+                } else {
+                    segment.insert(vector).expect("hashmap vector");
+                }
+                match operation {
+                    0 => segment.update(pruning_node(1)).expect("replace with node"),
+                    1 => segment
+                        .update_hot(pruning_node(1), &[])
+                        .expect("hot replacement"),
+                    2 => {
+                        segment.seal().expect("seal vector");
+                        segment
+                            .force_update_with_metadata(&pruning_node(1), &[], None)
+                            .expect("sealed replacement");
+                    }
+                    _ => {
+                        *segment.get_mut(EntityId::new(1)).expect("mutable vector") =
+                            pruning_node(1)
+                    }
+                }
+                assert!(segment.may_contain_graph_kind(GraphEntityKind::Node));
+                assert!(matches!(
+                    segment.get(EntityId::new(1)).expect("node").kind,
+                    EntityKind::GraphNode(_)
+                ));
+                if operation == 3 {
+                    assert!(segment.may_contain_graph_kind(GraphEntityKind::Edge));
+                }
+                segment
+                    .force_update_with_metadata(&pruning_edge(1), &[], None)
+                    .expect("replace with edge");
+                assert!(segment.may_contain_graph_kind(GraphEntityKind::Edge));
+                assert!(segment.may_contain_graph_kind(GraphEntityKind::Node));
+            }
+        }
+    }
 
     fn primary_key_row(id: u64, key: Value) -> UnifiedEntity {
         UnifiedEntity::new(
