@@ -305,3 +305,66 @@ fn graph_pruning_rebuilds_after_reopen_and_versioned_rollback() {
         );
     }
 }
+
+#[test]
+fn search_graph_does_not_clone_unreachable_node_or_vector_payloads() {
+    use reddb::application::SearchContextInput;
+    use reddb_types::Value;
+    use std::collections::HashMap;
+    for sealed in [false, true] {
+        let runtime = mixed_graph_fixture(false, 64);
+        let mut request = SearchContextInput {
+            query: "alice".into(),
+            field: None,
+            vector: None,
+            collections: Some(vec!["mixed_graph".into()]),
+            limit: Some(20),
+            graph_depth: Some(2),
+            graph_max_edges: Some(2),
+            max_cross_refs: None,
+            follow_cross_refs: Some(false),
+            expand_graph: Some(true),
+            global_scan: Some(true),
+            reindex: Some(true),
+            min_score: None,
+        };
+        runtime
+            .db()
+            .store()
+            .context_index()
+            .set_collection_enabled("mixed_graph", true);
+        runtime
+            .search_context_input(request.clone())
+            .expect("index seed");
+        let store = runtime.db().store();
+        for index in 0..64 {
+            let node = UnifiedEntity::graph_node(
+                store.next_entity_id(),
+                format!("unrelated-{index}"),
+                "Other",
+                HashMap::from([("payload".into(), Value::text("x".repeat(65_536)))]),
+            );
+            store.insert("mixed_graph", node).expect("unreachable node");
+        }
+        if sealed {
+            store
+                .get_collection("mixed_graph")
+                .expect("collection")
+                .force_seal()
+                .expect("seal");
+        }
+        request.global_scan = Some(false);
+        request.reindex = Some(false);
+        runtime.search_context_input(request.clone()).expect("warm");
+        ALLOCATED_BYTES.with(|total| total.set(0));
+        LARGEST_ALLOCATION.with(|largest| largest.set(0));
+        TRACK_ALLOCATIONS.with(|enabled| enabled.set(true));
+        let result = runtime.search_context_input(request);
+        TRACK_ALLOCATIONS.with(|enabled| enabled.set(false));
+        assert_eq!(result.expect("search").graph.nodes.len(), 2);
+        let largest = LARGEST_ALLOCATION.with(Cell::get);
+        let total = ALLOCATED_BYTES.with(Cell::get);
+        assert!(largest < 65_536, "unrelated payload copied: {largest}");
+        assert!(total < 512 * 1024, "search allocated {total}");
+    }
+}

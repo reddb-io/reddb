@@ -42,11 +42,10 @@ contracts remain in effect.
 
 ## Scope and remaining work
 
-The search expansion in `impl_search.rs` still calls `materialize_graph_lazy`
-and hydrates items through a separate path. Its snapshot, RLS and identity
-contract needs a dedicated correction; it is not covered by the native graph
-command change. Whole-graph TVFs retain their existing collection-argument
-semantics. Non-versioned in-place rollback and crash-durability guarantees are
+The subsequent [search expansion correction](search-graph-expansion.md) applies
+the snapshot, RLS and logical-identity boundary with scalar node locations and
+lazy hydration. It removes the legacy `materialize_graph_lazy` path. Whole-graph
+TVFs retain their existing collection-argument semantics. Non-versioned in-place rollback and crash-durability guarantees are
 separate work.
 
 Regressions live in `tests/grouped/graph_analytics/e2e_native_graph_identity.rs`:

@@ -1576,6 +1576,7 @@ mod rls_injection;
 pub mod schema_diff;
 pub mod schema_vocabulary;
 pub(crate) mod score_sketch;
+mod search_graph;
 pub(crate) mod sessionize;
 pub mod signed_chain;
 pub mod signed_writes_kind;

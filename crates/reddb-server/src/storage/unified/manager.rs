@@ -2774,11 +2774,9 @@ mod tests {
             (
                 "runtime/graph_dsl.rs",
                 include_str!("../../runtime/graph_dsl.rs"),
-                3,
-                "remaining legacy debt: two lazy-search edge scans and the unused \
-                 edge-property helper. Native topology and node properties now use \
-                 snapshot visitors. TODO(#2138 follow-up): migrate lazy search \
-                 expansion and its item hydration to the snapshot/RLS boundary",
+                1,
+                "remaining legacy debt: unused edge-property helper; search expansion \
+                 now uses snapshot visitors and RLS-gated hydration",
             ),
             (
                 "runtime/graph_tvf.rs",
@@ -2818,6 +2816,12 @@ mod tests {
                 include_str!("../../runtime/record_search.rs"),
                 0,
                 "fully migrated by batch 2",
+            ),
+            (
+                "runtime/search_graph.rs",
+                include_str!("../../runtime/search_graph.rs"),
+                0,
+                "search graph preparation uses snapshot visitors and gated hydration",
             ),
             (
                 "runtime/impl_search.rs",

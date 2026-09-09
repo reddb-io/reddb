@@ -1007,6 +1007,17 @@ impl RedDBRuntime {
     }
 
     pub fn search_context(&self, input: SearchContextInput) -> RedDBResult<ContextSearchResult> {
+        // Direct API calls need the same transaction/savepoint view as RQL.
+        // Nested reads inherit the existing statement snapshot.
+        let _scope = if crate::runtime::impl_core::capture_current_snapshot().is_none() {
+            use super::statement_frame::{StatementExecutionFrame, StatementIdentity};
+            Some(
+                StatementExecutionFrame::build(self, StatementIdentity::Text("SEARCH CONTEXT"))?
+                    .install(self),
+            )
+        } else {
+            None
+        };
         let started = std::time::Instant::now();
         let result_limit = input.limit.unwrap_or(25).max(1);
         let graph_depth = input.graph_depth.unwrap_or(1).min(3);
@@ -1205,7 +1216,21 @@ impl RedDBRuntime {
                     if scored.contains_key(&xref.target.raw()) {
                         continue;
                     }
-                    if let Some(target) = self.inner.db.get(xref.target) {
+                    if allowed_collections
+                        .as_ref()
+                        .is_some_and(|scope| !scope.contains(&xref.target_collection))
+                    {
+                        continue;
+                    }
+                    if let Some(target) = store.get(&xref.target_collection, xref.target) {
+                        if !self.search_entity_allowed(
+                            &xref.target_collection,
+                            &target,
+                            snap_ctx.as_ref(),
+                            &mut rls_cache,
+                        ) {
+                            continue;
+                        }
                         let decayed_score = source_score * xref.weight * 0.8;
                         if decayed_score >= min_score {
                             expanded_cross_refs += 1;
@@ -1228,82 +1253,18 @@ impl RedDBRuntime {
         }
 
         // ── Expansion: Graph traversal ──────────────────────────────────
-        let mut expanded_graph = 0usize;
-        if expand_graph && graph_depth > 0 {
-            let seed_node_ids: Vec<(u64, String, f32, String)> = scored
-                .values()
-                .filter_map(|(entity, score, _, collection)| {
-                    if matches!(entity.kind, EntityKind::GraphNode(_)) {
-                        Some((
-                            entity.id.raw(),
-                            entity.id.raw().to_string(),
-                            *score,
-                            collection.clone(),
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if !seed_node_ids.is_empty() {
-                // Use lazy graph materialization — only loads seed nodes + BFS neighbors
-                let seed_ids: Vec<u64> = seed_node_ids.iter().map(|(id, _, _, _)| *id).collect();
-                if let Ok(graph) = materialize_graph_lazy(store.as_ref(), &seed_ids, graph_depth) {
-                    for (source_id, node_id_str, source_score, source_collection) in &seed_node_ids
-                    {
-                        let mut visited: HashSet<String> = HashSet::new();
-                        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-                        visited.insert(node_id_str.clone());
-                        queue.push_back((node_id_str.clone(), 0));
-
-                        while let Some((current, depth)) = queue.pop_front() {
-                            if depth >= graph_depth {
-                                continue;
-                            }
-                            let neighbors = graph_adjacent_edges(
-                                &graph,
-                                &current,
-                                RuntimeGraphDirection::Both,
-                                None,
-                            );
-                            for (neighbor_id, _edge) in neighbors.into_iter().take(graph_max_edges)
-                            {
-                                if !visited.insert(neighbor_id.clone()) {
-                                    continue;
-                                }
-                                if let Ok(parsed) = neighbor_id.parse::<u64>() {
-                                    if scored.contains_key(&parsed) {
-                                        continue;
-                                    }
-                                    if let Some(entity) = self.inner.db.get(EntityId::new(parsed)) {
-                                        let decay = 0.7f32.powi((depth + 1) as i32);
-                                        let decayed_score = source_score * decay;
-                                        if decayed_score >= min_score {
-                                            expanded_graph += 1;
-                                            scored.insert(
-                                                parsed,
-                                                (
-                                                    entity,
-                                                    decayed_score,
-                                                    DiscoveryMethod::GraphTraversal {
-                                                        source_id: *source_id,
-                                                        edge_type: "adjacent".to_string(),
-                                                        depth: depth + 1,
-                                                    },
-                                                    source_collection.clone(),
-                                                ),
-                                            );
-                                        }
-                                    }
-                                }
-                                queue.push_back((neighbor_id, depth + 1));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let expanded_graph = if expand_graph && graph_depth > 0 && graph_max_edges > 0 {
+            self.search_context_expand_graph(
+                &mut scored,
+                allowed_collections.as_ref(),
+                graph_depth,
+                graph_max_edges,
+                min_score,
+                &mut rls_cache,
+            )?
+        } else {
+            0
+        };
 
         // ── Expansion: Vectors ──────────────────────────────────────────
         let mut expanded_vectors = 0usize;

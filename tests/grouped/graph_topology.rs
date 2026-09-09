@@ -53,3 +53,6 @@ mod e2e_issue_804_topology_hint;
 
 #[path = "graph_analytics/integration_graph_ops.rs"]
 mod integration_graph_ops;
+
+#[path = "graph_analytics/e2e_search_graph_expansion.rs"]
+mod e2e_search_graph_expansion;

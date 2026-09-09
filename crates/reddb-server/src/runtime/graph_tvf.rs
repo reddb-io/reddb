@@ -885,7 +885,7 @@ impl RedDBRuntime {
 /// Legacy edges can reference any retained physical version. Identity lookup
 /// does not grant visibility: only nodes admitted by the snapshot/RLS pass may
 /// become endpoints. Cache misses too, so dangling edges do not repeat probes.
-fn resolve_materialized_graph_endpoint<'a>(
+pub(super) fn resolve_materialized_graph_endpoint<'a>(
     endpoint: &str,
     allowed_nodes: &'a std::collections::HashSet<String>,
     aliases: &mut std::collections::HashMap<String, Option<String>>,
