@@ -34,6 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::metadata::{Metadata, MetadataStorage};
+use super::segment_graph_index::SegmentGraphIndex;
 use super::segment_unique_key::SegmentUniqueKey;
 use crate::storage::query::value_compare::partial_compare_values;
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
@@ -487,6 +488,9 @@ pub struct GrowingSegment {
     /// Conservative physical presence, independent of kind_index and MVCC.
     /// Bits only accumulate; unrestricted mutable access sets both bits.
     graph_kind_mask: u8,
+    /// Retains every physical graph version until physical reclamation.
+    graph_read_index: parking_lot::RwLock<Option<SegmentGraphIndex>>,
+    graph_read_index_bytes: AtomicU64,
     /// Cross-reference index: source → Vec<(target, ref_type)>
     cross_ref_forward: HashMap<EntityId, Vec<(EntityId, RefType)>>,
     /// Reverse cross-reference index: target → Vec<(source, ref_type)>
@@ -614,6 +618,8 @@ impl GrowingSegment {
             unique_key_lookup: parking_lot::RwLock::new(Vec::new()),
             unique_key_lookup_bytes: AtomicU64::new(0),
             kind_index: HashMap::new(),
+            graph_read_index: parking_lot::RwLock::new(Some(SegmentGraphIndex::default())),
+            graph_read_index_bytes: AtomicU64::new(0),
             graph_kind_mask: 0,
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
@@ -661,6 +667,17 @@ impl GrowingSegment {
         entity: &UnifiedEntity,
     ) -> Result<UpdateIndexSnapshot, SegmentError> {
         self.invalidate_unique_key_lookup();
+        if (self.graph_kind_mask != 0
+            || matches!(
+                entity.kind,
+                EntityKind::GraphNode(_) | EntityKind::GraphEdge(_)
+            ))
+            && self
+                .get(entity.id)
+                .is_some_and(|old| !SegmentGraphIndex::same_keys(old, entity))
+        {
+            self.invalidate_graph_read_index();
+        }
         // Record before replacement, including forced sealed updates. Failed
         // updates may leave a false positive, never a false negative.
         self.observe_graph_kind(&entity.kind);
@@ -761,6 +778,11 @@ impl GrowingSegment {
         if !self.deleted.insert(id) {
             return false;
         }
+        if let Some(index) = self.graph_read_index.get_mut() {
+            index.remove(&self.flat_entities[idx]);
+            self.graph_read_index_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+        }
         let size = Self::estimate_entity_size(&self.flat_entities[idx]) as u64;
         self.dead_entity_bytes += size;
         self.dead_resident_count += 1;
@@ -839,6 +861,7 @@ impl GrowingSegment {
     pub fn memory_bytes(&self) -> u64 {
         self.memory_bytes.load(Ordering::Relaxed)
             + self.unique_key_lookup_bytes.load(Ordering::Relaxed)
+            + self.graph_read_index_bytes.load(Ordering::Relaxed)
     }
 
     /// Release a resident entity's payload from the memory estimate. Only for
@@ -1112,6 +1135,11 @@ impl GrowingSegment {
     /// Index an entity
     fn index_entity(&mut self, entity: &UnifiedEntity) {
         self.observe_graph_kind(&entity.kind);
+        if let Some(index) = self.graph_read_index.get_mut() {
+            index.insert(entity);
+            self.graph_read_index_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+        }
         let indexes = self.unique_key_lookup.get_mut();
         for index in indexes.iter_mut() {
             index.insert(entity);
@@ -1151,6 +1179,62 @@ impl GrowingSegment {
                 .or_default()
                 .push((cross_ref.source, cross_ref.ref_type));
         }
+    }
+
+    fn invalidate_graph_read_index(&mut self) {
+        *self.graph_read_index.get_mut() = None;
+        self.graph_read_index_bytes.store(0, Ordering::Relaxed);
+    }
+
+    /// The owning segment read lock keeps candidates stable. Callers must not
+    /// re-enter storage in `visit`; collect IDs and evaluate RLS after unlocking.
+    pub(crate) fn visit_graph_index_candidates(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        before_work: &mut impl FnMut() -> bool,
+        visit: &mut impl FnMut(&UnifiedEntity) -> bool,
+    ) -> bool {
+        let mut cached = self.graph_read_index.read();
+        if cached.is_none() {
+            drop(cached);
+            let mut writer = self.graph_read_index.write();
+            if writer.is_none() {
+                let mut index = SegmentGraphIndex::default();
+                // Only unrestricted structural mutation invalidates the index.
+                // A stopped rebuild is discarded, never published partially.
+                if !self.for_each_fast(|entity| {
+                    if !before_work() {
+                        return false;
+                    }
+                    index.insert(entity);
+                    true
+                }) {
+                    return false;
+                }
+                self.graph_read_index_bytes
+                    .store(index.memory_bytes(), Ordering::Relaxed);
+                *writer = Some(index);
+            }
+            cached = parking_lot::RwLockWriteGuard::downgrade(writer);
+        }
+        let index = cached.as_ref().expect("complete graph index");
+        for key in keys {
+            if !before_work() {
+                return false;
+            }
+            for id in index.candidates(kind, *key) {
+                if !before_work() {
+                    return false;
+                }
+                if let Some(entity) = self.get(id) {
+                    if !visit(entity) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Probe one declared UNIQUE/PRIMARY KEY against physical rows. Cache all
@@ -1257,6 +1341,11 @@ impl GrowingSegment {
 
     /// Remove entity from indices
     fn unindex_entity(&mut self, entity: &UnifiedEntity) {
+        if let Some(index) = self.graph_read_index.get_mut() {
+            index.remove(entity);
+            self.graph_read_index_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+        }
         // Kind index
         let kind_key = entity.kind.storage_type().to_string();
         if let Some(set) = self.kind_index.get_mut(&kind_key) {
@@ -1425,6 +1514,18 @@ impl GrowingSegment {
         {
             let kind = run[0].kind.storage_type();
             self.observe_graph_kind(&run[0].kind);
+            if matches!(
+                run[0].kind,
+                EntityKind::GraphNode(_) | EntityKind::GraphEdge(_)
+            ) {
+                if let Some(index) = self.graph_read_index.get_mut() {
+                    for entity in run {
+                        index.insert(entity);
+                    }
+                    self.graph_read_index_bytes
+                        .store(index.memory_bytes(), Ordering::Relaxed);
+                }
+            }
             let kind_set = match self.kind_index.get_mut(kind) {
                 Some(ids) => ids,
                 None => self.kind_index.entry(kind.to_string()).or_default(),
@@ -1687,6 +1788,7 @@ impl UnifiedSegment for GrowingSegment {
 
     fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity> {
         self.invalidate_unique_key_lookup();
+        self.invalidate_graph_read_index();
         if self.deleted.contains(&id) || !self.state.is_writable() {
             return None;
         }

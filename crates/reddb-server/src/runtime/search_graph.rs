@@ -1,9 +1,196 @@
 //! Context-search graph expansion under the enclosing statement's read view.
 use super::execution_context::capture_current_snapshot;
 use super::function_budget;
-use super::graph_tvf::{resolve_materialized_graph_endpoint, visit_graph_materialization_entities};
 use super::*;
 use crate::storage::unified::segment::GraphEntityKind;
+
+struct SearchGraphNodeLocation {
+    collection: String,
+    physical_id: EntityId,
+    aliases: Vec<EntityId>,
+}
+
+struct SearchGraphNeighbor {
+    logical_id: String,
+    edge_id: u64,
+    collection: String,
+    physical_id: EntityId,
+}
+
+/// Query-local caches contain only probed identities and reached adjacency.
+struct SearchGraphRead<'a> {
+    runtime: &'a RedDBRuntime,
+    store: &'a UnifiedStore,
+    snapshot: Option<super::impl_core::SnapshotContext>,
+    collections: Vec<String>,
+    nodes: HashMap<EntityId, Option<SearchGraphNodeLocation>>,
+    endpoints: HashMap<String, Option<EntityId>>,
+    adjacency: HashMap<String, Vec<SearchGraphNeighbor>>,
+}
+
+impl SearchGraphRead<'_> {
+    fn visible(&self, entity: &UnifiedEntity) -> bool {
+        // Preserve the scalar scan fallback for internal callers without a frame.
+        (self.snapshot.is_some() || entity.xmax == 0)
+            && super::impl_core::entity_visible_with_context(self.snapshot.as_ref(), entity)
+    }
+
+    fn node(&mut self, logical: EntityId) -> RedDBResult<Option<&SearchGraphNodeLocation>> {
+        if !self.nodes.contains_key(&logical) {
+            let mut aliases = vec![logical];
+            let mut visible = None;
+            for collection in &self.collections {
+                function_budget::charge(1)?;
+                let Some(manager) = self.store.get_collection(collection) else {
+                    continue;
+                };
+                manager.visit_graph_index_candidates(
+                    GraphEntityKind::Node,
+                    &[logical],
+                    || function_budget::charge(1).is_ok(),
+                    |entity| {
+                        aliases.push(entity.id);
+                        if self.visible(entity) {
+                            visible = Some((collection.clone(), entity.id));
+                        }
+                        true
+                    },
+                );
+                function_budget::charge(0)?;
+            }
+            aliases.sort_unstable();
+            aliases.dedup();
+            self.nodes.insert(
+                logical,
+                visible.map(|(collection, physical_id)| SearchGraphNodeLocation {
+                    collection,
+                    physical_id,
+                    aliases,
+                }),
+            );
+        }
+        Ok(self.nodes.get(&logical).and_then(Option::as_ref))
+    }
+
+    fn endpoint(&mut self, endpoint: &str) -> RedDBResult<Option<EntityId>> {
+        if let Some(identity) = self.endpoints.get(endpoint) {
+            return Ok(*identity);
+        }
+        let mut resolved = None;
+        if let Ok(id) = endpoint.parse::<u64>() {
+            let id = EntityId::new(id);
+            if self.node(id)?.is_some() {
+                resolved = Some(id);
+            } else {
+                // Retained physical aliases reveal identity only. A visible
+                // logical version must still exist in the requested scope.
+                let mut logical = None;
+                for collection in &self.collections {
+                    function_budget::charge(1)?;
+                    let Some(manager) = self.store.get_collection(collection) else {
+                        continue;
+                    };
+                    logical =
+                        manager.graph_node_logical_id(id, || function_budget::charge(1).is_ok());
+                    function_budget::charge(0)?;
+                    if logical.is_some() {
+                        break;
+                    }
+                }
+                if let Some(logical) = logical {
+                    if self.node(logical)?.is_some() {
+                        resolved = Some(logical);
+                    }
+                }
+            }
+        }
+        self.endpoints.insert(endpoint.to_string(), resolved);
+        Ok(resolved)
+    }
+
+    fn neighbors(
+        &mut self,
+        current: &str,
+        policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
+    ) -> RedDBResult<&[SearchGraphNeighbor]> {
+        if !self.adjacency.contains_key(current) {
+            let logical = EntityId::new(current.parse().expect("numeric logical node ID"));
+            let aliases = self
+                .node(logical)?
+                .map(|node| node.aliases.clone())
+                .unwrap_or_default();
+            let mut candidates = Vec::new();
+            let mut seen = HashSet::new();
+            if !aliases.is_empty() {
+                for collection in &self.collections {
+                    function_budget::charge(1)?;
+                    let Some(manager) = self.store.get_collection(collection) else {
+                        continue;
+                    };
+                    manager.visit_graph_index_candidates(
+                        GraphEntityKind::Edge,
+                        &aliases,
+                        || function_budget::charge(1).is_ok(),
+                        |entity| {
+                            if self.visible(entity) && seen.insert(entity.id) {
+                                candidates.push((collection.clone(), entity.id));
+                            }
+                            true
+                        },
+                    );
+                    function_budget::charge(0)?;
+                }
+            }
+            let mut neighbors = Vec::new();
+            // Hydrate and evaluate policies after releasing all segment locks.
+            for (collection, id) in candidates {
+                function_budget::charge(1)?;
+                let Some(entity) = self.store.get(&collection, id) else {
+                    continue;
+                };
+                if !self.runtime.search_entity_allowed(
+                    &collection,
+                    &entity,
+                    self.snapshot.as_ref(),
+                    policies,
+                ) {
+                    continue;
+                }
+                let EntityKind::GraphEdge(edge) = &entity.kind else {
+                    continue;
+                };
+                let Some(from) = self.endpoint(&edge.from_node)? else {
+                    continue;
+                };
+                let Some(to) = self.endpoint(&edge.to_node)? else {
+                    continue;
+                };
+                let neighbor = if from == logical {
+                    to
+                } else if to == logical {
+                    from
+                } else {
+                    continue;
+                };
+                let node = self.node(neighbor)?.expect("endpoint has a visible node");
+                neighbors.push(SearchGraphNeighbor {
+                    logical_id: neighbor.raw().to_string(),
+                    edge_id: entity.logical_id().raw(),
+                    collection: node.collection.clone(),
+                    physical_id: node.physical_id,
+                });
+            }
+            neighbors.sort_by(|left, right| {
+                left.logical_id
+                    .cmp(&right.logical_id)
+                    .then_with(|| left.edge_id.cmp(&right.edge_id))
+            });
+            self.adjacency.insert(current.to_string(), neighbors);
+        }
+        function_budget::charge(0)?;
+        Ok(self.adjacency.get(current).expect("adjacency resolved"))
+    }
+}
 
 impl RedDBRuntime {
     pub(super) fn search_context_expand_graph(
@@ -37,89 +224,15 @@ impl RedDBRuntime {
             .into_iter()
             .filter(|collection| scope.is_none_or(|scope| scope.contains(collection)))
             .collect();
-        // Retain only scalar locations. Payloads and RLS evaluation stay outside
-        // segment locks and are loaded only when traversal reaches a candidate.
-        let mut locations = HashMap::new();
-        for collection in &collections {
-            function_budget::charge(1)?;
-            let Some(manager) = store.get_collection(collection) else {
-                continue;
-            };
-            manager.scan_graph_candidates_for_each(
-                snapshot.as_ref(),
-                GraphEntityKind::Node,
-                || function_budget::charge(1).is_ok(),
-                |entity| {
-                    if function_budget::charge(1).is_err() {
-                        return false;
-                    }
-                    if matches!(entity.kind, EntityKind::GraphNode(_)) {
-                        locations.insert(
-                            entity.logical_id().raw().to_string(),
-                            (collection.clone(), entity.id),
-                        );
-                    }
-                    true
-                },
-            );
-            function_budget::charge(0)?;
-        }
-        let visible_nodes: HashSet<_> = locations.keys().cloned().collect();
-        let mut aliases = HashMap::new();
-        let mut adjacency: HashMap<String, Vec<(String, u64)>> = HashMap::new();
-        for collection in &collections {
-            let Some(manager) = store.get_collection(collection) else {
-                continue;
-            };
-            visit_graph_materialization_entities(
-                &manager,
-                snapshot.as_ref(),
-                GraphEntityKind::Edge,
-                |entity| {
-                    if !self.search_entity_rls_allowed(collection, &entity, policies) {
-                        return Ok(());
-                    }
-                    let EntityKind::GraphEdge(edge) = &entity.kind else {
-                        return Ok(());
-                    };
-                    let Some(from) = resolve_materialized_graph_endpoint(
-                        &edge.from_node,
-                        &visible_nodes,
-                        &mut aliases,
-                        &store,
-                        &collections,
-                    )?
-                    else {
-                        return Ok(());
-                    };
-                    let Some(to) = resolve_materialized_graph_endpoint(
-                        &edge.to_node,
-                        &visible_nodes,
-                        &mut aliases,
-                        &store,
-                        &collections,
-                    )?
-                    else {
-                        return Ok(());
-                    };
-                    let edge_id = entity.logical_id().raw();
-                    adjacency
-                        .entry(from.to_string())
-                        .or_default()
-                        .push((to.to_string(), edge_id));
-                    if from != to {
-                        adjacency
-                            .entry(to.to_string())
-                            .or_default()
-                            .push((from.to_string(), edge_id));
-                    }
-                    Ok(())
-                },
-            )?;
-        }
-        for neighbors in adjacency.values_mut() {
-            neighbors.sort_unstable();
-        }
+        let mut graph = SearchGraphRead {
+            runtime: self,
+            store: store.as_ref(),
+            snapshot: snapshot.clone(),
+            collections,
+            nodes: HashMap::new(),
+            endpoints: HashMap::new(),
+            adjacency: HashMap::new(),
+        };
         let mut hydrated: HashMap<String, Option<UnifiedEntity>> = HashMap::new();
         let mut expanded = 0;
         // Map logical identity to the existing result slot without changing the
@@ -137,18 +250,18 @@ impl RedDBRuntime {
                 if depth >= max_depth {
                     continue;
                 }
-                let Some(neighbors) = adjacency.get(&current) else {
-                    continue;
-                };
+                let neighbors = graph.neighbors(&current, policies)?;
                 let mut admitted_edges = 0;
-                for (neighbor, _) in neighbors {
+                for adjacent in neighbors {
+                    let neighbor = &adjacent.logical_id;
                     function_budget::charge(1)?;
                     if admitted_edges >= max_edges {
                         break;
                     }
-                    let (collection, physical) = &locations[neighbor];
+                    let collection = &adjacent.collection;
+                    let physical = adjacent.physical_id;
                     let entity = hydrated.entry(neighbor.clone()).or_insert_with(|| {
-                        store.get(collection, *physical).filter(|entity| {
+                        store.get(collection, physical).filter(|entity| {
                             self.search_entity_allowed(
                                 collection,
                                 entity,
@@ -220,7 +333,7 @@ mod tests {
             let _budget = function_budget::Scope::enter(1, 10_000).expect("budget");
             let error = runtime
                 .search_context_expand_graph(&mut scored, None, 3, 20, 0.0, &mut policies)
-                .expect_err("scalar preparation exceeds budget");
+                .expect_err("indexed expansion exceeds budget");
             assert!(
                 error.to_string().contains("execution work_max exceeded"),
                 "{error}"
@@ -232,5 +345,85 @@ mod tests {
                 .expect("scope restored"),
             0
         );
+    }
+
+    #[test]
+    fn indexed_expansion_budget_ignores_unreachable_graph() {
+        for sealed in [false, true] {
+            let runtime = RedDBRuntime::in_memory().expect("runtime");
+            let store = runtime.db().store();
+            store.get_or_create_collection("links");
+            let seed_id = store.next_entity_id();
+            let seed = UnifiedEntity::graph_node(seed_id, "seed", "Node", HashMap::new());
+            store.insert("links", seed.clone()).expect("seed");
+            let neighbor_id = store.next_entity_id();
+            store
+                .insert(
+                    "links",
+                    UnifiedEntity::graph_node(neighbor_id, "neighbor", "Node", HashMap::new()),
+                )
+                .expect("neighbor");
+            store
+                .insert(
+                    "links",
+                    UnifiedEntity::graph_edge(
+                        store.next_entity_id(),
+                        "step",
+                        seed_id.raw().to_string(),
+                        neighbor_id.raw().to_string(),
+                        1.0,
+                        HashMap::new(),
+                    ),
+                )
+                .expect("edge");
+            let mut unrelated = Vec::new();
+            for _ in 0..4096 {
+                let id = store.next_entity_id();
+                unrelated.push(UnifiedEntity::graph_node(
+                    id,
+                    "orphan",
+                    "Node",
+                    HashMap::new(),
+                ));
+                unrelated.push(UnifiedEntity::graph_edge(
+                    store.next_entity_id(),
+                    "isolated",
+                    id.raw().to_string(),
+                    id.raw().to_string(),
+                    1.0,
+                    HashMap::new(),
+                ));
+            }
+            store
+                .bulk_insert("links", unrelated)
+                .expect("unreachable graph");
+            if sealed {
+                store
+                    .get_collection("links")
+                    .expect("collection")
+                    .force_seal()
+                    .expect("seal");
+            }
+            let mut scored = HashMap::from([(
+                seed_id.raw(),
+                (seed, 1.0, DiscoveryMethod::GlobalScan, "links".into()),
+            )]);
+            let scope = BTreeSet::from(["links".into()]);
+            let _budget = function_budget::Scope::enter(128, 10_000).expect("budget");
+            assert_eq!(
+                runtime
+                    .search_context_expand_graph(
+                        &mut scored,
+                        Some(&scope),
+                        1,
+                        2,
+                        0.0,
+                        &mut HashMap::new(),
+                    )
+                    .expect("unrelated entities do not consume candidate budget"),
+                1
+            );
+            assert!(scored.contains_key(&neighbor_id.raw()));
+        }
     }
 }

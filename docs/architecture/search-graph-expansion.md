@@ -11,10 +11,11 @@ neighbor stored elsewhere.
 an existing frame for nested calls. Direct matches and graph expansion use the
 same snapshot, including transaction-local writes and savepoint visibility.
 
-Graph expansion collects snapshot-visible logical node IDs and physical storage
-locations with the graph-kind-pruned scalar visitor. It uses the shared graph
-visitor for visible edges and the shared retained-version endpoint resolver.
-Edge RLS applies before building adjacency. Node payloads are fetched and checked
+Graph expansion probes a maintained per-segment index for the reached logical
+node and all its retained physical versions. Incident-edge probes include those
+physical aliases and the logical ID; endpoint resolution requires a visible
+logical node in scope. Candidates are checked against the captured snapshot.
+Edge RLS applies before caching reached adjacency. Node payloads are fetched and checked
 against snapshot and node RLS when reached, outside segment locks. A denied node
 cannot become a result or a traversal bridge. Endpoint identity resolution alone
 never authorizes traversal.
@@ -44,28 +45,43 @@ visited set prevents cycles. Existing per-bucket result limits remain unchanged.
 
 ## Cost and limits of this slice
 
-For S segments, G candidates in graph-bearing segments, V visible nodes and E
-admitted edges, preparation costs O(S + G) scanning plus O(V + E) scalar storage
-and adjacency sorting. Retained physical endpoint aliases have the query-local
-probe cost described in [graph identity](graph-logical-identity.md). Payload
-memory is proportional to hydrated candidates and returned results; denied
-candidate payloads are released after policy evaluation. Edge scans still copy
-the current collection's edge payloads before visiting them outside locks.
+Each segment maintains B-tree sets of `(logical node ID, physical node ID)` and
+`(numeric endpoint, physical edge ID)`. Both endpoints are indexed; self-loops
+produce one pair. The index retains superseded MVCC versions until physical
+reclamation. Insert, mixed bulk insert and consolidation adoption maintain it;
+sealing preserves it. Existing recovery insertion paths reconstruct it from
+entities. Property-only and MVCC metadata updates keep the keys. Structural
+replacement or unrestricted mutable access invalidates the derived index; the
+next probe rebuilds it under the segment lock with cooperative work checks. An
+interrupted rebuild is discarded and never publishes partial candidates.
+
+Cost sketch: each key probes scoped collections/segments, with O(log N + K)
+work in a graph-bearing segment containing N pairs and K matching candidates.
+This replaces the per-query whole-graph scan and map. Reads still pay for
+collection/segment probes, retained aliases and incident degree; reached
+adjacency is sorted before applying the edge allowance. Query-local caches grow
+with probed identities and reached adjacency, including policy-denied candidates,
+not unrelated graph entries. A cold rebuild after invalidation costs O(M log N)
+for M resident entities and N graph pairs. Ordinary maintained writes add
+O(log N) work per pair. Accounting estimates 64 bytes per resident pair for keys,
+B-tree headers and occupancy slack; this is not a hard memory admission bound.
 There is no new WAL record, disk format, fsync or network round trip.
 
-This removes eager reachable-node graph materialization before edge limits are
-applied. It does not provide an indexed adjacency seek or a shared peak-memory
-admission bound: the scalar node map and edge adjacency still scale with the
-scoped graph. CALL work/deadline checks propagate errors from preparation,
-identity resolution and traversal rather than returning partial success.
+CALL work/deadline checks cover collection/segment probes, key seeks, physical
+candidates, rebuilds, identity resolution and traversal. They propagate errors
+instead of returning partial success. Lock waits and sorting are not individually
+interruptible; shared peak-memory admission remains separate work.
 
-The allocation regression isolates indexed search plus expansion, with global
-fallback disabled after indexing the seed. It covers growing and sealed mixed
-collections, 64 unrelated vector payloads and 64 unreachable large node
-properties. It measures the calling thread; it is not an all-thread memory bound
-or a throughput benchmark. Global fallback scan still clones its candidate
-payloads, and vector expansion's separate hydration path needs its own review.
-No SQLite, Postgres, Cassandra or SurrealDB performance parity is claimed here.
+Allocation regressions isolate indexed search plus expansion, with global
+fallback disabled after indexing the seed. They cover growing and sealed mixed
+collections, unrelated vector payloads, unreachable large node properties and
+4,096 unreachable nodes plus 4,096 unreachable edges. The last case measures the
+first read after insertion/sealing, without a graph-query warmup, and requires
+less than 512 KiB of calling-thread allocations. This measures cumulative
+allocations, not peak resident memory, all-thread memory or throughput. Global
+fallback scan still clones its candidate payloads, and vector expansion's
+separate hydration path needs its own review. No SQLite, Postgres, Cassandra or
+SurrealDB performance parity is claimed here.
 
 Regression coverage lives in
 `tests/grouped/graph_analytics/e2e_search_graph_expansion.rs` and

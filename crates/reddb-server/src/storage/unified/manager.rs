@@ -586,6 +586,40 @@ impl SegmentManager {
         None
     }
 
+    /// Indexed physical candidates, including retained MVCC history. The caller
+    /// applies its explicit snapshot and defers RLS until segment locks are gone.
+    pub(crate) fn visit_graph_index_candidates(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        mut before_work: impl FnMut() -> bool,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) {
+        if let Some(growing) = self.growing.read().as_ref() {
+            if !before_work() {
+                return;
+            }
+            let segment = growing.read();
+            if segment.may_contain_graph_kind(kind)
+                && !segment.visit_graph_index_candidates(kind, keys, &mut before_work, &mut visit)
+            {
+                return;
+            }
+        }
+        let sealed = self.sealed.read();
+        for segment in sealed.iter() {
+            if !before_work() {
+                return;
+            }
+            let segment = segment.read();
+            if segment.may_contain_graph_kind(kind)
+                && !segment.visit_graph_index_candidates(kind, keys, &mut before_work, &mut visit)
+            {
+                return;
+            }
+        }
+    }
+
     /// Batch-fetch multiple entities by ID in a single lock acquisition per segment.
     ///
     /// For indexed-scan result sets (up to ~5000 ids from range/bitmap lookup) this

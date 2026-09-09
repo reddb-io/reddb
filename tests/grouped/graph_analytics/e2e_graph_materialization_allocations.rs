@@ -368,3 +368,82 @@ fn search_graph_does_not_clone_unreachable_node_or_vector_payloads() {
         assert!(total < 512 * 1024, "search allocated {total}");
     }
 }
+
+#[test]
+fn search_graph_index_cost_does_not_grow_with_unreachable_graph() {
+    use reddb::application::SearchContextInput;
+    use std::collections::HashMap;
+    for sealed in [false, true] {
+        let runtime = mixed_graph_fixture(false, 0);
+        let store = runtime.db().store();
+        store
+            .context_index()
+            .set_collection_enabled("mixed_graph", true);
+        let mut request = SearchContextInput {
+            query: "alice".into(),
+            field: None,
+            vector: None,
+            collections: Some(vec!["mixed_graph".into()]),
+            limit: Some(20),
+            graph_depth: Some(1),
+            graph_max_edges: Some(2),
+            max_cross_refs: None,
+            follow_cross_refs: Some(false),
+            expand_graph: Some(true),
+            global_scan: Some(true),
+            reindex: Some(true),
+            min_score: None,
+        };
+        assert_eq!(
+            runtime
+                .search_context_input(request.clone())
+                .expect("index seed")
+                .graph
+                .nodes
+                .len(),
+            2
+        );
+        let mut unrelated = Vec::new();
+        for index in 0..4096 {
+            let id = store.next_entity_id();
+            unrelated.push(UnifiedEntity::graph_node(
+                id,
+                format!("orphan-{index}"),
+                "Other",
+                HashMap::new(),
+            ));
+            unrelated.push(UnifiedEntity::graph_edge(
+                store.next_entity_id(),
+                "isolated",
+                id.raw().to_string(),
+                id.raw().to_string(),
+                1.0,
+                HashMap::new(),
+            ));
+        }
+        store
+            .bulk_insert("mixed_graph", unrelated)
+            .expect("unreachable graph");
+        if sealed {
+            store
+                .get_collection("mixed_graph")
+                .expect("collection")
+                .force_seal()
+                .expect("seal");
+        }
+        request.global_scan = Some(false);
+        request.reindex = Some(false);
+        // No graph-query warmup after insertion/sealing: maintained indexes must
+        // avoid a query-sized rebuild even on the first read after these writes.
+        ALLOCATED_BYTES.with(|total| total.set(0));
+        TRACK_ALLOCATIONS.with(|enabled| enabled.set(true));
+        let result = runtime.search_context_input(request);
+        TRACK_ALLOCATIONS.with(|enabled| enabled.set(false));
+        assert_eq!(result.expect("indexed expansion").graph.nodes.len(), 2);
+        let total = ALLOCATED_BYTES.with(Cell::get);
+        assert!(
+            total < 512 * 1024,
+            "unreachable graph expanded allocation to {total}"
+        );
+    }
+}
