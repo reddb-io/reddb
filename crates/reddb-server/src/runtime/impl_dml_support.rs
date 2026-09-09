@@ -301,7 +301,24 @@ pub(super) fn resolve_edge_endpoint(
             if let Ok(n) = s.parse::<u64>() {
                 return Ok(n);
             }
-            let matches = store.lookup_graph_nodes_by_label_in(collection, &s);
+            let physical_ids = store.lookup_graph_nodes_by_label_in(collection, &s);
+            let mut matches = Vec::new();
+            if let Some(manager) = store.get_collection(collection) {
+                // Recovery may index several physical versions of one node.
+                // Only distinct logical nodes make a label ambiguous.
+                for physical in physical_ids {
+                    super::function_budget::charge(1)?;
+                    let logical = manager.graph_node_logical_id(physical, || {
+                        super::function_budget::charge(1).is_ok()
+                    });
+                    super::function_budget::charge(0)?;
+                    if let Some(logical) = logical {
+                        matches.push(logical);
+                    }
+                }
+                matches.sort_unstable();
+                matches.dedup();
+            }
             match matches.len() {
                 0 => Err(RedDBError::Query(format!(
                     "column '{name}': no graph node with label '{s}' in collection '{collection}'"

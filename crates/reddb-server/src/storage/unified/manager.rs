@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use super::entity::{EntityId, UnifiedEntity};
+use super::entity::{EntityId, EntityKind, UnifiedEntity};
 use super::metadata::{Metadata, MetadataFilter};
 use super::segment::{
     GraphEntityKind, GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState,
@@ -551,6 +551,38 @@ impl SegmentManager {
             }
         }
 
+        None
+    }
+
+    /// Resolve a physical graph node reference without cloning historical payloads.
+    /// This deliberately ignores MVCC: callers must authorize the visible logical
+    /// node separately. The callback bounds every segment probe, including misses.
+    pub(crate) fn graph_node_logical_id(
+        &self,
+        id: EntityId,
+        mut before_segment: impl FnMut() -> bool,
+    ) -> Option<EntityId> {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            if !before_segment() {
+                return None;
+            }
+            let growing = growing_arc.read();
+            if let Some(entity) = growing.get(id) {
+                return matches!(entity.kind, EntityKind::GraphNode(_))
+                    .then(|| entity.logical_id());
+            }
+        }
+        let sealed = self.sealed.read();
+        for segment in sealed.iter() {
+            if !before_segment() {
+                return None;
+            }
+            let segment = segment.read();
+            if let Some(entity) = segment.get(id) {
+                return matches!(entity.kind, EntityKind::GraphNode(_))
+                    .then(|| entity.logical_id());
+            }
+        }
         None
     }
 

@@ -93,3 +93,8 @@ logical identity resolution, change default transaction semantics or claim
 MATCH read-own-write correctness across versioned graph updates. That is a
 priority follow-up, including edges created before and after several versions,
 commit/rollback/savepoints, RLS and historical snapshots.
+
+The follow-up [graph logical identity correction](../architecture/graph-logical-identity.md)
+addresses this second gap in runtime MATCH/path materialization, including
+retained intermediate physical endpoints. Non-versioned in-place transaction
+semantics remain separate.
