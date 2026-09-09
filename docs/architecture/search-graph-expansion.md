@@ -83,6 +83,21 @@ fallback scan still clones its candidate payloads, and vector expansion's
 separate hydration path needs its own review. No SQLite, Postgres, Cassandra or
 SurrealDB performance parity is claimed here.
 
+A standalone public `search_context_input` allocation probe used the same query,
+returned the same two nodes, disabled global fallback/reindex after seed indexing,
+and measured the first query after unrelated bulk insertion:
+
+| Unreachable nodes / edges | Parent whole-graph preparation | Indexed preparation |
+|---|---:|---:|
+| 0 / 0 | 10,929 bytes | 10,175 bytes |
+| 4,096 / 4,096 | 7,278,621 bytes | 10,175 bytes |
+
+These are calling-thread allocated bytes from local debug builds, not timing or
+throughput measurements. The maintained index moves work and memory into writes;
+write-throughput and high-degree workloads still need separate measurements.
+The work-budget regression also expands the connected pair with a 128-unit
+budget despite 8,192 unrelated graph entities, for growing and sealed segments.
+
 Regression coverage lives in
 `tests/grouped/graph_analytics/e2e_search_graph_expansion.rs` and
 `tests/grouped/graph_analytics/e2e_graph_materialization_allocations.rs`.
