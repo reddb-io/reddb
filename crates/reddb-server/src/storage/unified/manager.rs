@@ -1682,7 +1682,8 @@ impl SegmentManager {
     /// Capture segment membership and append boundaries, then hydrate bounded
     /// batches. The consumer runs outside topology and segment locks, so scoring
     /// and RLS may re-enter storage and writers can progress between batches.
-    /// Retired source segments remain pinned until this scan finishes.
+    /// Retired sources pin positions only; hydration uses current segments so
+    /// mutations after consolidation are visible to the snapshot predicate.
     pub(crate) fn scan_batches(
         &self,
         snapshot: Option<&SnapshotContext>,
@@ -1702,20 +1703,33 @@ impl SegmentManager {
             }
             segments
         };
+        let mut ids = Vec::new();
         let mut batch = Vec::new();
         for (segment, mut cursor) in segments {
             while !cursor.finished() {
+                ids.clear();
                 batch.clear();
-                batch.reserve_exact(cursor.remaining().min(super::segment::SCAN_BATCH_SIZE));
+                let batch_size = cursor.remaining().min(super::segment::SCAN_BATCH_SIZE);
+                ids.reserve_exact(batch_size);
+                batch.reserve_exact(batch_size);
                 {
                     let segment = segment.read();
-                    if !segment.scan_batch(&mut cursor, &mut before_work, &mut |entity| {
-                        if Self::scan_entity_visible(snapshot, entity) {
-                            batch.push(entity.clone());
-                        }
-                    }) {
+                    if !segment.scan_batch(&mut cursor, &mut before_work, &mut |id| ids.push(id)) {
                         return false;
                     }
+                }
+                // Sources can retire between batches. Consult authoritative storage
+                // after releasing the source guard, just as the former ID-list scan did.
+                if !before_work() {
+                    return false;
+                }
+                self.for_each_id(&ids, |_, entity| {
+                    if Self::scan_entity_visible(snapshot, entity) {
+                        batch.push(entity.clone());
+                    }
+                });
+                if !before_work() {
+                    return false;
                 }
                 if !consume(&batch) {
                     return false;
@@ -2495,6 +2509,10 @@ mod tests {
                         .expect("new write");
                     drain_maintenance(&manager);
                     assert!(manager.stats().consolidation.runs_completed > 0);
+                    assert!(manager
+                        .delete(EntityId::new(1))
+                        .expect("delete after source retirement"));
+                    assert!(manager.get(EntityId::new(1)).is_none());
                 }
                 true
             }
@@ -2502,7 +2520,7 @@ mod tests {
         seen.sort_unstable();
         assert_eq!(
             seen,
-            (1..=900).collect::<Vec<_>>(),
+            (2..=900).collect::<Vec<_>>(),
             "no duplicate, missing or late candidates"
         );
         let mut after = Vec::new();
@@ -2515,9 +2533,106 @@ mod tests {
             }
         ));
         after.sort_unstable();
-        let mut expected: Vec<_> = (1..=900).collect();
+        let mut expected: Vec<_> = (2..=900).collect();
         expected.push(5000);
         assert_eq!(after, expected, "adopted entities have scan positions");
+    }
+
+    #[test]
+    fn bounded_scan_applies_snapshot_to_relocated_versions() {
+        for (consolidate, bulk) in [(false, false), (false, true), (true, false), (true, true)] {
+            let manager = SegmentManager::with_config(
+                "vectors",
+                ManagerConfig {
+                    max_sealed_segments: 1,
+                    ..Default::default()
+                },
+            );
+            for ids in [[1, 2], [3, 4]] {
+                let entities = ids.map(|id| {
+                    let mut entity = UnifiedEntity::vector(EntityId::new(id), "vectors", vec![1.0]);
+                    entity.set_xmin(3);
+                    entity
+                });
+                if bulk {
+                    manager
+                        .bulk_insert(entities.into())
+                        .expect("initial versions");
+                } else {
+                    for entity in entities {
+                        manager.insert(entity).expect("initial version");
+                    }
+                }
+                manager.force_seal().expect("seal source");
+            }
+            let snapshot = SnapshotContext {
+                snapshot: Snapshot {
+                    xid: 10,
+                    in_progress: HashSet::new(),
+                },
+                manager: Arc::new(SnapshotManager::new()),
+                own_xids: HashSet::new(),
+                requires_index_fallback: false,
+                serializable_reader: None,
+            };
+            let mut changed = false;
+            let mut seen = Vec::new();
+            assert!(manager.scan_batches(
+                Some(&snapshot),
+                || true,
+                |batch| {
+                    seen.extend(batch.iter().map(|entity| entity.id.raw()));
+                    if !changed {
+                        changed = true;
+                        if consolidate {
+                            drain_maintenance(&manager);
+                            assert!(manager.stats().consolidation.runs_completed > 0);
+                        }
+                        for (id, xmax) in [(3, 8), (4, 12)] {
+                            let mut entity =
+                                manager.get(EntityId::new(id)).expect("retained version");
+                            entity.set_xmax(xmax);
+                            manager
+                                .update(entity)
+                                .expect("update after source retirement");
+                        }
+                    }
+                    true
+                }
+            ));
+            seen.sort_unstable();
+            assert_eq!(seen, vec![1, 2, 4], "snapshot uses authoritative xmax");
+            let mut again = Vec::new();
+            assert!(manager.scan_batches(
+                Some(&snapshot),
+                || true,
+                |batch| {
+                    again.extend(batch.iter().map(|entity| entity.id.raw()));
+                    true
+                }
+            ));
+            again.sort_unstable();
+            assert_eq!(
+                again,
+                vec![1, 2, 4],
+                "old slots do not duplicate relocated versions"
+            );
+            let mut current = Vec::new();
+            assert!(manager.scan_batches(
+                None,
+                || true,
+                |batch| {
+                    current.extend(batch.iter().map(|entity| entity.id.raw()));
+                    true
+                }
+            ));
+            current.sort_unstable();
+            assert_eq!(
+                current,
+                vec![1, 2],
+                "current view excludes both deleted versions"
+            );
+        }
     }
 
     #[test]

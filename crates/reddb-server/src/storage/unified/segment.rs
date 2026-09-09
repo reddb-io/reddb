@@ -177,14 +177,14 @@ fn entity_id_from_probe_key(key: &[u8]) -> Option<EntityId> {
 
 const SEALED_MULTI_ZONE_MAX_INTERVALS: usize = 4;
 
-/// Approximate cost of one entry in the `deleted` tombstone set: the 8-byte
-/// entity id plus hashbrown's control byte and load-factor slack.
+/// Approximate cost of one entry in the `deleted` tombstone map: the entity
+/// id and deletion ordinal plus hashbrown's control byte and load-factor slack.
 ///
 /// Tombstones outlive the entity they bury — a sealed segment holds its
-/// `deleted` set for as long as the segment lives. That set is the memory
+/// `deleted` map for as long as the segment lives. That map is the memory
 /// consolidation reclaims even in HashMap mode, where the entity body itself
 /// was already freed by `force_delete`.
-const TOMBSTONE_ENTRY_BYTES: u64 = 16;
+const TOMBSTONE_ENTRY_BYTES: u64 = 24;
 
 #[derive(Debug, Clone)]
 struct UpdateIndexSnapshot {
@@ -457,6 +457,7 @@ pub(crate) const SCAN_BATCH_SIZE: usize = 256;
 pub(crate) struct SegmentScanCursor {
     flat_end: usize,
     hash_end: usize,
+    deleted_end: usize,
     position: usize,
 }
 
@@ -496,7 +497,9 @@ pub struct GrowingSegment {
     /// Whether flat storage is active (bulk insert mode)
     use_flat: bool,
     /// Deleted entity IDs (tombstones)
-    deleted: HashSet<EntityId>,
+    // Ordinals never change or disappear during the segment lifetime. Cursors
+    // skip old tombstones but keep IDs relocated after their capture boundary.
+    deleted: HashMap<EntityId, usize>,
     /// Metadata storage (type-aware)
     metadata: MetadataStorage,
 
@@ -563,17 +566,19 @@ impl GrowingSegment {
         SegmentScanCursor {
             flat_end: self.flat_entities.len(),
             hash_end: self.hash_scan_ids.len(),
+            deleted_end: self.deleted.len(),
             position: 0,
         }
     }
 
     /// Append-only slots survive insertions, deletions and sealing. The caller
     /// owns the segment read guard and must not re-enter storage in `visit`.
+    /// IDs must be hydrated through the manager: retired sources can be stale.
     pub(crate) fn scan_batch(
         &self,
         cursor: &mut SegmentScanCursor,
         before_work: &mut impl FnMut() -> bool,
-        visit: &mut impl FnMut(&UnifiedEntity),
+        visit: &mut impl FnMut(EntityId),
     ) -> bool {
         for _ in 0..SCAN_BATCH_SIZE {
             if cursor.finished() {
@@ -588,8 +593,14 @@ impl GrowingSegment {
                 self.hash_scan_ids[cursor.position - cursor.flat_end]
             };
             cursor.position += 1;
-            if let Some(entity) = self.get(id) {
-                visit(entity);
+            let eligible = match self.deleted.get(&id) {
+                Some(&ordinal) => ordinal >= cursor.deleted_end,
+                // Unpublished consolidation eviction leaves an unused position
+                // without a tombstone. It must not become a candidate later.
+                None => self.get(id).is_some(),
+            };
+            if eligible {
+                visit(id);
             }
         }
         true
@@ -619,7 +630,7 @@ impl GrowingSegment {
                 }
             } else {
                 for entity in &self.flat_entities {
-                    if self.deleted.contains(&entity.id) {
+                    if self.deleted.contains_key(&entity.id) {
                         continue;
                     }
                     if !f(entity) {
@@ -627,7 +638,7 @@ impl GrowingSegment {
                     }
                 }
                 for entity in self.entities.values() {
-                    if self.deleted.contains(&entity.id) {
+                    if self.deleted.contains_key(&entity.id) {
                         continue;
                     }
                     if !f(entity) {
@@ -645,7 +656,7 @@ impl GrowingSegment {
                 }
             } else {
                 for entity in self.entities.values() {
-                    if self.deleted.contains(&entity.id) {
+                    if self.deleted.contains_key(&entity.id) {
                         continue;
                     }
                     if !f(entity) {
@@ -672,7 +683,7 @@ impl GrowingSegment {
             flat_entities: Vec::new(),
             base_entity_id: 0,
             use_flat: false,
-            deleted: HashSet::new(),
+            deleted: HashMap::new(),
             metadata: MetadataStorage::new(),
             pk_index: BTreeMap::new(),
             unique_key_lookup: parking_lot::RwLock::new(Vec::new()),
@@ -699,7 +710,7 @@ impl GrowingSegment {
     }
 
     fn has_live_entity(&self, id: EntityId) -> bool {
-        if self.deleted.contains(&id) {
+        if self.deleted.contains_key(&id) {
             return false;
         }
         if self.use_flat {
@@ -828,6 +839,18 @@ impl GrowingSegment {
         Ok(())
     }
 
+    /// Preserve the first removal order, including repeated flat deletes.
+    fn record_tombstone(&mut self, id: EntityId) -> bool {
+        let ordinal = self.deleted.len();
+        match self.deleted.entry(id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ordinal);
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(_) => false,
+        }
+    }
+
     /// Tombstone a flat-mode entity in place. Its slot stays so that positional
     /// lookup by `id - base_entity_id` keeps working, so its payload keeps
     /// costing memory until consolidation merges the segment away.
@@ -835,7 +858,7 @@ impl GrowingSegment {
     /// Returns `false` when the entity was already tombstoned.
     fn tombstone_flat_entity(&mut self, idx: usize, id: EntityId) -> bool {
         self.invalidate_unique_key_lookup();
-        if !self.deleted.insert(id) {
+        if !self.record_tombstone(id) {
             return false;
         }
         if let Some(index) = self.graph_read_index.get_mut() {
@@ -862,7 +885,7 @@ impl GrowingSegment {
         self.release_memory(Self::estimate_entity_size(&entity));
         self.unindex_entity(&entity);
         self.metadata.remove_all(id);
-        self.deleted.insert(id);
+        self.record_tombstone(id);
         true
     }
 
@@ -1132,7 +1155,7 @@ impl GrowingSegment {
 
         if self.use_flat {
             for entity in &self.flat_entities {
-                if self.deleted.contains(&entity.id) {
+                if self.deleted.contains_key(&entity.id) {
                     continue;
                 }
                 if let EntityData::Row(row) = &entity.data {
@@ -1141,7 +1164,7 @@ impl GrowingSegment {
             }
         } else {
             for entity in self.entities.values() {
-                if self.deleted.contains(&entity.id) {
+                if self.deleted.contains_key(&entity.id) {
                     continue;
                 }
                 if let EntityData::Row(row) = &entity.data {
@@ -1829,7 +1852,7 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn get(&self, id: EntityId) -> Option<&UnifiedEntity> {
-        if self.deleted.contains(&id) {
+        if self.deleted.contains_key(&id) {
             return None;
         }
         if self.use_flat {
@@ -1854,7 +1877,7 @@ impl UnifiedSegment for GrowingSegment {
     fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity> {
         self.invalidate_unique_key_lookup();
         self.invalidate_graph_read_index();
-        if self.deleted.contains(&id) || !self.state.is_writable() {
+        if self.deleted.contains_key(&id) || !self.state.is_writable() {
             return None;
         }
         // The caller can replace the kind through this reference. Conservatively
@@ -2027,7 +2050,7 @@ impl UnifiedSegment for GrowingSegment {
         if self.deleted.is_empty() {
             base
         } else {
-            Box::new(base.filter(|e| !self.deleted.contains(&e.id)))
+            Box::new(base.filter(|e| !self.deleted.contains_key(&e.id)))
         }
     }
 
@@ -2043,7 +2066,7 @@ impl UnifiedSegment for GrowingSegment {
             Box::new(std::iter::empty())
         };
         Box::new(flat.chain(self.entities.values()).filter(move |e| {
-            if self.deleted.contains(&e.id) {
+            if self.deleted.contains_key(&e.id) {
                 return false;
             }
             if let Some(ids) = ids {
@@ -2068,7 +2091,7 @@ impl UnifiedSegment for GrowingSegment {
         flat_ids
             .chain(self.entities.keys().copied())
             .filter(|id| {
-                if self.deleted.contains(id) {
+                if self.deleted.contains_key(id) {
                     return false;
                 }
                 let metadata = self.metadata.get_all(*id);
