@@ -381,7 +381,7 @@ impl UnifiedStore {
 
         managers
             .iter()
-            .map(|manager| manager.memory_bytes())
+            .map(|manager| manager.resident_bytes())
             .fold(0, u64::saturating_add)
     }
 

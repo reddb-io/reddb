@@ -67,9 +67,10 @@ Tombstones now store an additional `usize` deletion ordinal. Resident/reclaimabl
 accounting estimates 24 bytes per tombstone instead of 16, including hash-table
 slack; this is shared per segment, not copied per query.
 
-Pinned retired segments can delay memory reclamation. Existing active-segment
-accounting is not a complete peak-memory admission bound for those retained
-references. Sealing now holds the growing topology guard through sealing and
+Pinned retired segments can delay memory reclamation. Their payloads and
+in-flight consolidation are now included in [resident arena accounting](retained-segment-memory.md).
+Atomic reservations and query-buffer admission remain necessary for a complete
+peak-memory bound. Sealing now holds the growing topology guard through sealing and
 publication; seal-heavy write latency needs its own measurements. No stronger
 write-throughput, crash-resilience or competitor-parity claim is made here.
 

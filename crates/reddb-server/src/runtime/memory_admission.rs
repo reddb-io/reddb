@@ -22,21 +22,18 @@ impl crate::RedDBRuntime {
         }
 
         let accounting = self.memory_accounting();
-        let budget = accounting.budget().resolved_bytes;
         let used = accounting.total_used_bytes();
         if pool == MemoryPool::SegmentArena {
             let store = self.db().store();
             if store.reclaimable_segment_bytes() > 0 {
                 let before = used;
                 let mut reclaimed = 0;
-                let mut attempted = false;
                 for _ in 0..MAX_PRESSURE_TICKS {
                     let pressure_advanced = store.pressure_consolidation_tick();
                     let maintenance_advanced = store.run_maintenance().is_ok();
                     if !pressure_advanced && !maintenance_advanced {
                         break;
                     }
-                    attempted = true;
                     self.refresh_memory_accounting();
                     let after = accounting.total_used_bytes();
                     reclaimed = before.saturating_sub(after);
@@ -44,10 +41,6 @@ impl crate::RedDBRuntime {
                         accounting.record_pressure_reclamation(reclaimed);
                         return Ok(());
                     }
-                }
-                if attempted && accounting.total_used_bytes() <= budget {
-                    accounting.record_pressure_reclamation(reclaimed);
-                    return Ok(());
                 }
                 accounting.record_pressure_reclamation(reclaimed);
             }
@@ -185,5 +178,53 @@ fn format_mib(bytes: u64) -> String {
 fn _assert_all_pools_named() {
     for pool in MEMORY_POOLS {
         let _ = didactic_pool_name(pool);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RedDBOptions, RedDBRuntime};
+
+    #[test]
+    fn retained_memory_pressure_cannot_admit_growth_larger_than_the_budget() {
+        let budget = 128 * 1024;
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
+                .expect("runtime");
+        let store = runtime.db().store();
+        store.create_collection("pressure").expect("collection");
+        let manager = store.get_collection("pressure").expect("manager");
+        let ids = manager
+            .bulk_insert(
+                (1..=10)
+                    .map(|id| {
+                        UnifiedEntity::vector(
+                            crate::storage::EntityId::new(id),
+                            "pressure",
+                            vec![1.0; 256],
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("bulk");
+        manager.force_seal().expect("seal");
+        for id in ids.iter().take(8) {
+            manager.delete(*id).expect("delete");
+        }
+        assert!(manager.reclaimable_bytes() > 0);
+        let result =
+            runtime.admit_non_evictable_growth(MemoryPool::SegmentArena, "test growth", budget);
+        assert!(
+            result.is_err(),
+            "reclamation cannot make budget plus live data fit"
+        );
+        assert!(
+            manager.stats().consolidation.runs_completed > 0,
+            "pressure ran consolidation"
+        );
+        runtime
+            .admit_non_evictable_growth(MemoryPool::SegmentArena, "small growth", 1)
+            .expect("small growth still fits after reclamation");
     }
 }

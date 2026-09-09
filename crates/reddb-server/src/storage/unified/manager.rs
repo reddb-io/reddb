@@ -15,7 +15,7 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use super::entity::{EntityId, EntityKind, UnifiedEntity};
 use super::metadata::{Metadata, MetadataFilter};
@@ -94,7 +94,7 @@ pub struct ConsolidationStats {
     pub segments_merged: u64,
     /// Tombstones garbage-collected by completed swaps.
     pub tombstones_reclaimed: u64,
-    /// Bytes returned to the memory budget by completed swaps.
+    /// Logical source-to-merged footprint reduction; readers may retain sources.
     pub bytes_reclaimed: u64,
 }
 
@@ -200,6 +200,8 @@ pub struct SegmentManager {
     growing: RwLock<Option<Arc<RwLock<GrowingSegment>>>>,
     /// Sealed segments (immutable, queryable)
     sealed: RwLock<Vec<Arc<RwLock<GrowingSegment>>>>,
+    /// Retired sources still owned by readers. Weak handles never prolong payload lifetime.
+    retired: RwLock<Vec<Weak<RwLock<GrowingSegment>>>>,
     /// Archived segment IDs (stored externally)
     archived: RwLock<Vec<SegmentId>>,
     /// Entity to segment mapping (for fast lookups by individually-inserted entities).
@@ -240,6 +242,7 @@ impl SegmentManager {
             total_entities_atomic: AtomicU64::new(0),
             growing: RwLock::new(None),
             sealed: RwLock::new(Vec::new()),
+            retired: RwLock::new(Vec::new()),
             archived: RwLock::new(Vec::new()),
             entity_segment: RwLock::new(HashMap::new()),
             column_schema: RwLock::new(None),
@@ -296,10 +299,8 @@ impl SegmentManager {
         &self.config
     }
 
-    /// Get statistics. total_entities is read from the lock-free atomic;
-    /// `total_memory_bytes` is summed across the live segments so that a
-    /// consolidation's reclamation is visible in the number the budget watches.
-    /// The remaining fields come from the slow-path stats struct.
+    /// Get statistics. Entity counts cover active segments; memory also covers
+    /// retained sources and unpublished consolidation work.
     pub fn stats(&self) -> ManagerStats {
         let mut s = self.stats.read().clone();
         s.total_entities = self.total_entities_atomic.load(Ordering::Relaxed) as usize;
@@ -307,38 +308,68 @@ impl SegmentManager {
         s
     }
 
-    /// Approximate bytes held by this collection's in-memory segments: resident
-    /// entity payloads plus the tombstone sets. This is the number consolidation
-    /// drives down.
+    /// Approximate resident segment memory, including tombstones, retired sources,
+    /// and the in-flight merge and its bookkeeping. This feeds budget admission.
     pub fn resident_bytes(&self) -> u64 {
-        let mut bytes = 0;
-        if let Some(growing_arc) = self.growing.read().as_ref() {
-            bytes += growing_arc.read().resident_bytes();
-        }
-        for segment in self.sealed.read().iter() {
-            bytes += segment.read().resident_bytes();
-        }
-        bytes
+        self.memory_usage().1
     }
 
-    /// Approximate resident *payload* bytes across this collection's growing
-    /// and sealed segments — the arena's contribution to the shared accounting
-    /// pool (ADR 0073 §2). Unlike [`Self::resident_bytes`] this excludes the
-    /// tombstone sets: the pool tracks payload memory, not reclaim potential.
-    ///
-    /// One relaxed load per segment under a read lock; no entity is touched.
+    /// Resident segment payload/directory bytes and consolidation bookkeeping,
+    /// including retired sources. Unlike `resident_bytes`, excludes tombstones.
     pub fn memory_bytes(&self) -> u64 {
-        let growing = self
-            .growing
-            .read()
-            .as_ref()
-            .map_or(0, |segment| segment.read().memory_bytes());
+        self.memory_usage().0
+    }
 
-        self.sealed
-            .read()
-            .iter()
-            .map(|segment| segment.read().memory_bytes())
-            .fold(growing, u64::saturating_add)
+    /// Sample payload and resident bytes under the publication lock order:
+    /// consolidation, growing, sealed, retired. No entity scan or strong handle
+    /// is retained beyond this call; expired weak entries are pruned in place.
+    fn memory_usage(&self) -> (u64, u64) {
+        let consolidation = self.consolidation.read();
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        let mut retired = self.retired.write();
+        let mut payload = 0u64;
+        let mut resident = 0u64;
+        {
+            let mut add = |segment: &GrowingSegment| {
+                payload = payload.saturating_add(segment.memory_bytes());
+                resident = resident.saturating_add(segment.resident_bytes());
+            };
+            for segment in growing.iter().chain(sealed.iter()) {
+                add(&segment.read());
+            }
+            retired.retain(|source| {
+                if let Some(source) = source.upgrade() {
+                    add(&source.read());
+                    true
+                } else {
+                    false
+                }
+            });
+            if let Some(run) = consolidation.as_ref() {
+                add(&run.merged);
+            }
+        }
+        let mut bookkeeping =
+            (retired.capacity() * std::mem::size_of::<Weak<RwLock<GrowingSegment>>>()) as u64;
+        if let Some(run) = consolidation.as_ref() {
+            bookkeeping = bookkeeping
+                .saturating_add(
+                    (run.sources.capacity() * std::mem::size_of::<SourceProgress>()) as u64,
+                )
+                .saturating_add(
+                    (run.pending_ids.capacity() * std::mem::size_of::<EntityId>()) as u64,
+                );
+            for source in &run.sources {
+                bookkeeping = bookkeeping.saturating_add(
+                    (source.copied.capacity() * std::mem::size_of::<EntityId>()) as u64,
+                );
+            }
+        }
+        (
+            payload.saturating_add(bookkeeping),
+            resident.saturating_add(bookkeeping),
+        )
     }
 
     /// Bytes a pressure-triggered consolidation could plausibly return.
@@ -2017,18 +2048,15 @@ impl SegmentManager {
             return;
         }
 
-        let finished = {
-            let mut guard = self.consolidation.write();
-            let Some(run) = guard.as_mut() else {
-                return;
-            };
-            self.copy_bounded(run);
-            run.cursor >= run.sources.len()
+        // Keep the accounting guard through publication: the merged allocation
+        // must never disappear between the in-flight and active inventories.
+        let mut guard = self.consolidation.write();
+        let Some(run) = guard.as_mut() else {
+            return;
         };
-
-        if finished {
-            let run = self.consolidation.write().take();
-            if let Some(run) = run {
+        self.copy_bounded(run);
+        if run.cursor >= run.sources.len() {
+            if let Some(run) = guard.take() {
                 self.finish_consolidation(run);
             }
         }
@@ -2303,8 +2331,15 @@ impl SegmentManager {
         let merged_bytes = run.merged.resident_bytes();
         let merged_arc = Arc::new(RwLock::new(run.merged));
 
-        for &index in positions.iter().rev() {
-            sealed.remove(index);
+        {
+            let mut retired = self.retired.write();
+            retired.retain(|source| source.strong_count() > 0);
+            for &index in positions.iter().rev() {
+                let source = sealed.remove(index);
+                if Arc::strong_count(&source) > 1 {
+                    retired.push(Arc::downgrade(&source));
+                }
+            }
         }
         let insert_at = positions[0].min(sealed.len());
         sealed.insert(insert_at, Arc::clone(&merged_arc));
@@ -3545,6 +3580,166 @@ mod tests {
             assert!(ticks < 1_000, "consolidation failed to converge");
         }
         ticks
+    }
+
+    #[test]
+    fn retained_memory_tracks_two_readers_until_the_last_cursor_finishes() {
+        let manager = consolidating_manager(CONSOLIDATION_ENTITIES_PER_TICK);
+        let ids = seal_bulk_segment(&manager, 100);
+        for id in ids.iter().take(40) {
+            manager.delete(*id).expect("delete before scan");
+        }
+        let source_bytes = manager.resident_bytes();
+        let source = Arc::downgrade(&manager.sealed.read()[0]);
+        std::thread::scope(|scope| {
+            let (ready, waiting) = std::sync::mpsc::channel();
+            let (release_first, first_wait) = std::sync::mpsc::channel();
+            let (release_last, last_wait) = std::sync::mpsc::channel();
+            let reader = |resume: std::sync::mpsc::Receiver<()>,
+                          ready: std::sync::mpsc::Sender<()>| {
+                assert!(manager.scan_batches(
+                    None,
+                    || true,
+                    |_| {
+                        ready.send(()).expect("signal captured cursor");
+                        let _ = resume.recv();
+                        true
+                    }
+                ));
+            };
+            let ready_first = ready.clone();
+            let first = scope.spawn(move || reader(first_wait, ready_first));
+            let last = scope.spawn(move || reader(last_wait, ready));
+            for _ in 0..2 {
+                waiting
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("reader ready");
+            }
+            drain_maintenance(&manager);
+            assert!(
+                source.upgrade().is_some(),
+                "both cursors pin the retired source"
+            );
+            let active_bytes = manager.sealed.read()[0].read().resident_bytes();
+            let held = manager.resident_bytes();
+            assert!(
+                held >= active_bytes + source_bytes,
+                "retired source remains resident"
+            );
+            release_first.send(()).expect("release first reader");
+            first.join().expect("first reader");
+            assert_eq!(
+                manager.resident_bytes(),
+                held,
+                "one reader still pins the source"
+            );
+            release_last.send(()).expect("release last reader");
+            last.join().expect("last reader");
+            assert!(
+                source.upgrade().is_none(),
+                "accounting must not retain payloads"
+            );
+            assert_eq!(held - manager.resident_bytes(), source_bytes);
+            assert_eq!(
+                manager.stats().total_memory_bytes as u64,
+                manager.resident_bytes()
+            );
+        });
+    }
+
+    #[test]
+    fn retained_memory_gates_runtime_growth_until_the_cursor_is_cancelled() {
+        use crate::storage::memory_pools::MemoryPool;
+        use crate::{RedDBOptions, RedDBRuntime};
+
+        let budget = 128 * 1024;
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
+                .expect("runtime");
+        runtime
+            .db()
+            .store()
+            .create_collection("test")
+            .expect("collection");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("test")
+            .expect("manager");
+        let ids = seal_bulk_segment(&manager, 100);
+        for id in ids.iter().take(40) {
+            manager.delete(*id).expect("delete before scan");
+        }
+        let source_bytes = manager.resident_bytes();
+        let mut growth = 0;
+        let mut held_used = 0;
+        assert!(!manager.scan_batches(
+            None,
+            || true,
+            |_| {
+                drain_maintenance(&manager);
+                runtime.refresh_memory_accounting();
+                // Other collections (including the runtime catalog) share this
+                // arena, so derive headroom from the complete runtime sample.
+                held_used = runtime.memory_accounting().total_used_bytes();
+                growth = budget
+                    .checked_sub(held_used)
+                    .expect("fixture fits while the cursor is open")
+                    + source_bytes / 2;
+                assert!(growth > 0);
+                assert!(
+                    runtime
+                        .admit_non_evictable_growth(
+                            MemoryPool::SegmentArena,
+                            "growth with pinned source",
+                            growth,
+                        )
+                        .is_err(),
+                    "retained source must participate in runtime admission"
+                );
+                false
+            }
+        ));
+        runtime.refresh_memory_accounting();
+        assert_eq!(
+            held_used - runtime.memory_accounting().total_used_bytes(),
+            source_bytes
+        );
+        runtime
+            .admit_non_evictable_growth(
+                MemoryPool::SegmentArena,
+                "growth after cursor cancellation",
+                growth,
+            )
+            .expect("the same growth fits once the cursor releases its source");
+    }
+
+    #[test]
+    fn retained_memory_includes_an_inflight_consolidation_copy() {
+        let manager = consolidating_manager(1);
+        let ids = seal_bulk_segment(&manager, 100);
+        for id in ids.iter().take(40) {
+            manager.delete(*id).expect("delete");
+        }
+        let before = manager.resident_bytes();
+        assert!(manager.pressure_consolidation_tick());
+        let copied = manager
+            .consolidation
+            .read()
+            .as_ref()
+            .expect("paced merge")
+            .merged
+            .resident_bytes();
+        assert!(copied > 0);
+        assert!(
+            manager.resident_bytes() >= before + copied,
+            "unpublished copy consumes memory"
+        );
+        drain_maintenance(&manager);
+        assert!(
+            manager.resident_bytes() < before,
+            "completed merge releases the old storage"
+        );
     }
 
     #[test]

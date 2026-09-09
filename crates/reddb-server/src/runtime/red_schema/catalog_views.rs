@@ -910,9 +910,9 @@ fn append_consolidation_thresholds(
 /// Per-collection consolidation counters (ADR 0073 §5, issue #1961).
 ///
 /// Consolidation is the budget's reclamation tool, so what it reclaimed is part
-/// of the memory story: `tombstones_reclaimed` and `bytes_reclaimed` are the
-/// memory that came back. These replace the `compact_ops` counter, which only
-/// ever counted a do-nothing branch.
+/// of the memory story: these counters describe the logical reduction from
+/// source segments to merged storage. Readers may still retain the old sources;
+/// the live arena sample determines memory available to admission.
 fn append_consolidation_stats(
     rows: &mut Vec<UnifiedRecord>,
     schema: &Arc<Vec<Arc<str>>>,
