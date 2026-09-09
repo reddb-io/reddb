@@ -19,6 +19,7 @@ impl RedDBRuntime {
         &self,
         collection: &str,
         ids: &[EntityId],
+        _topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<(u64, Vec<u64>)> {
         if ids.is_empty() {
             return Ok((0, vec![]));
@@ -100,6 +101,11 @@ impl RedDBRuntime {
                 let pre_delete_fields = entity_row_fields_snapshot(&entity);
                 entity.set_xmax(xid);
                 if manager.update(entity.clone()).is_ok() {
+                    #[cfg(test)]
+                    self.index_store_ref().mutation_test_hook(
+                        collection,
+                        super::index_store::MutationTestPhase::StoragePublished,
+                    );
                     if active_xid.is_some() {
                         self.record_pending_tombstone(conn_id, collection, id, xid, previous_xmax);
                     } else if !pre_delete_fields.is_empty() {
@@ -154,6 +160,13 @@ impl RedDBRuntime {
         let deleted_ids = store
             .delete_batch(collection, &physical_delete_ids)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        #[cfg(test)]
+        if !deleted_ids.is_empty() {
+            self.index_store_ref().mutation_test_hook(
+                collection,
+                super::index_store::MutationTestPhase::StoragePublished,
+            );
+        }
         affected += deleted_ids.len() as u64;
         for id in &deleted_ids {
             if let Some((_, fields)) = index_delete_fields
@@ -182,6 +195,7 @@ impl RedDBRuntime {
     pub(super) fn flush_update_chunk(
         &self,
         applied: &[AppliedEntityMutation],
+        topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<Vec<u64>> {
         if applied.is_empty() {
             return Ok(Vec::new());
@@ -202,6 +216,12 @@ impl RedDBRuntime {
             self.refresh_update_secondary_indexes(item)?;
         }
 
+        drop(topology_guard);
+        #[cfg(test)]
+        self.index_store_ref().mutation_test_hook(
+            &applied[0].collection,
+            super::index_store::MutationTestPhase::BeforeEvents,
+        );
         let mut lsns = Vec::with_capacity(applied.len());
         for item in applied {
             let lsn = self.cdc_emit_prebuilt(
@@ -221,7 +241,15 @@ impl RedDBRuntime {
         &self,
         applied: &[AppliedEntityMutation],
     ) -> RedDBResult<()> {
-        self.persist_applied_entity_mutations(applied)
+        self.persist_applied_entity_mutations(applied)?;
+        #[cfg(test)]
+        if let Some(first) = applied.first() {
+            self.index_store_ref().mutation_test_hook(
+                &first.collection,
+                super::index_store::MutationTestPhase::StoragePublished,
+            );
+        }
+        Ok(())
     }
 
     fn refresh_update_secondary_indexes(&self, applied: &AppliedEntityMutation) -> RedDBResult<()> {

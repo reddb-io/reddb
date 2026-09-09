@@ -206,7 +206,7 @@ impl RedDBRuntime {
                 {
                     let conflicting_xid = entity.xmin;
                     if self.snapshot_manager().is_active(conflicting_xid)
-                        && self.current_xid() != Some(conflicting_xid)
+                        && !self.own_transaction_xids().contains(&conflicting_xid)
                     {
                         return Err(RedDBError::Query(format!(
                             "serialization conflict: ON CONFLICT key in '{collection}' is owned by active transaction {conflicting_xid}; retry the statement after that transaction resolves"
@@ -442,6 +442,11 @@ impl RedDBRuntime {
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            self,
+            &query.table,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         // CollectionContract gate (#49): single entry point for the
         // operator's collection-level write rules. Today this is a
         // no-op for INSERT (APPEND ONLY permits insert); routing
@@ -585,6 +590,7 @@ impl RedDBRuntime {
             };
         let mut returning_result: Option<UnifiedResult> = None;
         let mut conflict_returning_records: Vec<UnifiedRecord> = Vec::new();
+        let mut auto_embed_ids = Vec::new();
 
         if matches!(query.entity_type, InsertEntityType::Row)
             && !matches!(
@@ -658,6 +664,7 @@ impl RedDBRuntime {
                     .is_some_and(|clause| clause.target.is_none())
                 {
                     fields = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(
+                        self,
                         &self.db(),
                         &query.table,
                     )
@@ -665,6 +672,7 @@ impl RedDBRuntime {
                 }
                 if let Some(clause) = &query.on_conflict {
                     let conflict_id = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(
+                        self,
                         &self.db(),
                         &query.table,
                     )
@@ -678,7 +686,7 @@ impl RedDBRuntime {
                         if let Some(conflicting) = store.get(&query.table, conflict_id) {
                             let conflicting_xid = conflicting.xmin;
                             if self.snapshot_manager().is_active(conflicting_xid)
-                                && self.current_xid() != Some(conflicting_xid)
+                                && !self.own_transaction_xids().contains(&conflicting_xid)
                             {
                                 return Err(RedDBError::Query(format!(
                                     "serialization conflict: ON CONFLICT key in '{}' is owned by active transaction {conflicting_xid}; retry the statement after that transaction resolves",
@@ -716,7 +724,14 @@ impl RedDBRuntime {
                                     filter: Some(Filter::Compare {
                                         field: FieldRef::column("", "rid"),
                                         op: CompareOp::Eq,
-                                        value: Value::UnsignedInteger(conflict_id.raw()),
+                                        // Uniqueness locates a physical version; RQL rid is
+                                        // the stable logical identity across updates.
+                                        value: Value::UnsignedInteger(
+                                            store
+                                                .get(&query.table, conflict_id)
+                                                .map(|entity| entity.logical_id().raw())
+                                                .unwrap_or(conflict_id.raw()),
+                                        ),
                                     }),
                                     ttl_ms: None,
                                     expires_at_ms: None,
@@ -737,6 +752,7 @@ impl RedDBRuntime {
                     }
                     if matches!(&clause.action, OnConflictAction::DoNothing)
                         && crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(
+                            self,
                             &self.db(),
                             &query.table,
                         )
@@ -983,6 +999,9 @@ impl RedDBRuntime {
                 self.create_rows_batch(batch)?
             };
             inserted_count += outputs.len() as u64;
+            if query.auto_embed.is_some() {
+                auto_embed_ids.extend(outputs.iter().map(|output| output.id));
+            }
 
             // Chain mode: commit the new tip to the in-memory cache only after
             // the batch persisted successfully. If the batch threw mid-way the
@@ -1476,6 +1495,10 @@ impl RedDBRuntime {
                 }
             }
 
+            if query.auto_embed.is_some() {
+                auto_embed_ids.extend(entity_outputs.iter().map(|output| output.id));
+            }
+
             if let Some(items) = query.returning.as_ref() {
                 let mut result =
                     build_returning_result(items, &returning_field_snaps, Some(&entity_outputs));
@@ -1509,16 +1532,12 @@ impl RedDBRuntime {
                 embed_config.model.as_deref(),
             );
 
-            // Collect the just-inserted rows (most-recently appended, reversed back to insert order).
-            let manager = store
-                .get_collection(&query.table)
-                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-            let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-            let entities = manager.scan(snapshot.as_ref(), |_| true);
-            let recent: Vec<_> = entities
-                .into_iter()
-                .rev()
-                .take(effective_rows.len())
+            // Read only this INSERT's returned IDs. A pre-write statement
+            // snapshot correctly excludes newly committed rows; a fresh/global
+            // scan could instead pick another writer's rows or conflict skips.
+            let recent: Vec<_> = auto_embed_ids
+                .iter()
+                .filter_map(|id| store.get(&query.table, *id))
                 .collect();
 
             // Collector phase: (entity_index, combined_text) for rows that have non-empty fields.
@@ -1527,18 +1546,16 @@ impl RedDBRuntime {
                 .enumerate()
                 .filter_map(|(i, entity)| {
                     if let EntityData::Row(ref row) = entity.data {
-                        if let Some(ref named) = row.named {
-                            let texts: Vec<String> = embed_config
-                                .fields
-                                .iter()
-                                .filter_map(|field| match named.get(field) {
-                                    Some(Value::Text(t)) if !t.is_empty() => Some(t.to_string()),
-                                    _ => None,
-                                })
-                                .collect();
-                            if !texts.is_empty() {
-                                return Some((i, texts.join(" ")));
-                            }
+                        let texts: Vec<String> = embed_config
+                            .fields
+                            .iter()
+                            .filter_map(|field| match row.get_field(field) {
+                                Some(Value::Text(t)) if !t.is_empty() => Some(t.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        if !texts.is_empty() {
+                            return Some((i, texts.join(" ")));
                         }
                     }
                     None
@@ -1762,7 +1779,7 @@ impl RedDBRuntime {
             ],
         );
         let index_fields = fields.clone();
-        self.admit_non_evictable_growth(
+        let _segment_reservation = self.admit_non_evictable_growth(
             crate::storage::memory_pools::MemoryPool::SegmentArena,
             &format!("insert into {collection}"),
             crate::runtime::memory_admission::estimate_timeseries_point_growth(
@@ -1776,16 +1793,18 @@ impl RedDBRuntime {
             .into_iter()
             .flat_map(|index| index.columns)
             .collect::<Vec<_>>();
-        if !indexed_columns.is_empty() {
-            self.admit_non_evictable_growth(
+        let _index_reservation = if indexed_columns.is_empty() {
+            None
+        } else {
+            Some(self.admit_non_evictable_growth(
                 crate::storage::memory_pools::MemoryPool::IndexMemory,
                 &format!("index insert into {collection}"),
                 crate::runtime::memory_admission::estimate_index_growth(
                     std::slice::from_ref(&index_fields),
                     &indexed_columns,
                 ),
-            )?;
-        }
+            )?)
+        };
         let series_id = super::impl_timeseries::intern_timeseries_series(
             self.inner.db.store().as_ref(),
             collection,
@@ -1861,6 +1880,11 @@ impl RedDBRuntime {
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            self,
+            &query.table,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         // Issue #523 — blockchain collections are immutable. Reject before
         // RLS / RETURNING work so the operator sees a clean 409-mapped
         // error instead of a partially-applied mutation surface.
@@ -2043,6 +2067,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<(RuntimeQueryResult, Vec<EntityId>)> {
         self.enforce_claim_order_by_index_gate(query)?;
         let store = self.inner.db.store();
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&query.table);
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
         let needs_rmw_lock = update_needs_rmw_lock(query);
@@ -2117,7 +2144,10 @@ impl RedDBRuntime {
         if needs_rmw_lock {
             target_scan = target_scan.with_live_table_rows();
         }
-        let ids_to_update = target_scan.find_target_ids()?;
+        let ids_to_update = {
+            let _topology_guard = topology_lock.read();
+            target_scan.find_target_ids()?
+        };
         let order_limit = if query.claim_limit.is_some() {
             None
         } else {
@@ -2171,6 +2201,7 @@ impl RedDBRuntime {
 
         let mut affected: u64 = 0;
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+            let topology_guard = topology_lock.read();
             let mut applied_chunk = Vec::with_capacity(chunk.len());
             for entity in manager.get_many(chunk).into_iter().flatten() {
                 let assignments =
@@ -2186,7 +2217,7 @@ impl RedDBRuntime {
             }
             self.persist_update_chunk(&applied_chunk)?;
             affected += applied_chunk.len() as u64;
-            let lsns = self.flush_update_chunk(&applied_chunk)?;
+            let lsns = self.flush_update_chunk(&applied_chunk, topology_guard)?;
             if !query.suppress_events {
                 self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
             }
@@ -2257,6 +2288,12 @@ impl RedDBRuntime {
         ids_to_update: &[EntityId],
         effective_filter: Option<&Filter>,
     ) -> RedDBResult<(RuntimeQueryResult, Vec<EntityId>)> {
+        // Existing table/claim locks precede topology; per-row RMW locks
+        // below follow it. Keep the same index set through persistence/flush.
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&query.table);
+        let topology_guard = topology_lock.read();
         let store = self.inner.db.store();
         let mut touched_ids = Vec::new();
         let mut lock_entries = Vec::new();
@@ -2308,7 +2345,7 @@ impl RedDBRuntime {
         let affected = applied_chunk.len() as u64;
         if !applied_chunk.is_empty() {
             self.persist_update_chunk(&applied_chunk)?;
-            let lsns = self.flush_update_chunk(&applied_chunk)?;
+            let lsns = self.flush_update_chunk(&applied_chunk, topology_guard)?;
             if !query.suppress_events {
                 self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
             }
@@ -2572,6 +2609,11 @@ impl RedDBRuntime {
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            self,
+            &query.table,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         // Issue #523 — blockchain collections are immutable; see
         // execute_update for the same gate.
         if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {
@@ -2668,6 +2710,9 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&query.table);
         let effective_filter = effective_delete_filter(query);
 
         // Find the rows that match the WHERE clause. The "find target
@@ -2679,7 +2724,10 @@ impl RedDBRuntime {
             effective_filter.as_ref(),
             None,
         );
-        let ids_to_delete = scan.find_target_ids()?;
+        let ids_to_delete = {
+            let _topology_guard = topology_lock.read();
+            scan.find_target_ids()?
+        };
 
         // For event-enabled collections, snapshot the pre-delete state
         // before rows are physically removed.
@@ -2693,7 +2741,13 @@ impl RedDBRuntime {
 
         let mut affected: u64 = 0;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            let (count, lsns) = self.delete_entities_batch(&query.table, chunk)?;
+            let (count, lsns) =
+                self.delete_entities_batch(&query.table, chunk, topology_lock.read())?;
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &query.table,
+                super::index_store::MutationTestPhase::BeforeEvents,
+            );
             affected += count;
             if needs_delete_events && !lsns.is_empty() {
                 // lsns.len() == actually-deleted entities; align with chunk ids.

@@ -426,7 +426,7 @@ impl RedDBRuntime {
         query: &str,
         params: &[Value],
     ) -> RedDBResult<RuntimeQueryResult> {
-        let parsed = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+        let parsed = self.parameterized_query_ast(query)?;
         let bound = crate::storage::query::user_params::bind(&parsed, params).map_err(|err| {
             RedDBError::Validation {
                 message: err.to_string(),
@@ -437,6 +437,32 @@ impl RedDBRuntime {
             }
         })?;
         self.execute_bound_query_expr_in_frame(query, bound)
+    }
+
+    /// Cache only the unbound parser output. Binding, views, authorization,
+    /// configuration and snapshots are resolved anew for every execution.
+    fn parameterized_query_ast(&self, query: &str) -> RedDBResult<QueryExpr> {
+        use crate::storage::query::planner::{CachedPlan, QueryPlan};
+
+        // Keep exact parameterized statements separate from normalized plans.
+        let key = format!("\0parameters\0{query}");
+        if let Some(parsed) = self
+            .inner
+            .query_cache
+            .read()
+            .peek(&key)
+            .filter(|entry| entry.matches_exact_query(query))
+            .map(|entry| entry.plan.original.clone())
+        {
+            return Ok(parsed);
+        }
+        let parsed = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+        let plan = QueryPlan::new(parsed.clone(), parsed.clone(), Default::default());
+        self.inner
+            .query_cache
+            .write()
+            .insert(key, CachedPlan::new(plan).with_exact_query(query));
+        Ok(parsed)
     }
 
     fn execute_bound_query_expr_in_frame(
@@ -716,36 +742,9 @@ impl RedDBRuntime {
         let query_audit_started = std::time::Instant::now();
 
         let query_result = match expr {
+            QueryExpr::Function(ref command) => self.execute_function(query, command),
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
-                // Apply MVCC visibility + RLS gate while materialising the
-                // graph: every node entity is screened against the source
-                // collection's policy chain (basic and `Nodes`-targeted)
-                // and dropped when the caller's tenant / role doesn't
-                // admit it. Edges are pruned automatically because the
-                // graph builder skips edges whose endpoints aren't in
-                // `allowed_nodes`.
-                let (graph, node_properties, edge_properties) =
-                    self.materialize_graph_with_rls()?;
-                let result =
-                    crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties(
-                        &graph,
-                        &expr,
-                        node_properties,
-                        edge_properties,
-                    )
-                        .map_err(|err| RedDBError::Query(err.to_string()))?;
-
-                Ok(RuntimeQueryResult {
-                    query: query.to_string(),
-                    mode,
-                    statement,
-                    engine: "materialized-graph",
-                    result,
-                    affected_rows: 0,
-                    statement_type: "select",
-                    bookmark: None,
-                    notice: None,
-                })
+                self.execute_materialized_graph(query, mode, statement, &expr)
             }
             QueryExpr::Table(table) => {
                 let table = self.resolve_table_expr_subqueries(
@@ -985,7 +984,7 @@ impl RedDBRuntime {
                     mode,
                     statement,
                     engine: "runtime-join",
-                    result: execute_runtime_join_query(&self.inner.db, &join_with_rls)?,
+                    result: execute_runtime_join_query(self, &join_with_rls)?,
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
@@ -997,7 +996,7 @@ impl RedDBRuntime {
                 mode,
                 statement,
                 engine: "runtime-vector",
-                result: execute_runtime_vector_query(&self.inner.db, &vector)?,
+                result: execute_runtime_vector_query(self, &vector)?,
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
@@ -1008,7 +1007,7 @@ impl RedDBRuntime {
                 mode,
                 statement,
                 engine: "runtime-hybrid",
-                result: execute_runtime_hybrid_query(&self.inner.db, &hybrid)?,
+                result: execute_runtime_hybrid_query(self, &hybrid)?,
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
@@ -1354,6 +1353,9 @@ impl RedDBRuntime {
                                 Value::Text(s) => s.as_ref(),
                                 _ => continue,
                             };
+                            if key_str == super::function_catalog::REGISTRY_KEY {
+                                continue;
+                            }
                             if let Some(ref pfx) = prefix {
                                 if !key_str.starts_with(pfx.as_str()) {
                                     continue;
@@ -1488,12 +1490,13 @@ impl RedDBRuntime {
                                 &own_xids,
                                 ctx.isolation,
                             ) {
-                                self.revive_pending_versioned_updates(conn_id);
+                                let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.discard_pending_store_wal_actions(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                undo?;
                                 return Err(err);
                             }
                             if let Err(err) = self.check_queue_dedup_write_conflicts(
@@ -1501,23 +1504,25 @@ impl RedDBRuntime {
                                 &ctx.snapshot,
                                 &own_xids,
                             ) {
-                                self.revive_pending_versioned_updates(conn_id);
+                                let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_queue_dedup(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.discard_pending_store_wal_actions(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                undo?;
                                 return Err(err);
                             }
                             self.restore_pending_write_stamps(conn_id);
                             if let Err(err) = self.flush_pending_store_wal_actions(conn_id) {
-                                self.revive_pending_versioned_updates(conn_id);
+                                let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_queue_dedup(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                undo?;
                                 return Err(err);
                             }
                             Ok(())
@@ -1544,13 +1549,14 @@ impl RedDBRuntime {
                                 // Phase 2.3.2b: tuples that the txn had
                                 // xmax-stamped become live again — wipe xmax
                                 // back to 0 so later snapshots see them.
-                                self.revive_pending_versioned_updates(conn_id);
+                                let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_queue_dedup(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 self.discard_pending_queue_wakes(conn_id);
                                 self.discard_pending_store_wal_actions(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                undo?;
                                 ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
                             }
                             None => (
@@ -1603,6 +1609,7 @@ impl RedDBRuntime {
                                 );
                                 let revived =
                                     self.revive_tombstones_since(conn_id, rollback.savepoint_xid);
+                                let reverted_updates = reverted_updates?;
                                 (
                                     "rollback_to_savepoint",
                                     format!(
@@ -2011,6 +2018,7 @@ impl RedDBRuntime {
                     .write()
                     .insert(key, Arc::new(q.clone()));
                 self.invalidate_plan_cache();
+                self.invalidate_result_cache();
                 // Issue #120 — surface policy names in the
                 // schema-vocabulary so AskPipeline (#121) can resolve
                 // a policy reference back to its table.
@@ -2040,6 +2048,7 @@ impl RedDBRuntime {
                     )));
                 }
                 self.invalidate_plan_cache();
+                self.invalidate_result_cache();
                 // Issue #120 — keep the schema-vocabulary policy
                 // entry in sync.
                 self.schema_vocabulary_apply(
@@ -2858,7 +2867,7 @@ impl RedDBRuntime {
             QueryExpr::Table(table) => {
                 execute_runtime_table_query(&self.inner.db, &table, Some(&self.inner.index_store))?
             }
-            QueryExpr::Join(join) => execute_runtime_join_query(&self.inner.db, &join)?,
+            QueryExpr::Join(join) => execute_runtime_join_query(self, &join)?,
             other => {
                 return Err(RedDBError::Query(format!(
                     "expression subquery must be a SELECT query, got {}",
@@ -2869,6 +2878,44 @@ impl RedDBRuntime {
         first_column_values(result)
     }
 
+    fn execute_materialized_graph(
+        &self,
+        query: &str,
+        mode: QueryMode,
+        statement: &'static str,
+        expr: &QueryExpr,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        // Apply MVCC visibility + RLS gate while materialising the
+        // graph: every node entity is screened against the source
+        // collection's policy chain (basic and `Nodes`-targeted)
+        // and dropped when the caller's tenant / role doesn't
+        // admit it. Edges are pruned automatically because the
+        // graph builder skips edges whose endpoints aren't in
+        // `allowed_nodes`.
+        let (graph, node_properties, edge_properties) = self.materialize_graph_with_rls()?;
+        let result =
+            crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties_checked(
+                &graph,
+                expr,
+                node_properties,
+                edge_properties,
+                super::function_budget::graph_work_check(),
+            )
+            .map_err(|err| RedDBError::Query(err.to_string()))?;
+
+        Ok(RuntimeQueryResult {
+            query: query.to_string(),
+            mode,
+            statement,
+            engine: "materialized-graph",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+            notice: None,
+        })
+    }
+
     fn dispatch_expr(
         &self,
         expr: QueryExpr,
@@ -2877,11 +2924,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         let statement = query_expr_name(&expr);
         match expr {
+            QueryExpr::Function(command) => self.execute_function(query_str, &command),
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
-                // Graph queries are not cacheable as prepared statements.
-                Err(RedDBError::Query(
-                    "graph queries cannot be used as prepared statements".to_string(),
-                ))
+                self.execute_materialized_graph(query_str, mode, statement, &expr)
             }
             QueryExpr::Table(table) => {
                 let scope = self.ai_scope();
@@ -3029,7 +3074,7 @@ impl RedDBRuntime {
                     mode,
                     statement,
                     engine: "runtime-join",
-                    result: execute_runtime_join_query(&self.inner.db, &join_with_rls)?,
+                    result: execute_runtime_join_query(self, &join_with_rls)?,
                     affected_rows: 0,
                     statement_type: "select",
                     bookmark: None,
@@ -3041,7 +3086,7 @@ impl RedDBRuntime {
                 mode,
                 statement,
                 engine: "runtime-vector",
-                result: execute_runtime_vector_query(&self.inner.db, &vector)?,
+                result: execute_runtime_vector_query(self, &vector)?,
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
@@ -3052,7 +3097,7 @@ impl RedDBRuntime {
                 mode,
                 statement,
                 engine: "runtime-hybrid",
-                result: execute_runtime_hybrid_query(&self.inner.db, &hybrid)?,
+                result: execute_runtime_hybrid_query(self, &hybrid)?,
                 affected_rows: 0,
                 statement_type: "select",
                 bookmark: None,
@@ -3085,6 +3130,10 @@ impl RedDBRuntime {
                 .with_deferred_store_wal_for_dml(self.delete_may_emit_events(delete), || {
                     self.execute_delete(query_str, delete)
                 }),
+            QueryExpr::QueueCommand(ref cmd) => self.with_deferred_store_wal_if_transaction(|| {
+                self.execute_queue_command(query_str, cmd)
+            }),
+            QueryExpr::KvCommand(ref cmd) => self.execute_kv_command(query_str, cmd),
             QueryExpr::SearchCommand(ref cmd) => self.execute_search_command(query_str, cmd),
             QueryExpr::Ask(ref ask) => self.execute_ask(query_str, ask),
             _ => Err(RedDBError::Query(format!(
@@ -3127,34 +3176,54 @@ impl RedDBRuntime {
         self.dispatch_graph_algorithm(name, nodes, edges, named_args)
     }
 
-    pub(crate) fn revive_versioned_updates_since(&self, conn_id: u64, stamper_xid: u64) -> usize {
-        let mut guard = self.inner.pending_versioned_updates.write();
-        let Some(pending) = guard.get_mut(&conn_id) else {
-            return 0;
+    pub(crate) fn revive_versioned_updates_since(
+        &self,
+        conn_id: u64,
+        stamper_xid: u64,
+    ) -> RedDBResult<usize> {
+        // Snapshot undo identities without retaining the journal while waiting
+        // for topology. Writers take topology before recording their undo entry.
+        let candidates = {
+            let guard = self.inner.pending_versioned_updates.read();
+            let Some(pending) = guard.get(&conn_id) else {
+                return Ok(0);
+            };
+            pending
+                .iter()
+                .rev()
+                .filter(|entry| entry.3 >= stamper_xid)
+                .cloned()
+                .collect::<Vec<_>>()
         };
-
-        let store = self.inner.db.store();
         let mut reverted = 0usize;
-        pending.retain(|(collection, old_id, new_id, xid, previous_xmax)| {
-            if *xid < stamper_xid {
-                return true;
-            }
-            if let Some(manager) = store.get_collection(collection) {
-                if let Some(mut old) = manager.get(*old_id) {
-                    if old.xmax == *xid {
-                        old.set_xmax(*previous_xmax);
-                        let _ = manager.update(old);
-                    }
-                }
-            }
-            let _ = store.delete_batch(collection, &[*new_id]);
+        for candidate in candidates {
+            let (collection, old_id, new_id, xid, previous_xmax) = &candidate;
+            let topology_lock = self.index_store_ref().collection_topology_lock(collection);
+            let topology_guard = topology_lock.read();
+            let mut guard = self.inner.pending_versioned_updates.write();
+            let Some(pending) = guard.get_mut(&conn_id) else {
+                continue;
+            };
+            // Revalidate after waiting. Remove only successfully restored entries;
+            // an error leaves this entry and the remaining undo journal intact.
+            let Some(position) = pending.iter().rposition(|entry| entry == &candidate) else {
+                continue;
+            };
+            self.revive_versioned_update(
+                collection,
+                *old_id,
+                *new_id,
+                *xid,
+                *previous_xmax,
+                topology_guard,
+            )?;
+            pending.remove(position);
             reverted += 1;
-            false
-        });
-        if pending.is_empty() {
-            guard.remove(&conn_id);
+            if pending.is_empty() {
+                guard.remove(&conn_id);
+            }
         }
-        reverted
+        Ok(reverted)
     }
 
     /// `EXPLAIN` is peeled off the statement text before parsing, so the
@@ -3180,7 +3249,7 @@ impl RedDBRuntime {
         self.check_explain_target_privilege(inner_sql)?;
         let explain = self.explain_query(inner_sql)?;
 
-        let columns = vec![
+        let mut columns = vec![
             "op".to_string(),
             "source".to_string(),
             "estimated_rows".to_string(),
@@ -3206,7 +3275,11 @@ impl RedDBRuntime {
             records.push(rec);
         }
 
-        walk_plan_node(&explain.logical_plan.root, 0, &mut records);
+        let vector_details = explain.statement == "vector";
+        if vector_details {
+            columns.extend(["access_path_reason".to_string(), "index_hint".to_string()]);
+        }
+        walk_plan_node(&explain.logical_plan.root, 0, &mut records, vector_details);
 
         let result = crate::storage::query::unified::UnifiedResult {
             columns,
@@ -3228,14 +3301,111 @@ impl RedDBRuntime {
         })
     }
 
+    fn explain_analyze_vector_as_rows(
+        &self,
+        raw_query: &str,
+        expr: QueryExpr,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let QueryExpr::Vector(query) = &expr else {
+            return Err(RedDBError::Internal(
+                "expected vector analysis target".to_string(),
+            ));
+        };
+        let source = query.collection.clone();
+        // The typed entry installs the full statement frame and privilege gate,
+        // and cannot serve an earlier result-cache measurement as a fresh run.
+        let execution = self.execute_query_expr(expr)?;
+        let stats = execution.result.stats;
+        let vector = stats.vector.as_ref().ok_or_else(|| {
+            RedDBError::Internal("vector executor did not provide measurements".to_string())
+        })?;
+        let fields = vec![
+            ("op", Value::text(vector.access_path.clone())),
+            ("source", Value::text(source)),
+            ("index_used", Value::Boolean(vector.index_used)),
+            ("mode_requested", Value::text(vector.mode_requested.clone())),
+            ("mode_executed", Value::text(vector.mode_executed.clone())),
+            (
+                "fallback_reason",
+                vector
+                    .fallback_reason
+                    .as_ref()
+                    .map_or(Value::Null, |reason| Value::text(reason.clone())),
+            ),
+            (
+                "approximate_distance_evaluations",
+                Value::UnsignedInteger(vector.approximate_distance_evaluations),
+            ),
+            (
+                "peak_topk_entries",
+                Value::UnsignedInteger(vector.peak_topk_entries),
+            ),
+            (
+                "candidates_examined",
+                Value::UnsignedInteger(vector.candidates_examined),
+            ),
+            (
+                "metadata_rejected",
+                Value::UnsignedInteger(vector.metadata_rejected),
+            ),
+            ("rls_rejected", Value::UnsignedInteger(vector.rls_rejected)),
+            (
+                "visibility_rejected",
+                Value::UnsignedInteger(vector.visibility_rejected),
+            ),
+            (
+                "exact_distance_evaluations",
+                Value::UnsignedInteger(vector.exact_distance_evaluations),
+            ),
+            ("actual_rows", Value::UnsignedInteger(vector.rows_returned)),
+            (
+                "actual_ms",
+                Value::Float(stats.exec_time_us as f64 / 1000.0),
+            ),
+            ("metrics_scope", Value::text("vector_pipeline")),
+            (
+                "operators",
+                Value::Json(vector.operators_json().to_string().into_bytes()),
+            ),
+        ];
+        let columns = fields.iter().map(|(name, _)| name.to_string()).collect();
+        let mut record = crate::storage::query::unified::UnifiedRecord::default();
+        for (name, value) in fields {
+            record.set_owned(name.to_string(), value);
+        }
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: execution.mode,
+            statement: "explain_analyze",
+            engine: "runtime-explain-analyze",
+            result: crate::storage::query::unified::UnifiedResult {
+                columns,
+                records: vec![record],
+                stats,
+                pre_serialized_json: None,
+            },
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+            notice: None,
+        })
+    }
+
     fn explain_analyze_as_rows(
         &self,
         raw_query: &str,
         inner_sql: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
+        if strip_keyword_ci(inner_sql.trim_start(), "VECTOR").is_some() {
+            let expr = parse_multi(inner_sql).map_err(|err| RedDBError::Query(err.to_string()))?;
+            if matches!(&expr, QueryExpr::Vector(_)) {
+                return self.explain_analyze_vector_as_rows(raw_query, expr);
+            }
+        }
         if !starts_with_dml_keyword(inner_sql) {
             return Err(RedDBError::Query(
-                "EXPLAIN ANALYZE currently supports INSERT, UPDATE, and DELETE".to_string(),
+                "EXPLAIN ANALYZE currently supports INSERT, UPDATE, DELETE, and VECTOR SEARCH"
+                    .to_string(),
             ));
         }
 
@@ -3340,6 +3510,7 @@ fn walk_plan_node(
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     depth: usize,
     out: &mut Vec<crate::storage::query::unified::UnifiedRecord>,
+    vector_details: bool,
 ) {
     use std::sync::Arc;
     let mut rec = crate::storage::query::unified::UnifiedRecord::default();
@@ -3357,9 +3528,21 @@ fn walk_plan_node(
         Value::Float(node.operator_cost),
     );
     rec.set_arc(Arc::from("depth"), Value::Integer(depth as i64));
+    if vector_details {
+        for name in ["access_path_reason", "index_hint"] {
+            rec.set_owned(
+                name.to_string(),
+                node.details
+                    .get(name)
+                    .cloned()
+                    .map(Value::text)
+                    .unwrap_or(Value::Null),
+            );
+        }
+    }
     out.push(rec);
     for child in &node.children {
-        walk_plan_node(child, depth + 1, out);
+        walk_plan_node(child, depth + 1, out, vector_details);
     }
 }
 

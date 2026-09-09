@@ -60,7 +60,7 @@ impl RedDBServer {
                     }
                     None => continue,
                 };
-                if key.is_empty() {
+                if key.is_empty() || key == crate::runtime::function_catalog::REGISTRY_KEY {
                     continue;
                 }
 
@@ -259,6 +259,16 @@ impl RedDBServer {
 
         let mut pairs = Vec::new();
         flatten_json("", &config, &mut pairs);
+
+        if pairs
+            .iter()
+            .any(|(key, _)| key == crate::runtime::function_catalog::REGISTRY_KEY)
+        {
+            return json_response(
+                400,
+                crate::json!({"error": "function catalog requires FUNCTION DDL"}),
+            );
+        }
 
         let mut saved = 0usize;
         for (key, value) in &pairs {

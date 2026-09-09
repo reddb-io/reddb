@@ -1,5 +1,10 @@
 # When NOT to use RedDB (yet)
 
+> Historical gap inventory from May 2026. The implementation and linked issue
+> states below have not been revalidated as current by this page. Use
+> [ADR 0076](../../.red/adr/0076-competitive-leadership-evidence-gate.md) for
+> current competitive targets and remeasure before making adoption claims.
+
 Status: 2026-05-06 — gaps from the canonical `duel-official` lock
 (issue #154). Companion to [`wins.md`](wins.md).
 

@@ -92,6 +92,18 @@ impl TransactionState {
         self.snapshot_manager.rollback(context.xid);
     }
 
+    pub(crate) fn has_savepoint(&self, connection_id: u64, name: &str) -> bool {
+        self.contexts
+            .read()
+            .get(&connection_id)
+            .is_some_and(|context| {
+                context
+                    .savepoints
+                    .iter()
+                    .any(|(existing, _)| existing == name)
+            })
+    }
+
     pub(crate) fn savepoint(&self, connection_id: u64, name: &str) -> Option<Xid> {
         let mut contexts = self.contexts.write();
         let context = contexts.get_mut(&connection_id)?;
@@ -168,13 +180,11 @@ impl TransactionState {
     pub(crate) fn current_snapshot(&self, connection_id: u64) -> Snapshot {
         if let Some(context) = self.context(connection_id) {
             if context.isolation == IsolationLevel::ReadCommitted {
-                let high_water = self.snapshot_manager.peek_next_xid();
-                return self.snapshot_manager.snapshot(high_water);
+                return self.snapshot_manager.fresh_read_snapshot();
             }
             return context.snapshot;
         }
-        let high_water = self.snapshot_manager.peek_next_xid();
-        self.snapshot_manager.snapshot(high_water)
+        self.snapshot_manager.fresh_read_snapshot()
     }
 
     pub(crate) fn writer_xid(&self, connection_id: u64) -> Option<Xid> {

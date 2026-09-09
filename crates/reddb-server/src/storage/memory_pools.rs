@@ -51,7 +51,7 @@ pub enum MemoryPool {
     PageCache,
     /// Blob Cache RAM tier: L1 entries plus L2's RAM-resident metadata.
     BlobCacheL1,
-    /// Unified segment arena — growing + sealed segments.
+    /// Unified segment arena — active/retained segments and in-flight consolidation.
     SegmentArena,
     /// Secondary-index memory — hash / bitmap / sorted / composite.
     IndexMemory,

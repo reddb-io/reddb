@@ -1,9 +1,9 @@
 # ADR 0009 — Performance gate scope: universal 20% vs scenario-specific
 
-**Status:** Accepted
+**Status:** Superseded
 **Date:** 2026-05-06
 **Supersedes:** —
-**Superseded by:** —
+**Superseded by:** [ADR 0076](0076-competitive-leadership-evidence-gate.md) (2026-09-07)
 **Related issues:**
 [#152](https://github.com/reddb-io/reddb/issues/152) (parent PRD: competitive perf push),
 [#153](https://github.com/reddb-io/reddb/issues/153) (this ADR),

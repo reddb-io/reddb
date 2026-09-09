@@ -35,7 +35,8 @@ use crate::storage::unified::entity::EntityId;
 /// many xids in a single `fetch_add` so back-to-back autocommit inserts
 /// share one atomic op instead of paying it per row. Sized small to
 /// keep a pristine `peek_next_xid()` close to the truth — VACUUM and
-/// diagnostics treat reserved-but-unused xids as already-committed.
+/// diagnostics observe the allocator high-water mark. Snapshots exclude
+/// reserved-but-unused slots from visibility until a later snapshot.
 pub(crate) const AUTOCOMMIT_POOL_BATCH: u64 = 16;
 
 /// A transaction identifier. Monotonic across the lifetime of the process.
@@ -55,7 +56,7 @@ pub struct Snapshot {
     /// The snapshot's xid — every row with `xmin <= xid` created before
     /// the snapshot is visible (assuming `xmax` hasn't passed).
     pub xid: Xid,
-    /// Transactions that were still active when the snapshot was taken.
+    /// Active transactions and reserved-but-unissued pool xids at capture.
     /// Their writes must be *hidden* even when `xmin <= xid`, because
     /// the writer hadn't committed yet from this snapshot's point of view.
     pub in_progress: HashSet<Xid>,
@@ -227,8 +228,14 @@ impl SnapshotManager {
     /// committed row version rather than a pinned statement snapshot.
     pub fn fresh_read_snapshot(&self) -> Snapshot {
         let state = self.state.read();
-        let xid = self.next_xid.load(Ordering::Relaxed);
-        let in_progress: HashSet<Xid> = state.active.iter().copied().collect();
+        let pool = self.autocommit_pool.lock();
+        // Visibility uses an inclusive bound. The allocator points at the
+        // next, not the last, xid; including it admits the next future writer.
+        let xid = self.next_xid.load(Ordering::Relaxed).saturating_sub(1);
+        let mut in_progress: HashSet<Xid> = state.active.iter().copied().collect();
+        // Reserved-but-unissued pool slots are future writers even though
+        // their numbers can be below this snapshot's high-water mark.
+        in_progress.extend(pool.next..pool.end);
         Snapshot { xid, in_progress }
     }
 
@@ -238,8 +245,10 @@ impl SnapshotManager {
     pub fn snapshot(&self, xid: Xid) -> Snapshot {
         let state = self.state.read();
         // Active xids other than our own appear as "in-progress" to us.
-        let in_progress: HashSet<Xid> =
+        let pool = self.autocommit_pool.lock();
+        let mut in_progress: HashSet<Xid> =
             state.active.iter().copied().filter(|&x| x != xid).collect();
+        in_progress.extend(pool.next..pool.end);
         Snapshot { xid, in_progress }
     }
 
@@ -393,6 +402,28 @@ impl SnapshotManager {
         self.state.read().active.contains(&xid)
     }
 
+    /// Unique-key admission uses current transaction outcomes, not the
+    /// reader's snapshot. An invisible active/newly committed writer still
+    /// reserves its key; an aborted creator or completed replacement does not.
+    pub(crate) fn row_reserves_unique_key(
+        &self,
+        xmin: Xid,
+        xmax: Xid,
+        own_xids: &HashSet<Xid>,
+    ) -> bool {
+        let state = self.state.read();
+        if state.aborted.contains(&xmin) {
+            return false;
+        }
+        if state.active.contains(&xmin) && !own_xids.contains(&xmin) {
+            return true;
+        }
+        if xmax == 0 || state.aborted.contains(&xmax) {
+            return true;
+        }
+        !own_xids.contains(&xmax) && state.active.contains(&xmax)
+    }
+
     /// Snapshot of every still-active xid (for VACUUM oldest-active-xid
     /// calculation — any row with `xmax < min(active)` is reclaimable).
     pub fn oldest_active_xid(&self) -> Option<Xid> {
@@ -418,7 +449,13 @@ impl SnapshotManager {
         if xid == XID_NONE {
             return;
         }
+        // Replay can import an xid from our still-unused reservation range.
+        // Retire those slots before publishing the floor: they must neither
+        // hide the recovered row in fresh snapshots nor be allocated again.
+        // Captured snapshots retain their original exclusions.
+        let mut pool = self.autocommit_pool.lock();
         let target = xid.saturating_add(1);
+        pool.next = pool.next.max(target.min(pool.end));
         let mut current = self.next_xid.load(Ordering::Relaxed);
         while current < target {
             match self.next_xid.compare_exchange(
@@ -688,5 +725,56 @@ mod tests {
         assert_eq!(m.oldest_active_xid(), Some(b));
         m.commit(b);
         assert_eq!(m.oldest_active_xid(), None);
+    }
+    #[test]
+    fn read_snapshot_excludes_first_future_writer_and_deleter() {
+        let manager = SnapshotManager::new();
+        let old = manager.begin();
+        manager.commit(old);
+        let snapshot = manager.fresh_read_snapshot();
+        let future = manager.begin();
+        manager.commit(future);
+        assert!(!snapshot.sees(future, XID_NONE));
+        assert!(snapshot.sees(old, future));
+        let fresh = manager.fresh_read_snapshot();
+        assert!(fresh.sees(future, XID_NONE));
+        assert!(!fresh.sees(old, future));
+    }
+
+    #[test]
+    fn snapshots_exclude_unissued_pool_slots_even_below_reader_xid() {
+        let manager = SnapshotManager::new();
+        let old = manager.allocate_committed_xid();
+        let reader = manager.begin();
+        let transaction_snapshot = manager.snapshot(reader);
+        let statement_snapshot = manager.fresh_read_snapshot();
+        let future = manager.allocate_committed_xid();
+        assert!(future < reader, "fixture must exercise the reserved range");
+        for snapshot in [transaction_snapshot, statement_snapshot] {
+            assert!(snapshot.sees(old, XID_NONE));
+            assert!(!snapshot.sees(future, XID_NONE));
+            assert!(snapshot.sees(old, future));
+        }
+        assert!(manager.fresh_read_snapshot().sees(future, XID_NONE));
+        manager.rollback(reader);
+    }
+
+    #[test]
+    fn replay_retires_reserved_xids_without_changing_captured_snapshots() {
+        let manager = SnapshotManager::new();
+        let first = manager.allocate_committed_xid();
+        let captured = manager.fresh_read_snapshot();
+        let replayed = first + 2;
+        manager.observe_committed_xid(replayed);
+        assert!(!captured.sees(replayed, XID_NONE));
+        assert!(manager.fresh_read_snapshot().sees(replayed, XID_NONE));
+        assert!(manager.allocate_committed_xid() > replayed);
+
+        let beyond_pool = manager.peek_next_xid() + 10;
+        let captured = manager.fresh_read_snapshot();
+        manager.observe_committed_xid(beyond_pool);
+        assert!(!captured.sees(beyond_pool, XID_NONE));
+        assert!(manager.fresh_read_snapshot().sees(beyond_pool, XID_NONE));
+        assert!(manager.allocate_committed_xid() > beyond_pool);
     }
 }

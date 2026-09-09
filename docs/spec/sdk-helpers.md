@@ -535,3 +535,12 @@ Driver minimum versions:
 
 _Status legend: ✅ supported · ⚠️ partial (known gaps) · ❌ unsupported._
 <!-- contract-matrix:end -->
+
+### Quoted SQL identifiers
+
+The `generic.query.quoted_identifiers` conformance case creates
+`"select" ("key name" INT, "text value" TEXT)`, inserts `(1, 'hello')` using
+bound parameters, and selects `"text value"` with `"key name" = $1`. Every
+transport must return the field named `text value` containing `hello`.
+This exercises the query method; it does not broaden a helper's identifier
+validation rules. See [SQL quotation rules](../query/sql-quoting.md).

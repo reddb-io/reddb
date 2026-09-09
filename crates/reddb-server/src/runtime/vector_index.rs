@@ -1,93 +1,85 @@
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
-use crate::storage::engine::distance::{distance, DistanceMetric};
 use crate::storage::{EntityId, SimilarResult, UnifiedEntity};
 
-#[derive(Debug, Clone)]
-pub(crate) struct VectorIndexEntry {
-    pub entity_id: EntityId,
-    pub vector: Vec<f32>,
-    pub entity: UnifiedEntity,
+/// A bounded selection heap. The worst retained result is at the root.
+/// Ties prefer the smaller physical entity id, independent of scan order.
+pub(crate) struct VectorTopK {
+    limit: usize,
+    entries: BinaryHeap<RankedVector>,
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct BruteForceVectorIndex {
-    entries: Vec<VectorIndexEntry>,
+struct RankedVector(SimilarResult);
+
+fn rank(left_score: f32, left_id: EntityId, right_score: f32, right_id: EntityId) -> Ordering {
+    if left_score == right_score {
+        left_id.raw().cmp(&right_id.raw())
+    } else {
+        right_score
+            .total_cmp(&left_score)
+            .then_with(|| left_id.raw().cmp(&right_id.raw()))
+    }
 }
 
-impl BruteForceVectorIndex {
-    pub(crate) fn upsert(&mut self, entry: VectorIndexEntry) {
-        if let Some(existing) = self
-            .entries
-            .iter_mut()
-            .find(|existing| existing.entity_id == entry.entity_id)
-        {
-            *existing = entry;
-        } else {
-            self.entries.push(entry);
+impl PartialEq for RankedVector {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for RankedVector {}
+impl PartialOrd for RankedVector {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for RankedVector {
+    fn cmp(&self, other: &Self) -> Ordering {
+        rank(
+            self.0.score,
+            self.0.entity_id,
+            other.0.score,
+            other.0.entity_id,
+        )
+    }
+}
+
+impl VectorTopK {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            entries: BinaryHeap::new(),
         }
     }
 
-    pub(crate) fn delete(&mut self, entity_id: EntityId) {
-        self.entries.retain(|entry| entry.entity_id != entity_id);
+    pub(crate) fn consider(&mut self, entity: &UnifiedEntity, score: f32, distance: f32) {
+        if self.limit == 0 {
+            return;
+        }
+        if self.entries.len() == self.limit {
+            let worst = self.entries.peek().expect("nonempty bounded heap");
+            if !rank(score, entity.id, worst.0.score, worst.0.entity_id).is_lt() {
+                return;
+            }
+            self.entries.pop();
+        }
+        self.entries.push(RankedVector(SimilarResult {
+            entity_id: entity.id,
+            score,
+            distance,
+            entity: entity.clone(),
+        }));
     }
 
-    pub(crate) fn search(
-        &self,
-        query: &[f32],
-        k: usize,
-        metric: DistanceMetric,
-        threshold: Option<f32>,
-    ) -> Vec<SimilarResult> {
-        let mut results: Vec<SimilarResult> = self
-            .entries
-            .iter()
-            .filter(|entry| entry.vector.len() == query.len())
-            .filter_map(|entry| {
-                let raw_distance = distance(query, &entry.vector, metric);
-                let score = vector_score(raw_distance, metric);
-                if !within_threshold(score, raw_distance, metric, threshold) {
-                    return None;
-                }
-                Some(SimilarResult {
-                    entity_id: entry.entity_id,
-                    score,
-                    distance: raw_distance,
-                    entity: entry.entity.clone(),
-                })
-            })
-            .collect();
-
-        results.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| left.entity_id.raw().cmp(&right.entity_id.raw()))
-        });
-        results.truncate(k);
-        results
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
     }
-}
 
-fn vector_score(distance: f32, metric: DistanceMetric) -> f32 {
-    match metric {
-        DistanceMetric::Cosine => 1.0 - distance,
-        DistanceMetric::InnerProduct | DistanceMetric::L2 => -distance,
-    }
-}
-
-fn within_threshold(
-    score: f32,
-    distance: f32,
-    metric: DistanceMetric,
-    threshold: Option<f32>,
-) -> bool {
-    let Some(threshold) = threshold else {
-        return true;
-    };
-    match metric {
-        DistanceMetric::L2 => distance <= threshold,
-        DistanceMetric::Cosine | DistanceMetric::InnerProduct => score >= threshold,
+    pub(crate) fn finish(self) -> Vec<SimilarResult> {
+        self.entries
+            .into_sorted_vec()
+            .into_iter()
+            .map(|entry| entry.0)
+            .collect()
     }
 }

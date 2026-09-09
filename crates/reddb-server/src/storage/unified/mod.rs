@@ -49,6 +49,8 @@ pub mod manager;
 pub mod metadata;
 pub mod segment;
 pub mod segment_codec;
+mod segment_graph_index;
+mod segment_unique_key;
 pub mod store;
 pub mod tokenization;
 pub(super) mod visibility_map;

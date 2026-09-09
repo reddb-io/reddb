@@ -38,6 +38,7 @@ pub enum SqlStatement {
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum FrontendStatement {
+    Function(crate::stored_function::FunctionCommand),
     Sql(SqlStatement),
     Graph(GraphQuery),
     GraphCommand(GraphCommand),
@@ -1684,6 +1685,7 @@ impl FrontendStatement {
             FrontendStatement::KvCommand(command) => QueryExpr::KvCommand(command),
             FrontendStatement::ConfigCommand(command) => QueryExpr::ConfigCommand(command),
             FrontendStatement::Ranking(expr) => expr,
+            FrontendStatement::Function(command) => QueryExpr::Function(Box::new(command)),
             FrontendStatement::Explain(query) => QueryExpr::Explain(query),
         }
     }
@@ -2076,6 +2078,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_frontend_statement_inner(&mut self) -> Result<FrontendStatement, ParseError> {
+        if self.starts_function_command()? {
+            return self
+                .parse_function_command()
+                .map(FrontendStatement::Function);
+        }
         match self.peek() {
             Token::Select => match self.parse_select_query()? {
                 QueryExpr::Table(query) => Ok(FrontendStatement::Sql(SqlStatement::Query(
@@ -3223,6 +3230,7 @@ impl<'a> Parser<'a> {
                 use crate::ast::PolicyTargetKind;
                 let kw = match self.peek() {
                     Token::Ident(s) => Some(s.to_ascii_uppercase()),
+                    Token::Vectors => Some("VECTORS".to_string()),
                     _ => None,
                 };
                 let kind = kw.as_deref().and_then(|k| match k {

@@ -78,15 +78,25 @@ impl ParamValue {
             JsonValue::Decimal(value) => Ok(Self::DecimalText(value.clone())),
             JsonValue::String(value) => Ok(Self::Text(value.clone())),
             JsonValue::Array(items) => {
-                if items
-                    .iter()
-                    .all(|value| matches!(value, JsonValue::Integer(_) | JsonValue::Number(_)))
-                {
+                if items.iter().all(|value| {
+                    matches!(
+                        value,
+                        JsonValue::Integer(_) | JsonValue::Number(_) | JsonValue::Decimal(_)
+                    )
+                }) {
+                    // Float32Array JSON often carries more digits than our
+                    // parser's native-number cutoff and arrives as Decimal.
+                    // It is still a numeric vector, not an opaque JSON value.
                     Ok(Self::Vector(
                         items
                             .iter()
-                            .map(|value| value.as_f64().unwrap_or(0.0) as f32)
-                            .collect(),
+                            .map(|value| {
+                                value
+                                    .as_f64()
+                                    .map(|number| number as f32)
+                                    .ok_or_else(|| "invalid numeric vector coordinate".to_string())
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
                     ))
                 } else {
                     Ok(Self::Json(crate::json::to_vec(value).unwrap_or_default()))

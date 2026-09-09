@@ -1,0 +1,29 @@
+{
+  "engine": "reddb",
+  "binary": "/tmp/reddb-competitive-audit/cargo-target/release/red",
+  "directory": "/tmp/reddb-competitive-audit/foundations-recovery/reddb-recovery-fy1s1a7a",
+  "valid": true,
+  "fault": "SIGKILL after 200 acknowledged writes; no machine/power failure",
+  "steps": [
+    {
+      "crash_recovery": "all 200 acknowledged keys and values verified"
+    },
+    {
+      "dump": {
+        "exit": 0,
+        "stdout": "dumped 358 rows from 15 collection(s), 0 secret key(s) to /tmp/reddb-competitive-audit/foundations-recovery/reddb-recovery-fy1s1a7a/dump.jsonl\n",
+        "stderr": ""
+      }
+    },
+    {
+      "restore": {
+        "exit": 0,
+        "stdout": "restored 358 rows, 0 secret key(s) (0 errors)\n",
+        "stderr": ""
+      }
+    },
+    {
+      "logical_restore": "all 200 keys and values in fresh store verified"
+    }
+  ]
+}

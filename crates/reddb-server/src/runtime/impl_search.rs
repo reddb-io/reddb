@@ -331,19 +331,21 @@ impl RedDBRuntime {
             collection,
             crate::catalog::CollectionModel::Vector,
         )?;
-        let mut results = self.inner.db.similar(collection, vector, k.max(1));
-        if results.is_empty() && self.inner.db.store().get_collection(collection).is_none() {
-            return Err(RedDBError::NotFound(collection.to_string()));
-        }
-        results.retain(|result| result.score >= min_score);
-        results.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.entity_id.raw().cmp(&right.entity_id.raw()))
-        });
-        Ok(results)
+        // SEARCH SIMILAR and ASK use the same exact, policy-before-top-k
+        // executor as VECTOR SEARCH. Preserve this API's cosine score contract.
+        let mut query = reddb_rql::ast::VectorQuery::new(
+            collection,
+            reddb_rql::ast::VectorSource::Literal(vector.to_vec()),
+        )
+        .limit(k);
+        query.metric = Some(reddb_rql::ast::DistanceMetric::Cosine);
+        query.threshold = Some(min_score);
+        super::query_exec::runtime_vector_matches(
+            self,
+            &query,
+            vector,
+            &mut crate::storage::query::unified::VectorQueryStats::default(),
+        )
     }
 
     pub fn search_ivf(
@@ -364,10 +366,15 @@ impl RedDBRuntime {
             .get_collection(collection)
             .ok_or_else(|| RedDBError::NotFound(collection.to_string()))?;
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+        let rls_enabled = self.is_rls_enabled(collection);
+        let mut rls_cache = HashMap::new();
 
         let vectors: Vec<(u64, Vec<f32>)> = manager
             .scan(snapshot.as_ref(), |_| true)
             .into_iter()
+            .filter(|entity| {
+                !rls_enabled || self.search_entity_rls_allowed(collection, entity, &mut rls_cache)
+            })
             .filter_map(|entity| match &entity.data {
                 EntityData::Vector(data) if !data.dense.is_empty() => {
                     Some((entity.id.raw(), data.dense.clone()))
@@ -882,8 +889,17 @@ impl RedDBRuntime {
             builder = builder.fuzzy();
         }
 
+        let snapshot = super::execution_context::capture_current_snapshot();
+        let mut rls_cache = HashMap::new();
         let mut result = builder
-            .execute(&self.inner.db.store())
+            .execute_filtered(&self.inner.db.store(), snapshot.as_ref(), |entity| {
+                self.search_entity_allowed(
+                    entity.kind.collection(),
+                    entity,
+                    snapshot.as_ref(),
+                    &mut rls_cache,
+                )
+            })
             .map_err(|err| RedDBError::Query(err.to_string()))?;
         for item in &mut result.matches {
             item.components.text_relevance = Some(item.score);
@@ -957,6 +973,30 @@ impl RedDBRuntime {
             // RLS on but no policy matches this role/action ⇒ deny.
             return false;
         };
+        if matches!(entity.kind, EntityKind::Vector { .. }) {
+            // Vector metadata lives beside the entity, not inside VectorData.
+            // Hydrate that namespace before evaluating policy expressions;
+            // the generic entity record contains only dimension and content.
+            let Some(mut record) = super::record_search::runtime_any_record_from_entity_ref(entity)
+            else {
+                return false;
+            };
+            let metadata = self
+                .inner
+                .db
+                .store()
+                .get_metadata(collection, entity.id)
+                .unwrap_or_default();
+            let metadata = crate::application::entity::metadata_to_json(&metadata);
+            record.set("metadata", Value::Json(metadata.to_string().into_bytes()));
+            return super::join_filter::evaluate_runtime_filter_with_db(
+                Some(&self.inner.db),
+                &record,
+                filter,
+                Some(collection),
+                Some(collection),
+            );
+        }
         super::query_exec::evaluate_entity_filter_with_db(
             Some(&self.inner.db),
             entity,
@@ -967,6 +1007,17 @@ impl RedDBRuntime {
     }
 
     pub fn search_context(&self, input: SearchContextInput) -> RedDBResult<ContextSearchResult> {
+        // Direct API calls need the same transaction/savepoint view as RQL.
+        // Nested reads inherit the existing statement snapshot.
+        let _scope = if crate::runtime::impl_core::capture_current_snapshot().is_none() {
+            use super::statement_frame::{StatementExecutionFrame, StatementIdentity};
+            Some(
+                StatementExecutionFrame::build(self, StatementIdentity::Text("SEARCH CONTEXT"))?
+                    .install(self),
+            )
+        } else {
+            None
+        };
         let started = std::time::Instant::now();
         let result_limit = input.limit.unwrap_or(25).max(1);
         let graph_depth = input.graph_depth.unwrap_or(1).min(3);
@@ -1165,7 +1216,21 @@ impl RedDBRuntime {
                     if scored.contains_key(&xref.target.raw()) {
                         continue;
                     }
-                    if let Some(target) = self.inner.db.get(xref.target) {
+                    if allowed_collections
+                        .as_ref()
+                        .is_some_and(|scope| !scope.contains(&xref.target_collection))
+                    {
+                        continue;
+                    }
+                    if let Some(target) = store.get(&xref.target_collection, xref.target) {
+                        if !self.search_entity_allowed(
+                            &xref.target_collection,
+                            &target,
+                            snap_ctx.as_ref(),
+                            &mut rls_cache,
+                        ) {
+                            continue;
+                        }
                         let decayed_score = source_score * xref.weight * 0.8;
                         if decayed_score >= min_score {
                             expanded_cross_refs += 1;
@@ -1188,82 +1253,18 @@ impl RedDBRuntime {
         }
 
         // ── Expansion: Graph traversal ──────────────────────────────────
-        let mut expanded_graph = 0usize;
-        if expand_graph && graph_depth > 0 {
-            let seed_node_ids: Vec<(u64, String, f32, String)> = scored
-                .values()
-                .filter_map(|(entity, score, _, collection)| {
-                    if matches!(entity.kind, EntityKind::GraphNode(_)) {
-                        Some((
-                            entity.id.raw(),
-                            entity.id.raw().to_string(),
-                            *score,
-                            collection.clone(),
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if !seed_node_ids.is_empty() {
-                // Use lazy graph materialization — only loads seed nodes + BFS neighbors
-                let seed_ids: Vec<u64> = seed_node_ids.iter().map(|(id, _, _, _)| *id).collect();
-                if let Ok(graph) = materialize_graph_lazy(store.as_ref(), &seed_ids, graph_depth) {
-                    for (source_id, node_id_str, source_score, source_collection) in &seed_node_ids
-                    {
-                        let mut visited: HashSet<String> = HashSet::new();
-                        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-                        visited.insert(node_id_str.clone());
-                        queue.push_back((node_id_str.clone(), 0));
-
-                        while let Some((current, depth)) = queue.pop_front() {
-                            if depth >= graph_depth {
-                                continue;
-                            }
-                            let neighbors = graph_adjacent_edges(
-                                &graph,
-                                &current,
-                                RuntimeGraphDirection::Both,
-                                None,
-                            );
-                            for (neighbor_id, _edge) in neighbors.into_iter().take(graph_max_edges)
-                            {
-                                if !visited.insert(neighbor_id.clone()) {
-                                    continue;
-                                }
-                                if let Ok(parsed) = neighbor_id.parse::<u64>() {
-                                    if scored.contains_key(&parsed) {
-                                        continue;
-                                    }
-                                    if let Some(entity) = self.inner.db.get(EntityId::new(parsed)) {
-                                        let decay = 0.7f32.powi((depth + 1) as i32);
-                                        let decayed_score = source_score * decay;
-                                        if decayed_score >= min_score {
-                                            expanded_graph += 1;
-                                            scored.insert(
-                                                parsed,
-                                                (
-                                                    entity,
-                                                    decayed_score,
-                                                    DiscoveryMethod::GraphTraversal {
-                                                        source_id: *source_id,
-                                                        edge_type: "adjacent".to_string(),
-                                                        depth: depth + 1,
-                                                    },
-                                                    source_collection.clone(),
-                                                ),
-                                            );
-                                        }
-                                    }
-                                }
-                                queue.push_back((neighbor_id, depth + 1));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let expanded_graph = if expand_graph && graph_depth > 0 && graph_max_edges > 0 {
+            self.search_context_expand_graph(
+                &mut scored,
+                allowed_collections.as_ref(),
+                graph_depth,
+                graph_max_edges,
+                min_score,
+                &mut rls_cache,
+            )?
+        } else {
+            0
+        };
 
         // ── Expansion: Vectors ──────────────────────────────────────────
         let mut expanded_vectors = 0usize;
@@ -1277,20 +1278,21 @@ impl RedDBRuntime {
                         if scored.contains_key(&result.entity_id.raw()) {
                             continue;
                         }
-                        if let Some(entity) = self.inner.db.get(result.entity_id) {
-                            expanded_vectors += 1;
-                            scored.insert(
-                                result.entity_id.raw(),
-                                (
-                                    entity,
-                                    result.score * 0.9,
-                                    DiscoveryMethod::VectorQuery {
-                                        similarity: result.score,
-                                    },
-                                    collection.clone(),
-                                ),
-                            );
-                        }
+                        // Exact search already owns the snapshot-visible, RLS-admitted
+                        // payload. Move it across this boundary without a second lookup
+                        // through the global entity cache and another vector copy.
+                        expanded_vectors += 1;
+                        scored.insert(
+                            result.entity_id.raw(),
+                            (
+                                result.entity,
+                                result.score * 0.9,
+                                DiscoveryMethod::VectorQuery {
+                                    similarity: result.score,
+                                },
+                                collection.clone(),
+                            ),
+                        );
                     }
                 }
             }

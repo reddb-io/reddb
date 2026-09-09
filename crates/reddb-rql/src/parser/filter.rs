@@ -539,11 +539,7 @@ impl<'a> Parser<'a> {
 
     fn parse_field_ref_segment(&mut self) -> Result<String, ParseError> {
         match &self.current.token {
-            Token::Ident(name) => {
-                let name = name.clone();
-                self.advance()?;
-                Ok(name)
-            }
+            Token::Ident(_) | Token::QuotedIdent(_) => self.expect_ident(),
             Token::Eof
             | Token::LParen
             | Token::RParen

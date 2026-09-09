@@ -72,7 +72,7 @@ pub enum DiffOp {
     TypeChange {
         name: String,
         from: DeclaredColumnContract,
-        to: DeclaredColumnContract,
+        to: Box<DeclaredColumnContract>,
     },
 }
 
@@ -148,7 +148,7 @@ pub fn compute_column_diff(
                     operations.push(DiffOp::TypeChange {
                         name: name.to_string(),
                         from: (*c).clone(),
-                        to: declared_column_contract_from_create(t),
+                        to: Box::new(declared_column_contract_from_create(t)),
                     });
                 }
             }
@@ -242,6 +242,13 @@ pub fn column_equivalent(c: &DeclaredColumnContract, t: &CreateColumnDef) -> boo
     }
 
     // 2. flags
+    if c.generated.as_ref().map(|expression| expression.source())
+        != t.generated.as_ref().map(|expression| expression.source())
+        || c.check.as_ref().map(|expression| expression.source())
+            != t.check.as_ref().map(|expression| expression.source())
+    {
+        return false;
+    }
     if c.not_null != t.not_null
         || c.unique != t.unique
         || c.primary_key != t.primary_key
@@ -405,6 +412,8 @@ fn declared_column_contract_from_create(column: &CreateColumnDef) -> DeclaredCol
         sql_type: Some(column.sql_type.clone()),
         not_null: column.not_null,
         default: column.default.clone(),
+        generated: column.generated.clone(),
+        check: column.check.clone(),
         compress: column.compress,
         unique: column.unique,
         primary_key: column.primary_key,
@@ -512,6 +521,15 @@ fn render_column_type(col: &DeclaredColumnContract) -> String {
         None => col.data_type.clone(),
     };
     let mut out = base;
+    if let Some(expression) = &col.generated {
+        out.push_str(&format!(
+            " GENERATED ALWAYS AS ({}) STORED",
+            expression.source()
+        ));
+    }
+    if let Some(expression) = &col.check {
+        out.push_str(&format!(" CHECK ({})", expression.source()));
+    }
     if col.primary_key {
         out.push_str(" PRIMARY KEY");
     }
@@ -609,6 +627,15 @@ fn json_column(col: &DeclaredColumnContract) -> String {
     if let Some(default) = col.default.as_ref() {
         out.push_str(&format!(", \"default\": {}", json_string(default)));
     }
+    for (name, expression) in [("generated", &col.generated), ("check", &col.check)] {
+        if let Some(expression) = expression {
+            out.push_str(&format!(
+                ", {}: {}",
+                json_string(name),
+                json_string(expression.source())
+            ));
+        }
+    }
     out.push_str(" }");
     out
 }
@@ -656,6 +683,8 @@ mod tests {
             sql_type: Some(SqlTypeName::new(sql_type)),
             not_null,
             default: None,
+            generated: None,
+            check: None,
             compress: None,
             unique: false,
             primary_key: false,
@@ -672,6 +701,8 @@ mod tests {
             sql_type: SqlTypeName::new(sql_type),
             not_null,
             default: None,
+            generated: None,
+            check: None,
             compress: None,
             unique: false,
             primary_key: false,

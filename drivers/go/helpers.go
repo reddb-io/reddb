@@ -893,20 +893,16 @@ func firstRow(body []byte) (map[string]any, uint64, error) {
 		return nil, 0, err
 	}
 	affected := affectedFromMap(obj)
-	rows, _ := obj["rows"].([]any)
-	if len(rows) == 0 {
+	if affected == 0 {
 		if nested, ok := obj["result"].(map[string]any); ok {
-			rows, _ = nested["rows"].([]any)
-			if affected == 0 {
-				affected = affectedFromMap(nested)
-			}
+			affected = affectedFromMap(nested)
 		}
 	}
+	rows := resultRows(obj)
 	if len(rows) == 0 {
 		return nil, affected, nil
 	}
-	row, _ := rows[0].(map[string]any)
-	return row, affected, nil
+	return rows[0], affected, nil
 }
 
 func allRows(body []byte) ([]map[string]any, error) {
@@ -914,19 +910,59 @@ func allRows(body []byte) ([]map[string]any, error) {
 	if err != nil || obj == nil {
 		return nil, err
 	}
-	raw, ok := obj["rows"].([]any)
-	if !ok {
+	return resultRows(obj), nil
+}
+
+// Canonical envelopes separate projected values from system metadata.
+// Legacy rows remain opaque: user fields named values/meta are not wrappers.
+func resultRows(obj map[string]any) []map[string]any {
+	raw, legacy := obj["rows"].([]any)
+	if !legacy {
 		if nested, ok := obj["result"].(map[string]any); ok {
-			raw, _ = nested["rows"].([]any)
+			obj = nested
+		}
+		raw, legacy = obj["rows"].([]any)
+		if !legacy {
+			raw, _ = obj["records"].([]any)
 		}
 	}
+	columns, _ := obj["columns"].([]any)
 	out := make([]map[string]any, 0, len(raw))
-	for _, r := range raw {
-		if m, ok := r.(map[string]any); ok {
-			out = append(out, m)
+	for _, item := range raw {
+		record, ok := item.(map[string]any)
+		if !ok {
+			continue
 		}
+		values, canonical := record["values"].(map[string]any)
+		if legacy || !canonical {
+			out = append(out, record)
+			continue
+		}
+		meta, _ := record["meta"].(map[string]any)
+		row := make(map[string]any)
+		if len(columns) > 0 {
+			for _, column := range columns {
+				name, ok := column.(string)
+				if !ok {
+					continue
+				}
+				if value, exists := values[name]; exists {
+					row[name] = value
+				} else if value, exists := meta[name]; exists {
+					row[name] = value
+				}
+			}
+		} else {
+			for key, value := range meta {
+				row[key] = value
+			}
+			for key, value := range values {
+				row[key] = value
+			}
+		}
+		out = append(out, row)
 	}
-	return out, nil
+	return out
 }
 
 func affectedFromBody(body []byte) (uint64, error) {

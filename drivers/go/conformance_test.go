@@ -166,6 +166,30 @@ func waitForConfConnect(ctx context.Context, uri string) (Conn, error) {
 
 // --- case ID: generic.* -----------------------------------------------
 
+// Case ID: generic.query.quoted_identifiers
+func TestConformance_generic_query_quoted_identifiers(t *testing.T) {
+	e := startConfEngine(t)
+	c, _ := e.dial(t)
+	ctx := context.Background()
+	if _, err := c.Exec(ctx, `CREATE TABLE "select" ("key name" INT, "text value" TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(ctx, `INSERT INTO "select" ("key name", "text value") VALUES ($1,$2)`, int64(1), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	body, err := c.Query(ctx, `SELECT "text value" FROM "select" WHERE "key name"=$1`, int64(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := allRows(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 || rows[0]["text value"] != "hello" {
+		t.Fatalf("quoted result: %s", body)
+	}
+}
+
 // Case ID: generic.query.no_params
 func TestConformance_generic_query_no_params(t *testing.T) {
 	e := startConfEngine(t)
@@ -570,8 +594,9 @@ func TestConformance_tx_commit_persists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select: %v", err)
 	}
-	if !strings.Contains(string(body), "keep") {
-		t.Fatalf("commit did not persist: %s", body)
+	rows, err := allRows(body)
+	if err != nil || len(rows) != 1 || rows[0]["name"] != "keep" {
+		t.Fatalf("commit did not persist: %s (%v)", body, err)
 	}
 }
 
@@ -598,8 +623,9 @@ func TestConformance_tx_rollback_discards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select: %v", err)
 	}
-	if strings.Contains(string(body), "drop") {
-		t.Fatalf("rollback did not discard: %s", body)
+	rows, err := allRows(body)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("rollback did not discard: %s (%v)", body, err)
 	}
 }
 

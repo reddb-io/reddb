@@ -57,8 +57,10 @@ pub mod optimizer;
 pub mod parser;
 pub mod planner;
 pub mod renderer;
+pub mod schema_expression;
 pub mod sql;
 pub mod sql_lowering;
+pub mod stored_function;
 
 pub use conformance::{render_cell, CellType};
 pub use lexer::{Lexer, LexerError, Position, Spanned, Token};

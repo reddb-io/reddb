@@ -107,3 +107,32 @@ mod integration_entity_query;
 
 #[path = "locking_concurrency/unit_locking.rs"]
 mod unit_locking;
+
+#[path = "schema_query_core/e2e_uniqueness_comparison.rs"]
+mod e2e_uniqueness_comparison;
+
+#[path = "schema_query_core/e2e_primary_key_lookup.rs"]
+mod e2e_primary_key_lookup;
+
+#[path = "mvcc_transactions/e2e_mvcc_key_reuse.rs"]
+mod e2e_mvcc_key_reuse;
+
+#[path = "schema_query_core/e2e_standalone_unique_admission.rs"]
+mod e2e_standalone_unique_admission;
+#[path = "schema_query_core/e2e_unique_key_lookup.rs"]
+mod e2e_unique_key_lookup;
+
+#[path = "schema_query_core/e2e_parameter_ast_cache.rs"]
+mod e2e_parameter_ast_cache;
+
+#[path = "schema_query_core/e2e_table_unique_constraints.rs"]
+mod e2e_table_unique_constraints;
+
+#[path = "schema_query_core/e2e_sql_quoted_identifiers.rs"]
+mod e2e_sql_quoted_identifiers;
+
+#[path = "schema_query_core/e2e_collection_expressions.rs"]
+mod e2e_collection_expressions;
+
+#[path = "schema_query_core/e2e_rql_functions.rs"]
+mod e2e_rql_functions;

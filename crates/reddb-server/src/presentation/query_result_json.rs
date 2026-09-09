@@ -428,6 +428,54 @@ pub(crate) fn query_stats_json(stats: &QueryStats) -> JsonValue {
         "exec_time_us".to_string(),
         JsonValue::Number(stats.exec_time_us as f64),
     );
+    if let Some(vector) = &stats.vector {
+        let mut metrics = Map::new();
+        metrics.insert("operators".into(), vector.operators_json());
+        metrics.insert(
+            "mode_requested".into(),
+            JsonValue::String(vector.mode_requested.clone()),
+        );
+        metrics.insert(
+            "mode_executed".into(),
+            JsonValue::String(vector.mode_executed.clone()),
+        );
+        metrics.insert(
+            "fallback_reason".into(),
+            vector
+                .fallback_reason
+                .as_ref()
+                .map_or(JsonValue::Null, |reason| JsonValue::String(reason.clone())),
+        );
+
+        metrics.insert("cache_hit".to_string(), JsonValue::Bool(vector.cache_hit));
+        metrics.insert(
+            "access_path".to_string(),
+            JsonValue::String(vector.access_path.clone()),
+        );
+        metrics.insert("index_used".to_string(), JsonValue::Bool(vector.index_used));
+        for (name, value) in [
+            (
+                "approximate_distance_evaluations",
+                vector.approximate_distance_evaluations,
+            ),
+            ("peak_topk_entries", vector.peak_topk_entries),
+            ("candidates_examined", vector.candidates_examined),
+            ("metadata_rejected", vector.metadata_rejected),
+            ("rls_rejected", vector.rls_rejected),
+            ("visibility_rejected", vector.visibility_rejected),
+            (
+                "exact_distance_evaluations",
+                vector.exact_distance_evaluations,
+            ),
+            ("rows_returned", vector.rows_returned),
+        ] {
+            metrics.insert(
+                name.to_string(),
+                StorageValue::UnsignedInteger(value).to_json(),
+            );
+        }
+        object.insert("vector".to_string(), JsonValue::Object(metrics));
+    }
     JsonValue::Object(object)
 }
 

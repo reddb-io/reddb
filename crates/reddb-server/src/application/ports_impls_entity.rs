@@ -718,7 +718,7 @@ impl RedDBRuntime {
                 }
 
                 if !modified_columns.is_empty() || row_contract_timestamps {
-                    let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+                    let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
                     let current_fields = if let Some(named) = row.named.take() {
                         named.into_iter().collect::<Vec<_>>()
                     } else if let Some(schema) = row.schema.as_ref() {
@@ -731,6 +731,16 @@ impl RedDBRuntime {
                         Vec::new()
                     };
                     let normalized_fields = contract.normalize_update_fields(current_fields)?;
+                    if let Some(schema) = db.collection_contract_arc(&collection) {
+                        for column in schema
+                            .declared_columns
+                            .iter()
+                            .filter(|column| column.generated.is_some())
+                        {
+                            modified_columns.push(column.name.clone());
+                            context_index_dirty = true;
+                        }
+                    }
                     if row_contract_timestamps {
                         modified_columns.push("updated_at".to_string());
                         context_index_dirty = true;
@@ -1276,13 +1286,33 @@ impl RedDBRuntime {
         }
 
         if !modified_columns.is_empty() || row_contract_timestamps {
-            let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+            let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
             if row_contract_timestamps {
                 context_index_dirty = true;
                 set_row_field(row, "updated_at", contract.managed_timestamp_value());
                 modified_columns.push("updated_at".to_string());
             }
-            if row_touches_unique_columns {
+            let expression_contract = if row_contract_plan.is_some_and(|plan| plan.has_expressions)
+            {
+                db.collection_contract_arc(&collection)
+            } else {
+                None
+            };
+            if let Some(schema) = &expression_contract {
+                let normalized = contract.normalize_update_fields(collect_row_fields(row))?;
+                for column in schema
+                    .declared_columns
+                    .iter()
+                    .filter(|column| column.generated.is_some())
+                {
+                    modified_columns.push(column.name.clone());
+                }
+                for (name, value) in normalized {
+                    set_row_field(row, &name, value);
+                }
+                context_index_dirty = true;
+            }
+            if row_touches_unique_columns || expression_contract.is_some() {
                 let current_fields = collect_row_fields(row);
                 contract.enforce_row_uniqueness(&current_fields, Some(id))?;
             }
@@ -1421,6 +1451,7 @@ impl RedDBRuntime {
     pub(crate) fn flush_applied_entity_mutation(
         &self,
         applied: &AppliedEntityMutation,
+        topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<()> {
         let store = self.db().store();
         if applied.context_index_dirty {
@@ -1548,6 +1579,12 @@ impl RedDBRuntime {
                 }
             }
         }
+        drop(topology_guard);
+        #[cfg(test)]
+        self.index_store_ref().mutation_test_hook(
+            &applied.collection,
+            crate::runtime::MutationTestPhase::BeforeEvents,
+        );
         self.cdc_emit_prebuilt_with_columns(
             crate::replication::cdc::ChangeOperation::Update,
             &applied.collection,
@@ -1566,11 +1603,17 @@ impl RedDBRuntime {
         entity: crate::storage::UnifiedEntity,
         payload: JsonValue,
         operations: Vec<PatchEntityOperation>,
+        topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<CreateEntityOutput> {
         let applied =
             self.apply_loaded_patch_entity_core(collection, entity, payload, operations)?;
         self.persist_applied_entity_mutations(std::slice::from_ref(&applied))?;
-        self.flush_applied_entity_mutation(&applied)?;
+        #[cfg(test)]
+        self.index_store_ref().mutation_test_hook(
+            &applied.collection,
+            crate::runtime::MutationTestPhase::StoragePublished,
+        );
+        self.flush_applied_entity_mutation(&applied, topology_guard)?;
         Ok(CreateEntityOutput {
             id: applied.id,
             entity: Some(public_document_entity(applied.entity)),
@@ -1659,7 +1702,7 @@ impl RedDBRuntime {
         input: CreateNodeInput,
     ) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Graph)?;
         let mut metadata = input.metadata;
         contract.apply_default_ttl(&mut metadata);
@@ -1715,7 +1758,7 @@ impl RedDBRuntime {
         input: CreateEdgeInput,
     ) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Graph)?;
         let mut metadata = input.metadata;
         contract.apply_default_ttl(&mut metadata);
@@ -1769,12 +1812,17 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
+    // Schema prevalidation does not admit standalone index keys. Route these
+    // collections through the guarded row kernel before installing any row.
+    if runtime.index_store_ref().has_unique_hash_index(&collection) {
+        return runtime.create_rows_batch_columnar_with_outputs(collection, column_names, rows);
+    }
     runtime.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
     runtime.check_batch_size(rows.len())?;
     runtime.check_db_size()?;
 
     let db = runtime.db();
-    let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+    let contract = CollectionContractWriteEnforcer::new(runtime, &db, &collection);
     contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
     let store = db.store();
@@ -1844,6 +1892,11 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
 impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            self,
+            &input.collection,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         let db = self.db();
         let CreateRowInput {
             collection,
@@ -1852,7 +1905,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             node_links,
             vector_links,
         } = input;
-        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
         contract.ensure_model(crate::catalog::CollectionModel::Table)?;
         let mut metadata = input_metadata;
         contract.apply_default_ttl(&mut metadata);
@@ -1884,6 +1937,11 @@ impl RuntimeEntityPort for RedDBRuntime {
         &self,
         input: CreateRowsBatchInput,
     ) -> RedDBResult<Vec<CreateEntityOutput>> {
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            self,
+            &input.collection,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         if input.rows.is_empty() {
             return Ok(Vec::new());
         }
@@ -1893,7 +1951,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         let db = self.db();
         let collection = input.collection;
         let suppress_events = input.suppress_events;
-        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
         contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
         let mut prepared_rows = Vec::with_capacity(input.rows.len());
@@ -1986,7 +2044,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         self.check_db_size()?;
 
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
         contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
         // Fast path: when the collection carries no contract (or the
@@ -1998,17 +2056,18 @@ impl RuntimeEntityPort for RedDBRuntime {
         // without the wasted (String, Value) clones. This is the
         // bench `bench_users` shape (no contract declared by the
         // adapter's `setup_schema`).
-        let needs_normalisation = match db.collection_contract(&collection) {
-            Some(c) => {
-                c.declared_model == crate::catalog::CollectionModel::Table
-                    && (!c.declared_columns.is_empty()
-                        || c.table_def
-                            .as_ref()
-                            .map(|t| !t.columns.is_empty())
-                            .unwrap_or(false))
-            }
-            None => false,
-        };
+        let needs_normalisation = self.index_store_ref().has_unique_hash_index(&collection)
+            || match db.collection_contract(&collection) {
+                Some(c) => {
+                    c.declared_model == crate::catalog::CollectionModel::Table
+                        && (!c.declared_columns.is_empty()
+                            || c.table_def
+                                .as_ref()
+                                .map(|t| !t.columns.is_empty())
+                                .unwrap_or(false))
+                }
+                None => false,
+            };
         if !needs_normalisation {
             return create_rows_batch_prevalidated_columnar_with_outputs(
                 self,
@@ -2071,7 +2130,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // rows at it — this one-off check is O(1), independent of
         // ncols, and catches schema-kind mismatches that the client
         // can't always see.
-        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &collection);
         contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
         // Hoist the per-collection default TTL lookup out of the
@@ -2147,7 +2206,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Vector)?;
         contract.ensure_vector_dimension(input.dense.len())?;
         let mut metadata = input.metadata;
@@ -2170,14 +2229,13 @@ impl RuntimeEntityPort for RedDBRuntime {
             builder = builder.link_to_node(link_node);
         }
 
-        let id = builder.save()?;
+        // The transaction stamp must be present on the first published version.
+        // Stamping after save exposed an xmin=0 vector to concurrent snapshots.
+        let id = builder.save_with_xmin(self.current_xid())?;
         let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
             Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
             _ => None,
         };
-        // Phase 1.1 MVCC universal: stamp xmin on the vector so
-        // concurrent ANN scans hide it until the transaction commits.
-        self.stamp_xmin_if_in_txn(&input.collection, id);
         refresh_context_index(&db, &input.collection, id)?;
         // Issue #693 — vector.turbo write path. Order matters and
         // matches the write sequence the next slice (#673) will
@@ -2225,7 +2283,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Document)?;
 
         if let JsonValue::Object(ref map) = input.body {
@@ -2284,7 +2342,7 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         let declared_model = db
             .collection_contract(&input.collection)
             .map(|contract| contract.declared_model);
@@ -2322,7 +2380,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     ) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::TimeSeries)?;
 
         let mut fields = vec![
@@ -2418,6 +2476,15 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn patch_entity(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            self,
+            &input.collection,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&input.collection);
+        let topology_guard = topology_lock.read();
         let PatchEntityInput {
             collection,
             id,
@@ -2437,11 +2504,20 @@ impl RuntimeEntityPort for RedDBRuntime {
                 id.raw()
             )));
         };
-        self.apply_loaded_patch_entity(collection, entity, payload, operations)
+        self.apply_loaded_patch_entity(collection, entity, payload, operations, topology_guard)
     }
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
+            self,
+            &input.collection,
+        );
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&input.collection);
+        let topology_guard = topology_lock.read();
         let store = self.db().store();
         // Snapshot row fields before delete so we can mirror the removal
         // into every secondary index. The fetch is best-effort: if the
@@ -2458,6 +2534,11 @@ impl RuntimeEntityPort for RedDBRuntime {
             .delete(&input.collection, input.id)
             .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
         if deleted {
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &input.collection,
+                crate::runtime::MutationTestPhase::StoragePublished,
+            );
             store.context_index().remove_entity(input.id);
             // Secondary index maintenance — surface only registry-shape
             // errors; missing-index removals are tolerated inside the call.
@@ -2466,6 +2547,12 @@ impl RuntimeEntityPort for RedDBRuntime {
                     .index_entity_delete(&input.collection, input.id, &pre_delete_fields)
                     .map_err(crate::RedDBError::Internal)?;
             }
+            drop(topology_guard);
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &input.collection,
+                crate::runtime::MutationTestPhase::BeforeEvents,
+            );
             self.cdc_emit(
                 crate::replication::cdc::ChangeOperation::Delete,
                 &input.collection,

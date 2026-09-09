@@ -228,6 +228,51 @@ impl RedDBRuntime {
 
         // Map QueryExpr → (Action, Resource).
         let (action, resource) = match expr {
+            QueryExpr::Function(command) => {
+                use reddb_rql::stored_function::FunctionCommand;
+                match command.as_ref() {
+                    FunctionCommand::Call { name, .. } => {
+                        let (schema, name) = match name.split_once('.') {
+                            Some((schema, name)) => (Some(schema.to_string()), name.to_string()),
+                            None => (None, name.clone()),
+                        };
+                        (Action::Execute, Resource::Function { schema, name })
+                    }
+                    FunctionCommand::Show { .. } => return Ok(()),
+                    FunctionCommand::Create {
+                        definition,
+                        replace,
+                    } => {
+                        return self.check_ddl_object_privilege(
+                            &auth_store,
+                            &principal_id,
+                            role,
+                            tenant.as_deref(),
+                            &username,
+                            if *replace { "alter" } else { "create" },
+                            "function",
+                            &definition.name,
+                            crate::auth::Role::Write,
+                        )
+                    }
+                    FunctionCommand::Drop { name, .. } => {
+                        return self.check_ddl_object_privilege(
+                            &auth_store,
+                            &principal_id,
+                            role,
+                            tenant.as_deref(),
+                            &username,
+                            "drop",
+                            "function",
+                            name,
+                            crate::auth::Role::Write,
+                        )
+                    }
+                }
+            }
+            QueryExpr::Table(t) if super::super::query_exec::table_query_is_storage_free(t) => {
+                return Ok(())
+            }
             QueryExpr::Table(t) => (Action::Select, Resource::table_from_name(&t.table)),
             QueryExpr::RankOf(_) | QueryExpr::ApproxRankOf(_) | QueryExpr::RankRange(_) => {
                 (Action::Select, Resource::Database)
@@ -1513,6 +1558,11 @@ impl RedDBRuntime {
     /// vault secret is sent as a bearer) is admin-only. Embedded callers with
     /// no identity pass, as everywhere else in this gate.
     pub(crate) fn check_config_write_privilege(&self, key: &str) -> RedDBResult<()> {
+        if key == super::super::function_catalog::REGISTRY_KEY {
+            return Err(RedDBError::Query(
+                "function catalog is managed through CREATE/ALTER/DROP FUNCTION".into(),
+            ));
+        }
         let Some(auth_store) = self.inner.auth_store.read().clone() else {
             return Ok(());
         };

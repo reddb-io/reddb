@@ -238,11 +238,20 @@ impl QueryResult {
             };
         };
         let result_obj = obj.get("result").and_then(|v| v.as_object()).unwrap_or(obj);
+        let canonical_query = obj.contains_key("query") && obj.contains_key("result");
         let statement = obj
-            .get("statement")
-            .or_else(|| obj.get("statement_type"))
+            .get("statement_type")
+            .or_else(|| {
+                if canonical_query {
+                    None
+                } else {
+                    obj.get("statement")
+                }
+            })
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            // Canonical SELECT envelopes omit statement_type; their statement
+            // field describes the result model (e.g. "table"), not the verb.
+            .unwrap_or(if canonical_query { "select" } else { "" })
             .to_string();
         let affected = obj
             .get("affected")
@@ -347,4 +356,39 @@ pub struct BulkInsertResult {
     pub rids: Vec<String>,
     /// Legacy alias for `rids`.
     pub ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod query_envelope_tests {
+    use super::QueryResult;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_dml_retains_verb_and_affected_count() {
+        let result = QueryResult::from_envelope(json!({
+            "ok": true, "query": "INSERT INTO t (id) VALUES (1)",
+            "statement": "table", "statement_type": "insert", "affected_rows": 1,
+            "result": {"columns": [], "records": []}
+        }));
+        assert_eq!(result.statement, "insert");
+        assert_eq!(result.affected, 1);
+    }
+
+    #[test]
+    fn canonical_select_uses_verb_instead_of_result_model() {
+        let result = QueryResult::from_envelope(json!({
+            "ok": true, "query": "SELECT id FROM t", "statement": "table",
+            "result": {"columns": ["id"], "records": [{"values": {"id": 1}}]}
+        }));
+        assert_eq!(result.statement, "select");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.affected, 0);
+    }
+
+    #[test]
+    fn legacy_summary_keeps_its_verb_and_affected_count() {
+        let result = QueryResult::from_envelope(json!({"statement": "delete", "affected": 2}));
+        assert_eq!(result.statement, "delete");
+        assert_eq!(result.affected, 2);
+    }
 }

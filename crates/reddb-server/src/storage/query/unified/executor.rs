@@ -27,6 +27,7 @@ pub struct UnifiedExecutor {
     /// Optional edge properties loaded from the unified entity store, keyed by
     /// `(from, canonical_label, to)` because GraphStore adjacency omits edge ids.
     edge_properties: Arc<EdgeProperties>,
+    work_check: Option<fn(u64) -> Result<(), ExecutionError>>,
 }
 
 impl UnifiedExecutor {
@@ -55,6 +56,14 @@ impl UnifiedExecutor {
             index,
             node_properties: Arc::new(node_properties),
             edge_properties: Arc::new(edge_properties),
+            work_check: None,
+        }
+    }
+
+    fn check_work(&self, work: u64) -> Result<(), ExecutionError> {
+        match self.work_check {
+            Some(check) => check(work),
+            None => Ok(()),
         }
     }
 
@@ -151,12 +160,31 @@ impl UnifiedExecutor {
         node_properties: HashMap<String, HashMap<String, Value>>,
         edge_properties: EdgeProperties,
     ) -> Result<UnifiedResult, ExecutionError> {
-        let temp = Self::new_with_graph_properties(
+        Self::execute_on_with_graph_properties_checked(
+            graph,
+            query,
+            node_properties,
+            edge_properties,
+            None,
+        )
+    }
+
+    pub(crate) fn execute_on_with_graph_properties_checked(
+        graph: &GraphStore,
+        query: &QueryExpr,
+        node_properties: HashMap<String, HashMap<String, Value>>,
+        edge_properties: EdgeProperties,
+        work_check: Option<fn(u64) -> Result<(), ExecutionError>>,
+    ) -> Result<UnifiedResult, ExecutionError> {
+        let mut temp = Self::new_with_graph_properties(
             Arc::new(GraphStore::new()),
             Arc::new(GraphTableIndex::new()),
             node_properties,
             edge_properties,
         );
+
+        temp.work_check = work_check;
+        temp.check_work(0)?;
 
         match query {
             QueryExpr::Graph(q) => temp.exec_graph_on(graph, q),
@@ -176,6 +204,7 @@ impl UnifiedExecutor {
             QueryExpr::Insert(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
+            | QueryExpr::Function(_)
             | QueryExpr::CreateTable(_)
             | QueryExpr::CreateCollection(_)
             | QueryExpr::CreateVector(_)
@@ -287,6 +316,7 @@ impl UnifiedExecutor {
         let matches = self.match_pattern_on(graph, &query.pattern, &mut stats)?;
 
         for matched in matches {
+            self.check_work(1)?;
             if Self::graph_limit_reached(result.records.len(), query.limit) {
                 break;
             }
@@ -429,6 +459,7 @@ impl UnifiedExecutor {
             QueryExpr::Insert(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
+            | QueryExpr::Function(_)
             | QueryExpr::CreateTable(_)
             | QueryExpr::CreateCollection(_)
             | QueryExpr::CreateVector(_)
@@ -543,6 +574,7 @@ impl UnifiedExecutor {
         let effective_projections = effective_graph_projections(query);
 
         for matched in matches {
+            self.check_work(1)?;
             if Self::graph_limit_reached(result.records.len(), query.limit) {
                 break;
             }
@@ -604,6 +636,7 @@ impl UnifiedExecutor {
 
         // Iterate through all nodes
         for node in graph.iter_nodes() {
+            self.check_work(1)?;
             stats.nodes_scanned += 1;
 
             // Check label filter (resolved against the graph's registry).
@@ -658,6 +691,7 @@ impl UnifiedExecutor {
             })?;
 
         for pm in matches {
+            self.check_work(1)?;
             // Get the source node
             let source_node = pm.nodes.get(&edge_pattern.from).ok_or_else(|| {
                 ExecutionError::new(format!(
@@ -701,6 +735,7 @@ impl UnifiedExecutor {
             };
 
             for (etype, other_id, weight, is_outgoing) in edges {
+                self.check_work(1)?;
                 stats.edges_scanned += 1;
 
                 // Check edge label filter — direct string compare against the

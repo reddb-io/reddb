@@ -381,7 +381,7 @@ impl UnifiedStore {
 
         managers
             .iter()
-            .map(|manager| manager.memory_bytes())
+            .map(|manager| manager.resident_bytes())
             .fold(0, u64::saturating_add)
     }
 
@@ -412,6 +412,7 @@ impl UnifiedStore {
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             aux_metadata: RwLock::new(Vec::new()),
+            snapshot_manager: std::sync::OnceLock::new(),
         }
     }
 
@@ -493,6 +494,7 @@ impl UnifiedStore {
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             aux_metadata: RwLock::new(Vec::new()),
+            snapshot_manager: std::sync::OnceLock::new(),
         };
 
         // Load existing data from pages if database exists

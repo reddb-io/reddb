@@ -141,6 +141,7 @@ impl<'a> Parser<'a> {
             collection_model: CollectionModel::Metrics,
             name,
             columns: Vec::new(),
+            unique_constraints: Vec::new(),
             if_not_exists,
             default_ttl_ms: raw_retention_ms,
             metrics_rollup_policies: downsample_policies,

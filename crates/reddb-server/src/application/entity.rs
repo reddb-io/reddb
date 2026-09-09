@@ -133,6 +133,7 @@ pub struct RowUpdateColumnRule {
 
 #[derive(Debug, Clone)]
 pub struct RowUpdateContractPlan {
+    pub has_expressions: bool,
     pub timestamps_enabled: bool,
     pub strict_schema: bool,
     pub declared_rules: HashMap<String, RowUpdateColumnRule>,

@@ -671,6 +671,7 @@ mod tests {
         use crate::storage::transaction::snapshot::Snapshot;
         use std::collections::HashSet;
         EffectiveScope {
+            captured_snapshot: None,
             tenant: None,
             identity: None,
             snapshot: Snapshot {

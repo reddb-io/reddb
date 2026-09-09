@@ -485,7 +485,7 @@ curl -X POST http://127.0.0.1:5000/context \
 | `field` | `string` | `null` | Restrict table/document matching to a specific field |
 | `collections` | `string[]` | `null` | Limit search to these collections |
 | `graph_depth` | `integer` | `1` | How many hops to traverse when expanding graph results |
-| `graph_max_edges` | `integer` | `20` | Maximum edges returned per graph expansion |
+| `graph_max_edges` | `integer` | `20` | Maximum visible, policy-admitted adjacent edges per expanded node and source; zero disables graph expansion |
 | `max_cross_refs` | `integer` | `10` | Maximum cross-references to follow |
 | `follow_cross_refs` | `boolean` | `true` | Whether to follow cross-references between entities |
 | `expand_graph` | `boolean` | `true` | Whether to expand graph neighborhoods around matched nodes |

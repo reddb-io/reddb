@@ -432,3 +432,35 @@ fn auto_embed_over_cdc_retries_then_dead_letters_then_redrives() {
 
     clear_local_embedding_backend_for_tests();
 }
+
+#[test]
+fn auto_embed_uses_only_inserted_rows_and_skips_conflicts() {
+    let _bg = backend_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    install_local_embedding_backend(Arc::new(FixedBackend {
+        vector: vec![1.0, 0.0],
+        calls: Arc::clone(&calls),
+    }));
+    let rt = rt();
+    register_installed_local_model(&rt, "mini", 2);
+    // Implicit collections admit both rows and attached vectors; an explicit
+    // CREATE TABLE correctly forbids vector writes under its model contract.
+    exec(&rt, "INSERT INTO docs (id,body) VALUES (1,'existing')");
+    exec(&rt, "INSERT INTO docs (id,body) VALUES (2,'alpha'),(3,'beta') WITH AUTO EMBED (body) USING local MODEL 'mini'");
+    exec(
+        &rt,
+        "CREATE TABLE skipped_docs (id INT PRIMARY KEY, body TEXT)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO skipped_docs (id,body) VALUES (1,'existing')",
+    );
+    exec(&rt, "INSERT INTO skipped_docs (id,body) VALUES (1,'skipped') WITH AUTO EMBED (body) USING local MODEL 'mini' ON CONFLICT DO NOTHING");
+    assert_eq!(
+        *calls.lock().expect("calls"),
+        vec![vec!["alpha".to_string(), "beta".to_string()]]
+    );
+    let result = exec(&rt, "VECTOR SEARCH docs SIMILAR TO [1.0,0.0] LIMIT 5");
+    assert_eq!(result.result.records.len(), 2);
+    clear_local_embedding_backend_for_tests();
+}

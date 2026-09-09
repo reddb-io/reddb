@@ -36,6 +36,29 @@ fn field<'a>(row: &'a [(String, ValueOut)], name: &str) -> &'a ValueOut {
 
 // ---------------------------------------------------------------- generic.*
 
+async fn case_generic_query_quoted_identifiers(db: &Reddb) {
+    db.query(r#"CREATE TABLE "select" ("key name" INT, "text value" TEXT)"#)
+        .await
+        .expect("quoted schema");
+    db.execute_with(
+        r#"INSERT INTO "select" ("key name", "text value") VALUES ($1,$2)"#,
+        (1i64, "hello"),
+    )
+    .await
+    .expect("bound values");
+    let result = db
+        .query_with(
+            r#"SELECT "text value" FROM "select" WHERE "key name"=$1"#,
+            (1i64,),
+        )
+        .await
+        .expect("quoted query");
+    assert_eq!(
+        field(&result.rows[0], "text value"),
+        &ValueOut::String("hello".into())
+    );
+}
+
 async fn case_generic_query_no_params(db: &Reddb) {
     db.query("CREATE TABLE generic_q (id INTEGER, name TEXT)")
         .await
@@ -591,6 +614,7 @@ macro_rules! embedded_case {
 mod embedded {
     use super::Reddb;
 
+    embedded_case!(case_generic_query_quoted_identifiers);
     embedded_case!(case_generic_query_no_params);
     embedded_case!(case_generic_query_with_params);
     embedded_case!(case_generic_insert_rid);
@@ -680,6 +704,7 @@ mod client_transport {
 
         // Same case bodies as the embedded suite — proves the helper surface
         // is transport-agnostic rather than asserting it by comment.
+        case_generic_query_quoted_identifiers(&db).await;
         case_generic_query_no_params(&db).await;
         case_generic_query_with_params(&db).await;
         case_generic_insert_rid(&db).await;

@@ -21,6 +21,7 @@ use super::authz::policy_columns::parse_positive_iterations;
 use super::execution_context::{capture_current_snapshot, current_auth_identity};
 use super::rls_injection::{edge_passes_rls, node_passes_rls};
 use super::*;
+use crate::storage::unified::segment::GraphEntityKind;
 
 /// The graph-analytics table-valued functions recognized in FROM position.
 /// Both the graph-collection form and the inline `nodes => / edges =>` form
@@ -326,10 +327,7 @@ impl RedDBRuntime {
     )> {
         use crate::storage::engine::graph_algorithms;
 
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
+        let graph = super::graph_dsl::materialize_graph_with_projection(self, None)?;
         let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
         let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
             .iter_all_edges()
@@ -634,10 +632,7 @@ impl RedDBRuntime {
         // projection uses the full graph store (the same result
         // `active_graph_projection` yields when no projection is registered).
         // Materialization never mutates any store.
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
+        let graph = super::graph_dsl::materialize_graph_with_projection(self, None)?;
 
         // Materialize abstract inputs for the pure algorithm.
         let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
@@ -678,10 +673,7 @@ impl RedDBRuntime {
         use crate::storage::query::unified::UnifiedResult;
         use reddb_types::Value;
 
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
+        let graph = super::graph_dsl::materialize_graph_with_projection(self, None)?;
 
         let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
         let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
@@ -735,6 +727,18 @@ impl RedDBRuntime {
         std::collections::HashMap<String, std::collections::HashMap<String, reddb_types::Value>>,
         crate::storage::query::unified::EdgeProperties,
     )> {
+        self.materialize_graph_filtered(None, true)
+    }
+
+    pub(super) fn materialize_graph_filtered(
+        &self,
+        projection: Option<&RuntimeGraphProjection>,
+        collect_properties: bool,
+    ) -> RedDBResult<(
+        crate::storage::engine::GraphStore,
+        std::collections::HashMap<String, std::collections::HashMap<String, reddb_types::Value>>,
+        crate::storage::query::unified::EdgeProperties,
+    )> {
         use crate::storage::engine::GraphStore;
         use crate::storage::unified::entity::{EntityData, EntityKind};
         use reddb_rql::ast::{PolicyAction, PolicyTargetKind};
@@ -749,6 +753,7 @@ impl RedDBRuntime {
             HashMap::new();
         let mut edge_properties: crate::storage::query::unified::EdgeProperties = HashMap::new();
         let mut allowed_nodes: HashSet<String> = HashSet::new();
+        let mut endpoint_aliases: HashMap<String, Option<String>> = HashMap::new();
 
         // Per-collection cached compiled filters — Nodes-kind for
         // first pass, Edges-kind for the second. None entries mean
@@ -758,32 +763,52 @@ impl RedDBRuntime {
 
         let collections = store.list_collections();
 
+        let node_labels =
+            projection.and_then(|p| normalize_token_filter_list(p.node_labels.clone()));
+        let node_types = projection.and_then(|p| normalize_token_filter_list(p.node_types.clone()));
+        let edge_labels = projection.and_then(|p| normalize_edge_filters(p.edge_labels.clone()));
+
         // First pass — gather nodes.
         for collection in &collections {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            let entities = manager.scan(snap_ctx.as_ref(), |_| true);
-            for entity in entities {
-                let EntityKind::GraphNode(ref node) = entity.kind else {
-                    continue;
-                };
-                if !node_passes_rls(self, collection, role.as_deref(), &mut node_rls, &entity) {
-                    continue;
-                }
-                let id_str = entity.id.raw().to_string();
-                graph
-                    .add_node_with_label(
-                        &id_str,
+            visit_graph_materialization_entities(
+                &manager,
+                snap_ctx.as_ref(),
+                GraphEntityKind::Node,
+                |entity| {
+                    let EntityKind::GraphNode(ref node) = entity.kind else {
+                        return Ok(());
+                    };
+                    if !matches_graph_node_projection(
                         &node.label,
-                        &super::graph_node_label(&node.node_type),
-                    )
-                    .map_err(|err| RedDBError::Query(err.to_string()))?;
-                allowed_nodes.insert(id_str.clone());
-                if let EntityData::Node(node_data) = &entity.data {
-                    node_properties.insert(id_str, node_data.properties.clone());
-                }
-            }
+                        &node.node_type,
+                        node_labels.as_ref(),
+                        node_types.as_ref(),
+                    ) {
+                        return Ok(());
+                    }
+                    if !node_passes_rls(self, collection, role.as_deref(), &mut node_rls, &entity) {
+                        return Ok(());
+                    }
+                    let id_str = entity.logical_id().raw().to_string();
+                    graph
+                        .add_node_with_label(
+                            &id_str,
+                            &node.label,
+                            &super::graph_node_label(&node.node_type),
+                        )
+                        .map_err(|err| RedDBError::Query(err.to_string()))?;
+                    allowed_nodes.insert(id_str.clone());
+                    if collect_properties {
+                        if let EntityData::Node(node_data) = &entity.data {
+                            node_properties.insert(id_str, node_data.properties.clone());
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
         }
 
         // Second pass — gather edges. An edge appears only when both
@@ -793,34 +818,59 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            let entities = manager.scan(snap_ctx.as_ref(), |_| true);
-            for entity in entities {
-                let EntityKind::GraphEdge(ref edge) = entity.kind else {
-                    continue;
-                };
-                if !allowed_nodes.contains(&edge.from_node)
-                    || !allowed_nodes.contains(&edge.to_node)
-                {
-                    continue;
-                }
-                if !edge_passes_rls(self, collection, role.as_deref(), &mut edge_rls, &entity) {
-                    continue;
-                }
-                let weight = match &entity.data {
-                    EntityData::Edge(e) => e.weight,
-                    _ => edge.weight as f32 / 1000.0,
-                };
-                let edge_label = super::graph_edge_label(&edge.label);
-                graph
-                    .add_edge_with_label(&edge.from_node, &edge.to_node, &edge_label, weight)
-                    .map_err(|err| RedDBError::Query(err.to_string()))?;
-                if let EntityData::Edge(edge_data) = &entity.data {
-                    edge_properties.insert(
-                        (edge.from_node.clone(), edge_label, edge.to_node.clone()),
-                        edge_data.properties.clone(),
-                    );
-                }
-            }
+            visit_graph_materialization_entities(
+                &manager,
+                snap_ctx.as_ref(),
+                GraphEntityKind::Edge,
+                |entity| {
+                    let EntityKind::GraphEdge(ref edge) = entity.kind else {
+                        return Ok(());
+                    };
+                    if !matches_graph_edge_projection(&edge.label, edge_labels.as_ref()) {
+                        return Ok(());
+                    }
+                    if !edge_passes_rls(self, collection, role.as_deref(), &mut edge_rls, &entity) {
+                        return Ok(());
+                    }
+                    let Some(from_node) = resolve_materialized_graph_endpoint(
+                        &edge.from_node,
+                        &allowed_nodes,
+                        &mut endpoint_aliases,
+                        &store,
+                        &collections,
+                    )?
+                    else {
+                        return Ok(());
+                    };
+                    let Some(to_node) = resolve_materialized_graph_endpoint(
+                        &edge.to_node,
+                        &allowed_nodes,
+                        &mut endpoint_aliases,
+                        &store,
+                        &collections,
+                    )?
+                    else {
+                        return Ok(());
+                    };
+                    let weight = match &entity.data {
+                        EntityData::Edge(e) => e.weight,
+                        _ => edge.weight as f32 / 1000.0,
+                    };
+                    let edge_label = super::graph_edge_label(&edge.label);
+                    graph
+                        .add_edge_with_label(from_node, to_node, &edge_label, weight)
+                        .map_err(|err| RedDBError::Query(err.to_string()))?;
+                    if collect_properties {
+                        if let EntityData::Edge(edge_data) = &entity.data {
+                            edge_properties.insert(
+                                (from_node.to_string(), edge_label, to_node.to_string()),
+                                edge_data.properties.clone(),
+                            );
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
         }
 
         // Suppress unused-PolicyAction/PolicyTargetKind warnings — both
@@ -829,5 +879,200 @@ impl RedDBRuntime {
         let _ = (PolicyAction::Select, PolicyTargetKind::Nodes);
 
         Ok((graph, node_properties, edge_properties))
+    }
+}
+
+/// Legacy edges can reference any retained physical version. Identity lookup
+/// does not grant visibility: the caller must gate endpoints by snapshot/RLS
+/// before exposing or traversing them. Cache misses too, so dangling edges do
+/// not repeat probes.
+pub(super) fn resolve_materialized_graph_endpoint<'a>(
+    endpoint: &str,
+    allowed_nodes: &'a std::collections::HashSet<String>,
+    aliases: &mut std::collections::HashMap<String, Option<String>>,
+    store: &crate::storage::unified::UnifiedStore,
+    collections: &[String],
+) -> RedDBResult<Option<&'a str>> {
+    if let Some(node) = allowed_nodes.get(endpoint) {
+        return Ok(Some(node.as_str()));
+    }
+    if !aliases.contains_key(endpoint) {
+        let mut logical = None;
+        if let Ok(physical) = endpoint.parse::<u64>() {
+            for collection in collections {
+                super::function_budget::charge(1)?;
+                let Some(manager) = store.get_collection(collection) else {
+                    continue;
+                };
+                let identity = manager.graph_node_logical_id(EntityId::new(physical), || {
+                    super::function_budget::charge(1).is_ok()
+                });
+                // A stopped probe must propagate the sticky budget error.
+                super::function_budget::charge(0)?;
+                if let Some(identity) = identity {
+                    logical = Some(identity.raw().to_string());
+                    break;
+                }
+            }
+        }
+        aliases.insert(endpoint.to_string(), logical);
+    }
+    Ok(aliases
+        .get(endpoint)
+        .and_then(Option::as_ref)
+        .and_then(|identity| allowed_nodes.get(identity))
+        .map(String::as_str))
+}
+
+/// RLS may re-enter storage, so only collect IDs while holding segment locks.
+/// Filter by entity kind before cloning payloads or collecting IDs. Collections
+/// can contain mixed kinds. Ordinary queries retain the parallel scan path.
+pub(super) fn visit_graph_materialization_entities(
+    manager: &crate::storage::unified::manager::SegmentManager,
+    snapshot: Option<&super::impl_core::SnapshotContext>,
+    kind: GraphEntityKind,
+    mut visit: impl FnMut(crate::storage::unified::entity::UnifiedEntity) -> RedDBResult<()>,
+) -> RedDBResult<()> {
+    if !super::function_budget::active() {
+        for entity in manager.scan_graph_kind(snapshot, kind) {
+            visit(entity)?;
+        }
+        return Ok(());
+    }
+    let mut ids = Vec::new();
+    let mut segment_failure = None;
+    super::function_budget::scan(
+        |callback| {
+            manager.scan_graph_candidates_for_each(
+                snapshot,
+                kind,
+                || {
+                    if let Err(cause) = super::function_budget::charge(1) {
+                        segment_failure = Some(cause);
+                        return false;
+                    }
+                    true
+                },
+                callback,
+            )
+        },
+        |entity| {
+            // The scan charges every visible candidate, including rejected kinds.
+            // Only the current graph pass's payloads need to leave the segment lock.
+            if kind.matches(&entity.kind) {
+                ids.push(entity.id);
+            }
+            true
+        },
+    )?;
+    if let Some(cause) = segment_failure {
+        return Err(cause);
+    }
+    for batch in ids.chunks(256) {
+        super::function_budget::charge(0)?;
+        for entity in manager.get_many(batch).into_iter().flatten() {
+            super::function_budget::charge(1)?;
+            // Re-check the captured MVCC view after releasing the scan lock.
+            if super::impl_core::entity_visible_with_context(snapshot, &entity) {
+                visit(entity)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pruning_tests {
+    use super::*;
+    use crate::storage::{EntityId, SegmentManager, UnifiedEntity};
+
+    #[test]
+    fn historical_endpoint_probes_consume_call_work() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let store = runtime.db().store();
+        let manager = store.get_or_create_collection("history");
+        for id in 1..=3 {
+            manager
+                .insert(UnifiedEntity::vector(EntityId::new(id), "history", vec![]))
+                .expect("vector");
+            manager.force_seal().expect("seal");
+        }
+        let mut historical =
+            UnifiedEntity::graph_node(EntityId::new(100), "history", "node", Default::default());
+        historical.set_logical_id(EntityId::new(99));
+        historical.set_xmax(5);
+        manager.insert(historical).expect("historical node");
+        manager.force_seal().expect("seal node");
+        let allowed = std::collections::HashSet::from(["99".to_string()]);
+        let collections = vec!["history".to_string()];
+        let mut aliases = std::collections::HashMap::new();
+        {
+            let _budget = super::super::function_budget::Scope::enter(2, 60_000).expect("budget");
+            let error = resolve_materialized_graph_endpoint(
+                "100",
+                &allowed,
+                &mut aliases,
+                &store,
+                &collections,
+            )
+            .expect_err("collection and segment probes exhaust budget");
+            assert!(
+                error.to_string().contains("execution work_max exceeded"),
+                "{error}"
+            );
+            assert!(
+                aliases.is_empty(),
+                "failed lookup cannot cache partial resolution"
+            );
+        }
+        assert_eq!(
+            resolve_materialized_graph_endpoint(
+                "100",
+                &allowed,
+                &mut aliases,
+                &store,
+                &collections,
+            )
+            .expect("retained identity"),
+            Some("99")
+        );
+        for invalid in ["1", "missing", "101"] {
+            assert_eq!(
+                resolve_materialized_graph_endpoint(
+                    invalid,
+                    &allowed,
+                    &mut aliases,
+                    &store,
+                    &collections,
+                )
+                .expect("absent node"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn skipped_graph_segments_still_consume_call_work() {
+        let manager = SegmentManager::new("vectors");
+        for id in 1..=3 {
+            manager
+                .bulk_insert(vec![UnifiedEntity::vector(
+                    EntityId::new(id),
+                    "vectors",
+                    vec![],
+                )])
+                .expect("vector segment");
+            manager.force_seal().expect("seal vectors");
+        }
+        let _budget = super::super::function_budget::Scope::enter(2, 60_000).expect("budget");
+        let error =
+            visit_graph_materialization_entities(&manager, None, GraphEntityKind::Node, |_| {
+                panic!("vector payload must not be visited")
+            })
+            .expect_err("three segments exceed two work units");
+        assert!(
+            error.to_string().contains("execution work_max exceeded"),
+            "{error}"
+        );
     }
 }

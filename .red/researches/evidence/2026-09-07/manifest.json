@@ -1,0 +1,315 @@
+{
+  "date": "2026-09-07",
+  "classification": "diagnostic only; shared host and builds overlapped some measurements",
+  "artifacts": [
+    {
+      "file": "reddb-ext4.json",
+      "sha256": "2f3c2c290cd31f58ffc26d9c6e97e2a8d131e1b386e51aa4c08230a094c94125",
+      "bytes": 49543
+    },
+    {
+      "file": "reddb-tmpfs.json",
+      "sha256": "a3940c26180afafcf013b2b02110aa4892342a5fb55ea6658a74754c75a6adf9",
+      "bytes": 50192
+    },
+    {
+      "file": "sqlite-full-disk.json",
+      "sha256": "361e226e934735b32c82bf0a134c93a1f061c21af04f984ef82d2c9e693e2b26",
+      "bytes": 51474
+    },
+    {
+      "file": "sqlite-normal-disk.json",
+      "sha256": "d10746b252a59076aee3d91fa5b9ab23b6b7ad423941e84b238499a17bbaa70f",
+      "bytes": 51040
+    },
+    {
+      "file": "initial-red-sqlite-full-analysis.json",
+      "sha256": "e4e9022655f1da1d773899c1dc269c74f4a5f42109cd9643f14e98a6809db460",
+      "bytes": 578
+    },
+    {
+      "file": "surface-release.json",
+      "sha256": "ab5e0575ace4c21f68801eb3364e4830bda4194f1b24e5cf610fb6faea3e7dd3",
+      "bytes": 4083
+    },
+    {
+      "file": "quickstarts-release.json",
+      "sha256": "11032f4c6b79d78460f83842deda7d0b73eeb7e09007f536d184b5d8d2d33198",
+      "bytes": 11441
+    },
+    {
+      "file": "surreal-small.json",
+      "sha256": "946dafcf06cdb012884d52a7625f963a792c819900f88c214a14cf882dc1a42c",
+      "bytes": 1871
+    },
+    {
+      "file": "surreal-journeys.json",
+      "sha256": "e7aef69b44f62b9475936413c1c300ff0272fd395b5e1a99124da5d3141ed6b3",
+      "bytes": 1148
+    },
+    {
+      "file": "recovery-reddb.json",
+      "sha256": "6e29633a5c38e9db635a0aad057192d23ed19ebfe9dc49126c0aca8b6b5f01cf",
+      "bytes": 585
+    },
+    {
+      "file": "recovery-surreal.json",
+      "sha256": "812182005766922556dd978becbbe16a902e0f42a22ff52e0cab47484eed6d10",
+      "bytes": 685
+    },
+    {
+      "file": "rpc-tmpfs-profile.json",
+      "sha256": "cd38fd52d366185cbe4329ffcfe68998cba2c34b1cf130266b5eb27a612cefd3",
+      "bytes": 5614
+    },
+    {
+      "file": "rpc-tmpfs-profile.strace",
+      "sha256": "6c5fa057d97ac06527ee47e91d1171eda84fe16346cbe8ad8ce187c94c65015a",
+      "bytes": 540
+    },
+    {
+      "file": "cli-connect.trace",
+      "sha256": "a4bb44580f7a8be3591bd9a9f0fb3b21a866310b3fd3f49e1adb2cbc884b20d5",
+      "bytes": 180
+    },
+    {
+      "file": "writers-reddb.json",
+      "sha256": "672210d3e93d8790f8a9ca31e0f5c282c4ef061ffa6af4db5dbea56de52b0a8e",
+      "bytes": 107536
+    },
+    {
+      "file": "writers-fresh-reddb.json",
+      "sha256": "37b7eae3ad20ae9de481e9a5cd70b32e55a43bdf38443c83223cbf2ec4e1fdc7",
+      "bytes": 129515
+    },
+    {
+      "file": "writers-fresh-surreal.json",
+      "sha256": "e2eb3092f38c9c6bbef6802ee56ca632930bf8aeecc7b05ba25889149de7496b",
+      "bytes": 127972
+    },
+    {
+      "file": "native-main-disk.json",
+      "sha256": "ef8b685ed0c6c1ffe3757598c3b8bb398b870df6bc8a90773bc3d95e1dd5c400",
+      "bytes": 108041
+    },
+    {
+      "file": "native-main-tmpfs.json",
+      "sha256": "bd059f05409c8909c3d8d9f00b68c52ae3923281e95fc80a228c7fad21d9ee78",
+      "bytes": 98700
+    },
+    {
+      "file": "surface-main.json",
+      "sha256": "3618551548b83c53054e86e6175ab02ecbc1875c35e1f5a4be8d92f7b88dccec",
+      "bytes": 5059
+    },
+    {
+      "file": "quickstarts-main.json",
+      "sha256": "ff75cc34c1ccf14e36baf4e71ab7b8cbf6afbd817f0ecf8f2c8453bf3279d935",
+      "bytes": 11441
+    },
+    {
+      "file": "rpc-tmpfs-uninstrumented.json",
+      "sha256": "52e2c004fe47d124f10d114660b421ca0aeec56543a3fa30d289ac97c39eaab3",
+      "bytes": 4841
+    },
+    {
+      "file": "rpc-tmpfs-events.json",
+      "sha256": "d215d5acdcca63ca508edbe0ca9cfd8dff367c6d64765cba903762f9385fb9bb",
+      "bytes": 5229
+    },
+    {
+      "file": "rpc-tmpfs-events.strace",
+      "sha256": "e7a04448e2c6a0c0267033b5243be048985891b730ad74bf57d9a2c3272f4026",
+      "bytes": 670666
+    },
+    {
+      "file": "recovery-main.json",
+      "sha256": "2b20e79a2da23d946da2fea30e05bcabc15adf399dfc2110b3b6dfd79b016b1a",
+      "bytes": 774
+    },
+    {
+      "file": "main-sdk-tmpfs.json",
+      "sha256": "4040666f318a387e40d4f0dcc3f121b1a6a24d36cd10d7fbe86e1c8fa5459781",
+      "bytes": 51282
+    },
+    {
+      "file": "main-sdk-disk.json",
+      "sha256": "100dabc5310f6f004d7fa9654e409890f94efd8bc5513842a3dbcdebffa93a54",
+      "bytes": 52601
+    },
+    {
+      "file": "native-reopen-node.json",
+      "sha256": "f9498ca1bfa27cb690d2f4566a8777c66ce55f00b86ad8131f17f5f03dddd247",
+      "bytes": 873
+    },
+    {
+      "file": "native-reopen-bun.json",
+      "sha256": "4237e473af4a50b06362f153f2f300ce18d94d2a40f8a415ac7e406485cad50a",
+      "bytes": 1406
+    },
+    {
+      "file": "writers-final-reddb.json",
+      "sha256": "edad26290932927bec13183fa728551ff9d21483f57bd765ce636b9643d48571",
+      "bytes": 129044
+    },
+    {
+      "file": "writers-fresh-surreal-basic.json",
+      "sha256": "346b806b3eb1aac241bb1343b7ab091fdec75ba0ad569d8a3c05c69aba0fabb7",
+      "bytes": 79951
+    },
+    {
+      "file": "http-constant.json",
+      "sha256": "c3dc2f253d1dcaf654f52ec20892bc53979d0edebc15c31281e296ec5e3cc7df",
+      "bytes": 494
+    },
+    {
+      "file": "http-constant-token.json",
+      "sha256": "f5a97bfa86c98f32484c4dc49a7b80464307248e4a32b91bcff570c5bed4bf47",
+      "bytes": 247
+    },
+    {
+      "file": "sync-phase-summary.json",
+      "sha256": "c1d2a40d6136f0ac4ba272cc34448abd3112be656dfec049672eb3af4e804e7c",
+      "bytes": 215
+    },
+    {
+      "file": "native-scale-1000.json",
+      "sha256": "09029c6a013dd48313915baded49298e60ff5da43128fa94f92261042424c1c0",
+      "bytes": 8262
+    },
+    {
+      "file": "native-scale-3000.json",
+      "sha256": "71a2e61a4576ec25400e0f04b9e923c2823967fa1515c01a249461271a8c665e",
+      "bytes": 24278
+    },
+    {
+      "file": "main-supervisor.json",
+      "sha256": "46a3780cba02314ec1fbbadd19f85b8f49455700f5e9f4fbacd2b3685aed1d00",
+      "bytes": 2119
+    },
+    {
+      "file": "expanded.log",
+      "sha256": "7c28e9097091f4b5dffe3a9ad7fa5690fcc325f2adb153de06bd22230a4d40ca",
+      "bytes": 18088
+    },
+    {
+      "file": "expanded--reddb-disk-select_point.json",
+      "sha256": "0cdaad3d4ee00dbd7535542a7619b8b624e180aa0cc0adb3ed917dacce5b9255",
+      "bytes": 51166
+    },
+    {
+      "file": "expanded--sqlite-full-disk-insert_bulk.json",
+      "sha256": "d9d2d00a05b15778dd677f77b049c65b2dc48f9cf091fc4ded827b398ca9bf18",
+      "bytes": 10821
+    },
+    {
+      "file": "expanded--reddb-disk-insert_bulk.json",
+      "sha256": "ade513452d406bbac5c5a5937bc07f50e2c4e67b0175d931790ccaf15465b4ae",
+      "bytes": 10975
+    },
+    {
+      "file": "expanded--sqlite-full-disk-select_point.json",
+      "sha256": "24a4d9ae60f692e951ce8d80e2ad05162865c12e1aee62424a1aa36516c8d653",
+      "bytes": 50652
+    },
+    {
+      "file": "expanded--sqlite-full-disk-insert_sequential.json",
+      "sha256": "131f983c5b9258cbe0d009325b68d821f5b4f995504e150ab401083cb08f49a9",
+      "bytes": 51873
+    },
+    {
+      "file": "expanded--suite-disk.json",
+      "sha256": "4c7f4c595e0ab61545545863db3d5c55040a2d527b4ce400a0326843c49b83f3",
+      "bytes": 4329
+    },
+    {
+      "file": "expanded--reddb-disk-insert_sequential.json",
+      "sha256": "1456688d9b799e46cce8dc950dd8df114ac536bc7ed2b4e4d431f779688a39a1",
+      "bytes": 50840
+    },
+    {
+      "file": "updates--reddb-disk-update_random.json",
+      "sha256": "13948977f866635cef9fba7c2856c35db95c09f9d46a8347d07ea6867492bb17",
+      "bytes": 50686
+    },
+    {
+      "file": "updates--suite-disk.json",
+      "sha256": "4526b681887b2819d967b5d8832143266d6bc3b27391aecb9fd37b7f7318d6b3",
+      "bytes": 800
+    },
+    {
+      "file": "updates--sqlite-full-disk-update_random.json",
+      "sha256": "c358c5477acc2a62fbe758bdb405e7e75115f41b628ec9b35bbb1d5b44f8b571",
+      "bytes": 51781
+    },
+    {
+      "file": "final-release--analysis-disk.json",
+      "sha256": "46d13ce128753ba30b158119cf516eb101f10368ae8ccf985855cb2462d1f7a7",
+      "bytes": 577
+    },
+    {
+      "file": "final-release--analysis-tmpfs.json",
+      "sha256": "083db89a28e5e36c13a9e1bf73c60e5f6223f5d185c2ad1c12fd8d0ab4cc3c1c",
+      "bytes": 576
+    },
+    {
+      "file": "final-release--suite-tmpfs.json",
+      "sha256": "38b143f72b32af799ea4924a8e3cc0baf9e55a187aa78efa7ecbdfc34c3bd868",
+      "bytes": 842
+    },
+    {
+      "file": "final-release--reddb-tmpfs-insert_sequential.json",
+      "sha256": "cd3317fca9c28317bcf6f50dbf6327376b54f0a4035332d8c874a44d9861d353",
+      "bytes": 52336
+    },
+    {
+      "file": "final-release--sqlite-full-disk-insert_sequential.json",
+      "sha256": "7e5700000f58185882a1cae8c777fec88bfcb806d4056032414733e39a640bb5",
+      "bytes": 50915
+    },
+    {
+      "file": "final-release--sqlite-full-tmpfs-insert_sequential.json",
+      "sha256": "0251145ecbdbe62a76f7425d29c4365c1c10a38deba2343bbb9b8125904dc83a",
+      "bytes": 52192
+    },
+    {
+      "file": "final-release--suite-disk.json",
+      "sha256": "fbdd6e5db3ce8f03d18586bf65f12bbb737a60128cc388e0532e7342bdacc45a",
+      "bytes": 854
+    },
+    {
+      "file": "final-release--reddb-disk-insert_sequential.json",
+      "sha256": "83ab41a586c0b07daa2e18bd77e976b8a30529477689583d18d601ab64ebd84a",
+      "bytes": 52144
+    },
+    {
+      "file": "ui-release-launch.log",
+      "sha256": "2bdcc3305b2cea7d04b1febdbf814d14c4fa7cf8741a59466fbf1366c9c05eab",
+      "bytes": 363
+    }
+  ],
+  "final_runner_source_hashes": {
+    "test_analyze.py": "2bfc4aa38d10e0c5b0a4647443bec6b288328dfd309dddb2b9557f66c7d2579d",
+    "journeys.mjs": "e9a901c04d4bd611658e6212707b6d165d4d63cdfe0b19f48a21ad4fb70150a1",
+    "reopen_probe.mjs": "7cc7c51493ebe86e98329c70f331f6dbb6d57b5a20a22aad9fea68de238a9f19",
+    "surreal_journeys.mjs": "596e61ab157e7564868ddc7cbe74bdf96ede402373cf8571260b5fef358289c2",
+    "bun.lock": "7fcccaad901ff074a257aed030acf7ce36723eec6004e8cb8d1261905ece3616",
+    "adapters.mjs": "756bee92649b1a1cf7a4ed656adbdde5084ff4e373de0e36065c72305d68d271",
+    "remote.py": "0fbc6a1f8f3af024faf50b1e136c7e197780e330c99bde82ba6ffa9127cd4751",
+    "suite.py": "9c31baef5c715c50cb53c36cf6adfe8f7cd202f074b6d4af6b40056e52c05997",
+    "native_sweep.py": "f468907c3dc250734fec7dee9929bb216cf460734b56e93f36ee68abedd936d5",
+    "recovery.py": "239e9f1f43e3f9b4595d51164a0c26b826c5e1798cc070872d2f9bc1342021cc",
+    "rpc_profile.py": "ad93a9d610cb4d7e642d9eac95c74dbe3e1915de82f9d3df99c69c7aec191ecd",
+    "fresh_writers.py": "d82c7f0cd2964d566d56b6b4a97a06c0dbd55a2c0ce745809a4e3f7773a4c8b9",
+    "audit.mjs": "1367f925cf2e32de04e4bcebeba48fae92c7eb92a8c8e472ddbcb3bfca857a73",
+    "package.json": "9bf4b546b78599d1aabd1e025e8a23b0958cbeb1530afdbe161f8f76b4370a65",
+    "analyze.py": "d37ef96d3ee343870ebcac4a43826535777594133cc59795598c7ce7dbc8bd24",
+    "audit.test.mjs": "9dea983f431fab9ed8cb26ac889f0aa8a6ed65eb08b0ca41df55bf32a8914fad",
+    "probe.mjs": "39531f19d12616a3ac1ec6a3b13e841a150c01c0189e3e97815705ded2e13abf",
+    "README.md": "805cd57f6c2a59840057076ca269d3697070b5f5d2c60915605b0f193d2b9d5b"
+  },
+  "benchmark_revision": "681a5b5abe2628bec701e5ad8ad25765bbe43f21",
+  "reddb_engine_base": "85153296d8beba3bfa5ded2dfa719f416f50393d",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "initial_runner_note": "Earlier artifacts record the then-current HEAD while tooling was modified. These final source hashes do not retroactively certify earlier runner bytes. See audit narrative and reproducible final harness; no official claim."
+}

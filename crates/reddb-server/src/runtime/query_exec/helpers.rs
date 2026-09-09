@@ -458,17 +458,20 @@ pub(crate) fn resolve_entity_document_path(
         }
     }
 
-    if let EntityData::Node(ref node) = entity.data {
-        if let Some(value) = node.properties.get(root) {
-            if tail.is_empty() {
-                return Some(value.clone());
-            }
-            return resolve_runtime_document_path_from_value(value, tail);
-        }
-    }
-
-    if let EntityData::Edge(ref edge) = entity.data {
-        if let Some(value) = edge.properties.get(root) {
+    let graph_properties = match &entity.data {
+        EntityData::Node(node) => Some(&node.properties),
+        EntityData::Edge(edge) => Some(&edge.properties),
+        _ => None,
+    };
+    if let Some(properties) = graph_properties {
+        // Graph records expose their property bag under `properties` as well
+        // as direct fields. Keep static comparisons consistent with expressions.
+        let (root, tail) = if root == "properties" {
+            tail.split_first()?
+        } else {
+            (root, tail)
+        };
+        if let Some(value) = properties.get(root) {
             if tail.is_empty() {
                 return Some(value.clone());
             }

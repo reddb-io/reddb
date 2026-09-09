@@ -25,7 +25,7 @@ pub(crate) fn grant_to_iam_policy(
     }
 
     let now = crate::auth::now_ms();
-    let id = format!("_grant_{:x}_{:x}", now, std::process::id());
+    let id = grant_policy_id(now);
 
     let resource_str = match resource {
         Resource::Database => "table:*".to_string(),
@@ -90,6 +90,26 @@ pub(crate) fn grant_to_iam_policy(
         return None;
     }
     Some(policy)
+}
+
+// Clock resolution cannot be the uniqueness boundary for independent grants.
+fn grant_policy_id(now_ms: u128) -> String {
+    let entropy = hex::encode(crate::auth::store::random_bytes(16));
+    format!("_grant_{now_ms:x}_{entropy}")
+}
+
+#[cfg(test)]
+mod grant_identity_tests {
+    #[test]
+    fn grant_policy_ids_remain_distinct_with_frozen_clock() {
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..128 {
+            assert!(
+                ids.insert(super::grant_policy_id(1_000)),
+                "independent GRANT policies must not overwrite each other within one millisecond"
+            );
+        }
+    }
 }
 
 /// Coerce a `key => <number>` table-function named argument into a positive

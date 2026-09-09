@@ -247,6 +247,9 @@ impl RedDBRuntime {
         let no_auth_boot = crate::service_cli::no_auth_active(&options);
         let runtime = Self {
             inner: Arc::new(RuntimeInner {
+                functions: parking_lot::RwLock::new(
+                    super::function_catalog::FunctionCatalog::load(&db)?,
+                ),
                 db: db.clone(),
                 layout: PhysicalLayout::from_options(&options),
                 embedded_single_file,
@@ -256,6 +259,9 @@ impl RedDBRuntime {
                         memory_budget,
                         memory_shares,
                     ),
+                ),
+                memory_reservations: parking_lot::Mutex::new(
+                    super::memory_admission::MemoryReservations::default(),
                 ),
                 indices: IndexCatalog::register_default_vector_graph(
                     options.has_capability(crate::api::Capability::Table),
@@ -568,6 +574,16 @@ impl RedDBRuntime {
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime.rehydrate_snapshot_xid_floor();
+        assert!(
+            runtime
+                .inner
+                .db
+                .store()
+                .snapshot_manager
+                .set(runtime.snapshot_manager())
+                .is_ok(),
+            "a new runtime owns the store transaction outcomes"
+        );
         runtime
             .bootstrap_system_keyed_collections()
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;

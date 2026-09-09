@@ -2016,14 +2016,20 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
         .expect("runtime with a small explicit budget");
 
     exec(&rt, "CREATE TABLE reclaim_gate (id INT, body TEXT)");
-    let rows = (0..160)
-        .map(|id| format!("({id}, '{}')", "x".repeat(96)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    exec(
-        &rt,
-        &format!("INSERT INTO reclaim_gate (id, body) VALUES {rows}"),
-    );
+    // The live seed fits, but reserving all 160 rows plus their index in one
+    // operation exceeds this small budget. Release estimate slack between
+    // bounded seed batches while preserving the same consolidation workload.
+    for first_id in (0..160).step_by(40) {
+        let rows = (first_id..first_id + 40)
+            .map(|id| format!("({id}, '{}')", "x".repeat(96)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        exec(
+            &rt,
+            &format!("INSERT INTO reclaim_gate (id, body) VALUES {rows}"),
+        );
+    }
+    assert!(budget_unsigned(&rt, "total_used_bytes") <= budget);
     rt.db()
         .store()
         .get_collection("reclaim_gate")
@@ -2037,7 +2043,8 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
     );
 
     let before_reclamations = budget_unsigned(&rt, "pressure_reclamations_triggered");
-    let pressure_rows = (10_000..10_080)
+    // Rows plus their index must fit after reclamation, not just current usage.
+    let pressure_rows = (10_000..10_032)
         .map(|id| format!("({id}, 'pressure')"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -2054,6 +2061,8 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
         budget_unsigned(&rt, "pressure_bytes_reclaimed") > 0,
         "pressure consolidation should report reclaimed bytes"
     );
+
+    assert!(budget_unsigned(&rt, "total_used_bytes") <= budget);
 
     cleanup_scope();
 }

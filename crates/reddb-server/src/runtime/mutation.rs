@@ -56,6 +56,22 @@ pub(crate) struct MutationEngine<'rt> {
     runtime: &'rt crate::RedDBRuntime,
     store: Arc<UnifiedStore>,
     suppress_events: bool,
+    #[cfg(test)]
+    after_admission: Option<&'rt (dyn Fn() + Sync)>,
+}
+
+enum RowIndexTopologyGuard<'a> {
+    Read(parking_lot::RwLockReadGuard<'a, ()>),
+    Write(parking_lot::RwLockWriteGuard<'a, ()>),
+}
+
+impl<'a> RowIndexTopologyGuard<'a> {
+    fn into_read(self) -> parking_lot::RwLockReadGuard<'a, ()> {
+        match self {
+            Self::Read(guard) => guard,
+            Self::Write(guard) => parking_lot::RwLockWriteGuard::downgrade(guard),
+        }
+    }
 }
 
 impl<'rt> MutationEngine<'rt> {
@@ -65,6 +81,8 @@ impl<'rt> MutationEngine<'rt> {
             runtime,
             store,
             suppress_events: false,
+            #[cfg(test)]
+            after_admission: None,
         }
     }
 
@@ -101,26 +119,98 @@ impl<'rt> MutationEngine<'rt> {
         self.runtime
             .apply_sync_moderation_gate(&collection, &mut rows)?;
 
+        let topology_lock = self
+            .runtime
+            .index_store_ref()
+            .collection_topology_lock(&collection);
+        loop {
+            let constraint_lock =
+                crate::application::collection_contract_enforcer::row_constraint_lock(
+                    self.runtime,
+                    &collection,
+                );
+            let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
+            let read_guard = topology_lock.read();
+            let topology_guard = if rows.first().is_some_and(|row| {
+                self.runtime.index_store_ref().needs_auto_id_index(
+                    &collection,
+                    &row.fields,
+                    self.store.config().auto_index_id,
+                )
+            }) {
+                // Never upgrade while retaining a shared guard: another first
+                // writer or DDL may be waiting. Re-estimate under exclusivity.
+                drop(read_guard);
+                RowIndexTopologyGuard::Write(topology_lock.write())
+            } else {
+                RowIndexTopologyGuard::Read(read_guard)
+            };
+            if constraint_lock.is_none()
+                && self
+                    .runtime
+                    .index_store_ref()
+                    .has_unique_hash_index(&collection)
+            {
+                // UNIQUE may have appeared while we waited for topology.
+                // Retry in constraint -> topology order before validating keys.
+                drop(topology_guard);
+                continue;
+            }
+            return self.apply_with_topology(collection, rows, topology_guard);
+        }
+    }
+
+    fn apply_with_topology(
+        &self,
+        collection: String,
+        mut rows: Vec<MutationRow>,
+        topology_guard: RowIndexTopologyGuard<'_>,
+    ) -> RedDBResult<MutationResult> {
+        self.runtime.enforce_unique_hash_rows(&collection, &rows)?;
+
         let growth_bytes = rows
             .iter()
             .map(|row| crate::runtime::memory_admission::estimate_row_growth(&row.fields))
             .fold(0, u64::saturating_add);
-        self.runtime.admit_non_evictable_growth(
+        let index_growth_bytes = self.runtime.index_store_ref().estimate_insert_growth(
+            &collection,
+            rows.iter().map(|row| row.fields.as_slice()),
+            self.store.config().auto_index_id,
+        );
+        // Reserve rows and every affected index together before either the
+        // single-row or batch kernel can publish data or create idx_id.
+        let _reservation = self.runtime.admit_non_evictable_growth(
             crate::storage::memory_pools::MemoryPool::SegmentArena,
             &format!("insert into {collection}"),
-            growth_bytes,
+            growth_bytes.saturating_add(index_growth_bytes),
         )?;
 
+        #[cfg(test)]
+        if let Some(hook) = self.after_admission {
+            hook();
+        }
+
+        // Only the exclusive branch can need an automatic index. Publish it
+        // before either kernel writes, then allow ordinary writers to overlap.
+        if let Some(first) = rows.first() {
+            self.maybe_auto_index_id(&collection, &first.fields);
+        }
+        let topology_guard = topology_guard.into_read();
         match rows.len() {
             0 => Ok(MutationResult::empty()),
-            1 => self.append_one(collection, rows.remove(0)),
-            _ => self.append_batch(collection, rows),
+            1 => self.append_one(collection, rows.remove(0), topology_guard),
+            _ => self.append_batch(collection, rows, topology_guard),
         }
     }
 
     // ── Kernel: single row ────────────────────────────────────────────────
 
-    fn append_one(&self, collection: String, row: MutationRow) -> RedDBResult<MutationResult> {
+    fn append_one(
+        &self,
+        collection: String,
+        row: MutationRow,
+        topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
+    ) -> RedDBResult<MutationResult> {
         let db = self.runtime.db();
 
         // Build entity — same logic as BatchBuilder::add_row
@@ -167,18 +257,14 @@ impl<'rt> MutationEngine<'rt> {
             );
         }
 
-        // First-insert hook: if this row carries a column named `id` and
-        // no index covers `id` yet on this collection, build a HASH index
-        // implicitly so subsequent `WHERE id = N` lookups hit the
-        // hash-index fast path instead of the O(N) zone scan. See #112
-        // and `docs/perf/delete-sequential-2026-05-06.md`.
-        self.maybe_auto_index_id(&collection, &row.fields);
-
         // Secondary indexes (not handled by insert_auto)
         self.runtime
             .index_store_ref()
             .index_entity_insert(&collection, id, &row.fields)
             .map_err(RedDBError::Internal)?;
+
+        // Callbacks may write again, including to this collection.
+        drop(topology_guard);
 
         // CDC + cache invalidation (once)
         let cdc_item_kind =
@@ -203,18 +289,9 @@ impl<'rt> MutationEngine<'rt> {
         &self,
         collection: String,
         rows: Vec<MutationRow>,
+        topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<MutationResult> {
         let n = rows.len();
-
-        // First-insert hook for #112: if any row in the batch carries an
-        // `id` column and no index covers `id` yet, register a HASH
-        // index up front so the `index_entity_insert_batch` pass below
-        // populates it. Must run BEFORE the `has_secondary_indexes`
-        // probe — otherwise the field_snapshots clone is skipped and
-        // the brand-new index never sees the rows.
-        if let Some(first) = rows.first() {
-            self.maybe_auto_index_id(&collection, &first.fields);
-        }
 
         // If the collection has no registered secondary indexes the whole
         // `field_snapshots.push(row.fields.clone())` work is pure waste:
@@ -359,6 +436,8 @@ impl<'rt> MutationEngine<'rt> {
                 .map_err(RedDBError::Internal)?;
         }
 
+        drop(topology_guard);
+
         // CDC: emit once per entity but only ONE cache invalidation for the batch.
         // Previous code called cdc_emit() per row which triggered
         // invalidate_result_cache() N times — one write-lock acquisition per row.
@@ -427,17 +506,8 @@ impl<'rt> MutationEngine<'rt> {
     // first row is indexed, so the standard
     // `index_entity_insert{,_batch}` call that follows populates it.
     fn maybe_auto_index_id(&self, collection: &str, fields: &[(String, Value)]) {
-        if !self.store.config().auto_index_id {
-            return;
-        }
-        if !fields.iter().any(|(name, _)| name == "id") {
-            return;
-        }
         let index_store = self.runtime.index_store_ref();
-        if index_store
-            .find_index_for_column(collection, "id")
-            .is_some()
-        {
+        if !index_store.needs_auto_id_index(collection, fields, self.store.config().auto_index_id) {
             return;
         }
 
@@ -1437,3 +1507,7 @@ fn delete_event_payload(
     crate::json::to_vec(&JsonValue::Object(object))
         .map_err(|err| RedDBError::Internal(format!("encode delete event payload: {err}")))
 }
+
+#[cfg(test)]
+#[path = "mutation_topology_tests.rs"]
+mod topology_tests;

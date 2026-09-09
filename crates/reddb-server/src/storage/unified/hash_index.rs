@@ -21,6 +21,8 @@ pub struct HashIndex {
     pub unique: bool,
     /// Number of keys
     key_count: usize,
+    /// Estimated key, posting-list and map-entry bytes.
+    entry_memory_bytes: usize,
 }
 
 impl HashIndex {
@@ -30,17 +32,23 @@ impl HashIndex {
             entries: HashMap::new(),
             unique,
             key_count: 0,
+            entry_memory_bytes: 0,
         }
     }
 
     /// Insert a key → entity mapping.
     /// Returns `Err` if the index is unique and the key already exists.
     pub fn insert(&mut self, key: Vec<u8>, entity_id: EntityId) -> Result<(), HashIndexError> {
+        let key_bytes = key.len();
         let entry = self.entries.entry(key).or_default();
         if self.unique && !entry.is_empty() {
             return Err(HashIndexError::DuplicateKey);
         }
         if !entry.contains(&entity_id) {
+            if entry.is_empty() {
+                self.entry_memory_bytes += key_bytes + 48;
+            }
+            self.entry_memory_bytes += std::mem::size_of::<EntityId>();
             entry.push(entity_id);
             self.key_count += 1;
         }
@@ -58,7 +66,9 @@ impl HashIndex {
             if let Some(pos) = ids.iter().position(|id| *id == entity_id) {
                 ids.swap_remove(pos);
                 self.key_count -= 1;
+                self.entry_memory_bytes -= std::mem::size_of::<EntityId>();
                 if ids.is_empty() {
+                    self.entry_memory_bytes -= key.len() + 48;
                     self.entries.remove(key);
                 }
                 return true;
@@ -69,10 +79,14 @@ impl HashIndex {
 
     /// Remove all entries for an entity ID (slower — scans all keys).
     pub fn remove_entity(&mut self, entity_id: EntityId) {
-        self.entries.retain(|_, ids| {
+        self.entries.retain(|key, ids| {
             if let Some(pos) = ids.iter().position(|id| *id == entity_id) {
                 ids.swap_remove(pos);
                 self.key_count -= 1;
+                self.entry_memory_bytes -= std::mem::size_of::<EntityId>();
+            }
+            if ids.is_empty() {
+                self.entry_memory_bytes -= key.len() + 48;
             }
             !ids.is_empty()
         });
@@ -105,16 +119,12 @@ impl HashIndex {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.key_count = 0;
+        self.entry_memory_bytes = 0;
     }
 
     /// Approximate memory usage in bytes
     pub fn memory_bytes(&self) -> usize {
-        let mut size = std::mem::size_of::<Self>();
-        for (key, ids) in &self.entries {
-            size += key.len() + ids.len() * std::mem::size_of::<EntityId>() + 48;
-            // HashMap overhead
-        }
-        size
+        std::mem::size_of::<Self>() + self.entry_memory_bytes
     }
 }
 
@@ -298,6 +308,46 @@ pub struct HashIndexStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_memory_accounting(index: &HashIndex) {
+        let recomputed = std::mem::size_of::<HashIndex>()
+            + index
+                .entries
+                .iter()
+                .map(|(key, ids)| key.len() + ids.len() * std::mem::size_of::<EntityId>() + 48)
+                .sum::<usize>();
+        assert_eq!(index.memory_bytes(), recomputed);
+    }
+
+    #[test]
+    fn memory_accounting_tracks_duplicates_removal_and_clear() {
+        for unique in [false, true] {
+            let mut index = HashIndex::new(unique);
+            assert_memory_accounting(&index);
+            for id in 0..128 {
+                let key = vec![b'x'; usize::try_from(id % 13).expect("small key")];
+                let _ = index.insert(key.clone(), EntityId::new(id));
+                assert_memory_accounting(&index);
+                let _ = index.insert(key, EntityId::new(id));
+                assert_memory_accounting(&index);
+            }
+            for id in 0..128 {
+                if id % 2 == 0 {
+                    index.remove_entity(EntityId::new(id));
+                } else {
+                    let key = vec![b'x'; usize::try_from(id % 13).expect("small key")];
+                    index.remove(&key, EntityId::new(id));
+                }
+                assert_memory_accounting(&index);
+            }
+            assert!(index.is_empty());
+            index
+                .insert(b"again".to_vec(), EntityId::new(1))
+                .expect("empty index");
+            index.clear();
+            assert_memory_accounting(&index);
+        }
+    }
 
     #[test]
     fn test_hash_index_basic() {

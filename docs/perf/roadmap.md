@@ -1,6 +1,15 @@
-# RedDB Performance Roadmap
+# RedDB Performance Roadmap — archived May 2026 program
 
-Status: 2026-05-06 — canonical methodology is `make duel-official` per
+> **Current policy (2026-09-07):** [ADR 0076](../../.red/adr/0076-competitive-leadership-evidence-gate.md)
+> supersedes the selective posture below. The active program covers foundations,
+> product experience and the full comparable multimodel matrix; see the
+> [competitive audit and implementation roadmap](../../.red/researches/2026-09-07-reddb-surrealdb-competitive-audit.md).
+> All “shipped”, “in flight”, ratios and non-goals below describe the May snapshot,
+> not current issue state or current competitive results. Universal leadership is
+> now the target; no storage redesign has been preselected. The old runner alone
+> cannot certify actual Bun SDK or SurrealDB comparisons.
+
+Historical status: 2026-05-06 — canonical methodology is `make duel-official` per
 issue #154 (`BenchConfigSchema`, `OFFICIAL_PROFILE=standard`,
 `OFFICIAL_RUNS=10`, `ITEMS=50000`). The earlier mini-duel target
 remains the dev variant; published numbers must come from

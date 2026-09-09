@@ -109,8 +109,25 @@ impl Codec {
         storage: &BlockedCodeStorage,
         metric: distance::DistanceMetric,
     ) -> Vec<f32> {
+        match self.score_many_checked(query, storage, metric, |_| {
+            Ok::<(), std::convert::Infallible>(())
+        }) {
+            Ok(scores) => scores,
+            Err(never) => match never {},
+        }
+    }
+
+    /// Poll before each packed scoring block; failed checks never return partial scores.
+    pub(crate) fn score_many_checked<E>(
+        &self,
+        query: &[f32],
+        storage: &BlockedCodeStorage,
+        metric: distance::DistanceMetric,
+        mut check: impl FnMut(u64) -> Result<(), E>,
+    ) -> Result<Vec<f32>, E> {
         assert_eq!(query.len(), self.dim, "Vector dimensions must match");
 
+        check(0)?;
         let n_blocks = storage.n_blocks();
         let mut scores = vec![f32::NEG_INFINITY; n_blocks * BLOCK_LANES];
 
@@ -118,6 +135,7 @@ impl Codec {
         if query_norm == 0.0 {
             for b in 0..n_blocks {
                 let filled = storage.block_lanes_filled(b);
+                check(u64::try_from(filled).expect("block holds at most 32 lanes"))?;
                 for lane in 0..filled {
                     let s = storage.lane_scale(b, lane);
                     scores[b * BLOCK_LANES + lane] = match metric {
@@ -126,7 +144,8 @@ impl Codec {
                     };
                 }
             }
-            return scores;
+            check(0)?;
+            return Ok(scores);
         }
 
         let normalized: Vec<f32> = query.iter().map(|v| *v / query_norm).collect();
@@ -138,6 +157,7 @@ impl Codec {
         let mut block_scores = [0.0f32; BLOCK_LANES];
         for b in 0..n_blocks {
             let filled = storage.block_lanes_filled(b);
+            check(u64::try_from(filled).expect("block holds at most 32 lanes"))?;
             scorer.score_block(
                 &lut,
                 storage.block_codes(b),
@@ -165,13 +185,43 @@ impl Codec {
                 scores[b * BLOCK_LANES + lane] = metric_score;
             }
         }
-        scores
+        check(0)?;
+        Ok(scores)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_scoring_stops_between_blocks_for_zero_and_nonzero_queries() {
+        let codec = Codec::new(2, 11);
+        let mut storage = BlockedCodeStorage::new(codec.n_byte_groups());
+        for _ in 0..70 {
+            codec.encode_into(&mut storage, &[1.0, 0.0]);
+        }
+        for query in [[0.0, 0.0], [1.0, 0.0]] {
+            let mut charged = 0;
+            let result = codec.score_many_checked(
+                &query,
+                &storage,
+                distance::DistanceMetric::Cosine,
+                |work| {
+                    if charged + work > 32 {
+                        return Err("exhausted");
+                    }
+                    charged += work;
+                    Ok(())
+                },
+            );
+            assert_eq!(
+                result.expect_err("second block exceeds budget"),
+                "exhausted"
+            );
+            assert_eq!(charged, 32, "only the first block was admitted");
+        }
+    }
 
     #[test]
     fn encode_is_bit_exact_for_frozen_vectors() {

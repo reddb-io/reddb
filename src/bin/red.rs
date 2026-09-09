@@ -1314,6 +1314,18 @@ fn emit_data_result(
 
 // DATA COMMANDS END (issue #2124)
 
+// Keep logical imports within the supported identifier vocabulary. The typed
+// INSERT preserves these names without interpreting them as SQL tokens.
+fn restore_identifier_is_safe(name: &str) -> bool {
+    name.split('.').all(|part| {
+        let mut chars = part.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 /// Print an error JSON envelope to **stderr** and exit with code 1.
 fn json_error(command: &str, error: &str) -> ! {
     eprintln!(
@@ -2026,6 +2038,10 @@ fn main() {
             };
             targets.sort();
             targets.dedup();
+            // Virtual system rows are rebuilt by the runtime, not writable imports.
+            targets.retain(|name| {
+                name != "red" && !name.starts_with("red.") && !name.starts_with("__red_schema_")
+            });
             let output_path = flag_string(&result.flags, "output");
 
             let mut buf = String::new();
@@ -2036,13 +2052,16 @@ fn main() {
                     Some(m) => m,
                     None => continue,
                 };
-                for entity in manager.query_all(|_| true) {
+                // Config resolves repeated keys by newest entity id. Preserve
+                // that insertion order when restore assigns fresh entity ids.
+                let mut entities = manager.query_all(|_| true);
+                entities.sort_unstable_by_key(|entity| entity.id.raw());
+                for entity in entities {
                     let mut row_obj = reddb::json::Map::new();
                     if let reddb::storage::EntityData::Row(ref row) = entity.data {
                         if let Some(named) = &row.named {
                             for (k, v) in named {
-                                row_obj
-                                    .insert(k.clone(), reddb::json::Value::String(v.to_string()));
+                                row_obj.insert(k.clone(), v.to_json());
                             }
                         }
                     }
@@ -2282,7 +2301,7 @@ fn main() {
                         continue;
                     }
                 };
-                // Build INSERT INTO {collection} (cols) VALUES (vals)
+                // Preserve field names and decoded values through the typed runtime entry.
                 let obj = match fields {
                     reddb::json::Value::Object(m) => m,
                     _ => {
@@ -2291,24 +2310,51 @@ fn main() {
                     }
                 };
                 let mut cols = Vec::new();
-                let mut vals = Vec::new();
-                for (k, v) in obj.iter() {
-                    cols.push(k.clone());
-                    vals.push(match v {
-                        reddb::json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                        reddb::json::Value::Number(n) => n.to_string(),
-                        reddb::json::Value::Bool(b) => b.to_string(),
-                        reddb::json::Value::Null => "NULL".to_string(),
-                        other => format!("'{}'", other.to_string_compact().replace('\'', "''")),
-                    });
+                let mut values = Vec::new();
+                let mut invalid = false;
+                if !restore_identifier_is_safe(&collection) {
+                    errors += 1;
+                    eprintln!("line {}: unsupported collection identifier", line_no + 1);
+                    continue;
                 }
-                let sql = format!(
-                    "INSERT INTO {} ({}) VALUES ({})",
-                    collection,
-                    cols.join(", "),
-                    vals.join(", ")
-                );
-                match rt.execute_query(&sql) {
+                for (k, v) in obj.iter() {
+                    if !restore_identifier_is_safe(k) {
+                        invalid = true;
+                        break;
+                    }
+                    cols.push(k.clone());
+                    match reddb::runtime::query_request::ParamValue::decode_json(v) {
+                        Ok(value) => values.push(value.into()),
+                        Err(err) => {
+                            eprintln!("line {}: {}", line_no + 1, err);
+                            invalid = true;
+                            break;
+                        }
+                    }
+                }
+                if invalid || cols.is_empty() {
+                    errors += 1;
+                    eprintln!(
+                        "line {}: invalid fields or unsupported identifier",
+                        line_no + 1
+                    );
+                    continue;
+                }
+                let insert = reddb_rql::ast::InsertQuery {
+                    table: collection,
+                    entity_type: reddb_rql::ast::InsertEntityType::Row,
+                    columns: cols,
+                    value_exprs: Vec::new(),
+                    values: vec![values],
+                    on_conflict: None,
+                    returning: None,
+                    ttl_ms: None,
+                    expires_at_ms: None,
+                    with_metadata: Vec::new(),
+                    auto_embed: None,
+                    suppress_events: false,
+                };
+                match rt.execute_query_expr(reddb_rql::ast::QueryExpr::Insert(insert)) {
                     Ok(_) => restored += 1,
                     Err(e) => {
                         errors += 1;
@@ -2316,8 +2362,19 @@ fn main() {
                     }
                 }
             }
-            checkpoint_local_runtime(&rt);
+            if let Err(err) = rt.checkpoint() {
+                errors += 1;
+                eprintln!("restore checkpoint failed: {err}");
+            }
 
+            if errors > 0 && json_mode {
+                json_error(
+                    "restore",
+                    &format!(
+                        "partial restore: {restored} rows, {restored_secret_keys} secret key(s), {errors} errors"
+                    ),
+                );
+            }
             if json_mode {
                 json_ok(
                     "restore",
@@ -2331,6 +2388,9 @@ fn main() {
                     "restored {} rows, {} secret key(s) ({} errors)",
                     restored, restored_secret_keys, errors
                 );
+            }
+            if errors > 0 {
+                std::process::exit(1);
             }
         }
 

@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+#[path = "collection_contract_expressions.rs"]
+mod expressions;
+pub(crate) use expressions::{has_contract_expressions, validate_contract_expressions};
+
 use crate::application::entity::{RowUpdateColumnRule, RowUpdateContractPlan};
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::physical::CollectionContract;
@@ -315,16 +319,22 @@ mod write_adapter {
     use super::*;
 
     pub(crate) struct CollectionContractWriteEnforcer<'a> {
+        runtime: &'a crate::RedDBRuntime,
         db: &'a crate::storage::unified::devx::RedDB,
         collection: &'a str,
     }
 
     impl<'a> CollectionContractWriteEnforcer<'a> {
         pub(crate) fn new(
+            runtime: &'a crate::RedDBRuntime,
             db: &'a crate::storage::unified::devx::RedDB,
             collection: &'a str,
         ) -> Self {
-            Self { db, collection }
+            Self {
+                runtime,
+                db,
+                collection,
+            }
         }
 
         pub(crate) fn ensure_model(
@@ -381,7 +391,7 @@ mod write_adapter {
             fields: &[(String, Value)],
             exclude_id: Option<crate::storage::EntityId>,
         ) -> RedDBResult<()> {
-            enforce_row_uniqueness(self.db, self.collection, fields, exclude_id)
+            enforce_row_uniqueness(self.runtime, self.db, self.collection, fields, exclude_id)
         }
 
         pub(crate) fn row_uniqueness_conflict_id(
@@ -389,8 +399,19 @@ mod write_adapter {
             fields: &[(String, Value)],
             target: Option<&[String]>,
         ) -> RedDBResult<Option<crate::storage::EntityId>> {
-            find_row_uniqueness_conflict(self.db, self.collection, fields, target, None)
-                .map(|conflict| conflict.map(|conflict| conflict.entity_id))
+            let conflict = find_row_uniqueness_conflict(
+                self.runtime,
+                self.db,
+                self.collection,
+                fields,
+                target,
+                None,
+            )?;
+            if let Some(conflict) = conflict {
+                return Ok(Some(conflict.entity_id));
+            }
+            self.runtime
+                .unique_hash_conflict_id(self.collection, fields, target)
         }
 
         pub(crate) fn has_row_uniqueness_conflict_with_rows(
@@ -399,9 +420,25 @@ mod write_adapter {
             existing_fields: &[Vec<(String, Value)>],
             target: Option<&[String]>,
         ) -> RedDBResult<bool> {
+            if self.runtime.has_unique_hash_batch_conflict(
+                self.collection,
+                fields,
+                existing_fields,
+                target,
+            ) {
+                return Ok(true);
+            }
             let Some(contract) = self.db.collection_contract(self.collection) else {
                 return Ok(false);
             };
+            if target.is_some_and(|target| {
+                self.runtime.has_unique_hash_target(self.collection, target)
+                    && !resolved_uniqueness_rules(&contract)
+                        .iter()
+                        .any(|rule| uniqueness_columns_match(&rule.columns, target))
+            }) {
+                return Ok(false);
+            }
             let existing_rows = existing_fields
                 .iter()
                 .enumerate()
@@ -524,8 +561,19 @@ fn normalize_row_fields_for_contract_at(
         )));
     }
     let mut normalized = Vec::new();
+    let generated_names: std::collections::BTreeSet<&str> = contract
+        .declared_columns
+        .iter()
+        .filter(|column| column.generated.is_some())
+        .map(|column| column.name.as_str())
+        .collect();
 
     for column in &resolved_columns {
+        if generated_names.contains(column.name.as_str()) {
+            // A derived value is never trusted, including one carried forward by UPDATE.
+            provided.remove(&column.name);
+            continue;
+        }
         match provided.remove(&column.name) {
             Some(value) => {
                 // Runtime-managed columns on Update: always overwrite
@@ -586,6 +634,7 @@ fn normalize_row_fields_for_contract_at(
         }
     }
 
+    expressions::apply_contract_expressions(contract, &resolved_columns, &mut normalized)?;
     Ok(normalized)
 }
 
@@ -596,13 +645,39 @@ fn current_unix_ms_u64() -> u64 {
         .unwrap_or(0)
 }
 
+/// Hold across validation and installation, not for the transaction lifetime.
+/// Unconstrained collections do not acquire this gate. Pending rows themselves
+/// reserve keys until their creator/deleter's outcome is known.
+pub(crate) fn row_constraint_lock(
+    runtime: &crate::RedDBRuntime,
+    collection: &str,
+) -> Option<std::sync::Arc<parking_lot::ReentrantMutex<()>>> {
+    let db = runtime.db();
+    let constrained = db
+        .collection_contract_arc(collection)
+        .is_some_and(|contract| {
+            matches!(
+                contract.declared_model,
+                crate::catalog::CollectionModel::Table | crate::catalog::CollectionModel::Mixed
+            ) && !resolved_uniqueness_rules(&contract).is_empty()
+        });
+    if !constrained && !runtime.index_store_ref().has_unique_hash_index(collection) {
+        return None;
+    }
+    db.store()
+        .get_collection(collection)
+        .map(|manager| manager.row_constraint_lock())
+}
+
 fn enforce_row_uniqueness(
+    runtime: &crate::RedDBRuntime,
     db: &crate::storage::unified::devx::RedDB,
     collection: &str,
     fields: &[(String, Value)],
     exclude_id: Option<crate::storage::EntityId>,
 ) -> RedDBResult<()> {
-    if let Some(conflict) = find_row_uniqueness_conflict(db, collection, fields, None, exclude_id)?
+    if let Some(conflict) =
+        find_row_uniqueness_conflict(runtime, db, collection, fields, None, exclude_id)?
     {
         return Err(row_uniqueness_error(&conflict.rule, collection));
     }
@@ -610,6 +685,7 @@ fn enforce_row_uniqueness(
 }
 
 fn find_row_uniqueness_conflict(
+    runtime: &crate::RedDBRuntime,
     db: &crate::storage::unified::devx::RedDB,
     collection: &str,
     fields: &[(String, Value)],
@@ -629,25 +705,65 @@ fn find_row_uniqueness_conflict(
     let Some(manager) = db.store().get_collection(collection) else {
         return Ok(None);
     };
-    let existing_rows: Vec<ContractRow> = manager
-        .query_all(|_| true)
-        .into_iter()
-        .filter_map(|entity| {
-            row_fields_from_entity(&entity).map(|fields| ContractRow {
-                id: entity.id,
-                fields,
-            })
-        })
+    let rules = resolved_uniqueness_rules(&contract);
+    let columns: Vec<Vec<String>> = rules.iter().map(|rule| rule.columns.clone()).collect();
+    if let Some(target) = target {
+        if !rules
+            .iter()
+            .any(|rule| uniqueness_columns_match(&rule.columns, target))
+            && !runtime.has_unique_hash_target(collection, target)
+        {
+            return Err(crate::RedDBError::Query(format!(
+                "no unique or primary-key constraint on collection '{}' matches ON CONFLICT ({})",
+                collection,
+                target.join(", ")
+            )));
+        }
+    }
+    let input_fields: std::collections::BTreeMap<&str, &Value> = fields
+        .iter()
+        .map(|(name, value)| (name.as_str(), value))
         .collect();
-
-    find_row_uniqueness_conflict_for_contract(
-        &contract,
-        collection,
-        fields,
-        &existing_rows,
-        target,
-        exclude_id,
-    )
+    let snapshot_manager = runtime.snapshot_manager();
+    let own_xids = runtime.own_transaction_xids();
+    let reserves_key = |entity: &crate::storage::UnifiedEntity| {
+        snapshot_manager.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids)
+    };
+    for (key_index, rule) in rules.into_iter().enumerate() {
+        if target.is_some_and(|target| !uniqueness_columns_match(&rule.columns, target)) {
+            continue;
+        }
+        let mut signatures = Vec::new();
+        let mut skip_rule = false;
+        for column in &rule.columns {
+            match input_fields.get(column.as_str()).copied() {
+                Some(Value::Null) | None if rule.primary_key => {
+                    return Err(crate::RedDBError::Query(format!(
+                        "primary key '{}' in collection '{}' requires non-null column '{}'",
+                        rule.name, collection, column
+                    )));
+                }
+                Some(Value::Null) | None => {
+                    skip_rule = true;
+                    break;
+                }
+                Some(value) => signatures.push(value_signature(value)),
+            }
+        }
+        if skip_rule {
+            continue;
+        }
+        if let Some(entity_id) = manager.find_unique_key_conflict(
+            &columns,
+            key_index,
+            &signatures,
+            exclude_id,
+            &reserves_key,
+        ) {
+            return Ok(Some(UniquenessConflict { rule, entity_id }));
+        }
+    }
+    Ok(None)
 }
 
 fn enforce_row_uniqueness_for_contract(
@@ -937,6 +1053,7 @@ fn build_row_update_contract_plan_for_contract(
     };
 
     Ok(RowUpdateContractPlan {
+        has_expressions: has_contract_expressions(contract),
         timestamps_enabled: contract.timestamps_enabled,
         strict_schema: matches!(contract.schema_mode, crate::catalog::SchemaMode::Strict),
         declared_rules,
@@ -1063,34 +1180,27 @@ fn resolved_uniqueness_rules(
         .collect()
 }
 
-fn row_fields_from_entity(
-    entity: &crate::storage::UnifiedEntity,
-) -> Option<std::collections::BTreeMap<String, Value>> {
-    match &entity.data {
-        crate::storage::EntityData::Row(row) => {
-            if let Some(named) = &row.named {
-                Some(
-                    named
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect(),
-                )
-            } else {
-                row.schema.as_ref().map(|schema| {
-                    schema
-                        .iter()
-                        .cloned()
-                        .zip(row.columns.iter().cloned())
-                        .collect()
-                })
-            }
-        }
-        _ => None,
-    }
-}
-
 fn value_signature(value: &Value) -> String {
     format!("{value:?}")
+}
+
+pub(crate) fn normalize_declared_value(
+    context: &str,
+    name: &str,
+    sql_type: &reddb_types::SqlTypeName,
+    value: Value,
+) -> RedDBResult<Value> {
+    let data_type = DataType::from_sql_type_name(sql_type)
+        .ok_or_else(|| crate::RedDBError::Query(format!("unknown declared type '{sql_type}'")))?;
+    let rule = ResolvedColumnRule {
+        name: name.to_string(),
+        data_type,
+        data_type_name: sql_type.to_string(),
+        not_null: false,
+        default: None,
+        enum_variants: sql_type.enum_variants().unwrap_or_default(),
+    };
+    normalize_contract_value(context, &rule, value)
 }
 
 fn normalize_contract_value(

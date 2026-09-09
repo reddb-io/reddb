@@ -1,0 +1,4 @@
+CREATE TABLE line_items (sku TEXT NOT NULL, quantity INTEGER NOT NULL CHECK (quantity > 0), unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0), total_cents INTEGER GENERATED ALWAYS AS (quantity * unit_price_cents) STORED);
+INSERT INTO line_items (sku, quantity, unit_price_cents) VALUES ('book', 2, 1200);
+UPDATE line_items SET quantity = 3 WHERE sku = 'book';
+SELECT sku, total_cents FROM line_items;

@@ -1,0 +1,23 @@
+{
+  "code_commit": "0f773cd840e1b0639755e3042b9cd4ee13025b80",
+  "binary_sha256": "4352218b7e84b09ce6339ad347e8f12fa2a9bfe8af7a657506831355d976f959",
+  "rust_integration_execution": "linked smoke from the exact registered integration source; cargo harness tracked separately in PR checks",
+  "checks": [
+    "cargo check --locked --tests -p reddb-io",
+    "cargo fmt --all -- --check",
+    "node scripts/gen-docs-from-matrix.mjs --check",
+    "CLI vector: 2 passed",
+    "stdio uniqueness: 4 passed",
+    "CLI dump/restore: 5 passed",
+    "Bun SDK/legacy/RedWire: 3 programs passed",
+    "linked Rust vector smoke: 5 passed",
+    "RedDB/SurrealDB quality oracle: 10 cases passed",
+    "SIGKILL recovery and logical restore: all 200 keys/payloads passed"
+  ],
+  "logs": {
+    "vector-cli": "..\n----------------------------------------------------------------------\nRan 2 tests in 3.503s\n\nOK\n",
+    "uniqueness": "....\n----------------------------------------------------------------------\nRan 4 tests in 0.902s\n\nOK\n",
+    "dump": ".....\n----------------------------------------------------------------------\nRan 5 tests in 5.804s\n\nOK\n",
+    "vector-linked": "vector_analysis_executes_instead_of_reusing_cached_measurements 0 PASS vector_analysis_executes_instead_of_reusing_cached_measurements\n\nturbo_plan_and_measurement_name_the_executed_path 0 PASS turbo_plan_and_measurement_name_the_executed_path\n\nvector_analysis_keeps_the_target_privilege_gate 0 PASS vector_analysis_keeps_the_target_privilege_gate\n\nregistered_hnsw_does_not_turn_an_exact_runtime_search_into_ann 0 PASS registered_hnsw_does_not_turn_an_exact_runtime_search_into_ann\n\nvector_analysis_does_not_end_the_callers_transaction 0 PASS vector_analysis_does_not_end_the_callers_transaction\n\n"
+  }
+}

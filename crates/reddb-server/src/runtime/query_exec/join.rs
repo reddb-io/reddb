@@ -14,10 +14,10 @@ use super::*;
 use reddb_rql::sql_lowering::{effective_join_filter, effective_join_projections};
 
 pub(crate) fn execute_runtime_join_query(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     query: &JoinQuery,
 ) -> RedDBResult<UnifiedResult> {
-    let records = execute_runtime_canonical_join_query(db, query)?;
+    let records = execute_runtime_canonical_join_query(runtime, query)?;
     let effective_projections = effective_join_projections(query);
     let columns = projected_columns(&records, &effective_projections);
 
@@ -30,24 +30,26 @@ pub(crate) fn execute_runtime_join_query(
 }
 
 pub(crate) fn execute_runtime_canonical_join_query(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     query: &JoinQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let db = &runtime.inner.db;
     let plan = CanonicalPlanner::new(db).build(&QueryExpr::Join(query.clone()));
-    execute_runtime_canonical_join_node(db, &plan.root, query)
+    execute_runtime_canonical_join_node(runtime, &plan.root, query)
 }
 
 pub(crate) fn execute_runtime_canonical_join_node(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &JoinQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let db = &runtime.inner.db;
     let (left_table_name, left_table_alias, right_table_name, right_table_alias) =
         runtime_join_table_context(query);
 
     match node.operator.as_str() {
         "filter" => {
-            let mut records = execute_runtime_canonical_join_child(db, node, query)?;
+            let mut records = execute_runtime_canonical_join_child(runtime, node, query)?;
             if let Some(filter) = effective_join_filter(query).as_ref() {
                 records.retain(|record| {
                     evaluate_runtime_join_filter_with_db(
@@ -64,7 +66,7 @@ pub(crate) fn execute_runtime_canonical_join_node(
             Ok(records)
         }
         "sort" | "document_sort" | "entity_sort" => {
-            let mut records = execute_runtime_canonical_join_child(db, node, query)?;
+            let mut records = execute_runtime_canonical_join_child(runtime, node, query)?;
             if !query.order_by.is_empty() {
                 records.sort_by(|left, right| {
                     compare_runtime_join_order_with_db(
@@ -84,12 +86,12 @@ pub(crate) fn execute_runtime_canonical_join_node(
             Ok(records)
         }
         "offset" => {
-            let records = execute_runtime_canonical_join_child(db, node, query)?;
+            let records = execute_runtime_canonical_join_child(runtime, node, query)?;
             let offset = query.offset.unwrap_or(0) as usize;
             Ok(records.into_iter().skip(offset).collect())
         }
         "limit" => {
-            let records = execute_runtime_canonical_join_child(db, node, query)?;
+            let records = execute_runtime_canonical_join_child(runtime, node, query)?;
             let limit = query.limit.map(|value| value as usize);
             Ok(match limit {
                 Some(limit) => records.into_iter().take(limit).collect(),
@@ -97,7 +99,7 @@ pub(crate) fn execute_runtime_canonical_join_node(
             })
         }
         "projection" => {
-            let records = execute_runtime_canonical_join_child(db, node, query)?;
+            let records = execute_runtime_canonical_join_child(runtime, node, query)?;
             let effective_projections = effective_join_projections(query);
             Ok(records
                 .iter()
@@ -115,7 +117,7 @@ pub(crate) fn execute_runtime_canonical_join_node(
                 .collect())
         }
         "join" => execute_runtime_canonical_join_base(
-            db,
+            runtime,
             node,
             query,
             left_table_name,
@@ -130,7 +132,7 @@ pub(crate) fn execute_runtime_canonical_join_node(
 }
 
 pub(crate) fn execute_runtime_canonical_join_base(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &JoinQuery,
     left_table_name: Option<&str>,
@@ -164,10 +166,10 @@ pub(crate) fn execute_runtime_canonical_join_base(
     };
 
     let left_records =
-        execute_runtime_canonical_expr_node(db, &node.children[0], query.left.as_ref())?;
+        execute_runtime_canonical_expr_node(runtime, &node.children[0], query.left.as_ref())?;
 
     let right_records =
-        execute_runtime_canonical_expr_node(db, &node.children[1], query.right.as_ref())?;
+        execute_runtime_canonical_expr_node(runtime, &node.children[1], query.right.as_ref())?;
 
     // Auto-upgrade to hash join for large datasets
     let join_strategy = if matches!(join_strategy, CanonicalJoinStrategy::NestedLoop)
@@ -231,7 +233,7 @@ pub(crate) fn execute_runtime_canonical_join_base(
 }
 
 pub(crate) fn execute_runtime_canonical_join_child(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &JoinQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
@@ -241,7 +243,7 @@ pub(crate) fn execute_runtime_canonical_join_child(
             node.operator
         ))
     })?;
-    execute_runtime_canonical_join_node(db, child, query)
+    execute_runtime_canonical_join_node(runtime, child, query)
 }
 
 pub(crate) fn runtime_join_table_context(

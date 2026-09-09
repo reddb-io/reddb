@@ -458,28 +458,65 @@ impl RedDBRuntime {
         }
     }
 
-    pub(crate) fn revive_pending_versioned_updates(&self, conn_id: u64) {
+    pub(crate) fn revive_pending_versioned_updates(&self, conn_id: u64) -> RedDBResult<()> {
         let Some(pending) = self
             .inner
             .pending_versioned_updates
             .write()
             .remove(&conn_id)
         else {
-            return;
+            return Ok(());
         };
+        // Undo newest versions first so repeated writes restore the original chain.
+        for (collection, old_id, new_id, xid, previous_xmax) in pending.into_iter().rev() {
+            let topology_lock = self.index_store_ref().collection_topology_lock(&collection);
+            self.revive_versioned_update(
+                &collection,
+                old_id,
+                new_id,
+                xid,
+                previous_xmax,
+                topology_lock.read(),
+            )?;
+        }
+        Ok(())
+    }
 
+    pub(crate) fn revive_versioned_update(
+        &self,
+        collection: &str,
+        old_id: crate::storage::EntityId,
+        new_id: crate::storage::EntityId,
+        xid: u64,
+        previous_xmax: u64,
+        _topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
+    ) -> RedDBResult<()> {
         let store = self.inner.db.store();
-        for (collection, old_id, new_id, xid, previous_xmax) in pending {
-            if let Some(manager) = store.get_collection(&collection) {
-                if let Some(mut old) = manager.get(old_id) {
-                    if old.xmax == xid {
-                        old.set_xmax(previous_xmax);
-                        let _ = manager.update(old);
-                    }
+        if let Some(new) = store.get(collection, new_id) {
+            let fields = crate::application::ports::entity_row_fields_snapshot(&new);
+            self.index_store_ref()
+                .index_entity_delete(collection, new_id, &fields)
+                .map_err(RedDBError::Internal)?;
+        }
+        store
+            .delete_batch(collection, &[new_id])
+            .map_err(|error| RedDBError::Internal(error.to_string()))?;
+        if let Some(manager) = store.get_collection(collection) {
+            if let Some(mut old) = manager.get(old_id) {
+                if old.xmax == xid {
+                    old.set_xmax(previous_xmax);
+                    manager
+                        .update(old.clone())
+                        .map_err(|error| RedDBError::Internal(error.to_string()))?;
+                    store.context_index().index_entity(collection, &old);
+                    let fields = crate::application::ports::entity_row_fields_snapshot(&old);
+                    self.index_store_ref()
+                        .index_entity_insert(collection, old_id, &fields)
+                        .map_err(RedDBError::Internal)?;
                 }
             }
-            let _ = store.delete_batch(&collection, &[new_id]);
         }
+        Ok(())
     }
 
     /// Flush tombstones on COMMIT. The xmax stamp is already the durable
@@ -598,7 +635,7 @@ impl RedDBRuntime {
 
     /// Phase 1.1 MVCC universal: post-save hook that stamps `xmin` on a
     /// freshly-inserted entity when the current connection holds an
-    /// open transaction. Used by graph / vector / queue / timeseries
+    /// open transaction. Used by graph / queue / timeseries
     /// write paths that go through the DevX builder API (`db.node(...)
     /// .save()` and friends) — those live in the storage crate and
     /// can't reach `current_xid()` without crossing layers, so the
@@ -695,6 +732,12 @@ impl RedDBRuntime {
         self.inner
             .transaction_state
             .writer_xid(current_connection_id())
+    }
+
+    pub(crate) fn own_transaction_xids(&self) -> std::collections::HashSet<u64> {
+        self.inner
+            .transaction_state
+            .own_xids(current_connection_id())
     }
 
     /// `true` when the given connection id has an open `BEGIN`. Issue

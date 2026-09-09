@@ -11,6 +11,8 @@ pub use reddb_types::vector_metadata::MetadataFilter;
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum QueryExpr {
+    /// Persisted function definition, invocation or catalog inspection.
+    Function(Box<crate::stored_function::FunctionCommand>),
     /// Pure table query: SELECT ... FROM ...
     Table(TableQuery),
     /// Pure graph query: MATCH ... RETURN ...
@@ -1658,6 +1660,14 @@ impl NodeSelector {
 // Vector Query
 // ============================================================================
 
+/// Accuracy contract for vector retrieval. Approximation requires explicit opt-in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VectorSearchMode {
+    #[default]
+    Exact,
+    Approximate,
+}
+
 /// Vector similarity search query
 ///
 /// ```text
@@ -1668,6 +1678,8 @@ impl NodeSelector {
 /// ```
 #[derive(Debug, Clone)]
 pub struct VectorQuery {
+    /// Exact full-precision search by default.
+    pub mode: VectorSearchMode,
     /// Optional outer alias when used as a join source
     pub alias: Option<String>,
     /// Collection name to search
@@ -1692,6 +1704,7 @@ impl VectorQuery {
     /// Create a new vector query
     pub fn new(collection: &str, query: VectorSource) -> Self {
         Self {
+            mode: VectorSearchMode::Exact,
             alias: None,
             collection: collection.to_string(),
             query_vector: query,
@@ -2038,6 +2051,13 @@ pub struct DeleteQuery {
     pub suppress_events: bool,
 }
 
+/// A table-level UNIQUE declaration; unnamed constraints receive a stable catalog name.
+#[derive(Debug, Clone)]
+pub struct CreateUniqueConstraint {
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+}
+
 /// CREATE TABLE name (columns) or CREATE {KV|CONFIG|VAULT} name
 #[derive(Debug, Clone)]
 pub struct CreateTableQuery {
@@ -2047,6 +2067,8 @@ pub struct CreateTableQuery {
     pub name: String,
     /// Column definitions
     pub columns: Vec<CreateColumnDef>,
+    /// Table-level UNIQUE constraints, including composite keys.
+    pub unique_constraints: Vec<CreateUniqueConstraint>,
     /// IF NOT EXISTS flag
     pub if_not_exists: bool,
     /// Optional default TTL applied to newly inserted items in this collection.
@@ -2219,6 +2241,10 @@ pub struct CreateColumnDef {
     pub not_null: bool,
     /// DEFAULT value expression
     pub default: Option<String>,
+    /// Persisted, deterministic expression for a stored generated field.
+    pub generated: Option<crate::schema_expression::SchemaExpression>,
+    /// SQL CHECK: FALSE rejects, TRUE or NULL accepts.
+    pub check: Option<crate::schema_expression::SchemaExpression>,
     /// Compression level (COMPRESS:N)
     pub compress: Option<u8>,
     /// UNIQUE constraint

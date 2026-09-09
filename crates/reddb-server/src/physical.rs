@@ -123,6 +123,24 @@ impl ContractOrigin {
     }
 }
 
+/// A decoded contract is authoritative; it cannot be repaired from row contents.
+#[derive(Debug)]
+pub(crate) struct CollectionContractDecodeError(pub String);
+
+impl std::fmt::Display for CollectionContractDecodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invalid collection contract: {}", self.0)
+    }
+}
+
+impl std::error::Error for CollectionContractDecodeError {}
+
+pub(crate) fn is_collection_contract_decode_error(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<CollectionContractDecodeError>())
+}
+
 #[derive(Debug, Clone)]
 pub struct DeclaredColumnContract {
     pub name: String,
@@ -130,6 +148,10 @@ pub struct DeclaredColumnContract {
     pub sql_type: Option<reddb_types::SqlTypeName>,
     pub not_null: bool,
     pub default: Option<String>,
+    /// Persisted, deterministic expression for a stored generated field.
+    pub generated: Option<reddb_rql::schema_expression::SchemaExpression>,
+    /// SQL CHECK: FALSE rejects, TRUE or NULL accepts.
+    pub check: Option<reddb_rql::schema_expression::SchemaExpression>,
     pub compress: Option<u8>,
     pub unique: bool,
     pub primary_key: bool,

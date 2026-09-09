@@ -1,211 +1,88 @@
+use super::execution_context::{capture_current_snapshot, current_auth_identity};
 use super::*;
 
-pub(super) fn materialize_graph(store: &UnifiedStore) -> RedDBResult<GraphStore> {
-    materialize_graph_with_projection(store, None)
+pub(super) fn materialize_graph(runtime: &RedDBRuntime) -> RedDBResult<GraphStore> {
+    materialize_graph_with_projection(runtime, None)
 }
 
 pub(super) fn materialize_graph_with_projection(
-    store: &UnifiedStore,
+    runtime: &RedDBRuntime,
     projection: Option<&RuntimeGraphProjection>,
 ) -> RedDBResult<GraphStore> {
-    let graph = GraphStore::new();
-    // Capture before the store fans the scan out across collection workers.
-    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-    let entities = store.scan(snap_ctx.as_ref(), |_| true);
-    let node_label_filters = projection
-        .and_then(|projection| normalize_token_filter_list(projection.node_labels.clone()));
-    let node_type_filters = projection
-        .and_then(|projection| normalize_token_filter_list(projection.node_types.clone()));
-    let edge_label_filters =
-        projection.and_then(|projection| normalize_edge_filters(projection.edge_labels.clone()));
-    let mut allowed_nodes = HashSet::new();
-
-    for (_, entity) in &entities {
-        if let EntityKind::GraphNode(ref node) = &entity.kind {
-            if !matches_graph_node_projection(
-                &node.label,
-                &node.node_type,
-                node_label_filters.as_ref(),
-                node_type_filters.as_ref(),
-            ) {
-                continue;
-            }
-            graph
-                .add_node_with_label(
-                    &entity.id.raw().to_string(),
-                    &node.label,
-                    &graph_node_label(&node.node_type),
-                )
-                .map_err(|err| RedDBError::Query(err.to_string()))?;
-            allowed_nodes.insert(entity.id.raw().to_string());
-        }
-    }
-
-    for (_, entity) in &entities {
-        if let EntityKind::GraphEdge(ref edge) = &entity.kind {
-            if !allowed_nodes.contains(&edge.from_node) || !allowed_nodes.contains(&edge.to_node) {
-                continue;
-            }
-            if !matches_graph_edge_projection(&edge.label, edge_label_filters.as_ref()) {
-                continue;
-            }
-            let resolved_weight = match &entity.data {
-                EntityData::Edge(e) => e.weight,
-                _ => edge.weight as f32 / 1000.0,
-            };
-
-            graph
-                .add_edge_with_label(
-                    &edge.from_node,
-                    &edge.to_node,
-                    &graph_edge_label(&edge.label),
-                    resolved_weight,
-                )
-                .map_err(|err| RedDBError::Query(err.to_string()))?;
-        }
-    }
-
+    let _scope = native_graph_read_scope(runtime)?;
+    let (graph, _, _) = runtime.materialize_graph_filtered(projection, false)?;
     Ok(graph)
 }
 
-/// Lazy graph materialization — only loads nodes reachable from seed IDs via BFS.
-/// Much faster than materialize_graph() when you only need a subgraph.
-pub(super) fn materialize_graph_lazy(
-    store: &UnifiedStore,
-    seed_entity_ids: &[u64],
-    max_depth: usize,
-) -> RedDBResult<GraphStore> {
-    let graph = GraphStore::new();
-    let mut visited_nodes: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-
-    // Phase 1: Load seed nodes
-    for &id in seed_entity_ids {
-        let id_str = id.to_string();
-        if visited_nodes.contains(&id_str) {
-            continue;
-        }
-        if let Some((_, entity)) = store.get_any(EntityId::new(id)) {
-            if let EntityKind::GraphNode(ref node) = &entity.kind {
-                let _ = graph.add_node_with_label(
-                    &id_str,
-                    &node.label,
-                    &graph_node_label(&node.node_type),
-                );
-                visited_nodes.insert(id_str.clone());
-                queue.push_back((id_str, 0));
-            }
-        }
+/// Native API calls need the same snapshot and transaction-local scope as RQL.
+/// Nested graph reads inherit the enclosing statement instead of resnapshotting.
+fn native_graph_read_scope(
+    runtime: &RedDBRuntime,
+) -> RedDBResult<Option<super::statement_frame::StatementFrameGuards>> {
+    use super::statement_frame::{StatementExecutionFrame, StatementIdentity};
+    if capture_current_snapshot().is_some() {
+        return Ok(None);
     }
-
-    // Phase 2: BFS — load neighbors on demand
-    // Collect edges from all collections in parallel
-    let collections = store.list_collections();
-    let use_parallel = collections.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
-    let all_edges: Vec<UnifiedEntity> = if use_parallel {
-        let store_ref = &store;
-        let edge_batches: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
-            collections
-                .iter()
-                .map(|col| {
-                    s.spawn(move || {
-                        store_ref
-                            .get_collection(col)
-                            .map(|m| m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge(_))))
-                            .unwrap_or_default()
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|h| h.join().unwrap_or_default())
-                .collect()
-        });
-        edge_batches.into_iter().flatten().collect()
-    } else {
-        collections
-            .iter()
-            .flat_map(|col| {
-                store
-                    .get_collection(col)
-                    .map(|m| m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge(_))))
-                    .unwrap_or_default()
-            })
-            .collect()
-    };
-
-    // Build adjacency from edges
-    let mut adjacency: HashMap<String, Vec<(String, String, String, f32)>> = HashMap::new();
-    for entity in &all_edges {
-        if let EntityKind::GraphEdge(ref edge) = &entity.kind {
-            let w = match &entity.data {
-                EntityData::Edge(e) => e.weight,
-                _ => edge.weight as f32 / 1000.0,
-            };
-            adjacency.entry(edge.from_node.clone()).or_default().push((
-                edge.to_node.clone(),
-                edge.label.clone(),
-                entity.id.raw().to_string(),
-                w,
-            ));
-            adjacency.entry(edge.to_node.clone()).or_default().push((
-                edge.from_node.clone(),
-                edge.label.clone(),
-                entity.id.raw().to_string(),
-                w,
-            ));
-        }
-    }
-
-    while let Some((node_id, depth)) = queue.pop_front() {
-        if depth >= max_depth {
-            continue;
-        }
-        if let Some(neighbors) = adjacency.get(&node_id) {
-            for (neighbor_id, label, _edge_id, weight) in neighbors {
-                // Add neighbor node if not visited
-                if !visited_nodes.contains(neighbor_id) {
-                    if let Ok(parsed) = neighbor_id.parse::<u64>() {
-                        if let Some((_, entity)) = store.get_any(EntityId::new(parsed)) {
-                            if let EntityKind::GraphNode(ref node) = &entity.kind {
-                                let _ = graph.add_node_with_label(
-                                    neighbor_id,
-                                    &node.label,
-                                    &graph_node_label(&node.node_type),
-                                );
-                                visited_nodes.insert(neighbor_id.clone());
-                                queue.push_back((neighbor_id.clone(), depth + 1));
-                            }
-                        }
-                    }
-                }
-                // Add edge
-                if visited_nodes.contains(neighbor_id) {
-                    let _ = graph.add_edge_with_label(
-                        &node_id,
-                        neighbor_id,
-                        &graph_edge_label(label),
-                        *weight,
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(graph)
+    let frame =
+        StatementExecutionFrame::build(runtime, StatementIdentity::Text("GRAPH PROPERTIES"))?;
+    Ok(Some(frame.install(runtime)))
 }
 
-pub(super) fn materialize_graph_node_properties(
-    store: &UnifiedStore,
-) -> RedDBResult<HashMap<String, HashMap<String, Value>>> {
-    let mut node_properties = HashMap::new();
-
-    for (_, entity) in store.query_all(|_| true) {
-        if let (EntityKind::GraphNode(_), EntityData::Node(node)) = (&entity.kind, &entity.data) {
-            node_properties.insert(entity.id.raw().to_string(), node.properties.clone());
-        }
+/// Resolve properties from one visible, RLS-admitted version. Exact logical IDs
+/// take precedence over labels, matching the topology resolver's public contract.
+pub(super) fn resolve_graph_node_properties(
+    runtime: &RedDBRuntime,
+    source: &str,
+) -> RedDBResult<UnifiedEntity> {
+    let _scope = native_graph_read_scope(runtime)?;
+    let snapshot = capture_current_snapshot();
+    let role = current_auth_identity().map(|(_, role)| role.as_str().to_string());
+    let mut policies = HashMap::new();
+    let mut exact = None;
+    let mut named = None;
+    let mut label_count = 0usize;
+    let store = runtime.db().store();
+    for collection in store.list_collections() {
+        let Some(manager) = store.get_collection(&collection) else {
+            continue;
+        };
+        super::graph_tvf::visit_graph_materialization_entities(
+            &manager,
+            snapshot.as_ref(),
+            crate::storage::unified::segment::GraphEntityKind::Node,
+            |entity| {
+                let EntityKind::GraphNode(ref node) = entity.kind else {
+                    return Ok(());
+                };
+                if !super::rls_injection::node_passes_rls(
+                    runtime,
+                    &collection,
+                    role.as_deref(),
+                    &mut policies,
+                    &entity,
+                ) {
+                    return Ok(());
+                }
+                if entity.logical_id().raw().to_string() == source {
+                    exact = Some(entity);
+                } else if node.label == source {
+                    label_count += 1;
+                    named = Some(entity);
+                }
+                Ok(())
+            },
+        )?;
     }
-
-    Ok(node_properties)
+    if let Some(entity) = exact {
+        return Ok(entity);
+    }
+    match label_count {
+        0 => Err(RedDBError::NotFound(source.to_string())),
+        1 => Ok(named.expect("one matching label retained its visible node")),
+        count => Err(RedDBError::Query(format!(
+            "ambiguous graph node reference '{source}': matches {count} nodes by label; use the numeric id"
+        ))),
+    }
 }
 
 pub(super) fn materialize_graph_edge_properties(

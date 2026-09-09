@@ -82,6 +82,13 @@ await test('meta.spec_version', async (db) => {
 
 // --- generic.* --------------------------------------------------------
 
+await test('generic.query.quoted_identifiers', async (db) => {
+  await db.query('CREATE TABLE "select" ("key name" INT, "text value" TEXT)')
+  await db.query('INSERT INTO "select" ("key name", "text value") VALUES ($1,$2)', [1, 'hello'])
+  const result = await db.query('SELECT "text value" FROM "select" WHERE "key name"=$1', [1])
+  assertEqual(result.rows[0]['text value'], 'hello', 'quoted names and bound values')
+})
+
 await test('generic.query.no_params', async (db) => {
   await db.query('CREATE TABLE conf_q (id INTEGER, name TEXT)')
   await db.query("INSERT INTO conf_q (id, name) VALUES (1, 'a')")

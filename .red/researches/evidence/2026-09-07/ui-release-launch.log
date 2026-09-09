@@ -1,0 +1,2 @@
+error: fetch red-ui bundle: could not download red-ui bundle v0.0.0-dev from https://github.com/reddb-io/red-ui/releases/download/v0.0.0-dev/ui-dist.tgz: HTTP GET https://github.com/reddb-io/red-ui/releases/download/v0.0.0-dev/ui-dist.tgz: http status: 404
+hint: run `red ui` while online to populate the cache, or pass --ui-dir to serve a local bundle directory

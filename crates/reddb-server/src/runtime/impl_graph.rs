@@ -9,8 +9,7 @@ impl RedDBRuntime {
         edge_labels: Option<Vec<String>>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphNeighborhoodResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let node = resolve_graph_node_id(&graph, node)?;
         let edge_filters = merge_edge_filters(edge_labels, projection.as_ref());
 
@@ -68,8 +67,7 @@ impl RedDBRuntime {
         edge_labels: Option<Vec<String>>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphTraversalResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let source = resolve_graph_node_id(&graph, source)?;
         let edge_filters = merge_edge_filters(edge_labels, projection.as_ref());
 
@@ -157,8 +155,7 @@ impl RedDBRuntime {
         edge_labels: Option<Vec<String>>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphPathResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let source_owned = resolve_graph_node_id(&graph, source)?;
         let target_owned = resolve_graph_node_id(&graph, target)?;
         let source = source_owned.as_str();
@@ -235,8 +232,7 @@ impl RedDBRuntime {
         min_size: usize,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphComponentsResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let min_size = min_size.max(1);
         let components = match mode {
             RuntimeGraphComponentsMode::Connected => ConnectedComponents::find(&graph)
@@ -290,8 +286,7 @@ impl RedDBRuntime {
         alpha: Option<f64>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphCentralityResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let top_k = top_k.max(1);
 
         match algorithm {
@@ -399,8 +394,7 @@ impl RedDBRuntime {
         resolution: Option<f64>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphCommunityResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let min_size = min_size.max(1);
 
         match algorithm {
@@ -474,8 +468,7 @@ impl RedDBRuntime {
         include_triangles: bool,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphClusteringResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let top_k = top_k.max(1);
         let result = ClusteringCoefficient::compute(&graph);
         let triangle_count = if include_triangles {
@@ -500,8 +493,7 @@ impl RedDBRuntime {
         max_iterations: Option<usize>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphCentralityResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         if seeds.is_empty() {
             return Err(RedDBError::Query(
                 "personalized pagerank requires at least one seed".to_string(),
@@ -540,8 +532,7 @@ impl RedDBRuntime {
         max_iterations: Option<usize>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphHitsResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let mut runner = HITS::new();
         if let Some(epsilon) = epsilon {
             runner.epsilon = epsilon.max(0.0);
@@ -565,8 +556,7 @@ impl RedDBRuntime {
         max_cycles: usize,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphCyclesResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let result = CycleDetector::new()
             .max_length(max_length.max(2))
             .max_cycles(max_cycles.max(1))
@@ -586,8 +576,7 @@ impl RedDBRuntime {
         &self,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphTopologicalSortResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let ordered_nodes = match DFS::topological_sort(&graph) {
             Some(order) => order
                 .into_iter()
@@ -607,8 +596,7 @@ impl RedDBRuntime {
         &self,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphPropertiesResult> {
-        let graph =
-            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph = materialize_graph_with_projection(self, projection.as_ref())?;
         let node_count = graph.node_count() as usize;
         let edges = graph.iter_all_edges();
         let edge_count = edges.len();

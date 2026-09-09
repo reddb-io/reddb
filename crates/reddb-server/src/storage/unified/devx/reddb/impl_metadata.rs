@@ -382,9 +382,19 @@ impl RedDB {
     pub(crate) fn with_initialized_metadata(self) -> Result<Self, Box<dyn std::error::Error>> {
         if self.options.mode == StorageMode::Persistent {
             // Load metadata without persisting (avoids blocking catalog snapshot on boot)
-            if let Ok(metadata) = self.load_or_bootstrap_physical_metadata(false) {
-                crate::reserved_fields::validate_physical_metadata_contracts(&metadata)
-                    .map_err(|err| err.to_string())?;
+            match self.load_or_bootstrap_physical_metadata(false) {
+                Ok(metadata) => {
+                    crate::reserved_fields::validate_physical_metadata_contracts(&metadata)
+                        .map_err(|err| err.to_string())?;
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(crate::physical::is_collection_contract_decode_error) =>
+                {
+                    return Err(error)
+                }
+                Err(_) => {}
             }
             // Skip repair on boot — deferred to first explicit persist_metadata() call.
             // This avoids the recursive catalog_model_snapshot → physical_metadata loop
@@ -401,7 +411,7 @@ impl RedDB {
             && self.options.storage_profile.packaging
                 == crate::storage::StoragePackaging::SingleFile
         {
-            self.seed_contract_cache_from_store_aux();
+            self.seed_contract_cache_from_store_aux()?;
         }
         // Issue #866 — rehydrate the hypertable chunk spine before the
         // API opens so chunk routing / pruning / TTL work immediately
@@ -533,6 +543,9 @@ impl RedDB {
                 Ok(metadata)
             }
             Err(err) => {
+                if crate::physical::is_collection_contract_decode_error(&err) {
+                    return Err(err.into());
+                }
                 let Some(native_state) = native_state else {
                     return Err(err.into());
                 };

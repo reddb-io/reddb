@@ -520,10 +520,10 @@ func parseReason(payload []byte) string {
 
 // --- Operations ------------------------------------------------------
 
-// Query sends a SQL string and returns the raw Result.payload bytes. When
-// `params` is non-empty the call routes through the binary `QueryWithParams`
-// frame (0x28) and requires the server to have advertised FeatureParams; an
-// older server triggers ErrParamsUnsupported.
+// Query returns the full result envelope through QueryWithParams (0x28)
+// whenever FeatureParams is advertised, including zero-parameter queries.
+// Query (0x01) returns only a summary and is retained for older servers;
+// nonempty parameters on those servers trigger ErrParamsUnsupported.
 func (c *Conn) Query(ctx context.Context, sql string, params ...any) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -534,7 +534,7 @@ func (c *Conn) Query(ctx context.Context, sql string, params ...any) ([]byte, er
 	defer cleanup()
 
 	var frame *Frame
-	if len(params) == 0 {
+	if len(params) == 0 && !c.SupportsParams() {
 		frame = NewFrame(KindQuery, c.nextCorr(), []byte(sql))
 	} else {
 		if !c.SupportsParams() {

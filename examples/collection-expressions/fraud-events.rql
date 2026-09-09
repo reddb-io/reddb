@@ -1,0 +1,3 @@
+CREATE TABLE risk_observations (event_key TEXT NOT NULL, amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0), review_threshold_cents INTEGER NOT NULL CHECK (review_threshold_cents > 0), needs_review BOOLEAN GENERATED ALWAYS AS (amount_cents >= review_threshold_cents) STORED);
+INSERT INTO risk_observations (event_key, amount_cents, review_threshold_cents) VALUES ('event-1', 20000, 10000);
+SELECT event_key, needs_review FROM risk_observations;

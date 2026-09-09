@@ -1058,6 +1058,7 @@ impl ScrubRuntimeState {
 }
 
 struct RuntimeInner {
+    functions: parking_lot::RwLock<function_catalog::FunctionCatalog>,
     db: Arc<RedDB>,
     layout: PhysicalLayout,
     embedded_single_file: bool,
@@ -1067,6 +1068,7 @@ struct RuntimeInner {
     /// The one shared accounting pool (ADR 0073 §2): each big consumer's share
     /// of the budget above, and the live usage they report into it.
     pub(crate) memory_accounting: Arc<crate::storage::memory_pools::MemoryAccounting>,
+    memory_reservations: parking_lot::Mutex<memory_admission::MemoryReservations>,
     indices: IndexCatalog,
     pool_config: ConnectionPoolConfig,
     pool: Mutex<PoolState>,
@@ -1522,6 +1524,10 @@ pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
 #[cfg(test)]
 mod evaluator_differential;
+mod function_budget;
+pub(crate) mod function_catalog;
+mod function_execution;
+mod function_validation;
 mod impl_scrub;
 mod impl_search;
 mod impl_serverless;
@@ -1529,6 +1535,8 @@ mod impl_timeseries;
 mod impl_tree;
 mod impl_vcs;
 mod index_store;
+#[cfg(test)]
+pub(crate) use index_store::MutationTestPhase;
 pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;
@@ -1546,6 +1554,8 @@ pub mod memory_accounting;
 pub(crate) mod memory_admission;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
+#[cfg(test)]
+mod mutation_index_topology_tests;
 pub(crate) mod mvcc_lifecycle;
 pub(crate) mod node_load_telemetry;
 pub(crate) mod occupancy_sampler;
@@ -1571,6 +1581,7 @@ mod rls_injection;
 pub mod schema_diff;
 pub mod schema_vocabulary;
 pub(crate) mod score_sketch;
+mod search_graph;
 pub(crate) mod sessionize;
 pub mod signed_chain;
 pub mod signed_writes_kind;
@@ -1580,6 +1591,7 @@ mod statement_frame;
 mod table_row_mvcc_resolver;
 pub(crate) mod transaction_state;
 pub mod turbo_crash_inject;
+mod unique_hash_admission;
 mod vcs_command;
 mod vector_index;
 pub mod vector_turbo_kind;

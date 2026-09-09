@@ -23,6 +23,14 @@ import reddb
 
 
 # ----------------------------------------------------------------- generic.*
+def test_generic_query_quoted_identifiers():
+    with reddb.connect("memory://") as db:
+        db.query('CREATE TABLE "select" ("key name" INT, "text value" TEXT)')
+        db.query('INSERT INTO "select" ("key name", "text value") VALUES ($1,$2)', 1, "hello")
+        result = db.query('SELECT "text value" FROM "select" WHERE "key name"=$1', 1)
+        assert result["rows"][0]["text value"] == "hello"
+
+
 def test_generic_query_no_params():
     with reddb.connect("memory://") as db:
         db.query("CREATE TABLE conf_q1 (name TEXT)")

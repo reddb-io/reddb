@@ -875,7 +875,9 @@ impl ConfigResolver {
 /// mirroring the role-independent `red.secret.*` hard-block (#1743).
 fn is_reserved_config_key(key: &str) -> bool {
     let key = key.strip_prefix("red.config/").unwrap_or(key);
-    key.starts_with("red.config.") || key == "red.config"
+    key.starts_with("red.config.")
+        || key == "red.config"
+        || key == super::function_catalog::REGISTRY_KEY
 }
 
 /// The system config-store collections (`red_config` / `red.config`) reached

@@ -1,0 +1,11 @@
+$ bun run params.test.ts && bun run wire-legacy.test.ts && bun run wire.test.ts
+ok shared SDK parameterized queries run under Bun
+ok Bun legacy capability fallback
+2026-09-07T07:43:19.414635Z  INFO reddb_server::telemetry: telemetry initialised service="reddb" log_dir="<none>" format=Pretty
+2026-09-07T07:43:19.418388Z  INFO reddb_server::service_cli: bootstrap preset applied preset=simple
+2026-09-07T07:43:19.419159Z  INFO reddb::http_limits: http_limits resolved max_handlers=16 handler_timeout_ms=30000 retry_after_secs=5 max_inflight_per_principal=64
+2026-09-07T07:43:19.419204Z  INFO reddb_server::service_cli::server_bootstrap: router bootstrapping bind=127.0.0.1:35933 cpus=8 workers=7
+2026-09-07T07:43:19.419224Z  INFO reddb_server::service_router: in-process demux online transport="router" bind=127.0.0.1:35933 protocols="grpc/http/wire"
+ok Bun wire bound/unbound result contract
+2026-09-07T07:43:19.503149Z  INFO reddb_server::service_cli: lifecycle signal received; shutting down signal="SIGTERM"
+2026-09-07T07:43:19.507026Z  INFO reddb_server::service_cli: graceful shutdown complete duration_ms=4 flushed_wal=true final_checkpoint=true backup_uploaded=false

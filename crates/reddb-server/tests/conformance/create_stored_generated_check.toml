@@ -1,0 +1,4 @@
+input = "CREATE TABLE orders (quantity INTEGER CHECK (quantity > 0), price INTEGER, total INTEGER GENERATED ALWAYS AS (price * quantity) STORED)"
+expected_kind = "CreateTable"
+source = "docs/query/create-table.md:60"
+kind = "positive"

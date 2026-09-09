@@ -303,12 +303,38 @@ fn render_show_create_table_ddl(
     contract: &crate::physical::CollectionContract,
     mut indices: Vec<super::index_store::RegisteredIndex>,
 ) -> String {
-    let columns = contract
+    let mut elements = contract
         .declared_columns
         .iter()
         .map(render_show_create_column)
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    if let Some(table) = &contract.table_def {
+        for constraint in &table.constraints {
+            if constraint.constraint_type != reddb_types::ConstraintType::Unique {
+                continue;
+            }
+            let inline = constraint.columns.len() == 1
+                && contract.declared_columns.iter().any(|column| {
+                    column.unique
+                        && constraint.columns[0] == column.name
+                        && constraint.name == format!("uniq_{}", column.name)
+                });
+            if inline {
+                continue;
+            }
+            elements.push(format!(
+                "CONSTRAINT {} UNIQUE ({})",
+                render_sql_identifier(&constraint.name),
+                constraint
+                    .columns
+                    .iter()
+                    .map(|column| render_sql_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+    }
+    let columns = elements.join(", ");
     let mut statements = vec![format!(
         "CREATE TABLE {} ({columns})",
         render_sql_identifier(&contract.name)
@@ -356,6 +382,15 @@ fn render_show_create_column(column: &crate::physical::DeclaredColumnContract) -
     if let Some(compress) = column.compress {
         parts.push(format!("COMPRESS:{compress}"));
     }
+    if let Some(expression) = &column.generated {
+        parts.push(format!(
+            "GENERATED ALWAYS AS ({}) STORED",
+            expression.source()
+        ));
+    }
+    if let Some(expression) = &column.check {
+        parts.push(format!("CHECK ({})", expression.source()));
+    }
     if column.unique {
         parts.push("UNIQUE".to_string());
     }
@@ -401,7 +436,7 @@ fn render_index_method_for_ddl(method: super::index_store::IndexMethodKind) -> &
 }
 
 fn render_sql_identifier(identifier: &str) -> String {
-    identifier.to_string()
+    reddb_rql::renderer::render_identifier(identifier)
 }
 
 pub(super) fn collections_snapshot(
@@ -875,9 +910,9 @@ fn append_consolidation_thresholds(
 /// Per-collection consolidation counters (ADR 0073 §5, issue #1961).
 ///
 /// Consolidation is the budget's reclamation tool, so what it reclaimed is part
-/// of the memory story: `tombstones_reclaimed` and `bytes_reclaimed` are the
-/// memory that came back. These replace the `compact_ops` counter, which only
-/// ever counted a do-nothing branch.
+/// of the memory story: these counters describe the logical reduction from
+/// source segments to merged storage. Readers may still retain the old sources;
+/// the live arena sample determines memory available to admission.
 fn append_consolidation_stats(
     rows: &mut Vec<UnifiedRecord>,
     schema: &Arc<Vec<Arc<str>>>,

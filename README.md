@@ -357,12 +357,15 @@ Same storage format. Start embedded, scale to server, expose to agents — zero 
 
 ## ⚡ Performance
 
-> **Where RedDB wins:** benchmarks show measurable wins over Postgres and Mongo today:
->
-> - `typed_insert` — **16× faster** than PostgreSQL on typed single-row inserts
-> - `disk_usage` — **1.5× faster** than MongoDB on compact-write workloads
->
-> See [`docs/perf/wins.md`](docs/perf/wins.md) for reproducible benchmarks and [`docs/perf/when-not-reddb.md`](docs/perf/when-not-reddb.md) for the honest gaps where we're still behind.
+> **Performance evidence:** the April/May 2026 results in
+> [`docs/perf/wins.md`](docs/perf/wins.md) are historical and have not been
+> revalidated against the current SDK paths. In particular, the old
+> `typed_insert` label does not establish sequential single-row latency.
+> [Issue #2270](https://github.com/reddb-io/reddb/issues/2270) and the
+> [September competitive audit](.red/researches/2026-09-07-reddb-surrealdb-competitive-audit.md)
+> document current diagnostic evidence and the remaining gaps.
+> [ADR 0076](.red/adr/0076-competitive-leadership-evidence-gate.md) requires
+> equivalent guarantees and a demonstrated 20% margin before claiming a lead.
 
 RedDB uses multiple optimization techniques for fast queries at scale:
 

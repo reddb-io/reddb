@@ -6,8 +6,9 @@ The `CREATE TABLE` statement defines a new collection with a typed schema.
 
 ```sql
 CREATE TABLE table_name (
-  column_name DataType [NOT NULL] [DEFAULT value],
+  column_name DataType [NOT NULL] [DEFAULT value] [UNIQUE],
   ...
+  [ [CONSTRAINT constraint_name] UNIQUE (column [, ...]) ]
 ) [WITH TTL duration]
   [WITH CONTEXT INDEX ON (column [, ...])]
 ```
@@ -26,6 +27,63 @@ CREATE TABLE hosts (
   last_seen Timestamp
 )
 ```
+
+## Uniqueness
+
+Use a table-level constraint when the combination of columns must be unique:
+
+```sql
+CREATE TABLE memberships (
+  id INT PRIMARY KEY,
+  organization TEXT NOT NULL,
+  username TEXT NOT NULL,
+  CONSTRAINT membership_key UNIQUE (organization, username)
+)
+```
+
+A username may occur in different organizations; the same pair cannot occur twice.
+`UNIQUE (organization, username)` also works without a constraint name. RedDB
+assigns a stable name and includes it in `SHOW CREATE TABLE`.
+
+Uniqueness is checked on inserts and updates and survives persistent reopen.
+A tuple containing `NULL` does not conflict with another tuple; use `NOT NULL`
+on every key column when that is undesirable. Missing or repeated key columns
+and duplicate constraint names are rejected before the table is created.
+`EXPLAIN ALTER` currently rejects changes to table-level UNIQUE constraints
+because its column migration planner cannot emit `ADD/DROP CONSTRAINT`.
+
+## Stored generated columns and CHECK
+
+TABLE collections support deterministic expressions over their declared fields:
+
+```sql
+CREATE TABLE line_items (
+  quantity INTEGER NOT NULL CHECK (quantity > 0),
+  unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+  total_cents INTEGER GENERATED ALWAYS AS (quantity * unit_price_cents) STORED
+)
+```
+
+Base values and defaults normalize first. Generated fields then evaluate in
+dependency order, including forward references; cycles and unknown fields are
+rejected at CREATE time. The generated result must satisfy its declared type and
+NOT NULL constraint. CHECK evaluates the final record: FALSE rejects the write,
+while TRUE or NULL passes. Use NOT NULL when an absent value must be rejected.
+
+INSERT, UPDATE, PATCH, upsert and bulk writes use this contract. Generated values
+supplied by callers or carried from a previous version are recomputed. Definitions
+and stored values survive reopening the database. A semantically invalid persisted
+contract prevents reopening rather than silently removing validation.
+
+This first version supports local scalar operators, CAST, CASE, IN, BETWEEN and
+null predicates. Functions, parameters, subqueries, virtual fields and schemas for
+other models are not supported here. ALTER operations that change an
+expression-bearing column schema or add expressions require a future validated
+backfill implementation and currently fail explicitly. Older binaries must not
+write databases carrying these new expressions, because they do not enforce them.
+
+See the [examples](../../examples/collection-expressions/README.md) and
+[implementation ledger](../architecture/multimodel-building-block-program.md).
 
 ## Supported Column Types
 

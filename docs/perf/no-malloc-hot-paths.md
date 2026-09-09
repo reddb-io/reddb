@@ -11,7 +11,7 @@ The current covered operations are:
 | Operation | Floor | Exception |
 | --- | ---: | --- |
 | `hash-index-point-read-hit` | 0 | None |
-| `growing-segment-flat-row-insert` | 3 | Temporary floor tracked under #1956; `bulk_insert` returns an allocated id vector and builds per-call flat insert bookkeeping. |
+| `growing-segment-flat-row-insert` | 2 | Temporary floor tracked under #1956; the fixture input vector and returned ID vector remain allocated. An existing kind key is borrowed. |
 | `page-cache-hit` | 0 | None |
 | `blob-cache-l1-hit` | 2 | Temporary floor tracked under #1956; `BlobCache::get` builds the owned namespace/key lookup key on the hit path. |
 | `wal-record-encode-into-group-commit-buffer` | 0 | None |

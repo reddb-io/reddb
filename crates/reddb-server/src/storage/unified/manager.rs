@@ -15,13 +15,13 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-use super::entity::{EntityId, UnifiedEntity};
+use super::entity::{EntityId, EntityKind, UnifiedEntity};
 use super::metadata::{Metadata, MetadataFilter};
 use super::segment::{
-    GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats,
-    UnifiedSegment, ZoneColPred, ZoneColPredKind,
+    GraphEntityKind, GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState,
+    SegmentStats, UnifiedSegment, ZoneColPred, ZoneColPredKind,
 };
 use super::visibility_map::VisibilityMap;
 use crate::runtime::mvcc::{entity_visible_with_context, SnapshotContext};
@@ -94,7 +94,7 @@ pub struct ConsolidationStats {
     pub segments_merged: u64,
     /// Tombstones garbage-collected by completed swaps.
     pub tombstones_reclaimed: u64,
-    /// Bytes returned to the memory budget by completed swaps.
+    /// Logical source-to-merged footprint reduction; readers may retain sources.
     pub bytes_reclaimed: u64,
 }
 
@@ -179,6 +179,9 @@ struct SourceProgress {
 
 /// Segment manager for a collection
 pub struct SegmentManager {
+    /// Statement-scoped constraint admission. Reentrant because SQL upserts
+    /// invoke the same typed mutation APIs while holding this collection gate.
+    row_constraint_lock: Arc<parking_lot::ReentrantMutex<()>>,
     /// Collection name
     collection: String,
     /// Configuration
@@ -197,6 +200,8 @@ pub struct SegmentManager {
     growing: RwLock<Option<Arc<RwLock<GrowingSegment>>>>,
     /// Sealed segments (immutable, queryable)
     sealed: RwLock<Vec<Arc<RwLock<GrowingSegment>>>>,
+    /// Retired sources still owned by readers. Weak handles never prolong payload lifetime.
+    retired: RwLock<Vec<Weak<RwLock<GrowingSegment>>>>,
     /// Archived segment IDs (stored externally)
     archived: RwLock<Vec<SegmentId>>,
     /// Entity to segment mapping (for fast lookups by individually-inserted entities).
@@ -228,6 +233,7 @@ impl SegmentManager {
     /// Create with custom configuration
     pub fn with_config(collection: impl Into<String>, config: ManagerConfig) -> Self {
         Self {
+            row_constraint_lock: Arc::new(parking_lot::ReentrantMutex::new(())),
             collection: collection.into(),
             config,
             next_segment_id: AtomicU64::new(1),
@@ -236,6 +242,7 @@ impl SegmentManager {
             total_entities_atomic: AtomicU64::new(0),
             growing: RwLock::new(None),
             sealed: RwLock::new(Vec::new()),
+            retired: RwLock::new(Vec::new()),
             archived: RwLock::new(Vec::new()),
             entity_segment: RwLock::new(HashMap::new()),
             column_schema: RwLock::new(None),
@@ -244,6 +251,10 @@ impl SegmentManager {
             events: RwLock::new(Vec::new()),
             visibility_map: VisibilityMap::new(),
         }
+    }
+
+    pub(crate) fn row_constraint_lock(&self) -> Arc<parking_lot::ReentrantMutex<()>> {
+        Arc::clone(&self.row_constraint_lock)
     }
 
     /// Get or create the shared column schema from first row's named fields.
@@ -288,10 +299,8 @@ impl SegmentManager {
         &self.config
     }
 
-    /// Get statistics. total_entities is read from the lock-free atomic;
-    /// `total_memory_bytes` is summed across the live segments so that a
-    /// consolidation's reclamation is visible in the number the budget watches.
-    /// The remaining fields come from the slow-path stats struct.
+    /// Get statistics. Entity counts cover active segments; memory also covers
+    /// retained sources and unpublished consolidation work.
     pub fn stats(&self) -> ManagerStats {
         let mut s = self.stats.read().clone();
         s.total_entities = self.total_entities_atomic.load(Ordering::Relaxed) as usize;
@@ -299,38 +308,68 @@ impl SegmentManager {
         s
     }
 
-    /// Approximate bytes held by this collection's in-memory segments: resident
-    /// entity payloads plus the tombstone sets. This is the number consolidation
-    /// drives down.
+    /// Approximate resident segment memory, including tombstones, retired sources,
+    /// and the in-flight merge and its bookkeeping. This feeds budget admission.
     pub fn resident_bytes(&self) -> u64 {
-        let mut bytes = 0;
-        if let Some(growing_arc) = self.growing.read().as_ref() {
-            bytes += growing_arc.read().resident_bytes();
-        }
-        for segment in self.sealed.read().iter() {
-            bytes += segment.read().resident_bytes();
-        }
-        bytes
+        self.memory_usage().1
     }
 
-    /// Approximate resident *payload* bytes across this collection's growing
-    /// and sealed segments — the arena's contribution to the shared accounting
-    /// pool (ADR 0073 §2). Unlike [`Self::resident_bytes`] this excludes the
-    /// tombstone sets: the pool tracks payload memory, not reclaim potential.
-    ///
-    /// One relaxed load per segment under a read lock; no entity is touched.
+    /// Resident segment payload/directory bytes and consolidation bookkeeping,
+    /// including retired sources. Unlike `resident_bytes`, excludes tombstones.
     pub fn memory_bytes(&self) -> u64 {
-        let growing = self
-            .growing
-            .read()
-            .as_ref()
-            .map_or(0, |segment| segment.read().memory_bytes());
+        self.memory_usage().0
+    }
 
-        self.sealed
-            .read()
-            .iter()
-            .map(|segment| segment.read().memory_bytes())
-            .fold(growing, u64::saturating_add)
+    /// Sample payload and resident bytes under the publication lock order:
+    /// consolidation, growing, sealed, retired. No entity scan or strong handle
+    /// is retained beyond this call; expired weak entries are pruned in place.
+    fn memory_usage(&self) -> (u64, u64) {
+        let consolidation = self.consolidation.read();
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        let mut retired = self.retired.write();
+        let mut payload = 0u64;
+        let mut resident = 0u64;
+        {
+            let mut add = |segment: &GrowingSegment| {
+                payload = payload.saturating_add(segment.memory_bytes());
+                resident = resident.saturating_add(segment.resident_bytes());
+            };
+            for segment in growing.iter().chain(sealed.iter()) {
+                add(&segment.read());
+            }
+            retired.retain(|source| {
+                if let Some(source) = source.upgrade() {
+                    add(&source.read());
+                    true
+                } else {
+                    false
+                }
+            });
+            if let Some(run) = consolidation.as_ref() {
+                add(&run.merged);
+            }
+        }
+        let mut bookkeeping =
+            (retired.capacity() * std::mem::size_of::<Weak<RwLock<GrowingSegment>>>()) as u64;
+        if let Some(run) = consolidation.as_ref() {
+            bookkeeping = bookkeeping
+                .saturating_add(
+                    (run.sources.capacity() * std::mem::size_of::<SourceProgress>()) as u64,
+                )
+                .saturating_add(
+                    (run.pending_ids.capacity() * std::mem::size_of::<EntityId>()) as u64,
+                );
+            for source in &run.sources {
+                bookkeeping = bookkeeping.saturating_add(
+                    (source.copied.capacity() * std::mem::size_of::<EntityId>()) as u64,
+                );
+            }
+        }
+        (
+            payload.saturating_add(bookkeeping),
+            resident.saturating_add(bookkeeping),
+        )
     }
 
     /// Bytes a pressure-triggered consolidation could plausibly return.
@@ -544,6 +583,72 @@ impl SegmentManager {
         }
 
         None
+    }
+
+    /// Resolve a physical graph node reference without cloning historical payloads.
+    /// This deliberately ignores MVCC: callers must authorize the visible logical
+    /// node separately. The callback bounds every segment probe, including misses.
+    pub(crate) fn graph_node_logical_id(
+        &self,
+        id: EntityId,
+        mut before_segment: impl FnMut() -> bool,
+    ) -> Option<EntityId> {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            if !before_segment() {
+                return None;
+            }
+            let growing = growing_arc.read();
+            if let Some(entity) = growing.get(id) {
+                return matches!(entity.kind, EntityKind::GraphNode(_))
+                    .then(|| entity.logical_id());
+            }
+        }
+        let sealed = self.sealed.read();
+        for segment in sealed.iter() {
+            if !before_segment() {
+                return None;
+            }
+            let segment = segment.read();
+            if let Some(entity) = segment.get(id) {
+                return matches!(entity.kind, EntityKind::GraphNode(_))
+                    .then(|| entity.logical_id());
+            }
+        }
+        None
+    }
+
+    /// Indexed physical candidates, including retained MVCC history. The caller
+    /// applies its explicit snapshot and defers RLS until segment locks are gone.
+    pub(crate) fn visit_graph_index_candidates(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        mut before_work: impl FnMut() -> bool,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) {
+        if let Some(growing) = self.growing.read().as_ref() {
+            if !before_work() {
+                return;
+            }
+            let segment = growing.read();
+            if segment.may_contain_graph_kind(kind)
+                && !segment.visit_graph_index_candidates(kind, keys, &mut before_work, &mut visit)
+            {
+                return;
+            }
+        }
+        let sealed = self.sealed.read();
+        for segment in sealed.iter() {
+            if !before_work() {
+                return;
+            }
+            let segment = segment.read();
+            if segment.may_contain_graph_kind(kind)
+                && !segment.visit_graph_index_candidates(kind, keys, &mut before_work, &mut visit)
+            {
+                return;
+            }
+        }
     }
 
     /// Batch-fetch multiple entities by ID in a single lock acquisition per segment.
@@ -1118,9 +1223,10 @@ impl SegmentManager {
 
     /// Seal the current growing segment
     pub fn seal_current(&self) -> Result<SegmentId, SegmentError> {
-        let growing_opt = self.growing.write().take();
-
-        if let Some(growing_arc) = growing_opt {
+        // Keep topology publication atomic for cursors that capture growing
+        // and sealed under the same lock order: growing, then sealed.
+        let mut growing_slot = self.growing.write();
+        if let Some(growing_arc) = growing_slot.take() {
             let mut growing = growing_arc.write();
             let seg_id = growing.id();
             let entity_count = growing.stats().entity_count as u64;
@@ -1134,6 +1240,7 @@ impl SegmentManager {
             // In a real implementation, we'd convert to SealedSegment here
             // For now, we keep it as-is since GrowingSegment implements UnifiedSegment
             self.sealed.write().push(growing_arc);
+            drop(growing_slot);
 
             // Mark sealed segment pages all-visible — they're now immutable
             self.mark_sealed_pages_visible(entity_count);
@@ -1205,25 +1312,75 @@ impl SegmentManager {
         self.visibility_map.mark_range_visible(start_page, end_page);
     }
 
+    /// Probe a unique-key lookup in each segment under the same entity
+    /// locks used by scans and writes. Lookup state is rebuilt lazily after
+    /// recovery, consolidation, or a key-changing mutation.
+    pub(crate) fn find_unique_key_conflict(
+        &self,
+        columns: &[Vec<String>],
+        key_index: usize,
+        signatures: &[String],
+        exclude_id: Option<EntityId>,
+        reserves_key: &impl Fn(&UnifiedEntity) -> bool,
+    ) -> Option<EntityId> {
+        if let Some(growing) = self.growing.read().as_ref() {
+            if let Some(id) = growing.read().find_unique_key_conflict(
+                columns,
+                key_index,
+                signatures,
+                exclude_id,
+                reserves_key,
+            ) {
+                return Some(id);
+            }
+        }
+        for segment in self.sealed.read().iter() {
+            if let Some(id) = segment.read().find_unique_key_conflict(
+                columns,
+                key_index,
+                signatures,
+                exclude_id,
+                reserves_key,
+            ) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
     /// Iterate over all entities in-place without collecting into a Vec.
     ///
     /// The callback receives a reference to each entity. Return `true` to
     /// continue iteration, `false` to stop early (e.g. when a LIMIT is reached).
     /// This avoids the allocation and cloning overhead of `query_all`.
-    pub fn for_each_entity<F>(&self, mut callback: F)
+    pub fn for_each_entity<F>(&self, callback: F)
     where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        self.for_each_entity_in_segments(|_| true, || true, callback);
+    }
+
+    fn for_each_entity_in_segments<F>(
+        &self,
+        segment_filter: impl Fn(&GrowingSegment) -> bool,
+        mut before_segment: impl FnMut() -> bool,
+        mut callback: F,
+    ) where
         F: FnMut(&UnifiedEntity) -> bool,
     {
         // Growing segment — direct iteration (no Box<dyn>)
         // Try non-blocking read first; fall back to blocking only when a writer
         // is actively holding the write lock (rare in read-heavy workloads).
         if let Some(growing_arc) = self.growing.read().as_ref() {
+            if !before_segment() {
+                return;
+            }
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
                 growing_arc.read()
             };
-            if !growing.for_each_fast(&mut callback) {
+            if segment_filter(&growing) && !growing.for_each_fast(&mut callback) {
                 return;
             }
         }
@@ -1231,8 +1388,11 @@ impl SegmentManager {
         // Sealed segments
         let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
+            if !before_segment() {
+                return;
+            }
             let segment = segment_arc.read();
-            if !segment.for_each_fast(&mut callback) {
+            if segment_filter(&segment) && !segment.for_each_fast(&mut callback) {
                 return;
             }
         }
@@ -1505,6 +1665,38 @@ impl SegmentManager {
         self.query_all(|entity| Self::scan_entity_visible(snapshot, entity) && filter(entity))
     }
 
+    /// Collect visible graph items, pruning only under the segment read guard.
+    pub(crate) fn scan_graph_kind(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        kind: GraphEntityKind,
+    ) -> Vec<UnifiedEntity> {
+        self.query_all_in_segments(
+            |segment| segment.may_contain_graph_kind(kind),
+            |entity| Self::scan_entity_visible(snapshot, entity) && kind.matches(&entity.kind),
+        )
+    }
+
+    /// Visit visible candidates in segments that may contain the requested kind.
+    /// Non-graph items in those segments still reach the callback so work budgets
+    /// charge every inspected visible candidate. RLS must run outside this callback.
+    /// `before_segment` runs even for pruned segments; false stops the entire scan.
+    pub(crate) fn scan_graph_candidates_for_each<F>(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        kind: GraphEntityKind,
+        before_segment: impl FnMut() -> bool,
+        mut callback: F,
+    ) where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        self.for_each_entity_in_segments(
+            |segment| segment.may_contain_graph_kind(kind),
+            before_segment,
+            |entity| !Self::scan_entity_visible(snapshot, entity) || callback(entity),
+        );
+    }
+
     /// Visit every entity visible under an explicit MVCC snapshot.
     ///
     /// Returning `false` from `callback` stops the scan early. Hidden entities
@@ -1516,6 +1708,66 @@ impl SegmentManager {
         self.for_each_entity(|entity| {
             !Self::scan_entity_visible(snapshot, entity) || callback(entity)
         });
+    }
+
+    /// Capture segment membership and append boundaries, then hydrate bounded
+    /// batches. The consumer runs outside topology and segment locks, so scoring
+    /// and RLS may re-enter storage and writers can progress between batches.
+    /// Retired sources pin positions only; hydration uses current segments so
+    /// mutations after consolidation are visible to the snapshot predicate.
+    pub(crate) fn scan_batches(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        mut before_work: impl FnMut() -> bool,
+        mut consume: impl FnMut(&[UnifiedEntity]) -> bool,
+    ) -> bool {
+        let segments = {
+            let growing = self.growing.read();
+            let sealed = self.sealed.read();
+            let mut segments = Vec::with_capacity(sealed.len() + usize::from(growing.is_some()));
+            for segment in growing.iter().chain(sealed.iter()) {
+                if !before_work() {
+                    return false;
+                }
+                let cursor = segment.read().scan_cursor();
+                segments.push((Arc::clone(segment), cursor));
+            }
+            segments
+        };
+        let mut ids = Vec::new();
+        let mut batch = Vec::new();
+        for (segment, mut cursor) in segments {
+            while !cursor.finished() {
+                ids.clear();
+                batch.clear();
+                let batch_size = cursor.remaining().min(super::segment::SCAN_BATCH_SIZE);
+                ids.reserve_exact(batch_size);
+                batch.reserve_exact(batch_size);
+                {
+                    let segment = segment.read();
+                    if !segment.scan_batch(&mut cursor, &mut before_work, &mut |id| ids.push(id)) {
+                        return false;
+                    }
+                }
+                // Sources can retire between batches. Consult authoritative storage
+                // after releasing the source guard, just as the former ID-list scan did.
+                if !before_work() {
+                    return false;
+                }
+                self.for_each_id(&ids, |_, entity| {
+                    if Self::scan_entity_visible(snapshot, entity) {
+                        batch.push(entity.clone());
+                    }
+                });
+                if !before_work() {
+                    return false;
+                }
+                if !consume(&batch) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Fold entities visible under an explicit MVCC snapshot in parallel.
@@ -1581,6 +1833,17 @@ impl SegmentManager {
     where
         F: Fn(&UnifiedEntity) -> bool + Sync,
     {
+        self.query_all_in_segments(|_| true, filter)
+    }
+
+    fn query_all_in_segments<F>(
+        &self,
+        segment_filter: impl Fn(&GrowingSegment) -> bool + Sync,
+        filter: F,
+    ) -> Vec<UnifiedEntity>
+    where
+        F: Fn(&UnifiedEntity) -> bool + Sync,
+    {
         let mut results = Vec::new();
 
         // Query growing segment — try non-blocking read first (avoids stalling
@@ -1591,7 +1854,9 @@ impl SegmentManager {
             } else {
                 growing_arc.read()
             };
-            results.extend(growing.iter().filter(|e| filter(e)).cloned());
+            if segment_filter(&growing) {
+                results.extend(growing.iter().filter(|e| filter(e)).cloned());
+            }
         }
 
         // Query sealed segments — parallel when multiple exist AND multi-core
@@ -1599,17 +1864,22 @@ impl SegmentManager {
         let use_parallel = sealed.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
         if use_parallel {
             let filter_ref = &filter;
+            let segment_filter_ref = &segment_filter;
             let segment_results: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
                 sealed
                     .iter()
                     .map(|segment| {
                         s.spawn(move || {
-                            segment
-                                .read()
-                                .iter()
-                                .filter(|e| filter_ref(e))
-                                .cloned()
-                                .collect::<Vec<_>>()
+                            let segment = segment.read();
+                            if segment_filter_ref(&segment) {
+                                segment
+                                    .iter()
+                                    .filter(|e| filter_ref(e))
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            } else {
+                                Vec::new()
+                            }
                         })
                     })
                     .collect::<Vec<_>>()
@@ -1623,7 +1893,9 @@ impl SegmentManager {
         } else {
             for segment in sealed.iter() {
                 let seg = segment.read();
-                results.extend(seg.iter().filter(|e| filter(e)).cloned());
+                if segment_filter(&seg) {
+                    results.extend(seg.iter().filter(|e| filter(e)).cloned());
+                }
             }
         }
 
@@ -1776,18 +2048,15 @@ impl SegmentManager {
             return;
         }
 
-        let finished = {
-            let mut guard = self.consolidation.write();
-            let Some(run) = guard.as_mut() else {
-                return;
-            };
-            self.copy_bounded(run);
-            run.cursor >= run.sources.len()
+        // Keep the accounting guard through publication: the merged allocation
+        // must never disappear between the in-flight and active inventories.
+        let mut guard = self.consolidation.write();
+        let Some(run) = guard.as_mut() else {
+            return;
         };
-
-        if finished {
-            let run = self.consolidation.write().take();
-            if let Some(run) = run {
+        self.copy_bounded(run);
+        if run.cursor >= run.sources.len() {
+            if let Some(run) = guard.take() {
                 self.finish_consolidation(run);
             }
         }
@@ -2062,8 +2331,15 @@ impl SegmentManager {
         let merged_bytes = run.merged.resident_bytes();
         let merged_arc = Arc::new(RwLock::new(run.merged));
 
-        for &index in positions.iter().rev() {
-            sealed.remove(index);
+        {
+            let mut retired = self.retired.write();
+            retired.retain(|source| source.strong_count() > 0);
+            for &index in positions.iter().rev() {
+                let source = sealed.remove(index);
+                if Arc::strong_count(&source) > 1 {
+                    retired.push(Arc::downgrade(&source));
+                }
+            }
         }
         let insert_at = positions[0].min(sealed.len());
         sealed.insert(insert_at, Arc::clone(&merged_arc));
@@ -2209,6 +2485,286 @@ mod tests {
     use reddb_types::Value;
 
     #[test]
+    fn bounded_scan_survives_sealing_consolidation_and_new_writes() {
+        let manager = SegmentManager::with_config(
+            "vectors",
+            ManagerConfig {
+                max_sealed_segments: 1,
+                consolidation_entities_per_tick: 10_000,
+                ..Default::default()
+            },
+        );
+        for part in 0..3 {
+            manager
+                .bulk_insert(
+                    (1..=300)
+                        .map(|offset| {
+                            UnifiedEntity::vector(
+                                EntityId::new(part * 300 + offset),
+                                "vectors",
+                                vec![1.0, 0.0],
+                            )
+                        })
+                        .collect(),
+                )
+                .expect("batch");
+            if part < 2 {
+                manager.force_seal().expect("seal");
+            }
+        }
+        let original_growing = manager.growing.read().as_ref().expect("growing").clone();
+        let mut changed = false;
+        let mut seen = Vec::new();
+        assert!(manager.scan_batches(
+            None,
+            || true,
+            |batch| {
+                assert!(batch.len() <= super::super::segment::SCAN_BATCH_SIZE);
+                assert!(
+                    manager.growing.try_write().is_some(),
+                    "consumer holds no topology guard"
+                );
+                assert!(
+                    original_growing.try_write().is_some(),
+                    "consumer holds no segment guard"
+                );
+                for entity in batch {
+                    assert!(manager.get(entity.id).is_some(), "reentrant storage lookup");
+                    seen.push(entity.id.raw());
+                }
+                if !changed {
+                    changed = true;
+                    manager.force_seal().expect("seal during scan");
+                    manager
+                        .insert(UnifiedEntity::vector(
+                            EntityId::new(5000),
+                            "vectors",
+                            vec![1.0, 0.0],
+                        ))
+                        .expect("new write");
+                    drain_maintenance(&manager);
+                    assert!(manager.stats().consolidation.runs_completed > 0);
+                    assert!(manager
+                        .delete(EntityId::new(1))
+                        .expect("delete after source retirement"));
+                    assert!(manager.get(EntityId::new(1)).is_none());
+                }
+                true
+            }
+        ));
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            (2..=900).collect::<Vec<_>>(),
+            "no duplicate, missing or late candidates"
+        );
+        let mut after = Vec::new();
+        assert!(manager.scan_batches(
+            None,
+            || true,
+            |batch| {
+                after.extend(batch.iter().map(|entity| entity.id.raw()));
+                true
+            }
+        ));
+        after.sort_unstable();
+        let mut expected: Vec<_> = (2..=900).collect();
+        expected.push(5000);
+        assert_eq!(after, expected, "adopted entities have scan positions");
+    }
+
+    #[test]
+    fn bounded_scan_applies_snapshot_to_relocated_versions() {
+        for (consolidate, bulk) in [(false, false), (false, true), (true, false), (true, true)] {
+            let manager = SegmentManager::with_config(
+                "vectors",
+                ManagerConfig {
+                    max_sealed_segments: 1,
+                    ..Default::default()
+                },
+            );
+            for ids in [[1, 2], [3, 4]] {
+                let entities = ids.map(|id| {
+                    let mut entity = UnifiedEntity::vector(EntityId::new(id), "vectors", vec![1.0]);
+                    entity.set_xmin(3);
+                    entity
+                });
+                if bulk {
+                    manager
+                        .bulk_insert(entities.into())
+                        .expect("initial versions");
+                } else {
+                    for entity in entities {
+                        manager.insert(entity).expect("initial version");
+                    }
+                }
+                manager.force_seal().expect("seal source");
+            }
+            let snapshot = SnapshotContext {
+                snapshot: Snapshot {
+                    xid: 10,
+                    in_progress: HashSet::new(),
+                },
+                manager: Arc::new(SnapshotManager::new()),
+                own_xids: HashSet::new(),
+                requires_index_fallback: false,
+                serializable_reader: None,
+            };
+            let mut changed = false;
+            let mut seen = Vec::new();
+            assert!(manager.scan_batches(
+                Some(&snapshot),
+                || true,
+                |batch| {
+                    seen.extend(batch.iter().map(|entity| entity.id.raw()));
+                    if !changed {
+                        changed = true;
+                        if consolidate {
+                            drain_maintenance(&manager);
+                            assert!(manager.stats().consolidation.runs_completed > 0);
+                        }
+                        for (id, xmax) in [(3, 8), (4, 12)] {
+                            let mut entity =
+                                manager.get(EntityId::new(id)).expect("retained version");
+                            entity.set_xmax(xmax);
+                            manager
+                                .update(entity)
+                                .expect("update after source retirement");
+                        }
+                    }
+                    true
+                }
+            ));
+            seen.sort_unstable();
+            assert_eq!(seen, vec![1, 2, 4], "snapshot uses authoritative xmax");
+            let mut again = Vec::new();
+            assert!(manager.scan_batches(
+                Some(&snapshot),
+                || true,
+                |batch| {
+                    again.extend(batch.iter().map(|entity| entity.id.raw()));
+                    true
+                }
+            ));
+            again.sort_unstable();
+            assert_eq!(
+                again,
+                vec![1, 2, 4],
+                "old slots do not duplicate relocated versions"
+            );
+            let mut current = Vec::new();
+            assert!(manager.scan_batches(
+                None,
+                || true,
+                |batch| {
+                    current.extend(batch.iter().map(|entity| entity.id.raw()));
+                    true
+                }
+            ));
+            current.sort_unstable();
+            assert_eq!(
+                current,
+                vec![1, 2],
+                "current view excludes both deleted versions"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_scan_keeps_flat_and_hash_positions_through_mutation() {
+        let manager = SegmentManager::new("mixed");
+        let vector = |id| UnifiedEntity::vector(EntityId::new(id), "mixed", vec![1.0]);
+        manager
+            .bulk_insert((1..=300).map(vector).collect())
+            .expect("flat");
+        manager.insert(vector(500)).expect("hash insert");
+        manager
+            .bulk_insert(vec![vector(502), vector(505)])
+            .expect("gapped bulk");
+        manager.delete(EntityId::new(2)).expect("flat delete");
+        manager.delete(EntityId::new(505)).expect("hash delete");
+        let mut changed = false;
+        let mut seen = Vec::new();
+        assert!(manager.scan_batches(
+            None,
+            || true,
+            |batch| {
+                seen.extend(batch.iter().map(|entity| entity.id.raw()));
+                if !changed {
+                    changed = true;
+                    manager
+                        .insert(vector(700))
+                        .expect("append after cursor boundary");
+                    manager
+                        .update(UnifiedEntity::graph_node(
+                            EntityId::new(500),
+                            "mixed",
+                            "Node",
+                            HashMap::new(),
+                        ))
+                        .expect("structural update");
+                }
+                true
+            }
+        ));
+        seen.sort_unstable();
+        let mut expected: Vec<_> = (1..=300).filter(|id| *id != 2).collect();
+        expected.extend([500, 502]);
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn bounded_scan_preserves_snapshot_and_discards_interrupted_batches() {
+        let manager = SegmentManager::new("vectors");
+        let mut entities = Vec::new();
+        for (id, xmin, xmax) in [(1, 3, 12), (2, 12, 0), (3, 3, 0), (4, 3, 4)] {
+            let mut entity = UnifiedEntity::vector(EntityId::new(id), "vectors", vec![1.0]);
+            entity.set_xmin(xmin);
+            entity.set_xmax(xmax);
+            entities.push(entity);
+        }
+        manager.bulk_insert(entities).expect("versions");
+        manager.force_seal().expect("seal");
+        let snapshot = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 10,
+                in_progress: HashSet::from([4]),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+        let mut work = 0;
+        let mut callbacks = 0;
+        assert!(!manager.scan_batches(
+            Some(&snapshot),
+            || {
+                work += 1;
+                work <= 2
+            },
+            |_| {
+                callbacks += 1;
+                true
+            }
+        ));
+        assert_eq!(callbacks, 0, "a stopped batch is not consumed");
+        for (view, expected) in [(Some(&snapshot), vec![1, 3, 4]), (None, vec![2, 3])] {
+            let mut seen = Vec::new();
+            assert!(manager.scan_batches(
+                view,
+                || true,
+                |batch| {
+                    seen.extend(batch.iter().map(|entity| entity.id.raw()));
+                    true
+                }
+            ));
+            seen.sort_unstable();
+            assert_eq!(seen, expected);
+        }
+    }
+
+    #[test]
     fn test_manager_basic() {
         let manager = SegmentManager::new("test_collection");
 
@@ -2222,6 +2778,124 @@ mod tests {
         let id = manager.insert(entity).unwrap();
         assert!(manager.get(id).is_some());
         assert_eq!(manager.count(), 1);
+    }
+
+    #[test]
+    fn graph_pruning_preserves_physical_versions_and_charges_only_selected_segments() {
+        let manager = Arc::new(SegmentManager::new("mixed"));
+        manager
+            .bulk_insert(
+                (1..=128)
+                    .map(|id| UnifiedEntity::vector(EntityId::new(id), "mixed", vec![]))
+                    .collect(),
+            )
+            .expect("vector-only segment");
+        manager.force_seal().expect("seal vectors");
+        let mut old =
+            UnifiedEntity::graph_node(EntityId::new(200), "mixed", "person", Default::default());
+        old.set_xmin(3);
+        old.set_xmax(12);
+        let mut new =
+            UnifiedEntity::graph_node(EntityId::new(201), "mixed", "person", Default::default());
+        new.set_xmin(12);
+        let edge = UnifiedEntity::graph_edge(
+            EntityId::new(202),
+            "mixed",
+            "a",
+            "b",
+            1.0,
+            Default::default(),
+        );
+        manager
+            .bulk_insert(vec![old, new, edge])
+            .expect("physical graph versions");
+        manager.force_seal().expect("seal graph");
+        manager
+            .insert(UnifiedEntity::graph_node(
+                EntityId::new(203),
+                "mixed",
+                "person",
+                Default::default(),
+            ))
+            .expect("growing node");
+        let snapshot = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 10,
+                in_progress: HashSet::new(),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+        std::thread::spawn(move || {
+            for view in [None, Some(&snapshot)] {
+                for kind in [GraphEntityKind::Node, GraphEntityKind::Edge] {
+                    let expected: HashSet<_> = manager
+                        .scan(view, |item| kind.matches(&item.kind))
+                        .into_iter()
+                        .map(|item| item.id)
+                        .collect();
+                    let actual: HashSet<_> = manager
+                        .scan_graph_kind(view, kind)
+                        .into_iter()
+                        .map(|item| item.id)
+                        .collect();
+                    assert_eq!(actual, expected);
+                    let mut visited = 0;
+                    let mut candidates = HashSet::new();
+                    manager.scan_graph_candidates_for_each(
+                        view,
+                        kind,
+                        || true,
+                        |item| {
+                            visited += 1;
+                            if kind.matches(&item.kind) {
+                                candidates.insert(item.id);
+                            }
+                            true
+                        },
+                    );
+                    assert_eq!(candidates, expected);
+                    assert_eq!(
+                        visited,
+                        if matches!(kind, GraphEntityKind::Node) {
+                            3
+                        } else {
+                            2
+                        }
+                    );
+                }
+            }
+            let ids: HashSet<_> = manager
+                .scan_graph_kind(Some(&snapshot), GraphEntityKind::Node)
+                .into_iter()
+                .map(|item| item.id.raw())
+                .collect();
+            assert_eq!(ids, HashSet::from([200, 203]));
+            let ids: HashSet<_> = manager
+                .scan_graph_kind(None, GraphEntityKind::Node)
+                .into_iter()
+                .map(|item| item.id.raw())
+                .collect();
+            assert_eq!(ids, HashSet::from([201, 203]));
+            let mut visits = 0;
+            manager.scan_graph_candidates_for_each(
+                None,
+                GraphEntityKind::Node,
+                || true,
+                |_| {
+                    visits += 1;
+                    false
+                },
+            );
+            assert_eq!(
+                visits, 1,
+                "early termination must also stop subsequent segments"
+            );
+        })
+        .join()
+        .expect("snapshot worker");
     }
 
     #[test]
@@ -2505,18 +3179,15 @@ mod tests {
             (
                 "runtime/impl_graph_commands.rs",
                 include_str!("../../runtime/impl_graph_commands.rs"),
-                1,
-                "maintenance: resolves a node's declared type from the catalog, \
-                 not a user-visible row projection",
+                0,
+                "native node properties resolve one snapshot-visible, RLS-admitted version",
             ),
             (
                 "runtime/graph_dsl.rs",
                 include_str!("../../runtime/graph_dsl.rs"),
-                4,
-                "maintenance: materializes the node/edge property side tables that \
-                 back traversal; the traversal result itself is scanned. \
-                 TODO(#2138 follow-up): confirm property materialization may keep \
-                 pre-snapshot versions",
+                1,
+                "remaining legacy debt: unused edge-property helper; search expansion \
+                 now uses snapshot visitors and RLS-gated hydration",
             ),
             (
                 "runtime/graph_tvf.rs",
@@ -2556,6 +3227,12 @@ mod tests {
                 include_str!("../../runtime/record_search.rs"),
                 0,
                 "fully migrated by batch 2",
+            ),
+            (
+                "runtime/search_graph.rs",
+                include_str!("../../runtime/search_graph.rs"),
+                0,
+                "search graph preparation uses snapshot visitors and gated hydration",
             ),
             (
                 "runtime/impl_search.rs",
@@ -2903,6 +3580,166 @@ mod tests {
             assert!(ticks < 1_000, "consolidation failed to converge");
         }
         ticks
+    }
+
+    #[test]
+    fn retained_memory_tracks_two_readers_until_the_last_cursor_finishes() {
+        let manager = consolidating_manager(CONSOLIDATION_ENTITIES_PER_TICK);
+        let ids = seal_bulk_segment(&manager, 100);
+        for id in ids.iter().take(40) {
+            manager.delete(*id).expect("delete before scan");
+        }
+        let source_bytes = manager.resident_bytes();
+        let source = Arc::downgrade(&manager.sealed.read()[0]);
+        std::thread::scope(|scope| {
+            let (ready, waiting) = std::sync::mpsc::channel();
+            let (release_first, first_wait) = std::sync::mpsc::channel();
+            let (release_last, last_wait) = std::sync::mpsc::channel();
+            let reader = |resume: std::sync::mpsc::Receiver<()>,
+                          ready: std::sync::mpsc::Sender<()>| {
+                assert!(manager.scan_batches(
+                    None,
+                    || true,
+                    |_| {
+                        ready.send(()).expect("signal captured cursor");
+                        let _ = resume.recv();
+                        true
+                    }
+                ));
+            };
+            let ready_first = ready.clone();
+            let first = scope.spawn(move || reader(first_wait, ready_first));
+            let last = scope.spawn(move || reader(last_wait, ready));
+            for _ in 0..2 {
+                waiting
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("reader ready");
+            }
+            drain_maintenance(&manager);
+            assert!(
+                source.upgrade().is_some(),
+                "both cursors pin the retired source"
+            );
+            let active_bytes = manager.sealed.read()[0].read().resident_bytes();
+            let held = manager.resident_bytes();
+            assert!(
+                held >= active_bytes + source_bytes,
+                "retired source remains resident"
+            );
+            release_first.send(()).expect("release first reader");
+            first.join().expect("first reader");
+            assert_eq!(
+                manager.resident_bytes(),
+                held,
+                "one reader still pins the source"
+            );
+            release_last.send(()).expect("release last reader");
+            last.join().expect("last reader");
+            assert!(
+                source.upgrade().is_none(),
+                "accounting must not retain payloads"
+            );
+            assert_eq!(held - manager.resident_bytes(), source_bytes);
+            assert_eq!(
+                manager.stats().total_memory_bytes as u64,
+                manager.resident_bytes()
+            );
+        });
+    }
+
+    #[test]
+    fn retained_memory_gates_runtime_growth_until_the_cursor_is_cancelled() {
+        use crate::storage::memory_pools::MemoryPool;
+        use crate::{RedDBOptions, RedDBRuntime};
+
+        let budget = 128 * 1024;
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
+                .expect("runtime");
+        runtime
+            .db()
+            .store()
+            .create_collection("test")
+            .expect("collection");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("test")
+            .expect("manager");
+        let ids = seal_bulk_segment(&manager, 100);
+        for id in ids.iter().take(40) {
+            manager.delete(*id).expect("delete before scan");
+        }
+        let source_bytes = manager.resident_bytes();
+        let mut growth = 0;
+        let mut held_used = 0;
+        assert!(!manager.scan_batches(
+            None,
+            || true,
+            |_| {
+                drain_maintenance(&manager);
+                runtime.refresh_memory_accounting();
+                // Other collections (including the runtime catalog) share this
+                // arena, so derive headroom from the complete runtime sample.
+                held_used = runtime.memory_accounting().total_used_bytes();
+                growth = budget
+                    .checked_sub(held_used)
+                    .expect("fixture fits while the cursor is open")
+                    + source_bytes / 2;
+                assert!(growth > 0);
+                assert!(
+                    runtime
+                        .admit_non_evictable_growth(
+                            MemoryPool::SegmentArena,
+                            "growth with pinned source",
+                            growth,
+                        )
+                        .is_err(),
+                    "retained source must participate in runtime admission"
+                );
+                false
+            }
+        ));
+        runtime.refresh_memory_accounting();
+        assert_eq!(
+            held_used - runtime.memory_accounting().total_used_bytes(),
+            source_bytes
+        );
+        let _reservation = runtime
+            .admit_non_evictable_growth(
+                MemoryPool::SegmentArena,
+                "growth after cursor cancellation",
+                growth,
+            )
+            .expect("the same growth fits once the cursor releases its source");
+    }
+
+    #[test]
+    fn retained_memory_includes_an_inflight_consolidation_copy() {
+        let manager = consolidating_manager(1);
+        let ids = seal_bulk_segment(&manager, 100);
+        for id in ids.iter().take(40) {
+            manager.delete(*id).expect("delete");
+        }
+        let before = manager.resident_bytes();
+        assert!(manager.pressure_consolidation_tick());
+        let copied = manager
+            .consolidation
+            .read()
+            .as_ref()
+            .expect("paced merge")
+            .merged
+            .resident_bytes();
+        assert!(copied > 0);
+        assert!(
+            manager.resident_bytes() >= before + copied,
+            "unpublished copy consumes memory"
+        );
+        drain_maintenance(&manager);
+        assert!(
+            manager.resident_bytes() < before,
+            "completed merge releases the old storage"
+        );
     }
 
     #[test]

@@ -142,9 +142,9 @@ const COVERED_OPERATIONS: &[CoveredOperation] = &[
     },
     CoveredOperation {
         name: "growing-segment-flat-row-insert",
-        allowed_allocs: 3,
+        allowed_allocs: 2,
         exception: Some(AllocationException {
-            reason: "bulk_insert returns an allocated id vector and builds per-call flat insert bookkeeping",
+            reason: "the fixture input vector and bulk_insert result ID vector remain allocated; an existing kind key is borrowed",
             follow_up_issue: 1956,
         }),
         measure: measure_growing_segment_flat_row_insert,
@@ -723,4 +723,55 @@ fn structural_hot_path_report() {
         move_count.allocs,
         clone_count.allocs
     );
+}
+
+#[test]
+fn row_index_growth_estimation_does_not_allocate_for_stored_fields() {
+    use reddb_types::Value;
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE estimate_rows (id INT, payload BLOB)")
+        .expect("table");
+    for (name, method) in [
+        ("estimate_hash", "HASH"),
+        ("estimate_sorted", "BTREE"),
+        ("estimate_bitmap", "BITMAP"),
+    ] {
+        runtime
+            .execute_query(&format!(
+                "CREATE INDEX {name} ON estimate_rows (payload) USING {method}"
+            ))
+            .expect("index");
+    }
+    let store = runtime.index_store_ref();
+    let fields = vec![
+        ("id".to_string(), Value::Integer(1)),
+        ("payload".to_string(), Value::Blob(vec![255; 1024])),
+    ];
+    let (estimate, count) = measure_allocations(|| {
+        store.estimate_insert_growth("estimate_rows", std::iter::once(fields.as_slice()), true)
+    });
+    assert!(estimate > 3 * 1024);
+    assert_eq!(
+        count.allocs, 0,
+        "sizing keys must not allocate encoded copies"
+    );
+    assert_eq!(count.deallocs, 0);
+}
+
+#[test]
+fn row_topology_lock_reuse_does_not_allocate() {
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    let indexes = runtime.index_store_ref();
+    let warm = indexes.collection_topology_lock("topology_records");
+    let (_, count) = measure_allocations(|| {
+        let lock = indexes.collection_topology_lock("topology_records");
+        let _guard = lock.read();
+        assert!(std::sync::Arc::ptr_eq(&warm, &lock));
+    });
+    assert_eq!(
+        count.allocs, 0,
+        "warmed row topology must not allocate per batch"
+    );
+    assert_eq!(count.deallocs, 0);
 }

@@ -201,31 +201,34 @@ fn execute_geo_candidate_scan(
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let hydrate_store = db.store();
     let mut records = Vec::new();
-    manager.scan_for_each(snapshot.as_ref(), |entity| {
-        if !candidate_ids.contains(&entity.id.raw()) {
-            return true;
-        }
-        if !db.replica_allows_entity_at_read(&query.table, entity) {
-            return true;
-        }
-        let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
-            hydrate_store.as_ref(),
-            entity,
-        );
-        let Some(record) = runtime_table_record_from_entity(hydrated) else {
-            return true;
-        };
-        if super::super::join_filter::evaluate_runtime_filter_with_db(
-            Some(db),
-            &record,
-            filter,
-            Some(table_name),
-            Some(table_alias),
-        ) {
-            records.push(record);
-        }
-        true
-    });
+    crate::runtime::function_budget::scan(
+        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+        |entity| {
+            if !candidate_ids.contains(&entity.id.raw()) {
+                return true;
+            }
+            if !db.replica_allows_entity_at_read(&query.table, entity) {
+                return true;
+            }
+            let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+                hydrate_store.as_ref(),
+                entity,
+            );
+            let Some(record) = runtime_table_record_from_entity(hydrated) else {
+                return true;
+            };
+            if super::super::join_filter::evaluate_runtime_filter_with_db(
+                Some(db),
+                &record,
+                filter,
+                Some(table_name),
+                Some(table_alias),
+            ) {
+                records.push(record);
+            }
+            true
+        },
+    )?;
 
     crate::runtime::window_phase::apply(
         Some(db),
@@ -474,8 +477,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let effective_filter = effective_table_filter(query);
     let effective_group_by = effective_table_group_by_exprs(query);
     let effective_having = effective_table_having_filter(query);
+    // Filtered/index-only shortcuts materialize source column names. An
+    // alias needs the canonical projection node to rename the result.
     let requires_runtime_projection =
-        projections_require_runtime_projection(&effective_projections);
+        projections_require_runtime_projection(&effective_projections)
+            || (effective_filter.is_some()
+                && effective_projections
+                    .iter()
+                    .any(|p| matches!(p, Projection::Alias(_, _) | Projection::Field(_, Some(_)))));
     let uses_document_projection =
         runtime_projections_use_document_path(&effective_projections, query);
 
@@ -769,6 +778,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     Vec::with_capacity(entity_ids.len().min(limit));
                 let mut stop = false;
                 let table_row_resolver = TableRowMvccReadResolver::current_statement();
+                crate::runtime::function_budget::charge(entity_ids.len() as u64)?;
                 manager.for_each_id(&entity_ids, |_idx, entity| {
                     if stop {
                         return;
@@ -817,6 +827,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
             let table_row_resolver = TableRowMvccReadResolver::current_statement();
             for entity_opt in entities.into_iter().flatten() {
+                crate::runtime::function_budget::charge(1)?;
                 if records.len() >= limit {
                     break;
                 }
@@ -927,6 +938,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             let mut records = Vec::with_capacity(intersection_ids.len().min(limit));
                             let table_row_resolver = TableRowMvccReadResolver::current_statement();
                             for entity_opt in entities.into_iter().flatten() {
+                                crate::runtime::function_budget::charge(1)?;
                                 if records.len() >= limit {
                                     break;
                                 }
@@ -1084,6 +1096,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
             let table_row_resolver = TableRowMvccReadResolver::current_statement();
             for entity_opt in entities.into_iter().flatten() {
+                crate::runtime::function_budget::charge(1)?;
                 if records.len() >= limit {
                     break;
                 }
@@ -1209,6 +1222,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         let mut records = Vec::with_capacity(entity_ids.len().min(limit));
                         let table_row_resolver = TableRowMvccReadResolver::current_statement();
                         for entity_opt in entities.into_iter().flatten() {
+                            crate::runtime::function_budget::charge(1)?;
                             if records.len() >= limit {
                                 break;
                             }
@@ -1503,7 +1517,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // across sealed segments using std::thread::scope. Sequential path kept
         // for LIMIT queries so the early-exit optimisation still works.
         let entity_count = manager.count();
-        let use_parallel = explicit_limit.is_none()
+        let use_parallel = !crate::runtime::function_budget::active()
+            && explicit_limit.is_none()
             && entity_count >= crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
 
         // SELECT * with lean materialization: skip the 6 heavy red_* system fields
@@ -1590,30 +1605,31 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 }
             }
         } else {
-            let scan_stats =
-                manager.scan_for_each_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
-                if records.len() >= limit {
-                    return false; // stop iteration
-                }
-                if !db.replica_allows_entity_at_read(&query.table, entity) {
-                    return true;
-                }
-                if let Some(candidates) = tag_series_candidates.as_ref() {
-                    let EntityData::TimeSeries(point) = &entity.data else {
-                        return true;
-                    };
-                    if !point.series_id.is_some_and(|id| candidates.contains(&id)) {
+            let scan_stats = crate::runtime::function_budget::scan(
+                |visit| {
+                    manager.scan_for_each_zoned_with_stats(snapshot.as_ref(), &zone_preds, visit)
+                },
+                |entity| {
+                    if records.len() >= limit {
+                        return false; // stop iteration
+                    }
+                    if !db.replica_allows_entity_at_read(&query.table, entity) {
                         return true;
                     }
-                    crate::runtime::observe_timeseries_tag_index_point();
-                }
-                let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
-                    hydrate_store.as_ref(),
-                    entity,
-                );
-                if compiled
-                    .as_ref()
-                    .is_none_or(|compiled| {
+                    if let Some(candidates) = tag_series_candidates.as_ref() {
+                        let EntityData::TimeSeries(point) = &entity.data else {
+                            return true;
+                        };
+                        if !point.series_id.is_some_and(|id| candidates.contains(&id)) {
+                            return true;
+                        }
+                        crate::runtime::observe_timeseries_tag_index_point();
+                    }
+                    let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+                        hydrate_store.as_ref(),
+                        entity,
+                    );
+                    if compiled.as_ref().is_none_or(|compiled| {
                         residual_filter.as_ref().is_some_and(|filter| {
                             compiled_entity_filter_matches(
                                 db,
@@ -1624,12 +1640,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 table_alias,
                             )
                         })
-                    })
-                {
-                    let record = if !select_cols.is_empty() {
-                        // Fast columnar path: use pre-computed schema indices when available.
-                        if let Some(ref idx_map) = schema_col_indices {
-                            super::super::record_search::runtime_table_record_with_col_indices(
+                    }) {
+                        let record = if !select_cols.is_empty() {
+                            // Fast columnar path: use pre-computed schema indices when available.
+                            if let Some(ref idx_map) = schema_col_indices {
+                                super::super::record_search::runtime_table_record_with_col_indices(
                                 &hydrated,
                                 &select_cols,
                                 idx_map,
@@ -1642,29 +1657,30 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             .or_else(|| {
                                 runtime_table_record_from_entity_projected(hydrated.clone(), &select_cols)
                             })
-                        } else {
-                            super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                            } else {
+                                super::super::record_search::runtime_table_record_from_entity_ref_projected(
                                 &hydrated,
                                 &select_cols,
                             )
                             .or_else(|| {
                                 runtime_table_record_from_entity_projected(hydrated.clone(), &select_cols)
                             })
-                        }
-                    } else if lean_select_star {
-                        super::super::record_search::runtime_table_record_lean_in_collection(
-                            hydrated.clone(),
-                            &query.table,
-                        )
+                            }
+                        } else if lean_select_star {
+                            super::super::record_search::runtime_table_record_lean_in_collection(
+                                hydrated.clone(),
+                                &query.table,
+                            )
                         } else {
                             runtime_table_record_from_entity(hydrated.clone())
                         };
-                    if let Some(record) = record {
-                        records.push(record);
+                        if let Some(record) = record {
+                            records.push(record);
+                        }
                     }
-                }
-                true // continue
-            });
+                    true // continue
+                },
+            )?;
             record_segment_scan_stats(scan_stats);
         }
 
@@ -1765,6 +1781,49 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             records.truncate(limit as usize);
         }
 
+        // Explicit column names and aliases must be projected on the fast
+        // scan too. Returning raw records silently turns SELECT col AS alias
+        // into SELECT *, including when the name is quoted.
+        // SESSIONIZE consumes its key/time inputs in the outer executor.
+        if query.sessionize.is_none()
+            && !matches!(effective_projections.as_slice(), [Projection::All])
+        {
+            crate::runtime::retention_filter::apply(
+                &mut records,
+                db.collection_contract(query.table.as_str()).as_ref(),
+            );
+            return records
+                .iter()
+                .map(|record| {
+                    let mut projected = project_runtime_record_with_db(
+                        Some(db),
+                        record,
+                        &effective_projections,
+                        Some(table_name),
+                        Some(table_alias),
+                        false,
+                        false,
+                    )?;
+                    // Keep the system envelope for wire metadata and stream
+                    // resume; result.columns still describes only the SELECT.
+                    for key in [
+                        "rid",
+                        "collection",
+                        "kind",
+                        "tenant",
+                        "created_at",
+                        "updated_at",
+                    ] {
+                        if projected.get(key).is_none() {
+                            if let Some(value) = record.get(key) {
+                                projected.set(key, value.clone());
+                            }
+                        }
+                    }
+                    Ok(projected)
+                })
+                .collect();
+        }
         return Ok(records);
     }
 
@@ -1917,7 +1976,15 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 let table_alias = context.table_alias;
                 let limit = context.query.limit.unwrap_or(10000) as usize;
 
-                let select_cols = extract_select_column_names(&effective_projections);
+                // The canonical parent still evaluates WHERE and ORDER BY
+                // before applying aliases. Keep its source fields available.
+                let select_cols = if effective_projections.iter().any(|p| {
+                    matches!(p, Projection::Alias(_, _) | Projection::Field(_, Some(_)))
+                }) {
+                    Vec::new()
+                } else {
+                    extract_select_column_names(&effective_projections)
+                };
                 let schema_arc = manager.column_schema();
                 let compiled = match schema_arc.as_ref() {
                     Some(schema) => {
@@ -1952,7 +2019,9 @@ pub(crate) fn execute_runtime_canonical_table_node(
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
                 let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-                manager.scan_for_each(snapshot.as_ref(), |entity| {
+                crate::runtime::function_budget::scan(
+            |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+            |entity| {
                     if records.len() >= limit {
                         return false;
                     }
@@ -2003,7 +2072,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
                         }
                     }
                     true
-                });
+                })?;
                 return Ok(records);
             }
 

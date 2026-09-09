@@ -13,10 +13,16 @@ fn cross_join_records(
     right_records: &[UnifiedRecord],
     left_query: &TableQuery,
     right_alias_or_name: Option<&str>,
-) -> Vec<UnifiedRecord> {
-    let mut records = Vec::with_capacity(left_records.len() * right_records.len());
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let mut records = if crate::runtime::function_budget::active() {
+        Vec::new()
+    } else {
+        Vec::with_capacity(left_records.len() * right_records.len())
+    };
     for left_record in left_records {
+        crate::runtime::function_budget::charge(1)?;
         for right_record in right_records {
+            crate::runtime::function_budget::charge(1)?;
             records.push(merge_join_records(
                 Some(left_record),
                 Some(right_record),
@@ -25,7 +31,7 @@ fn cross_join_records(
             ));
         }
     }
-    records
+    Ok(records)
 }
 
 pub(crate) fn execute_runtime_nested_loop_join(
@@ -41,20 +47,22 @@ pub(crate) fn execute_runtime_nested_loop_join(
     join_type: JoinType,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     if matches!(join_type, JoinType::Cross) {
-        return Ok(cross_join_records(
+        return cross_join_records(
             left_records,
             right_records,
             left_query,
             right_table_alias.or(right_table_name),
-        ));
+        );
     }
 
     let mut matched_right = vec![false; right_records.len()];
     let mut records = Vec::new();
 
     for left_record in left_records {
+        crate::runtime::function_budget::charge(1)?;
         let mut matched = false;
         for (index, right_record) in right_records.iter().enumerate() {
+            crate::runtime::function_budget::charge(1)?;
             if join_condition_matches(
                 left_record,
                 left_table_name,
@@ -88,6 +96,7 @@ pub(crate) fn execute_runtime_nested_loop_join(
 
     if matches!(join_type, JoinType::RightOuter | JoinType::FullOuter) {
         for (matched, right_record) in matched_right.into_iter().zip(right_records.iter()) {
+            crate::runtime::function_budget::charge(1)?;
             if !matched {
                 records.push(merge_join_records(
                     None,
@@ -117,12 +126,12 @@ pub(crate) fn execute_runtime_hash_join(
     join_type: JoinType,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     if matches!(join_type, JoinType::Cross) {
-        return Ok(cross_join_records(
+        return cross_join_records(
             left_records,
             right_records,
             left_query,
             right_table_alias.or(right_table_name),
-        ));
+        );
     }
     // Build hash table on right side. The build-side cardinality is the
     // right record count, so pre-size to avoid incremental rehashing.
@@ -132,6 +141,7 @@ pub(crate) fn execute_runtime_hash_join(
     // and graph-lookup paths.
     let mut hash_table: HashMap<String, Vec<usize>> = HashMap::with_capacity(right_records.len());
     for (idx, right_record) in right_records.iter().enumerate() {
+        crate::runtime::function_budget::charge(1)?;
         let key = resolve_runtime_field(
             right_record,
             right_join_field,
@@ -148,6 +158,7 @@ pub(crate) fn execute_runtime_hash_join(
 
     // Probe with left side — O(1) lookup per left record
     for left_record in left_records {
+        crate::runtime::function_budget::charge(1)?;
         let key = resolve_runtime_field(
             left_record,
             left_join_field,
@@ -160,6 +171,7 @@ pub(crate) fn execute_runtime_hash_join(
         let mut matched = false;
         if let Some(indices) = hash_table.get(&key) {
             for &idx in indices {
+                crate::runtime::function_budget::charge(1)?;
                 matched = true;
                 matched_right[idx] = true;
                 records.push(merge_join_records(
@@ -183,6 +195,7 @@ pub(crate) fn execute_runtime_hash_join(
 
     if matches!(join_type, JoinType::RightOuter | JoinType::FullOuter) {
         for (matched, right_record) in matched_right.into_iter().zip(right_records.iter()) {
+            crate::runtime::function_budget::charge(1)?;
             if !matched {
                 records.push(merge_join_records(
                     None,
@@ -210,16 +223,17 @@ pub(crate) fn execute_runtime_graph_lookup_join(
     join_type: JoinType,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     if matches!(join_type, JoinType::Cross) {
-        return Ok(cross_join_records(
+        return cross_join_records(
             left_records,
             right_records,
             left_query,
             right_table_alias.or(right_table_name),
-        ));
+        );
     }
     let mut right_index: HashMap<RuntimeJoinKey, Vec<usize>> =
         HashMap::with_capacity(right_records.len());
     for (index, right_record) in right_records.iter().enumerate() {
+        crate::runtime::function_budget::charge(1)?;
         let keys = runtime_graph_join_record_keys(
             right_record,
             right_join_field,
@@ -227,6 +241,7 @@ pub(crate) fn execute_runtime_graph_lookup_join(
             right_table_alias,
         );
         for key in keys {
+            crate::runtime::function_budget::charge(1)?;
             right_index.entry(key).or_default().push(index);
         }
     }
@@ -235,6 +250,7 @@ pub(crate) fn execute_runtime_graph_lookup_join(
     let mut records = Vec::new();
 
     for left_record in left_records {
+        crate::runtime::function_budget::charge(1)?;
         let candidate_indexes = runtime_graph_join_probe_indexes(
             left_record,
             left_join_field,
@@ -245,6 +261,7 @@ pub(crate) fn execute_runtime_graph_lookup_join(
         let mut matched = false;
 
         for index in candidate_indexes {
+            crate::runtime::function_budget::charge(1)?;
             let right_record = &right_records[index];
             if join_condition_matches(
                 left_record,
@@ -279,6 +296,7 @@ pub(crate) fn execute_runtime_graph_lookup_join(
 
     if matches!(join_type, JoinType::RightOuter | JoinType::FullOuter) {
         for (matched, right_record) in matched_right.into_iter().zip(right_records.iter()) {
+            crate::runtime::function_budget::charge(1)?;
             if !matched {
                 records.push(merge_join_records(
                     None,
@@ -306,16 +324,17 @@ pub(crate) fn execute_runtime_indexed_join(
     join_type: JoinType,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     if matches!(join_type, JoinType::Cross) {
-        return Ok(cross_join_records(
+        return cross_join_records(
             left_records,
             right_records,
             left_query,
             right_table_alias.or(right_table_name),
-        ));
+        );
     }
     let mut right_index: HashMap<RuntimeJoinKey, Vec<usize>> =
         HashMap::with_capacity(right_records.len());
     for (index, right_record) in right_records.iter().enumerate() {
+        crate::runtime::function_budget::charge(1)?;
         let Some(value) = resolve_runtime_field(
             right_record,
             right_join_field,
@@ -334,6 +353,7 @@ pub(crate) fn execute_runtime_indexed_join(
     let mut records = Vec::new();
 
     for left_record in left_records {
+        crate::runtime::function_budget::charge(1)?;
         let left_value = resolve_runtime_field(
             left_record,
             left_join_field,
@@ -352,6 +372,7 @@ pub(crate) fn execute_runtime_indexed_join(
         let mut matched = false;
 
         for &index in candidate_indexes {
+            crate::runtime::function_budget::charge(1)?;
             let right_record = &right_records[index];
             if join_condition_matches(
                 left_record,
@@ -386,6 +407,7 @@ pub(crate) fn execute_runtime_indexed_join(
 
     if matches!(join_type, JoinType::RightOuter | JoinType::FullOuter) {
         for (matched, right_record) in matched_right.into_iter().zip(right_records.iter()) {
+            crate::runtime::function_budget::charge(1)?;
             if !matched {
                 records.push(merge_join_records(
                     None,

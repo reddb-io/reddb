@@ -47,6 +47,7 @@
   - [Search Commands](/query/search-commands.md)
   - [Spatial Search](/query/spatial-search.md)
   - [Scalar Functions](/query/scalar-functions.md)
+  - [Stored RQL Functions](/query/stored-functions.md)
   - [Probabilistic Commands](/query/probabilistic-commands.md)
   - [Multi-Mode (Gremlin, SPARQL, NL)](/query/multi-mode.md)
 

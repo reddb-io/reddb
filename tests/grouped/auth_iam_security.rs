@@ -125,3 +125,6 @@ mod vault_capacity;
 
 #[path = "runtime_persistence/vault_chain_recovery.rs"]
 mod vault_chain_recovery;
+
+#[path = "auth_security/e2e_model_policy_resolution.rs"]
+mod e2e_model_policy_resolution;

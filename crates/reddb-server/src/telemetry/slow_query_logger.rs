@@ -310,6 +310,7 @@ mod tests {
 
     fn empty_scope() -> EffectiveScope {
         EffectiveScope {
+            captured_snapshot: None,
             tenant: None,
             identity: None,
             snapshot: Snapshot {

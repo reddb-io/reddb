@@ -189,22 +189,6 @@ impl ParseError {
         }
     }
 
-    /// Didactic (#1704): a document-model newcomer reached for a Postgres
-    /// `GENERATED ALWAYS AS (…) STORED` column. In the document model,
-    /// top-level body fields already auto-flatten into queryable columns.
-    pub fn generated_column_unneeded(position: Position) -> Self {
-        Self {
-            message: "top-level document body fields auto-flatten into queryable \
-                      columns, so no generated column is needed: drop the \
-                      `GENERATED ALWAYS AS (…) STORED` clause and query the field by \
-                      its dotted path (e.g. `body.details.ip`)"
-                .to_string(),
-            position,
-            expected: Vec::new(),
-            kind: ParseErrorKind::Syntax,
-        }
-    }
-
     /// Didactic (#1704): a document-model newcomer used the Postgres JSON
     /// operators `->` / `->>` in a query. The native idiom is the dotted
     /// path. (Graph-mode `->` / `<-` traversal is parsed elsewhere and is
@@ -275,6 +259,7 @@ fn recognized_keyword_name(token: &Token) -> Option<String> {
         | Token::Float(_)
         | Token::JsonLiteral(_)
         | Token::Ident(_)
+        | Token::QuotedIdent(_)
         | Token::Eq
         | Token::Ne
         | Token::Lt
@@ -344,7 +329,7 @@ impl fmt::Display for SafeTokenDisplay<'_> {
             // User-controlled byte payloads. Render via `escape_debug`
             // so embedded CR / LF / NUL / quote bytes do not reach
             // downstream serialization sinks unescaped.
-            Token::Ident(s) => write_escaped(f, s),
+            Token::Ident(s) | Token::QuotedIdent(s) => write_escaped(f, s),
             Token::String(s) => {
                 f.write_str("'")?;
                 write_escaped(f, s)?;

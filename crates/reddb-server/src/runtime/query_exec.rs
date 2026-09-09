@@ -36,7 +36,7 @@ pub(crate) use indexed_scan::try_sorted_index_lookup;
 pub(super) use join::execute_runtime_join_query;
 pub(super) use json_writers::execute_runtime_serialize_single_entity;
 pub(crate) use json_writers::{decode_stored_tag_value, TIMESERIES_TAG_JSON_PREFIX};
-pub(super) use vector::execute_runtime_vector_query;
+pub(super) use vector::{execute_runtime_vector_query, runtime_vector_matches};
 
 // Private imports used by functions still in query_exec.rs.
 use aggregate::{execute_aggregate_query, has_aggregate_projections};
@@ -357,6 +357,14 @@ pub(crate) fn table_query_is_implicit_scalar_select(query: &TableQuery) -> bool 
             .all(select_item_is_source_free_scalar)
 }
 
+/// Exact storage-free branch used by scalar evaluation and authorization.
+pub(crate) fn table_query_is_storage_free(query: &TableQuery) -> bool {
+    table_query_is_implicit_scalar_select(query)
+        && !has_aggregate_projections(&effective_table_projections(query))
+        && effective_table_group_by_exprs(query).is_empty()
+        && effective_table_having_filter(query).is_none()
+}
+
 fn select_item_is_source_free_scalar(item: &SelectItem) -> bool {
     match item {
         SelectItem::Wildcard => false,
@@ -535,14 +543,19 @@ pub(super) fn compare_runtime_ranked_records(
 }
 
 pub(super) fn execute_runtime_canonical_expr_node(
-    db: &RedDB,
+    runtime: &RedDBRuntime,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     expr: &QueryExpr,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let db = &runtime.inner.db;
     match expr {
         QueryExpr::Table(table) => {
-            if matches!(table.source, Some(reddb_rql::ast::TableSource::Subquery(_))) {
-                return execute_runtime_canonical_table_query_indexed(db, table, None);
+            if runtime.is_rls_enabled(&table.table)
+                || matches!(table.source, Some(reddb_rql::ast::TableSource::Subquery(_)))
+            {
+                // HYBRID's structured lane and vector-source subqueries must
+                // not bypass the relational authorization entry point.
+                return Ok(runtime.execute_query_expr(expr.clone())?.result.records);
             }
             let table_name = table.table.as_str();
             let table_alias = table.alias.as_deref().unwrap_or(table_name);
@@ -554,22 +567,21 @@ pub(super) fn execute_runtime_canonical_expr_node(
             execute_runtime_canonical_table_node(db, node, &context)
         }
         QueryExpr::Graph(_) | QueryExpr::Path(_) => {
-            let graph = materialize_graph(db.store().as_ref())?;
-            let node_properties = materialize_graph_node_properties(db.store().as_ref())?;
-            let edge_properties = materialize_graph_edge_properties(db.store().as_ref())?;
+            let (graph, node_properties, edge_properties) = runtime.materialize_graph_with_rls()?;
             let result =
-                crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties(
+                crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties_checked(
                     &graph,
                     expr,
                     node_properties,
                     edge_properties,
+                    crate::runtime::function_budget::graph_work_check(),
                 )
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
             Ok(result.records)
         }
-        QueryExpr::Vector(vector) => Ok(execute_runtime_vector_query(db, vector)?.records),
-        QueryExpr::Hybrid(hybrid) => Ok(execute_runtime_hybrid_query(db, hybrid)?.records),
-        QueryExpr::Join(join) => join::execute_runtime_canonical_join_node(db, node, join),
+        QueryExpr::Vector(vector) => Ok(execute_runtime_vector_query(runtime, vector)?.records),
+        QueryExpr::Hybrid(hybrid) => Ok(execute_runtime_hybrid_query(runtime, hybrid)?.records),
+        QueryExpr::Join(join) => join::execute_runtime_canonical_join_node(runtime, node, join),
         other => Err(RedDBError::Query(format!(
             "canonical join execution does not yet support {} child expressions",
             query_expr_name(other)

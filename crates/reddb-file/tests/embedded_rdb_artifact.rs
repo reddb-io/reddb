@@ -18,6 +18,251 @@ fn temp_dir(label: &str) -> tempfile::TempDir {
         .expect("temp dir")
 }
 
+// Count actual bytes read by this thread, independently of disk/page-cache
+// latency. A warm append should read roots, not the whole immutable snapshot.
+#[cfg(target_os = "linux")]
+#[test]
+fn warm_append_reads_bounded_metadata_for_large_snapshot() {
+    fn bytes_read() -> u64 {
+        fs::read_to_string("/proc/thread-self/io")
+            .expect("thread I/O counters")
+            .lines()
+            .find_map(|line| line.strip_prefix("rchar: "))
+            .expect("rchar counter")
+            .trim()
+            .parse()
+            .expect("numeric rchar")
+    }
+    let dir = temp_dir("append-snapshot-read-budget");
+    let path = dir.path().join("data.rdb");
+    let mut snapshot = vec![0x42; 4 * 1024 * 1024];
+    snapshot[..4].copy_from_slice(b"RDST");
+    EmbeddedRdbArtifact::create_with_snapshot(&path, &snapshot).expect("create snapshot");
+    EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"first".to_vec()])
+        .expect("validate snapshot and populate cache");
+    let before = bytes_read();
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"second".to_vec()])
+        .expect("warm append");
+    let read_bytes = bytes_read() - before;
+    assert!(
+        read_bytes < 128 * 1024,
+        "warm append read {read_bytes} bytes"
+    );
+    assert_eq!(
+        EmbeddedRdbArtifact::read_snapshot(&open).expect("checked snapshot read"),
+        Some(snapshot)
+    );
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read WAL"),
+        [b"first".to_vec(), b"second".to_vec()]
+    );
+}
+
+#[test]
+fn append_revalidates_snapshot_after_external_corruption() {
+    let dir = temp_dir("append-snapshot-corruption");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-original").expect("create");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"first".to_vec()])
+        .expect("populate cache");
+    rot_bit(&path, open.manifest.snapshot_offset + 5);
+    let error = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"second".to_vec()])
+        .expect_err("changed file must trigger snapshot checksum validation");
+    assert!(error.to_string().contains("snapshot zone"), "{error}");
+    assert!(EmbeddedRdbArtifact::read_snapshot(&open).is_err());
+    assert!(EmbeddedRdbArtifact::open(&path).is_err());
+    rot_bit(&path, open.manifest.snapshot_offset + 5);
+    let repaired = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"repaired".to_vec()])
+        .expect("failed append must invalidate cache");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_snapshot(&repaired).expect("read repaired snapshot"),
+        Some(b"RDST-original".to_vec())
+    );
+}
+
+#[test]
+fn append_revalidates_replacement_snapshot_with_identical_roots() {
+    let dir = temp_dir("append-replacement-snapshot");
+    let path = dir.path().join("data.rdb");
+    let replacement = dir.path().join("replacement.rdb");
+    EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-original").expect("create");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"first".to_vec()])
+        .expect("populate cache");
+    fs::copy(&path, &replacement).expect("copy identical roots");
+    rot_bit(&replacement, open.manifest.snapshot_offset + 5);
+    fs::rename(&replacement, &path).expect("replace inode");
+    let error = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"second".to_vec()])
+        .expect_err("new inode must trigger snapshot checksum validation");
+    assert!(error.to_string().contains("snapshot zone"), "{error}");
+}
+
+#[test]
+fn warm_append_crash_preserves_snapshot_and_published_wal() {
+    const TEST_NAME: &str = "warm_append_crash_preserves_snapshot_and_published_wal";
+    if std::env::var("REDDB_EMBEDDED_RDB_CRASH_CHILD_OP").as_deref() == Ok("warm-wal") {
+        let path = PathBuf::from(
+            std::env::var_os("REDDB_EMBEDDED_RDB_CRASH_CHILD_PATH").expect("child path"),
+        );
+        let point = std::env::var_os("REDDB_EMBEDDED_RDB_CRASH_AT").expect("crash point");
+        // Only this isolated child changes its environment. Populate the cache
+        // first so the crash interrupts an append that reuses validation.
+        std::env::remove_var("REDDB_EMBEDDED_RDB_CRASH_AT");
+        EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"warm".to_vec()])
+            .expect("warm child cache");
+        std::env::set_var("REDDB_EMBEDDED_RDB_CRASH_AT", point);
+        EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"crash".to_vec()])
+            .expect("crash append");
+        panic!("crash injection did not exit");
+    }
+    let dir = temp_dir("warm-append-crash");
+    for point in [
+        "wal_after_frame_write",
+        "wal_after_frame_sync",
+        "wal_after_superblock_write",
+    ] {
+        let path = dir.path().join(format!("{point}.rdb"));
+        EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-original").expect("create");
+        run_crash_child(TEST_NAME, &path, "warm-wal", point);
+        let open = EmbeddedRdbArtifact::open(&path).expect("recover");
+        assert_eq!(
+            EmbeddedRdbArtifact::read_snapshot(&open).expect("snapshot"),
+            Some(b"RDST-original".to_vec())
+        );
+        let recovered = EmbeddedRdbArtifact::read_wal_payloads(&open).expect("WAL");
+        assert!(
+            recovered == [b"warm".to_vec()] || recovered == [b"warm".to_vec(), b"crash".to_vec()],
+            "unexpected recovered WAL at {point}: {recovered:?}"
+        );
+        let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"after".to_vec()])
+            .expect("append after recovery");
+        let mut expected = recovered;
+        expected.push(b"after".to_vec());
+        assert_eq!(
+            EmbeddedRdbArtifact::read_wal_payloads(&open).expect("WAL"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn append_tail_survives_external_writer_checkpoint_and_replacement() {
+    const CHILD_PATH: &str = "REDDB_APPEND_TAIL_CHILD_PATH";
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        EmbeddedRdbArtifact::append_wal_payloads(path, &[b"external".to_vec()])
+            .expect("external append");
+        return;
+    }
+    let dir = temp_dir("append-tail");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create");
+    EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"first".to_vec()]).expect("append");
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "append_tail_survives_external_writer_checkpoint_and_replacement",
+        ])
+        .env(CHILD_PATH, &path)
+        .output()
+        .expect("external writer");
+    assert!(child.status.success(), "{child:?}");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"last".to_vec()])
+        .expect("append after external writer");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"first".to_vec(), b"external".to_vec(), b"last".to_vec()]
+    );
+
+    EmbeddedRdbArtifact::write_snapshot(&path, b"RDST-snapshot").expect("checkpoint");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"after checkpoint".to_vec()])
+        .expect("append after checkpoint");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"after checkpoint".to_vec()]
+    );
+
+    // Replacing the pathname must discard the previous inode's tail.
+    let replacement = dir.path().join("replacement.rdb");
+    EmbeddedRdbArtifact::create(&replacement).expect("create replacement");
+    EmbeddedRdbArtifact::append_wal_payloads(&replacement, &[b"replacement".to_vec()])
+        .expect("replacement append");
+    std::fs::rename(&replacement, &path).expect("replace file");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"final".to_vec()])
+        .expect("append after replacement");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"replacement".to_vec(), b"final".to_vec()]
+    );
+}
+
+#[test]
+fn append_refuses_an_externally_corrupted_published_tail() {
+    let dir = temp_dir("append-corrupt-tail");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"durable".to_vec()])
+        .expect("append and populate tail");
+    let offset = open.manifest.wal_recovery_boundary - 1;
+    rot_bit(&path, offset);
+    let error = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"unreachable".to_vec()])
+        .expect_err("never acknowledge a write beyond corrupt published WAL");
+    assert!(error.to_string().contains("wal zone"), "{error}");
+    // Repair our injected fault. The failed append must leave no cached tail
+    // or published frame, so a fresh scan can safely extend the original.
+    rot_bit(&path, offset);
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"after repair".to_vec()])
+        .expect("append after repair");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"durable".to_vec(), b"after repair".to_vec()]
+    );
+}
+
+#[test]
+fn append_invalidates_replacement_with_identical_superblocks() {
+    let dir = temp_dir("append-same-headers");
+    let path = dir.path().join("data.rdb");
+    let replacement = dir.path().join("replacement.rdb");
+    let donor = dir.path().join("donor.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"original".to_vec()])
+        .expect("populate original tail");
+    std::fs::copy(&path, &replacement).expect("copy original headers");
+    EmbeddedRdbArtifact::create(&donor).expect("create donor");
+    let donor_open = EmbeddedRdbArtifact::append_wal_payloads(&donor, &[b"replaced".to_vec()])
+        .expect("encode different same-length tail");
+    assert_eq!(
+        open.manifest.wal_live_bytes,
+        donor_open.manifest.wal_live_bytes
+    );
+    let mut frame = vec![0; usize::try_from(open.manifest.wal_live_bytes).expect("frame length")];
+    let mut file = std::fs::File::open(&donor).expect("read donor");
+    file.seek(SeekFrom::Start(donor_open.manifest.wal_region_offset))
+        .expect("seek");
+    file.read_exact(&mut frame).expect("read donor frame");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(&replacement)
+        .expect("open replacement");
+    file.seek(SeekFrom::Start(open.manifest.wal_region_offset))
+        .expect("seek");
+    file.write_all(&frame).expect("replace WAL only");
+    file.sync_all().expect("sync");
+    drop(file);
+    assert_eq!(
+        EmbeddedRdbArtifact::open(&replacement)
+            .expect("open replacement")
+            .selected_superblock,
+        open.selected_superblock
+    );
+    std::fs::rename(&replacement, &path).expect("replace pathname");
+    let open = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"last".to_vec()])
+        .expect("extend new CRC chain");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_wal_payloads(&open).expect("read"),
+        [b"replaced".to_vec(), b"last".to_vec()]
+    );
+}
+
 fn artifact_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()

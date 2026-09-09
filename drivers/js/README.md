@@ -608,3 +608,11 @@ remote URIs.
 
 _Status legend: ✅ supported · ⚠️ partial (known gaps) · ❌ unsupported._
 <!-- contract-matrix:end -->
+
+## SQL quotation compatibility
+
+SQL double quotes delimit identifiers; single quotes delimit text. For example,
+`SELECT "title" FROM articles WHERE author = 'alice'` reads the `title` column.
+Bind application values as parameters. JSON object/array strings keep double
+quotes. See the [SQL quotation migration guide](../../docs/query/sql-quoting.md)
+before upgrading applications that used double-quoted SQL text literals.

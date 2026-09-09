@@ -50,11 +50,12 @@ pub(crate) fn estimate_cardinality(expr: &QueryExpr) -> CardinalityEstimate {
 }
 
 pub(crate) fn base_collection_cardinality(db: &RedDB, collection: &str) -> CardinalityEstimate {
+    // Cardinality needs the live counter, not a catalog cross-reference scan
+    // that clones every entity in every collection. Both use the same counter.
     let rows = db
-        .catalog_snapshot()
-        .stats_by_collection
-        .get(collection)
-        .map(|stats| stats.entities as f64)
+        .store()
+        .get_collection(collection)
+        .map(|manager| manager.count() as f64)
         .unwrap_or(1000.0);
     CardinalityEstimate {
         rows,
@@ -430,6 +431,7 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         QueryExpr::Insert(_)
         | QueryExpr::Update(_)
         | QueryExpr::Delete(_)
+        | QueryExpr::Function(_)
         | QueryExpr::CreateTable(_)
         | QueryExpr::CreateCollection(_)
         | QueryExpr::CreateVector(_)
@@ -558,7 +560,19 @@ pub(crate) fn hybrid_ranking_mode(fusion: &FusionStrategy) -> String {
     }
 }
 
-pub(crate) fn vector_access_path_hint(db: &RedDB, collection: &str) -> AccessPathDecision {
+pub(crate) fn vector_access_path_hint(
+    db: &RedDB,
+    query: &reddb_rql::ast::VectorQuery,
+) -> AccessPathDecision {
+    let collection = query.collection.as_str();
+    if query.mode == reddb_rql::ast::VectorSearchMode::Exact {
+        return AccessPathDecision {
+            path: "vector_exact_scan",
+            index_hint: None,
+            reason: "MODE EXACT evaluates eligible vectors at full precision".to_string(),
+            warning: None,
+        };
+    }
     let all_indexes = db.index_statuses();
     let indexes = all_indexes
         .clone()
@@ -571,30 +585,35 @@ pub(crate) fn vector_access_path_hint(db: &RedDB, collection: &str) -> AccessPat
         })
         .collect::<Vec<_>>();
 
-    if let Some(index) = indexes.iter().find(|status| status.kind == "vector.hnsw") {
+    // Planning must not materialize TurboQuant state or start a rebuild worker.
+    // Match the durable routing prerequisites checked by `turbo_state`.
+    let turbo_available = crate::runtime::vector_turbo_kind::is_turbo(&db.store(), collection)
+        && db
+            .collection_contract(collection)
+            .is_some_and(|contract| contract.vector_dimension.is_some());
+    if turbo_available {
         return AccessPathDecision {
-            path: "vector_ann_hnsw",
-            index_hint: Some(index.name.clone()),
-            reason: "HNSW ANN index is declared, operational, and enabled".to_string(),
+            path: "vector_turbo_search",
+            index_hint: indexes
+                .iter()
+                .find(|index| index.kind == "vector.turbo")
+                .map(|index| index.name.clone()),
+            reason: "runtime uses TurboQuant candidates followed by exact reranking".to_string(),
             warning: None,
         };
     }
-    if let Some(index) = indexes
+    let unused_ann = indexes
         .iter()
-        .find(|status| status.kind == "vector.inverted")
-    {
-        return AccessPathDecision {
-            path: "vector_ann_ivf",
-            index_hint: Some(index.name.clone()),
-            reason: "IVF ANN index is declared, operational, and enabled".to_string(),
-            warning: None,
-        };
-    }
+        .any(|index| matches!(index.kind.as_str(), "vector.hnsw" | "vector.inverted"));
 
     AccessPathDecision {
         path: "vector_exact_scan",
         index_hint: None,
-        reason: "no usable ANN index was available; planner fell back to exact scan".to_string(),
+        reason: if unused_ann {
+            "runtime VECTOR SEARCH uses exact scan; the registered HNSW/IVF index is not used by this route"
+        } else {
+            "runtime VECTOR SEARCH uses exact scan; no TurboQuant runtime is available"
+        }.to_string(),
         warning: all_indexes
             .into_iter()
             .find(|status| status.collection.as_deref() == Some(collection))
@@ -817,6 +836,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::Insert(_) => "insert",
         QueryExpr::Update(_) => "update",
         QueryExpr::Delete(_) => "delete",
+        QueryExpr::Function(_) => "function",
         QueryExpr::CreateTable(_) => "create_table",
         QueryExpr::CreateCollection(_) => "create_collection",
         QueryExpr::CreateVector(_) => "create_vector",
