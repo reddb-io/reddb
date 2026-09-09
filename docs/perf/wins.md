@@ -1,5 +1,12 @@
 # Where RedDB Wins
 
+> Historical results, not a current-release performance claim. The 2026-09-07
+> audit found that the current benchmark `typed_insert` executes bulk/streaming
+> operations, while this historical page describes sequential writes. Rebuild
+> the exact cited revision and validate SDK, transaction and durability semantics
+> before reusing the ratios. Current acceptance policy is
+> [ADR 0076](../../.red/adr/0076-competitive-leadership-evidence-gate.md).
+
 Status: 2026-05-06 — verifiable wins from the canonical `duel-official`
 methodology lock (issue #154).
 

@@ -1,0 +1,11 @@
+{
+  "url": "https://auth.surrealdb.com/u/login/identifier",
+  "title": "Log in | SurrealDB Studio",
+  "text": "Get started for free\n\nThe context layer for AI agents. The only\nvertical stack from storage to memory\n\nGraph, vectors, documents, time-series and relational data, fully-managed\nScale horizontally from single-node to Petabyte-scale clusters\nEnterprise-grade security: SOC 2 Type II, ISO 27001 certified\nNo credit card required\n\nAlso available via the AWS Marketplace for faster procurement and simplified billing\n\nAmazon Web Services\nWelcome\n\nLog in to SurrealDB Studio\n\nContinue with a passkey\nContinue with Google\nContinue with GitHub\nContinue with Microsoft Account\n\nOR\n\nCan't log in to your account?\nContinue\nDon't have an account?\nSign up",
+  "failures": [
+    {
+      "url": "https://static.reo.dev/c07f38f6d83bb7e/reo.js",
+      "error": "net::ERR_BLOCKED_BY_ORB"
+    }
+  ]
+}

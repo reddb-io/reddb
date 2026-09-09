@@ -1,0 +1,558 @@
+reddb run=-1 stage=open
+reddb run=-1 stage=setup
+reddb run=-1 stage=measurement
+reddb run=-1 stage=readback
+reddb run=-1 stage=close
+reddb run=-1 stage=reopen
+reddb run=-1 stage=disk-size
+reddb insert_sequential run=-1 valid=true us/row=4739.35
+reddb run=0 stage=open
+reddb run=0 stage=setup
+reddb run=0 stage=measurement
+reddb run=0 stage=readback
+reddb run=0 stage=close
+reddb run=0 stage=reopen
+reddb run=0 stage=disk-size
+reddb insert_sequential run=0 valid=true us/row=4494.64
+reddb run=1 stage=open
+reddb run=1 stage=setup
+reddb run=1 stage=measurement
+reddb run=1 stage=readback
+reddb run=1 stage=close
+reddb run=1 stage=reopen
+reddb run=1 stage=disk-size
+reddb insert_sequential run=1 valid=true us/row=4933.21
+reddb run=2 stage=open
+reddb run=2 stage=setup
+reddb run=2 stage=measurement
+reddb run=2 stage=readback
+reddb run=2 stage=close
+reddb run=2 stage=reopen
+reddb run=2 stage=disk-size
+reddb insert_sequential run=2 valid=true us/row=4432.17
+reddb run=3 stage=open
+reddb run=3 stage=setup
+reddb run=3 stage=measurement
+reddb run=3 stage=readback
+reddb run=3 stage=close
+reddb run=3 stage=reopen
+reddb run=3 stage=disk-size
+reddb insert_sequential run=3 valid=true us/row=4957.72
+reddb run=4 stage=open
+reddb run=4 stage=setup
+reddb run=4 stage=measurement
+reddb run=4 stage=readback
+reddb run=4 stage=close
+reddb run=4 stage=reopen
+reddb run=4 stage=disk-size
+reddb insert_sequential run=4 valid=true us/row=4510.98
+reddb run=5 stage=open
+reddb run=5 stage=setup
+reddb run=5 stage=measurement
+reddb run=5 stage=readback
+reddb run=5 stage=close
+reddb run=5 stage=reopen
+reddb run=5 stage=disk-size
+reddb insert_sequential run=5 valid=true us/row=4506.77
+reddb run=6 stage=open
+reddb run=6 stage=setup
+reddb run=6 stage=measurement
+reddb run=6 stage=readback
+reddb run=6 stage=close
+reddb run=6 stage=reopen
+reddb run=6 stage=disk-size
+reddb insert_sequential run=6 valid=true us/row=4777.93
+reddb run=7 stage=open
+reddb run=7 stage=setup
+reddb run=7 stage=measurement
+reddb run=7 stage=readback
+reddb run=7 stage=close
+reddb run=7 stage=reopen
+reddb run=7 stage=disk-size
+reddb insert_sequential run=7 valid=true us/row=4747.05
+reddb run=8 stage=open
+reddb run=8 stage=setup
+reddb run=8 stage=measurement
+reddb run=8 stage=readback
+reddb run=8 stage=close
+reddb run=8 stage=reopen
+reddb run=8 stage=disk-size
+reddb insert_sequential run=8 valid=true us/row=4778.65
+reddb run=9 stage=open
+reddb run=9 stage=setup
+reddb run=9 stage=measurement
+reddb run=9 stage=readback
+reddb run=9 stage=close
+reddb run=9 stage=reopen
+reddb run=9 stage=disk-size
+reddb insert_sequential run=9 valid=true us/row=4707.50
+sqlite-full run=-1 stage=open
+sqlite-full run=-1 stage=setup
+sqlite-full run=-1 stage=measurement
+sqlite-full run=-1 stage=readback
+sqlite-full run=-1 stage=close
+sqlite-full run=-1 stage=reopen
+sqlite-full run=-1 stage=disk-size
+sqlite-full insert_sequential run=-1 valid=true us/row=1359.73
+sqlite-full run=0 stage=open
+sqlite-full run=0 stage=setup
+sqlite-full run=0 stage=measurement
+sqlite-full run=0 stage=readback
+sqlite-full run=0 stage=close
+sqlite-full run=0 stage=reopen
+sqlite-full run=0 stage=disk-size
+sqlite-full insert_sequential run=0 valid=true us/row=1346.16
+sqlite-full run=1 stage=open
+sqlite-full run=1 stage=setup
+sqlite-full run=1 stage=measurement
+sqlite-full run=1 stage=readback
+sqlite-full run=1 stage=close
+sqlite-full run=1 stage=reopen
+sqlite-full run=1 stage=disk-size
+sqlite-full insert_sequential run=1 valid=true us/row=1416.42
+sqlite-full run=2 stage=open
+sqlite-full run=2 stage=setup
+sqlite-full run=2 stage=measurement
+sqlite-full run=2 stage=readback
+sqlite-full run=2 stage=close
+sqlite-full run=2 stage=reopen
+sqlite-full run=2 stage=disk-size
+sqlite-full insert_sequential run=2 valid=true us/row=1441.68
+sqlite-full run=3 stage=open
+sqlite-full run=3 stage=setup
+sqlite-full run=3 stage=measurement
+sqlite-full run=3 stage=readback
+sqlite-full run=3 stage=close
+sqlite-full run=3 stage=reopen
+sqlite-full run=3 stage=disk-size
+sqlite-full insert_sequential run=3 valid=true us/row=1362.79
+sqlite-full run=4 stage=open
+sqlite-full run=4 stage=setup
+sqlite-full run=4 stage=measurement
+sqlite-full run=4 stage=readback
+sqlite-full run=4 stage=close
+sqlite-full run=4 stage=reopen
+sqlite-full run=4 stage=disk-size
+sqlite-full insert_sequential run=4 valid=true us/row=1347.96
+sqlite-full run=5 stage=open
+sqlite-full run=5 stage=setup
+sqlite-full run=5 stage=measurement
+sqlite-full run=5 stage=readback
+sqlite-full run=5 stage=close
+sqlite-full run=5 stage=reopen
+sqlite-full run=5 stage=disk-size
+sqlite-full insert_sequential run=5 valid=true us/row=1285.54
+sqlite-full run=6 stage=open
+sqlite-full run=6 stage=setup
+sqlite-full run=6 stage=measurement
+sqlite-full run=6 stage=readback
+sqlite-full run=6 stage=close
+sqlite-full run=6 stage=reopen
+sqlite-full run=6 stage=disk-size
+sqlite-full insert_sequential run=6 valid=true us/row=1378.77
+sqlite-full run=7 stage=open
+sqlite-full run=7 stage=setup
+sqlite-full run=7 stage=measurement
+sqlite-full run=7 stage=readback
+sqlite-full run=7 stage=close
+sqlite-full run=7 stage=reopen
+sqlite-full run=7 stage=disk-size
+sqlite-full insert_sequential run=7 valid=true us/row=1350.02
+sqlite-full run=8 stage=open
+sqlite-full run=8 stage=setup
+sqlite-full run=8 stage=measurement
+sqlite-full run=8 stage=readback
+sqlite-full run=8 stage=close
+sqlite-full run=8 stage=reopen
+sqlite-full run=8 stage=disk-size
+sqlite-full insert_sequential run=8 valid=true us/row=1421.54
+sqlite-full run=9 stage=open
+sqlite-full run=9 stage=setup
+sqlite-full run=9 stage=measurement
+sqlite-full run=9 stage=readback
+sqlite-full run=9 stage=close
+sqlite-full run=9 stage=reopen
+sqlite-full run=9 stage=disk-size
+sqlite-full insert_sequential run=9 valid=true us/row=1268.56
+surreal-rocksdb run=-1 stage=open
+surreal-rocksdb run=-1 stage=setup
+surreal-rocksdb run=-1 stage=measurement
+surreal-rocksdb run=-1 stage=readback
+surreal-rocksdb run=-1 stage=close
+surreal-rocksdb run=-1 stage=reopen
+surreal-surrealkv run=-1 stage=open
+surreal-surrealkv run=-1 stage=setup
+surreal-surrealkv run=-1 stage=measurement
+surreal-surrealkv run=-1 stage=readback
+surreal-surrealkv run=-1 stage=close
+surreal-surrealkv run=-1 stage=reopen
+reddb run=-1 stage=open
+reddb run=-1 stage=setup
+reddb run=-1 stage=measurement
+reddb run=-1 stage=readback
+reddb run=-1 stage=close
+reddb run=-1 stage=reopen
+reddb run=-1 stage=disk-size
+reddb insert_bulk run=-1 valid=true us/row=123.57
+reddb run=0 stage=open
+reddb run=0 stage=setup
+reddb run=0 stage=measurement
+reddb run=0 stage=readback
+reddb run=0 stage=close
+reddb run=0 stage=reopen
+reddb run=0 stage=disk-size
+reddb insert_bulk run=0 valid=true us/row=129.39
+reddb run=1 stage=open
+reddb run=1 stage=setup
+reddb run=1 stage=measurement
+reddb run=1 stage=readback
+reddb run=1 stage=close
+reddb run=1 stage=reopen
+reddb run=1 stage=disk-size
+reddb insert_bulk run=1 valid=true us/row=149.80
+reddb run=2 stage=open
+reddb run=2 stage=setup
+reddb run=2 stage=measurement
+reddb run=2 stage=readback
+reddb run=2 stage=close
+reddb run=2 stage=reopen
+reddb run=2 stage=disk-size
+reddb insert_bulk run=2 valid=true us/row=150.82
+reddb run=3 stage=open
+reddb run=3 stage=setup
+reddb run=3 stage=measurement
+reddb run=3 stage=readback
+reddb run=3 stage=close
+reddb run=3 stage=reopen
+reddb run=3 stage=disk-size
+reddb insert_bulk run=3 valid=true us/row=154.97
+reddb run=4 stage=open
+reddb run=4 stage=setup
+reddb run=4 stage=measurement
+reddb run=4 stage=readback
+reddb run=4 stage=close
+reddb run=4 stage=reopen
+reddb run=4 stage=disk-size
+reddb insert_bulk run=4 valid=true us/row=132.95
+reddb run=5 stage=open
+reddb run=5 stage=setup
+reddb run=5 stage=measurement
+reddb run=5 stage=readback
+reddb run=5 stage=close
+reddb run=5 stage=reopen
+reddb run=5 stage=disk-size
+reddb insert_bulk run=5 valid=true us/row=143.00
+reddb run=6 stage=open
+reddb run=6 stage=setup
+reddb run=6 stage=measurement
+reddb run=6 stage=readback
+reddb run=6 stage=close
+reddb run=6 stage=reopen
+reddb run=6 stage=disk-size
+reddb insert_bulk run=6 valid=true us/row=281.78
+reddb run=7 stage=open
+reddb run=7 stage=setup
+reddb run=7 stage=measurement
+reddb run=7 stage=readback
+reddb run=7 stage=close
+reddb run=7 stage=reopen
+reddb run=7 stage=disk-size
+reddb insert_bulk run=7 valid=true us/row=136.97
+reddb run=8 stage=open
+reddb run=8 stage=setup
+reddb run=8 stage=measurement
+reddb run=8 stage=readback
+reddb run=8 stage=close
+reddb run=8 stage=reopen
+reddb run=8 stage=disk-size
+reddb insert_bulk run=8 valid=true us/row=129.81
+reddb run=9 stage=open
+reddb run=9 stage=setup
+reddb run=9 stage=measurement
+reddb run=9 stage=readback
+reddb run=9 stage=close
+reddb run=9 stage=reopen
+reddb run=9 stage=disk-size
+reddb insert_bulk run=9 valid=true us/row=133.88
+sqlite-full run=-1 stage=open
+sqlite-full run=-1 stage=setup
+sqlite-full run=-1 stage=measurement
+sqlite-full run=-1 stage=readback
+sqlite-full run=-1 stage=close
+sqlite-full run=-1 stage=reopen
+sqlite-full run=-1 stage=disk-size
+sqlite-full insert_bulk run=-1 valid=true us/row=17.25
+sqlite-full run=0 stage=open
+sqlite-full run=0 stage=setup
+sqlite-full run=0 stage=measurement
+sqlite-full run=0 stage=readback
+sqlite-full run=0 stage=close
+sqlite-full run=0 stage=reopen
+sqlite-full run=0 stage=disk-size
+sqlite-full insert_bulk run=0 valid=true us/row=11.66
+sqlite-full run=1 stage=open
+sqlite-full run=1 stage=setup
+sqlite-full run=1 stage=measurement
+sqlite-full run=1 stage=readback
+sqlite-full run=1 stage=close
+sqlite-full run=1 stage=reopen
+sqlite-full run=1 stage=disk-size
+sqlite-full insert_bulk run=1 valid=true us/row=15.05
+sqlite-full run=2 stage=open
+sqlite-full run=2 stage=setup
+sqlite-full run=2 stage=measurement
+sqlite-full run=2 stage=readback
+sqlite-full run=2 stage=close
+sqlite-full run=2 stage=reopen
+sqlite-full run=2 stage=disk-size
+sqlite-full insert_bulk run=2 valid=true us/row=12.87
+sqlite-full run=3 stage=open
+sqlite-full run=3 stage=setup
+sqlite-full run=3 stage=measurement
+sqlite-full run=3 stage=readback
+sqlite-full run=3 stage=close
+sqlite-full run=3 stage=reopen
+sqlite-full run=3 stage=disk-size
+sqlite-full insert_bulk run=3 valid=true us/row=10.71
+sqlite-full run=4 stage=open
+sqlite-full run=4 stage=setup
+sqlite-full run=4 stage=measurement
+sqlite-full run=4 stage=readback
+sqlite-full run=4 stage=close
+sqlite-full run=4 stage=reopen
+sqlite-full run=4 stage=disk-size
+sqlite-full insert_bulk run=4 valid=true us/row=9.65
+sqlite-full run=5 stage=open
+sqlite-full run=5 stage=setup
+sqlite-full run=5 stage=measurement
+sqlite-full run=5 stage=readback
+sqlite-full run=5 stage=close
+sqlite-full run=5 stage=reopen
+sqlite-full run=5 stage=disk-size
+sqlite-full insert_bulk run=5 valid=true us/row=12.38
+sqlite-full run=6 stage=open
+sqlite-full run=6 stage=setup
+sqlite-full run=6 stage=measurement
+sqlite-full run=6 stage=readback
+sqlite-full run=6 stage=close
+sqlite-full run=6 stage=reopen
+sqlite-full run=6 stage=disk-size
+sqlite-full insert_bulk run=6 valid=true us/row=12.71
+sqlite-full run=7 stage=open
+sqlite-full run=7 stage=setup
+sqlite-full run=7 stage=measurement
+sqlite-full run=7 stage=readback
+sqlite-full run=7 stage=close
+sqlite-full run=7 stage=reopen
+sqlite-full run=7 stage=disk-size
+sqlite-full insert_bulk run=7 valid=true us/row=12.93
+sqlite-full run=8 stage=open
+sqlite-full run=8 stage=setup
+sqlite-full run=8 stage=measurement
+sqlite-full run=8 stage=readback
+sqlite-full run=8 stage=close
+sqlite-full run=8 stage=reopen
+sqlite-full run=8 stage=disk-size
+sqlite-full insert_bulk run=8 valid=true us/row=12.15
+sqlite-full run=9 stage=open
+sqlite-full run=9 stage=setup
+sqlite-full run=9 stage=measurement
+sqlite-full run=9 stage=readback
+sqlite-full run=9 stage=close
+sqlite-full run=9 stage=reopen
+sqlite-full run=9 stage=disk-size
+sqlite-full insert_bulk run=9 valid=true us/row=12.03
+surreal-rocksdb run=-1 stage=open
+surreal-rocksdb run=-1 stage=setup
+surreal-rocksdb run=-1 stage=measurement
+surreal-rocksdb run=-1 stage=readback
+surreal-rocksdb run=-1 stage=close
+surreal-rocksdb run=-1 stage=reopen
+surreal-surrealkv run=-1 stage=open
+surreal-surrealkv run=-1 stage=setup
+surreal-surrealkv run=-1 stage=measurement
+surreal-surrealkv run=-1 stage=readback
+surreal-surrealkv run=-1 stage=close
+surreal-surrealkv run=-1 stage=reopen
+reddb run=-1 stage=open
+reddb run=-1 stage=setup
+reddb run=-1 stage=measurement
+reddb run=-1 stage=readback
+reddb run=-1 stage=close
+reddb run=-1 stage=reopen
+reddb run=-1 stage=disk-size
+reddb select_point run=-1 valid=true us/row=1795.46
+reddb run=0 stage=open
+reddb run=0 stage=setup
+reddb run=0 stage=measurement
+reddb run=0 stage=readback
+reddb run=0 stage=close
+reddb run=0 stage=reopen
+reddb run=0 stage=disk-size
+reddb select_point run=0 valid=true us/row=1379.34
+reddb run=1 stage=open
+reddb run=1 stage=setup
+reddb run=1 stage=measurement
+reddb run=1 stage=readback
+reddb run=1 stage=close
+reddb run=1 stage=reopen
+reddb run=1 stage=disk-size
+reddb select_point run=1 valid=true us/row=1268.19
+reddb run=2 stage=open
+reddb run=2 stage=setup
+reddb run=2 stage=measurement
+reddb run=2 stage=readback
+reddb run=2 stage=close
+reddb run=2 stage=reopen
+reddb run=2 stage=disk-size
+reddb select_point run=2 valid=true us/row=1184.65
+reddb run=3 stage=open
+reddb run=3 stage=setup
+reddb run=3 stage=measurement
+reddb run=3 stage=readback
+reddb run=3 stage=close
+reddb run=3 stage=reopen
+reddb run=3 stage=disk-size
+reddb select_point run=3 valid=true us/row=1035.31
+reddb run=4 stage=open
+reddb run=4 stage=setup
+reddb run=4 stage=measurement
+reddb run=4 stage=readback
+reddb run=4 stage=close
+reddb run=4 stage=reopen
+reddb run=4 stage=disk-size
+reddb select_point run=4 valid=true us/row=1139.90
+reddb run=5 stage=open
+reddb run=5 stage=setup
+reddb run=5 stage=measurement
+reddb run=5 stage=readback
+reddb run=5 stage=close
+reddb run=5 stage=reopen
+reddb run=5 stage=disk-size
+reddb select_point run=5 valid=true us/row=1074.87
+reddb run=6 stage=open
+reddb run=6 stage=setup
+reddb run=6 stage=measurement
+reddb run=6 stage=readback
+reddb run=6 stage=close
+reddb run=6 stage=reopen
+reddb run=6 stage=disk-size
+reddb select_point run=6 valid=true us/row=1376.38
+reddb run=7 stage=open
+reddb run=7 stage=setup
+reddb run=7 stage=measurement
+reddb run=7 stage=readback
+reddb run=7 stage=close
+reddb run=7 stage=reopen
+reddb run=7 stage=disk-size
+reddb select_point run=7 valid=true us/row=988.64
+reddb run=8 stage=open
+reddb run=8 stage=setup
+reddb run=8 stage=measurement
+reddb run=8 stage=readback
+reddb run=8 stage=close
+reddb run=8 stage=reopen
+reddb run=8 stage=disk-size
+reddb select_point run=8 valid=true us/row=980.75
+reddb run=9 stage=open
+reddb run=9 stage=setup
+reddb run=9 stage=measurement
+reddb run=9 stage=readback
+reddb run=9 stage=close
+reddb run=9 stage=reopen
+reddb run=9 stage=disk-size
+reddb select_point run=9 valid=true us/row=1180.92
+sqlite-full run=-1 stage=open
+sqlite-full run=-1 stage=setup
+sqlite-full run=-1 stage=measurement
+sqlite-full run=-1 stage=readback
+sqlite-full run=-1 stage=close
+sqlite-full run=-1 stage=reopen
+sqlite-full run=-1 stage=disk-size
+sqlite-full select_point run=-1 valid=true us/row=25.56
+sqlite-full run=0 stage=open
+sqlite-full run=0 stage=setup
+sqlite-full run=0 stage=measurement
+sqlite-full run=0 stage=readback
+sqlite-full run=0 stage=close
+sqlite-full run=0 stage=reopen
+sqlite-full run=0 stage=disk-size
+sqlite-full select_point run=0 valid=true us/row=14.11
+sqlite-full run=1 stage=open
+sqlite-full run=1 stage=setup
+sqlite-full run=1 stage=measurement
+sqlite-full run=1 stage=readback
+sqlite-full run=1 stage=close
+sqlite-full run=1 stage=reopen
+sqlite-full run=1 stage=disk-size
+sqlite-full select_point run=1 valid=true us/row=10.82
+sqlite-full run=2 stage=open
+sqlite-full run=2 stage=setup
+sqlite-full run=2 stage=measurement
+sqlite-full run=2 stage=readback
+sqlite-full run=2 stage=close
+sqlite-full run=2 stage=reopen
+sqlite-full run=2 stage=disk-size
+sqlite-full select_point run=2 valid=true us/row=7.44
+sqlite-full run=3 stage=open
+sqlite-full run=3 stage=setup
+sqlite-full run=3 stage=measurement
+sqlite-full run=3 stage=readback
+sqlite-full run=3 stage=close
+sqlite-full run=3 stage=reopen
+sqlite-full run=3 stage=disk-size
+sqlite-full select_point run=3 valid=true us/row=14.51
+sqlite-full run=4 stage=open
+sqlite-full run=4 stage=setup
+sqlite-full run=4 stage=measurement
+sqlite-full run=4 stage=readback
+sqlite-full run=4 stage=close
+sqlite-full run=4 stage=reopen
+sqlite-full run=4 stage=disk-size
+sqlite-full select_point run=4 valid=true us/row=47.73
+sqlite-full run=5 stage=open
+sqlite-full run=5 stage=setup
+sqlite-full run=5 stage=measurement
+sqlite-full run=5 stage=readback
+sqlite-full run=5 stage=close
+sqlite-full run=5 stage=reopen
+sqlite-full run=5 stage=disk-size
+sqlite-full select_point run=5 valid=true us/row=6.50
+sqlite-full run=6 stage=open
+sqlite-full run=6 stage=setup
+sqlite-full run=6 stage=measurement
+sqlite-full run=6 stage=readback
+sqlite-full run=6 stage=close
+sqlite-full run=6 stage=reopen
+sqlite-full run=6 stage=disk-size
+sqlite-full select_point run=6 valid=true us/row=8.44
+sqlite-full run=7 stage=open
+sqlite-full run=7 stage=setup
+sqlite-full run=7 stage=measurement
+sqlite-full run=7 stage=readback
+sqlite-full run=7 stage=close
+sqlite-full run=7 stage=reopen
+sqlite-full run=7 stage=disk-size
+sqlite-full select_point run=7 valid=true us/row=9.66
+sqlite-full run=8 stage=open
+sqlite-full run=8 stage=setup
+sqlite-full run=8 stage=measurement
+sqlite-full run=8 stage=readback
+sqlite-full run=8 stage=close
+sqlite-full run=8 stage=reopen
+sqlite-full run=8 stage=disk-size
+sqlite-full select_point run=8 valid=true us/row=73.82
+sqlite-full run=9 stage=open
+sqlite-full run=9 stage=setup
+sqlite-full run=9 stage=measurement
+sqlite-full run=9 stage=readback
+sqlite-full run=9 stage=close
+sqlite-full run=9 stage=reopen
+sqlite-full run=9 stage=disk-size
+sqlite-full select_point run=9 valid=true us/row=8.18
+surreal-rocksdb run=-1 stage=open
+surreal-rocksdb run=-1 stage=setup
+surreal-rocksdb run=-1 stage=measurement
+surreal-rocksdb run=-1 stage=readback
+surreal-rocksdb run=-1 stage=close
+surreal-rocksdb run=-1 stage=reopen
