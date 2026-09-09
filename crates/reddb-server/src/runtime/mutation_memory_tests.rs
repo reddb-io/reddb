@@ -460,3 +460,80 @@ fn mutation_memory_late_constraint_error_finishes_published_indexes() {
         .records
         .is_empty());
 }
+
+#[test]
+fn mutation_memory_native_vector_content_and_graph_type_are_governed() {
+    use crate::application::entity::{CreateNodeInput, CreateVectorInput};
+    for graph in [false, true] {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024),
+        )
+        .expect("runtime");
+        let (id, path) = if graph {
+            runtime.execute_query("CREATE GRAPH growth").expect("graph");
+            let id = runtime
+                .create_node(CreateNodeInput {
+                    collection: "growth".to_string(),
+                    label: "seed".to_string(),
+                    node_type: Some("small".to_string()),
+                    properties: Vec::new(),
+                    metadata: Vec::new(),
+                    embeddings: Vec::new(),
+                    table_links: Vec::new(),
+                    node_links: Vec::new(),
+                })
+                .expect("node")
+                .id;
+            (id, vec!["node_type".to_string()])
+        } else {
+            let id = runtime
+                .create_vector(CreateVectorInput {
+                    collection: "growth".to_string(),
+                    dense: vec![1.0, 0.0, 0.0],
+                    content: Some("small".to_string()),
+                    metadata: Vec::new(),
+                    link_row: None,
+                    link_node: None,
+                })
+                .expect("vector")
+                .id;
+            (id, vec!["fields".to_string(), "content".to_string()])
+        };
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("growth")
+            .expect("collection");
+        let snapshot = manager.get(id).expect("before");
+        let patch = |payload: String| {
+            runtime.patch_entity(PatchEntityInput {
+                collection: "growth".to_string(),
+                id,
+                payload: crate::json::Value::Null,
+                operations: vec![PatchEntityOperation {
+                    op: PatchEntityOperationType::Set,
+                    path: path.clone(),
+                    value: Some(crate::json::json!(payload)),
+                }],
+            })
+        };
+        let error =
+            patch("x".repeat(8 * 1024 * 1024)).expect_err("variable payload exceeds budget");
+        assert!(
+            error.to_string().contains("over budget"),
+            "graph={graph}: {error}"
+        );
+        let unchanged = manager.get(id).expect("unchanged");
+        assert_eq!(unchanged.kind, snapshot.kind);
+        assert_eq!(
+            format!("{:?}", unchanged.data),
+            format!("{:?}", snapshot.data)
+        );
+        let before = manager.resident_bytes();
+        patch("x".repeat(64 * 1024)).expect("admitted payload");
+        assert!(
+            manager.resident_bytes() >= before + 64 * 1024 - 5,
+            "graph={graph}: charge the admitted payload"
+        );
+    }
+}

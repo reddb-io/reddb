@@ -119,13 +119,19 @@ pub(crate) fn entity_bytes(entity: &UnifiedEntity) -> usize {
             });
             columns.saturating_add(row.named.as_ref().map_or(0, named_fields_bytes))
         }
-        EntityData::Node(node) => named_fields_bytes(&node.properties),
+        EntityData::Node(node) => {
+            named_fields_bytes(&node.properties).saturating_add(match &entity.kind {
+                super::entity::EntityKind::GraphNode(kind) => kind.node_type.len(),
+                _ => 0,
+            })
+        }
         EntityData::Edge(edge) => named_fields_bytes(&edge.properties),
         EntityData::Vector(vector) => std::mem::size_of_val(vector.dense.as_slice())
             .saturating_add(vector.sparse.as_ref().map_or(0, |sparse| {
                 std::mem::size_of_val(sparse.indices.as_slice())
                     .saturating_add(std::mem::size_of_val(sparse.values.as_slice()))
-            })),
+            }))
+            .saturating_add(vector.content.as_ref().map_or(0, String::len)),
         EntityData::TimeSeries(point) => 64usize
             .saturating_add(point.metric.len())
             .saturating_add(named_fields_bytes(&point.fields))
