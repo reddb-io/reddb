@@ -110,5 +110,5 @@ expression-bearing data, because they do not enforce the new contract.
 - Deterministic histories and scheduled interleavings, literal child-process kills,
   and existing VFS extended to model unsynced writes, partial writes, ENOSPC/EIO.
 
-Ship independently reviewable capability PRs, with their evidence. Draft PRs and
-pushes are authorized; main merge and release remain outside this implementation.
+Ship independently reviewable capability PRs, with their evidence. PRs and pushes are authorized. Integration into main is authorized after
+validation; releases remain a separate action.
