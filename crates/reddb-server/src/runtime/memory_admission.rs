@@ -444,6 +444,107 @@ mod tests {
     }
 
     #[test]
+    fn row_indexes_must_fit_before_single_or_batch_insert() {
+        for batch_size in [1, 3] {
+            for explicit_indexes in [false, true] {
+                let (runtime, _) = runtime_with_headroom();
+                runtime
+                    .execute_query("CREATE TABLE indexed_rows (id INT, body TEXT)")
+                    .expect("table");
+                if explicit_indexes {
+                    runtime
+                        .execute_query("CREATE INDEX id_hash ON indexed_rows (id) USING HASH")
+                        .expect("id index");
+                    runtime
+                        .execute_query("CREATE INDEX body_hash ON indexed_rows (body) USING HASH")
+                        .expect("body index");
+                }
+                runtime.refresh_memory_accounting();
+                let headroom = runtime.memory_budget().resolved_bytes
+                    - runtime.memory_accounting().total_used_bytes();
+                let fields = vec![
+                    ("id".to_string(), Value::Integer(1)),
+                    ("body".to_string(), Value::text("payload")),
+                ];
+                let row_bytes = estimate_row_growth(&fields) * batch_size;
+                let held = runtime
+                    .admit_non_evictable_growth(
+                        MemoryPool::SegmentArena,
+                        "competing operation",
+                        headroom - row_bytes,
+                    )
+                    .expect("leave room for rows but no indexes");
+                let rows = (1..=batch_size)
+                    .map(|id| format!("({id}, 'payload')"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!("INSERT INTO indexed_rows (id, body) VALUES {rows}");
+                assert!(runtime.execute_query(&sql).is_err(),
+                    "index growth must be reserved: batch={batch_size}, explicit={explicit_indexes}");
+                assert!(runtime
+                    .execute_query("SELECT * FROM indexed_rows")
+                    .expect("read after rejection")
+                    .result
+                    .records
+                    .is_empty());
+                if !explicit_indexes {
+                    assert!(
+                        runtime
+                            .index_store_ref()
+                            .list_indices("indexed_rows")
+                            .is_empty(),
+                        "rejection must precede implicit index creation"
+                    );
+                }
+                drop(held);
+                runtime
+                    .execute_query(&sql)
+                    .expect("retry after competing reservation finishes");
+                assert_eq!(
+                    runtime
+                        .execute_query("SELECT * FROM indexed_rows")
+                        .expect("read after retry")
+                        .result
+                        .records
+                        .len(),
+                    batch_size as usize
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auto_index_disabled_does_not_reserve_a_phantom_index() {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_memory_budget(128 * 1024)
+                .with_auto_index_id(false),
+        )
+        .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE unindexed_rows (id INT)")
+            .expect("table");
+        runtime.refresh_memory_accounting();
+        let headroom =
+            runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+        let row_bytes = estimate_row_growth(&[("id".to_string(), Value::Integer(1))]);
+        let _held = runtime
+            .admit_non_evictable_growth(
+                MemoryPool::SegmentArena,
+                "competing operation",
+                headroom - row_bytes,
+            )
+            .expect("leave exactly the row estimate");
+        runtime
+            .execute_query("INSERT INTO unindexed_rows (id) VALUES (1)")
+            .expect("no index growth when auto-indexing is disabled");
+        assert!(runtime
+            .index_store_ref()
+            .list_indices("unindexed_rows")
+            .is_empty());
+    }
+
+    #[test]
     fn retained_memory_pressure_cannot_admit_growth_larger_than_the_budget() {
         let budget = 128 * 1024;
         let runtime =

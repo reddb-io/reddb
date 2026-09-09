@@ -49,8 +49,9 @@ unused reservations do not leak and partial writes remain charged as resident da
 
 Estimates remain approximate. This does not establish a hard process RSS ceiling,
 change transaction rollback behavior, or add admission to currently ungoverned
-paths. Remaining work includes complete growth estimates (including implicit row
-indexes and metadata), other model/update paths, query buffers, maintenance
+paths. [Row index admission](row-index-memory-admission.md) now covers registered
+secondary indexes and the implicit id index in the row mutation engine. Remaining
+work includes complete metadata estimates, other model/update paths, query buffers, maintenance
 headroom before copying, and removed collections with outstanding handles.
 Independently constructed runtimes do not gain a process-global reservation pool.
 

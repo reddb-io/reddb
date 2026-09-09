@@ -446,6 +446,25 @@ impl SortedCompositeIndex {
         self.entries.values().map(|v| v.len()).sum()
     }
 
+    fn insert_fields(
+        &mut self,
+        columns: &[String],
+        entity_id: EntityId,
+        fields: &[(String, Value)],
+    ) {
+        let mut tuple = Vec::with_capacity(columns.len());
+        for column in columns {
+            let Some((_, value)) = fields.iter().find(|(name, _)| name == column) else {
+                return;
+            };
+            let CanonicalizedValue::Exact(key) = classify_sorted_value(value) else {
+                return;
+            };
+            tuple.push(key);
+        }
+        self.insert(tuple, entity_id);
+    }
+
     /// Approximate resident bytes (ADR 0073 §2). Every column of the composite
     /// key is charged, so a wide index costs what it weighs.
     pub fn memory_bytes(&self) -> usize {
@@ -671,21 +690,27 @@ impl SortedIndexManager {
             if coll != collection {
                 continue;
             }
-            let mut tuple = Vec::with_capacity(cols.len());
-            let mut complete = true;
-            for col in cols {
-                let val = fields.iter().find(|(name, _)| name == col).map(|(_, v)| v);
-                match val.map(classify_sorted_value) {
-                    Some(CanonicalizedValue::Exact(k)) => tuple.push(k),
-                    _ => {
-                        complete = false;
-                        break;
-                    }
-                }
-            }
-            if complete {
-                idx.insert(tuple, entity_id);
-            }
+            idx.insert_fields(cols, entity_id, fields);
+        }
+    }
+
+    /// Maintain only the composite selected by the registry entry. Updating
+    /// every composite here once per entry duplicates postings and memory.
+    fn composite_insert_one(
+        &self,
+        collection: &str,
+        columns: &[String],
+        entity_id: EntityId,
+        fields: &[(String, Value)],
+    ) {
+        let mut guard = self.composite.write();
+        // Borrow the existing key; do not allocate collection/column copies
+        // just to address an index in the single-row path.
+        if let Some((_, index)) = guard
+            .iter_mut()
+            .find(|((name, indexed_columns), _)| name == collection && indexed_columns == columns)
+        {
+            index.insert_fields(columns, entity_id, fields);
         }
     }
 
@@ -704,21 +729,7 @@ impl SortedIndexManager {
         };
 
         for (entity_id, fields) in rows {
-            let mut tuple = Vec::with_capacity(columns.len());
-            let mut complete = true;
-            for col in columns {
-                let val = fields.iter().find(|(name, _)| name == col).map(|(_, v)| v);
-                match val.map(classify_sorted_value) {
-                    Some(CanonicalizedValue::Exact(k)) => tuple.push(k),
-                    _ => {
-                        complete = false;
-                        break;
-                    }
-                }
-            }
-            if complete {
-                idx.insert(tuple, *entity_id);
-            }
+            idx.insert_fields(columns, *entity_id, fields);
         }
     }
 
@@ -1270,14 +1281,54 @@ impl IndexStore {
     /// Approximate resident bytes across every in-RAM secondary index — the
     /// `index_memory` pool's live usage (ADR 0073 §2).
     ///
-    /// `BTree` and `H3` methods are disk-resident (they live under the pager
-    /// and are accounted by the `page_cache` pool), so they contribute nothing
-    /// here. Only the RAM families do: hash, bitmap, sorted, composite.
+    /// Includes the sorted backing of BTree/H3, composite BTree tuples and
+    /// the auxiliary equality hash of single-column BTree indexes.
     pub fn memory_bytes(&self) -> u64 {
         self.hash
             .memory_bytes()
             .saturating_add(self.bitmap.memory_bytes())
             .saturating_add(self.sorted.memory_bytes())
+    }
+
+    /// Estimate resident index growth before row mutation, without cloning
+    /// rows or the registry. Each potential new key receives entry overhead;
+    /// existing postings can therefore make this deliberately conservative.
+    /// No registry guard survives into memory admission or storage mutation.
+    pub(crate) fn estimate_insert_growth<'a>(
+        &self,
+        collection: &str,
+        rows: impl Iterator<Item = &'a [(String, Value)]> + Clone,
+        auto_index_id: bool,
+    ) -> u64 {
+        let registry = self.registry.read();
+        let indexes = registry
+            .values()
+            .filter(|index| index.collection == collection);
+        // Match the existing first-row auto-index trigger and its single-column
+        // coverage rule. A composite containing id does not suppress idx_id.
+        let needs_auto_id = auto_index_id
+            && rows
+                .clone()
+                .next()
+                .is_some_and(|fields| fields.iter().any(|(name, _)| name == "id"))
+            && !indexes
+                .clone()
+                .any(|index| index.columns.len() == 1 && index.columns[0] == "id");
+        let mut growth = 0u64;
+        if needs_auto_id {
+            growth = std::mem::size_of::<crate::storage::unified::hash_index::HashIndex>() as u64;
+            for fields in rows.clone() {
+                if let Some(value) = index_field_value(fields, "id") {
+                    growth = growth.saturating_add(estimate_index_entry_bytes(value.as_ref()));
+                }
+            }
+        }
+        for index in indexes {
+            for fields in rows.clone() {
+                growth = growth.saturating_add(estimate_registered_index_growth(index, fields));
+            }
+        }
+        growth
     }
 
     /// Register and build an index from existing entities.
@@ -1677,7 +1728,7 @@ impl IndexStore {
             // Composite BTree (multi-column) — maintain the tuple index.
             if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
                 self.sorted
-                    .composite_entity_insert(collection, entity_id, fields);
+                    .composite_insert_one(collection, &idx.columns, entity_id, fields);
                 continue;
             }
 
@@ -2159,6 +2210,79 @@ fn derive_h3_cell_entities(
         .collect()
 }
 
+// Conservative per-key allowance for hash/bitmap map slots, postings and
+// bitmap forward/reverse IDs. Canonical sorted keys are added separately.
+const INDEX_GROWTH_ENTRY_BYTES: u64 = 96;
+
+fn estimate_index_entry_bytes(value: &Value) -> u64 {
+    INDEX_GROWTH_ENTRY_BYTES.saturating_add(value_to_bytes_len(value))
+}
+
+fn estimate_registered_index_growth(index: &RegisteredIndex, fields: &[(String, Value)]) -> u64 {
+    let canonical_bytes = std::mem::size_of::<CanonicalKey>() as u64;
+    if index.method == IndexMethodKind::BTree && index.columns.len() > 1 {
+        return index
+            .columns
+            .iter()
+            .try_fold(INDEX_GROWTH_ENTRY_BYTES, |growth, column| {
+                let (_, value) = fields.iter().find(|(name, _)| name == column)?;
+                Some(
+                    growth
+                        .saturating_add(canonical_bytes)
+                        .saturating_add(value_to_bytes_len(value).max(16)),
+                )
+            })
+            .unwrap_or(0);
+    }
+    let Some(column) = index.columns.first() else {
+        return 0;
+    };
+    let Some(value) = index_field_value(fields, column) else {
+        return 0;
+    };
+    match index.method {
+        // H3 stores a fixed-width canonical cell, not the source geometry.
+        IndexMethodKind::H3 { .. } => INDEX_GROWTH_ENTRY_BYTES
+            .saturating_add(canonical_bytes)
+            .saturating_add(16),
+        IndexMethodKind::Hash | IndexMethodKind::Bitmap => {
+            estimate_index_entry_bytes(value.as_ref())
+        }
+        IndexMethodKind::BTree => {
+            // Single-column BTree maintains both a sorted key and equality hash.
+            let key_bytes = value_to_bytes_len(value.as_ref());
+            INDEX_GROWTH_ENTRY_BYTES
+                .saturating_add(key_bytes)
+                .saturating_add(INDEX_GROWTH_ENTRY_BYTES)
+                .saturating_add(canonical_bytes)
+                .saturating_add(key_bytes.max(16))
+        }
+    }
+}
+
+/// Size the existing hash-key encoding without materializing a second buffer.
+/// Debug-encoded values can be much larger than their underlying payload.
+fn value_to_bytes_len(value: &Value) -> u64 {
+    match value {
+        Value::Text(text) => text.len() as u64,
+        Value::Integer(_) | Value::UnsignedInteger(_) | Value::Float(_) => 8,
+        Value::Boolean(_) => 1,
+        _ => {
+            struct ByteCount(u64);
+            impl std::fmt::Write for ByteCount {
+                fn write_str(&mut self, text: &str) -> std::fmt::Result {
+                    self.0 = self.0.saturating_add(text.len() as u64);
+                    Ok(())
+                }
+            }
+            let mut count = ByteCount(0);
+            std::fmt::Write::write_fmt(&mut count, format_args!("{value:?}"))
+                .expect("invariant: counting formatted bytes cannot fail");
+            count.0
+        }
+    }
+}
+
 /// Convert a Value to bytes for index key
 pub(crate) fn value_to_bytes(value: &Value) -> Vec<u8> {
     match value {
@@ -2174,6 +2298,176 @@ pub(crate) fn value_to_bytes(value: &Value) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_index_single_insert_updates_each_composite_once() {
+        let store = IndexStore::new();
+        for (name, columns) in [
+            ("first", vec!["a".to_string(), "b".to_string()]),
+            ("second", vec!["b".to_string(), "a".to_string()]),
+        ] {
+            store
+                .create_index(name, "rows", &columns, IndexMethodKind::BTree, false, &[])
+                .expect("composite index");
+            store.register(RegisteredIndex {
+                name: name.to_string(),
+                collection: "rows".to_string(),
+                columns,
+                method: IndexMethodKind::BTree,
+                unique: false,
+            });
+        }
+        store
+            .index_entity_insert(
+                "rows",
+                EntityId::new(1),
+                &[
+                    ("a".to_string(), Value::Integer(10)),
+                    ("b".to_string(), Value::Integer(20)),
+                ],
+            )
+            .expect("insert");
+        for index in store.list_indices("rows") {
+            assert_eq!(
+                store.entries_indexed(&index),
+                1,
+                "one posting per composite index"
+            );
+        }
+    }
+
+    #[test]
+    fn row_index_estimates_cover_resident_growth_for_single_and_batch_writes() {
+        for batch_size in [1, 16] {
+            for (method, columns) in [
+                (IndexMethodKind::Hash, vec!["a".to_string()]),
+                (IndexMethodKind::Bitmap, vec!["a".to_string()]),
+                (IndexMethodKind::BTree, vec!["a".to_string()]),
+                (
+                    IndexMethodKind::BTree,
+                    vec!["a".to_string(), "b".to_string()],
+                ),
+                (
+                    IndexMethodKind::H3 { resolution: 9 },
+                    vec!["geo".to_string()],
+                ),
+            ] {
+                let store = IndexStore::new();
+                for name in ["first", "second"] {
+                    store
+                        .create_index(name, "rows", &columns, method, false, &[])
+                        .expect("index");
+                    store.register(RegisteredIndex {
+                        name: name.to_string(),
+                        collection: "rows".to_string(),
+                        columns: columns.clone(),
+                        method,
+                        unique: false,
+                    });
+                }
+                let rows = (1..=batch_size)
+                    .map(|id| {
+                        (
+                            EntityId::new(id),
+                            vec![
+                                (
+                                    "a".to_string(),
+                                    Value::text(format!("{id}-{}", "x".repeat(1024))),
+                                ),
+                                ("b".to_string(), Value::Integer(id as i64)),
+                                ("geo".to_string(), Value::GeoPoint(23_000_000, -46_000_000)),
+                            ],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let estimate = store.estimate_insert_growth(
+                    "rows",
+                    rows.iter().map(|(_, fields)| fields.as_slice()),
+                    false,
+                );
+                let before = store.memory_bytes();
+                if batch_size == 1 {
+                    store
+                        .index_entity_insert("rows", rows[0].0, &rows[0].1)
+                        .expect("single");
+                } else {
+                    store
+                        .index_entity_insert_batch("rows", &rows)
+                        .expect("batch");
+                }
+                let growth = store.memory_bytes() - before;
+                assert!(growth > 0, "fixture must populate {method:?}");
+                assert!(
+                    estimate >= growth,
+                    "{method:?}: estimated {estimate}, resident delta {growth}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn row_index_auto_estimate_includes_header_and_stops_after_registration() {
+        let store = IndexStore::new();
+        let fields = vec![("id".to_string(), Value::Integer(1))];
+        let rows = std::iter::once(fields.as_slice());
+        assert_eq!(store.estimate_insert_growth("rows", rows.clone(), false), 0);
+        let estimate = store.estimate_insert_growth("rows", rows.clone(), true);
+        let columns = vec!["id".to_string()];
+        store
+            .create_index(
+                "idx_id",
+                "rows",
+                &columns,
+                IndexMethodKind::Hash,
+                false,
+                &[],
+            )
+            .expect("auto index");
+        store.register(RegisteredIndex {
+            name: "idx_id".to_string(),
+            collection: "rows".to_string(),
+            columns,
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+        store
+            .index_entity_insert("rows", EntityId::new(1), &fields)
+            .expect("single");
+        assert!(
+            estimate >= store.memory_bytes(),
+            "initial header and entry must fit"
+        );
+        assert_eq!(
+            store.estimate_insert_growth("rows", rows.clone(), true),
+            store.estimate_insert_growth("rows", rows, false),
+            "registered id is not charged twice"
+        );
+        assert_eq!(
+            store.estimate_insert_growth("rows", std::iter::once([].as_slice()), true),
+            0,
+            "missing fields do not create index entries"
+        );
+    }
+
+    #[test]
+    fn row_index_key_size_matches_the_existing_encoding() {
+        for value in [
+            Value::Null,
+            Value::Integer(-7),
+            Value::UnsignedInteger(u64::MAX),
+            Value::Float(1.25),
+            Value::Boolean(true),
+            Value::text("ação\n\""),
+            Value::Blob(vec![0, 127, 255]),
+            Value::RowRef("rows".to_string(), 42),
+            Value::Array(vec![Value::text("nested"), Value::Integer(3)]),
+        ] {
+            assert_eq!(
+                value_to_bytes_len(&value),
+                value_to_bytes(&value).len() as u64
+            );
+        }
+    }
 
     fn ids(values: &[EntityId]) -> Vec<u64> {
         values.iter().map(|id| id.raw()).collect()

@@ -724,3 +724,37 @@ fn structural_hot_path_report() {
         clone_count.allocs
     );
 }
+
+#[test]
+fn row_index_growth_estimation_does_not_allocate_for_stored_fields() {
+    use reddb_types::Value;
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE estimate_rows (id INT, payload BLOB)")
+        .expect("table");
+    for (name, method) in [
+        ("estimate_hash", "HASH"),
+        ("estimate_sorted", "BTREE"),
+        ("estimate_bitmap", "BITMAP"),
+    ] {
+        runtime
+            .execute_query(&format!(
+                "CREATE INDEX {name} ON estimate_rows (payload) USING {method}"
+            ))
+            .expect("index");
+    }
+    let store = runtime.index_store_ref();
+    let fields = vec![
+        ("id".to_string(), Value::Integer(1)),
+        ("payload".to_string(), Value::Blob(vec![255; 1024])),
+    ];
+    let (estimate, count) = measure_allocations(|| {
+        store.estimate_insert_growth("estimate_rows", std::iter::once(fields.as_slice()), true)
+    });
+    assert!(estimate > 3 * 1024);
+    assert_eq!(
+        count.allocs, 0,
+        "sizing keys must not allocate encoded copies"
+    );
+    assert_eq!(count.deallocs, 0);
+}

@@ -113,10 +113,17 @@ impl<'rt> MutationEngine<'rt> {
             .iter()
             .map(|row| crate::runtime::memory_admission::estimate_row_growth(&row.fields))
             .fold(0, u64::saturating_add);
+        let index_growth_bytes = self.runtime.index_store_ref().estimate_insert_growth(
+            &collection,
+            rows.iter().map(|row| row.fields.as_slice()),
+            self.store.config().auto_index_id,
+        );
+        // Reserve rows and every affected index together before either the
+        // single-row or batch kernel can publish data or create idx_id.
         let _reservation = self.runtime.admit_non_evictable_growth(
             crate::storage::memory_pools::MemoryPool::SegmentArena,
             &format!("insert into {collection}"),
-            growth_bytes,
+            growth_bytes.saturating_add(index_growth_bytes),
         )?;
 
         match rows.len() {
