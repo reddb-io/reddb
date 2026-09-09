@@ -143,3 +143,23 @@ fn graph_reads_do_not_copy_vector_payloads_from_mixed_collections() {
         );
     }
 }
+
+#[test]
+fn graph_budget_still_counts_non_graph_scan_candidates() {
+    let runtime = mixed_graph_fixture(false, 32);
+    runtime
+        .execute_query("SET CONFIG functions.execution.work_max = 20")
+        .expect("tight budget");
+    let error = runtime
+        .execute_query(GRAPH_CALL)
+        .expect_err("scan must exhaust budget");
+    assert!(
+        error.to_string().contains("execution work_max exceeded"),
+        "{error}"
+    );
+    assert_graph_result(
+        &runtime
+            .execute_query(GRAPH_QUERY)
+            .expect("ordinary query after failure"),
+    );
+}
