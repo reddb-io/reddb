@@ -1960,13 +1960,15 @@ fn red_stats_echoes_an_explicitly_configured_memory_budget() {
 #[test]
 fn small_budget_denies_live_entity_growth_didactically_and_keeps_serving() {
     cleanup_scope();
-    let budget = 32 * 1024;
+    // Include the boot catalog payloads while leaving room for live inserts.
+    let budget = 64 * 1024;
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
         .expect("runtime with a tiny explicit budget");
 
     exec(&rt, "CREATE TABLE budget_gate (id INT, body TEXT)");
 
     let mut denied = None;
+    let mut inserted = 0;
     for id in 0..1_000 {
         let sql = format!(
             "INSERT INTO budget_gate (id, body) VALUES ({id}, '{}')",
@@ -1976,10 +1978,15 @@ fn small_budget_denies_live_entity_growth_didactically_and_keeps_serving() {
             denied = Some(err.to_string());
             break;
         }
+        inserted += 1;
     }
+    assert!(
+        inserted > 0,
+        "the fixture must admit writes before reaching pressure"
+    );
     let err = denied.expect("small budget eventually denies live growth");
     assert!(
-        err.contains("operation needs ~") && err.contains("bytes over budget 32768"),
+        err.contains("operation needs ~") && err.contains(&format!("bytes over budget {budget}")),
         "{err}"
     );
     assert!(err.contains("largest consumers:"), "{err}");
@@ -2011,7 +2018,8 @@ fn small_budget_denies_live_entity_growth_didactically_and_keeps_serving() {
 #[test]
 fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
     cleanup_scope();
-    let budget = 112 * 1024;
+    // Named row payloads and retained zone bounds participate in accounting.
+    let budget = 160 * 1024;
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
         .expect("runtime with a small explicit budget");
 
@@ -2044,7 +2052,7 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
 
     let before_reclamations = budget_unsigned(&rt, "pressure_reclamations_triggered");
     // Rows plus their index must fit after reclamation, not just current usage.
-    let pressure_rows = (10_000..10_032)
+    let pressure_rows = (10_000..10_064)
         .map(|id| format!("({id}, 'pressure')"))
         .collect::<Vec<_>>()
         .join(", ");
