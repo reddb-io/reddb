@@ -40,7 +40,7 @@ jobs:
         with:
           shared-key: testbox-rust-1.91.0-2vcpu
           cache-on-failure: 'true'
-      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
         with:
           tool: nextest
       - name: Run Testbox
@@ -67,7 +67,7 @@ jobs:
         with:
           shared-key: testbox-rust-1.91.0-4vcpu
           cache-on-failure: 'true'
-      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
         with:
           tool: nextest
       - name: Run Testbox
@@ -94,7 +94,7 @@ jobs:
         with:
           shared-key: testbox-rust-1.91.0-8vcpu
           cache-on-failure: 'true'
-      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
         with:
           tool: nextest
       - name: Run Testbox
