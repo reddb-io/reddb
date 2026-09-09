@@ -2768,18 +2768,17 @@ mod tests {
             (
                 "runtime/impl_graph_commands.rs",
                 include_str!("../../runtime/impl_graph_commands.rs"),
-                1,
-                "maintenance: resolves a node's declared type from the catalog, \
-                 not a user-visible row projection",
+                0,
+                "native node properties resolve one snapshot-visible, RLS-admitted version",
             ),
             (
                 "runtime/graph_dsl.rs",
                 include_str!("../../runtime/graph_dsl.rs"),
-                4,
-                "maintenance: materializes the node/edge property side tables that \
-                 back traversal; the traversal result itself is scanned. \
-                 TODO(#2138 follow-up): confirm property materialization may keep \
-                 pre-snapshot versions",
+                3,
+                "remaining legacy debt: two lazy-search edge scans and the unused \
+                 edge-property helper. Native topology and node properties now use \
+                 snapshot visitors. TODO(#2138 follow-up): migrate lazy search \
+                 expansion and its item hydration to the snapshot/RLS boundary",
             ),
             (
                 "runtime/graph_tvf.rs",
