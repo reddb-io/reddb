@@ -18,19 +18,10 @@
 //!      `Status` error with the explicit `QUEUE READ WAIT cancelled`
 //!      message — not an empty 0-record reply.
 //!
-//! The brief frames cancellation as "tonic request cancellation".
-//! The Query RPC handler delegates to a synchronous
-//! `RedDBRuntime::execute_query` call which blocks the tokio task;
-//! tonic-side request cancellation cannot unwind a sync blocked
-//! call, so the only cancellation primitive that reaches a parked
-//! waiter today is `QueueWaitRegistry::cancel_all()`. The smoke
-//! pins the gRPC propagation path the same way the #728 runtime
-//! test pins the runtime path and the #730 HTTP smoke pins the
-//! HTTP path. A follow-up slice can wire per-request cancellation
-//! into the gRPC handler once the runtime grows a per-waiter
-//! cancel handle reachable from the async handler; the assertion
-//! here (tonic error + explicit message) is the contract that
-//! wiring must continue to satisfy.
+//! Query executes synchronous runtime work on the blocking pool so WAIT
+//! leaves the async executor free to drive producer requests, even with one
+//! worker. Dropping an RPC cannot interrupt that synchronous work; this
+//! smoke verifies explicit registry cancellation through `cancel_all()`.
 
 use reddb_server::grpc::{proto, GrpcServerOptions, RedDBGrpcServer};
 use reddb_server::{RedDBOptions, RedDBRuntime};
@@ -134,7 +125,8 @@ async fn grpc_wait_returns_empty_after_budget_when_queue_stays_empty() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// A single worker makes accidental synchronous dispatch fail deterministically.
+#[tokio::test(flavor = "current_thread")]
 async fn grpc_enqueue_during_wait_delivers_message_to_waiter() {
     let h = start_grpc_server().await;
     let mut waiter = connect_client(h.addr).await;

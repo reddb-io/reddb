@@ -1692,14 +1692,22 @@ impl RedDb for GrpcRuntime {
         let identity = grpc_request_identity(self, &request);
         let request = request.into_inner();
         let (entity_types, capabilities) = grpc_parse_query_filters(&request)?;
-        let result = execute_grpc_query_request(
-            &self.runtime,
-            &self.prepared_registry,
-            identity,
-            request.query,
-            request.params,
-            commit_policy,
-        )?;
+        let runtime = self.runtime.clone();
+        let prepared_registry = Arc::clone(&self.prepared_registry);
+        // WAIT and storage I/O must not park the async worker that drives
+        // producer requests. Install request identity inside the blocking task.
+        let result = tokio::task::spawn_blocking(move || {
+            execute_grpc_query_request(
+                &runtime,
+                &prepared_registry,
+                identity,
+                request.query,
+                request.params,
+                commit_policy,
+            )
+        })
+        .await
+        .map_err(|error| Status::internal(format!("query task failed: {error}")))??;
         Ok(Response::new(query_reply(
             result,
             &entity_types,
