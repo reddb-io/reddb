@@ -62,11 +62,26 @@ impl TurboQuantIndex {
         k: usize,
         metric: DistanceMetric,
     ) -> Vec<TurboSearchResult> {
+        match self.search_checked(query, k, metric, |_| Ok::<(), std::convert::Infallible>(())) {
+            Ok(results) => results,
+            Err(never) => match never {},
+        }
+    }
+
+    pub(crate) fn search_checked<E>(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        mut check: impl FnMut(u64) -> Result<(), E>,
+    ) -> Result<Vec<TurboSearchResult>, E> {
         if query.len() != self.codec.dim() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
-        let scores = self.codec.score_many(query, &self.storage, metric);
+        let scores = self
+            .codec
+            .score_many_checked(query, &self.storage, metric, &mut check)?;
         let mut results = self
             .ids
             .iter()
@@ -74,13 +89,15 @@ impl TurboQuantIndex {
             .zip(&self.vectors)
             .filter(|((_, _), vector)| vector.len() == query.len())
             .map(|((entity_id, handle), _)| {
+                check(1)?;
                 let idx = handle.block_idx as usize * BLOCK_LANES + handle.lane as usize;
-                TurboSearchResult {
+                Ok(TurboSearchResult {
                     entity_id: *entity_id,
                     score: scores[idx],
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, E>>()?;
+        check(0)?;
         results.sort_by(|left, right| {
             right
                 .score
@@ -89,7 +106,8 @@ impl TurboQuantIndex {
                 .then_with(|| left.entity_id.raw().cmp(&right.entity_id.raw()))
         });
         results.truncate(k);
-        results
+        check(0)?;
+        Ok(results)
     }
 
     /// Encode `vector` to the packed-codes + LE f32-norm byte layout

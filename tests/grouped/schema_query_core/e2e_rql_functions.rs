@@ -690,3 +690,195 @@ fn zero_function_budget_is_rejected_without_opening_a_transaction() {
     work_budget(&runtime, 100);
     assert_eq!(scalar(&runtime, "CALL read_amount()"), Value::Integer(10));
 }
+
+fn vector_budget_rows(runtime: &RedDBRuntime, turbo: bool) {
+    execute(
+        runtime,
+        if turbo {
+            "CREATE COLLECTION budget_vectors KIND vector.turbo DIM 2 METRIC cosine"
+        } else {
+            "CREATE VECTOR budget_vectors DIM 2 METRIC cosine"
+        },
+    );
+    for id in 0..64 {
+        execute(
+            runtime,
+            &format!(
+                "INSERT INTO budget_vectors VECTOR (dense, content) VALUES ([1.0, 0.0], 'v{id}')"
+            ),
+        );
+    }
+}
+
+#[test]
+fn function_budget_interrupts_exact_and_approximate_vector_search_with_limit_one() {
+    for turbo in [false, true] {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        vector_budget_rows(&runtime, turbo);
+        let mode = if turbo { "APPROXIMATE" } else { "EXACT" };
+        define(
+            &runtime,
+            "nearest() RETURNS TABLE (content TEXT) EFFECT READ",
+            &format!("VECTOR SEARCH budget_vectors SIMILAR TO [1.0, 0.0] MODE {mode} LIMIT 1"),
+        );
+        work_budget(&runtime, 20);
+        exhausted(&runtime, "CALL nearest()");
+        work_budget(&runtime, 200);
+        let result = execute(&runtime, "CALL nearest()");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result
+                .result
+                .stats
+                .vector
+                .expect("vector stats")
+                .mode_executed,
+            if turbo { "approximate" } else { "exact" }
+        );
+    }
+}
+
+#[test]
+fn vector_budget_failure_rolls_back_prior_body_write_and_keeps_caller_transaction() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    accounts(&runtime);
+    vector_budget_rows(&runtime, false);
+    define(&runtime, "write_then_search() RETURNS TABLE (content TEXT) EFFECT WRITE",
+        "UPDATE accounts SET amount = 99 WHERE id = 1; VECTOR SEARCH budget_vectors SIMILAR TO [1.0, 0.0] LIMIT 1");
+    work_budget(&runtime, 80); // ID discovery fits; scoring exhausts the remainder.
+    execute(&runtime, "BEGIN");
+    execute(&runtime, "UPDATE accounts SET amount = 20 WHERE id = 1");
+    exhausted(&runtime, "CALL write_then_search()");
+    assert_eq!(amount(&runtime), Value::Integer(20));
+    execute(&runtime, "COMMIT");
+    assert_eq!(amount(&runtime), Value::Integer(20));
+}
+
+#[test]
+fn graph_materialization_budget_rejects_instead_of_returning_an_empty_match() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    accounts(&runtime);
+    for id in 0..40 {
+        execute(
+            &runtime,
+            &format!("INSERT INTO budget_graph NODE (label, name) VALUES ('n{id}', 'node{id}')"),
+        );
+    }
+    define(&runtime, "write_then_match() RETURNS TABLE (name TEXT) EFFECT WRITE",
+        "UPDATE accounts SET amount = 99 WHERE id = 1; MATCH (n) WHERE n.name = 'absent' RETURN n.name AS name");
+    work_budget(&runtime, 20);
+    exhausted(&runtime, "CALL write_then_match()");
+    assert_eq!(amount(&runtime), Value::Integer(10));
+    work_budget(&runtime, 1_000);
+    assert!(execute(&runtime, "CALL write_then_match()")
+        .result
+        .records
+        .is_empty());
+    assert_eq!(amount(&runtime), Value::Integer(99));
+}
+
+#[test]
+fn graph_expansion_budget_rolls_back_after_materialization_succeeds() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    accounts(&runtime);
+    for id in 0..4 {
+        execute(
+            &runtime,
+            &format!("INSERT INTO budget_graph NODE (label, name) VALUES ('n{id}', 'node{id}')"),
+        );
+    }
+    for source in 0..4 {
+        for target in 0..4 {
+            execute(&runtime, &format!("INSERT INTO budget_graph EDGE (label, from, to) VALUES ('step', 'n{source}', 'n{target}')"));
+        }
+    }
+    define(&runtime, "expand_graph() RETURNS TABLE (name TEXT) EFFECT WRITE",
+        "UPDATE accounts SET amount = 99 WHERE id = 1; MATCH (a)-[:step]->(b)-[:step]->(c)-[:step]->(d)-[:step]->(e) RETURN a.name AS name");
+    work_budget(&runtime, 500);
+    exhausted(&runtime, "CALL expand_graph()");
+    assert_eq!(amount(&runtime), Value::Integer(10));
+    work_budget(&runtime, 10_000);
+    assert_eq!(
+        execute(&runtime, "CALL expand_graph()")
+            .result
+            .records
+            .len(),
+        1024
+    );
+    assert_eq!(amount(&runtime), Value::Integer(99));
+}
+
+#[test]
+fn budgeted_graph_materialization_preserves_invoker_node_and_edge_policies() {
+    use reddb::auth::Role;
+    use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    for query in [
+        "CREATE GRAPH guarded_graph",
+        "INSERT INTO guarded_graph NODE (label,node_type,owner,name) VALUES ('alice','Paper','alice','Alice')",
+        "INSERT INTO guarded_graph NODE (label,node_type,owner,name) VALUES ('bob','Paper','bob','Bob')",
+        "INSERT INTO guarded_graph EDGE (label,from,to,visible) VALUES ('step','alice','alice',true)",
+        "INSERT INTO guarded_graph EDGE (label,from,to,visible) VALUES ('step','bob','bob',true)",
+        "INSERT INTO guarded_graph EDGE (label,from,to,visible) VALUES ('hidden','alice','alice',false)",
+        "INSERT INTO guarded_graph EDGE (label,from,to,visible) VALUES ('step','alice','bob',true)",
+        "CREATE POLICY own_nodes ON NODES OF guarded_graph USING (properties.owner=CURRENT_USER())",
+        "CREATE POLICY visible_edges ON EDGES OF guarded_graph USING (properties.visible=true)",
+        "ALTER TABLE guarded_graph ENABLE ROW LEVEL SECURITY",
+    ] {
+        execute(&runtime, query);
+    }
+    define(
+        &runtime,
+        "visible_graph() RETURNS TABLE (name TEXT) EFFECT READ",
+        "MATCH (a:Paper)-[e]->(b:Paper) RETURN b.name AS name",
+    );
+    work_budget(&runtime, 1_000);
+    for (user, expected) in [("alice", "Alice"), ("bob", "Bob")] {
+        set_current_auth_identity(user.to_string(), Role::Read);
+        let result = runtime.execute_query("CALL visible_graph()");
+        clear_current_auth_identity();
+        let result = result.expect("budgeted graph respects invoker policies");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::Text(expected.into()))
+        );
+    }
+}
+
+#[test]
+fn hybrid_children_and_fusion_share_the_call_budget() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    budget_rows(&runtime);
+    vector_budget_rows(&runtime, false);
+    define(
+        &runtime,
+        "structured_part() RETURNS TABLE (id INTEGER) EFFECT READ",
+        "SELECT id FROM budget_rows",
+    );
+    define(
+        &runtime,
+        "vector_part() RETURNS TABLE (content TEXT) EFFECT READ",
+        "VECTOR SEARCH budget_vectors SIMILAR TO [1.0, 0.0] MODE EXACT LIMIT 1",
+    );
+    define(&runtime, "combined() RETURNS TABLE (score FLOAT) EFFECT READ",
+        "HYBRID FROM budget_rows VECTOR SEARCH budget_vectors SIMILAR TO [1.0, 0.0] MODE EXACT FUSION UNION(0.0, 1.0) LIMIT 1");
+    work_budget(&runtime, 150);
+    assert_eq!(
+        execute(&runtime, "CALL structured_part()")
+            .result
+            .records
+            .len(),
+        64
+    );
+    assert_eq!(
+        execute(&runtime, "CALL vector_part()").result.records.len(),
+        1
+    );
+    exhausted(&runtime, "CALL combined()");
+    // Both child scans fit in 200 units; map construction/fusion must also be charged.
+    work_budget(&runtime, 200);
+    exhausted(&runtime, "CALL combined()");
+    work_budget(&runtime, 1_000);
+    assert_eq!(execute(&runtime, "CALL combined()").result.records.len(), 1);
+}

@@ -92,6 +92,14 @@ pub(crate) fn charge(work: u64) -> RedDBResult<()> {
     })
 }
 
+pub(crate) fn graph_work_check(
+) -> Option<fn(u64) -> Result<(), crate::storage::query::unified::ExecutionError>> {
+    active().then_some(|work| {
+        charge(work)
+            .map_err(|cause| crate::storage::query::unified::ExecutionError::new(cause.to_string()))
+    })
+}
+
 /// Adapt the storage visitor's stop flag to a query error. The caller receives
 /// Err immediately after the scan stops, never a successful truncated result.
 /// Ordinary queries take the original visitor without per-row budget checks.
@@ -121,6 +129,41 @@ pub(crate) fn scan<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_pattern_expansion_consumes_the_call_budget() {
+        use crate::storage::engine::GraphStore;
+        use crate::storage::query::unified::UnifiedExecutor;
+        let graph = GraphStore::new();
+        for name in ["a", "b", "c", "d"] {
+            graph.add_node_with_label(name, name, "node").expect("node");
+        }
+        for source in ["a", "b", "c", "d"] {
+            for target in ["a", "b", "c", "d"] {
+                graph
+                    .add_edge_with_label(source, target, "step", 1.0)
+                    .expect("edge");
+            }
+        }
+        let query =
+            reddb_rql::modes::parse_multi("MATCH (a)-[:step]->(b)-[:step]->(c) RETURN a.id AS id")
+                .expect("pattern");
+        let scope = Scope::enter(10, 60_000).expect("budget");
+        let result = UnifiedExecutor::execute_on_with_graph_properties_checked(
+            &graph,
+            &query,
+            Default::default(),
+            Default::default(),
+            graph_work_check(),
+        );
+        assert!(result
+            .expect_err("expansion exceeds budget")
+            .to_string()
+            .contains("work_max"));
+        drop(scope);
+        let result = UnifiedExecutor::execute_on(&graph, &query).expect("unbudgeted graph");
+        assert_eq!(result.records.len(), 64);
+    }
 
     #[test]
     fn exact_work_boundary_is_sticky_and_scope_does_not_leak() {

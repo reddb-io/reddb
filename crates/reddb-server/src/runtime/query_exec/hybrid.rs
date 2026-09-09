@@ -86,7 +86,9 @@ pub(crate) fn execute_runtime_canonical_hybrid_fusion(
 
     let mut structured_map = HashMap::new();
     let mut structured_rank = HashMap::new();
-    for (index, record) in structured.iter().cloned().enumerate() {
+    for (index, record) in structured.iter().enumerate() {
+        crate::runtime::function_budget::charge(1)?;
+        let record = record.clone();
         let key = runtime_record_identity_key(&record);
         structured_rank.insert(key.clone(), index);
         structured_map.insert(key, record);
@@ -94,7 +96,9 @@ pub(crate) fn execute_runtime_canonical_hybrid_fusion(
 
     let mut vector_map = HashMap::new();
     let mut vector_rank = HashMap::new();
-    for (index, record) in vector.iter().cloned().enumerate() {
+    for (index, record) in vector.iter().enumerate() {
+        crate::runtime::function_budget::charge(1)?;
+        let record = record.clone();
         let key = runtime_record_identity_key(&record);
         vector_rank.insert(key.clone(), index);
         vector_map.insert(key, record);
@@ -104,6 +108,7 @@ pub(crate) fn execute_runtime_canonical_hybrid_fusion(
 
     let mut scored_records = Vec::new();
     for key in ordered_keys {
+        crate::runtime::function_budget::charge(1)?;
         let structured_record = structured_map.get(&key);
         let vector_record = vector_map.get(&key);
         let s_rank = structured_rank.get(&key).copied();

@@ -569,11 +569,12 @@ pub(super) fn execute_runtime_canonical_expr_node(
         QueryExpr::Graph(_) | QueryExpr::Path(_) => {
             let (graph, node_properties, edge_properties) = runtime.materialize_graph_with_rls()?;
             let result =
-                crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties(
+                crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties_checked(
                     &graph,
                     expr,
                     node_properties,
                     edge_properties,
+                    crate::runtime::function_budget::graph_work_check(),
                 )
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
             Ok(result.records)

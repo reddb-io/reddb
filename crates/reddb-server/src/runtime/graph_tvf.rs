@@ -763,13 +763,12 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            let entities = manager.scan(snap_ctx.as_ref(), |_| true);
-            for entity in entities {
+            visit_graph_materialization_entities(&manager, snap_ctx.as_ref(), |entity| {
                 let EntityKind::GraphNode(ref node) = entity.kind else {
-                    continue;
+                    return Ok(());
                 };
                 if !node_passes_rls(self, collection, role.as_deref(), &mut node_rls, &entity) {
-                    continue;
+                    return Ok(());
                 }
                 let id_str = entity.id.raw().to_string();
                 graph
@@ -783,7 +782,8 @@ impl RedDBRuntime {
                 if let EntityData::Node(node_data) = &entity.data {
                     node_properties.insert(id_str, node_data.properties.clone());
                 }
-            }
+                Ok(())
+            })?;
         }
 
         // Second pass — gather edges. An edge appears only when both
@@ -793,18 +793,17 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            let entities = manager.scan(snap_ctx.as_ref(), |_| true);
-            for entity in entities {
+            visit_graph_materialization_entities(&manager, snap_ctx.as_ref(), |entity| {
                 let EntityKind::GraphEdge(ref edge) = entity.kind else {
-                    continue;
+                    return Ok(());
                 };
                 if !allowed_nodes.contains(&edge.from_node)
                     || !allowed_nodes.contains(&edge.to_node)
                 {
-                    continue;
+                    return Ok(());
                 }
                 if !edge_passes_rls(self, collection, role.as_deref(), &mut edge_rls, &entity) {
-                    continue;
+                    return Ok(());
                 }
                 let weight = match &entity.data {
                     EntityData::Edge(e) => e.weight,
@@ -820,7 +819,8 @@ impl RedDBRuntime {
                         edge_data.properties.clone(),
                     );
                 }
-            }
+                Ok(())
+            })?;
         }
 
         // Suppress unused-PolicyAction/PolicyTargetKind warnings — both
@@ -830,4 +830,38 @@ impl RedDBRuntime {
 
         Ok((graph, node_properties, edge_properties))
     }
+}
+
+/// RLS may re-enter storage, so only collect IDs while holding segment locks.
+/// Unbudgeted graph materialization retains the existing parallel scan path.
+fn visit_graph_materialization_entities(
+    manager: &crate::storage::unified::manager::SegmentManager,
+    snapshot: Option<&super::impl_core::SnapshotContext>,
+    mut visit: impl FnMut(crate::storage::unified::entity::UnifiedEntity) -> RedDBResult<()>,
+) -> RedDBResult<()> {
+    if !super::function_budget::active() {
+        for entity in manager.scan(snapshot, |_| true) {
+            visit(entity)?;
+        }
+        return Ok(());
+    }
+    let mut ids = Vec::new();
+    super::function_budget::scan(
+        |callback| manager.scan_for_each(snapshot, callback),
+        |entity| {
+            ids.push(entity.id);
+            true
+        },
+    )?;
+    for batch in ids.chunks(256) {
+        super::function_budget::charge(0)?;
+        for entity in manager.get_many(batch).into_iter().flatten() {
+            super::function_budget::charge(1)?;
+            // Re-check the captured MVCC view after releasing the scan lock.
+            if super::impl_core::entity_visible_with_context(snapshot, &entity) {
+                visit(entity)?;
+            }
+        }
+    }
+    Ok(())
 }

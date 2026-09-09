@@ -125,6 +125,15 @@ scan callbacks (before predicate filtering), indexed candidate processing, join
 build/probe/pair iterations, affected rows reported by statements, and TABLE
 return rows normalized by CALL. Accounting is cumulative and depends on the
 chosen execution plan; it is not a count of CPU instructions or physical reads.
+
+Multimodel paths share that same counter. Exact vector search charges visible
+candidate-ID discovery and candidate processing before distance evaluation.
+TurboQuant charges the filled lanes before each block of up to 32 vectors, then
+charges candidate conversion and exact reranking. Graph materialization charges
+visible candidate IDs and entity processing in each of its two passes; pattern
+matching charges seed nodes, partial matches, edge candidates and projected
+matches. Hybrid fusion charges its input-map entries and fused candidates.
+A small LIMIT or an empty final result does not exempt input work from accounting.
 An exhausted call returns `stored function: execution work_max exceeded` or
 `stored function: execution timeout_ms exceeded`, including both limits.
 
@@ -139,10 +148,12 @@ when a later statement fails after earlier writes. In an existing transaction,
 the caller's earlier writes and savepoints remain usable. The budget is removed
 before COMMIT/ROLLBACK so cleanup can complete.
 
-Coverage is intentionally incomplete: vector search, graph traversal, mutation
-internals, invisible-version traversal, index candidate discovery/batch fetching,
-scalar built-ins, sorting,
-and aggregate finalization are not yet fully interruptible. Their elapsed time
+Coverage is intentionally incomplete: individual vector distance calculations,
+TurboQuant query rotation/LUT preparation, index readiness/rebuild, graph adjacency
+list construction, mutation internals, invisible-version traversal, index candidate
+discovery/batch fetching, scalar built-ins, sorting and aggregate finalization are
+not yet fully interruptible. Graph analytics/shortest-path APIs outside admitted
+CALL graph patterns do not acquire this budget. Their elapsed time
 is checked when they return to an instrumented boundary; mutation counts are
 charged after execution. Blocking I/O and lock waits cannot be preempted by these
 checks. Commit/rollback time is outside the execution deadline. This is therefore
@@ -151,13 +162,20 @@ cancel requests for CALL.
 
 CALL uses sequential fallbacks for the table/aggregate scan paths that would
 otherwise start workers without inheriting the thread-local execution context.
-Parallel budget propagation remains pending. Ordinary SQL retains its existing
+Budgeted graph materialization likewise collects IDs under the segment lock and
+fetches entities in batches of 256 before evaluating RLS outside that lock; it
+preserves the captured MVCC view. Unbudgeted graph materialization retains its
+existing scan path. Parallel budget propagation remains pending. Ordinary SQL retains its existing
 parallel paths. Cost sketch: N visited candidates add N budget checks and about
 N/256 clock samples, with no per-candidate budget allocation, locks or atomics;
 ordinary scan callbacks bypass per-row accounting. Reading the two limits uses
 the existing configuration accessors, each scanning `red_config`; long config
 histories add lookup cost. This is an implementation cost estimate, not a
-measured throughput claim.
+measured throughput claim. Exact vector search adds about 2N work units for N
+candidates; TurboQuant adds one callback per scoring block plus candidate/rerank
+checks. Graph cost includes the existing two collection passes and the number of
+expanded pattern matches. Vector ID lists, TurboQuant score buffers and graph
+adjacency lists still use O(input size) memory; these checks are not a memory cap.
 
 Functions are a foundation for later collection rules and declarative endpoints.
 This slice does not implement either, nor does it establish performance parity

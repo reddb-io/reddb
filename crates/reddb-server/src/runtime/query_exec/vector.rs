@@ -201,11 +201,21 @@ pub(crate) fn runtime_vector_matches(
         let raw = {
             let index = state.index.lock();
             stats.approximate_distance_evaluations = index.len() as u64;
-            index.search(vector, search_k, metric)
+            if crate::runtime::function_budget::active() {
+                index.search_checked(
+                    vector,
+                    search_k,
+                    metric,
+                    crate::runtime::function_budget::charge,
+                )?
+            } else {
+                index.search(vector, search_k, metric)
+            }
         };
         let mut top = VectorTopK::new(k);
         let filter = effective_vector_filter(query);
         for hit in raw {
+            crate::runtime::function_budget::charge(1)?;
             stats.candidates_examined += 1;
             let Some(entity) = db.store().get(&query.collection, hit.entity_id) else {
                 stats.visibility_rejected += 1;
@@ -323,12 +333,17 @@ pub(crate) fn runtime_vector_matches(
     // and regressed concurrent writes. The ID list is O(N); payload copies
     // remain bounded to one batch. Predicates may also re-enter storage.
     let mut ids = Vec::new();
-    manager.scan_for_each(snapshot.as_ref(), |entity| {
-        ids.push(entity.id);
-        true
-    });
+    crate::runtime::function_budget::scan(
+        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+        |entity| {
+            ids.push(entity.id);
+            true
+        },
+    )?;
     for batch in ids.chunks(256) {
+        crate::runtime::function_budget::charge(0)?;
         for entity in manager.get_many(batch).into_iter().flatten() {
+            crate::runtime::function_budget::charge(1)?;
             consider(&entity);
         }
     }
