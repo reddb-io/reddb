@@ -61,3 +61,22 @@ inputs, gapped bulk IDs, deletion and structural updates, old snapshots,
 interrupted batches, reentrant consumer reads/writes, sealing and consolidation
 between batches, and rebuilding positions through adoption. Existing vector
 MVCC/RLS and persistent reopen suites remain part of validation.
+
+## Allocation probe
+
+A standalone public `search_similar` probe uses two-dimensional vectors, exact
+cosine scoring and top-k three, after catalog warmup. Each run returns three
+results. Local debug-build calling-thread measurements are:
+
+| Ingestion | Candidates | Parent allocated bytes | Cursor allocated bytes | Parent largest allocation | Cursor largest allocation |
+|---|---:|---:|---:|---:|---:|
+| Individual | 1,024 | 314,785 | 87,287 | 67,584 | 67,584 |
+| Individual | 16,384 | 5,015,125 | 363,767 | 131,072 | 67,584 |
+| Bulk | 1,024 | 314,551 | 87,287 | 67,584 | 67,584 |
+| Bulk | 16,384 | 5,014,711 | 363,767 | 131,072 | 67,584 |
+
+The total decreases because both the ID list and repeated per-batch container
+allocations disappear. Dense values and collection strings still clone during
+hydration, so cumulative allocations continue to grow with candidate count.
+These measurements are not peak-memory, throughput or latency benchmarks and do
+not include ingestion or the shared directory's resident-memory cost.
