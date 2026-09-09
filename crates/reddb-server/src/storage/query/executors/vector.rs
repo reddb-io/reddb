@@ -685,6 +685,7 @@ mod tests {
         executor.add_vector("test", 4, vec![0.9, 0.1, 0.0], None);
 
         let query = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "test".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0, 0.0]),
@@ -729,6 +730,7 @@ mod tests {
 
         // Search with filter: type = 'cve' AND severity >= 7
         let query = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "vulns".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
@@ -758,6 +760,7 @@ mod tests {
         executor.add_vector("test", 2, vec![0.0, 1.0], None); // Far from query
 
         let query = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "test".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
@@ -782,6 +785,7 @@ mod tests {
         executor.add_vector("test", 1, vec![1.0, 2.0, 3.0], None);
 
         let query = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "test".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 2.0, 3.0]),
@@ -810,6 +814,7 @@ mod tests {
 
         let executor = VectorExecutor::new(Arc::new(store));
         let query = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "refs".to_string(),
             query_vector: VectorSource::Reference {
@@ -838,6 +843,7 @@ mod tests {
 
         let executor = VectorExecutor::new(Arc::new(store));
         let inner = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "refs".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
@@ -849,6 +855,7 @@ mod tests {
             threshold: None,
         };
         let query = VectorQuery {
+            mode: Default::default(),
             alias: None,
             collection: "refs".to_string(),
             query_vector: VectorSource::Subquery(Box::new(QueryExpr::Vector(inner))),

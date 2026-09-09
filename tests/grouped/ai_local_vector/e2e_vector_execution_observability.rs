@@ -69,7 +69,7 @@ fn vector_analysis_executes_instead_of_reusing_cached_measurements() {
 #[test]
 fn turbo_plan_and_measurement_name_the_executed_path() {
     let (_directory, rt) = fixture(true);
-    let sql = "VECTOR SEARCH embeddings SIMILAR TO [1.0,0.0] LIMIT 1";
+    let sql = "VECTOR SEARCH embeddings SIMILAR TO [1.0,0.0] MODE APPROXIMATE LIMIT 1";
     let plan = rt.execute_query(&format!("EXPLAIN {sql}")).expect("plan");
     assert!(plan
         .result
@@ -82,6 +82,9 @@ fn turbo_plan_and_measurement_name_the_executed_path() {
     let metrics = analyzed.result.stats.vector.expect("metrics");
     assert_eq!(metrics.access_path, "vector_turbo_search");
     assert!(metrics.index_used);
+    assert_eq!(metrics.mode_requested, "approximate");
+    assert_eq!(metrics.mode_executed, "approximate");
+    assert_eq!(metrics.approximate_distance_evaluations, 1);
     assert_eq!(metrics.rows_returned, 1);
     assert_eq!(metrics.exact_distance_evaluations, 1);
 }
@@ -149,7 +152,9 @@ fn registered_hnsw_does_not_turn_an_exact_runtime_search_into_ann() {
         .expect("associated index");
     assert!(status.declared && status.operational && status.enabled);
     let plan = rt
-        .execute_query("EXPLAIN VECTOR SEARCH embeddings SIMILAR TO [1.0,0.0] LIMIT 1")
+        .execute_query(
+            "EXPLAIN VECTOR SEARCH embeddings SIMILAR TO [1.0,0.0] MODE APPROXIMATE LIMIT 1",
+        )
         .expect("plan");
     assert!(plan.result.records.iter().any(|row| {
         row.get("op") == Some(&Value::text("vector_exact_scan"))
@@ -173,4 +178,23 @@ fn vector_analysis_does_not_end_the_callers_transaction() {
         .execute_query("SELECT * FROM changes")
         .expect("read after rollback");
     assert!(rows.result.records.is_empty());
+}
+
+#[test]
+fn approximate_mode_reports_exact_fallback_without_a_turbo_route() {
+    let (_directory, rt) = fixture(false);
+    let result = rt
+        .execute_query(
+            "EXPLAIN ANALYZE VECTOR SEARCH embeddings SIMILAR TO [1,0] MODE APPROXIMATE LIMIT 1",
+        )
+        .expect("fallback");
+    let stats = result.result.stats.vector.expect("metrics");
+    assert_eq!(stats.mode_requested, "approximate");
+    assert_eq!(stats.mode_executed, "exact");
+    assert_eq!(
+        stats.fallback_reason.as_deref(),
+        Some("no operational approximate index")
+    );
+    assert_eq!(stats.approximate_distance_evaluations, 0);
+    assert!(!stats.index_used);
 }

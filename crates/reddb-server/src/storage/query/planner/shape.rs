@@ -303,6 +303,7 @@ fn bind_query_expr_inner(expr: &QueryExpr, binds: &[Value]) -> Option<QueryExpr>
 
 fn parameterize_vector_query(query: &VectorQuery, next_index: &mut usize) -> Option<VectorQuery> {
     Some(VectorQuery {
+        mode: query.mode,
         alias: query.alias.clone(),
         collection: query.collection.clone(),
         query_vector: parameterize_vector_source(&query.query_vector, next_index)?,
@@ -322,6 +323,7 @@ fn parameterize_vector_query(query: &VectorQuery, next_index: &mut usize) -> Opt
 
 fn bind_vector_query(query: &VectorQuery, binds: &[Value]) -> Option<VectorQuery> {
     Some(VectorQuery {
+        mode: query.mode,
         alias: query.alias.clone(),
         collection: query.collection.clone(),
         query_vector: bind_vector_source(&query.query_vector, binds)?,

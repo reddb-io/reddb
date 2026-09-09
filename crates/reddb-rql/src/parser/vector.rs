@@ -2,7 +2,7 @@
 
 use super::error::ParseError;
 use super::Parser;
-use crate::ast::{QueryExpr, VectorQuery, VectorSource};
+use crate::ast::{QueryExpr, VectorQuery, VectorSearchMode, VectorSource};
 use crate::lexer::Token;
 use reddb_types::distance::DistanceMetric;
 use reddb_types::vector_metadata::{MetadataFilter, MetadataValue};
@@ -15,6 +15,7 @@ impl<'a> Parser<'a> {
     /// VECTOR SEARCH collection
     /// SIMILAR TO [0.1, 0.2, ...] | 'text query' | (subquery)
     /// [WHERE metadata conditions]
+    /// [MODE EXACT|APPROXIMATE]
     /// [METRIC L2|COSINE|INNER_PRODUCT]
     /// [THRESHOLD 0.5]
     /// [INCLUDE VECTORS] [INCLUDE METADATA]
@@ -34,6 +35,7 @@ impl<'a> Parser<'a> {
         let query_vector = self.parse_vector_source()?;
 
         // Parse optional clauses
+        let mut mode = None;
         let mut filter: Option<MetadataFilter> = None;
         let mut metric: Option<DistanceMetric> = None;
         let mut threshold: Option<f32> = None;
@@ -45,6 +47,14 @@ impl<'a> Parser<'a> {
         loop {
             if self.consume(&Token::Where)? {
                 filter = Some(self.parse_metadata_filter()?);
+            } else if self.consume(&Token::Mode)? {
+                if mode.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate vector MODE clause".to_string(),
+                        self.position(),
+                    ));
+                }
+                mode = Some(self.parse_vector_search_mode()?);
             } else if self.consume(&Token::Metric)? {
                 metric = Some(self.parse_distance_metric()?);
             } else if self.consume(&Token::Threshold)? {
@@ -73,6 +83,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(QueryExpr::Vector(VectorQuery {
+            mode: mode.unwrap_or_default(),
             alias: None,
             collection,
             query_vector,
@@ -83,6 +94,20 @@ impl<'a> Parser<'a> {
             include_metadata,
             threshold,
         }))
+    }
+
+    pub(super) fn parse_vector_search_mode(&mut self) -> Result<VectorSearchMode, ParseError> {
+        if self.consume_ident_ci("EXACT")? {
+            Ok(VectorSearchMode::Exact)
+        } else if self.consume_ident_ci("APPROXIMATE")? {
+            Ok(VectorSearchMode::Approximate)
+        } else {
+            Err(ParseError::expected(
+                vec!["EXACT", "APPROXIMATE"],
+                self.peek(),
+                self.position(),
+            ))
+        }
     }
 
     /// Parse vector source: literal array, text, reference, or subquery
@@ -580,6 +605,36 @@ mod tests {
             "VECTOR SEARCH docs SIMILAR TO (docs)",
         ] {
             assert!(parse_query(sql).is_err(), "{sql} should not parse");
+        }
+    }
+}
+
+#[cfg(test)]
+mod search_mode_tests {
+    use super::*;
+    #[test]
+    fn vector_modes_are_explicit_and_exact_by_default() {
+        for (clause, expected) in [
+            ("", VectorSearchMode::Exact),
+            ("MODE EXACT", VectorSearchMode::Exact),
+            ("MODE APPROXIMATE", VectorSearchMode::Approximate),
+        ] {
+            let sql = format!("VECTOR SEARCH embeddings SIMILAR TO [1,0] {clause} LIMIT 3");
+            let QueryExpr::Vector(query) = Parser::new(&sql)
+                .expect("lexer")
+                .parse_vector_query()
+                .expect("query")
+            else {
+                panic!("vector")
+            };
+            assert_eq!(query.mode, expected);
+        }
+        for clause in ["MODE QUICK", "MODE EXACT MODE APPROXIMATE"] {
+            let sql = format!("VECTOR SEARCH embeddings SIMILAR TO [1,0] {clause}");
+            assert!(Parser::new(&sql)
+                .expect("lexer")
+                .parse_vector_query()
+                .is_err());
         }
     }
 }
