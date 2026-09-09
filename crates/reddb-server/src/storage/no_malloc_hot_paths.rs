@@ -758,3 +758,20 @@ fn row_index_growth_estimation_does_not_allocate_for_stored_fields() {
     );
     assert_eq!(count.deallocs, 0);
 }
+
+#[test]
+fn row_topology_lock_reuse_does_not_allocate() {
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    let indexes = runtime.index_store_ref();
+    let warm = indexes.collection_topology_lock("topology_records");
+    let (_, count) = measure_allocations(|| {
+        let lock = indexes.collection_topology_lock("topology_records");
+        let _guard = lock.read();
+        assert!(std::sync::Arc::ptr_eq(&warm, &lock));
+    });
+    assert_eq!(
+        count.allocs, 0,
+        "warmed row topology must not allocate per batch"
+    );
+    assert_eq!(count.deallocs, 0);
+}

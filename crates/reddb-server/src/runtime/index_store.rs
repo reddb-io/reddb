@@ -1266,6 +1266,11 @@ pub struct IndexStore {
     pub sorted: SortedIndexManager,
     /// Registry of all created indices: (collection, index_name) → metadata
     registry: RwLock<HashMap<(String, String), RegisteredIndex>>,
+    // Keep identities stable across DROP/recreate, including queued writers.
+    // The memory sampler never takes a topology lock.
+    topology: RwLock<HashMap<String, std::sync::Arc<RwLock<()>>>>,
+    #[cfg(test)]
+    pub(super) before_build: parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl IndexStore {
@@ -1275,7 +1280,40 @@ impl IndexStore {
             bitmap: BitmapIndexManager::new(),
             sorted: SortedIndexManager::new(),
             registry: RwLock::new(HashMap::new()),
+            topology: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            before_build: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Shared across row admission and maintenance; exclusive across topology
+    /// changes, including the snapshot used to backfill. Release before events.
+    /// Lock order: row constraint -> topology -> reservation -> storage/index.
+    pub(crate) fn collection_topology_lock(&self, collection: &str) -> std::sync::Arc<RwLock<()>> {
+        if let Some(lock) = self.topology.read().get(collection) {
+            return std::sync::Arc::clone(lock);
+        }
+        std::sync::Arc::clone(
+            self.topology
+                .write()
+                .entry(collection.to_string())
+                .or_insert_with(|| std::sync::Arc::new(RwLock::new(()))),
+        )
+    }
+
+    pub(crate) fn needs_auto_id_index(
+        &self,
+        collection: &str,
+        fields: &[(String, Value)],
+        enabled: bool,
+    ) -> bool {
+        enabled
+            && fields.iter().any(|(name, _)| name == "id")
+            && !self.registry.read().values().any(|index| {
+                index.collection == collection
+                    && index.columns.len() == 1
+                    && index.columns[0] == "id"
+            })
     }
 
     /// Approximate resident bytes across every in-RAM secondary index — the
@@ -1293,7 +1331,8 @@ impl IndexStore {
     /// Estimate resident index growth before row mutation, without cloning
     /// rows or the registry. Each potential new key receives entry overhead;
     /// existing postings can therefore make this deliberately conservative.
-    /// No registry guard survives into memory admission or storage mutation.
+    /// The caller holds the collection topology guard through storage mutation;
+    /// no backend or registry guard survives into memory admission.
     pub(crate) fn estimate_insert_growth<'a>(
         &self,
         collection: &str,
@@ -1331,7 +1370,8 @@ impl IndexStore {
         growth
     }
 
-    /// Register and build an index from existing entities.
+    /// Build physical backing. Runtime callers hold exclusive collection topology
+    /// from before collecting entities until after registering metadata.
     pub fn create_index(
         &self,
         name: &str,
@@ -1341,6 +1381,10 @@ impl IndexStore {
         unique: bool,
         entities: &[(EntityId, Vec<(String, Value)>)],
     ) -> Result<usize, String> {
+        #[cfg(test)]
+        if let Some(hook) = self.before_build.lock().clone() {
+            hook();
+        }
         let col = columns.first().map(|s| s.as_str()).unwrap_or("");
         if columns.len() > 1 && columns.iter().any(|column| column.contains('.')) {
             return Err(

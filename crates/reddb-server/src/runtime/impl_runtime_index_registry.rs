@@ -77,6 +77,8 @@ fn index_method_kind_from_str(
 
 impl RedDBRuntime {
     pub(crate) fn rebuild_runtime_indexes_for_table(&self, table: &str) -> RedDBResult<()> {
+        let topology_lock = self.inner.index_store.collection_topology_lock(table);
+        let _topology_guard = topology_lock.write();
         let registered = self.inner.index_store.list_indices(table);
         if registered.is_empty() {
             return Ok(());
@@ -276,6 +278,11 @@ impl RedDBRuntime {
         }
 
         for index in latest.into_values().flatten() {
+            let topology_lock = self
+                .inner
+                .index_store
+                .collection_topology_lock(&index.collection);
+            let _topology_guard = topology_lock.write();
             let Some(manager) = store.get_collection(&index.collection) else {
                 continue;
             };

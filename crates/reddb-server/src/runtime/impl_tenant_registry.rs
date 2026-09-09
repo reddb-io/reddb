@@ -244,6 +244,8 @@ impl RedDBRuntime {
         if column.contains('.') {
             return;
         }
+        let topology_lock = self.inner.index_store.collection_topology_lock(table);
+        let _topology_guard = topology_lock.write();
         let index_name = format!("__tenant_idx_{table}");
         let registry = self.inner.index_store.list_indices(table);
         if registry.iter().any(|idx| idx.name == index_name) {
@@ -323,6 +325,8 @@ impl RedDBRuntime {
     /// Drop the auto-generated tenant index, if one exists. Called from
     /// `unregister_tenant_table` so DISABLE TENANCY / DROP TABLE clean up.
     fn drop_tenant_index(&self, table: &str) {
+        let topology_lock = self.inner.index_store.collection_topology_lock(table);
+        let _topology_guard = topology_lock.write();
         let index_name = format!("__tenant_idx_{table}");
         self.inner.index_store.drop_index(&index_name, table);
     }

@@ -664,6 +664,8 @@ impl RedDBRuntime {
             final_count,
         )?;
 
+        let topology_lock = self.inner.index_store.collection_topology_lock(&query.name);
+        let _topology_guard = topology_lock.write();
         let orphaned_indices: Vec<String> = self
             .inner
             .index_store
@@ -1597,6 +1599,11 @@ impl RedDBRuntime {
         query: &CreateIndexQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let topology_lock = self
+            .inner
+            .index_store
+            .collection_topology_lock(&query.table);
+        let _topology_guard = topology_lock.write();
         let store = self.inner.db.store();
 
         // Verify the table exists
@@ -1764,6 +1771,11 @@ impl RedDBRuntime {
         query: &DropIndexQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let topology_lock = self
+            .inner
+            .index_store
+            .collection_topology_lock(&query.table);
+        let _topology_guard = topology_lock.write();
         let store = self.inner.db.store();
 
         // Verify the table exists
@@ -1945,6 +1957,8 @@ impl RedDBRuntime {
             final_count,
         )?;
 
+        let topology_lock = self.inner.index_store.collection_topology_lock(name);
+        let _topology_guard = topology_lock.write();
         let orphaned_indices: Vec<String> = self
             .inner
             .index_store

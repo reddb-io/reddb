@@ -42,11 +42,11 @@ Resident estimates still exclude allocator capacity slack and temporary write or
 query buffers. Existing rows sharing a posting list may use less than reserved.
 This is not a hard process RSS guarantee or latency/throughput benchmark.
 
-The index registry is sampled before admission, not locked across mutation. DDL
-that changes index topology concurrently still needs a separate synchronization
-contract. Other model/update paths, complete metadata estimates, explicit index
-build/timeseries estimator alignment, query buffers and maintenance headroom remain
-follow-up work. WAL formats and transaction rollback semantics are unchanged.
+A [collection topology guard](index-topology-admission.md) now spans row admission
+and index maintenance, coordinating these inserts with runtime index creation,
+drop and rebuild. Other model/update paths, complete metadata estimates, explicit
+index build/timeseries estimator alignment, query buffers and maintenance headroom
+remain follow-up work. WAL formats and transaction rollback semantics are unchanged.
 
 ## Verification
 
