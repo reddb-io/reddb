@@ -130,9 +130,10 @@ Multimodel paths share that same counter. Exact vector search charges visible
 candidate-ID discovery and candidate processing before distance evaluation.
 TurboQuant charges the filled lanes before each block of up to 32 vectors, then
 charges candidate conversion and exact reranking. Graph materialization charges
-visible candidate IDs and entity processing in each of its two passes over all
-collections, including non-graph entities; pattern matching charges seed nodes,
-partial matches, edge candidates and projected
+every visible candidate inspected in each of its two passes over all collections,
+including non-graph entities. It collects IDs and fetches/processes payloads only
+for the current pass's kind (nodes or edges), charging that processing separately.
+Pattern matching charges seed nodes, partial matches, edge candidates and projected
 matches. Hybrid fusion charges its input-map entries and fused candidates.
 A small LIMIT or an empty final result does not exempt input work from accounting.
 An exhausted call returns `stored function: execution work_max exceeded` or
@@ -163,8 +164,9 @@ cancel requests for CALL.
 
 CALL uses sequential fallbacks for the table/aggregate scan paths that would
 otherwise start workers without inheriting the thread-local execution context.
-Budgeted graph materialization likewise collects IDs under the segment lock and
-fetches entities in batches of 256 before evaluating RLS outside that lock; it
+Graph materialization filters entity kinds before copying payloads, including in
+mixed collections. Budgeted materialization collects only matching IDs under the
+segment lock and fetches entities in batches of 256 before evaluating RLS outside that lock; it
 preserves the captured MVCC view. Unbudgeted graph materialization retains its
 existing scan path. Parallel budget propagation remains pending. Ordinary SQL retains its existing
 parallel paths. Cost sketch: N visited candidates add N budget checks and about
@@ -174,8 +176,9 @@ the existing configuration accessors, each scanning `red_config`; long config
 histories add lookup cost. This is an implementation cost estimate, not a
 measured throughput claim. Exact vector search adds about 2N work units for N
 candidates; TurboQuant adds one callback per scoring block plus candidate/rerank
-checks. Graph cost includes the existing two collection passes and the number of
-expanded pattern matches. Vector ID lists, TurboQuant score buffers and graph
+checks. For N visible entities and G graph entities, graph materialization charges
+about 2N + G units before pattern expansion, while retaining the existing two
+collection passes. Vector ID lists, TurboQuant score buffers and graph
 adjacency lists still use O(input size) memory; these checks are not a memory cap.
 
 Functions are a foundation for later collection rules and declarative endpoints.

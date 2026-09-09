@@ -6,6 +6,9 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+#[path = "graph_analytics/e2e_graph_materialization_allocations.rs"]
+mod e2e_graph_materialization_allocations;
+
 #[path = "graph_analytics/e2e_graph_compound_updates.rs"]
 mod e2e_graph_compound_updates;
 

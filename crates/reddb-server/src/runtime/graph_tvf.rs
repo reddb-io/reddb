@@ -763,27 +763,32 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            visit_graph_materialization_entities(&manager, snap_ctx.as_ref(), |entity| {
-                let EntityKind::GraphNode(ref node) = entity.kind else {
-                    return Ok(());
-                };
-                if !node_passes_rls(self, collection, role.as_deref(), &mut node_rls, &entity) {
-                    return Ok(());
-                }
-                let id_str = entity.id.raw().to_string();
-                graph
-                    .add_node_with_label(
-                        &id_str,
-                        &node.label,
-                        &super::graph_node_label(&node.node_type),
-                    )
-                    .map_err(|err| RedDBError::Query(err.to_string()))?;
-                allowed_nodes.insert(id_str.clone());
-                if let EntityData::Node(node_data) = &entity.data {
-                    node_properties.insert(id_str, node_data.properties.clone());
-                }
-                Ok(())
-            })?;
+            visit_graph_materialization_entities(
+                &manager,
+                snap_ctx.as_ref(),
+                |entity| matches!(entity.kind, EntityKind::GraphNode(_)),
+                |entity| {
+                    let EntityKind::GraphNode(ref node) = entity.kind else {
+                        return Ok(());
+                    };
+                    if !node_passes_rls(self, collection, role.as_deref(), &mut node_rls, &entity) {
+                        return Ok(());
+                    }
+                    let id_str = entity.id.raw().to_string();
+                    graph
+                        .add_node_with_label(
+                            &id_str,
+                            &node.label,
+                            &super::graph_node_label(&node.node_type),
+                        )
+                        .map_err(|err| RedDBError::Query(err.to_string()))?;
+                    allowed_nodes.insert(id_str.clone());
+                    if let EntityData::Node(node_data) = &entity.data {
+                        node_properties.insert(id_str, node_data.properties.clone());
+                    }
+                    Ok(())
+                },
+            )?;
         }
 
         // Second pass — gather edges. An edge appears only when both
@@ -793,34 +798,39 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            visit_graph_materialization_entities(&manager, snap_ctx.as_ref(), |entity| {
-                let EntityKind::GraphEdge(ref edge) = entity.kind else {
-                    return Ok(());
-                };
-                if !allowed_nodes.contains(&edge.from_node)
-                    || !allowed_nodes.contains(&edge.to_node)
-                {
-                    return Ok(());
-                }
-                if !edge_passes_rls(self, collection, role.as_deref(), &mut edge_rls, &entity) {
-                    return Ok(());
-                }
-                let weight = match &entity.data {
-                    EntityData::Edge(e) => e.weight,
-                    _ => edge.weight as f32 / 1000.0,
-                };
-                let edge_label = super::graph_edge_label(&edge.label);
-                graph
-                    .add_edge_with_label(&edge.from_node, &edge.to_node, &edge_label, weight)
-                    .map_err(|err| RedDBError::Query(err.to_string()))?;
-                if let EntityData::Edge(edge_data) = &entity.data {
-                    edge_properties.insert(
-                        (edge.from_node.clone(), edge_label, edge.to_node.clone()),
-                        edge_data.properties.clone(),
-                    );
-                }
-                Ok(())
-            })?;
+            visit_graph_materialization_entities(
+                &manager,
+                snap_ctx.as_ref(),
+                |entity| matches!(entity.kind, EntityKind::GraphEdge(_)),
+                |entity| {
+                    let EntityKind::GraphEdge(ref edge) = entity.kind else {
+                        return Ok(());
+                    };
+                    if !allowed_nodes.contains(&edge.from_node)
+                        || !allowed_nodes.contains(&edge.to_node)
+                    {
+                        return Ok(());
+                    }
+                    if !edge_passes_rls(self, collection, role.as_deref(), &mut edge_rls, &entity) {
+                        return Ok(());
+                    }
+                    let weight = match &entity.data {
+                        EntityData::Edge(e) => e.weight,
+                        _ => edge.weight as f32 / 1000.0,
+                    };
+                    let edge_label = super::graph_edge_label(&edge.label);
+                    graph
+                        .add_edge_with_label(&edge.from_node, &edge.to_node, &edge_label, weight)
+                        .map_err(|err| RedDBError::Query(err.to_string()))?;
+                    if let EntityData::Edge(edge_data) = &entity.data {
+                        edge_properties.insert(
+                            (edge.from_node.clone(), edge_label, edge.to_node.clone()),
+                            edge_data.properties.clone(),
+                        );
+                    }
+                    Ok(())
+                },
+            )?;
         }
 
         // Suppress unused-PolicyAction/PolicyTargetKind warnings — both
@@ -833,14 +843,16 @@ impl RedDBRuntime {
 }
 
 /// RLS may re-enter storage, so only collect IDs while holding segment locks.
-/// Unbudgeted graph materialization retains the existing parallel scan path.
+/// Filter by entity kind before cloning payloads or collecting IDs. Collections
+/// can contain mixed kinds. Ordinary queries retain the parallel scan path.
 fn visit_graph_materialization_entities(
     manager: &crate::storage::unified::manager::SegmentManager,
     snapshot: Option<&super::impl_core::SnapshotContext>,
+    filter: impl Fn(&crate::storage::unified::entity::UnifiedEntity) -> bool + Sync,
     mut visit: impl FnMut(crate::storage::unified::entity::UnifiedEntity) -> RedDBResult<()>,
 ) -> RedDBResult<()> {
     if !super::function_budget::active() {
-        for entity in manager.scan(snapshot, |_| true) {
+        for entity in manager.scan(snapshot, &filter) {
             visit(entity)?;
         }
         return Ok(());
@@ -849,7 +861,11 @@ fn visit_graph_materialization_entities(
     super::function_budget::scan(
         |callback| manager.scan_for_each(snapshot, callback),
         |entity| {
-            ids.push(entity.id);
+            // The scan charges every visible candidate, including rejected kinds.
+            // Only the current graph pass's payloads need to leave the segment lock.
+            if filter(entity) {
+                ids.push(entity.id);
+            }
             true
         },
     )?;
