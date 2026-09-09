@@ -59,9 +59,10 @@ Complete metadata accounting and reclamation remain follow-up work; this is not
 a hard RSS bound.
 
 This slice protects inserts through the unified row mutation engine against the
-runtime topology callers listed above. Updates/deletes, other model writers,
-replication/internal store writes and direct low-level index API users do not
-acquire this guard yet. It therefore does not claim general concurrent DDL/DML
+runtime topology callers listed above. The [mutation extension](mutation-index-topology.md)
+also coordinates SQL updates/deletes, native entity PATCH/delete and versioned
+update undo. Other model-specific writers, replication/internal store writes
+and direct low-level index API users still need integration. It does not claim general concurrent DDL/DML
 serializability, atomic tenancy-policy changes, or reader isolation during index
 replacement. Those paths need their own scoped integration. Existing index-build
 estimation and temporary backfill-buffer accounting remain unchanged. WAL format,

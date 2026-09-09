@@ -1535,6 +1535,8 @@ mod impl_timeseries;
 mod impl_tree;
 mod impl_vcs;
 mod index_store;
+#[cfg(test)]
+pub(crate) use index_store::MutationTestPhase;
 pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;
@@ -1552,6 +1554,8 @@ pub mod memory_accounting;
 pub(crate) mod memory_admission;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
+#[cfg(test)]
+mod mutation_index_topology_tests;
 pub(crate) mod mvcc_lifecycle;
 pub(crate) mod node_load_telemetry;
 pub(crate) mod occupancy_sampler;

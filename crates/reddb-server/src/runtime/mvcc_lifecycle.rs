@@ -469,7 +469,15 @@ impl RedDBRuntime {
         };
         // Undo newest versions first so repeated writes restore the original chain.
         for (collection, old_id, new_id, xid, previous_xmax) in pending.into_iter().rev() {
-            self.revive_versioned_update(&collection, old_id, new_id, xid, previous_xmax)?;
+            let topology_lock = self.index_store_ref().collection_topology_lock(&collection);
+            self.revive_versioned_update(
+                &collection,
+                old_id,
+                new_id,
+                xid,
+                previous_xmax,
+                topology_lock.read(),
+            )?;
         }
         Ok(())
     }
@@ -481,6 +489,7 @@ impl RedDBRuntime {
         new_id: crate::storage::EntityId,
         xid: u64,
         previous_xmax: u64,
+        _topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<()> {
         let store = self.inner.db.store();
         if let Some(new) = store.get(collection, new_id) {

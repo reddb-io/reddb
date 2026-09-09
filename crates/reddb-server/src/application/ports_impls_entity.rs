@@ -1451,6 +1451,7 @@ impl RedDBRuntime {
     pub(crate) fn flush_applied_entity_mutation(
         &self,
         applied: &AppliedEntityMutation,
+        topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<()> {
         let store = self.db().store();
         if applied.context_index_dirty {
@@ -1578,6 +1579,12 @@ impl RedDBRuntime {
                 }
             }
         }
+        drop(topology_guard);
+        #[cfg(test)]
+        self.index_store_ref().mutation_test_hook(
+            &applied.collection,
+            crate::runtime::MutationTestPhase::BeforeEvents,
+        );
         self.cdc_emit_prebuilt_with_columns(
             crate::replication::cdc::ChangeOperation::Update,
             &applied.collection,
@@ -1596,11 +1603,17 @@ impl RedDBRuntime {
         entity: crate::storage::UnifiedEntity,
         payload: JsonValue,
         operations: Vec<PatchEntityOperation>,
+        topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<CreateEntityOutput> {
         let applied =
             self.apply_loaded_patch_entity_core(collection, entity, payload, operations)?;
         self.persist_applied_entity_mutations(std::slice::from_ref(&applied))?;
-        self.flush_applied_entity_mutation(&applied)?;
+        #[cfg(test)]
+        self.index_store_ref().mutation_test_hook(
+            &applied.collection,
+            crate::runtime::MutationTestPhase::StoragePublished,
+        );
+        self.flush_applied_entity_mutation(&applied, topology_guard)?;
         Ok(CreateEntityOutput {
             id: applied.id,
             entity: Some(public_document_entity(applied.entity)),
@@ -2468,6 +2481,10 @@ impl RuntimeEntityPort for RedDBRuntime {
             &input.collection,
         );
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&input.collection);
+        let topology_guard = topology_lock.read();
         let PatchEntityInput {
             collection,
             id,
@@ -2487,7 +2504,7 @@ impl RuntimeEntityPort for RedDBRuntime {
                 id.raw()
             )));
         };
-        self.apply_loaded_patch_entity(collection, entity, payload, operations)
+        self.apply_loaded_patch_entity(collection, entity, payload, operations, topology_guard)
     }
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
@@ -2497,6 +2514,10 @@ impl RuntimeEntityPort for RedDBRuntime {
             &input.collection,
         );
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&input.collection);
+        let topology_guard = topology_lock.read();
         let store = self.db().store();
         // Snapshot row fields before delete so we can mirror the removal
         // into every secondary index. The fetch is best-effort: if the
@@ -2513,6 +2534,11 @@ impl RuntimeEntityPort for RedDBRuntime {
             .delete(&input.collection, input.id)
             .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
         if deleted {
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &input.collection,
+                crate::runtime::MutationTestPhase::StoragePublished,
+            );
             store.context_index().remove_entity(input.id);
             // Secondary index maintenance — surface only registry-shape
             // errors; missing-index removals are tolerated inside the call.
@@ -2521,6 +2547,12 @@ impl RuntimeEntityPort for RedDBRuntime {
                     .index_entity_delete(&input.collection, input.id, &pre_delete_fields)
                     .map_err(crate::RedDBError::Internal)?;
             }
+            drop(topology_guard);
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &input.collection,
+                crate::runtime::MutationTestPhase::BeforeEvents,
+            );
             self.cdc_emit(
                 crate::replication::cdc::ChangeOperation::Delete,
                 &input.collection,

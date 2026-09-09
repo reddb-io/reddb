@@ -2067,6 +2067,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<(RuntimeQueryResult, Vec<EntityId>)> {
         self.enforce_claim_order_by_index_gate(query)?;
         let store = self.inner.db.store();
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&query.table);
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
         let needs_rmw_lock = update_needs_rmw_lock(query);
@@ -2141,7 +2144,10 @@ impl RedDBRuntime {
         if needs_rmw_lock {
             target_scan = target_scan.with_live_table_rows();
         }
-        let ids_to_update = target_scan.find_target_ids()?;
+        let ids_to_update = {
+            let _topology_guard = topology_lock.read();
+            target_scan.find_target_ids()?
+        };
         let order_limit = if query.claim_limit.is_some() {
             None
         } else {
@@ -2195,6 +2201,7 @@ impl RedDBRuntime {
 
         let mut affected: u64 = 0;
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+            let topology_guard = topology_lock.read();
             let mut applied_chunk = Vec::with_capacity(chunk.len());
             for entity in manager.get_many(chunk).into_iter().flatten() {
                 let assignments =
@@ -2210,7 +2217,7 @@ impl RedDBRuntime {
             }
             self.persist_update_chunk(&applied_chunk)?;
             affected += applied_chunk.len() as u64;
-            let lsns = self.flush_update_chunk(&applied_chunk)?;
+            let lsns = self.flush_update_chunk(&applied_chunk, topology_guard)?;
             if !query.suppress_events {
                 self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
             }
@@ -2281,6 +2288,12 @@ impl RedDBRuntime {
         ids_to_update: &[EntityId],
         effective_filter: Option<&Filter>,
     ) -> RedDBResult<(RuntimeQueryResult, Vec<EntityId>)> {
+        // Existing table/claim locks precede topology; per-row RMW locks
+        // below follow it. Keep the same index set through persistence/flush.
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&query.table);
+        let topology_guard = topology_lock.read();
         let store = self.inner.db.store();
         let mut touched_ids = Vec::new();
         let mut lock_entries = Vec::new();
@@ -2332,7 +2345,7 @@ impl RedDBRuntime {
         let affected = applied_chunk.len() as u64;
         if !applied_chunk.is_empty() {
             self.persist_update_chunk(&applied_chunk)?;
-            let lsns = self.flush_update_chunk(&applied_chunk)?;
+            let lsns = self.flush_update_chunk(&applied_chunk, topology_guard)?;
             if !query.suppress_events {
                 self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
             }
@@ -2697,6 +2710,9 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        let topology_lock = self
+            .index_store_ref()
+            .collection_topology_lock(&query.table);
         let effective_filter = effective_delete_filter(query);
 
         // Find the rows that match the WHERE clause. The "find target
@@ -2708,7 +2724,10 @@ impl RedDBRuntime {
             effective_filter.as_ref(),
             None,
         );
-        let ids_to_delete = scan.find_target_ids()?;
+        let ids_to_delete = {
+            let _topology_guard = topology_lock.read();
+            scan.find_target_ids()?
+        };
 
         // For event-enabled collections, snapshot the pre-delete state
         // before rows are physically removed.
@@ -2722,7 +2741,13 @@ impl RedDBRuntime {
 
         let mut affected: u64 = 0;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            let (count, lsns) = self.delete_entities_batch(&query.table, chunk)?;
+            let (count, lsns) =
+                self.delete_entities_batch(&query.table, chunk, topology_lock.read())?;
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &query.table,
+                super::index_store::MutationTestPhase::BeforeEvents,
+            );
             affected += count;
             if needs_delete_events && !lsns.is_empty() {
                 // lsns.len() == actually-deleted entities; align with chunk ids.

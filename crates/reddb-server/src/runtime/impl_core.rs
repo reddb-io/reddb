@@ -3181,20 +3181,47 @@ impl RedDBRuntime {
         conn_id: u64,
         stamper_xid: u64,
     ) -> RedDBResult<usize> {
-        let mut guard = self.inner.pending_versioned_updates.write();
-        let Some(pending) = guard.get_mut(&conn_id) else {
-            return Ok(0);
+        // Snapshot undo identities without retaining the journal while waiting
+        // for topology. Writers take topology before recording their undo entry.
+        let candidates = {
+            let guard = self.inner.pending_versioned_updates.read();
+            let Some(pending) = guard.get(&conn_id) else {
+                return Ok(0);
+            };
+            pending
+                .iter()
+                .rev()
+                .filter(|entry| entry.3 >= stamper_xid)
+                .cloned()
+                .collect::<Vec<_>>()
         };
         let mut reverted = 0usize;
-        for (collection, old_id, new_id, xid, previous_xmax) in pending.iter().rev() {
-            if *xid >= stamper_xid {
-                self.revive_versioned_update(collection, *old_id, *new_id, *xid, *previous_xmax)?;
-                reverted += 1;
+        for candidate in candidates {
+            let (collection, old_id, new_id, xid, previous_xmax) = &candidate;
+            let topology_lock = self.index_store_ref().collection_topology_lock(collection);
+            let topology_guard = topology_lock.read();
+            let mut guard = self.inner.pending_versioned_updates.write();
+            let Some(pending) = guard.get_mut(&conn_id) else {
+                continue;
+            };
+            // Revalidate after waiting. Remove only successfully restored entries;
+            // an error leaves this entry and the remaining undo journal intact.
+            let Some(position) = pending.iter().rposition(|entry| entry == &candidate) else {
+                continue;
+            };
+            self.revive_versioned_update(
+                collection,
+                *old_id,
+                *new_id,
+                *xid,
+                *previous_xmax,
+                topology_guard,
+            )?;
+            pending.remove(position);
+            reverted += 1;
+            if pending.is_empty() {
+                guard.remove(&conn_id);
             }
-        }
-        pending.retain(|(_, _, _, xid, _)| *xid < stamper_xid);
-        if pending.is_empty() {
-            guard.remove(&conn_id);
         }
         Ok(reverted)
     }

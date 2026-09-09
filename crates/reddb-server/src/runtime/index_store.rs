@@ -1259,6 +1259,16 @@ impl IndexMethodKind {
 /// so this default is only a structural placeholder.
 pub(crate) const DEFAULT_H3_RESOLUTION: u8 = 9;
 
+#[cfg(test)]
+type MutationTestHook = std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + Sync>;
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MutationTestPhase {
+    StoragePublished,
+    BeforeEvents,
+}
+
 /// Unified index store aggregating all secondary index managers.
 pub struct IndexStore {
     pub hash: HashIndexManager,
@@ -1271,6 +1281,8 @@ pub struct IndexStore {
     topology: RwLock<HashMap<String, std::sync::Arc<RwLock<()>>>>,
     #[cfg(test)]
     pub(super) before_build: parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(super) mutation_hook: parking_lot::Mutex<Option<MutationTestHook>>,
 }
 
 impl IndexStore {
@@ -1283,6 +1295,16 @@ impl IndexStore {
             topology: RwLock::new(HashMap::new()),
             #[cfg(test)]
             before_build: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            mutation_hook: parking_lot::Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mutation_test_hook(&self, collection: &str, phase: MutationTestPhase) {
+        let hook = self.mutation_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook(collection, phase);
         }
     }
 
