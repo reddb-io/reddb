@@ -11,6 +11,8 @@ use reddb_types::Value;
 pub(super) struct MemoryReservations {
     pub(super) reserved_bytes: u64,
     pub(super) completed_bytes: u64,
+    #[cfg(test)]
+    pub(super) samples: usize,
 }
 
 /// Keep this guard through all storage/index writes, including failure cleanup.
@@ -34,11 +36,88 @@ impl Drop for MemoryReservation<'_> {
     }
 }
 
+/// Amortize pool sampling across small post-images while keeping every byte
+/// reserved before publication. At most one quantum of unused slack is held.
+pub(super) struct MutationMemoryReservations<'runtime> {
+    runtime: &'runtime crate::RedDBRuntime,
+    guards: Vec<MemoryReservation<'runtime>>,
+    available_bytes: u64,
+}
+
+impl<'runtime> MutationMemoryReservations<'runtime> {
+    pub(super) fn new(runtime: &'runtime crate::RedDBRuntime) -> Self {
+        Self {
+            runtime,
+            guards: Vec::new(),
+            available_bytes: 0,
+        }
+    }
+
+    pub(super) fn admit(
+        &mut self,
+        applied: &crate::application::entity::AppliedEntityMutation,
+    ) -> RedDBResult<()> {
+        const RESERVATION_QUANTUM_BYTES: u64 = 64 * 1024;
+        let growth = self.runtime.estimate_entity_mutation_growth(applied);
+        if growth > self.available_bytes {
+            let needed = growth - self.available_bytes;
+            // Extra slack is optional. If it does not fit, apply the ordinary
+            // reclamation/denial path only to the bytes this mutation needs.
+            let guard = match self
+                .runtime
+                .try_reserve_memory_growth(needed.max(RESERVATION_QUANTUM_BYTES))
+            {
+                Some(guard) => guard,
+                None => self.runtime.admit_non_evictable_growth(
+                    MemoryPool::SegmentArena,
+                    "update",
+                    needed,
+                )?,
+            };
+            self.available_bytes += guard.bytes;
+            self.guards.push(guard);
+        }
+        self.available_bytes -= growth;
+        Ok(())
+    }
+}
+
 const MAX_PRESSURE_TICKS: usize = 64;
 const FIELD_BASE_BYTES: u64 = 64;
 const INDEX_ENTRY_BYTES: u64 = 96;
 
 impl crate::RedDBRuntime {
+    pub(crate) fn admit_entity_mutation(
+        &self,
+        applied: &crate::application::entity::AppliedEntityMutation,
+    ) -> RedDBResult<MemoryReservation<'_>> {
+        self.admit_non_evictable_growth(
+            MemoryPool::SegmentArena,
+            "update",
+            self.estimate_entity_mutation_growth(applied),
+        )
+    }
+
+    fn estimate_entity_mutation_growth(
+        &self,
+        applied: &crate::application::entity::AppliedEntityMutation,
+    ) -> u64 {
+        let entity_bytes = crate::storage::unified::memory_size::entity_bytes(&applied.entity)
+            .saturating_add(
+                crate::storage::unified::memory_size::entity_zone_growth_bytes(&applied.entity),
+            );
+        // Reserve the full replacement, including in-place PATCH: the old
+        // payload remains resident until publication and another writer may
+        // replace it before we do. A stale pre-image must never grant credit.
+        let index_growth = self.index_store_ref().estimate_update_growth(
+            &applied.collection,
+            &applied.pre_mutation_fields,
+            &applied.entity,
+            applied.replaced_entity.is_some(),
+        );
+        (entity_bytes as u64).saturating_add(index_growth)
+    }
+
     pub(crate) fn admit_non_evictable_growth(
         &self,
         pool: MemoryPool,
@@ -129,7 +208,16 @@ impl crate::RedDBRuntime {
 }
 
 pub(crate) fn estimate_row_growth(fields: &[(String, Value)]) -> u64 {
-    entity_base_bytes().saturating_add(estimate_value_fields_bytes(fields))
+    entity_base_bytes()
+        .saturating_add(estimate_value_fields_bytes(fields))
+        .saturating_add(
+            fields
+                .iter()
+                .map(|(_, value)| {
+                    crate::storage::unified::memory_size::zone_growth_bytes(value) as u64
+                })
+                .fold(0, u64::saturating_add),
+        )
 }
 
 pub(crate) fn estimate_timeseries_point_growth(
@@ -171,18 +259,7 @@ pub(crate) fn estimate_index_growth(rows: &[Vec<(String, Value)>], columns: &[St
 }
 
 fn estimate_value_bytes(value: &Value) -> u64 {
-    match value {
-        Value::Text(text) => text.len() as u64,
-        Value::Blob(bytes) | Value::Json(bytes) => bytes.len() as u64,
-        Value::Vector(values) => values.len() as u64 * 4,
-        Value::NodeRef(value)
-        | Value::EdgeRef(value)
-        | Value::Email(value)
-        | Value::Url(value)
-        | Value::RowRef(value, _)
-        | Value::VectorRef(value, _) => value.len() as u64,
-        _ => 16,
-    }
+    (crate::storage::unified::memory_size::value_heap_bytes(value) as u64).max(16)
 }
 
 fn entity_base_bytes() -> u64 {

@@ -304,6 +304,21 @@ pub struct ColZone {
 }
 
 impl ColZone {
+    fn payload_bytes(&self) -> usize {
+        super::memory_size::value_heap_bytes(&self.min)
+            .saturating_add(super::memory_size::value_heap_bytes(&self.max))
+            .saturating_add(
+                self.min_key
+                    .as_ref()
+                    .map_or(0, super::memory_size::canonical_heap_bytes),
+            )
+            .saturating_add(
+                self.max_key
+                    .as_ref()
+                    .map_or(0, super::memory_size::canonical_heap_bytes),
+            )
+    }
+
     fn new(v: Value) -> Self {
         Self {
             min_key: value_to_canonical_key(&v),
@@ -524,6 +539,7 @@ pub struct GrowingSegment {
 
     /// Per-column zone maps: col_name → (min, max) for segment pruning
     col_zones: HashMap<String, ColZone>,
+    zone_payload_bytes: usize,
     /// Sealed-only minmax-multi summaries built from canonical ordering.
     sealed_col_zones: HashMap<String, MultiColZone>,
 
@@ -695,6 +711,7 @@ impl GrowingSegment {
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
             col_zones: HashMap::new(),
+            zone_payload_bytes: 0,
             sealed_col_zones: HashMap::new(),
             sequence: AtomicU64::new(0),
             memory_bytes: AtomicU64::new(0),
@@ -762,7 +779,9 @@ impl GrowingSegment {
                     .filter(|slot| slot.id == entity.id)
                 {
                     let snapshot = UpdateIndexSnapshot::from_entity(slot);
+                    let old_bytes = Self::estimate_entity_size(slot);
                     slot.clone_from(entity);
+                    self.replace_entity_memory(old_bytes, Self::estimate_entity_size(entity));
                     return Ok(snapshot);
                 }
             }
@@ -770,14 +789,18 @@ impl GrowingSegment {
                 return Err(SegmentError::NotFound(entity.id));
             };
             let snapshot = UpdateIndexSnapshot::from_entity(slot);
+            let old_bytes = Self::estimate_entity_size(slot);
             slot.clone_from(entity);
+            self.replace_entity_memory(old_bytes, Self::estimate_entity_size(entity));
             Ok(snapshot)
         } else {
             let Some(slot) = self.entities.get_mut(&entity.id) else {
                 return Err(SegmentError::NotFound(entity.id));
             };
             let snapshot = UpdateIndexSnapshot::from_entity(slot);
+            let old_bytes = Self::estimate_entity_size(slot);
             slot.clone_from(entity);
+            self.replace_entity_memory(old_bytes, Self::estimate_entity_size(entity));
             Ok(snapshot)
         }
     }
@@ -937,12 +960,21 @@ impl GrowingSegment {
         self.memory_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    fn replace_entity_memory(&self, previous: usize, current: usize) {
+        if current >= previous {
+            self.add_memory(current - previous);
+        } else {
+            self.release_memory(previous - current);
+        }
+    }
+
     /// This segment's approximate resident bytes. One relaxed load — the
     /// arena's contribution to the shared accounting pool (ADR 0073 §2).
     /// Unlike `stats()` this never walks the entity map, so a stats reader
     /// does not pay `O(entities)` to observe memory.
     pub fn memory_bytes(&self) -> u64 {
         self.memory_bytes.load(Ordering::Relaxed)
+            + self.zone_payload_bytes as u64
             + self.unique_key_lookup_bytes.load(Ordering::Relaxed)
             + self.graph_read_index_bytes.load(Ordering::Relaxed)
             + (self.hash_scan_ids.capacity() * std::mem::size_of::<EntityId>()) as u64
@@ -1061,29 +1093,7 @@ impl GrowingSegment {
 
     /// Estimate memory for an entity
     fn estimate_entity_size(entity: &UnifiedEntity) -> usize {
-        let mut size = std::mem::size_of::<UnifiedEntity>();
-
-        // Add data size
-        size += match &entity.data {
-            EntityData::Row(row) => row.columns.len() * 64, // Rough estimate
-            EntityData::Node(node) => node.properties.len() * 128,
-            EntityData::Edge(edge) => edge.properties.len() * 128,
-            EntityData::Vector(vec) => {
-                vec.dense.len() * 4 + vec.sparse.as_ref().map_or(0, |s| s.indices.len() * 8)
-            }
-            EntityData::TimeSeries(_) => 64,
-            EntityData::QueueMessage(_) => 128,
-        };
-
-        // Add embeddings
-        for emb in entity.embeddings() {
-            size += emb.vector.len() * 4 + emb.name.len() + emb.model.len();
-        }
-
-        // Add cross-refs
-        size += std::mem::size_of_val(entity.cross_refs());
-
-        size
+        super::memory_size::entity_bytes(entity)
     }
 
     /// Update per-column zone maps from a newly inserted entity's fields.
@@ -1093,30 +1103,37 @@ impl GrowingSegment {
     /// - **Positional** (`row.columns` + `row.schema`): bulk-inserted entities stored as `Vec<Value>`
     ///   keyed by the shared schema. Previously this path was silently skipped, meaning zone maps
     ///   were always empty for bulk-loaded tables and segment pruning never fired.
+    fn update_column_zone(&mut self, column: &str, value: &Value) {
+        if matches!(value, Value::Null) {
+            return;
+        }
+        match self.col_zones.entry(column.to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let before = entry.get().payload_bytes();
+                entry.get_mut().update(value);
+                self.zone_payload_bytes = self
+                    .zone_payload_bytes
+                    .saturating_sub(before)
+                    .saturating_add(entry.get().payload_bytes());
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let zone = ColZone::new(value.clone());
+                self.zone_payload_bytes =
+                    self.zone_payload_bytes.saturating_add(zone.payload_bytes());
+                entry.insert(zone);
+            }
+        }
+    }
+
     fn update_col_zones_from_entity(&mut self, entity: &UnifiedEntity) {
         if let EntityData::Row(row) = &entity.data {
             if let Some(named) = &row.named {
-                // Individual insert path — HashMap fields
-                for (col, val) in named {
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    self.col_zones
-                        .entry(col.clone())
-                        .and_modify(|z| z.update(val))
-                        .or_insert_with(|| ColZone::new(val.clone()));
+                for (column, value) in named {
+                    self.update_column_zone(column, value);
                 }
             } else if let Some(schema) = &row.schema {
-                // Bulk-insert (columnar) path — positional Vec<Value> + shared schema.
-                // Previously skipped: zone maps were always empty for bulk-loaded tables.
-                for (col, val) in schema.iter().zip(row.columns.iter()) {
-                    if matches!(val, Value::Null) {
-                        continue;
-                    }
-                    self.col_zones
-                        .entry(col.clone())
-                        .and_modify(|z| z.update(val))
-                        .or_insert_with(|| ColZone::new(val.clone()));
+                for (column, value) in schema.iter().zip(&row.columns) {
+                    self.update_column_zone(column, value);
                 }
             }
         }
@@ -1190,6 +1207,21 @@ impl GrowingSegment {
             }
         }
 
+        let previous = self
+            .sealed_col_zones
+            .values()
+            .flat_map(|zones| &zones.intervals)
+            .map(ColZone::payload_bytes)
+            .fold(0, usize::saturating_add);
+        let current = sealed_col_zones
+            .values()
+            .flat_map(|zones| &zones.intervals)
+            .map(ColZone::payload_bytes)
+            .fold(0, usize::saturating_add);
+        self.zone_payload_bytes = self
+            .zone_payload_bytes
+            .saturating_sub(previous)
+            .saturating_add(current);
         self.sealed_col_zones = sealed_col_zones;
     }
 
@@ -1747,6 +1779,10 @@ impl GrowingSegment {
                 // instead of the old ncols×nrows.
                 let mut iter = values.into_iter();
                 if let Some(first) = iter.next() {
+                    let previous = self
+                        .col_zones
+                        .get(col_name)
+                        .map_or(0, ColZone::payload_bytes);
                     let zone = self
                         .col_zones
                         .entry(col_name.clone())
@@ -1755,14 +1791,15 @@ impl GrowingSegment {
                     for v in iter {
                         zone.update(&v);
                     }
+                    self.zone_payload_bytes = self
+                        .zone_payload_bytes
+                        .saturating_sub(previous)
+                        .saturating_add(zone.payload_bytes());
                 }
             }
         }
         for (col, val) in named_zone_updates {
-            self.col_zones
-                .entry(col)
-                .and_modify(|z| z.update(&val))
-                .or_insert_with(|| ColZone::new(val));
+            self.update_column_zone(&col, &val);
         }
 
         self.add_memory(batch_bytes);

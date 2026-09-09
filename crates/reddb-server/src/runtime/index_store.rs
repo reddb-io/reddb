@@ -1392,6 +1392,42 @@ impl IndexStore {
         growth
     }
 
+    /// Reserve a new physical version's entries, or changed in-place keys.
+    /// Replaced keys are not credited before publication: other writers must
+    /// not spend space whose removal has not completed yet.
+    pub(crate) fn estimate_update_growth(
+        &self,
+        collection: &str,
+        before: &[(String, Value)],
+        entity: &crate::storage::UnifiedEntity,
+        versioned: bool,
+    ) -> u64 {
+        let registry = self.registry.read();
+        let mut indexes = registry
+            .values()
+            .filter(|index| index.collection == collection)
+            .peekable();
+        if indexes.peek().is_none() {
+            return 0;
+        }
+        let crate::storage::EntityData::Row(row) = &entity.data else {
+            return 0;
+        };
+        let after: Vec<_> = row
+            .iter_fields()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
+        indexes
+            .filter(|index| {
+                versioned
+                    || index.columns.iter().any(|column| {
+                        index_field_value(before, column) != index_field_value(&after, column)
+                    })
+            })
+            .map(|index| estimate_registered_index_growth(index, &after))
+            .fold(0, u64::saturating_add)
+    }
+
     /// Build physical backing. Runtime callers hold exclusive collection topology
     /// from before collecting entities until after registering metadata.
     pub fn create_index(
