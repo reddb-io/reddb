@@ -40,6 +40,10 @@ impl RedDBRuntime {
         &self,
         reservations: &mut super::memory_admission::MemoryReservations,
     ) {
+        #[cfg(test)]
+        {
+            reservations.samples += 1;
+        }
         let accounting = self.memory_accounting();
         let store = self.db().store();
 

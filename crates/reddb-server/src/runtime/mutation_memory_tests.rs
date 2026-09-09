@@ -537,3 +537,58 @@ fn mutation_memory_native_vector_content_and_graph_type_are_governed() {
         );
     }
 }
+
+#[test]
+fn mutation_memory_batch_amortizes_pool_sampling() {
+    let runtime = seeded_runtime(4 * 1024 * 1024, false);
+    for _ in 1..100 {
+        runtime
+            .execute_query("INSERT INTO growth (payload) VALUES ('small')")
+            .expect("seed");
+    }
+    let before = runtime.inner.memory_reservations.lock().samples;
+    runtime
+        .execute_query("UPDATE growth SET payload = 'updated'")
+        .expect("batch update");
+    let samples = runtime.inner.memory_reservations.lock().samples - before;
+    assert!(
+        samples < 10,
+        "100 small mutations must not sample every pool per row: {samples}"
+    );
+    assert_eq!(
+        runtime
+            .execute_query("SELECT payload FROM growth WHERE payload = 'updated'")
+            .expect("readback")
+            .result
+            .records
+            .len(),
+        100
+    );
+}
+
+#[test]
+fn mutation_memory_batch_optional_slack_cannot_deny_a_fitting_update() {
+    let runtime = seeded_runtime(128 * 1024, false);
+    runtime.refresh_memory_accounting();
+    let headroom =
+        runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+    let _held = runtime
+        .admit_non_evictable_growth(
+            crate::storage::memory_pools::MemoryPool::IndexMemory,
+            "competing writer",
+            headroom - 8 * 1024,
+        )
+        .expect("leave less than a reservation quantum");
+    runtime
+        .execute_query("UPDATE growth SET payload = 'updated'")
+        .expect("the replacement fits without speculative slack");
+    assert_eq!(
+        runtime
+            .execute_query("SELECT payload FROM growth WHERE payload = 'updated'")
+            .expect("readback")
+            .result
+            .records
+            .len(),
+        1
+    );
+}

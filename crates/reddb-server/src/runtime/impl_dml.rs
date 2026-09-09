@@ -2204,7 +2204,7 @@ impl RedDBRuntime {
         // autocommit chunks visible. Prepared payload is bounded by admission.
         let topology_guard = topology_lock.read();
         let mut prepared = Vec::new();
-        let mut reservations = Vec::new();
+        let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
             for entity in manager.get_many(chunk).into_iter().flatten() {
                 let assignments =
@@ -2215,7 +2215,7 @@ impl RedDBRuntime {
                     &compiled_plan,
                     assignments,
                 )?;
-                reservations.push(self.admit_entity_mutation(&applied)?);
+                reservations.admit(&applied)?;
                 touched_ids.push(applied.id);
                 prepared.push(applied);
             }
@@ -2345,7 +2345,7 @@ impl RedDBRuntime {
         let _rmw_guards: Vec<_> = lock_entries.iter().map(|entry| entry.2.lock()).collect();
 
         let mut applied_chunk = Vec::new();
-        let mut reservations = Vec::new();
+        let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for (_, logical_id, _) in &lock_entries {
             let Some(entity) = resolve_update_entity_by_logical_id(self, &query.table, *logical_id)
             else {
@@ -2371,7 +2371,7 @@ impl RedDBRuntime {
                 compiled_plan,
                 assignments,
             )?;
-            reservations.push(self.admit_entity_mutation(&applied)?);
+            reservations.admit(&applied)?;
             touched_ids.push(applied.id);
             applied_chunk.push(applied);
         }
