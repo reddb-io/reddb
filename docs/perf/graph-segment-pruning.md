@@ -44,8 +44,9 @@ locks, and batch fetches still recheck the captured snapshot before RLS.
   with the full scan, checks old/new physical IDs explicitly, counts visited
   candidates and checks early termination. Node passes inspect three visible
   candidates; edge passes inspect two, excluding the 128-vector segment.
-- A persistent runtime test checks MATCH results before/after clean reopen,
-  read-own-write after updating a sealed graph, and rollback. This is a clean
+- A persistent runtime test checks MATCH results before/after clean reopen and
+  after rolling back a versioned update to a sealed graph. Versioning is enabled
+  explicitly; SELECT checks read-own-write before rollback. This is a clean
   recovery regression, not a power-loss or crash-injection test.
 
 ```sh
@@ -73,3 +74,22 @@ remain unprunable until reconstruction. Intermixed graph/vector items still
 require a candidate scan. Stable snapshot cursors, projection pushdown and
 controlled optimized benchmarks remain separate work. Reduced inspected work
 does not establish SQLite, PostgreSQL or SurrealDB throughput parity.
+
+## Transaction composition gaps found during validation
+
+The initial fixture assumed that a non-versioned graph UPDATE would be undone
+by ROLLBACK. A raw storage probe showed the changed value still present: the
+existing `apply_loaded_patch_entity_core`/`persist_applied_entity_mutations`
+path uses in-place last-writer-wins for non-versioned graphs. With
+`VcsUseCases::set_versioned("mixed_graph", true)`, rollback restores the node.
+Those mutation paths are unchanged by this PR.
+
+A second probe found a separate logical-identity gap: after a versioned node
+UPDATE inside BEGIN, SELECT sees the changed name, but MATCH across its existing
+edge returns no row. After ROLLBACK, MATCH returns the original path again.
+Materialization still keys nodes by physical entity ID; physical versions have
+new IDs while edges retain their endpoint references. This PR does not fix
+logical identity resolution, change default transaction semantics or claim
+MATCH read-own-write correctness across versioned graph updates. That is a
+priority follow-up, including edges created before and after several versions,
+commit/rollback/savepoints, RLS and historical snapshots.

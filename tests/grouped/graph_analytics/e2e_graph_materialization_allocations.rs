@@ -216,7 +216,7 @@ fn graph_budget_skips_segments_without_graph_items() {
 }
 
 #[test]
-fn graph_pruning_rebuilds_after_reopen_and_preserves_rollback() {
+fn graph_pruning_rebuilds_after_reopen_and_versioned_rollback() {
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("graph.rdb");
     for reopening in [false, true] {
@@ -234,6 +234,11 @@ fn graph_pruning_rebuilds_after_reopen_and_preserves_rollback() {
                 runtime.execute_query(query).expect("persistent graph");
             }
         }
+        // Non-versioned graph PATCH/UPDATE uses in-place last-writer-wins.
+        // Opt into physical versions for the transaction restoration check.
+        reddb::application::VcsUseCases::new(&runtime)
+            .set_versioned("mixed_graph", true)
+            .expect("versioned graph");
         runtime
             .db()
             .store()
@@ -246,7 +251,9 @@ fn graph_pruning_rebuilds_after_reopen_and_preserves_rollback() {
         runtime
             .execute_query("UPDATE mixed_graph NODES SET name = 'Changed' WHERE name = 'Bob'")
             .expect("update node");
-        let changed = runtime.execute_query(GRAPH_QUERY).expect("read own write");
+        let changed = runtime
+            .execute_query("SELECT name FROM mixed_graph WHERE name = 'Changed'")
+            .expect("read own versioned write");
         assert_eq!(changed.result.records.len(), 1);
         assert_eq!(
             changed.result.records[0].get("name"),
