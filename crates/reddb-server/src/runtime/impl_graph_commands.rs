@@ -120,34 +120,15 @@ impl RedDBRuntime {
                     // Per-node property lookup (#423). Uses the same label
                     // resolution as NEIGHBORHOOD/TRAVERSE so '<label>' and
                     // '<numeric id>' both work.
-                    let graph =
-                        materialize_graph_with_projection(self.inner.db.store().as_ref(), None)?;
-                    let resolved = resolve_graph_node_id(&graph, node_ref)?;
-                    let stored = graph
-                        .get_node(&resolved)
-                        .ok_or_else(|| RedDBError::NotFound(node_ref.to_string()))?;
-                    let node_type = self
-                        .inner
-                        .db
-                        .store()
-                        .query_all(|entity| {
-                            entity.id.raw().to_string() == resolved
-                                && matches!(
-                                    entity.kind,
-                                    crate::storage::unified::EntityKind::GraphNode(_)
-                                )
-                        })
-                        .into_iter()
-                        .find_map(|(_, entity)| match entity.kind {
-                            crate::storage::unified::EntityKind::GraphNode(node) => {
-                                Some(node.node_type)
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| stored.node_type.clone());
-                    let all_props =
-                        materialize_graph_node_properties(self.inner.db.store().as_ref())?;
-                    let props = all_props.get(&resolved).cloned().unwrap_or_default();
+                    let entity = resolve_graph_node_properties(self, node_ref)?;
+                    let node_id = entity.logical_id().raw().to_string();
+                    let EntityKind::GraphNode(node) = entity.kind else {
+                        unreachable!("property resolver returns only graph nodes");
+                    };
+                    let props = match entity.data {
+                        EntityData::Node(data) => data.properties,
+                        _ => HashMap::new(),
+                    };
 
                     // Fixed columns first, then property keys in sorted order so
                     // the schema is stable across snapshots / wire renders.
@@ -162,9 +143,9 @@ impl RedDBRuntime {
                     }
                     let mut result = UnifiedResult::with_columns(columns);
                     let mut record = UnifiedRecord::new();
-                    record.set("node_id", Value::text(stored.id.clone()));
-                    record.set("label", Value::text(stored.label.clone()));
-                    record.set("node_type", Value::text(node_type));
+                    record.set("node_id", Value::text(node_id));
+                    record.set("label", Value::text(node.label));
+                    record.set("node_type", Value::text(node.node_type));
                     for k in &prop_keys {
                         if let Some(v) = props.get(*k) {
                             record.set(k.as_str(), v.clone());

@@ -327,10 +327,7 @@ impl RedDBRuntime {
     )> {
         use crate::storage::engine::graph_algorithms;
 
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
+        let graph = super::graph_dsl::materialize_graph_with_projection(self, None)?;
         let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
         let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
             .iter_all_edges()
@@ -635,10 +632,7 @@ impl RedDBRuntime {
         // projection uses the full graph store (the same result
         // `active_graph_projection` yields when no projection is registered).
         // Materialization never mutates any store.
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
+        let graph = super::graph_dsl::materialize_graph_with_projection(self, None)?;
 
         // Materialize abstract inputs for the pure algorithm.
         let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
@@ -679,10 +673,7 @@ impl RedDBRuntime {
         use crate::storage::query::unified::UnifiedResult;
         use reddb_types::Value;
 
-        let graph = super::graph_dsl::materialize_graph_with_projection(
-            self.inner.db.store().as_ref(),
-            None,
-        )?;
+        let graph = super::graph_dsl::materialize_graph_with_projection(self, None)?;
 
         let nodes: Vec<String> = graph.iter_nodes().map(|n| n.id.clone()).collect();
         let edges: Vec<(String, String, graph_algorithms::Weight)> = graph
@@ -736,6 +727,18 @@ impl RedDBRuntime {
         std::collections::HashMap<String, std::collections::HashMap<String, reddb_types::Value>>,
         crate::storage::query::unified::EdgeProperties,
     )> {
+        self.materialize_graph_filtered(None, true)
+    }
+
+    pub(super) fn materialize_graph_filtered(
+        &self,
+        projection: Option<&RuntimeGraphProjection>,
+        collect_properties: bool,
+    ) -> RedDBResult<(
+        crate::storage::engine::GraphStore,
+        std::collections::HashMap<String, std::collections::HashMap<String, reddb_types::Value>>,
+        crate::storage::query::unified::EdgeProperties,
+    )> {
         use crate::storage::engine::GraphStore;
         use crate::storage::unified::entity::{EntityData, EntityKind};
         use reddb_rql::ast::{PolicyAction, PolicyTargetKind};
@@ -760,6 +763,11 @@ impl RedDBRuntime {
 
         let collections = store.list_collections();
 
+        let node_labels =
+            projection.and_then(|p| normalize_token_filter_list(p.node_labels.clone()));
+        let node_types = projection.and_then(|p| normalize_token_filter_list(p.node_types.clone()));
+        let edge_labels = projection.and_then(|p| normalize_edge_filters(p.edge_labels.clone()));
+
         // First pass — gather nodes.
         for collection in &collections {
             let Some(manager) = store.get_collection(collection) else {
@@ -773,6 +781,14 @@ impl RedDBRuntime {
                     let EntityKind::GraphNode(ref node) = entity.kind else {
                         return Ok(());
                     };
+                    if !matches_graph_node_projection(
+                        &node.label,
+                        &node.node_type,
+                        node_labels.as_ref(),
+                        node_types.as_ref(),
+                    ) {
+                        return Ok(());
+                    }
                     if !node_passes_rls(self, collection, role.as_deref(), &mut node_rls, &entity) {
                         return Ok(());
                     }
@@ -785,8 +801,10 @@ impl RedDBRuntime {
                         )
                         .map_err(|err| RedDBError::Query(err.to_string()))?;
                     allowed_nodes.insert(id_str.clone());
-                    if let EntityData::Node(node_data) = &entity.data {
-                        node_properties.insert(id_str, node_data.properties.clone());
+                    if collect_properties {
+                        if let EntityData::Node(node_data) = &entity.data {
+                            node_properties.insert(id_str, node_data.properties.clone());
+                        }
                     }
                     Ok(())
                 },
@@ -808,6 +826,9 @@ impl RedDBRuntime {
                     let EntityKind::GraphEdge(ref edge) = entity.kind else {
                         return Ok(());
                     };
+                    if !matches_graph_edge_projection(&edge.label, edge_labels.as_ref()) {
+                        return Ok(());
+                    }
                     if !edge_passes_rls(self, collection, role.as_deref(), &mut edge_rls, &entity) {
                         return Ok(());
                     }
@@ -839,11 +860,13 @@ impl RedDBRuntime {
                     graph
                         .add_edge_with_label(from_node, to_node, &edge_label, weight)
                         .map_err(|err| RedDBError::Query(err.to_string()))?;
-                    if let EntityData::Edge(edge_data) = &entity.data {
-                        edge_properties.insert(
-                            (from_node.to_string(), edge_label, to_node.to_string()),
-                            edge_data.properties.clone(),
-                        );
+                    if collect_properties {
+                        if let EntityData::Edge(edge_data) = &entity.data {
+                            edge_properties.insert(
+                                (from_node.to_string(), edge_label, to_node.to_string()),
+                                edge_data.properties.clone(),
+                            );
+                        }
                     }
                     Ok(())
                 },
@@ -903,7 +926,7 @@ fn resolve_materialized_graph_endpoint<'a>(
 /// RLS may re-enter storage, so only collect IDs while holding segment locks.
 /// Filter by entity kind before cloning payloads or collecting IDs. Collections
 /// can contain mixed kinds. Ordinary queries retain the parallel scan path.
-fn visit_graph_materialization_entities(
+pub(super) fn visit_graph_materialization_entities(
     manager: &crate::storage::unified::manager::SegmentManager,
     snapshot: Option<&super::impl_core::SnapshotContext>,
     kind: GraphEntityKind,

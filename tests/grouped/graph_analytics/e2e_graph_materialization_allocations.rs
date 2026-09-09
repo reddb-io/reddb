@@ -95,7 +95,11 @@ fn assert_graph_result(result: &RuntimeQueryResult) {
     );
 }
 
-fn measured_query(runtime: &RedDBRuntime, query: &str) -> (usize, usize) {
+fn measured_query(
+    runtime: &RedDBRuntime,
+    query: &str,
+    validate: impl FnOnce(&RuntimeQueryResult),
+) -> (usize, usize) {
     struct AllocationScope;
     impl Drop for AllocationScope {
         fn drop(&mut self) {
@@ -108,7 +112,7 @@ fn measured_query(runtime: &RedDBRuntime, query: &str) -> (usize, usize) {
     let scope = AllocationScope;
     let result = runtime.execute_query(query);
     drop(scope);
-    assert_graph_result(&result.expect("graph read"));
+    validate(&result.expect("graph read"));
     (
         ALLOCATED_BYTES.with(Cell::get),
         LARGEST_ALLOCATION.with(Cell::get),
@@ -122,9 +126,9 @@ fn graph_reads_do_not_copy_vector_payloads_from_mixed_collections() {
     // thread-local allocator observes the entire scan without counting other tests.
     for sealed in [false, true] {
         let runtime = mixed_graph_fixture(sealed, 64);
-        for query in [GRAPH_QUERY, GRAPH_CALL] {
+        for query in [GRAPH_QUERY, GRAPH_CALL, "GRAPH PROPERTIES 'bob'"] {
             assert_graph_result(&runtime.execute_query(query).expect("warm query"));
-            let (allocated_bytes, largest) = measured_query(&runtime, query);
+            let (allocated_bytes, largest) = measured_query(&runtime, query, assert_graph_result);
             println!(
                 "sealed={sealed} query={query} allocated_bytes={allocated_bytes} largest={largest}"
             );
@@ -140,6 +144,40 @@ fn graph_reads_do_not_copy_vector_payloads_from_mixed_collections() {
         assert!(
             allocated_bytes < 512 * 1024,
             "graph read allocated {allocated_bytes} bytes"
+        );
+    }
+}
+
+#[test]
+fn native_topology_does_not_copy_unrelated_vector_payloads() {
+    for sealed in [false, true] {
+        let runtime = mixed_graph_fixture(sealed, 64);
+        let query = "GRAPH NEIGHBORHOOD 'alice' DEPTH 2";
+        runtime
+            .execute_query(query)
+            .expect("warm native graph read");
+        let (allocated_bytes, largest) = measured_query(&runtime, query, |result| {
+            let mut labels: Vec<_> = result
+                .result
+                .records
+                .iter()
+                .map(|row| {
+                    row.get("label")
+                        .expect("label")
+                        .as_text()
+                        .expect("text label")
+                })
+                .collect();
+            labels.sort();
+            assert_eq!(labels, ["alice", "bob"]);
+        });
+        assert!(
+            largest < 64 * 1024,
+            "copied unrelated payload: {largest} bytes"
+        );
+        assert!(
+            allocated_bytes < 512 * 1024,
+            "native graph allocated {allocated_bytes} bytes"
         );
     }
 }

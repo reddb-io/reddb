@@ -36,7 +36,9 @@ There are no new writes, fsyncs, network calls, persisted fields or WAL formats.
 MATCH node identity projections now remain logical across UPDATE, aligning with
 the immutable `rid` contract; non-versioned IDs are unchanged. This change is
 limited to the shared runtime MATCH/path materializer and RQL label admission.
-Other native graph materializers require their own identity audit.
+The [native graph follow-up](native-graph-identity.md) extends the same pipeline
+to native topology reads and fixes per-node properties. Lazy graph search
+expansion remains separate.
 
 Versioning remains explicit. The existing in-place mutation semantics of
 non-versioned graph collections are outside this correction. Clean reopen tests
