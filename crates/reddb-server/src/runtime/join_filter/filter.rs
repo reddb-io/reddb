@@ -22,7 +22,14 @@ pub(in crate::runtime::join_filter) struct RecordRow<'a> {
 
 impl crate::storage::query::evaluator::Row for RecordRow<'_> {
     fn get(&self, field: &FieldRef) -> Option<Value> {
-        resolve_runtime_field(self.record, field, self.table_name, self.table_alias)
+        resolve_runtime_field(self.record, field, self.table_name, self.table_alias).or_else(|| {
+            // Schemaless document fields may be absent in individual records.
+            // Feed NULL to the typed evaluator without hiding errors in values
+            // that are present or unknown columns on ordinary table rows.
+            (matches!(field, FieldRef::TableColumn { .. })
+                && crate::runtime::query_exec::runtime_record_has_document_capability(self.record))
+            .then_some(Value::Null)
+        })
     }
 }
 

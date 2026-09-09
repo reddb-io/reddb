@@ -2826,6 +2826,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn where_sparse_document_fields_are_null_without_hiding_errors() {
+        let rt = rt();
+        exec(&rt, "CREATE DOCUMENT sparse_values");
+        exec(
+            &rt,
+            r#"INSERT INTO sparse_values DOCUMENT VALUES ({"name":"absent"}), ({"name":"present","n":1})"#,
+        );
+        for predicate in ["n + 1 > 1", "ABS(n) > 0"] {
+            assert_eq!(
+                text_values(
+                    &rt,
+                    &format!("SELECT name FROM sparse_values WHERE {predicate}"),
+                    "name",
+                ),
+                ["present"],
+            );
+        }
+        let error = rt
+            .execute_query("SELECT name FROM sparse_values WHERE n / 0 > 0")
+            .expect_err("present document values must still report arithmetic errors");
+        assert!(error.to_string().contains("division by zero"), "{error}");
+
+        exec(&rt, "CREATE TABLE strict_values (n INT)");
+        exec(&rt, "INSERT INTO strict_values (n) VALUES (1)");
+        let error = rt
+            .execute_query("SELECT n FROM strict_values WHERE missing + 1 > 1")
+            .expect_err("unknown table columns must remain errors");
+        assert!(error.to_string().contains("unknown column"), "{error}");
+    }
+
     fn rid(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
         let result = rt
             .execute_query(&format!("SELECT rid FROM {table} WHERE id = {id}"))
