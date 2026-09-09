@@ -2857,6 +2857,27 @@ mod tests {
         assert!(error.to_string().contains("unknown column"), "{error}");
     }
 
+    #[test]
+    fn where_omitted_nullable_columns_are_null_before_enrichment() {
+        let rt = rt();
+        exec(&rt, "CREATE TABLE nullable_values (id INT, n INT)");
+        exec(&rt, "INSERT INTO nullable_values (id) VALUES (1)");
+        exec(&rt, "INSERT INTO nullable_values (id, n) VALUES (2, 1)");
+        for predicate in ["n + 1 > 1", "ABS(v.n) > 0"] {
+            let result = rt
+                .execute_query(&format!(
+                    "SELECT id FROM nullable_values AS v WHERE {predicate}"
+                ))
+                .expect("omitted nullable columns do not reject the query");
+            assert_eq!(result.result.records.len(), 1);
+            assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(2)));
+        }
+        let error = rt
+            .execute_query("SELECT id FROM nullable_values WHERE n / 0 > 0")
+            .expect_err("present values still report arithmetic failures");
+        assert!(error.to_string().contains("division by zero"), "{error}");
+    }
+
     fn rid(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
         let result = rt
             .execute_query(&format!("SELECT rid FROM {table} WHERE id = {id}"))

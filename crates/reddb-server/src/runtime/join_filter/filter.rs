@@ -15,6 +15,7 @@ pub(in crate::runtime) fn evaluate_runtime_filter(
 /// can look up columns via the same `resolve_runtime_field` path used by
 /// the rest of the runtime filter evaluation.
 pub(in crate::runtime::join_filter) struct RecordRow<'a> {
+    pub(in crate::runtime::join_filter) db: Option<&'a RedDB>,
     pub(in crate::runtime::join_filter) record: &'a UnifiedRecord,
     pub(in crate::runtime::join_filter) table_name: Option<&'a str>,
     pub(in crate::runtime::join_filter) table_alias: Option<&'a str>,
@@ -23,12 +24,33 @@ pub(in crate::runtime::join_filter) struct RecordRow<'a> {
 impl crate::storage::query::evaluator::Row for RecordRow<'_> {
     fn get(&self, field: &FieldRef) -> Option<Value> {
         resolve_runtime_field(self.record, field, self.table_name, self.table_alias).or_else(|| {
-            // Schemaless document fields may be absent in individual records.
-            // Feed NULL to the typed evaluator without hiding errors in values
-            // that are present or unknown columns on ordinary table rows.
-            (matches!(field, FieldRef::TableColumn { .. })
-                && crate::runtime::query_exec::runtime_record_has_document_capability(self.record))
-            .then_some(Value::Null)
+            let FieldRef::TableColumn { table, column } = field else {
+                return None;
+            };
+            if crate::runtime::query_exec::runtime_record_has_document_capability(self.record) {
+                return Some(Value::Null);
+            }
+            if !table.is_empty()
+                && !runtime_table_context_matches(table, self.table_name, self.table_alias)
+            {
+                return None;
+            }
+            // A declared nullable column may be physically absent (for example,
+            // before asynchronous enrichment). Consult the shared contract only
+            // after a miss, preserving unknown-column errors and the hot lookup.
+            let collection = self
+                .table_name
+                .filter(|name| !is_universal_entity_source(name))
+                .or_else(|| match self.record.get("collection") {
+                    Some(Value::Text(name)) => Some(name.as_ref()),
+                    _ => None,
+                })?;
+            let contract = self.db?.collection_contract_arc(collection)?;
+            contract
+                .declared_columns
+                .iter()
+                .any(|declared| declared.name == *column && !declared.not_null)
+                .then_some(Value::Null)
         })
     }
 }
@@ -76,6 +98,7 @@ pub(in crate::runtime) fn evaluate_runtime_filter_result_with_db(
             // functions may use the db-aware walker; data and type errors
             // are part of WHERE semantics and must reach the caller.
             let row = RecordRow {
+                db,
                 record,
                 table_name,
                 table_alias,
