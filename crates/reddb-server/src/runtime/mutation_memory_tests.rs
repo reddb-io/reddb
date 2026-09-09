@@ -226,10 +226,10 @@ fn mutation_memory_late_budget_denial_does_not_publish_earlier_chunks() {
         "UPDATE growth SET payload = '{}'",
         "x".repeat(3000)
     ));
-    assert!(
-        result.is_err(),
-        "all replacement versions exceed the budget"
-    );
+    assert!(result
+        .expect_err("all replacement versions exceed the budget")
+        .to_string()
+        .contains("over budget"));
     assert_eq!(
         runtime
             .execute_query("SELECT id FROM growth WHERE payload = 'small'")
@@ -261,10 +261,11 @@ fn mutation_memory_index_growth_is_reserved_before_data_changes() {
         )
         .expect("reserve");
     let sql = format!("UPDATE growth SET payload = '{}'", "x".repeat(16 * 1024));
-    assert!(
-        runtime.execute_query(&sql).is_err(),
-        "index bytes must participate in admission"
-    );
+    assert!(runtime
+        .execute_query(&sql)
+        .expect_err("index bytes must participate in admission")
+        .to_string()
+        .contains("over budget"));
     assert_eq!(
         runtime
             .execute_query("SELECT payload FROM growth WHERE payload = 'small'")
@@ -368,12 +369,15 @@ fn mutation_memory_wal_child() {
     runtime
         .execute_query("UPDATE growth SET payload = 'committed'")
         .expect("durable update");
-    assert!(runtime
+    // Stay below the parser's 1 MiB input cap. The row plus retained
+    // zone bounds exceed this runtime's 4 MiB memory budget.
+    let denied = runtime
         .execute_query(&format!(
             "UPDATE growth SET payload = '{}'",
-            "x".repeat(8 * 1024 * 1024)
+            "x".repeat(900 * 1024)
         ))
-        .is_err());
+        .expect_err("memory admission must reject the replacement");
+    assert!(denied.to_string().contains("over budget"), "{denied}");
     // Simulate process loss without running runtime/storage destructors.
     std::process::exit(0);
 }
