@@ -173,56 +173,68 @@ fn context_expansion_does_not_copy_selected_vector_payloads_again() {
     }
 }
 
+// Keep every ingestion/segment combination independently scheduled: fixture
+// construction dominates this allocation check and must not share one timeout.
 #[test]
-fn exact_search_avoids_collection_sized_candidate_allocations() {
-    for bulk in [false, true] {
-        for sealed in [false, true] {
-            for count in [0, 1, 16_384] {
-                let runtime = RedDBRuntime::in_memory().expect("runtime");
-                runtime
-                    .execute_query("CREATE VECTOR cursor_vectors DIM 2 METRIC cosine")
-                    .expect("collection");
-                let store = runtime.db().store();
-                let entities: Vec<_> = (0..count)
-                    .map(|_| {
-                        UnifiedEntity::vector(
-                            store.next_entity_id(),
-                            "cursor_vectors",
-                            vec![1.0, 0.0],
-                        )
-                    })
-                    .collect();
-                if bulk {
-                    store
-                        .bulk_insert("cursor_vectors", entities)
-                        .expect("bulk vectors");
-                } else {
-                    for entity in entities {
-                        store.insert("cursor_vectors", entity).expect("vector");
-                    }
-                }
-                if sealed {
-                    store
-                        .get_collection("cursor_vectors")
-                        .expect("collection")
-                        .force_seal()
-                        .expect("seal");
-                }
-                runtime
-                    .search_similar("cursor_vectors", &[1.0, 0.0], 3, 0.0)
-                    .expect("warm catalog");
-                LARGEST_ALLOCATION.with(|largest| largest.set(0));
-                let (result, _) = measured_allocations(|| {
-                    runtime.search_similar("cursor_vectors", &[1.0, 0.0], 3, 0.0)
-                });
-                assert_eq!(result.expect("exact search").len(), count.min(3));
-                let largest = LARGEST_ALLOCATION.with(Cell::get);
-                let bound = if count < 256 { 16 * 1024 } else { 128 * 1024 };
-                assert!(
-                    largest < bound,
-                    "candidate allocation={largest}, count={count}, bulk={bulk}, sealed={sealed}"
-                );
+fn exact_search_candidates_incremental_active() {
+    assert_exact_search_candidate_allocations(false, false);
+}
+
+#[test]
+fn exact_search_candidates_incremental_sealed() {
+    assert_exact_search_candidate_allocations(false, true);
+}
+
+#[test]
+fn exact_search_candidates_bulk_active() {
+    assert_exact_search_candidate_allocations(true, false);
+}
+
+#[test]
+fn exact_search_candidates_bulk_sealed() {
+    assert_exact_search_candidate_allocations(true, true);
+}
+
+fn assert_exact_search_candidate_allocations(bulk: bool, sealed: bool) {
+    for count in [0, 1, 16_384] {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE VECTOR cursor_vectors DIM 2 METRIC cosine")
+            .expect("collection");
+        let store = runtime.db().store();
+        let entities: Vec<_> = (0..count)
+            .map(|_| {
+                UnifiedEntity::vector(store.next_entity_id(), "cursor_vectors", vec![1.0, 0.0])
+            })
+            .collect();
+        if bulk {
+            store
+                .bulk_insert("cursor_vectors", entities)
+                .expect("bulk vectors");
+        } else {
+            for entity in entities {
+                store.insert("cursor_vectors", entity).expect("vector");
             }
         }
+        if sealed {
+            store
+                .get_collection("cursor_vectors")
+                .expect("collection")
+                .force_seal()
+                .expect("seal");
+        }
+        runtime
+            .search_similar("cursor_vectors", &[1.0, 0.0], 3, 0.0)
+            .expect("warm catalog");
+        LARGEST_ALLOCATION.with(|largest| largest.set(0));
+        let (result, _) =
+            measured_allocations(|| runtime.search_similar("cursor_vectors", &[1.0, 0.0], 3, 0.0));
+        assert_eq!(result.expect("exact search").len(), count.min(3));
+        let largest = LARGEST_ALLOCATION.with(Cell::get);
+        let bound = if count < 256 { 16 * 1024 } else { 128 * 1024 };
+        assert!(
+            largest < bound,
+            "candidate allocation={largest}, count={count}, bulk={bulk}, sealed={sealed}"
+        );
     }
 }
