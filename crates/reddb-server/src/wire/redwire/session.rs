@@ -1681,17 +1681,22 @@ mod tests {
         assert!(
             matrix.contains("| command | auth requirement | HTTP | gRPC | MCP | stdio | RedWire |")
         );
-        // RedWire binds Query/Prepare/ExecutePrepared here; gRPC binds four rpcs
-        // to it in `grpc/catalog_dispatch.rs`; MCP exposes it as `reddb_query`;
-        // `rpc_stdio.rs` names no command ids at all.
-        assert!(matrix.contains(
-            "| query.execute | user-required | served | served | served | undeclared | served |"
-        ));
-        // No frame kind and no rpc carry `catalog.snapshot`; MCP reaches it
-        // through the `reddb_type_of` tool.
-        assert!(matrix.contains(
-            "| catalog.snapshot | user-required | served | undeclared | served | undeclared | undeclared |"
-        ));
+        // Pin this transport's binding column. The stdio column describes
+        // individual local/remote method dispositions, covered by catalog tests.
+        for (command, expected) in [
+            ("query.execute", "served"),
+            ("catalog.snapshot", "undeclared"),
+        ] {
+            let row = matrix
+                .lines()
+                .find(|line| line.starts_with(&format!("| {command} |")))
+                .expect("catalog command has a coverage row");
+            assert_eq!(
+                row.rsplit('|').nth(1).map(str::trim),
+                Some(expected),
+                "RedWire coverage for {command}: {row}"
+            );
+        }
     }
 
     struct DenyAndCountPolicy(Cell<usize>);
