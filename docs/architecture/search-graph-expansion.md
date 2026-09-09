@@ -79,8 +79,9 @@ collections, unrelated vector payloads, unreachable large node properties and
 first read after insertion/sealing, without a graph-query warmup, and requires
 less than 512 KiB of calling-thread allocations. This measures cumulative
 allocations, not peak resident memory, all-thread memory or throughput. Global
-fallback scan still clones its candidate payloads, and vector expansion's
-separate hydration path needs its own review. No SQLite, Postgres, Cassandra or
+fallback scan still clones its candidate payloads, and exact vector scoring's
+ID list and payload batches remain separate work. Context vector expansion now
+[reuses its authorized selected payloads](search-vector-expansion.md). No SQLite, Postgres, Cassandra or
 SurrealDB performance parity is claimed here.
 
 A standalone public `search_context_input` allocation probe used the same query,

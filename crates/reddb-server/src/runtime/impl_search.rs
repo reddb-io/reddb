@@ -1278,20 +1278,21 @@ impl RedDBRuntime {
                         if scored.contains_key(&result.entity_id.raw()) {
                             continue;
                         }
-                        if let Some(entity) = self.inner.db.get(result.entity_id) {
-                            expanded_vectors += 1;
-                            scored.insert(
-                                result.entity_id.raw(),
-                                (
-                                    entity,
-                                    result.score * 0.9,
-                                    DiscoveryMethod::VectorQuery {
-                                        similarity: result.score,
-                                    },
-                                    collection.clone(),
-                                ),
-                            );
-                        }
+                        // Exact search already owns the snapshot-visible, RLS-admitted
+                        // payload. Move it across this boundary without a second lookup
+                        // through the global entity cache and another vector copy.
+                        expanded_vectors += 1;
+                        scored.insert(
+                            result.entity_id.raw(),
+                            (
+                                result.entity,
+                                result.score * 0.9,
+                                DiscoveryMethod::VectorQuery {
+                                    similarity: result.score,
+                                },
+                                collection.clone(),
+                            ),
+                        );
                     }
                 }
             }
