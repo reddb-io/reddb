@@ -106,6 +106,48 @@ curl -X POST http://127.0.0.1:5000/text/search \
   }'
 ```
 
+## Inspect VECTOR SEARCH execution
+
+Use `EXPLAIN` to inspect the planned runtime route, or `EXPLAIN ANALYZE` to
+execute the query and measure its work:
+
+```sql
+EXPLAIN VECTOR SEARCH articles
+SIMILAR TO [0.15,0.42,0.75,0.20,0.58,0.85,0.30,0.65] LIMIT 5;
+
+EXPLAIN ANALYZE VECTOR SEARCH articles
+SIMILAR TO [0.15,0.42,0.75,0.20,0.58,0.85,0.30,0.65]
+WHERE category = 'tutorial' LIMIT 5;
+```
+
+`vector_turbo_search` means TurboQuant candidates followed by exact reranking.
+New collections created with `CREATE VECTOR` use this route. Legacy collections
+without the TurboQuant marker use `vector_exact_scan`. The plan's
+`access_path_reason` explains the choice, including registered HNSW/IVF indexes
+that this runtime route does not use. These names describe `VECTOR SEARCH`;
+other vector endpoints may have different execution paths.
+
+ANALYZE returns one measured row with `metrics_scope = vector_pipeline`:
+
+| Field | Meaning |
+| --- | --- |
+| `index_used` | Whether the pipeline used the TurboQuant index |
+| `candidates_examined` | Visible scan entities or returned TurboQuant hits visited by the pipeline |
+| `metadata_rejected` | Candidates rejected by the effective predicate |
+| `visibility_rejected` | TurboQuant hits missing or invisible in the statement snapshot |
+| `exact_distance_evaluations` | Exact distance calls, including reranking |
+| `actual_rows` | Rows returned after filtering and top-k |
+| `actual_ms` | Vector pipeline time, excluding the surrounding authorization/frame overhead |
+
+These counters do not measure approximate scoring inside the index or each
+logical operator separately. A filtered TurboQuant query can still visit the
+whole collection. A small candidate count alone does not prove low index cost.
+
+Ordinary queries expose optional `stats.vector` measurements. `cache_hit=true`
+means those measurements describe the cached computation. ANALYZE always runs
+the query again through the normal authorization gate and preserves an active
+caller transaction.
+
 ## Tips
 
 - **Dimension consistency**: All vectors in a collection should have the same dimension

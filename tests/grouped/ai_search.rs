@@ -71,3 +71,6 @@ mod mock_ai_provider;
 
 #[path = "surface_contracts/smoke_embedded.rs"]
 mod smoke_embedded;
+
+#[path = "ai_local_vector/e2e_vector_execution_observability.rs"]
+mod e2e_vector_execution_observability;

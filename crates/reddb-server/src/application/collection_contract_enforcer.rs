@@ -629,25 +629,66 @@ fn find_row_uniqueness_conflict(
     let Some(manager) = db.store().get_collection(collection) else {
         return Ok(None);
     };
-    let existing_rows: Vec<ContractRow> = manager
-        .query_all(|_| true)
-        .into_iter()
-        .filter_map(|entity| {
-            row_fields_from_entity(&entity).map(|fields| ContractRow {
-                id: entity.id,
-                fields,
-            })
-        })
+    let mut rules = resolved_uniqueness_rules(&contract);
+    if let Some(target) = target {
+        rules.retain(|rule| uniqueness_columns_match(&rule.columns, target));
+        if rules.is_empty() {
+            return Err(crate::RedDBError::Query(format!(
+                "no unique or primary-key constraint on collection '{}' matches ON CONFLICT ({})",
+                collection,
+                target.join(", ")
+            )));
+        }
+    }
+    let input_fields: std::collections::BTreeMap<&str, &Value> = fields
+        .iter()
+        .map(|(name, value)| (name.as_str(), value))
         .collect();
-
-    find_row_uniqueness_conflict_for_contract(
-        &contract,
-        collection,
-        fields,
-        &existing_rows,
-        target,
-        exclude_id,
-    )
+    for rule in rules {
+        let mut expected = Vec::new();
+        let mut skip_rule = false;
+        for column in &rule.columns {
+            match input_fields.get(column.as_str()).copied() {
+                Some(Value::Null) | None if rule.primary_key => {
+                    return Err(crate::RedDBError::Query(format!(
+                        "primary key '{}' in collection '{}' requires non-null column '{}'",
+                        rule.name, collection, column
+                    )));
+                }
+                Some(Value::Null) | None => {
+                    skip_rule = true;
+                    break;
+                }
+                Some(value) => expected.push((column, value_signature(value))),
+            }
+        }
+        if skip_rule {
+            continue;
+        }
+        let mut conflict_id = None;
+        // Borrow rows under the manager's existing read locks. Checking a key
+        // must not clone every entity and every unrelated payload in the table.
+        manager.for_each_entity(|entity| {
+            if exclude_id == Some(entity.id) {
+                return true;
+            }
+            let crate::storage::EntityData::Row(row) = &entity.data else {
+                return true;
+            };
+            let duplicate = expected.iter().all(|(column, signature)| {
+                row.get_field(column)
+                    .is_some_and(|value| value_signature(value) == *signature)
+            });
+            if duplicate {
+                conflict_id = Some(entity.id);
+            }
+            !duplicate
+        });
+        if let Some(entity_id) = conflict_id {
+            return Ok(Some(UniquenessConflict { rule, entity_id }));
+        }
+    }
+    Ok(None)
 }
 
 fn enforce_row_uniqueness_for_contract(
@@ -1061,32 +1102,6 @@ fn resolved_uniqueness_rules(
         .into_iter()
         .filter(|rule| dedup.insert((rule.primary_key, rule.columns.clone())))
         .collect()
-}
-
-fn row_fields_from_entity(
-    entity: &crate::storage::UnifiedEntity,
-) -> Option<std::collections::BTreeMap<String, Value>> {
-    match &entity.data {
-        crate::storage::EntityData::Row(row) => {
-            if let Some(named) = &row.named {
-                Some(
-                    named
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect(),
-                )
-            } else {
-                row.schema.as_ref().map(|schema| {
-                    schema
-                        .iter()
-                        .cloned()
-                        .zip(row.columns.iter().cloned())
-                        .collect()
-                })
-            }
-        }
-        _ => None,
-    }
 }
 
 fn value_signature(value: &Value) -> String {

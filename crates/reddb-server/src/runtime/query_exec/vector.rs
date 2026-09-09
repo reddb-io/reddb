@@ -10,19 +10,28 @@
 use super::*;
 use crate::runtime::vector_index::{BruteForceVectorIndex, VectorIndexEntry};
 use crate::storage::engine::distance::DistanceMetric;
+use crate::storage::query::unified::{QueryStats, VectorQueryStats};
 use reddb_rql::sql_lowering::effective_vector_filter;
 
 pub(crate) fn execute_runtime_vector_query(
     db: &RedDB,
     query: &VectorQuery,
 ) -> RedDBResult<UnifiedResult> {
+    let started = std::time::Instant::now();
+    let mut vector_stats = VectorQueryStats::default();
     let plan = CanonicalPlanner::new(db).build(&QueryExpr::Vector(query.clone()));
-    let records = execute_runtime_canonical_vector_node(db, &plan.root, query)?;
+    let records = execute_runtime_canonical_vector_node(db, &plan.root, query, &mut vector_stats)?;
 
+    vector_stats.rows_returned = records.len() as u64;
     Ok(UnifiedResult {
         columns: collect_visible_columns(&records),
         records,
-        stats: Default::default(),
+        stats: QueryStats {
+            rows_scanned: vector_stats.candidates_examined,
+            exec_time_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            vector: Some(vector_stats),
+            ..Default::default()
+        },
         pre_serialized_json: None,
     })
 }
@@ -31,18 +40,19 @@ pub(crate) fn execute_runtime_canonical_vector_node(
     db: &RedDB,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &VectorQuery,
+    stats: &mut VectorQueryStats,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     match node.operator.as_str() {
-        "vector_ann_hnsw" | "vector_ann_ivf" | "vector_exact_scan" => {
+        "vector_turbo_search" | "vector_exact_scan" => {
             let vector = resolve_runtime_vector_source(db, &query.query_vector)?;
-            let matches = runtime_vector_matches(db, query, &vector)?;
+            let matches = runtime_vector_matches(db, query, &vector, stats)?;
             Ok(matches
                 .into_iter()
                 .map(runtime_vector_record_from_match)
                 .collect())
         }
         "metadata_filter" => {
-            let mut records = execute_runtime_canonical_vector_child(db, node, query)?;
+            let mut records = execute_runtime_canonical_vector_child(db, node, query, stats)?;
             if let Some(filter) = effective_vector_filter(query).as_ref() {
                 records.retain(|record| {
                     runtime_vector_record_matches_filter(db, &query.collection, record, filter)
@@ -51,7 +61,7 @@ pub(crate) fn execute_runtime_canonical_vector_node(
             Ok(records)
         }
         "similarity_threshold" => {
-            let mut records = execute_runtime_canonical_vector_child(db, node, query)?;
+            let mut records = execute_runtime_canonical_vector_child(db, node, query, stats)?;
             if let Some(threshold) = query.threshold {
                 let metric = runtime_vector_metric(db, query);
                 records.retain(|record| {
@@ -61,11 +71,11 @@ pub(crate) fn execute_runtime_canonical_vector_node(
             Ok(records)
         }
         "topk" => {
-            let mut records = execute_runtime_canonical_vector_child(db, node, query)?;
+            let mut records = execute_runtime_canonical_vector_child(db, node, query, stats)?;
             records.sort_by(compare_runtime_ranked_records);
             Ok(records.into_iter().take(query.k.max(1)).collect())
         }
-        "projection" => execute_runtime_canonical_vector_child(db, node, query),
+        "projection" => execute_runtime_canonical_vector_child(db, node, query, stats),
         other => Err(RedDBError::Query(format!(
             "unsupported canonical vector operator {other}"
         ))),
@@ -76,6 +86,7 @@ pub(crate) fn execute_runtime_canonical_vector_child(
     db: &RedDB,
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &VectorQuery,
+    stats: &mut VectorQueryStats,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let child = node.children.first().ok_or_else(|| {
         RedDBError::Query(format!(
@@ -83,13 +94,14 @@ pub(crate) fn execute_runtime_canonical_vector_child(
             node.operator
         ))
     })?;
-    execute_runtime_canonical_vector_node(db, child, query)
+    execute_runtime_canonical_vector_node(db, child, query, stats)
 }
 
 pub(crate) fn runtime_vector_matches(
     db: &RedDB,
     query: &VectorQuery,
     vector: &[f32],
+    stats: &mut VectorQueryStats,
 ) -> RedDBResult<Vec<SimilarResult>> {
     validate_vector_query_shape(db, query, vector)?;
     let metric = runtime_vector_metric(db, query);
@@ -104,6 +116,8 @@ pub(crate) fn runtime_vector_matches(
     // selected). Legacy `vector` collections continue on the
     // brute-force path below.
     if let Some(state) = db.turbo_state(&query.collection) {
+        stats.access_path = "vector_turbo_search".to_string();
+        stats.index_used = true;
         // Issue #673 — wait briefly for the background rebuild to
         // finish. If the timeout fires, return a structured NOT_READY
         // signal instead of silently blocking or returning empty.
@@ -149,7 +163,9 @@ pub(crate) fn runtime_vector_matches(
         let mut results = Vec::with_capacity(raw.len());
         let filter = effective_vector_filter(query);
         for hit in raw {
+            stats.candidates_examined += 1;
             let Some(entity) = db.store().get(&query.collection, hit.entity_id) else {
+                stats.visibility_rejected += 1;
                 continue;
             };
             // The TurboQuant index is append-only and never prunes
@@ -160,10 +176,12 @@ pub(crate) fn runtime_vector_matches(
             // there is no captured snapshot context) — so a deleted or
             // version-superseded vector never reaches the results.
             if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
+                stats.visibility_rejected += 1;
                 continue;
             }
             if let Some(filter) = filter.as_ref() {
                 if !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter) {
+                    stats.metadata_rejected += 1;
                     continue;
                 }
             }
@@ -171,6 +189,7 @@ pub(crate) fn runtime_vector_matches(
             // than trusting the quantised approximate score.
             let (score, distance) = match &entity.data {
                 EntityData::Vector(data) => {
+                    stats.exact_distance_evaluations += 1;
                     let raw_distance =
                         crate::storage::engine::distance::distance(vector, &data.dense, metric);
                     let score = match metric {
@@ -213,6 +232,7 @@ pub(crate) fn runtime_vector_matches(
         return Ok(results);
     }
 
+    stats.access_path = "vector_exact_scan".to_string();
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     let mut index = BruteForceVectorIndex::default();
     let filter = effective_vector_filter(query);
@@ -223,8 +243,10 @@ pub(crate) fn runtime_vector_matches(
     };
 
     for entity in manager.scan(snap_ctx.as_ref(), |_| true) {
+        stats.candidates_examined += 1;
         if let Some(filter) = filter.as_ref() {
             if !runtime_vector_entity_matches_filter(db, &query.collection, entity.id, filter) {
+                stats.metadata_rejected += 1;
                 continue;
             }
         }
@@ -237,14 +259,13 @@ pub(crate) fn runtime_vector_matches(
         }
     }
 
-    let out = index.search(vector, search_k, metric, query.threshold);
-    eprintln!(
-        "VECDBG matches metric={metric:?} k={search_k}: {:?}",
-        out.iter()
-            .map(|m| (m.entity_id.raw(), m.score))
-            .collect::<Vec<_>>()
-    );
-    Ok(out)
+    Ok(index.search(
+        vector,
+        search_k,
+        metric,
+        query.threshold,
+        &mut stats.exact_distance_evaluations,
+    ))
 }
 
 pub(crate) fn runtime_vector_record_matches_filter(

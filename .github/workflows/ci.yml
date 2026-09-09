@@ -628,6 +628,12 @@ jobs:
         env:
           REDDB_BINARY_PATH: ${{ github.workspace }}/target/debug/red
         run: python3 tests/cli_dump_restore.py
+      - name: Vector execution metrics and uniqueness regressions
+        env:
+          REDDB_BINARY_PATH: ${{ github.workspace }}/target/debug/red
+        run: |
+          python3 tests/cli_vector_explain.py
+          python3 tests/stdio_uniqueness.py
       - name: Rust client transport conformance over RedWire (red://)
         # The `redwire` feature is not in the client's default set, so a plain
         # `cargo test` exercises the embedded path only and the wire path goes

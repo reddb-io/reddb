@@ -3180,7 +3180,7 @@ impl RedDBRuntime {
         self.check_explain_target_privilege(inner_sql)?;
         let explain = self.explain_query(inner_sql)?;
 
-        let columns = vec![
+        let mut columns = vec![
             "op".to_string(),
             "source".to_string(),
             "estimated_rows".to_string(),
@@ -3206,7 +3206,11 @@ impl RedDBRuntime {
             records.push(rec);
         }
 
-        walk_plan_node(&explain.logical_plan.root, 0, &mut records);
+        let vector_details = explain.statement == "vector";
+        if vector_details {
+            columns.extend(["access_path_reason".to_string(), "index_hint".to_string()]);
+        }
+        walk_plan_node(&explain.logical_plan.root, 0, &mut records, vector_details);
 
         let result = crate::storage::query::unified::UnifiedResult {
             columns,
@@ -3228,14 +3232,89 @@ impl RedDBRuntime {
         })
     }
 
+    fn explain_analyze_vector_as_rows(
+        &self,
+        raw_query: &str,
+        expr: QueryExpr,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let QueryExpr::Vector(query) = &expr else {
+            return Err(RedDBError::Internal(
+                "expected vector analysis target".to_string(),
+            ));
+        };
+        let source = query.collection.clone();
+        // The typed entry installs the full statement frame and privilege gate,
+        // and cannot serve an earlier result-cache measurement as a fresh run.
+        let execution = self.execute_query_expr(expr)?;
+        let stats = execution.result.stats;
+        let vector = stats.vector.as_ref().ok_or_else(|| {
+            RedDBError::Internal("vector executor did not provide measurements".to_string())
+        })?;
+        let fields = vec![
+            ("op", Value::text(vector.access_path.clone())),
+            ("source", Value::text(source)),
+            ("index_used", Value::Boolean(vector.index_used)),
+            (
+                "candidates_examined",
+                Value::UnsignedInteger(vector.candidates_examined),
+            ),
+            (
+                "metadata_rejected",
+                Value::UnsignedInteger(vector.metadata_rejected),
+            ),
+            (
+                "visibility_rejected",
+                Value::UnsignedInteger(vector.visibility_rejected),
+            ),
+            (
+                "exact_distance_evaluations",
+                Value::UnsignedInteger(vector.exact_distance_evaluations),
+            ),
+            ("actual_rows", Value::UnsignedInteger(vector.rows_returned)),
+            (
+                "actual_ms",
+                Value::Float(stats.exec_time_us as f64 / 1000.0),
+            ),
+            ("metrics_scope", Value::text("vector_pipeline")),
+        ];
+        let columns = fields.iter().map(|(name, _)| name.to_string()).collect();
+        let mut record = crate::storage::query::unified::UnifiedRecord::default();
+        for (name, value) in fields {
+            record.set_owned(name.to_string(), value);
+        }
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: execution.mode,
+            statement: "explain_analyze",
+            engine: "runtime-explain-analyze",
+            result: crate::storage::query::unified::UnifiedResult {
+                columns,
+                records: vec![record],
+                stats,
+                pre_serialized_json: None,
+            },
+            affected_rows: 0,
+            statement_type: "select",
+            bookmark: None,
+            notice: None,
+        })
+    }
+
     fn explain_analyze_as_rows(
         &self,
         raw_query: &str,
         inner_sql: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
+        if strip_keyword_ci(inner_sql.trim_start(), "VECTOR").is_some() {
+            let expr = parse_multi(inner_sql).map_err(|err| RedDBError::Query(err.to_string()))?;
+            if matches!(&expr, QueryExpr::Vector(_)) {
+                return self.explain_analyze_vector_as_rows(raw_query, expr);
+            }
+        }
         if !starts_with_dml_keyword(inner_sql) {
             return Err(RedDBError::Query(
-                "EXPLAIN ANALYZE currently supports INSERT, UPDATE, and DELETE".to_string(),
+                "EXPLAIN ANALYZE currently supports INSERT, UPDATE, DELETE, and VECTOR SEARCH"
+                    .to_string(),
             ));
         }
 
@@ -3340,6 +3419,7 @@ fn walk_plan_node(
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     depth: usize,
     out: &mut Vec<crate::storage::query::unified::UnifiedRecord>,
+    vector_details: bool,
 ) {
     use std::sync::Arc;
     let mut rec = crate::storage::query::unified::UnifiedRecord::default();
@@ -3357,9 +3437,21 @@ fn walk_plan_node(
         Value::Float(node.operator_cost),
     );
     rec.set_arc(Arc::from("depth"), Value::Integer(depth as i64));
+    if vector_details {
+        for name in ["access_path_reason", "index_hint"] {
+            rec.set_owned(
+                name.to_string(),
+                node.details
+                    .get(name)
+                    .cloned()
+                    .map(Value::text)
+                    .unwrap_or(Value::Null),
+            );
+        }
+    }
     out.push(rec);
     for child in &node.children {
-        walk_plan_node(child, depth + 1, out);
+        walk_plan_node(child, depth + 1, out, vector_details);
     }
 }
 

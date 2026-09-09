@@ -38,12 +38,14 @@ impl BruteForceVectorIndex {
         k: usize,
         metric: DistanceMetric,
         threshold: Option<f32>,
+        exact_distance_evaluations: &mut u64,
     ) -> Vec<SimilarResult> {
         let mut results: Vec<SimilarResult> = self
             .entries
             .iter()
             .filter(|entry| entry.vector.len() == query.len())
             .filter_map(|entry| {
+                *exact_distance_evaluations += 1;
                 let raw_distance = distance(query, &entry.vector, metric);
                 let score = vector_score(raw_distance, metric);
                 if !within_threshold(score, raw_distance, metric, threshold) {
