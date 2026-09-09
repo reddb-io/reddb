@@ -11,6 +11,9 @@ Bulk ingestion now indexes runs of consecutive items with the same storage
 type. A homogeneous batch retains batched reservation; mixed batches need no
 per-item key-string allocation. `iter_kind` borrows the existing ID set under
 the segment borrow/read guard instead of cloning it for every lookup.
+The warmed flat-row insert allocation ratchet drops from three allocations to
+two because the existing kind key is borrowed; the fixture input vector and
+returned ID vector still allocate.
 
 The regression compares exact result IDs and types with a full scan, rotating
 the first kind and checking growing segments, sealing, physical deletions and

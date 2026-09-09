@@ -142,9 +142,9 @@ const COVERED_OPERATIONS: &[CoveredOperation] = &[
     },
     CoveredOperation {
         name: "growing-segment-flat-row-insert",
-        allowed_allocs: 3,
+        allowed_allocs: 2,
         exception: Some(AllocationException {
-            reason: "bulk_insert returns an allocated id vector and builds per-call flat insert bookkeeping",
+            reason: "the fixture input vector and bulk_insert result ID vector remain allocated; an existing kind key is borrowed",
             follow_up_issue: 1956,
         }),
         measure: measure_growing_segment_flat_row_insert,
