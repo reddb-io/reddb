@@ -22,7 +22,6 @@ fn assert_kind_results(manager: &SegmentManager, expected_live: &[EntityId]) {
             result.iter().all(|item| item.kind.storage_type() == kind),
             "kind lookup returned another type for {kind}"
         );
-        let mut expected_live = Vec::new();
         let mut actual: Vec<_> = result.into_iter().map(|item| item.id).collect();
         expected.sort_unstable();
         actual.sort_unstable();
@@ -41,6 +40,7 @@ fn mixed_bulk_lifecycle(hashmap_first: bool, gap: bool) {
                 ..Default::default()
             },
         );
+        let mut expected_live = Vec::new();
         assert!(manager
             .bulk_insert(Vec::new())
             .expect("empty bulk")
