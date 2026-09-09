@@ -507,3 +507,186 @@ fn failed_catalog_flush_blocks_function_operations_until_reopen() {
         "failed DDL may recover either complete catalog"
     );
 }
+
+fn work_budget(runtime: &RedDBRuntime, work_max: u64) {
+    execute(
+        runtime,
+        &format!("SET CONFIG functions.execution.work_max = {work_max}"),
+    );
+}
+
+fn budget_rows(runtime: &RedDBRuntime) {
+    execute(
+        runtime,
+        "CREATE TABLE budget_rows (id INTEGER, bucket INTEGER)",
+    );
+    let values = (0..64)
+        .map(|id| format!("({id}, 1)"))
+        .collect::<Vec<_>>()
+        .join(",");
+    execute(
+        runtime,
+        &format!("INSERT INTO budget_rows (id, bucket) VALUES {values}"),
+    );
+}
+
+fn exhausted(runtime: &RedDBRuntime, source: &str) {
+    let error = runtime
+        .execute_query(source)
+        .expect_err("CALL must fail instead of returning partial data");
+    assert!(
+        error.to_string().contains("execution work_max exceeded"),
+        "{source}: {error}"
+    );
+}
+
+#[test]
+fn function_budget_accumulates_across_statements_and_resets_between_calls() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    define(&runtime, "one() RETURNS INTEGER EFFECT PURE", "SELECT 1");
+    define(
+        &runtime,
+        "three() RETURNS INTEGER EFFECT PURE",
+        "SELECT 1; SELECT 2; SELECT 3",
+    );
+    work_budget(&runtime, 2);
+    exhausted(&runtime, "CALL three()");
+    assert_eq!(scalar(&runtime, "CALL one()"), Value::Integer(1));
+    assert_eq!(scalar(&runtime, "CALL one()"), Value::Integer(1));
+    work_budget(&runtime, 3);
+    assert_eq!(scalar(&runtime, "CALL three()"), Value::Integer(3));
+}
+
+#[test]
+fn function_budget_counts_rejected_scan_rows_and_aggregate_inputs() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    budget_rows(&runtime);
+    define(
+        &runtime,
+        "filtered() RETURNS TABLE (id INTEGER) EFFECT READ",
+        "SELECT id FROM budget_rows WHERE id + 1 = 9999",
+    );
+    define(
+        &runtime,
+        "counted() RETURNS INTEGER EFFECT READ",
+        "SELECT COUNT(*) FROM budget_rows",
+    );
+    define(
+        &runtime,
+        "grouped() RETURNS TABLE (bucket INTEGER) EFFECT READ",
+        "SELECT bucket, COUNT(*) AS total FROM budget_rows GROUP BY bucket",
+    );
+    work_budget(&runtime, 20);
+    for name in ["filtered", "counted", "grouped"] {
+        exhausted(&runtime, &format!("CALL {name}()"));
+    }
+    // Ordinary SQL has no CALL budget, including after a failed scan.
+    assert_eq!(
+        scalar(&runtime, "SELECT COUNT(*) FROM budget_rows"),
+        Value::Integer(64)
+    );
+    work_budget(&runtime, 200);
+    assert_eq!(scalar(&runtime, "CALL counted()"), Value::Integer(64));
+    assert!(execute(&runtime, "CALL filtered()")
+        .result
+        .records
+        .is_empty());
+    assert_eq!(
+        execute(&runtime, "CALL grouped()").result.records[0].get("bucket"),
+        Some(&Value::Integer(1))
+    );
+}
+
+#[test]
+fn function_budget_interrupts_join_expansion_before_return_row_limit() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    budget_rows(&runtime);
+    define(
+        &runtime,
+        "product() RETURNS TABLE (id INTEGER) EFFECT READ",
+        "SELECT a.id AS id FROM budget_rows a CROSS JOIN budget_rows b",
+    );
+    define(
+        &runtime,
+        "matched() RETURNS TABLE (id INTEGER) EFFECT READ",
+        "SELECT a.id AS id FROM budget_rows a JOIN budget_rows b ON a.bucket = b.bucket",
+    );
+    // Inputs fit; the 4,096-row expansion does not.
+    work_budget(&runtime, 300);
+    exhausted(&runtime, "CALL product()");
+    exhausted(&runtime, "CALL matched()");
+    work_budget(&runtime, 20_000);
+    assert_eq!(
+        execute(&runtime, "CALL product()").result.records.len(),
+        4096
+    );
+    assert_eq!(
+        execute(&runtime, "CALL matched()").result.records.len(),
+        4096
+    );
+}
+
+#[test]
+fn function_budget_rolls_back_writes_in_owned_and_caller_transactions() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    accounts(&runtime);
+    budget_rows(&runtime);
+    define(
+        &runtime,
+        "expensive_write() RETURNS INTEGER EFFECT WRITE",
+        "UPDATE accounts SET amount = amount + 1 WHERE id = 1; SELECT COUNT(*) FROM budget_rows",
+    );
+    work_budget(&runtime, 20);
+    exhausted(&runtime, "CALL expensive_write()");
+    assert_eq!(amount(&runtime), Value::Integer(10));
+
+    execute(&runtime, "BEGIN");
+    execute(&runtime, "UPDATE accounts SET amount = 20 WHERE id = 1");
+    execute(&runtime, "SAVEPOINT user_savepoint");
+    exhausted(&runtime, "CALL expensive_write()");
+    assert_eq!(amount(&runtime), Value::Integer(20));
+    execute(&runtime, "ROLLBACK TO SAVEPOINT user_savepoint");
+    execute(&runtime, "COMMIT");
+    assert_eq!(amount(&runtime), Value::Integer(20));
+}
+
+#[test]
+fn function_budget_charges_mutations_and_table_return_rows() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    accounts(&runtime);
+    define(
+        &runtime,
+        "write_only() RETURNS TABLE (id INTEGER) EFFECT WRITE",
+        "UPDATE accounts SET amount = amount + 1 WHERE id = 1; SELECT 1 AS id",
+    );
+    // Two statements + one affected row fit, return normalization does not.
+    work_budget(&runtime, 3);
+    exhausted(&runtime, "CALL write_only()");
+    assert_eq!(amount(&runtime), Value::Integer(10));
+    work_budget(&runtime, 4);
+    assert_eq!(
+        execute(&runtime, "CALL write_only()").result.records.len(),
+        1
+    );
+    assert_eq!(amount(&runtime), Value::Integer(11));
+}
+
+#[test]
+fn zero_function_budget_is_rejected_without_opening_a_transaction() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    accounts(&runtime);
+    define(
+        &runtime,
+        "read_amount() RETURNS INTEGER EFFECT READ",
+        "SELECT amount FROM accounts WHERE id = 1",
+    );
+    work_budget(&runtime, 0);
+    let error = runtime
+        .execute_query("CALL read_amount()")
+        .expect_err("zero is not unlimited");
+    assert!(error.to_string().contains("must be positive"));
+    execute(&runtime, "BEGIN");
+    execute(&runtime, "ROLLBACK");
+    work_budget(&runtime, 100);
+    assert_eq!(scalar(&runtime, "CALL read_amount()"), Value::Integer(10));
+}

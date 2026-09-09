@@ -146,33 +146,36 @@ pub(super) fn try_execute_pushdown_aggregate(
 
     let mut rows: Vec<ScanRow> = Vec::new();
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    manager.scan_for_each(snapshot.as_ref(), |entity| {
-        if let Some(f) = compiled_filter.as_ref() {
-            if f.evaluate(entity) != CompiledEntityFilterDecision::Match {
-                return true;
+    crate::runtime::function_budget::scan(
+        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+        |entity| {
+            if let Some(f) = compiled_filter.as_ref() {
+                if f.evaluate(entity) != CompiledEntityFilterDecision::Match {
+                    return true;
+                }
             }
-        }
-        let group_key = match resolve_kind(&group_kind, entity) {
-            Some(v) => v.into_owned(),
-            None => return true,
-        };
-        let mut agg_inputs: Vec<Value> = Vec::with_capacity(lowered.len());
-        for slot in &lowered {
-            let value = match &slot.input_kind {
-                None => Value::Null,
-                Some(kind) => match resolve_kind(kind, entity) {
-                    Some(v) => v.into_owned(),
-                    None => Value::Null,
-                },
+            let group_key = match resolve_kind(&group_kind, entity) {
+                Some(v) => v.into_owned(),
+                None => return true,
             };
-            agg_inputs.push(value);
-        }
-        rows.push(ScanRow {
-            group_key,
-            agg_inputs,
-        });
-        true
-    });
+            let mut agg_inputs: Vec<Value> = Vec::with_capacity(lowered.len());
+            for slot in &lowered {
+                let value = match &slot.input_kind {
+                    None => Value::Null,
+                    Some(kind) => match resolve_kind(kind, entity) {
+                        Some(v) => v.into_owned(),
+                        None => Value::Null,
+                    },
+                };
+                agg_inputs.push(value);
+            }
+            rows.push(ScanRow {
+                group_key,
+                agg_inputs,
+            });
+            true
+        },
+    )?;
 
     let stream = AggregateQueryPlanner::plan(&ast, VecScanIter(rows.into_iter()))
         .map_err(|e| RedDBError::Query(format!("aggregate push-down planner: {e}")))?;

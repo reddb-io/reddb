@@ -133,6 +133,12 @@ impl RedDBRuntime {
                 arguments.len()
             )));
         }
+        let budget = super::function_budget::Scope::enter(
+            self.config_u64("functions.execution.work_max", 1_000_000)
+                .min(1_000_000),
+            self.config_u64("functions.execution.timeout_ms", 5_000)
+                .min(5_000),
+        )?;
         let parameters = arguments
             .iter()
             .zip(&function.definition.parameters)
@@ -186,6 +192,10 @@ impl RedDBRuntime {
         }
 
         let execution = self.execute_function_body(function, &parameters);
+        // Deadline/result checks happen before success, but commit and rollback
+        // must finish even after the execution budget has been exhausted.
+        let execution = super::function_budget::charge(0).and(execution);
+        drop(budget);
         let mut result = match execution {
             Ok(mut result) => {
                 if let Some(name) = &savepoint {
@@ -198,8 +208,9 @@ impl RedDBRuntime {
             }
             Err(cause) => {
                 if let Some(name) = &savepoint {
+                    // Runtime rollback_to_savepoint removes the named savepoint
+                    // as well as its children; releasing again masks the cause.
                     self.execute_query(&format!("ROLLBACK TO SAVEPOINT {name}"))?;
-                    self.execute_query(&format!("RELEASE SAVEPOINT {name}"))?;
                 }
                 if owns_transaction {
                     self.execute_query("ROLLBACK")?;
@@ -227,6 +238,8 @@ impl RedDBRuntime {
         let mut last = None;
         let mut affected_rows = 0u64;
         for (source, expression) in &function.statements {
+            super::function_budget::charge(0)?;
+            super::function_budget::charge(1)?;
             let bound = crate::storage::query::user_params::bind_available_parameters(
                 expression, parameters,
             )
@@ -234,6 +247,8 @@ impl RedDBRuntime {
             let bound = self.rewrite_view_refs(bound);
             validate_statement(&bound, function.definition.effect)?;
             let result = self.execute_prepared_query(source, bound)?;
+            super::function_budget::charge(0)?;
+            super::function_budget::charge(result.affected_rows)?;
             if result.result.records.len() > RETURN_ROWS_MAX {
                 return Err(error("statement result exceeds 10000 rows"));
             }
@@ -263,6 +278,7 @@ impl RedDBRuntime {
             FunctionReturn::Table(columns) => {
                 output.columns = columns.iter().map(|column| column.name.clone()).collect();
                 for record in &result.result.records {
+                    super::function_budget::charge(1)?;
                     let mut projected = UnifiedRecord::default();
                     for column in columns {
                         let value = record

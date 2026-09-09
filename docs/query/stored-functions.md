@@ -97,12 +97,65 @@ not a measured DDL throughput optimization.
 | Expression/projection nesting | 64 |
 | Materialized result per statement | 10,000 rows |
 | Catalog | 1,024 functions, 4 MiB serialized |
+| Cumulative execution work | 1,000,000 instrumented units per CALL |
+| Cooperative execution deadline | 5,000 ms per CALL |
 
 The result limit is checked after statement execution. It is **not** a hard limit
-on scanned rows, elapsed time or peak memory. Loops and recursive calls are
-unsupported; execution deadlines, cumulative work/memory accounting and interrupt
-checks remain future work. Native integration tests do not establish every
-transport/SDK's behavior. Clean reopen is not evidence of power-loss recovery.
+on scanned rows or peak memory. Loops and recursive calls remain unsupported.
+Native integration tests do not establish every transport/SDK's behavior. Clean
+reopen is not evidence of power-loss recovery.
+
+### Cooperative execution budgets
+
+Each CALL shares one budget across its body statements and return validation.
+Operators can tighten the default ceilings with ordinary configuration:
+
+```sql
+SET CONFIG functions.execution.work_max = 100000;
+SET CONFIG functions.execution.timeout_ms = 1000;
+```
+
+Values above the defaults are capped at the defaults; zero rejects CALL rather
+than disabling the budget. Configuration is read once when CALL starts. These
+settings do not change ordinary SQL execution or the persisted function format.
+The existing configuration authorization rules apply.
+
+Work units count body statements, MVCC-visible candidates visited by the instrumented table
+scan callbacks (before predicate filtering), indexed candidate processing, join
+build/probe/pair iterations, affected rows reported by statements, and TABLE
+return rows normalized by CALL. Accounting is cumulative and depends on the
+chosen execution plan; it is not a count of CPU instructions or physical reads.
+An exhausted call returns `stored function: execution work_max exceeded` or
+`stored function: execution timeout_ms exceeded`, including both limits.
+
+Instrumented sequential table scans, universal collection scans and aggregate
+input scans stop at the next candidate that exceeds the work budget. Runtime
+joins check before each build/probe/pair step; CROSS JOIN under CALL grows its
+result incrementally instead of reserving the whole Cartesian product first.
+An interrupted scan returns an error, never a successful partial result.
+Statement boundaries force a clock check; charged loops sample elapsed time
+at least every 256 work units. Exhaustion rolls back the call's writes, including
+when a later statement fails after earlier writes. In an existing transaction,
+the caller's earlier writes and savepoints remain usable. The budget is removed
+before COMMIT/ROLLBACK so cleanup can complete.
+
+Coverage is intentionally incomplete: vector search, graph traversal, mutation
+internals, invisible-version traversal, index candidate discovery/batch fetching,
+scalar built-ins, sorting,
+and aggregate finalization are not yet fully interruptible. Their elapsed time
+is checked when they return to an instrumented boundary; mutation counts are
+charged after execution. Blocking I/O and lock waits cannot be preempted by these
+checks. Commit/rollback time is outside the execution deadline. This is therefore
+**not a hard wall-clock or peak-memory guarantee** and does not implement client
+cancel requests for CALL.
+
+CALL uses sequential fallbacks for the table/aggregate scan paths that would
+otherwise start workers without inheriting the thread-local execution context.
+Parallel budget propagation remains pending. Ordinary SQL retains its existing
+parallel paths. Cost sketch: N visited candidates add N budget checks and about
+N/256 clock samples, with no per-candidate budget allocation, locks or atomics;
+ordinary scan callbacks bypass per-row accounting. This is an implementation
+cost estimate, not a measured throughput claim.
 
 Functions are a foundation for later collection rules and declarative endpoints.
 This slice does not implement either, nor does it establish performance parity

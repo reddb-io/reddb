@@ -160,19 +160,24 @@ pub(super) fn scan_runtime_table_source_records_limited(
     use crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
     let entity_count = manager.count();
     let sequential_cap = limit.unwrap_or(usize::MAX);
-    let go_parallel = entity_count >= MIN_PARALLEL_ROWS && sequential_cap >= MIN_PARALLEL_ROWS;
+    let go_parallel = !crate::runtime::function_budget::active()
+        && entity_count >= MIN_PARALLEL_ROWS
+        && sequential_cap >= MIN_PARALLEL_ROWS;
     if go_parallel {
         let schema = manager.column_schema();
         let table_name = table.to_string();
         let hydrate_store = db.store();
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
-        manager.scan_for_each(snapshot.as_ref(), |e| {
-            if db.replica_allows_entity_at_read(table, e) {
-                entities.push(e.clone());
-            }
-            true
-        });
+        crate::runtime::function_budget::scan(
+            |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+            |e| {
+                if db.replica_allows_entity_at_read(table, e) {
+                    entities.push(e.clone());
+                }
+                true
+            },
+        )?;
         let mut records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
             &entities,
             move |chunk| {
@@ -221,26 +226,31 @@ pub(super) fn scan_runtime_table_source_records_limited(
         Some(n) => Vec::with_capacity(n),
         None => Vec::new(),
     };
-    manager.scan_for_each(snapshot.as_ref(), |entity| {
-        if !db.replica_allows_entity_at_read(table, entity) {
-            return true;
-        }
-        let hydrated =
-            crate::runtime::impl_timeseries::hydrate_timeseries_entity(db.store().as_ref(), entity);
-        if let Some(mut record) = runtime_table_record_from_entity_ref_with_schema(
-            &hydrated,
-            manager.column_schema().as_ref(),
-        ) {
-            set_source_collection(&mut record, table);
-            records.push(record);
-            if let Some(n) = limit {
-                if records.len() >= n {
-                    return false; // stop scan early
+    crate::runtime::function_budget::scan(
+        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+        |entity| {
+            if !db.replica_allows_entity_at_read(table, entity) {
+                return true;
+            }
+            let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
+                db.store().as_ref(),
+                entity,
+            );
+            if let Some(mut record) = runtime_table_record_from_entity_ref_with_schema(
+                &hydrated,
+                manager.column_schema().as_ref(),
+            ) {
+                set_source_collection(&mut record, table);
+                records.push(record);
+                if let Some(n) = limit {
+                    if records.len() >= n {
+                        return false; // stop scan early
+                    }
                 }
             }
-        }
-        true
-    });
+            true
+        },
+    )?;
     Ok(records)
 }
 
@@ -255,7 +265,9 @@ pub(super) fn scan_runtime_universal_source_records_limited(
     // the snapshot so worker threads see the same MVCC view instead of
     // defaulting to "no snapshot" (every row visible).
     let snapshot = capture_current_snapshot();
-    if let Some(collections) = candidate_collections {
+    let budget_collections =
+        crate::runtime::function_budget::active().then(|| db.store().list_collections());
+    if let Some(collections) = candidate_collections.or(budget_collections.as_deref()) {
         let store = db.store();
         let mut records = match limit {
             Some(n) => Vec::with_capacity(n),
@@ -265,23 +277,26 @@ pub(super) fn scan_runtime_universal_source_records_limited(
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            manager.scan_for_each(snapshot.as_ref(), |entity| {
-                if records.len() >= limit.unwrap_or(usize::MAX) {
-                    return false;
-                }
-                if !db.replica_allows_entity_at_read(collection, entity) {
-                    return true;
-                }
-                let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
-                    store.as_ref(),
-                    entity,
-                );
-                if let Some(mut record) = runtime_any_record_from_entity_ref(&hydrated) {
-                    set_source_collection(&mut record, collection);
-                    records.push(record);
-                }
-                true
-            });
+            crate::runtime::function_budget::scan(
+                |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+                |entity| {
+                    if records.len() >= limit.unwrap_or(usize::MAX) {
+                        return false;
+                    }
+                    if !db.replica_allows_entity_at_read(collection, entity) {
+                        return true;
+                    }
+                    let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
+                        store.as_ref(),
+                        entity,
+                    );
+                    if let Some(mut record) = runtime_any_record_from_entity_ref(&hydrated) {
+                        set_source_collection(&mut record, collection);
+                        records.push(record);
+                    }
+                    true
+                },
+            )?;
         }
         return Ok(records);
     }
@@ -336,12 +351,15 @@ pub(crate) fn stream_runtime_table_source_scan(
 
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> = Vec::new();
-    manager.scan_for_each(snapshot.as_ref(), |entity| {
-        if db.replica_allows_entity_at_read(table, entity) {
-            entities.push(entity.clone());
-        }
-        true
-    });
+    crate::runtime::function_budget::scan(
+        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+        |entity| {
+            if db.replica_allows_entity_at_read(table, entity) {
+                entities.push(entity.clone());
+            }
+            true
+        },
+    )?;
 
     // Columns mirror `collect_visible_columns`'s uniform-schema fast path:
     // sample the first materialized row's column set.

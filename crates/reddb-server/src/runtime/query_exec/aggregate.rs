@@ -153,8 +153,10 @@ pub(crate) fn execute_aggregate_query(
     // parallelised across segments via rayon. This is the mini-duel
     // aggregate_group shape and avoids the generic Vec<GroupKeyPart> +
     // spill-capable accumulator for low-cardinality group scans.
-    if let Some(result) = try_execute_parallel_single_col_numeric_aggs(db, query)? {
-        return Ok(result);
+    if !crate::runtime::function_budget::active() {
+        if let Some(result) = try_execute_parallel_single_col_numeric_aggs(db, query)? {
+            return Ok(result);
+        }
     }
 
     let effective_projections = effective_table_projections(query);
@@ -323,241 +325,245 @@ pub(crate) fn execute_aggregate_query(
     let mut spill_err: Option<String> = None;
 
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    manager.scan_for_each(snapshot.as_ref(), |entity| {
-        // ── Lazy record materialisation ──────────────────────────────────
-        // We defer `runtime_table_record_from_entity` until we actually
-        // need it (complex filters, GROUP BY exprs or aggregate args that
-        // can't be read directly from the entity).
-        let mut record_cache: Option<UnifiedRecord> = None;
+    crate::runtime::function_budget::scan(
+        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+        |entity| {
+            // ── Lazy record materialisation ──────────────────────────────────
+            // We defer `runtime_table_record_from_entity` until we actually
+            // need it (complex filters, GROUP BY exprs or aggregate args that
+            // can't be read directly from the entity).
+            let mut record_cache: Option<UnifiedRecord> = None;
 
-        macro_rules! get_or_make_record {
-            () => {{
-                if record_cache.is_none() {
-                    record_cache = runtime_table_record_from_entity_ref(entity);
-                }
-                record_cache.as_ref()
-            }};
-        }
-
-        if let Some(c) = compiled_filter.as_ref() {
-            let matches = c.evaluate(entity).resolve_with_fallback(|| {
-                let Some(record) = get_or_make_record!() else {
-                    return false;
-                };
-                effective_filter.as_ref().is_some_and(|filter| {
-                    evaluate_runtime_filter_with_db(
-                        Some(db),
-                        record,
-                        filter,
-                        Some(table_name),
-                        Some(table_alias),
-                    )
-                })
-            });
-            if !matches {
-                return true;
-            }
-        }
-
-        let group_values = if has_group_by {
-            if group_by_all_fast {
-                // Fast path: all GROUP BY are simple columns → read from entity.
-                let mut values = Vec::with_capacity(effective_group_by.len());
-                for (resolver_opt, expr) in group_by_kinds.iter().zip(&effective_group_by) {
-                    let value = if let Some(resolver) = resolver_opt {
-                        resolver.get_value(0, entity).map(|v| v.into_owned())
-                    } else {
-                        None
-                    };
-                    if let Some(v) = value {
-                        values.push(v);
-                    } else {
-                        // Shouldn't happen (group_by_all_fast is true) but
-                        // fall back gracefully.
-                        let Some(rec) = get_or_make_record!() else {
-                            return true;
-                        };
-                        let Some(v) = resolve_group_by_value(db, expr, rec) else {
-                            return true;
-                        };
-                        values.push(v);
+            macro_rules! get_or_make_record {
+                () => {{
+                    if record_cache.is_none() {
+                        record_cache = runtime_table_record_from_entity_ref(entity);
                     }
-                }
-                values
-            } else {
-                // Slow path: at least one complex GROUP BY expr.
-                let Some(rec) = get_or_make_record!() else {
-                    return true;
-                };
-                let mut values = Vec::with_capacity(effective_group_by.len());
-                for group_expr in &effective_group_by {
-                    let Some(value) = resolve_group_by_value(db, group_expr, rec) else {
-                        return true;
-                    };
-                    values.push(value);
-                }
-                values
+                    record_cache.as_ref()
+                }};
             }
-        } else {
-            Vec::new()
-        };
-        // Build the group-by key in a single String buffer instead
-        // of `iter().map().collect::<Vec<_>>().join("|")`, which used
-        // to pay N+1 String allocations per row. See sibling
-        // `aggregation.rs::make_group_key` for the same optimisation
-        // on the executor path.
-        let group_key = if has_group_by {
-            build_aggregate_group_key(&group_values)
-        } else {
-            Vec::new()
-        };
 
-        // One-probe entry dispatch. The old code did `contains_key`
-        // (hash probe #1) + `entry()` (hash probe #2) on every row —
-        // doubling the HashMap cost on the hot aggregate hit path.
-        // Now: one probe, one match; the spill check only runs for
-        // Vacant entries and only when the map is already at cap.
-        use std::collections::hash_map::Entry;
-        let need_spill_check = groups.len() >= max_groups;
-        let group = match groups.entry(group_key) {
-            Entry::Occupied(occ) => occ.into_mut(),
-            Entry::Vacant(vac) => {
-                if need_spill_check {
-                    // Re-extract the key (consumed by the insert) and
-                    // flush every existing group to the spill file,
-                    // then start a fresh in-memory batch holding this
-                    // new group.
-                    let fresh_key = vac.key().clone();
-                    drop(vac);
-                    let batch = std::mem::take(&mut groups);
-                    for (k, v) in batch {
-                        if let Err(e) = spill_agg.accumulate(k, v) {
-                            spill_err = Some(format!("agg spill error: {e}"));
-                            return false; // stop iteration
+            if let Some(c) = compiled_filter.as_ref() {
+                let matches = c.evaluate(entity).resolve_with_fallback(|| {
+                    let Some(record) = get_or_make_record!() else {
+                        return false;
+                    };
+                    effective_filter.as_ref().is_some_and(|filter| {
+                        evaluate_runtime_filter_with_db(
+                            Some(db),
+                            record,
+                            filter,
+                            Some(table_name),
+                            Some(table_alias),
+                        )
+                    })
+                });
+                if !matches {
+                    return true;
+                }
+            }
+
+            let group_values = if has_group_by {
+                if group_by_all_fast {
+                    // Fast path: all GROUP BY are simple columns → read from entity.
+                    let mut values = Vec::with_capacity(effective_group_by.len());
+                    for (resolver_opt, expr) in group_by_kinds.iter().zip(&effective_group_by) {
+                        let value = if let Some(resolver) = resolver_opt {
+                            resolver.get_value(0, entity).map(|v| v.into_owned())
+                        } else {
+                            None
+                        };
+                        if let Some(v) = value {
+                            values.push(v);
+                        } else {
+                            // Shouldn't happen (group_by_all_fast is true) but
+                            // fall back gracefully.
+                            let Some(rec) = get_or_make_record!() else {
+                                return true;
+                            };
+                            let Some(v) = resolve_group_by_value(db, expr, rec) else {
+                                return true;
+                            };
+                            values.push(v);
                         }
                     }
-                    groups.entry(fresh_key).or_insert_with(|| AggregateGroup {
-                        group_values: group_values.clone(),
-                        state: SlottedAggState::new(&agg_plan),
-                    })
+                    values
                 } else {
-                    vac.insert(AggregateGroup {
-                        group_values: group_values.clone(),
-                        state: SlottedAggState::new(&agg_plan),
-                    })
-                }
-            }
-        };
-        let state = &mut group.state;
-        state.count += 1;
-
-        // Accumulate values — slot-indexed, zero HashMap/String overhead per row.
-        for (proj_idx, proj) in all_aggregate_projections.iter().enumerate() {
-            let Projection::Function(func, args) = proj else {
-                continue;
-            };
-            let func_name = base_function_name(func);
-            if !is_aggregate_function(func_name) {
-                continue;
-            }
-
-            let slot = match agg_plan.proj_slots.get(proj_idx) {
-                Some(s) => s,
-                None => continue,
-            };
-
-            // COUNT(*) — already counted above.
-            if matches!(slot, ProjSlot::CountStar) {
-                continue;
-            }
-
-            // Resolve argument value: entity fast path first, then record.
-            let val = if let Some(kind) = agg_arg_kinds.get(proj_idx).and_then(|k| k.as_ref()) {
-                super::filter_compiled::resolve_kind(kind, entity)
-                    .map(|v| v.into_owned())
-                    .or_else(|| {
-                        get_or_make_record!()
-                            .and_then(|rec| resolve_aggregate_argument_value(db, args.first(), rec))
-                    })
-            } else {
-                match get_or_make_record!() {
-                    Some(rec) => resolve_aggregate_argument_value(db, args.first(), rec),
-                    None => continue,
-                }
-            };
-            let Some(val) = val else { continue };
-            let num = super::aggregate_value_to_f64(&val);
-
-            match slot {
-                ProjSlot::CountStar => {}
-                ProjSlot::CountOnly(idx) => {
-                    if !matches!(val, Value::Null) {
-                        state.count_only[*idx] += 1;
-                    }
-                }
-                ProjSlot::SumCount(idx) => {
-                    if let Some(n) = num {
-                        state.sums[*idx] += n;
-                        state.sum_agg_counts[*idx] += 1;
-                    }
-                }
-                ProjSlot::SumCountSq(idx) => {
-                    if let Some(n) = num {
-                        state.sums[*idx] += n;
-                        state.sum_agg_counts[*idx] += 1;
-                        state.sum_squares[*idx] += n * n;
-                    }
-                }
-                ProjSlot::Min(idx) => {
-                    update_extreme_value_slot(
-                        &mut state.mins[*idx],
-                        &val,
-                        std::cmp::Ordering::Less,
-                    );
-                }
-                ProjSlot::Max(idx) => {
-                    update_extreme_value_slot(
-                        &mut state.maxs[*idx],
-                        &val,
-                        std::cmp::Ordering::Greater,
-                    );
-                }
-                ProjSlot::AllValues(idx) => {
-                    if let Some(n) = num {
-                        state.all_values[*idx].push(n);
-                    }
-                }
-                ProjSlot::Concat(idx) => {
-                    if !matches!(val, Value::Null) {
-                        let text: String = match &val {
-                            Value::Text(s) => s.to_string(),
-                            other => other.display_string(),
+                    // Slow path: at least one complex GROUP BY expr.
+                    let Some(rec) = get_or_make_record!() else {
+                        return true;
+                    };
+                    let mut values = Vec::with_capacity(effective_group_by.len());
+                    for group_expr in &effective_group_by {
+                        let Some(value) = resolve_group_by_value(db, group_expr, rec) else {
+                            return true;
                         };
-                        state.concat_values[*idx].push(text);
+                        values.push(value);
+                    }
+                    values
+                }
+            } else {
+                Vec::new()
+            };
+            // Build the group-by key in a single String buffer instead
+            // of `iter().map().collect::<Vec<_>>().join("|")`, which used
+            // to pay N+1 String allocations per row. See sibling
+            // `aggregation.rs::make_group_key` for the same optimisation
+            // on the executor path.
+            let group_key = if has_group_by {
+                build_aggregate_group_key(&group_values)
+            } else {
+                Vec::new()
+            };
+
+            // One-probe entry dispatch. The old code did `contains_key`
+            // (hash probe #1) + `entry()` (hash probe #2) on every row —
+            // doubling the HashMap cost on the hot aggregate hit path.
+            // Now: one probe, one match; the spill check only runs for
+            // Vacant entries and only when the map is already at cap.
+            use std::collections::hash_map::Entry;
+            let need_spill_check = groups.len() >= max_groups;
+            let group = match groups.entry(group_key) {
+                Entry::Occupied(occ) => occ.into_mut(),
+                Entry::Vacant(vac) => {
+                    if need_spill_check {
+                        // Re-extract the key (consumed by the insert) and
+                        // flush every existing group to the spill file,
+                        // then start a fresh in-memory batch holding this
+                        // new group.
+                        let fresh_key = vac.key().clone();
+                        drop(vac);
+                        let batch = std::mem::take(&mut groups);
+                        for (k, v) in batch {
+                            if let Err(e) = spill_agg.accumulate(k, v) {
+                                spill_err = Some(format!("agg spill error: {e}"));
+                                return false; // stop iteration
+                            }
+                        }
+                        groups.entry(fresh_key).or_insert_with(|| AggregateGroup {
+                            group_values: group_values.clone(),
+                            state: SlottedAggState::new(&agg_plan),
+                        })
+                    } else {
+                        vac.insert(AggregateGroup {
+                            group_values: group_values.clone(),
+                            state: SlottedAggState::new(&agg_plan),
+                        })
                     }
                 }
-                ProjSlot::First(idx) => {
-                    if state.first_values[*idx].is_none() {
-                        state.first_values[*idx] = Some(val);
+            };
+            let state = &mut group.state;
+            state.count += 1;
+
+            // Accumulate values — slot-indexed, zero HashMap/String overhead per row.
+            for (proj_idx, proj) in all_aggregate_projections.iter().enumerate() {
+                let Projection::Function(func, args) = proj else {
+                    continue;
+                };
+                let func_name = base_function_name(func);
+                if !is_aggregate_function(func_name) {
+                    continue;
+                }
+
+                let slot = match agg_plan.proj_slots.get(proj_idx) {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                // COUNT(*) — already counted above.
+                if matches!(slot, ProjSlot::CountStar) {
+                    continue;
+                }
+
+                // Resolve argument value: entity fast path first, then record.
+                let val = if let Some(kind) = agg_arg_kinds.get(proj_idx).and_then(|k| k.as_ref()) {
+                    super::filter_compiled::resolve_kind(kind, entity)
+                        .map(|v| v.into_owned())
+                        .or_else(|| {
+                            get_or_make_record!().and_then(|rec| {
+                                resolve_aggregate_argument_value(db, args.first(), rec)
+                            })
+                        })
+                } else {
+                    match get_or_make_record!() {
+                        Some(rec) => resolve_aggregate_argument_value(db, args.first(), rec),
+                        None => continue,
                     }
-                }
-                ProjSlot::Last(idx) => {
-                    state.last_values[*idx] = Some(val);
-                }
-                ProjSlot::Array(idx) => {
-                    state.array_values[*idx].push(val);
-                }
-                ProjSlot::Distinct(idx) => {
-                    if !matches!(val, Value::Null) {
-                        state.distinct_sets[*idx]
-                            .get_or_insert_with(std::collections::HashSet::new)
-                            .insert(group_value_key(&val));
+                };
+                let Some(val) = val else { continue };
+                let num = super::aggregate_value_to_f64(&val);
+
+                match slot {
+                    ProjSlot::CountStar => {}
+                    ProjSlot::CountOnly(idx) => {
+                        if !matches!(val, Value::Null) {
+                            state.count_only[*idx] += 1;
+                        }
+                    }
+                    ProjSlot::SumCount(idx) => {
+                        if let Some(n) = num {
+                            state.sums[*idx] += n;
+                            state.sum_agg_counts[*idx] += 1;
+                        }
+                    }
+                    ProjSlot::SumCountSq(idx) => {
+                        if let Some(n) = num {
+                            state.sums[*idx] += n;
+                            state.sum_agg_counts[*idx] += 1;
+                            state.sum_squares[*idx] += n * n;
+                        }
+                    }
+                    ProjSlot::Min(idx) => {
+                        update_extreme_value_slot(
+                            &mut state.mins[*idx],
+                            &val,
+                            std::cmp::Ordering::Less,
+                        );
+                    }
+                    ProjSlot::Max(idx) => {
+                        update_extreme_value_slot(
+                            &mut state.maxs[*idx],
+                            &val,
+                            std::cmp::Ordering::Greater,
+                        );
+                    }
+                    ProjSlot::AllValues(idx) => {
+                        if let Some(n) = num {
+                            state.all_values[*idx].push(n);
+                        }
+                    }
+                    ProjSlot::Concat(idx) => {
+                        if !matches!(val, Value::Null) {
+                            let text: String = match &val {
+                                Value::Text(s) => s.to_string(),
+                                other => other.display_string(),
+                            };
+                            state.concat_values[*idx].push(text);
+                        }
+                    }
+                    ProjSlot::First(idx) => {
+                        if state.first_values[*idx].is_none() {
+                            state.first_values[*idx] = Some(val);
+                        }
+                    }
+                    ProjSlot::Last(idx) => {
+                        state.last_values[*idx] = Some(val);
+                    }
+                    ProjSlot::Array(idx) => {
+                        state.array_values[*idx].push(val);
+                    }
+                    ProjSlot::Distinct(idx) => {
+                        if !matches!(val, Value::Null) {
+                            state.distinct_sets[*idx]
+                                .get_or_insert_with(std::collections::HashSet::new)
+                                .insert(group_value_key(&val));
+                        }
                     }
                 }
             }
-        }
-        true
-    });
+            true
+        },
+    )?;
 
     // Propagate any spill I/O error from the iteration callback
     if let Some(e) = spill_err {

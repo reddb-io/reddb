@@ -1523,6 +1523,7 @@ pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
 #[cfg(test)]
 mod evaluator_differential;
+mod function_budget;
 pub(crate) mod function_catalog;
 mod function_execution;
 mod function_validation;
