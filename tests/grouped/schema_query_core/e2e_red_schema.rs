@@ -2037,7 +2037,8 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
     );
 
     let before_reclamations = budget_unsigned(&rt, "pressure_reclamations_triggered");
-    let pressure_rows = (10_000..10_080)
+    // The estimated growth must fit after reclamation, not just current usage.
+    let pressure_rows = (10_000..10_040)
         .map(|id| format!("({id}, 'pressure')"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -2054,6 +2055,8 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
         budget_unsigned(&rt, "pressure_bytes_reclaimed") > 0,
         "pressure consolidation should report reclaimed bytes"
     );
+
+    assert!(budget_unsigned(&rt, "total_used_bytes") <= budget);
 
     cleanup_scope();
 }
