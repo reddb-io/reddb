@@ -72,6 +72,9 @@ mod e2e_migrations_bootstrap;
 #[path = "storage_durability/e2e_storage_integrity_errors.rs"]
 mod e2e_storage_integrity_errors;
 
+#[path = "storage_durability/mixed_bulk_kind_index.rs"]
+mod mixed_bulk_kind_index;
+
 #[path = "runtime_persistence/e2e_seqn_journal_policy.rs"]
 mod e2e_seqn_journal_policy;
 

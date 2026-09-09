@@ -1343,7 +1343,7 @@ impl GrowingSegment {
     ///
     /// Optimizations vs normal insert:
     /// - Skips cross-refs
-    /// - Computes kind_key ONCE (not per entity)
+    /// - Resolves kind_index once per consecutive run of the same storage type
     /// - Pre-allocates kind_index HashSet
     /// - Skips contains_key check (caller guarantees unique IDs)
     /// - Uses Relaxed ordering for sequence counter
@@ -1371,15 +1371,23 @@ impl GrowingSegment {
 
         let n = entities.len();
 
-        // Compute kind_key ONCE
-        let kind_key = if let Some(first) = entities.first() {
-            first.kind.storage_type().to_string()
-        } else {
+        if entities.is_empty() {
             return Ok(Vec::new());
-        };
+        }
 
-        let kind_set = self.kind_index.entry(kind_key).or_default();
-        kind_set.reserve(n);
+        // A collection may receive a mixed-model batch. Index each item's actual
+        // type while retaining batched lookup/reservation for homogeneous input.
+        for run in
+            entities.chunk_by(|left, right| left.kind.storage_type() == right.kind.storage_type())
+        {
+            let kind = run[0].kind.storage_type();
+            let kind_set = match self.kind_index.get_mut(kind) {
+                Some(ids) => ids,
+                None => self.kind_index.entry(kind.to_string()).or_default(),
+            };
+            kind_set.reserve(run.len());
+            kind_set.extend(run.iter().map(|entity| entity.id));
+        }
 
         let now = current_unix_secs();
 
@@ -1421,7 +1429,6 @@ impl GrowingSegment {
             for (i, mut entity) in entities.into_iter().enumerate() {
                 entity.sequence_id = base_seq + i as u64;
                 let id = entity.id;
-                kind_set.insert(id);
                 ids.push(id);
                 batch_bytes += Self::estimate_entity_size(&entity);
                 if let EntityData::Row(row) = &entity.data {
@@ -1474,7 +1481,6 @@ impl GrowingSegment {
             for (i, mut entity) in entities.into_iter().enumerate() {
                 entity.sequence_id = base_seq + i as u64;
                 let id = entity.id;
-                kind_set.insert(id);
                 ids.push(id);
                 batch_bytes += Self::estimate_entity_size(&entity);
                 if let EntityData::Row(row) = &entity.data {
@@ -1489,10 +1495,9 @@ impl GrowingSegment {
             self.entities.extend(pairs);
         }
 
-        // Apply zone updates now that kind_set borrow is released.
+        // Apply the accumulated zone updates.
         // Columnar path: one `col_zones.entry` call per column (not
         // per cell). Named-fallback path: unchanged.
-        let _ = kind_set;
         if !columnar_zone_updates.is_empty() {
             let schema = columnar_schema.as_ref();
             for (ci, values) in columnar_zone_updates.into_iter().enumerate() {
@@ -1813,7 +1818,9 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn iter_kind(&self, kind_filter: &str) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
-        let ids = self.kind_index.get(kind_filter).cloned();
+        // The iterator borrows the segment, so the index cannot change underneath
+        // it. Borrow the ID set as well instead of copying O(kind count) entries.
+        let ids = self.kind_index.get(kind_filter);
         // In flat mode entities live in `flat_entities`, not `entities` —
         // chain both so iter_kind doesn't drop bulk-inserted entities.
         let flat: Box<dyn Iterator<Item = &UnifiedEntity>> = if self.use_flat {
@@ -1825,7 +1832,7 @@ impl UnifiedSegment for GrowingSegment {
             if self.deleted.contains(&e.id) {
                 return false;
             }
-            if let Some(ref ids) = ids {
+            if let Some(ids) = ids {
                 ids.contains(&e.id)
             } else {
                 false
