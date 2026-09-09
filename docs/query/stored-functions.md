@@ -154,8 +154,10 @@ otherwise start workers without inheriting the thread-local execution context.
 Parallel budget propagation remains pending. Ordinary SQL retains its existing
 parallel paths. Cost sketch: N visited candidates add N budget checks and about
 N/256 clock samples, with no per-candidate budget allocation, locks or atomics;
-ordinary scan callbacks bypass per-row accounting. This is an implementation
-cost estimate, not a measured throughput claim.
+ordinary scan callbacks bypass per-row accounting. Reading the two limits uses
+the existing configuration accessors, each scanning `red_config`; long config
+histories add lookup cost. This is an implementation cost estimate, not a
+measured throughput claim.
 
 Functions are a foundation for later collection rules and declarative endpoints.
 This slice does not implement either, nor does it establish performance parity
