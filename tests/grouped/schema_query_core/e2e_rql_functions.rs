@@ -799,7 +799,8 @@ fn graph_expansion_budget_rolls_back_after_materialization_succeeds() {
         "materialize_only() RETURNS TABLE (name TEXT) EFFECT READ",
         "MATCH (a) WHERE a.name = 'absent' RETURN a.name AS name",
     );
-    work_budget(&runtime, 500);
+    // Internal collections also contribute to the two materialization passes.
+    work_budget(&runtime, 2_000);
     assert!(execute(&runtime, "CALL materialize_only()")
         .result
         .records

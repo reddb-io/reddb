@@ -130,8 +130,9 @@ Multimodel paths share that same counter. Exact vector search charges visible
 candidate-ID discovery and candidate processing before distance evaluation.
 TurboQuant charges the filled lanes before each block of up to 32 vectors, then
 charges candidate conversion and exact reranking. Graph materialization charges
-visible candidate IDs and entity processing in each of its two passes; pattern
-matching charges seed nodes, partial matches, edge candidates and projected
+visible candidate IDs and entity processing in each of its two passes over all
+collections, including non-graph entities; pattern matching charges seed nodes,
+partial matches, edge candidates and projected
 matches. Hybrid fusion charges its input-map entries and fused candidates.
 A small LIMIT or an empty final result does not exempt input work from accounting.
 An exhausted call returns `stored function: execution work_max exceeded` or
