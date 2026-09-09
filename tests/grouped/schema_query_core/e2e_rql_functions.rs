@@ -794,7 +794,16 @@ fn graph_expansion_budget_rolls_back_after_materialization_succeeds() {
     }
     define(&runtime, "expand_graph() RETURNS TABLE (name TEXT) EFFECT WRITE",
         "UPDATE accounts SET amount = 99 WHERE id = 1; MATCH (a)-[:step]->(b)-[:step]->(c)-[:step]->(d)-[:step]->(e) RETURN a.name AS name");
+    define(
+        &runtime,
+        "materialize_only() RETURNS TABLE (name TEXT) EFFECT READ",
+        "MATCH (a) WHERE a.name = 'absent' RETURN a.name AS name",
+    );
     work_budget(&runtime, 500);
+    assert!(execute(&runtime, "CALL materialize_only()")
+        .result
+        .records
+        .is_empty());
     exhausted(&runtime, "CALL expand_graph()");
     assert_eq!(amount(&runtime), Value::Integer(10));
     work_budget(&runtime, 10_000);
@@ -881,4 +890,67 @@ fn hybrid_children_and_fusion_share_the_call_budget() {
     exhausted(&runtime, "CALL combined()");
     work_budget(&runtime, 1_000);
     assert_eq!(execute(&runtime, "CALL combined()").result.records.len(), 1);
+}
+
+#[test]
+fn budgeted_graph_materialization_preserves_caller_snapshot_across_segments() {
+    use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+    struct ConnectionGuard;
+    impl Drop for ConnectionGuard {
+        fn drop(&mut self) {
+            clear_current_connection_id();
+        }
+    }
+    let _connection = ConnectionGuard;
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    set_current_connection_id(99820);
+    execute(&runtime, "CREATE GRAPH snapshot_graph");
+    execute(
+        &runtime,
+        "INSERT INTO snapshot_graph NODE (label, name) VALUES ('base', 'base')",
+    );
+    define(
+        &runtime,
+        "snapshot_nodes() RETURNS TABLE (name TEXT) EFFECT READ",
+        "MATCH (n) RETURN n.name AS name",
+    );
+    runtime
+        .db()
+        .store()
+        .get_collection("snapshot_graph")
+        .expect("graph manager")
+        .force_seal()
+        .expect("seal original nodes");
+    execute(&runtime, "BEGIN ISOLATION LEVEL SNAPSHOT");
+    assert_eq!(
+        execute(&runtime, "CALL snapshot_nodes()")
+            .result
+            .records
+            .len(),
+        1
+    );
+
+    set_current_connection_id(99821);
+    execute(&runtime, "BEGIN");
+    execute(
+        &runtime,
+        "INSERT INTO snapshot_graph NODE (label, name) VALUES ('later', 'later')",
+    );
+    execute(&runtime, "COMMIT");
+
+    set_current_connection_id(99820);
+    let result = execute(&runtime, "CALL snapshot_nodes()");
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(
+        result.result.records[0].get("name"),
+        Some(&Value::text("base"))
+    );
+    execute(&runtime, "COMMIT");
+    assert_eq!(
+        execute(&runtime, "CALL snapshot_nodes()")
+            .result
+            .records
+            .len(),
+        2
+    );
 }
