@@ -50,7 +50,8 @@ process/power-loss test. These tests live in
 `tests/grouped/ai_local_vector/e2e_search_vector_expansion.rs` and
 `tests/grouped/ai_local_vector/e2e_vector_exact_allocations.rs`.
 
-Exact scoring still scans candidates, retains an O(N) ID list and hydrates bounded
-payload batches outside segment locks. Its own top-k payload copies and the global
+Exact scoring still scans candidates and hydrates bounded payload batches outside
+segment locks; its [segment cursor](vector-scan-cursor.md) replaces the former O(N)
+per-query ID list. Its own top-k payload copies and the global
 text fallback are separate work. Allocation measurements do not establish
 latency, throughput or performance parity with other databases.

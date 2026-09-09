@@ -328,25 +328,26 @@ pub(crate) fn runtime_vector_matches(
         }
         top.consider(entity, score, distance);
     };
-    // Keep distance calculation and top-k payload cloning outside segment
-    // locks. Borrowed scoring held the growing segment for the entire scan
-    // and regressed concurrent writes. The ID list is O(N); payload copies
-    // remain bounded to one batch. Predicates may also re-enter storage.
-    let mut ids = Vec::new();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
-        |entity| {
-            ids.push(entity.id);
+    // The segment cursor fixes membership and append boundaries without an
+    // O(N) ID list. Scoring, top-k copies and reentrant policies stay outside
+    // segment locks; only one bounded payload batch is resident here.
+    manager.scan_batches(
+        snapshot.as_ref(),
+        || crate::runtime::function_budget::charge(1).is_ok(),
+        |batch| {
+            if crate::runtime::function_budget::charge(0).is_err() {
+                return false;
+            }
+            for entity in batch {
+                if crate::runtime::function_budget::charge(1).is_err() {
+                    return false;
+                }
+                consider(entity);
+            }
             true
         },
-    )?;
-    for batch in ids.chunks(256) {
-        crate::runtime::function_budget::charge(0)?;
-        for entity in manager.get_many(batch).into_iter().flatten() {
-            crate::runtime::function_budget::charge(1)?;
-            consider(&entity);
-        }
-    }
+    );
+    crate::runtime::function_budget::charge(0)?;
     stats.peak_topk_entries = top.len() as u64;
     Ok(top.finish())
 }

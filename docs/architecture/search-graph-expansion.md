@@ -80,7 +80,8 @@ first read after insertion/sealing, without a graph-query warmup, and requires
 less than 512 KiB of calling-thread allocations. This measures cumulative
 allocations, not peak resident memory, all-thread memory or throughput. Global
 fallback scan still clones its candidate payloads, and exact vector scoring's
-ID list and payload batches remain separate work. Context vector expansion now
+payload batches remain separate work; its [segment cursor](vector-scan-cursor.md)
+now avoids the per-query ID list. Context vector expansion now
 [reuses its authorized selected payloads](search-vector-expansion.md). No SQLite, Postgres, Cassandra or
 SurrealDB performance parity is claimed here.
 

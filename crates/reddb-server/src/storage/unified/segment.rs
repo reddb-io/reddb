@@ -450,6 +450,26 @@ impl GraphEntityKind {
     }
 }
 
+/// Maximum physical positions examined under one segment read guard.
+pub(crate) const SCAN_BATCH_SIZE: usize = 256;
+
+/// Stable append-only positions, bounded when a scan opens the segment.
+pub(crate) struct SegmentScanCursor {
+    flat_end: usize,
+    hash_end: usize,
+    position: usize,
+}
+
+impl SegmentScanCursor {
+    pub(crate) fn remaining(&self) -> usize {
+        self.flat_end + self.hash_end - self.position
+    }
+
+    pub(crate) fn finished(&self) -> bool {
+        self.remaining() == 0
+    }
+}
+
 /// Growing segment implementation (in-memory, writable)
 pub struct GrowingSegment {
     /// Segment ID
@@ -465,6 +485,9 @@ pub struct GrowingSegment {
 
     /// Entity storage (HashMap for random access)
     entities: HashMap<EntityId, UnifiedEntity>,
+    /// Append-only positions for HashMap-resident IDs. Deleted entries stay
+    /// until the segment is reclaimed; flat storage already has stable positions.
+    hash_scan_ids: Vec<EntityId>,
     /// Flat entity storage for bulk inserts (no HashMap overhead, O(1) by offset)
     /// Used when entity IDs are sequential from base_entity_id
     flat_entities: Vec<UnifiedEntity>,
@@ -534,6 +557,42 @@ impl GrowingSegment {
             EntityKind::GraphEdge(_) => GraphEntityKind::Edge.mask(),
             _ => 0,
         };
+    }
+
+    pub(crate) fn scan_cursor(&self) -> SegmentScanCursor {
+        SegmentScanCursor {
+            flat_end: self.flat_entities.len(),
+            hash_end: self.hash_scan_ids.len(),
+            position: 0,
+        }
+    }
+
+    /// Append-only slots survive insertions, deletions and sealing. The caller
+    /// owns the segment read guard and must not re-enter storage in `visit`.
+    pub(crate) fn scan_batch(
+        &self,
+        cursor: &mut SegmentScanCursor,
+        before_work: &mut impl FnMut() -> bool,
+        visit: &mut impl FnMut(&UnifiedEntity),
+    ) -> bool {
+        for _ in 0..SCAN_BATCH_SIZE {
+            if cursor.finished() {
+                break;
+            }
+            if !before_work() {
+                return false;
+            }
+            let id = if cursor.position < cursor.flat_end {
+                self.flat_entities[cursor.position].id
+            } else {
+                self.hash_scan_ids[cursor.position - cursor.flat_end]
+            };
+            cursor.position += 1;
+            if let Some(entity) = self.get(id) {
+                visit(entity);
+            }
+        }
+        true
     }
 
     /// Direct iteration without Box<dyn> trait dispatch. Returns false to stop early.
@@ -609,6 +668,7 @@ impl GrowingSegment {
             created_at: now,
             last_write_at: now,
             entities: HashMap::new(),
+            hash_scan_ids: Vec::new(),
             flat_entities: Vec::new(),
             base_entity_id: 0,
             use_flat: false,
@@ -862,6 +922,7 @@ impl GrowingSegment {
         self.memory_bytes.load(Ordering::Relaxed)
             + self.unique_key_lookup_bytes.load(Ordering::Relaxed)
             + self.graph_read_index_bytes.load(Ordering::Relaxed)
+            + (self.hash_scan_ids.capacity() * std::mem::size_of::<EntityId>()) as u64
     }
 
     /// Release a resident entity's payload from the memory estimate. Only for
@@ -1134,6 +1195,7 @@ impl GrowingSegment {
 
     /// Index an entity
     fn index_entity(&mut self, entity: &UnifiedEntity) {
+        self.hash_scan_ids.push(entity.id);
         self.observe_graph_kind(&entity.kind);
         if let Some(index) = self.graph_read_index.get_mut() {
             index.insert(entity);
@@ -1616,12 +1678,14 @@ impl GrowingSegment {
                 if id.raw() == expected {
                     self.flat_entities.push(entity);
                 } else {
+                    self.hash_scan_ids.push(id);
                     self.entities.insert(id, entity);
                 }
             }
         } else {
             // Fallback to HashMap for non-sequential inserts
             self.entities.reserve(n);
+            self.hash_scan_ids.reserve(n);
             let mut pairs = Vec::with_capacity(n);
             for (i, mut entity) in entities.into_iter().enumerate() {
                 entity.sequence_id = base_seq + i as u64;
@@ -1635,6 +1699,7 @@ impl GrowingSegment {
                         }
                     }
                 }
+                self.hash_scan_ids.push(id);
                 pairs.push((id, entity));
             }
             self.entities.extend(pairs);

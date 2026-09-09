@@ -1192,9 +1192,10 @@ impl SegmentManager {
 
     /// Seal the current growing segment
     pub fn seal_current(&self) -> Result<SegmentId, SegmentError> {
-        let growing_opt = self.growing.write().take();
-
-        if let Some(growing_arc) = growing_opt {
+        // Keep topology publication atomic for cursors that capture growing
+        // and sealed under the same lock order: growing, then sealed.
+        let mut growing_slot = self.growing.write();
+        if let Some(growing_arc) = growing_slot.take() {
             let mut growing = growing_arc.write();
             let seg_id = growing.id();
             let entity_count = growing.stats().entity_count as u64;
@@ -1208,6 +1209,7 @@ impl SegmentManager {
             // In a real implementation, we'd convert to SealedSegment here
             // For now, we keep it as-is since GrowingSegment implements UnifiedSegment
             self.sealed.write().push(growing_arc);
+            drop(growing_slot);
 
             // Mark sealed segment pages all-visible — they're now immutable
             self.mark_sealed_pages_visible(entity_count);
@@ -1675,6 +1677,52 @@ impl SegmentManager {
         self.for_each_entity(|entity| {
             !Self::scan_entity_visible(snapshot, entity) || callback(entity)
         });
+    }
+
+    /// Capture segment membership and append boundaries, then hydrate bounded
+    /// batches. The consumer runs outside topology and segment locks, so scoring
+    /// and RLS may re-enter storage and writers can progress between batches.
+    /// Retired source segments remain pinned until this scan finishes.
+    pub(crate) fn scan_batches(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        mut before_work: impl FnMut() -> bool,
+        mut consume: impl FnMut(&[UnifiedEntity]) -> bool,
+    ) -> bool {
+        let segments = {
+            let growing = self.growing.read();
+            let sealed = self.sealed.read();
+            let mut segments = Vec::with_capacity(sealed.len() + usize::from(growing.is_some()));
+            for segment in growing.iter().chain(sealed.iter()) {
+                if !before_work() {
+                    return false;
+                }
+                let cursor = segment.read().scan_cursor();
+                segments.push((Arc::clone(segment), cursor));
+            }
+            segments
+        };
+        let mut batch = Vec::new();
+        for (segment, mut cursor) in segments {
+            while !cursor.finished() {
+                batch.clear();
+                batch.reserve_exact(cursor.remaining().min(super::segment::SCAN_BATCH_SIZE));
+                {
+                    let segment = segment.read();
+                    if !segment.scan_batch(&mut cursor, &mut before_work, &mut |entity| {
+                        if Self::scan_entity_visible(snapshot, entity) {
+                            batch.push(entity.clone());
+                        }
+                    }) {
+                        return false;
+                    }
+                }
+                if !consume(&batch) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Fold entities visible under an explicit MVCC snapshot in parallel.
@@ -2386,6 +2434,185 @@ mod tests {
     use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityData, EntityKind, RowData};
     use reddb_types::Value;
+
+    #[test]
+    fn bounded_scan_survives_sealing_consolidation_and_new_writes() {
+        let manager = SegmentManager::with_config(
+            "vectors",
+            ManagerConfig {
+                max_sealed_segments: 1,
+                consolidation_entities_per_tick: 10_000,
+                ..Default::default()
+            },
+        );
+        for part in 0..3 {
+            manager
+                .bulk_insert(
+                    (1..=300)
+                        .map(|offset| {
+                            UnifiedEntity::vector(
+                                EntityId::new(part * 300 + offset),
+                                "vectors",
+                                vec![1.0, 0.0],
+                            )
+                        })
+                        .collect(),
+                )
+                .expect("batch");
+            if part < 2 {
+                manager.force_seal().expect("seal");
+            }
+        }
+        let original_growing = manager.growing.read().as_ref().expect("growing").clone();
+        let mut changed = false;
+        let mut seen = Vec::new();
+        assert!(manager.scan_batches(
+            None,
+            || true,
+            |batch| {
+                assert!(batch.len() <= super::super::segment::SCAN_BATCH_SIZE);
+                assert!(
+                    manager.growing.try_write().is_some(),
+                    "consumer holds no topology guard"
+                );
+                assert!(
+                    original_growing.try_write().is_some(),
+                    "consumer holds no segment guard"
+                );
+                for entity in batch {
+                    assert!(manager.get(entity.id).is_some(), "reentrant storage lookup");
+                    seen.push(entity.id.raw());
+                }
+                if !changed {
+                    changed = true;
+                    manager.force_seal().expect("seal during scan");
+                    manager
+                        .insert(UnifiedEntity::vector(
+                            EntityId::new(5000),
+                            "vectors",
+                            vec![1.0, 0.0],
+                        ))
+                        .expect("new write");
+                    drain_maintenance(&manager);
+                    assert!(manager.stats().consolidation.runs_completed > 0);
+                }
+                true
+            }
+        ));
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            (1..=900).collect::<Vec<_>>(),
+            "no duplicate, missing or late candidates"
+        );
+        let mut after = Vec::new();
+        assert!(manager.scan_batches(
+            None,
+            || true,
+            |batch| {
+                after.extend(batch.iter().map(|entity| entity.id.raw()));
+                true
+            }
+        ));
+        after.sort_unstable();
+        let mut expected: Vec<_> = (1..=900).collect();
+        expected.push(5000);
+        assert_eq!(after, expected, "adopted entities have scan positions");
+    }
+
+    #[test]
+    fn bounded_scan_keeps_flat_and_hash_positions_through_mutation() {
+        let manager = SegmentManager::new("mixed");
+        let vector = |id| UnifiedEntity::vector(EntityId::new(id), "mixed", vec![1.0]);
+        manager
+            .bulk_insert((1..=300).map(vector).collect())
+            .expect("flat");
+        manager.insert(vector(500)).expect("hash insert");
+        manager
+            .bulk_insert(vec![vector(502), vector(505)])
+            .expect("gapped bulk");
+        manager.delete(EntityId::new(2)).expect("flat delete");
+        manager.delete(EntityId::new(505)).expect("hash delete");
+        let mut changed = false;
+        let mut seen = Vec::new();
+        assert!(manager.scan_batches(
+            None,
+            || true,
+            |batch| {
+                seen.extend(batch.iter().map(|entity| entity.id.raw()));
+                if !changed {
+                    changed = true;
+                    manager
+                        .insert(vector(700))
+                        .expect("append after cursor boundary");
+                    manager
+                        .update(UnifiedEntity::graph_node(
+                            EntityId::new(500),
+                            "mixed",
+                            "Node",
+                            HashMap::new(),
+                        ))
+                        .expect("structural update");
+                }
+                true
+            }
+        ));
+        seen.sort_unstable();
+        let mut expected: Vec<_> = (1..=300).filter(|id| *id != 2).collect();
+        expected.extend([500, 502]);
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn bounded_scan_preserves_snapshot_and_discards_interrupted_batches() {
+        let manager = SegmentManager::new("vectors");
+        let mut entities = Vec::new();
+        for (id, xmin, xmax) in [(1, 3, 12), (2, 12, 0), (3, 3, 0), (4, 3, 4)] {
+            let mut entity = UnifiedEntity::vector(EntityId::new(id), "vectors", vec![1.0]);
+            entity.set_xmin(xmin);
+            entity.set_xmax(xmax);
+            entities.push(entity);
+        }
+        manager.bulk_insert(entities).expect("versions");
+        manager.force_seal().expect("seal");
+        let snapshot = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 10,
+                in_progress: HashSet::from([4]),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+        let mut work = 0;
+        let mut callbacks = 0;
+        assert!(!manager.scan_batches(
+            Some(&snapshot),
+            || {
+                work += 1;
+                work <= 2
+            },
+            |_| {
+                callbacks += 1;
+                true
+            }
+        ));
+        assert_eq!(callbacks, 0, "a stopped batch is not consumed");
+        for (view, expected) in [(Some(&snapshot), vec![1, 3, 4]), (None, vec![2, 3])] {
+            let mut seen = Vec::new();
+            assert!(manager.scan_batches(
+                view,
+                || true,
+                |batch| {
+                    seen.extend(batch.iter().map(|entity| entity.id.raw()));
+                    true
+                }
+            ));
+            seen.sort_unstable();
+            assert_eq!(seen, expected);
+        }
+    }
 
     #[test]
     fn test_manager_basic() {
