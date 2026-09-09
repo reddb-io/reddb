@@ -6,8 +6,9 @@ The `CREATE TABLE` statement defines a new collection with a typed schema.
 
 ```sql
 CREATE TABLE table_name (
-  column_name DataType [NOT NULL] [DEFAULT value],
+  column_name DataType [NOT NULL] [DEFAULT value] [UNIQUE],
   ...
+  [ [CONSTRAINT constraint_name] UNIQUE (column [, ...]) ]
 ) [WITH TTL duration]
   [WITH CONTEXT INDEX ON (column [, ...])]
 ```
@@ -26,6 +27,30 @@ CREATE TABLE hosts (
   last_seen Timestamp
 )
 ```
+
+## Uniqueness
+
+Use a table-level constraint when the combination of columns must be unique:
+
+```sql
+CREATE TABLE memberships (
+  id INT PRIMARY KEY,
+  organization TEXT NOT NULL,
+  username TEXT NOT NULL,
+  CONSTRAINT membership_key UNIQUE (organization, username)
+)
+```
+
+A username may occur in different organizations; the same pair cannot occur twice.
+`UNIQUE (organization, username)` also works without a constraint name. RedDB
+assigns a stable name and includes it in `SHOW CREATE TABLE`.
+
+Uniqueness is checked on inserts and updates and survives persistent reopen.
+A tuple containing `NULL` does not conflict with another tuple; use `NOT NULL`
+on every key column when that is undesirable. Missing or repeated key columns
+and duplicate constraint names are rejected before the table is created.
+`EXPLAIN ALTER` currently rejects changes to table-level UNIQUE constraints
+because its column migration planner cannot emit `ADD/DROP CONSTRAINT`.
 
 ## Supported Column Types
 

@@ -62,6 +62,7 @@ impl RuntimeSchemaPort for RedDBRuntime {
             collection_model: crate::catalog::CollectionModel::Table,
             name,
             columns: columns.into_iter().map(to_create_column_def).collect(),
+            unique_constraints: Vec::new(),
             if_not_exists,
             default_ttl_ms,
             metrics_rollup_policies: Vec::new(),

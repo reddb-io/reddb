@@ -303,12 +303,38 @@ fn render_show_create_table_ddl(
     contract: &crate::physical::CollectionContract,
     mut indices: Vec<super::index_store::RegisteredIndex>,
 ) -> String {
-    let columns = contract
+    let mut elements = contract
         .declared_columns
         .iter()
         .map(render_show_create_column)
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    if let Some(table) = &contract.table_def {
+        for constraint in &table.constraints {
+            if constraint.constraint_type != reddb_types::ConstraintType::Unique {
+                continue;
+            }
+            let inline = constraint.columns.len() == 1
+                && contract.declared_columns.iter().any(|column| {
+                    column.unique
+                        && constraint.columns[0] == column.name
+                        && constraint.name == format!("uniq_{}", column.name)
+                });
+            if inline {
+                continue;
+            }
+            elements.push(format!(
+                "CONSTRAINT {} UNIQUE ({})",
+                render_sql_identifier(&constraint.name),
+                constraint
+                    .columns
+                    .iter()
+                    .map(|column| render_sql_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+    }
+    let columns = elements.join(", ");
     let mut statements = vec![format!(
         "CREATE TABLE {} ({columns})",
         render_sql_identifier(&contract.name)

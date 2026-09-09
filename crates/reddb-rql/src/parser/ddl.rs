@@ -4,9 +4,10 @@ use super::error::ParseError;
 use super::Parser;
 use crate::ast::{
     AlterOperation, AlterTableQuery, CreateCollectionQuery, CreateColumnDef, CreateTableQuery,
-    CreateVcsRefQuery, CreateVectorQuery, DropCollectionQuery, DropDocumentQuery, DropGraphQuery,
-    DropKvQuery, DropTableQuery, DropVcsRefQuery, DropVectorQuery, ExplainAlterQuery,
-    ExplainFormat, PartitionKind, PartitionSpec, QueryExpr, TruncateQuery, VcsRefKind,
+    CreateUniqueConstraint, CreateVcsRefQuery, CreateVectorQuery, DropCollectionQuery,
+    DropDocumentQuery, DropGraphQuery, DropKvQuery, DropTableQuery, DropVcsRefQuery,
+    DropVectorQuery, ExplainAlterQuery, ExplainFormat, PartitionKind, PartitionSpec, QueryExpr,
+    TruncateQuery, VcsRefKind,
 };
 use crate::lexer::Token;
 use reddb_types::catalog::{CollectionModel, SubscriptionDescriptor, SubscriptionOperation};
@@ -21,16 +22,7 @@ impl<'a> Parser<'a> {
         let if_not_exists = self.match_if_not_exists()?;
         let name = self.expect_ident()?;
 
-        self.expect(Token::LParen)?;
-        let mut columns = Vec::new();
-        loop {
-            let col = self.parse_column_def()?;
-            columns.push(col);
-            if !self.consume(&Token::Comma)? {
-                break;
-            }
-        }
-        self.expect(Token::RParen)?;
+        let (columns, unique_constraints) = self.parse_create_table_elements()?;
 
         let mut default_ttl_ms = None;
         let mut context_index_fields = Vec::new();
@@ -73,6 +65,7 @@ impl<'a> Parser<'a> {
             collection_model: CollectionModel::Table,
             name,
             columns,
+            unique_constraints,
             if_not_exists,
             default_ttl_ms,
             metrics_rollup_policies: Vec::new(),
@@ -87,6 +80,41 @@ impl<'a> Parser<'a> {
             vault_own_master_key: false,
             ai_policy: None,
         }))
+    }
+
+    fn parse_create_table_elements(
+        &mut self,
+    ) -> Result<(Vec<CreateColumnDef>, Vec<CreateUniqueConstraint>), ParseError> {
+        self.expect(Token::LParen)?;
+        let mut columns = Vec::new();
+        let mut unique_constraints = Vec::new();
+        loop {
+            let name = if self.consume_ident_ci("CONSTRAINT")? {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            if name.is_some() || self.check(&Token::Unique) {
+                self.expect(Token::Unique)?;
+                self.expect(Token::LParen)?;
+                let mut keys = vec![self.expect_ident()?];
+                while self.consume(&Token::Comma)? {
+                    keys.push(self.expect_ident()?);
+                }
+                self.expect(Token::RParen)?;
+                unique_constraints.push(CreateUniqueConstraint {
+                    name,
+                    columns: keys,
+                });
+            } else {
+                columns.push(self.parse_column_def()?);
+            }
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        Ok((columns, unique_constraints))
     }
 
     /// Parse: DROP TABLE [IF EXISTS] name
@@ -138,16 +166,7 @@ impl<'a> Parser<'a> {
             return Err(ParseError::document_create_table(self.position()));
         }
 
-        self.expect(Token::LParen)?;
-        let mut columns = Vec::new();
-        loop {
-            let col = self.parse_column_def()?;
-            columns.push(col);
-            if !self.consume(&Token::Comma)? {
-                break;
-            }
-        }
-        self.expect(Token::RParen)?;
+        let (columns, unique_constraints) = self.parse_create_table_elements()?;
 
         let mut default_ttl_ms = None;
         let mut context_index_fields = Vec::new();
@@ -315,6 +334,7 @@ impl<'a> Parser<'a> {
             collection_model: CollectionModel::Table,
             name,
             columns,
+            unique_constraints,
             if_not_exists,
             default_ttl_ms,
             metrics_rollup_policies: Vec::new(),
@@ -457,6 +477,7 @@ impl<'a> Parser<'a> {
             collection_model: model,
             name,
             columns: Vec::new(),
+            unique_constraints: Vec::new(),
             if_not_exists,
             default_ttl_ms: None,
             metrics_rollup_policies: Vec::new(),
@@ -1755,6 +1776,37 @@ mod tests {
 
     fn parser(input: &str) -> Parser<'_> {
         Parser::new(input).unwrap_or_else(|err| panic!("failed to lex {input:?}: {err:?}"))
+    }
+
+    #[test]
+    fn table_unique_constraints_use_both_parser_entrypoints() {
+        let body = "pairs (left_key INT, UNIQUE (left_key, right_key), right_key TEXT, CONSTRAINT named_pair UNIQUE (right_key, left_key))";
+        for parsed in [
+            parser(body).parse_create_table_body(),
+            parser(&format!("CREATE TABLE {body}")).parse_create_table_query(),
+        ] {
+            let QueryExpr::CreateTable(table) = parsed.expect("table constraints") else {
+                panic!("expected table");
+            };
+            assert_eq!(table.columns.len(), 2);
+            assert_eq!(table.unique_constraints.len(), 2);
+            assert_eq!(table.unique_constraints[0].name, None);
+            assert_eq!(
+                table.unique_constraints[0].columns,
+                ["left_key", "right_key"]
+            );
+            assert_eq!(
+                table.unique_constraints[1].name.as_deref(),
+                Some("named_pair")
+            );
+        }
+        for body in [
+            "pairs (left_key INT, UNIQUE ())",
+            "pairs (left_key INT, CONSTRAINT named_pair (left_key))",
+            "pairs (left_key INT, UNIQUE (left_key,))",
+        ] {
+            assert!(parser(body).parse_create_table_body().is_err(), "{body}");
+        }
     }
 
     #[test]
