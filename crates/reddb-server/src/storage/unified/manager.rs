@@ -3705,7 +3705,7 @@ mod tests {
             held_used - runtime.memory_accounting().total_used_bytes(),
             source_bytes
         );
-        runtime
+        let _reservation = runtime
             .admit_non_evictable_growth(
                 MemoryPool::SegmentArena,
                 "growth after cursor cancellation",

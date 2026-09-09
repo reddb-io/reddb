@@ -260,6 +260,9 @@ impl RedDBRuntime {
                         memory_shares,
                     ),
                 ),
+                memory_reservations: parking_lot::Mutex::new(
+                    super::memory_admission::MemoryReservations::default(),
+                ),
                 indices: IndexCatalog::register_default_vector_graph(
                     options.has_capability(crate::api::Capability::Table),
                     options.has_capability(crate::api::Capability::Graph),

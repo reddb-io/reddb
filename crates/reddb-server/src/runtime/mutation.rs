@@ -113,7 +113,7 @@ impl<'rt> MutationEngine<'rt> {
             .iter()
             .map(|row| crate::runtime::memory_admission::estimate_row_growth(&row.fields))
             .fold(0, u64::saturating_add);
-        self.runtime.admit_non_evictable_growth(
+        let _reservation = self.runtime.admit_non_evictable_growth(
             crate::storage::memory_pools::MemoryPool::SegmentArena,
             &format!("insert into {collection}"),
             growth_bytes,

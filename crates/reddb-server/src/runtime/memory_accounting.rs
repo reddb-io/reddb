@@ -29,6 +29,17 @@ impl RedDBRuntime {
     /// Samples store/segment inventories without scanning entity payloads.
     /// Maintenance publication can delay a sample; ordinary reads do not call it.
     pub fn refresh_memory_accounting(&self) {
+        let mut reservations = self.inner.memory_reservations.lock();
+        self.refresh_memory_accounting_with_reservations(&mut reservations);
+    }
+
+    /// Caller holds the reservation mutex across sampling and publication. A
+    /// completed guard cannot return headroom until this sample sees its writes;
+    /// an older sampler cannot overwrite this sample after headroom is returned.
+    pub(super) fn refresh_memory_accounting_with_reservations(
+        &self,
+        reservations: &mut super::memory_admission::MemoryReservations,
+    ) {
         let accounting = self.memory_accounting();
         let store = self.db().store();
 
@@ -47,5 +58,11 @@ impl RedDBRuntime {
         // and retain no live WAL buffer between mutations.
         accounting.report(MemoryPool::WalBuffers, store.wal_buffer_bytes_in_use());
         accounting.observe_total_used(accounting.total_used_bytes());
+        assert!(
+            reservations.completed_bytes <= reservations.reserved_bytes,
+            "invariant: only completed reservations can be reconciled"
+        );
+        reservations.reserved_bytes -= reservations.completed_bytes;
+        reservations.completed_bytes = 0;
     }
 }

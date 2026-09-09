@@ -1779,7 +1779,7 @@ impl RedDBRuntime {
             ],
         );
         let index_fields = fields.clone();
-        self.admit_non_evictable_growth(
+        let _segment_reservation = self.admit_non_evictable_growth(
             crate::storage::memory_pools::MemoryPool::SegmentArena,
             &format!("insert into {collection}"),
             crate::runtime::memory_admission::estimate_timeseries_point_growth(
@@ -1793,16 +1793,18 @@ impl RedDBRuntime {
             .into_iter()
             .flat_map(|index| index.columns)
             .collect::<Vec<_>>();
-        if !indexed_columns.is_empty() {
-            self.admit_non_evictable_growth(
+        let _index_reservation = if indexed_columns.is_empty() {
+            None
+        } else {
+            Some(self.admit_non_evictable_growth(
                 crate::storage::memory_pools::MemoryPool::IndexMemory,
                 &format!("index insert into {collection}"),
                 crate::runtime::memory_admission::estimate_index_growth(
                     std::slice::from_ref(&index_fields),
                     &indexed_columns,
                 ),
-            )?;
-        }
+            )?)
+        };
         let series_id = super::impl_timeseries::intern_timeseries_series(
             self.inner.db.store().as_ref(),
             collection,

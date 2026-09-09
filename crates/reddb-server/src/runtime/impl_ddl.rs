@@ -1667,7 +1667,7 @@ impl RedDBRuntime {
             .iter()
             .map(|(_, fields)| fields.clone())
             .collect::<Vec<_>>();
-        self.admit_non_evictable_growth(
+        let _reservation = self.admit_non_evictable_growth(
             crate::storage::memory_pools::MemoryPool::IndexMemory,
             &format!("create index {}", query.name),
             crate::runtime::memory_admission::estimate_index_growth(

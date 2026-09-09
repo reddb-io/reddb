@@ -46,9 +46,10 @@ capacity estimates are shared storage accounting, not per-reader copies.
 
 This closes lifetime-accounting and post-reclamation admission gaps, not a hard
 process RSS bound. Existing entity/allocator estimates remain approximate. Query
-result buffers, atomic growth reservations across concurrent writers, collection
-removal with outstanding handles, and maintenance headroom before allocation
-still need their own admission work. Sampling an unpublished copy after a paced
+result buffers, collection removal with outstanding handles, and maintenance
+headroom before allocation still need their own admission work.
+[Concurrent growth reservations](concurrent-memory-reservations.md) now protect
+the existing runtime admission paths. Sampling an unpublished copy after a paced
 tick is not reserving its peak allocation in advance.
 
 ## Verification

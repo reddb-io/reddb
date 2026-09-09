@@ -1068,6 +1068,7 @@ struct RuntimeInner {
     /// The one shared accounting pool (ADR 0073 §2): each big consumer's share
     /// of the budget above, and the live usage they report into it.
     pub(crate) memory_accounting: Arc<crate::storage::memory_pools::MemoryAccounting>,
+    memory_reservations: parking_lot::Mutex<memory_admission::MemoryReservations>,
     indices: IndexCatalog,
     pool_config: ConnectionPoolConfig,
     pool: Mutex<PoolState>,
