@@ -90,7 +90,9 @@ pub(crate) fn runtime_query_json(
         if result.statement == "ask" {
             unified_result_json_with_rendered_records(
                 &result.result,
-                super::query_result::ask_json(&records).into_iter().collect(),
+                super::query_result::ask_json(&records)
+                    .into_iter()
+                    .collect(),
             )
         } else {
             unified_result_json_with_records(&result.result, &records)
