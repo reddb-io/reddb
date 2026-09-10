@@ -2,10 +2,11 @@
 
 Context graph expansion uses the maintained per-segment graph index through a
 resumable physical-candidate cursor. It replaces the full candidate ID array and
-geometric retries that repeatedly scanned an already consumed prefix. The candidate
-adjacency is still resolved and ordered before applying `graph_max_edges`.
-Only the first policy-admitted edges within that limit remain in the ordered
-adjacency cache; rejected and excess candidates have temporary ownership.
+geometric retries that repeatedly scanned an already consumed prefix. An ordered
+selection retains at most `graph_max_edges` eligible neighbors, plus one
+replacement slot, rather than sorting a degree-sized candidate vector. Every
+physical candidate is still inspected; physical index order does not determine
+which logical neighbors win.
 
 ## Read and ownership contract
 
@@ -48,24 +49,42 @@ batch and return to that bank after its consumer finishes; temporary payload adm
 edges over the entire query. There is no new persisted index, WAL record, fsync,
 network hop or storage format.
 
-For each expanded node, candidate adjacency and physical-edge deduplication use
-one temporary query-credit scope. After sorting, lazy node hydration and RLS run
-in the same logical endpoint/edge order as traversal, stopping after K accepted
-edges. Hidden nodes do not consume K; parallel edges, self-loops and already
-visited endpoints do. Only those K edges move into the retained cache. Repeated
-visits from other sources reuse that selection and the query's hydration cache.
-Discarded candidates and deduplication state drop before their scope refunds
-credits. Selected entries receive permanent admission before ownership moves.
+For each expanded node, aliases and physical-edge deduplication use a temporary
+query-credit scope. Ranked candidates have individually refundable string credits;
+their container capacity remains admitted until selection finishes. The ordered
+key is `(logical endpoint string, logical edge ID, physical edge ID)`. The final
+physical-ID tie break preserves separate parallel occurrences with otherwise
+identical traversal behavior. A candidate that cannot improve the current K-edge
+selection does not allocate a neighbor or hydrate a node payload.
 
-For E expanded nodes of degree D and edge limit K, candidate preparation still
-costs O(D log D) CPU and O(D) temporary memory per node; retained adjacency costs
-O(E * K), instead of O(E * D). Identity and hydration caches still grow with
-probed/reached identities, including denied nodes. Runtime reservations retain
-the query high-water mark, but later nodes can reuse temporary credits. The physical
-index is not ordered by authorized logical neighbor, so stopping after the first
-K physical IDs would change results. Early bounded top-k selection and precise
-peak-memory admission across the complete multimodel pipeline remain pending.
-Cold index rebuilds and policy-evaluator scratch retain their previous bounds.
+Node RLS applies before a competitive candidate occupies a slot. Hidden nodes do
+not consume K; parallel edges, self-loops and already visited endpoints do. Each
+new policy-authorized destination owns its exact payload in a temporary scope,
+shared by its selected parallel edges. Removing its last selected edge releases
+that payload. Denied identities reuse the query's negative hydration cache.
+At completion, surviving payloads and their existing credits move into the query
+hydration cache without an extra payload clone or duplicate admission. Unrestricted
+node payloads remain lazy and are read only after final selection. If a selected
+lazy node disappears or ceases to be allowed before hydration, expansion fails
+with a retryable query error instead of silently returning an incomplete prefix.
+Normal statement snapshots retain the selected visible versions.
+
+RLS evaluation now follows competitive candidate arrival, rather than a complete
+sorted pass. It runs outside storage locks and can examine more candidate payloads
+than the previous lazy sorted prefix. At most K selected policy payloads plus the
+incoming replacement are owned at once; a single large policy payload still
+requires admission. The selected payload is not re-evaluated after ownership
+transfer. Existing statement visibility and query-local policy/hydration caching
+remain authoritative; no stronger catalog snapshot is introduced.
+
+For E expanded nodes of degree D and edge limit K, ordering costs O(D log(K + 1))
+CPU and O(K) candidate metadata; retained adjacency costs O(E * K). Policy payload
+sizes are additional to that metadata bound. Deduplication still costs O(D) per
+expanded node, and identity/hydration caches grow with probed/reached identities,
+including denied nodes. Runtime reservations retain the query high-water mark,
+but eviction and later expansions reuse temporary credits. Precise peak-memory
+admission across the complete multimodel pipeline remains pending. Cold index
+rebuilds and policy-evaluator scratch retain their previous bounds.
 
 ## Regression evidence
 
@@ -94,3 +113,13 @@ parallel edges each, one requested neighbor per seed and 2 MiB of headroom. All
 and completion must return the query credits. The parent retains discarded
 adjacency across seeds and exhausts that allowance. This measures admission and
 result equivalence, not RSS or competitive latency.
+
+A selection regression uses 8,192 edges, a one-edge limit and 1 MiB of available
+headroom. The lexically smallest neighbor arrives last; an earlier losing node
+has 2 MiB of properties. The degree-sized candidate vector exhausts the allowance
+on the parent, while bounded selection returns the same seed/winner without
+cloning the losing payload, for growing and sealed collections. Additional RLS
+regressions exercise 64 progressively better destinations with 32 KiB payloads,
+and transfer of a selected 200 KiB payload, within 512 KiB of headroom. Completion
+returns all query credits. These are admission/result regressions, not RSS or
+competitive latency measurements.

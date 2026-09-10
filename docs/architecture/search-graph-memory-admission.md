@@ -1,8 +1,8 @@
 # Context graph expansion memory admission
 
-`graph_max_edges` limits admitted adjacent edges during traversal. It does not
-limit the degree of the node whose adjacency must first be resolved, authorized
-and ordered. Previously, that preparation could allocate candidates, identity
+`graph_max_edges` bounds the ordered candidate selection and admitted adjacent
+edges during traversal. It does not bound the degree that must be inspected or
+the identity/deduplication state required by those probes. Previously, that preparation could allocate candidates, identity
 caches and payload copies without consulting the runtime's shared memory budget.
 
 ## Admission and ownership
@@ -47,14 +47,18 @@ consolidation details. There are no new WAL records, formats, fsyncs or network
 round trips.
 
 Identity, selected adjacency, hydrated payload and result credits remain
-conservative over the query lifetime. Unselected adjacency and physical-edge
-deduplication use a per-expanded-node temporary scope. After sorting and node
-RLS, only the first `graph_max_edges` admitted edges move into the retained cache;
-later expansions reuse the discarded candidates' credits. Temporary edge payloads are charged per batch, then released;
+conservative over the query lifetime. Physical-edge deduplication uses a per-expanded-node temporary scope. Ordered
+selection retains at most `graph_max_edges` authorized candidates plus one
+replacement. Eviction refunds candidate strings and displaced policy payloads;
+container capacity remains charged until selection drops. Selected policy
+payloads transfer their credits into query-lifetime ownership without duplicate
+admission. Later expansions reuse the discarded candidates' credits. Temporary edge payloads are charged per batch, then released;
 within a batch, their credits still accumulate conservatively. This is not a
-precise peak-memory allocator or a hard process RSS cap. Degree still determines preparation work and temporary adjacency size. Retained
-adjacency is bounded by the edge allowance per expanded node; early top-k
-selection to bound preparation memory remains separate performance work.
+precise peak-memory allocator or a hard process RSS cap. Degree still determines preparation work and temporary deduplication size.
+Candidate ordering and retained adjacency are bounded by the edge allowance per
+expanded node; identity/deduplication bounds remain separate performance work.
+RLS may inspect additional competitive node payloads before the final selection;
+unrestricted losing payloads remain unhydrated.
 
 This slice does not admit earlier context/global search buffers, policy-evaluator
 scratch, collection catalog enumeration, subsequent vector-search allocations,

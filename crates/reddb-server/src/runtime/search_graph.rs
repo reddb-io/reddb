@@ -19,6 +19,194 @@ struct SearchGraphNeighbor {
     physical_id: EntityId,
 }
 
+/// Only ranked candidates own these credits. Eviction drops their strings and
+/// refunds the slot; candidate count never follows incident degree.
+struct SearchGraphCandidate<'a> {
+    neighbor: SearchGraphNeighbor,
+    _memory: GraphMemory<'a>,
+}
+
+/// Policy evaluation happens outside storage locks. Keep the exact authorized
+/// payload while any selected parallel edge needs it; eviction releases it.
+struct SearchGraphCandidateNode<'a> {
+    entity: UnifiedEntity,
+    edges: usize,
+    _memory: GraphMemory<'a>,
+}
+
+struct SearchGraphSelection<'a> {
+    max_edges: usize,
+    candidates: BTreeMap<(String, u64, EntityId), SearchGraphCandidate<'a>>,
+    nodes: HashMap<String, SearchGraphCandidateNode<'a>>,
+    slots: usize,
+    _slots_memory: GraphMemory<'a>,
+}
+
+impl<'a> SearchGraphSelection<'a> {
+    fn new(max_edges: usize, memory: &GraphMemory<'a>) -> Self {
+        Self {
+            max_edges,
+            candidates: BTreeMap::new(),
+            nodes: HashMap::new(),
+            slots: 0,
+            _slots_memory: memory.scratch(),
+        }
+    }
+
+    fn admit_slot(&mut self) -> RedDBResult<()> {
+        if self.candidates.len() < self.slots {
+            return Ok(());
+        }
+        // Hash-table capacity can outlive individual payloads. Retain backing
+        // credits until both containers drop, including one replacement slot.
+        self._slots_memory
+            .entry::<((String, u64, EntityId), SearchGraphCandidate<'_>)>(40)?;
+        self._slots_memory
+            .entry::<(String, SearchGraphCandidateNode<'_>)>(20)?;
+        self.slots += 1;
+        Ok(())
+    }
+
+    fn accepts(&self, logical: &str, edge: u64, physical: EntityId) -> bool {
+        if self.max_edges == 0 {
+            return false;
+        }
+        if self.candidates.len() < self.max_edges {
+            return true;
+        }
+        let (last, _) = self
+            .candidates
+            .last_key_value()
+            .expect("full nonempty selection");
+        (logical, edge, physical) < (last.0.as_str(), last.1, last.2)
+    }
+
+    fn consider(
+        &mut self,
+        graph: &SearchGraphRead<'_>,
+        candidate: SearchGraphCandidate<'a>,
+        physical_edge: EntityId,
+        hydrated: &mut HashMap<String, Option<UnifiedEntity>>,
+        memory: &mut GraphMemory<'a>,
+        policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
+    ) -> RedDBResult<()> {
+        let neighbor = &candidate.neighbor;
+        let logical = &neighbor.logical_id;
+        if let Some(entity) = hydrated.get(logical) {
+            if entity.is_none() {
+                return Ok(());
+            }
+        } else if !self.nodes.contains_key(logical)
+            && graph.runtime.is_rls_enabled(&neighbor.collection)
+        {
+            let mut node_memory = memory.scratch();
+            node_memory.entry::<()>(logical.len())?;
+            let entity = node_memory.entity_if(
+                graph.store,
+                &neighbor.collection,
+                neighbor.physical_id,
+                |entity| graph.visible(entity),
+            )?;
+            let entity = entity.filter(|entity| {
+                graph.runtime.search_entity_allowed(
+                    &neighbor.collection,
+                    entity,
+                    graph.snapshot.as_ref(),
+                    policies,
+                )
+            });
+            let Some(entity) = entity else {
+                memory.entry::<(String, Option<UnifiedEntity>)>(logical.len())?;
+                hydrated.insert(logical.clone(), None);
+                return Ok(());
+            };
+            self.nodes.insert(
+                logical.clone(),
+                SearchGraphCandidateNode {
+                    entity,
+                    edges: 0,
+                    _memory: node_memory,
+                },
+            );
+        }
+        if let Some(node) = self.nodes.get_mut(logical) {
+            node.edges += 1;
+        }
+        let key = (logical.clone(), neighbor.edge_id, physical_edge);
+        assert!(
+            self.candidates.insert(key, candidate).is_none(),
+            "physical edge deduplicated"
+        );
+        if self.candidates.len() > self.max_edges {
+            let (_, evicted) = self.candidates.pop_last().expect("selection over limit");
+            let logical = &evicted.neighbor.logical_id;
+            if let Some(node) = self.nodes.get_mut(logical) {
+                assert!(node.edges > 0, "selected node has an incident candidate");
+                node.edges -= 1;
+                if node.edges == 0 {
+                    self.nodes.remove(logical);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        graph: &SearchGraphRead<'_>,
+        hydrated: &mut HashMap<String, Option<UnifiedEntity>>,
+        memory: &mut GraphMemory<'_>,
+        policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
+    ) -> RedDBResult<Vec<SearchGraphNeighbor>> {
+        let _slots_memory = self._slots_memory;
+        let mut nodes = self.nodes;
+        let mut admitted = Vec::new();
+        for (_, candidate) in self.candidates {
+            function_budget::charge(1)?;
+            let neighbor = &candidate.neighbor;
+            let logical = &neighbor.logical_id;
+            if !hydrated.contains_key(logical) {
+                memory.entry::<(String, Option<UnifiedEntity>)>(logical.len())?;
+                let entity = if let Some(node) = nodes.remove(logical) {
+                    // The payload moves without a clone. Keep its existing
+                    // credits for the query instead of charging it twice.
+                    node._memory.retain_for_query();
+                    Some(node.entity)
+                } else {
+                    // Unrestricted destinations stay lazy: an early, large
+                    // payload that loses the ranking is never cloned.
+                    memory
+                        .entity_if(
+                            graph.store,
+                            &neighbor.collection,
+                            neighbor.physical_id,
+                            |entity| graph.visible(entity),
+                        )?
+                        .filter(|entity| {
+                            graph.runtime.search_entity_allowed(
+                                &neighbor.collection,
+                                entity,
+                                graph.snapshot.as_ref(),
+                                policies,
+                            )
+                        })
+                };
+                if entity.is_none() {
+                    // A policy/catalog change or an unframed low-level mutation
+                    // invalidated selection. Never report a truncated success.
+                    return Err(RedDBError::InvalidOperation(
+                        "graph candidate changed during context expansion; retry the query".into(),
+                    ));
+                }
+                hydrated.insert(logical.clone(), entity);
+            }
+            memory.entry::<SearchGraphNeighbor>(logical.len() + neighbor.collection.len())?;
+            admitted.push(candidate.neighbor);
+        }
+        Ok(admitted)
+    }
+}
+
 /// Query-local caches contain only probed identities and reached adjacency.
 struct SearchGraphRead<'a> {
     runtime: &'a RedDBRuntime,
@@ -138,17 +326,17 @@ impl SearchGraphRead<'_> {
         Ok(resolved)
     }
 
-    fn neighbors(
+    fn neighbors<'a>(
         &mut self,
         current: &str,
         max_edges: usize,
         hydrated: &mut HashMap<String, Option<UnifiedEntity>>,
-        memory: &mut GraphMemory<'_>,
+        memory: &mut GraphMemory<'a>,
         policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
     ) -> RedDBResult<&[SearchGraphNeighbor]> {
         if !self.adjacency.contains_key(current) {
-            // Candidates and deduplication live only until this node's ordered,
-            // policy-admitted prefix has moved into the permanent cache.
+            // Deduplication and aliases are temporary. The ranked selection
+            // separately owns and refunds each evictable candidate.
             let mut candidates_memory = memory.scratch();
             let logical = EntityId::new(current.parse().expect("numeric logical node ID"));
             let aliases = if let Some(node) = self.node(logical, memory)? {
@@ -158,7 +346,7 @@ impl SearchGraphRead<'_> {
                 Vec::new()
             };
             let mut seen = HashSet::new();
-            let mut neighbors = Vec::new();
+            let mut selection = SearchGraphSelection::new(max_edges, memory);
             if !aliases.is_empty() {
                 for index in 0..self.collections.len() {
                     function_budget::charge(1)?;
@@ -179,7 +367,8 @@ impl SearchGraphRead<'_> {
                                 &collection,
                                 ids,
                                 &mut seen,
-                                &mut neighbors,
+                                &mut selection,
+                                hydrated,
                                 &mut candidates_memory,
                                 memory,
                                 policies,
@@ -190,13 +379,7 @@ impl SearchGraphRead<'_> {
                     function_budget::charge(0)?;
                 }
             }
-            neighbors.sort_unstable_by(|left, right| {
-                left.logical_id
-                    .cmp(&right.logical_id)
-                    .then_with(|| left.edge_id.cmp(&right.edge_id))
-            });
-            let neighbors =
-                self.neighbors_admitted(neighbors, max_edges, hydrated, memory, policies)?;
+            let neighbors = selection.finish(self, hydrated, memory, policies)?;
             memory.entry::<(String, Vec<SearchGraphNeighbor>)>(current.len())?;
             self.adjacency.insert(current.to_string(), neighbors);
             // Drop temporary owners before their credit scope is refunded.
@@ -206,59 +389,16 @@ impl SearchGraphRead<'_> {
         Ok(self.adjacency.get(current).expect("adjacency resolved"))
     }
 
-    fn neighbors_admitted(
-        &self,
-        candidates: Vec<SearchGraphNeighbor>,
-        max_edges: usize,
-        hydrated: &mut HashMap<String, Option<UnifiedEntity>>,
-        memory: &mut GraphMemory<'_>,
-        policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
-    ) -> RedDBResult<Vec<SearchGraphNeighbor>> {
-        let mut admitted = Vec::new();
-        for adjacent in candidates {
-            function_budget::charge(1)?;
-            if admitted.len() >= max_edges {
-                break;
-            }
-            let neighbor = &adjacent.logical_id;
-            if !hydrated.contains_key(neighbor) {
-                memory.entry::<(String, Option<UnifiedEntity>)>(neighbor.len())?;
-                let entity = memory
-                    .entity(self.store, &adjacent.collection, adjacent.physical_id)?
-                    .filter(|entity| {
-                        self.runtime.search_entity_allowed(
-                            &adjacent.collection,
-                            entity,
-                            self.snapshot.as_ref(),
-                            policies,
-                        )
-                    });
-                hydrated.insert(neighbor.clone(), entity);
-            }
-            if hydrated
-                .get(neighbor)
-                .expect("neighbor hydration resolved")
-                .is_none()
-            {
-                continue;
-            }
-            // Selection is independent of each source's visited set. Parallel
-            // edges and self-loops still consume the per-source edge allowance.
-            memory.entry::<SearchGraphNeighbor>(neighbor.len() + adjacent.collection.len())?;
-            admitted.push(adjacent);
-        }
-        Ok(admitted)
-    }
-
-    fn neighbors_batch(
+    fn neighbors_batch<'a>(
         &mut self,
         logical: EntityId,
         collection: &str,
         ids: &[EntityId],
         seen: &mut HashSet<EntityId>,
-        neighbors: &mut Vec<SearchGraphNeighbor>,
+        selection: &mut SearchGraphSelection<'a>,
+        hydrated: &mut HashMap<String, Option<UnifiedEntity>>,
         candidates_memory: &mut GraphMemory<'_>,
-        memory: &mut GraphMemory<'_>,
+        memory: &mut GraphMemory<'a>,
         policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
     ) -> RedDBResult<()> {
         let mut scratch = memory.scratch();
@@ -298,16 +438,28 @@ impl SearchGraphRead<'_> {
             } else {
                 continue;
             };
+            scratch.admit(20)?;
+            let logical_id = neighbor.raw().to_string();
+            let edge_id = entity.logical_id().raw();
+            if !selection.accepts(&logical_id, edge_id, *id) {
+                continue;
+            }
             let node = self
                 .node(neighbor, memory)?
                 .expect("endpoint has a visible node");
-            candidates_memory.entry::<SearchGraphNeighbor>(20 + node.collection.len())?;
-            neighbors.push(SearchGraphNeighbor {
-                logical_id: neighbor.raw().to_string(),
-                edge_id: entity.logical_id().raw(),
-                collection: node.collection.clone(),
-                physical_id: node.physical_id,
-            });
+            selection.admit_slot()?;
+            let mut candidate_memory = memory.scratch();
+            candidate_memory.entry::<()>(40 + node.collection.len())?;
+            let candidate = SearchGraphCandidate {
+                neighbor: SearchGraphNeighbor {
+                    logical_id,
+                    edge_id,
+                    collection: node.collection.clone(),
+                    physical_id: node.physical_id,
+                },
+                _memory: candidate_memory,
+            };
+            selection.consider(self, candidate, *id, hydrated, memory, policies)?;
         }
         Ok(())
     }
@@ -677,6 +829,254 @@ mod tests {
                 )
                 .expect("no leaked batch credits");
         }
+    }
+
+    #[test]
+    fn graph_candidate_selection_fits_high_degree_and_skips_unselected_payloads() {
+        use crate::storage::memory_pools::MemoryPool;
+        for sealed in [false, true] {
+            let (runtime, _) = memory_fixture(0, 0, false);
+            let store = runtime.db().store();
+            let seed =
+                UnifiedEntity::graph_node(EntityId::new(100), "seed", "Node", HashMap::new());
+            store
+                .insert("links", seed.clone())
+                .expect("explicit source identity");
+            for (id, payload) in [(9, 2 * 1024 * 1024), (10, 0)] {
+                store
+                    .insert(
+                        "links",
+                        UnifiedEntity::graph_node(
+                            EntityId::new(id),
+                            "neighbor",
+                            "Node",
+                            HashMap::from([("body".into(), Value::text("x".repeat(payload)))]),
+                        ),
+                    )
+                    .expect("node");
+            }
+            let edges = (0..8192)
+                .map(|index| {
+                    UnifiedEntity::graph_edge(
+                        EntityId::new(1000 + index),
+                        "step",
+                        seed.id.raw().to_string(),
+                        if index == 8191 { "10" } else { "9" },
+                        1.0,
+                        HashMap::new(),
+                    )
+                })
+                .collect();
+            store
+                .bulk_insert("links", edges)
+                .expect("parallel edges with late lexical winner");
+            if sealed {
+                store
+                    .get_collection("links")
+                    .expect("collection")
+                    .force_seal()
+                    .expect("seal");
+            }
+            runtime.refresh_memory_accounting();
+            let headroom = runtime.memory_budget().resolved_bytes
+                - runtime.memory_accounting().total_used_bytes();
+            let held = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "competing query",
+                    headroom - 1024 * 1024,
+                )
+                .expect("leave candidate scratch");
+            let mut scored = HashMap::from([(
+                seed.id.raw(),
+                (seed, 1.0, DiscoveryMethod::GlobalScan, "links".into()),
+            )]);
+            let mut memory = GraphMemory::new(&runtime);
+            assert_eq!(
+                runtime
+                    .search_context_expand_graph(
+                        &mut scored,
+                        None,
+                        1,
+                        1,
+                        0.0,
+                        &mut memory,
+                        &mut HashMap::new(),
+                    )
+                    .expect("bounded selection must fit without cloning the unselected payload"),
+                1
+            );
+            assert_eq!(scored.len(), 2);
+            assert!(scored.contains_key(&10));
+            assert!(!scored.contains_key(&9));
+            drop((scored, memory, held));
+            let _returned = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "all query credits returned",
+                    headroom,
+                )
+                .expect("no leaked candidate credits");
+        }
+    }
+
+    #[test]
+    fn graph_candidate_eviction_reuses_authorized_payload_credits() {
+        use crate::storage::memory_pools::MemoryPool;
+        for sealed in [false, true] {
+            for (degree, payload) in [(64, 32 * 1024), (1, 200 * 1024)] {
+                let (runtime, _) = memory_fixture(0, 0, false);
+                let store = runtime.db().store();
+                let seed =
+                    UnifiedEntity::graph_node(EntityId::new(100), "seed", "Node", HashMap::new());
+                store
+                    .insert("links", seed.clone())
+                    .expect("explicit source identity");
+                for index in 0..degree {
+                    let id = 10000 + degree - 1 - index;
+                    store
+                        .insert(
+                            "links",
+                            UnifiedEntity::graph_node(
+                                EntityId::new(id),
+                                "neighbor",
+                                "Node",
+                                HashMap::from([
+                                    ("body".into(), Value::text("x".repeat(payload))),
+                                    ("allowed".into(), Value::Boolean(id % 3 != 0)),
+                                ]),
+                            ),
+                        )
+                        .expect("node");
+                    store
+                        .insert(
+                            "links",
+                            UnifiedEntity::graph_edge(
+                                EntityId::new(20000 + index),
+                                "step",
+                                seed.id.raw().to_string(),
+                                id.to_string(),
+                                1.0,
+                                HashMap::new(),
+                            ),
+                        )
+                        .expect("edge with increasingly competitive destination");
+                }
+                for query in [
+                "CREATE POLICY nodes ON NODES OF links USING (label = 'seed' OR properties.allowed = true)",
+                "CREATE POLICY edges ON EDGES OF links USING (true)",
+                "ALTER TABLE links ENABLE ROW LEVEL SECURITY",
+            ] {
+                runtime.execute_query(query).expect("policy");
+            }
+                if sealed {
+                    store
+                        .get_collection("links")
+                        .expect("collection")
+                        .force_seal()
+                        .expect("seal");
+                }
+                runtime.refresh_memory_accounting();
+                let headroom = runtime.memory_budget().resolved_bytes
+                    - runtime.memory_accounting().total_used_bytes();
+                let held = runtime
+                    .admit_non_evictable_growth(
+                        MemoryPool::IndexMemory,
+                        "competing query",
+                        headroom - 512 * 1024,
+                    )
+                    .expect("leave replacement scratch");
+                let mut scored = HashMap::from([(
+                    seed.id.raw(),
+                    (seed, 1.0, DiscoveryMethod::GlobalScan, "links".into()),
+                )]);
+                let mut memory = GraphMemory::new(&runtime);
+                assert_eq!(
+                    runtime
+                        .search_context_expand_graph(
+                            &mut scored,
+                            None,
+                            1,
+                            1,
+                            0.0,
+                            &mut memory,
+                            &mut HashMap::new(),
+                        )
+                        .expect("displaced policy payloads must release credits"),
+                    1
+                );
+                assert_eq!(scored.len(), 2);
+                assert!(scored.contains_key(&10000));
+                drop((scored, memory, held));
+                let _returned = runtime
+                    .admit_non_evictable_growth(
+                        MemoryPool::IndexMemory,
+                        "all query credits returned",
+                        headroom,
+                    )
+                    .expect("no leaked policy payload credits");
+            }
+        }
+    }
+
+    #[test]
+    fn graph_candidate_policy_change_cannot_return_a_truncated_success() {
+        let (runtime, _) = memory_fixture(0, 0, false);
+        let store = runtime.db().store();
+        store
+            .insert(
+                "links",
+                UnifiedEntity::graph_node(EntityId::new(11), "destination", "Node", HashMap::new()),
+            )
+            .expect("destination");
+        let graph = SearchGraphRead {
+            runtime: &runtime,
+            store: store.as_ref(),
+            snapshot: None,
+            collections: vec!["links".into()],
+            nodes: HashMap::new(),
+            endpoints: HashMap::new(),
+            adjacency: HashMap::new(),
+        };
+        let mut memory = GraphMemory::new(&runtime);
+        let mut selection = SearchGraphSelection::new(1, &memory);
+        selection.admit_slot().expect("candidate slot");
+        let mut candidate_memory = memory.scratch();
+        candidate_memory.entry::<()>(45).expect("candidate strings");
+        let mut hydrated = HashMap::new();
+        let mut policies = HashMap::new();
+        selection
+            .consider(
+                &graph,
+                SearchGraphCandidate {
+                    neighbor: SearchGraphNeighbor {
+                        logical_id: "11".into(),
+                        edge_id: 1000,
+                        collection: "links".into(),
+                        physical_id: EntityId::new(11),
+                    },
+                    _memory: candidate_memory,
+                },
+                EntityId::new(1000),
+                &mut hydrated,
+                &mut memory,
+                &mut policies,
+            )
+            .expect("unrestricted candidate");
+        for query in [
+            "CREATE POLICY nodes ON NODES OF links USING (false)",
+            "ALTER TABLE links ENABLE ROW LEVEL SECURITY",
+        ] {
+            runtime
+                .execute_query(query)
+                .expect("concurrent policy change");
+        }
+        let error = selection
+            .finish(&graph, &mut hydrated, &mut memory, &mut policies)
+            .err()
+            .expect("invalidated prefix must fail");
+        assert!(error.to_string().contains("graph candidate changed"));
+        assert!(hydrated.is_empty());
     }
 
     #[test]

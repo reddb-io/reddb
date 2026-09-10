@@ -82,6 +82,15 @@ impl<'a> GraphMemory<'a> {
         }
     }
 
+    /// Transfer a temporary scope's admitted allocations into query-owned
+    /// state without cloning or reserving the same payload a second time.
+    pub(super) fn retain_for_query(mut self) {
+        assert!(
+            self.refundable_bytes.take().is_some(),
+            "invariant: only temporary credits transfer into query ownership"
+        );
+    }
+
     pub(super) fn admit(&mut self, bytes: usize) -> RedDBResult<()> {
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
         let mut credits = self.credits.borrow_mut();
@@ -121,6 +130,7 @@ impl<'a> GraphMemory<'a> {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn entity(
         &mut self,
         store: &UnifiedStore,
