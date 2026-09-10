@@ -251,9 +251,8 @@ impl RedWireClient {
         Ok(QueryResult::from_envelope(value))
     }
 
-    /// Send a query and return the raw `Result` payload string. This is
-    /// used by the legacy `red_client` compatibility shim so the CLI
-    /// output stays byte-for-byte aligned with its old RedWire path.
+    /// Send the legacy `Query` frame and return its raw summary payload.
+    /// Call [`Self::query`] when result records are needed.
     pub async fn query_raw(&mut self, sql: &str) -> Result<String> {
         let corr = self.next_corr();
         let req = build_query_frame(corr, sql).map_err(frame_build_err)?;

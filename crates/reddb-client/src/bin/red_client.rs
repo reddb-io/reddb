@@ -169,9 +169,9 @@ async fn run_redwire(host: String, port: u16, tls: bool, parsed: ParsedArgs) -> 
         }
     };
     match parsed.command {
-        Some(Command::OneShot(sql)) => match client.query_raw(&sql).await {
+        Some(Command::OneShot(sql)) => match client.query(&sql).await {
             Ok(out) => {
-                print_one_shot_result(&out, parsed.format);
+                print_typed_result(&out, parsed.format);
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -282,7 +282,11 @@ fn print_one_shot_result(body: &str, format: RowFormat) {
         return;
     };
     let result = QueryResult::from_envelope(value);
-    let bytes = format_query_result(&result, format);
+    print_typed_result(&result, format);
+}
+
+fn print_typed_result(result: &QueryResult, format: RowFormat) {
+    let bytes = format_query_result(result, format);
     use std::io::Write;
     std::io::stdout().write_all(&bytes).expect("write stdout");
 }

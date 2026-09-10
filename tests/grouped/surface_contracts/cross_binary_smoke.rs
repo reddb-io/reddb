@@ -291,24 +291,26 @@ fn red_client_round_trips_against_red_over_redwire() {
     }
 
     let uri = format!("red://127.0.0.1:{port}");
-    let out = Command::new(&red_client)
-        .args([&uri, "-c", "SELECT 1"])
-        .output()
-        .expect("spawn red_client");
-    let code = out.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-
+    for (format, expected) in [
+        ("table", "release_probe\n-------------\n1\n"),
+        ("json", "[{\"release_probe\":1}]\n"),
+        ("ndjson", "{\"release_probe\":1}\n"),
+        ("csv", "release_probe\n1\n"),
+        ("tsv", "release_probe\n1\n"),
+        ("toon", "[1]{release_probe}:\n  1\n"),
+    ] {
+        let out = Command::new(&red_client)
+            .args([&uri, "-c", "SELECT 1 AS release_probe", "--format", format])
+            .output()
+            .expect("spawn red_client");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "format={format}: {stderr}");
+        // Nonempty output alone accepts [] and (no rows), hiding a client
+        // that accidentally requests the protocol's summary-only response.
+        assert_eq!(stdout, expected, "format={format}: {stderr}");
+    }
     server.kill();
-
-    assert_eq!(
-        code, 0,
-        "red_client over RedWire should exit 0; got {code}\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        !stdout.trim().is_empty(),
-        "red_client should print a result; stdout empty.\nstderr: {stderr}"
-    );
 }
 
 #[test]
