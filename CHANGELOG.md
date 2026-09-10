@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.3
+
+### Patch Changes
+
+- Reduce graph and exact-vector query allocations, enforce shared memory admission before mutation and graph expansion, and preserve logical identity, MVCC, RLS and recovery behavior. Context expansion now deduplicates ordered physical-edge streams with constant ID state and bounds retained candidates by the edge allowance. Includes the accumulated query/transport fixes and persisted collection-expression and invoker-function building blocks on main. See the v1.23.3 upgrade notes before enabling persisted expressions or functions; older writers must not be used on databases relying on those contracts. Allocation/admission regressions do not establish competitive latency or throughput parity.
+
 ## 1.23.2
 
 ### Patch Changes
