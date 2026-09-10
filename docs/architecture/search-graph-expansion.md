@@ -15,7 +15,11 @@ Graph expansion probes a maintained per-segment index for the reached logical
 node and all its retained physical versions. Incident-edge probes include those
 physical aliases and the logical ID; endpoint resolution requires a visible
 logical node in scope. Candidates are checked against the captured snapshot.
-Edge RLS applies before ranked candidate selection. Competitive destinations
+Incident-edge streams merge in physical-ID/requested-collection order with
+32 IDs per active source/key stream. Deduplication retains only the last visible
+physical ID: invisible copies allow later visible copies, while the first visible
+copy takes precedence before edge RLS, including when denied. Final logical
+neighbor ordering is unchanged. Edge RLS applies before ranked candidate selection. Competitive destinations
 with node RLS are hydrated and authorized outside segment locks before occupying
 a slot. Unrestricted node payloads stay lazy until final selection. Only the
 first authorized edges in logical endpoint/edge order remain in the query-local
@@ -64,9 +68,11 @@ This replaces the per-query whole-graph scan and map. Reads still pay for
 collection/segment probes, retained aliases and incident degree; reached
 adjacency uses a bounded ordered selection for the edge allowance. Query-local identity/hydration caches grow with probed identities, including
 policy-denied nodes, not unrelated graph entries. The adjacency cache retains
-only the policy-admitted edge allowance per expanded node. Bounded candidate selection and physical-edge deduplication remain temporary
-per-node preparation;
-[their credits are reused](search-graph-candidate-cursor.md) by later expansions. A cold rebuild after invalidation costs O(M log N)
+only the policy-admitted edge allowance per expanded node. Bounded candidate selection and ordered cursor buffers remain temporary
+per-node preparation; physical-edge deduplication uses one last-visible ID;
+[their credits are reused](search-graph-candidate-cursor.md) by later expansions. The edge merge adds O(D log(R + 1)) heap work for D raw occurrences
+and R active source/key streams, with O(S + 32R) cursor metadata across S sources
+and a fixed 256-entry output buffer. A cold rebuild after invalidation costs O(M log N)
 for M resident entities and N graph pairs. Ordinary maintained writes add
 O(log N) work per pair. Accounting estimates 64 bytes per resident pair for keys,
 B-tree headers and occupancy slack; this is not a hard memory admission bound.

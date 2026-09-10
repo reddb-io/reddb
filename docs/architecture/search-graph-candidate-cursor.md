@@ -16,41 +16,55 @@ retained-segment accounting includes them until the cursor releases them. Captur
 reserves its handle-array estimate outside storage locks and retries the small
 inventory array if concurrent sealing grew the inventory before capture.
 
-Before delivering any batch, each captured source records the largest physical
-ID across all requested identity/endpoint keys. A segment cursor then visits one
-key at a time. Each batch seeks strictly after the last consumed ID and stops at
-that source bound, including the `u64::MAX` boundary. Later appends above the
-bound are excluded even for keys visited in a later batch. This is a physical traversal bound,
-not an MVCC snapshot or a promise about arbitrary low-level inserts with reused
-or out-of-order IDs. The enclosing statement snapshot remains authoritative.
+For incident edges, the reader merges all captured source/key streams in physical
+ID, then requested collection order. Each active stream has a captured upper ID,
+an exclusive resume cursor and a 32-ID read-ahead buffer. All bounds and initial
+buffers are captured before the first consumer callback, including keys and
+collections whose candidates arrive later. Empty streams are discarded. Each
+refill seeks after the consumed ID without rescanning prefixes, including at
+`u64::MAX`. Later monotonic appends above the bound are excluded. This is a
+physical traversal bound, not an MVCC snapshot or a promise about arbitrary
+low-level inserts with reused/out-of-order IDs or structural mutation. The
+statement snapshot remains authoritative. Node identity probes retain the
+existing per-source, key-at-a-time 256-ID cursor.
 
-The batch contains at most 256 IDs. Consumers and memory admission run outside
-segment/topology locks. Consumers inspect/hydrate through the current manager,
-so updates after consolidation cannot make a retired source's payload authoritative.
-Hidden edge versions are rejected before sizing/cloning. Node/edge RLS still runs
-outside storage locks. Index rebuilds remain cooperative; cancelled partial
-batches and interrupted rebuilds never become successful partial results.
+Edge output batches contain at most 256 `(physical ID, collection ordinal)`
+entries. Consumers and admission run outside segment/topology locks. Payloads
+are inspected/hydrated through the current manager, so retired sources never
+become authoritative after consolidation. Hidden versions are rejected before
+sizing/cloning; node/edge RLS runs outside storage locks. Index rebuilds remain
+cooperative. Cancelled partial buffers and interrupted rebuilds never become
+successful partial results.
 
-Visible physical edges are deduplicated across aliases before authorization and
-adjacency insertion. Logical identity, collection scope, node policies, stable
-endpoint/edge ordering, self-loop handling, per-source edge limits and score decay
-retain their existing contracts. The consumer can stop early; errors release the
+Duplicate physical occurrences remain adjacent across aliases, segments and
+collections. Deduplication retains only the last visible physical ID across
+batch boundaries. An invisible copy cannot hide a visible later collection's
+copy; the first visible copy wins before edge RLS, so a denied copy cannot be
+bypassed through a later collection. Logical identity, scope, node policies,
+final logical endpoint/edge ordering, self-loops, parallel edges, per-source
+limits and score decay retain their contracts. Early stop and errors release
 source handles and reservations.
 
 ## Cost and limits
 
-Cost sketch: S captured source handles plus a fixed 256 × 8-byte ID buffer;
-O(D + (B + K) log N) indexed work for D candidate occurrences, B batches and K key
-opens across the captured segments. Alias-key duplicates remain candidate
-occurrences. Each candidate occurrence is inspected once, without prefix rescans.
-Cursor metadata and edge payloads spend credits from the same query-local bank
-as retained adjacency. Edge payload credits accumulate only within the current
-batch and return to that bank after its consumer finishes; temporary payload admission no longer scales with all D
-edges over the entire query. There is no new persisted index, WAL record, fsync,
-network hop or storage format.
+Cost sketch: O(S + 32R) cursor metadata for S captured sources and R active
+source/key streams, plus a fixed 256-entry output buffer (4 KiB on 64-bit
+platforms). Source handles include scoped sources even if they have no matching
+graph kind. A binary min-heap orders stream heads. For D raw occurrences and P
+source/key probes, indexed work is approximately O((P + D/32) log N + D), plus
+O(D log(R + 1)) merge work; N is the segment index size. Alias/segment duplicates
+count as raw occurrences. There are no degree-sized ID arrays or prefix rescans.
+The smaller per-stream buffer trades more seeks and heap work for removing the
+O(D) deduplication set; latency needs separate measurement.
 
-For each expanded node, aliases and physical-edge deduplication use a temporary
-query-credit scope. Ranked candidates have individually refundable string credits;
+Source handles, streams, heap growth and output buffers are admitted before
+allocation outside storage locks. Edge payload credits accumulate only within
+the current output batch and return to the query-local bank after its consumer
+finishes. There is no new persisted index, WAL record, fsync, network hop or
+storage format. Aliases and manager handles use a temporary credit scope;
+physical-edge deduplication is one last-visible ID.
+
+Ranked candidates have individually refundable string credits;
 their container capacity remains admitted until selection finishes. The ordered
 key is `(logical endpoint string, logical edge ID, physical edge ID)`. The final
 physical-ID tie break preserves separate parallel occurrences with otherwise
@@ -79,8 +93,8 @@ remain authoritative; no stronger catalog snapshot is introduced.
 
 For E expanded nodes of degree D and edge limit K, ordering costs O(D log(K + 1))
 CPU and O(K) candidate metadata; retained adjacency costs O(E * K). Policy payload
-sizes are additional to that metadata bound. Deduplication still costs O(D) per
-expanded node, and identity/hydration caches grow with probed/reached identities,
+sizes are additional to that metadata bound. Physical-edge deduplication uses O(1) state;
+identity/hydration caches still grow with probed/reached identities,
 including denied nodes. Runtime reservations retain the query high-water mark,
 but eviction and later expansions reuse temporary credits. Precise peak-memory
 admission across the complete multimodel pipeline remains pending. Cold index
@@ -123,3 +137,15 @@ regressions exercise 64 progressively better destinations with 32 KiB payloads,
 and transfer of a selected 200 KiB payload, within 512 KiB of headroom. Completion
 returns all query credits. These are admission/result regressions, not RSS or
 competitive latency measurements.
+
+An ordered-deduplication regression expands 32,768 parallel edges with a one-edge
+allowance while another operation leaves only 512 KiB available. The parent
+physical-ID set exhausts this allowance; the merge returns the seed and neighbor
+and releases all query credits, for growing and sealed collections. This isolates
+admission and result correctness, not latency or RSS. Additional tests compare
+raw merged occurrences against the complete reader across aliases, sources and
+collections, retain source pins across consolidation with live hydration, and
+exercise callback lock freedom, cancellation, admission errors and appends before
+later streams are delivered. Runtime cases cover duplicate copies split across
+output batches (invisible, RLS-denied and allowed collection precedence), alias
+self-loops and distinct parallel-edge allowances.
