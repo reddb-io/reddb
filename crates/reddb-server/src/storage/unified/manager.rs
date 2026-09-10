@@ -627,38 +627,82 @@ impl SegmentManager {
         None
     }
 
-    /// Indexed physical candidates, including retained MVCC history. The caller
-    /// applies its explicit snapshot and defers RLS until segment locks are gone.
-    pub(crate) fn visit_graph_index_candidates(
+    /// Pin the source inventory across sealing/consolidation. Consumers hydrate
+    /// IDs through the current manager and run outside all storage locks.
+    /// Admission is also outside storage locks; a growing inventory retries only
+    /// its small handle array. Each indexed candidate buffer has a fixed size.
+    pub(crate) fn visit_graph_index_batches<E>(
         &self,
         kind: GraphEntityKind,
         keys: &[EntityId],
         mut before_work: impl FnMut() -> bool,
-        mut visit: impl FnMut(&UnifiedEntity) -> bool,
-    ) {
-        if let Some(growing) = self.growing.read().as_ref() {
-            if !before_work() {
-                return;
+        mut admit: impl FnMut(usize) -> Result<(), E>,
+        mut consume: impl FnMut(&[EntityId]) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        use super::segment::{GraphIndexCursor, SCAN_BATCH_SIZE};
+        admit(std::mem::size_of::<[EntityId; SCAN_BATCH_SIZE]>())?;
+        let mut admitted = 0;
+        let sources = loop {
+            let count = {
+                let growing = self.growing.read();
+                let sealed = self.sealed.read();
+                sealed.len() + usize::from(growing.is_some())
+            };
+            let bytes = count.saturating_mul(std::mem::size_of::<(
+                Arc<RwLock<GrowingSegment>>,
+                GraphIndexCursor,
+            )>());
+            admit(bytes.saturating_sub(admitted))?;
+            admitted = admitted.max(bytes);
+            let mut sources = Vec::with_capacity(count);
+            let growing = self.growing.read();
+            let sealed = self.sealed.read();
+            if sealed.len() + usize::from(growing.is_some()) > sources.capacity() {
+                continue;
             }
-            let segment = growing.read();
-            if segment.may_contain_graph_kind(kind)
-                && !segment.visit_graph_index_candidates(kind, keys, &mut before_work, &mut visit)
-            {
-                return;
+            for segment in growing.iter().chain(sealed.iter()) {
+                if !before_work() {
+                    return Ok(false);
+                }
+                let view = segment.read();
+                if !view.may_contain_graph_kind(kind) {
+                    continue;
+                }
+                let Some(cursor) = view.graph_index_cursor(kind, keys, &mut before_work) else {
+                    return Ok(false);
+                };
+                sources.push((Arc::clone(segment), cursor));
+            }
+            break sources;
+        };
+        let mut ids = [EntityId::new(0); SCAN_BATCH_SIZE];
+        for (source, mut cursor) in sources {
+            while !cursor.finished(keys) {
+                let mut count = 0;
+                {
+                    let segment = source.read();
+                    if !segment.may_contain_graph_kind(kind) {
+                        break;
+                    }
+                    if !segment.graph_index_batch(
+                        kind,
+                        keys,
+                        &mut cursor,
+                        &mut before_work,
+                        &mut |id| {
+                            ids[count] = id;
+                            count += 1;
+                        },
+                    ) {
+                        return Ok(false);
+                    }
+                }
+                if !before_work() || !consume(&ids[..count])? {
+                    return Ok(false);
+                }
             }
         }
-        let sealed = self.sealed.read();
-        for segment in sealed.iter() {
-            if !before_work() {
-                return;
-            }
-            let segment = segment.read();
-            if segment.may_contain_graph_kind(kind)
-                && !segment.visit_graph_index_candidates(kind, keys, &mut before_work, &mut visit)
-            {
-                return;
-            }
-        }
+        Ok(true)
     }
 
     /// Batch-fetch multiple entities by ID in a single lock acquisition per segment.
@@ -3590,6 +3634,137 @@ mod tests {
             assert!(ticks < 1_000, "consolidation failed to converge");
         }
         ticks
+    }
+
+    #[test]
+    fn graph_index_batches_pin_sources_and_hydrate_current_after_consolidation() {
+        let manager = consolidating_manager(CONSOLIDATION_ENTITIES_PER_TICK);
+        let ids = manager
+            .bulk_insert(
+                (1..=1024)
+                    .map(|id| {
+                        UnifiedEntity::graph_edge(
+                            EntityId::new(id),
+                            "step",
+                            "2000",
+                            "3000",
+                            1.0,
+                            HashMap::new(),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("edges");
+        manager.force_seal().expect("seal");
+        for id in ids.iter().take(300) {
+            manager.delete(*id).expect("fragment source");
+        }
+        let source = Arc::downgrade(&manager.sealed.read()[0]);
+        let mut seen = Vec::new();
+        let mut changed = false;
+        let mut metadata_bytes = 0;
+        assert!(manager.visit_graph_index_batches(GraphEntityKind::Edge, &[EntityId::new(2000)],
+            || true,
+            |bytes| { metadata_bytes += bytes; Ok::<_, ()>(()) },
+            |batch| {
+                assert!(batch.len() <= super::super::segment::SCAN_BATCH_SIZE);
+                assert!(manager.growing.try_write().is_some(), "no growing topology guard");
+                assert!(manager.sealed.try_write().is_some(), "no sealed topology guard");
+                assert!(source.upgrade().expect("source pinned").try_write().is_some(), "no source guard");
+                if !changed {
+                    changed = true;
+                    drain_maintenance(&manager);
+                    assert!(manager.stats().consolidation.runs_completed > 0);
+                    assert!(source.upgrade().is_some(), "retired cursor source remains pinned");
+                    let mut updated = manager.get(EntityId::new(1024)).expect("future edge");
+                    if let EntityKind::GraphEdge(edge) = &mut updated.kind { edge.weight = 2000; }
+                    manager.update(updated).expect("update authoritative merged copy");
+                }
+                for id in batch {
+                    let entity = manager.get(*id).expect("hydrate current manager");
+                    if id.raw() == 1024 {
+                        assert!(matches!(&entity.kind, EntityKind::GraphEdge(edge) if edge.weight == 2000));
+                    }
+                    seen.push(id.raw());
+                }
+                Ok(true)
+            }).expect("cursor"));
+        assert_eq!(seen, (301..=1024).collect::<Vec<_>>());
+        assert!(
+            source.upgrade().is_none(),
+            "finished cursor releases retired source"
+        );
+        assert!(
+            metadata_bytes < 4096,
+            "fixed ID buffer plus source handles: {metadata_bytes}"
+        );
+    }
+
+    #[test]
+    fn graph_index_batches_propagate_admission_and_cancel_before_partial_delivery() {
+        let manager = SegmentManager::new("graph");
+        manager
+            .bulk_insert(
+                (1..=1024)
+                    .map(|id| {
+                        UnifiedEntity::graph_edge(
+                            EntityId::new(id),
+                            "step",
+                            "2000",
+                            "3000",
+                            1.0,
+                            HashMap::new(),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("edges");
+        let mut delivered = 0;
+        let denied = manager.visit_graph_index_batches(
+            GraphEntityKind::Edge,
+            &[EntityId::new(2000)],
+            || true,
+            |_| Err("out of memory"),
+            |ids| {
+                delivered += ids.len();
+                Ok(true)
+            },
+        );
+        assert_eq!(denied, Err("out of memory"));
+        assert_eq!(delivered, 0);
+        let mut work = 0;
+        assert!(!manager
+            .visit_graph_index_batches(
+                GraphEntityKind::Edge,
+                &[EntityId::new(2000)],
+                || {
+                    work += 1;
+                    work < 100
+                },
+                |_| Ok::<_, ()>(()),
+                |ids| {
+                    delivered += ids.len();
+                    Ok(true)
+                }
+            )
+            .expect("cancelled cursor"));
+        assert_eq!(
+            delivered, 0,
+            "cancelled partial batch cannot reach consumer"
+        );
+        assert!(!manager
+            .visit_graph_index_batches(
+                GraphEntityKind::Edge,
+                &[EntityId::new(2000)],
+                || true,
+                |_| Ok::<_, ()>(()),
+                |ids| {
+                    delivered += ids.len();
+                    Ok(false)
+                }
+            )
+            .expect("consumer stop"));
+        assert_eq!(delivered, super::super::segment::SCAN_BATCH_SIZE);
     }
 
     #[test]

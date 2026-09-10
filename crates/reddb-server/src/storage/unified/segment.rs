@@ -486,6 +486,20 @@ impl SegmentScanCursor {
     }
 }
 
+/// One indexed key at a time, with an exclusive resume ID and a source-wide
+/// upper bound captured before any batch. MVCC is checked during live hydration.
+pub(crate) struct GraphIndexCursor {
+    key_index: usize,
+    after: Option<EntityId>,
+    upper: EntityId,
+}
+
+impl GraphIndexCursor {
+    pub(crate) fn finished(&self, keys: &[EntityId]) -> bool {
+        self.key_index == keys.len()
+    }
+}
+
 /// Growing segment implementation (in-memory, writable)
 pub struct GrowingSegment {
     /// Segment ID
@@ -1305,6 +1319,7 @@ impl GrowingSegment {
 
     /// The owning segment read lock keeps candidates stable. Callers must not
     /// re-enter storage in `visit`; collect IDs and evaluate RLS after unlocking.
+    #[cfg(test)]
     pub(crate) fn visit_graph_index_candidates(
         &self,
         kind: GraphEntityKind,
@@ -1312,29 +1327,9 @@ impl GrowingSegment {
         before_work: &mut impl FnMut() -> bool,
         visit: &mut impl FnMut(&UnifiedEntity) -> bool,
     ) -> bool {
-        let mut cached = self.graph_read_index.read();
-        if cached.is_none() {
-            drop(cached);
-            let mut writer = self.graph_read_index.write();
-            if writer.is_none() {
-                let mut index = SegmentGraphIndex::default();
-                // Only unrestricted structural mutation invalidates the index.
-                // A stopped rebuild is discarded, never published partially.
-                if !self.for_each_fast(|entity| {
-                    if !before_work() {
-                        return false;
-                    }
-                    index.insert(entity);
-                    true
-                }) {
-                    return false;
-                }
-                self.graph_read_index_bytes
-                    .store(index.memory_bytes(), Ordering::Relaxed);
-                *writer = Some(index);
-            }
-            cached = parking_lot::RwLockWriteGuard::downgrade(writer);
-        }
+        let Some(cached) = self.graph_read_index_for_query(before_work) else {
+            return false;
+        };
         let index = cached.as_ref().expect("complete graph index");
         for key in keys {
             if !before_work() {
@@ -1350,6 +1345,100 @@ impl GrowingSegment {
                     }
                 }
             }
+        }
+        true
+    }
+
+    fn graph_read_index_for_query(
+        &self,
+        before_work: &mut impl FnMut() -> bool,
+    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<SegmentGraphIndex>>> {
+        let mut cached = self.graph_read_index.read();
+        if cached.is_none() {
+            drop(cached);
+            let mut writer = self.graph_read_index.write();
+            if writer.is_none() {
+                let mut index = SegmentGraphIndex::default();
+                // Only unrestricted structural mutation invalidates the index.
+                // A stopped rebuild is discarded, never published partially.
+                if !self.for_each_fast(|entity| {
+                    if !before_work() {
+                        return false;
+                    }
+                    index.insert(entity);
+                    true
+                }) {
+                    return None;
+                }
+                self.graph_read_index_bytes
+                    .store(index.memory_bytes(), Ordering::Relaxed);
+                *writer = Some(index);
+            }
+            cached = parking_lot::RwLockWriteGuard::downgrade(writer);
+        }
+        Some(cached)
+    }
+
+    pub(crate) fn graph_index_cursor(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        before_work: &mut impl FnMut() -> bool,
+    ) -> Option<GraphIndexCursor> {
+        let cached = self.graph_read_index_for_query(before_work)?;
+        let index = cached.as_ref().expect("complete graph index");
+        let mut upper = EntityId::new(0);
+        for key in keys {
+            if !before_work() {
+                return None;
+            }
+            if let Some(last) = index.candidates(kind, *key).next_back() {
+                upper = upper.max(last);
+            }
+        }
+        Some(GraphIndexCursor {
+            key_index: 0,
+            after: None,
+            upper,
+        })
+    }
+
+    /// Collect at most SCAN_BATCH_SIZE physical index entries without payload
+    /// copies. Resume by key seek, never by rescanning an already consumed prefix.
+    pub(crate) fn graph_index_batch(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        cursor: &mut GraphIndexCursor,
+        before_work: &mut impl FnMut() -> bool,
+        visit: &mut impl FnMut(EntityId),
+    ) -> bool {
+        let Some(cached) = self.graph_read_index_for_query(before_work) else {
+            return false;
+        };
+        let index = cached.as_ref().expect("complete graph index");
+        let mut count = 0;
+        while !cursor.finished(keys) && count < SCAN_BATCH_SIZE {
+            let key = keys[cursor.key_index];
+            if !before_work() {
+                return false;
+            }
+            for id in index
+                .candidates_after(kind, key, cursor.after, cursor.upper)
+                .take(SCAN_BATCH_SIZE - count)
+            {
+                if !before_work() {
+                    return false;
+                }
+                cursor.after = Some(id);
+                count += 1;
+                visit(id);
+            }
+            if count == SCAN_BATCH_SIZE && cursor.after != Some(cursor.upper) {
+                break;
+            }
+            cursor.key_index += 1;
+            cursor.after = None;
         }
         true
     }

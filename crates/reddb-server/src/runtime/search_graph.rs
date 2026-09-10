@@ -52,18 +52,36 @@ impl SearchGraphRead<'_> {
                 let Some(manager) = self.store.get_collection(collection) else {
                     continue;
                 };
-                let candidates =
-                    memory.candidates(&manager, GraphEntityKind::Node, &[logical], |entity| {
-                        self.visible(entity)
-                    })?;
-                for (id, is_visible) in candidates {
-                    memory.entry::<EntityId>(0)?;
-                    aliases.push(id);
-                    if is_visible {
-                        memory.admit(collection.len())?;
-                        visible = Some((collection.clone(), id));
-                    }
-                }
+                let mut cursor_memory = memory.scratch();
+                manager.visit_graph_index_batches(
+                    GraphEntityKind::Node,
+                    &[logical],
+                    || function_budget::charge(1).is_ok(),
+                    |bytes| cursor_memory.admit(bytes),
+                    |ids| {
+                        for id in ids {
+                            function_budget::charge(1)?;
+                            let Some(is_visible) = manager
+                                .get_with(*id, |entity| {
+                                    (matches!(entity.kind, EntityKind::GraphNode(_))
+                                        && entity.logical_id() == logical)
+                                        .then(|| self.visible(entity))
+                                })
+                                .flatten()
+                            else {
+                                continue;
+                            };
+                            memory.entry::<EntityId>(0)?;
+                            aliases.push(*id);
+                            if is_visible {
+                                memory.admit(collection.len())?;
+                                visible = Some((collection.clone(), *id));
+                            }
+                        }
+                        Ok(true)
+                    },
+                )?;
+                function_budget::charge(0)?;
             }
             aliases.sort_unstable();
             aliases.dedup();
@@ -134,69 +152,37 @@ impl SearchGraphRead<'_> {
             } else {
                 Vec::new()
             };
-            let mut candidates = Vec::new();
             let mut seen = HashSet::new();
+            let mut neighbors = Vec::new();
             if !aliases.is_empty() {
-                for collection in &self.collections {
+                for index in 0..self.collections.len() {
                     function_budget::charge(1)?;
-                    let Some(manager) = self.store.get_collection(collection) else {
+                    memory.admit(self.collections[index].len())?;
+                    let collection = self.collections[index].clone();
+                    let Some(manager) = self.store.get_collection(&collection) else {
                         continue;
                     };
-                    let found =
-                        memory.candidates(&manager, GraphEntityKind::Edge, &aliases, |entity| {
-                            self.visible(entity)
-                        })?;
-                    for (id, is_visible) in found {
-                        if is_visible && !seen.contains(&id) {
-                            memory.entry::<EntityId>(0)?;
-                            memory.entry::<(String, EntityId)>(collection.len())?;
-                            seen.insert(id);
-                            candidates.push((collection.clone(), id));
-                        }
-                    }
+                    let mut cursor_memory = memory.scratch();
+                    manager.visit_graph_index_batches(
+                        GraphEntityKind::Edge,
+                        &aliases,
+                        || function_budget::charge(1).is_ok(),
+                        |bytes| cursor_memory.admit(bytes),
+                        |ids| {
+                            self.neighbors_batch(
+                                logical,
+                                &collection,
+                                ids,
+                                &mut seen,
+                                &mut neighbors,
+                                memory,
+                                policies,
+                            )?;
+                            Ok(true)
+                        },
+                    )?;
+                    function_budget::charge(0)?;
                 }
-            }
-            let mut neighbors = Vec::new();
-            // Hydrate and evaluate policies after releasing all segment locks.
-            for (collection, id) in candidates {
-                function_budget::charge(1)?;
-                let Some(entity) = memory.entity(self.store, &collection, id)? else {
-                    continue;
-                };
-                if !self.runtime.search_entity_allowed(
-                    &collection,
-                    &entity,
-                    self.snapshot.as_ref(),
-                    policies,
-                ) {
-                    continue;
-                }
-                let EntityKind::GraphEdge(edge) = &entity.kind else {
-                    continue;
-                };
-                let Some(from) = self.endpoint(&edge.from_node, memory)? else {
-                    continue;
-                };
-                let Some(to) = self.endpoint(&edge.to_node, memory)? else {
-                    continue;
-                };
-                let neighbor = if from == logical {
-                    to
-                } else if to == logical {
-                    from
-                } else {
-                    continue;
-                };
-                let node = self
-                    .node(neighbor, memory)?
-                    .expect("endpoint has a visible node");
-                memory.entry::<SearchGraphNeighbor>(20 + node.collection.len())?;
-                neighbors.push(SearchGraphNeighbor {
-                    logical_id: neighbor.raw().to_string(),
-                    edge_id: entity.logical_id().raw(),
-                    collection: node.collection.clone(),
-                    physical_id: node.physical_id,
-                });
             }
             neighbors.sort_unstable_by(|left, right| {
                 left.logical_id
@@ -208,6 +194,67 @@ impl SearchGraphRead<'_> {
         }
         function_budget::charge(0)?;
         Ok(self.adjacency.get(current).expect("adjacency resolved"))
+    }
+
+    fn neighbors_batch(
+        &mut self,
+        logical: EntityId,
+        collection: &str,
+        ids: &[EntityId],
+        seen: &mut HashSet<EntityId>,
+        neighbors: &mut Vec<SearchGraphNeighbor>,
+        memory: &mut GraphMemory<'_>,
+        policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
+    ) -> RedDBResult<()> {
+        let mut scratch = memory.scratch();
+        for id in ids {
+            function_budget::charge(1)?;
+            if seen.contains(id) {
+                continue;
+            }
+            let Some(entity) =
+                scratch.entity_if(self.store, collection, *id, |entity| self.visible(entity))?
+            else {
+                continue;
+            };
+            memory.entry::<EntityId>(0)?;
+            seen.insert(*id);
+            if !self.runtime.search_entity_allowed(
+                collection,
+                &entity,
+                self.snapshot.as_ref(),
+                policies,
+            ) {
+                continue;
+            }
+            let EntityKind::GraphEdge(edge) = &entity.kind else {
+                continue;
+            };
+            let Some(from) = self.endpoint(&edge.from_node, memory)? else {
+                continue;
+            };
+            let Some(to) = self.endpoint(&edge.to_node, memory)? else {
+                continue;
+            };
+            let neighbor = if from == logical {
+                to
+            } else if to == logical {
+                from
+            } else {
+                continue;
+            };
+            let node = self
+                .node(neighbor, memory)?
+                .expect("endpoint has a visible node");
+            memory.entry::<SearchGraphNeighbor>(20 + node.collection.len())?;
+            neighbors.push(SearchGraphNeighbor {
+                logical_id: neighbor.raw().to_string(),
+                edge_id: entity.logical_id().raw(),
+                collection: node.collection.clone(),
+                physical_id: node.physical_id,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -512,6 +559,166 @@ mod tests {
                     .expect("query completion returns credits");
             }
         }
+    }
+
+    #[test]
+    fn graph_batches_reuse_payload_headroom_across_high_degree() {
+        use crate::storage::memory_pools::MemoryPool;
+        for sealed in [false, true] {
+            let (runtime, seed) = memory_fixture(0, 0, false);
+            let store = runtime.db().store();
+            let neighbor_id = store.next_entity_id();
+            store
+                .insert(
+                    "links",
+                    UnifiedEntity::graph_node(neighbor_id, "neighbor", "Node", HashMap::new()),
+                )
+                .expect("neighbor");
+            let payload = Value::text("x".repeat(4096));
+            let edges = (0..2048)
+                .map(|_| {
+                    UnifiedEntity::graph_edge(
+                        store.next_entity_id(),
+                        "step",
+                        seed.id.raw().to_string(),
+                        neighbor_id.raw().to_string(),
+                        1.0,
+                        HashMap::from([("body".into(), payload.clone())]),
+                    )
+                })
+                .collect();
+            store.bulk_insert("links", edges).expect("parallel edges");
+            if sealed {
+                store
+                    .get_collection("links")
+                    .expect("collection")
+                    .force_seal()
+                    .expect("seal");
+            }
+            runtime.refresh_memory_accounting();
+            let headroom = runtime.memory_budget().resolved_bytes
+                - runtime.memory_accounting().total_used_bytes();
+            let held = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "competing query",
+                    headroom - 4 * 1024 * 1024,
+                )
+                .expect("leave bounded scratch");
+            let mut scored = HashMap::from([(
+                seed.id.raw(),
+                (
+                    seed.clone(),
+                    1.0,
+                    DiscoveryMethod::GlobalScan,
+                    "links".into(),
+                ),
+            )]);
+            let mut memory = GraphMemory::new(&runtime);
+            assert_eq!(
+                runtime
+                    .search_context_expand_graph(
+                        &mut scored,
+                        None,
+                        1,
+                        1,
+                        0.0,
+                        &mut memory,
+                        &mut HashMap::new()
+                    )
+                    .expect("batch payloads must reuse headroom"),
+                1
+            );
+            assert_eq!(scored.len(), 2);
+            assert!(scored.contains_key(&neighbor_id.raw()));
+            drop((scored, memory, held));
+            let _returned = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "all query credits returned",
+                    headroom,
+                )
+                .expect("no leaked batch credits");
+        }
+    }
+
+    #[test]
+    fn graph_batch_scopes_share_small_query_headroom() {
+        use crate::storage::memory_pools::MemoryPool;
+        for allowance in [64 * 1024, 130 * 1024] {
+            let (runtime, seed) = memory_fixture(1, 0, false);
+            runtime.refresh_memory_accounting();
+            let headroom = runtime.memory_budget().resolved_bytes
+                - runtime.memory_accounting().total_used_bytes();
+            let held = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "other query",
+                    headroom - allowance,
+                )
+                .expect("small query allowance");
+            let mut scored = HashMap::from([(
+                seed.id.raw(),
+                (seed, 1.0, DiscoveryMethod::GlobalScan, "links".into()),
+            )]);
+            assert_eq!(
+                runtime
+                    .search_context_expand_graph(
+                        &mut scored,
+                        None,
+                        1,
+                        1,
+                        0.0,
+                        &mut GraphMemory::new(&runtime),
+                        &mut HashMap::new()
+                    )
+                    .expect("nested scopes share credits"),
+                1
+            );
+            drop((scored, held));
+        }
+    }
+
+    #[test]
+    fn graph_scratch_unwind_refunds_query_credits_without_releasing_active_scopes() {
+        use crate::storage::memory_pools::MemoryPool;
+        let (runtime, _) = memory_fixture(0, 0, false);
+        runtime.refresh_memory_accounting();
+        let headroom =
+            runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+        let held = runtime
+            .admit_non_evictable_growth(
+                MemoryPool::IndexMemory,
+                "other operation",
+                headroom - 64 * 1024,
+            )
+            .expect("query allowance");
+        let mut memory = GraphMemory::new(&runtime);
+        memory.admit(16 * 1024).expect("retained results");
+        let mut active = memory.scratch();
+        active.admit(16 * 1024).expect("live temporary buffer");
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut temporary = memory.scratch();
+            temporary.admit(32 * 1024).expect("remaining credits");
+            assert!(
+                memory.admit(1).is_err(),
+                "active temporary credits cannot be reused"
+            );
+            panic!("cancel temporary work");
+        }));
+        assert!(failed.is_err());
+        memory
+            .admit(32 * 1024)
+            .expect("only unwound scope credits return");
+        assert!(memory.admit(1).is_err(), "active scope remains charged");
+        drop(active);
+        memory
+            .admit(16 * 1024)
+            .expect("last scope returns its credits");
+        drop((memory, held));
+        let _returned = runtime
+            .admit_non_evictable_growth(MemoryPool::IndexMemory, "finished query", headroom)
+            .expect("runtime guard finally released");
     }
 
     #[test]

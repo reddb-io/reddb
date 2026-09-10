@@ -2,7 +2,6 @@
 use super::*;
 use crate::runtime::memory_admission::MemoryReservation;
 use crate::storage::memory_pools::MemoryPool;
-use crate::storage::unified::manager::SegmentManager;
 
 pub(super) fn payload_bytes(entity: &UnifiedEntity) -> usize {
     let strings = match &entity.kind {
@@ -34,32 +33,67 @@ pub(super) fn payload_bytes(entity: &UnifiedEntity) -> usize {
         .saturating_add(256)
 }
 
+/// Query-local scopes spend the same admitted credits. Temporary scopes refund
+/// their usage only after their payloads/buffers have been dropped.
 pub(crate) struct GraphMemory<'a> {
+    credits: std::rc::Rc<std::cell::RefCell<GraphMemoryCredits<'a>>>,
+    refundable_bytes: Option<u64>,
+}
+
+struct GraphMemoryCredits<'a> {
     runtime: &'a RedDBRuntime,
     guards: Vec<MemoryReservation<'a>>,
+    reserved_bytes: u64,
     available_bytes: u64,
+}
+
+impl Drop for GraphMemory<'_> {
+    fn drop(&mut self) {
+        if let Some(bytes) = self.refundable_bytes {
+            let mut credits = self.credits.borrow_mut();
+            credits.available_bytes += bytes;
+            assert!(
+                credits.available_bytes <= credits.reserved_bytes,
+                "invariant: temporary scopes return only admitted credits"
+            );
+        }
+    }
 }
 
 impl<'a> GraphMemory<'a> {
     pub(crate) fn new(runtime: &'a RedDBRuntime) -> Self {
         Self {
-            runtime,
-            guards: Vec::new(),
-            available_bytes: 0,
+            credits: std::rc::Rc::new(std::cell::RefCell::new(GraphMemoryCredits {
+                runtime,
+                guards: Vec::new(),
+                reserved_bytes: 0,
+                available_bytes: 0,
+            })),
+            refundable_bytes: None,
+        }
+    }
+
+    /// The caller must retain this scope until all its temporary allocations
+    /// are gone. Permanent identity/adjacency state stays on the enclosing scope.
+    pub(super) fn scratch(&self) -> Self {
+        Self {
+            credits: std::rc::Rc::clone(&self.credits),
+            refundable_bytes: Some(0),
         }
     }
 
     pub(super) fn admit(&mut self, bytes: usize) -> RedDBResult<()> {
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-        if bytes > self.available_bytes {
-            let needed = bytes - self.available_bytes;
-            let guard = match self
+        let mut credits = self.credits.borrow_mut();
+        if bytes > credits.available_bytes {
+            let needed = bytes - credits.available_bytes;
+            let (guard, reserved) = match credits
                 .runtime
                 .try_reserve_memory_growth(needed.max(64 * 1024))
             {
                 Some(guard) => (guard, needed.max(64 * 1024)),
                 None => (
-                    self.runtime.admit_non_evictable_growth(
+                    credits.runtime.admit_non_evictable_growth(
                         MemoryPool::IndexMemory,
                         "context graph expansion",
                         needed,
@@ -67,10 +101,14 @@ impl<'a> GraphMemory<'a> {
                     needed,
                 ),
             };
-            self.available_bytes += guard.1;
-            self.guards.push(guard.0);
+            credits.available_bytes += reserved;
+            credits.reserved_bytes += reserved;
+            credits.guards.push(guard);
         }
-        self.available_bytes -= bytes;
+        credits.available_bytes -= bytes;
+        if let Some(ref mut refundable) = self.refundable_bytes {
+            *refundable += bytes;
+        }
         Ok(())
     }
 
@@ -89,6 +127,18 @@ impl<'a> GraphMemory<'a> {
         collection: &str,
         id: EntityId,
     ) -> RedDBResult<Option<UnifiedEntity>> {
+        self.entity_if(store, collection, id, |_| true)
+    }
+
+    /// The predicate is a pure visibility check under the owning segment lock.
+    /// Hidden retained versions must not allocate payloads or consume credits.
+    pub(super) fn entity_if(
+        &mut self,
+        store: &UnifiedStore,
+        collection: &str,
+        id: EntityId,
+        visible: impl Fn(&UnifiedEntity) -> bool,
+    ) -> RedDBResult<Option<UnifiedEntity>> {
         let Some(manager) = store.get_collection(collection) else {
             return Ok(None);
         };
@@ -96,63 +146,25 @@ impl<'a> GraphMemory<'a> {
         loop {
             function_budget::charge(1)?;
             let result = manager.get_with(id, |entity| {
+                if !visible(entity) {
+                    return Ok(None);
+                }
                 let bytes = payload_bytes(entity);
                 if bytes > admitted {
                     Err(bytes)
                 } else {
-                    Ok(entity.clone())
+                    Ok(Some(entity.clone()))
                 }
             });
             match result {
                 None => return Ok(None),
-                Some(Ok(entity)) => return Ok(Some(entity)),
+                Some(Ok(entity)) => return Ok(entity),
                 Some(Err(bytes)) => {
                     // A concurrent replacement may have grown since the size probe.
                     self.admit(bytes - admitted)?;
                     admitted = bytes;
                 }
             }
-        }
-    }
-
-    /// Never grow a buffer under segment locks: reserve outside, then retry an
-    /// overflowing probe with twice the capacity. No prefix escapes on failure.
-    pub(super) fn candidates(
-        &mut self,
-        manager: &SegmentManager,
-        kind: GraphEntityKind,
-        keys: &[EntityId],
-        visible: impl Fn(&UnifiedEntity) -> bool,
-    ) -> RedDBResult<Vec<(EntityId, bool)>> {
-        let mut capacity = 32usize;
-        let mut admitted = 0;
-        loop {
-            let bytes = capacity.saturating_mul(std::mem::size_of::<(EntityId, bool)>());
-            self.admit(bytes.saturating_sub(admitted))?;
-            admitted = bytes;
-            let mut candidates = Vec::with_capacity(capacity);
-            let mut overflow = false;
-            manager.visit_graph_index_candidates(
-                kind,
-                keys,
-                || function_budget::charge(1).is_ok(),
-                |entity| {
-                    if candidates.len() == capacity {
-                        overflow = true;
-                        return false;
-                    }
-                    candidates.push((entity.id, visible(entity)));
-                    true
-                },
-            );
-            function_budget::charge(0)?;
-            if !overflow {
-                return Ok(candidates);
-            }
-            drop(candidates);
-            capacity = capacity.checked_mul(2).ok_or_else(|| {
-                RedDBError::InvalidOperation("context graph candidate size overflow".into())
-            })?;
         }
     }
 }
