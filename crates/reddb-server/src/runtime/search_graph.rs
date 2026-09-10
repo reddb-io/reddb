@@ -840,7 +840,7 @@ mod tests {
         for mode in ["hidden", "denied", "visible"] {
             let (runtime, _) = memory_fixture(0, 0, false);
             let store = runtime.db().store();
-            for collection in ["first", "second", "nodes"] {
+            for collection in ["earlier_edges", "later_edges", "nodes"] {
                 store.get_or_create_collection(collection);
             }
             for id in [100, 200, 300] {
@@ -866,11 +866,11 @@ mod tests {
                     HashMap::new(),
                 );
                 edge.xmax = 1;
-                store.insert("first", edge).expect("hidden prefix");
+                store.insert("earlier_edges", edge).expect("hidden prefix");
             }
             let mut first = UnifiedEntity::graph_edge(
                 EntityId::new(1000),
-                "first",
+                "earlier_edges",
                 "100",
                 "200",
                 1.0,
@@ -880,14 +880,14 @@ mod tests {
                 first.xmax = 1;
             }
             store
-                .insert("first", first)
+                .insert("earlier_edges", first)
                 .expect("first copy at batch boundary");
             store
                 .insert(
-                    "second",
+                    "later_edges",
                     UnifiedEntity::graph_edge(
                         EntityId::new(1000),
-                        "second",
+                        "later_edges",
                         "100",
                         "300",
                         1.0,
@@ -897,8 +897,8 @@ mod tests {
                 .expect("later copy");
             if mode == "denied" {
                 for query in [
-                    "CREATE POLICY edges ON EDGES OF first USING (false)",
-                    "ALTER TABLE first ENABLE ROW LEVEL SECURITY",
+                    "CREATE POLICY edges ON EDGES OF earlier_edges USING (false)",
+                    "ALTER TABLE earlier_edges ENABLE ROW LEVEL SECURITY",
                 ] {
                     runtime
                         .execute_query(query)
@@ -912,7 +912,7 @@ mod tests {
                 runtime: &runtime,
                 store: store.as_ref(),
                 snapshot: None,
-                collections: vec!["first".into(), "second".into(), "nodes".into()],
+                collections: vec!["earlier_edges".into(), "later_edges".into(), "nodes".into()],
                 nodes: HashMap::new(),
                 endpoints: HashMap::new(),
                 adjacency: HashMap::new(),
