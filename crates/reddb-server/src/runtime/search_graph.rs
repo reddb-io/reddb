@@ -141,13 +141,18 @@ impl SearchGraphRead<'_> {
     fn neighbors(
         &mut self,
         current: &str,
+        max_edges: usize,
+        hydrated: &mut HashMap<String, Option<UnifiedEntity>>,
         memory: &mut GraphMemory<'_>,
         policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
     ) -> RedDBResult<&[SearchGraphNeighbor]> {
         if !self.adjacency.contains_key(current) {
+            // Candidates and deduplication live only until this node's ordered,
+            // policy-admitted prefix has moved into the permanent cache.
+            let mut candidates_memory = memory.scratch();
             let logical = EntityId::new(current.parse().expect("numeric logical node ID"));
             let aliases = if let Some(node) = self.node(logical, memory)? {
-                memory.admit(std::mem::size_of_val(node.aliases.as_slice()))?;
+                candidates_memory.admit(std::mem::size_of_val(node.aliases.as_slice()))?;
                 node.aliases.clone()
             } else {
                 Vec::new()
@@ -157,7 +162,7 @@ impl SearchGraphRead<'_> {
             if !aliases.is_empty() {
                 for index in 0..self.collections.len() {
                     function_budget::charge(1)?;
-                    memory.admit(self.collections[index].len())?;
+                    candidates_memory.admit(self.collections[index].len())?;
                     let collection = self.collections[index].clone();
                     let Some(manager) = self.store.get_collection(&collection) else {
                         continue;
@@ -175,6 +180,7 @@ impl SearchGraphRead<'_> {
                                 ids,
                                 &mut seen,
                                 &mut neighbors,
+                                &mut candidates_memory,
                                 memory,
                                 policies,
                             )?;
@@ -189,11 +195,59 @@ impl SearchGraphRead<'_> {
                     .cmp(&right.logical_id)
                     .then_with(|| left.edge_id.cmp(&right.edge_id))
             });
+            let neighbors =
+                self.neighbors_admitted(neighbors, max_edges, hydrated, memory, policies)?;
             memory.entry::<(String, Vec<SearchGraphNeighbor>)>(current.len())?;
             self.adjacency.insert(current.to_string(), neighbors);
+            // Drop temporary owners before their credit scope is refunded.
+            drop((seen, aliases));
         }
         function_budget::charge(0)?;
         Ok(self.adjacency.get(current).expect("adjacency resolved"))
+    }
+
+    fn neighbors_admitted(
+        &self,
+        candidates: Vec<SearchGraphNeighbor>,
+        max_edges: usize,
+        hydrated: &mut HashMap<String, Option<UnifiedEntity>>,
+        memory: &mut GraphMemory<'_>,
+        policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
+    ) -> RedDBResult<Vec<SearchGraphNeighbor>> {
+        let mut admitted = Vec::new();
+        for adjacent in candidates {
+            function_budget::charge(1)?;
+            if admitted.len() >= max_edges {
+                break;
+            }
+            let neighbor = &adjacent.logical_id;
+            if !hydrated.contains_key(neighbor) {
+                memory.entry::<(String, Option<UnifiedEntity>)>(neighbor.len())?;
+                let entity = memory
+                    .entity(self.store, &adjacent.collection, adjacent.physical_id)?
+                    .filter(|entity| {
+                        self.runtime.search_entity_allowed(
+                            &adjacent.collection,
+                            entity,
+                            self.snapshot.as_ref(),
+                            policies,
+                        )
+                    });
+                hydrated.insert(neighbor.clone(), entity);
+            }
+            if hydrated
+                .get(neighbor)
+                .expect("neighbor hydration resolved")
+                .is_none()
+            {
+                continue;
+            }
+            // Selection is independent of each source's visited set. Parallel
+            // edges and self-loops still consume the per-source edge allowance.
+            memory.entry::<SearchGraphNeighbor>(neighbor.len() + adjacent.collection.len())?;
+            admitted.push(adjacent);
+        }
+        Ok(admitted)
     }
 
     fn neighbors_batch(
@@ -203,6 +257,7 @@ impl SearchGraphRead<'_> {
         ids: &[EntityId],
         seen: &mut HashSet<EntityId>,
         neighbors: &mut Vec<SearchGraphNeighbor>,
+        candidates_memory: &mut GraphMemory<'_>,
         memory: &mut GraphMemory<'_>,
         policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
     ) -> RedDBResult<()> {
@@ -217,7 +272,7 @@ impl SearchGraphRead<'_> {
             else {
                 continue;
             };
-            memory.entry::<EntityId>(0)?;
+            candidates_memory.entry::<EntityId>(0)?;
             seen.insert(*id);
             if !self.runtime.search_entity_allowed(
                 collection,
@@ -246,7 +301,7 @@ impl SearchGraphRead<'_> {
             let node = self
                 .node(neighbor, memory)?
                 .expect("endpoint has a visible node");
-            memory.entry::<SearchGraphNeighbor>(20 + node.collection.len())?;
+            candidates_memory.entry::<SearchGraphNeighbor>(20 + node.collection.len())?;
             neighbors.push(SearchGraphNeighbor {
                 logical_id: neighbor.raw().to_string(),
                 edge_id: entity.logical_id().raw(),
@@ -340,34 +395,16 @@ impl RedDBRuntime {
                 if depth >= max_depth {
                     continue;
                 }
-                let neighbors = graph.neighbors(&current, memory, policies)?;
-                let mut admitted_edges = 0;
+                let neighbors =
+                    graph.neighbors(&current, max_edges, &mut hydrated, memory, policies)?;
                 for adjacent in neighbors {
                     let neighbor = &adjacent.logical_id;
                     function_budget::charge(1)?;
-                    if admitted_edges >= max_edges {
-                        break;
-                    }
                     let collection = &adjacent.collection;
-                    let physical = adjacent.physical_id;
-                    if !hydrated.contains_key(neighbor) {
-                        memory.entry::<(String, Option<UnifiedEntity>)>(neighbor.len())?;
-                        let entity =
-                            memory
-                                .entity(store.as_ref(), collection, physical)?
-                                .filter(|entity| {
-                                    self.search_entity_allowed(
-                                        collection,
-                                        entity,
-                                        snapshot.as_ref(),
-                                        policies,
-                                    )
-                                });
-                        hydrated.insert(neighbor.clone(), entity);
-                    }
-                    let entity = hydrated.get(neighbor).expect("neighbor hydration resolved");
-                    let Some(entity) = entity else { continue };
-                    admitted_edges += 1;
+                    let entity = hydrated
+                        .get(neighbor)
+                        .and_then(Option::as_ref)
+                        .expect("cached adjacency has an authorized hydrated node");
                     if visited.contains(neighbor) {
                         continue;
                     }
@@ -639,6 +676,192 @@ mod tests {
                     headroom,
                 )
                 .expect("no leaked batch credits");
+        }
+    }
+
+    #[test]
+    fn graph_cached_adjacency_preserves_authorized_edge_allowance() {
+        for sealed in [false, true] {
+            let (runtime, _) = memory_fixture(0, 0, false);
+            let store = runtime.db().store();
+            let mut seeds = HashMap::new();
+            for (id, allowed) in [(2, true), (10, false), (11, true), (100, true), (200, true)] {
+                let entity = UnifiedEntity::graph_node(
+                    EntityId::new(id),
+                    "node",
+                    "Node",
+                    HashMap::from([("allowed".into(), Value::Boolean(allowed))]),
+                );
+                store.insert("links", entity.clone()).expect("node");
+                if id >= 100 {
+                    seeds.insert(
+                        id,
+                        (entity, 1.0, DiscoveryMethod::GlobalScan, "links".into()),
+                    );
+                }
+            }
+            // Physical order differs from lexical logical order. The denied
+            // endpoint sorts first, then the self-loop, two parallel edges,
+            // and node 2 (which sorts after node 11).
+            for (index, (from, to)) in [
+                (100, 2),
+                (100, 11),
+                (100, 10),
+                (100, 11),
+                (100, 100),
+                (200, 100),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                store
+                    .insert(
+                        "links",
+                        UnifiedEntity::graph_edge(
+                            EntityId::new(1000 + u64::try_from(index).expect("small edge index")),
+                            "step",
+                            from.to_string(),
+                            to.to_string(),
+                            1.0,
+                            HashMap::new(),
+                        ),
+                    )
+                    .expect("edge");
+            }
+            for query in [
+                "CREATE POLICY nodes ON NODES OF links USING (properties.allowed = true)",
+                "CREATE POLICY edges ON EDGES OF links USING (true)",
+                "ALTER TABLE links ENABLE ROW LEVEL SECURITY",
+            ] {
+                runtime.execute_query(query).expect("policy");
+            }
+            if sealed {
+                store
+                    .get_collection("links")
+                    .expect("collection")
+                    .force_seal()
+                    .expect("seal");
+            }
+            for (max_edges, expected) in [
+                (1, vec![100, 200]),
+                (2, vec![11, 100, 200]),
+                (3, vec![11, 100, 200]),
+                (4, vec![2, 11, 100, 200]),
+            ] {
+                let mut scored = seeds.clone();
+                runtime
+                    .search_context_expand_graph(
+                        &mut scored,
+                        None,
+                        2,
+                        max_edges,
+                        0.0,
+                        &mut GraphMemory::new(&runtime),
+                        &mut HashMap::new(),
+                    )
+                    .expect("ordered expansion with cached source revisits");
+                let mut actual: Vec<_> = scored.keys().copied().collect();
+                actual.sort_unstable();
+                assert_eq!(
+                    actual, expected,
+                    "edge allowance {max_edges}, sealed {sealed}"
+                );
+                for id in [100, 200] {
+                    assert!(matches!(scored[&id].2, DiscoveryMethod::GlobalScan));
+                }
+                if max_edges >= 2 {
+                    assert_eq!(scored[&11].1, 0.7);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn graph_adjacency_reuses_headroom_across_high_degree_seeds() {
+        use crate::storage::memory_pools::MemoryPool;
+        for sealed in [false, true] {
+            let (runtime, _) = memory_fixture(0, 0, false);
+            let store = runtime.db().store();
+            let mut scored = HashMap::new();
+            let mut expected = Vec::new();
+            for _ in 0..8 {
+                let seed = UnifiedEntity::graph_node(
+                    store.next_entity_id(),
+                    "source",
+                    "Node",
+                    HashMap::new(),
+                );
+                let neighbor = UnifiedEntity::graph_node(
+                    store.next_entity_id(),
+                    "destination",
+                    "Node",
+                    HashMap::new(),
+                );
+                store.insert("links", seed.clone()).expect("source");
+                store
+                    .insert("links", neighbor.clone())
+                    .expect("destination");
+                let edges = (0..2048)
+                    .map(|_| {
+                        UnifiedEntity::graph_edge(
+                            store.next_entity_id(),
+                            "step",
+                            seed.id.raw().to_string(),
+                            neighbor.id.raw().to_string(),
+                            1.0,
+                            HashMap::new(),
+                        )
+                    })
+                    .collect();
+                store.bulk_insert("links", edges).expect("parallel edges");
+                expected.push(neighbor.id.raw());
+                scored.insert(
+                    seed.id.raw(),
+                    (seed, 1.0, DiscoveryMethod::GlobalScan, "links".into()),
+                );
+            }
+            if sealed {
+                store
+                    .get_collection("links")
+                    .expect("collection")
+                    .force_seal()
+                    .expect("seal");
+            }
+            runtime.refresh_memory_accounting();
+            let headroom = runtime.memory_budget().resolved_bytes
+                - runtime.memory_accounting().total_used_bytes();
+            let held = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "competing query",
+                    headroom - 2 * 1024 * 1024,
+                )
+                .expect("leave adjacency scratch");
+            let mut memory = GraphMemory::new(&runtime);
+            assert_eq!(
+                runtime
+                    .search_context_expand_graph(
+                        &mut scored,
+                        None,
+                        1,
+                        1,
+                        0.0,
+                        &mut memory,
+                        &mut HashMap::new(),
+                    )
+                    .expect("discarded adjacency must release query credits"),
+                8
+            );
+            assert_eq!(scored.len(), 16);
+            assert!(expected.iter().all(|id| scored.contains_key(id)));
+            drop((scored, memory, held));
+            let _returned = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "all query credits returned",
+                    headroom,
+                )
+                .expect("no leaked adjacency credits");
         }
     }
 

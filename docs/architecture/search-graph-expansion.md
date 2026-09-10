@@ -15,8 +15,10 @@ Graph expansion probes a maintained per-segment index for the reached logical
 node and all its retained physical versions. Incident-edge probes include those
 physical aliases and the logical ID; endpoint resolution requires a visible
 logical node in scope. Candidates are checked against the captured snapshot.
-Edge RLS applies before caching reached adjacency. Node payloads are fetched and checked
-against snapshot and node RLS when reached, outside segment locks. A denied node
+Edge RLS applies before sorting candidate adjacency. Node payloads are fetched
+and checked against snapshot and node RLS in sorted order, outside segment
+locks, until the edge allowance is filled. Only those admitted edges remain in
+the query-local adjacency cache. A denied node
 cannot become a result or a traversal bridge. Endpoint identity resolution alone
 never authorizes traversal.
 
@@ -59,9 +61,11 @@ Cost sketch: each key probes scoped collections/segments, with O(log N + K)
 work in a graph-bearing segment containing N pairs and K matching candidates.
 This replaces the per-query whole-graph scan and map. Reads still pay for
 collection/segment probes, retained aliases and incident degree; reached
-adjacency is sorted before applying the edge allowance. Query-local caches grow
-with probed identities and reached adjacency, including policy-denied candidates,
-not unrelated graph entries. A cold rebuild after invalidation costs O(M log N)
+adjacency is sorted before applying the edge allowance. Query-local identity/hydration caches grow with probed identities, including
+policy-denied nodes, not unrelated graph entries. The adjacency cache retains
+only the policy-admitted edge allowance per expanded node. Full candidate
+adjacency and physical-edge deduplication remain temporary per-node preparation;
+[their credits are reused](search-graph-candidate-cursor.md) by later expansions. A cold rebuild after invalidation costs O(M log N)
 for M resident entities and N graph pairs. Ordinary maintained writes add
 O(log N) work per pair. Accounting estimates 64 bytes per resident pair for keys,
 B-tree headers and occupancy slack; this is not a hard memory admission bound.

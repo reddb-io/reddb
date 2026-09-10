@@ -2,8 +2,10 @@
 
 Context graph expansion uses the maintained per-segment graph index through a
 resumable physical-candidate cursor. It replaces the full candidate ID array and
-geometric retries that repeatedly scanned an already consumed prefix. The final
+geometric retries that repeatedly scanned an already consumed prefix. The candidate
 adjacency is still resolved and ordered before applying `graph_max_edges`.
+Only the first policy-admitted edges within that limit remain in the ordered
+adjacency cache; rejected and excess candidates have temporary ownership.
 
 ## Read and ownership contract
 
@@ -46,10 +48,22 @@ batch and return to that bank after its consumer finishes; temporary payload adm
 edges over the entire query. There is no new persisted index, WAL record, fsync,
 network hop or storage format.
 
-Deduplication, identity and ordered-adjacency caches still grow with reached
-identities and incident degree, under shared runtime admission. The physical
+For each expanded node, candidate adjacency and physical-edge deduplication use
+one temporary query-credit scope. After sorting, lazy node hydration and RLS run
+in the same logical endpoint/edge order as traversal, stopping after K accepted
+edges. Hidden nodes do not consume K; parallel edges, self-loops and already
+visited endpoints do. Only those K edges move into the retained cache. Repeated
+visits from other sources reuse that selection and the query's hydration cache.
+Discarded candidates and deduplication state drop before their scope refunds
+credits. Selected entries receive permanent admission before ownership moves.
+
+For E expanded nodes of degree D and edge limit K, candidate preparation still
+costs O(D log D) CPU and O(D) temporary memory per node; retained adjacency costs
+O(E * K), instead of O(E * D). Identity and hydration caches still grow with
+probed/reached identities, including denied nodes. Runtime reservations retain
+the query high-water mark, but later nodes can reuse temporary credits. The physical
 index is not ordered by authorized logical neighbor, so stopping after the first
-K physical IDs would change results. Bounded top-k selection and precise
+K physical IDs would change results. Early bounded top-k selection and precise
 peak-memory admission across the complete multimodel pipeline remain pending.
 Cold index rebuilds and policy-evaluator scratch retain their previous bounds.
 
@@ -73,3 +87,10 @@ A consolidation test pins the retired source, updates an unconsumed edge in the
 merged segment, and checks that live hydration sees the updated payload exactly
 once. Public graph-search and allocation suites retain the existing semantic
 and unrelated-data regression checks.
+
+A retained-adjacency regression expands eight independent seeds with 2,048
+parallel edges each, one requested neighbor per seed and 2 MiB of headroom. All
+16 source/destination nodes must be returned for growing and sealed collections,
+and completion must return the query credits. The parent retains discarded
+adjacency across seeds and exhausts that allowance. This measures admission and
+result equivalence, not RSS or competitive latency.
