@@ -46,12 +46,15 @@ arrays or geometric prefix rescans. See the cursor contract for snapshot and
 consolidation details. There are no new WAL records, formats, fsyncs or network
 round trips.
 
-Identity, deduplication, adjacency and result credits remain conservative over
-the query lifetime. Temporary edge payloads are charged per batch, then released;
+Identity, selected adjacency, hydrated payload and result credits remain
+conservative over the query lifetime. Unselected adjacency and physical-edge
+deduplication use a per-expanded-node temporary scope. After sorting and node
+RLS, only the first `graph_max_edges` admitted edges move into the retained cache;
+later expansions reuse the discarded candidates' credits. Temporary edge payloads are charged per batch, then released;
 within a batch, their credits still accumulate conservatively. This is not a
-precise peak-memory allocator or a hard process RSS cap. Degree still determines
-preparation work and retained adjacency; early top-k selection remains separate
-performance work.
+precise peak-memory allocator or a hard process RSS cap. Degree still determines preparation work and temporary adjacency size. Retained
+adjacency is bounded by the edge allowance per expanded node; early top-k
+selection to bound preparation memory remains separate performance work.
 
 This slice does not admit earlier context/global search buffers, policy-evaluator
 scratch, collection catalog enumeration, subsequent vector-search allocations,
