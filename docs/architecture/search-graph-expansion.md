@@ -70,7 +70,9 @@ There is no new WAL record, disk format, fsync or network round trip.
 CALL work/deadline checks cover collection/segment probes, key seeks, physical
 candidates, rebuilds, identity resolution and traversal. They propagate errors
 instead of returning partial success. Lock waits and sorting are not individually
-interruptible; shared peak-memory admission remains separate work.
+interruptible. [Graph expansion admission](search-graph-memory-admission.md) now
+reserves query-owned candidates, caches, graph payloads and traversal state;
+precise peak-memory admission across the full search pipeline remains separate work.
 
 Allocation regressions isolate indexed search plus expansion, with global
 fallback disabled after indexing the seed. They cover growing and sealed mixed

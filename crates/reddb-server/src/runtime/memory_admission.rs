@@ -160,7 +160,10 @@ impl crate::RedDBRuntime {
         ))
     }
 
-    fn try_reserve_memory_growth(&self, growth_bytes: u64) -> Option<MemoryReservation<'_>> {
+    pub(super) fn try_reserve_memory_growth(
+        &self,
+        growth_bytes: u64,
+    ) -> Option<MemoryReservation<'_>> {
         let mut reservations = self.inner.memory_reservations.lock();
         self.refresh_memory_accounting_with_reservations(&mut reservations);
         let accounting = self.memory_accounting();

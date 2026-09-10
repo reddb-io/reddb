@@ -1253,6 +1253,7 @@ impl RedDBRuntime {
         }
 
         // ── Expansion: Graph traversal ──────────────────────────────────
+        let mut graph_memory = super::search_graph::memory::GraphMemory::new(self);
         let expanded_graph = if expand_graph && graph_depth > 0 && graph_max_edges > 0 {
             self.search_context_expand_graph(
                 &mut scored,
@@ -1260,6 +1261,7 @@ impl RedDBRuntime {
                 graph_depth,
                 graph_max_edges,
                 min_score,
+                &mut graph_memory,
                 &mut rls_cache,
             )?
         } else {

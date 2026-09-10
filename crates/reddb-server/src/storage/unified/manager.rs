@@ -565,11 +565,21 @@ impl SegmentManager {
 
     /// Get an entity by ID — scans growing then sealed segments.
     pub fn get(&self, id: EntityId) -> Option<UnifiedEntity> {
+        self.get_with(id, Clone::clone)
+    }
+
+    /// Inspect under the segment lock, for example to bound a payload clone.
+    /// The callback must not re-enter storage or runtime memory admission.
+    pub(crate) fn get_with<T>(
+        &self,
+        id: EntityId,
+        visit: impl FnOnce(&UnifiedEntity) -> T,
+    ) -> Option<T> {
         // Growing segment first (most likely for recent inserts)
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
             if let Some(entity) = growing.get(id) {
-                return Some(entity.clone());
+                return Some(visit(entity));
             }
         }
 
@@ -578,7 +588,7 @@ impl SegmentManager {
         for segment in sealed.iter() {
             let seg = segment.read();
             if let Some(entity) = seg.get(id) {
-                return Some(entity.clone());
+                return Some(visit(entity));
             }
         }
 
