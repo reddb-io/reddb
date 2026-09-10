@@ -373,6 +373,7 @@ impl RedDBRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::SearchContextInput;
 
     fn memory_fixture(
         degree: usize,
