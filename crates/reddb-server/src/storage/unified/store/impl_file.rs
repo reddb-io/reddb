@@ -78,7 +78,10 @@ impl UnifiedStore {
         reddb_file::verify_native_store_crc32_footer(&mut buf, version)
             .map_err(|err| err.to_string())?;
 
-        let store = Self::with_config(config);
+        let mut store = Self::with_config(config);
+        // Reconstruct the snapshot without appending its old images to the
+        // live WAL. The caller replays that WAL after loading this snapshot.
+        let embedded_wal_path = store.config.embedded_wal_path.take();
         store.set_format_version(version);
 
         // Read collection count
@@ -156,6 +159,7 @@ impl UnifiedStore {
         if store.format_version() < STORE_VERSION_CURRENT {
             store.set_format_version(STORE_VERSION_CURRENT);
         }
+        store.config.embedded_wal_path = embedded_wal_path;
 
         Ok(store)
     }
@@ -1664,6 +1668,63 @@ impl UnifiedStore {
 mod aux_metadata_dump_tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn snapshot_load_preserves_existing_wal_and_restores_future_appends() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("snapshot.rdb");
+        let store = UnifiedStore::with_config(UnifiedStoreConfig::default());
+        let old =
+            UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::text("snapshot")]);
+        store.insert_auto("rows", old).expect("snapshot row");
+        let snapshot = store.to_binary_dump_bytes();
+        crate::storage::EmbeddedRdbArtifact::create_with_snapshot(&path, &snapshot)
+            .expect("artifact");
+        let newer = UnifiedEntity::table_row(
+            EntityId::new(1),
+            "rows",
+            1,
+            vec![Value::text("durable WAL")],
+        );
+        let action = StoreWalAction::upsert_entity("rows", &newer, None, STORE_VERSION_CURRENT);
+        UnifiedStore::with_config(UnifiedStoreConfig::default().with_embedded_wal_path(&path))
+            .finish_paged_write([action])
+            .expect("durable update after snapshot");
+        let before = std::fs::read(&path).expect("original artifact bytes");
+        let loaded = UnifiedStore::load_from_bytes_with_config(
+            &snapshot,
+            UnifiedStoreConfig::default().with_embedded_wal_path(&path),
+        )
+        .expect("reconstruct snapshot");
+        assert_eq!(std::fs::read(&path).expect("artifact after load"), before);
+        assert_eq!(
+            loaded.config().embedded_wal_path.as_deref(),
+            Some(path.as_path())
+        );
+
+        let generation = crate::storage::EmbeddedRdbArtifact::open(&path)
+            .expect("boundary before future write")
+            .selected_superblock
+            .generation;
+        loaded
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(
+                    EntityId::new(2),
+                    "rows",
+                    2,
+                    vec![Value::text("future write")],
+                ),
+            )
+            .expect("future writes still append WAL");
+        assert_eq!(
+            crate::storage::EmbeddedRdbArtifact::open(&path)
+                .expect("boundary after future write")
+                .selected_superblock
+                .generation,
+            generation + 1
+        );
+    }
 
     #[test]
     fn aux_metadata_round_trips_through_binary_dump() {
