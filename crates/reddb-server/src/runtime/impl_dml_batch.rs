@@ -241,11 +241,12 @@ impl RedDBRuntime {
         &self,
         applied: &[AppliedEntityMutation],
     ) -> RedDBResult<()> {
-        // Transactions and event-enabled statements already own their capture.
-        // Otherwise publish this bounded chunk with one durable WAL append,
+        // One item cannot amortize a WAL append. Transactions and event-enabled
+        // statements already own their capture. Otherwise publish this bounded
+        // chunk with one durable WAL append,
         // instead of synchronizing each old/new row-version pair separately.
         // The wrapper also appends completed writes if a later item fails.
-        if UnifiedStore::deferred_store_wal_capture_active() {
+        if applied.len() <= 1 || UnifiedStore::deferred_store_wal_capture_active() {
             self.persist_applied_entity_mutations(applied)?;
         } else {
             self.with_deferred_store_wal_for_dml(true, || {
