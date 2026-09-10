@@ -1,4 +1,5 @@
 // Diagnostic before/after SDK timings, not a cross-database benchmark.
+// memory:// uses an ephemeral persistent file, including the embedded WAL.
 // Build both binaries with the same profile. Run with no concurrent builds:
 // REDDB_MEMORY_BUDGET=67108864 node scripts/mutation-memory-bench.mjs BEFORE AFTER
 import { connect } from '../drivers/js/src/index.js';
@@ -45,6 +46,7 @@ for (const mode of ['single', 'bulk']) {
         if (ids.size !== rows) throw new Error(`${mode}/${label}: missing keys`);
         samples[mode][label].push(elapsed);
         statementSamples[mode][label].push(statements);
+        console.error(`${mode}/${label} run ${run + 1}/7: ${elapsed.toFixed(3)} ms/statement`);
       } finally {
         await db.close();
       }
@@ -54,6 +56,7 @@ for (const mode of ['single', 'bulk']) {
 const result = {
   node: process.version,
   classification: 'diagnostic; host exclusivity and build equivalence must be verified separately',
+  storage: 'memory:// (ephemeral file with embedded WAL, not a RAM-only backend)',
   workload: { runs: 7, single: { rows: 1, warmups: 30, iterations: 300 }, bulk: { rows: 2500, warmups: 1, iterations: 8 } },
   budget: process.env.REDDB_MEMORY_BUDGET ?? 'host-detected',
   binary_sha256: Object.fromEntries(Object.entries(binaries).map(([label, path]) => [label, createHash('sha256').update(readFileSync(path)).digest('hex')])),
