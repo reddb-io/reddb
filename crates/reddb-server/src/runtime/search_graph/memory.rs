@@ -33,32 +33,67 @@ pub(super) fn payload_bytes(entity: &UnifiedEntity) -> usize {
         .saturating_add(256)
 }
 
+/// Query-local scopes spend the same admitted credits. Temporary scopes refund
+/// their usage only after their payloads/buffers have been dropped.
 pub(crate) struct GraphMemory<'a> {
+    credits: std::rc::Rc<std::cell::RefCell<GraphMemoryCredits<'a>>>,
+    refundable_bytes: Option<u64>,
+}
+
+struct GraphMemoryCredits<'a> {
     runtime: &'a RedDBRuntime,
     guards: Vec<MemoryReservation<'a>>,
+    reserved_bytes: u64,
     available_bytes: u64,
+}
+
+impl Drop for GraphMemory<'_> {
+    fn drop(&mut self) {
+        if let Some(bytes) = self.refundable_bytes {
+            let mut credits = self.credits.borrow_mut();
+            credits.available_bytes += bytes;
+            assert!(
+                credits.available_bytes <= credits.reserved_bytes,
+                "invariant: temporary scopes return only admitted credits"
+            );
+        }
+    }
 }
 
 impl<'a> GraphMemory<'a> {
     pub(crate) fn new(runtime: &'a RedDBRuntime) -> Self {
         Self {
-            runtime,
-            guards: Vec::new(),
-            available_bytes: 0,
+            credits: std::rc::Rc::new(std::cell::RefCell::new(GraphMemoryCredits {
+                runtime,
+                guards: Vec::new(),
+                reserved_bytes: 0,
+                available_bytes: 0,
+            })),
+            refundable_bytes: None,
+        }
+    }
+
+    /// The caller must retain this scope until all its temporary allocations
+    /// are gone. Permanent identity/adjacency state stays on the enclosing scope.
+    pub(super) fn scratch(&self) -> Self {
+        Self {
+            credits: std::rc::Rc::clone(&self.credits),
+            refundable_bytes: Some(0),
         }
     }
 
     pub(super) fn admit(&mut self, bytes: usize) -> RedDBResult<()> {
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-        if bytes > self.available_bytes {
-            let needed = bytes - self.available_bytes;
-            let guard = match self
+        let mut credits = self.credits.borrow_mut();
+        if bytes > credits.available_bytes {
+            let needed = bytes - credits.available_bytes;
+            let (guard, reserved) = match credits
                 .runtime
                 .try_reserve_memory_growth(needed.max(64 * 1024))
             {
                 Some(guard) => (guard, needed.max(64 * 1024)),
                 None => (
-                    self.runtime.admit_non_evictable_growth(
+                    credits.runtime.admit_non_evictable_growth(
                         MemoryPool::IndexMemory,
                         "context graph expansion",
                         needed,
@@ -66,10 +101,14 @@ impl<'a> GraphMemory<'a> {
                     needed,
                 ),
             };
-            self.available_bytes += guard.1;
-            self.guards.push(guard.0);
+            credits.available_bytes += reserved;
+            credits.reserved_bytes += reserved;
+            credits.guards.push(guard);
         }
-        self.available_bytes -= bytes;
+        credits.available_bytes -= bytes;
+        if let Some(ref mut refundable) = self.refundable_bytes {
+            *refundable += bytes;
+        }
         Ok(())
     }
 

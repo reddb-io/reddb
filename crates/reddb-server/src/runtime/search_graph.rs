@@ -52,7 +52,7 @@ impl SearchGraphRead<'_> {
                 let Some(manager) = self.store.get_collection(collection) else {
                     continue;
                 };
-                let mut cursor_memory = GraphMemory::new(self.runtime);
+                let mut cursor_memory = memory.scratch();
                 manager.visit_graph_index_batches(
                     GraphEntityKind::Node,
                     &[logical],
@@ -162,7 +162,7 @@ impl SearchGraphRead<'_> {
                     let Some(manager) = self.store.get_collection(&collection) else {
                         continue;
                     };
-                    let mut cursor_memory = GraphMemory::new(self.runtime);
+                    let mut cursor_memory = memory.scratch();
                     manager.visit_graph_index_batches(
                         GraphEntityKind::Edge,
                         &aliases,
@@ -206,7 +206,7 @@ impl SearchGraphRead<'_> {
         memory: &mut GraphMemory<'_>,
         policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
     ) -> RedDBResult<()> {
-        let mut scratch = GraphMemory::new(self.runtime);
+        let mut scratch = memory.scratch();
         for id in ids {
             function_budget::charge(1)?;
             if seen.contains(id) {
@@ -640,6 +640,85 @@ mod tests {
                 )
                 .expect("no leaked batch credits");
         }
+    }
+
+    #[test]
+    fn graph_batch_scopes_share_small_query_headroom() {
+        use crate::storage::memory_pools::MemoryPool;
+        for allowance in [64 * 1024, 130 * 1024] {
+            let (runtime, seed) = memory_fixture(1, 0, false);
+            runtime.refresh_memory_accounting();
+            let headroom = runtime.memory_budget().resolved_bytes
+                - runtime.memory_accounting().total_used_bytes();
+            let held = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "other query",
+                    headroom - allowance,
+                )
+                .expect("small query allowance");
+            let mut scored = HashMap::from([(
+                seed.id.raw(),
+                (seed, 1.0, DiscoveryMethod::GlobalScan, "links".into()),
+            )]);
+            assert_eq!(
+                runtime
+                    .search_context_expand_graph(
+                        &mut scored,
+                        None,
+                        1,
+                        1,
+                        0.0,
+                        &mut GraphMemory::new(&runtime),
+                        &mut HashMap::new()
+                    )
+                    .expect("nested scopes share credits"),
+                1
+            );
+            drop((scored, held));
+        }
+    }
+
+    #[test]
+    fn graph_scratch_unwind_refunds_query_credits_without_releasing_active_scopes() {
+        use crate::storage::memory_pools::MemoryPool;
+        let (runtime, _) = memory_fixture(0, 0, false);
+        runtime.refresh_memory_accounting();
+        let headroom =
+            runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+        let held = runtime
+            .admit_non_evictable_growth(
+                MemoryPool::IndexMemory,
+                "other operation",
+                headroom - 64 * 1024,
+            )
+            .expect("query allowance");
+        let mut memory = GraphMemory::new(&runtime);
+        memory.admit(16 * 1024).expect("retained results");
+        let mut active = memory.scratch();
+        active.admit(16 * 1024).expect("live temporary buffer");
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut temporary = memory.scratch();
+            temporary.admit(32 * 1024).expect("remaining credits");
+            assert!(
+                memory.admit(1).is_err(),
+                "active temporary credits cannot be reused"
+            );
+            panic!("cancel temporary work");
+        }));
+        assert!(failed.is_err());
+        memory
+            .admit(32 * 1024)
+            .expect("only unwound scope credits return");
+        assert!(memory.admit(1).is_err(), "active scope remains charged");
+        drop(active);
+        memory
+            .admit(16 * 1024)
+            .expect("last scope returns its credits");
+        drop((memory, held));
+        let _returned = runtime
+            .admit_non_evictable_growth(MemoryPool::IndexMemory, "finished query", headroom)
+            .expect("runtime guard finally released");
     }
 
     #[test]

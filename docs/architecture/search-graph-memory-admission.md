@@ -16,7 +16,11 @@ payload estimates charge shared values conservatively per query owner.
 
 Reservations grow in 64 KiB quanta; when slack does not fit, only the required
 bytes are requested. The caller holds the guards through context result assembly,
-including subsequent vector expansion. Errors and unwinding release the guards.
+including subsequent vector expansion. Temporary cursor and batch scopes spend
+credits from this same query-local bank and refund their usage to it on drop.
+They cannot strand separate 64 KiB reservations and reject an otherwise small
+query. Runtime reservations remain held at the query's conservative high-water
+mark until completion; errors and unwinding release the guards.
 The existing sampler reconciles completed reservations before admitting the next
 operation. This introduces no independent per-query budget setting.
 

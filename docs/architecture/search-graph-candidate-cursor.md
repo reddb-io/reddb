@@ -40,8 +40,9 @@ Cost sketch: S captured source handles plus a fixed 256 × 8-byte ID buffer;
 O(D + (B + K) log N) indexed work for D candidate occurrences, B batches and K key
 opens across the captured segments. Alias-key duplicates remain candidate
 occurrences. Each candidate occurrence is inspected once, without prefix rescans.
-Edge payload credits accumulate only within the current batch and return after
-its consumer finishes; temporary payload admission no longer scales with all D
+Cursor metadata and edge payloads spend credits from the same query-local bank
+as retained adjacency. Edge payload credits accumulate only within the current
+batch and return to that bank after its consumer finishes; temporary payload admission no longer scales with all D
 edges over the entire query. There is no new persisted index, WAL record, fsync,
 network hop or storage format.
 
@@ -60,6 +61,11 @@ temporary payload reservations exhaust the budget before traversal. The batched
 implementation must return the same seed and neighbor and return all query
 credits after completion, for growing and sealed collections. This is an
 admission regression, not a measured process-RSS or competitive latency result.
+
+Small-query regressions leave 64 KiB and 130 KiB of headroom while another
+operation holds the rest. Nested temporary scopes must share the same query
+credits. Unwinding one temporary scope returns only its own credits, leaving
+other live scopes charged.
 
 Storage regressions compare the cursor with the complete indexed reader, exercise
 missing keys, maximum IDs, appends/sealing between batches and cancellation.
