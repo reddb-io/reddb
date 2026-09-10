@@ -2,7 +2,6 @@
 use super::*;
 use crate::runtime::memory_admission::MemoryReservation;
 use crate::storage::memory_pools::MemoryPool;
-use crate::storage::unified::manager::SegmentManager;
 
 pub(super) fn payload_bytes(entity: &UnifiedEntity) -> usize {
     let strings = match &entity.kind {
@@ -89,6 +88,18 @@ impl<'a> GraphMemory<'a> {
         collection: &str,
         id: EntityId,
     ) -> RedDBResult<Option<UnifiedEntity>> {
+        self.entity_if(store, collection, id, |_| true)
+    }
+
+    /// The predicate is a pure visibility check under the owning segment lock.
+    /// Hidden retained versions must not allocate payloads or consume credits.
+    pub(super) fn entity_if(
+        &mut self,
+        store: &UnifiedStore,
+        collection: &str,
+        id: EntityId,
+        visible: impl Fn(&UnifiedEntity) -> bool,
+    ) -> RedDBResult<Option<UnifiedEntity>> {
         let Some(manager) = store.get_collection(collection) else {
             return Ok(None);
         };
@@ -96,63 +107,25 @@ impl<'a> GraphMemory<'a> {
         loop {
             function_budget::charge(1)?;
             let result = manager.get_with(id, |entity| {
+                if !visible(entity) {
+                    return Ok(None);
+                }
                 let bytes = payload_bytes(entity);
                 if bytes > admitted {
                     Err(bytes)
                 } else {
-                    Ok(entity.clone())
+                    Ok(Some(entity.clone()))
                 }
             });
             match result {
                 None => return Ok(None),
-                Some(Ok(entity)) => return Ok(Some(entity)),
+                Some(Ok(entity)) => return Ok(entity),
                 Some(Err(bytes)) => {
                     // A concurrent replacement may have grown since the size probe.
                     self.admit(bytes - admitted)?;
                     admitted = bytes;
                 }
             }
-        }
-    }
-
-    /// Never grow a buffer under segment locks: reserve outside, then retry an
-    /// overflowing probe with twice the capacity. No prefix escapes on failure.
-    pub(super) fn candidates(
-        &mut self,
-        manager: &SegmentManager,
-        kind: GraphEntityKind,
-        keys: &[EntityId],
-        visible: impl Fn(&UnifiedEntity) -> bool,
-    ) -> RedDBResult<Vec<(EntityId, bool)>> {
-        let mut capacity = 32usize;
-        let mut admitted = 0;
-        loop {
-            let bytes = capacity.saturating_mul(std::mem::size_of::<(EntityId, bool)>());
-            self.admit(bytes.saturating_sub(admitted))?;
-            admitted = bytes;
-            let mut candidates = Vec::with_capacity(capacity);
-            let mut overflow = false;
-            manager.visit_graph_index_candidates(
-                kind,
-                keys,
-                || function_budget::charge(1).is_ok(),
-                |entity| {
-                    if candidates.len() == capacity {
-                        overflow = true;
-                        return false;
-                    }
-                    candidates.push((entity.id, visible(entity)));
-                    true
-                },
-            );
-            function_budget::charge(0)?;
-            if !overflow {
-                return Ok(candidates);
-            }
-            drop(candidates);
-            capacity = capacity.checked_mul(2).ok_or_else(|| {
-                RedDBError::InvalidOperation("context graph candidate size overflow".into())
-            })?;
         }
     }
 }

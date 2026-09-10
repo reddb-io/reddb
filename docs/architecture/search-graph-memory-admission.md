@@ -20,9 +20,10 @@ including subsequent vector expansion. Errors and unwinding release the guards.
 The existing sampler reconciles completed reservations before admitting the next
 operation. This introduces no independent per-query budget setting.
 
-Candidate probes allocate a reserved fixed-capacity array before entering segment
-locks. On overflow, the array is discarded and the probe restarts with twice the
-admitted capacity. An incomplete probe is never used as a successful result.
+[Indexed graph cursors](search-graph-candidate-cursor.md) use a fixed 256-ID
+buffer and seek after the last consumed physical ID. Source handles are admitted
+before capture, and edge payload credits are released after each consumed batch.
+An interrupted partial batch never reaches the consumer.
 Payload reads inspect the size under the owning segment lock, reserve outside
 storage, then recheck before cloning. A larger concurrent replacement requires
 additional admission. RLS evaluation remains outside segment locks.
@@ -34,19 +35,19 @@ limits, score decay and strongest-source deduplication retain their contracts.
 
 ## Cost and remaining boundaries
 
-Cost sketch: for D physical incident candidates, geometric retries inspect O(D)
-candidates on a stable graph, plus O(log D) indexed restarts; admission samples
-resident inventories once per credit refill, amortized across 64 KiB. Each graph
-payload adds a size inspection before its admitted clone. There are no new WAL
-records, disk formats, fsyncs or network round trips. Sorting uses an in-place
-unstable sort with the same explicit ordering keys, avoiding sort scratch space.
+Cost sketch: each physical index entry is examined once per requested key and
+captured segment. Each batch resumes with an indexed seek. Source capture uses
+O(S) handles and the ID buffer is fixed at 2 KiB; there are no degree-sized ID
+arrays or geometric prefix rescans. See the cursor contract for snapshot and
+consolidation details. There are no new WAL records, formats, fsyncs or network
+round trips.
 
-Credits are conservative over the query lifetime: temporary allocations are not
-individually refunded. A long expansion can therefore exhaust its allowance
-before its actual peak resident memory would exhaust the budget. This is a first
-admission boundary, not a precise peak-memory allocator or a hard process RSS cap.
-Degree still determines preparation work; a resumable bounded adjacency cursor
-and earlier top-k selection remain separate performance work.
+Identity, deduplication, adjacency and result credits remain conservative over
+the query lifetime. Temporary edge payloads are charged per batch, then released;
+within a batch, their credits still accumulate conservatively. This is not a
+precise peak-memory allocator or a hard process RSS cap. Degree still determines
+preparation work and retained adjacency; early top-k selection remains separate
+performance work.
 
 This slice does not admit earlier context/global search buffers, policy-evaluator
 scratch, collection catalog enumeration, subsequent vector-search allocations,

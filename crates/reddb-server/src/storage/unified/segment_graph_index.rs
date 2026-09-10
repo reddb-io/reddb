@@ -46,13 +46,25 @@ impl SegmentGraphIndex {
         &self,
         kind: GraphEntityKind,
         key: EntityId,
-    ) -> impl Iterator<Item = EntityId> + '_ {
+    ) -> impl DoubleEndedIterator<Item = EntityId> + '_ {
+        self.candidates_after(kind, key, None, EntityId::new(u64::MAX))
+    }
+
+    pub(super) fn candidates_after(
+        &self,
+        kind: GraphEntityKind,
+        key: EntityId,
+        after: Option<EntityId>,
+        end: EntityId,
+    ) -> impl DoubleEndedIterator<Item = EntityId> + '_ {
+        use std::ops::Bound::{Excluded, Included};
         let index = match kind {
             GraphEntityKind::Node => &self.nodes,
             GraphEntityKind::Edge => &self.edges,
         };
+        let start = after.map_or(Included((key, EntityId::new(0))), |id| Excluded((key, id)));
         index
-            .range((key, EntityId::new(0))..=(key, EntityId::new(u64::MAX)))
+            .range((start, Included((key, end))))
             .map(|(_, id)| *id)
     }
 
@@ -101,6 +113,86 @@ mod tests {
             }
         ));
         ids
+    }
+
+    #[test]
+    fn graph_index_cursor_seeks_once_per_batch_and_stops_at_opened_upper_id() {
+        use crate::storage::unified::segment::SCAN_BATCH_SIZE;
+        for maximum_id in [false, true] {
+            let mut segment = GrowingSegment::new(1, "graph");
+            segment
+                .bulk_insert((1..=1025).map(|id| node(id, 10)).collect())
+                .expect("history");
+            if maximum_id {
+                segment.insert(node(u64::MAX, 10)).expect("maximum ID");
+            }
+            let expected = candidates(&segment, GraphEntityKind::Node, 10);
+            let keys = [EntityId::new(9), EntityId::new(10), EntityId::new(11)];
+            let mut cursor = segment
+                .graph_index_cursor(GraphEntityKind::Node, &keys, &mut || true)
+                .expect("cursor");
+            let mut actual = Vec::new();
+            let mut work = 0;
+            let mut batches = 0;
+            while !cursor.finished(&keys) {
+                let before = actual.len();
+                assert!(segment.graph_index_batch(
+                    GraphEntityKind::Node,
+                    &keys,
+                    &mut cursor,
+                    &mut || {
+                        work += 1;
+                        true
+                    },
+                    &mut |id| actual.push(id.raw())
+                ));
+                assert!(actual.len() - before <= SCAN_BATCH_SIZE);
+                batches += 1;
+                if batches == 1 && !maximum_id {
+                    segment
+                        .insert(node(2000, 10))
+                        .expect("append above opened bound");
+                    segment.seal().expect("seal between batches");
+                }
+            }
+            assert_eq!(actual, expected);
+            assert_eq!(batches, 5);
+            assert!(work <= expected.len() + 10, "no prefix rescans: {work}");
+        }
+    }
+
+    #[test]
+    fn graph_index_cursor_bounds_later_aliases_before_consuming_first_batch() {
+        let mut segment = GrowingSegment::new(1, "graph");
+        segment
+            .bulk_insert((1..=1024).map(|id| node(id, 10)).collect())
+            .expect("first key");
+        segment.insert(node(2000, 20)).expect("later key");
+        let keys = [EntityId::new(10), EntityId::new(20)];
+        let mut cursor = segment
+            .graph_index_cursor(GraphEntityKind::Node, &keys, &mut || true)
+            .expect("capture all keys");
+        let mut actual = Vec::new();
+        assert!(segment.graph_index_batch(
+            GraphEntityKind::Node,
+            &keys,
+            &mut cursor,
+            &mut || true,
+            &mut |id| actual.push(id.raw())
+        ));
+        segment
+            .insert(node(3000, 20))
+            .expect("append to unopened key");
+        while !cursor.finished(&keys) {
+            assert!(segment.graph_index_batch(
+                GraphEntityKind::Node,
+                &keys,
+                &mut cursor,
+                &mut || true,
+                &mut |id| actual.push(id.raw())
+            ));
+        }
+        assert_eq!(actual, (1..=1024).chain([2000]).collect::<Vec<_>>());
     }
 
     #[test]
