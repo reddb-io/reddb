@@ -6888,6 +6888,35 @@ fn decode_hex_fixture(hex: &str) -> Vec<u8> {
 }
 
 #[test]
+fn fuzz_regression_issue_2099_migration_seeds_terminate() {
+    for seed in [
+        include_str!("fuzz_seeds/issue_2099_migration_1.hex"),
+        include_str!("fuzz_seeds/issue_2099_migration_2.hex"),
+    ] {
+        let bytes = decode_hex_fixture(seed);
+        let raw = std::str::from_utf8(&bytes).expect("reported fuzz seed is UTF-8");
+        let (prefix_byte, tail) = bytes.split_first().expect("reported seed is nonempty");
+        let prefixes = [
+            "CREATE MIGRATION ",
+            "APPLY MIGRATION ",
+            "ROLLBACK MIGRATION ",
+            "EXPLAIN MIGRATION ",
+        ];
+        let prefixed = format!(
+            "{}{}",
+            prefixes[usize::from(*prefix_byte) % prefixes.len()],
+            std::str::from_utf8(tail).expect("reported seed tail is UTF-8")
+        );
+        // Mirror both calls made by the migration_parser fuzz target. These
+        // malformed inputs must terminate with an error, without cloning an
+        // exponentially growing expression tree (the fix landed in #2105).
+        for input in [prefixed.as_str(), raw] {
+            assert!(super::parse(input).is_err(), "malformed issue #2099 seed");
+        }
+    }
+}
+
+#[test]
 fn fuzz_regression_issue_1479_migration_seed_terminates() {
     let bytes = decode_hex_fixture(include_str!("fuzz_seeds/issue_1479_migration_parser.hex"));
     let raw = std::str::from_utf8(&bytes).expect("fuzz seed is utf-8");

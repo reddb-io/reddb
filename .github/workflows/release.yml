@@ -480,6 +480,10 @@ jobs:
           MINOR_TAG="${VERSION%.*}"
           MAJOR_TAG="${VERSION%%.*}"
           CHANGELOG="$(cat release-changelog.md)"
+          UPGRADE_NOTES="Review the changelog above before upgrading. Storage-format, wire-protocol, or API breaking changes must appear in the changelog as breaking changes; if none are listed, this release is intended to be a standard same-major upgrade."
+          if [[ -f "docs/release/${TAG}.md" ]]; then
+            UPGRADE_NOTES="$(cat "docs/release/${TAG}.md")"
+          fi
           cat > release-body.md <<MARKDOWN
           # RedDB ${TAG}
 
@@ -489,7 +493,7 @@ jobs:
 
           ## Upgrade Notes
 
-          Review the changelog above before upgrading. Storage-format, wire-protocol, or API breaking changes must appear in the changelog as breaking changes; if none are listed, this release is intended to be a standard same-major upgrade.
+          ${UPGRADE_NOTES}
 
           ## Compatibility
 

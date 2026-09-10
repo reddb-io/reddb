@@ -183,7 +183,7 @@ test("release workflows publish aggregate checksum manifests for installers", ()
 
   for (const workflow of [releaseWorkflow, rcWorkflow]) {
     assert.match(workflow, /name: Generate checksum manifest/);
-    assert.match(workflow, new RegExp(`uses: ${actionRef("anchore/sbom-action/download-syft", "v0.24.0")}`));
+    assert.match(workflow, new RegExp(`uses: ${actionRef("anchore/sbom-action/download-syft", "v0.24.2")}`));
     assert.match(workflow, /syft-version: v1\.46\.0/);
     assert.match(workflow, /name: Generate source SBOMs/);
     assert.match(workflow, /--exclude '\.\/\.git\/\*\*'/);
