@@ -843,6 +843,10 @@ impl Drop for StoreCommitCoordinator {
 }
 
 impl UnifiedStore {
+    pub(crate) fn deferred_store_wal_capture_active() -> bool {
+        deferred_store_wal_capture_active()
+    }
+
     pub(crate) fn begin_deferred_store_wal_capture() {
         begin_deferred_store_wal_capture();
     }

@@ -592,3 +592,92 @@ fn mutation_memory_batch_optional_slack_cannot_deny_a_fitting_update() {
         1
     );
 }
+
+#[test]
+fn bulk_update_wal_child() {
+    let Some(path) = std::env::var_os("REDDB_BULK_UPDATE_WAL_TEST_PATH") else {
+        return;
+    };
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(&path)
+            .with_memory_budget(32 * 1024 * 1024)
+            .with_auto_checkpoint(0),
+    )
+    .expect("persistent runtime");
+    runtime
+        .execute_query("CREATE TABLE batch_growth (id INT, payload TEXT)")
+        .expect("table");
+    for start in (0..2050).step_by(500) {
+        let rows = (start..(start + 500).min(2050))
+            .map(|id| format!("({id}, 'seed')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO batch_growth (id,payload) VALUES {rows}"
+            ))
+            .expect("seed");
+    }
+    let generation_before = crate::storage::EmbeddedRdbArtifact::open(&path)
+        .expect("read initial durable boundary")
+        .selected_superblock
+        .generation;
+    runtime
+        .execute_query("UPDATE batch_growth SET payload = 'committed'")
+        .expect("durable bulk update");
+    let generation_after = crate::storage::EmbeddedRdbArtifact::open(&path)
+        .expect("read committed durable boundary")
+        .selected_superblock
+        .generation;
+    // Each embedded WAL append advances the durable superblock generation.
+    // Two chunks require two appends; either chunk may additionally grow the
+    // WAL region with a checkpoint. Per-row appends advanced it 2057 times.
+    let publications = generation_after - generation_before;
+    assert!(
+        (2..=4).contains(&publications),
+        "expected two chunk appends plus at most two growth checkpoints, got {publications}"
+    );
+    // Lose the process without a checkpoint or runtime/storage destructors.
+    std::process::exit(0);
+}
+
+#[test]
+fn bulk_update_wal_batches_and_recovers_every_key_after_process_exit() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("batch-growth.rdb");
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "runtime::mutation_memory_tests::bulk_update_wal_child",
+            "--nocapture",
+        ])
+        .env("REDDB_BULK_UPDATE_WAL_TEST_PATH", &path)
+        .output()
+        .expect("child");
+    assert!(
+        output.status.success(),
+        "child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+        .expect("reopen after process loss");
+    let records = runtime
+        .execute_query("SELECT id,payload FROM batch_growth ORDER BY id")
+        .expect("recovered rows")
+        .result
+        .records;
+    assert_eq!(records.len(), 2050);
+    for (id, record) in records.iter().enumerate() {
+        assert_eq!(
+            record.get("id"),
+            Some(&reddb_types::Value::Integer(
+                i64::try_from(id).expect("small fixture")
+            ))
+        );
+        assert_eq!(
+            record.get("payload"),
+            Some(&reddb_types::Value::text("committed")),
+            "recovered payload for id={id}"
+        );
+    }
+}
