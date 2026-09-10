@@ -12,6 +12,8 @@
 //! - Paced consolidation of sealed segments (ADR 0073 §5)
 //! - Archive old segments to cold storage
 
+mod graph_index_merge;
+
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

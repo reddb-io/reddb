@@ -1413,19 +1413,35 @@ impl GrowingSegment {
         before_work: &mut impl FnMut() -> bool,
         visit: &mut impl FnMut(EntityId),
     ) -> bool {
+        self.graph_index_batch_with_limit(kind, keys, cursor, before_work, visit, SCAN_BATCH_SIZE)
+    }
+
+    pub(crate) fn graph_index_batch_with_limit(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        cursor: &mut GraphIndexCursor,
+        before_work: &mut impl FnMut() -> bool,
+        visit: &mut impl FnMut(EntityId),
+        limit: usize,
+    ) -> bool {
+        assert!(
+            limit > 0 && limit <= SCAN_BATCH_SIZE,
+            "bounded graph index batch"
+        );
         let Some(cached) = self.graph_read_index_for_query(before_work) else {
             return false;
         };
         let index = cached.as_ref().expect("complete graph index");
         let mut count = 0;
-        while !cursor.finished(keys) && count < SCAN_BATCH_SIZE {
+        while !cursor.finished(keys) && count < limit {
             let key = keys[cursor.key_index];
             if !before_work() {
                 return false;
             }
             for id in index
                 .candidates_after(kind, key, cursor.after, cursor.upper)
-                .take(SCAN_BATCH_SIZE - count)
+                .take(limit - count)
             {
                 if !before_work() {
                     return false;
@@ -1434,7 +1450,7 @@ impl GrowingSegment {
                 count += 1;
                 visit(id);
             }
-            if count == SCAN_BATCH_SIZE && cursor.after != Some(cursor.upper) {
+            if count == limit && cursor.after != Some(cursor.upper) {
                 break;
             }
             cursor.key_index += 1;

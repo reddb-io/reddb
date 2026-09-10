@@ -2,6 +2,7 @@
 use super::execution_context::capture_current_snapshot;
 use super::function_budget;
 use super::*;
+use crate::storage::unified::manager::SegmentManager;
 use crate::storage::unified::segment::GraphEntityKind;
 pub(super) mod memory;
 use memory::GraphMemory;
@@ -335,8 +336,8 @@ impl SearchGraphRead<'_> {
         policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
     ) -> RedDBResult<&[SearchGraphNeighbor]> {
         if !self.adjacency.contains_key(current) {
-            // Deduplication and aliases are temporary. The ranked selection
-            // separately owns and refunds each evictable candidate.
+            // Alias copies and manager handles are temporary. Ordered physical
+            // candidates need only the last visible ID for deduplication.
             let mut candidates_memory = memory.scratch();
             let logical = EntityId::new(current.parse().expect("numeric logical node ID"));
             let aliases = if let Some(node) = self.node(logical, memory)? {
@@ -345,45 +346,44 @@ impl SearchGraphRead<'_> {
             } else {
                 Vec::new()
             };
-            let mut seen = HashSet::new();
+            let mut last_seen = None;
             let mut selection = SearchGraphSelection::new(max_edges, memory);
             if !aliases.is_empty() {
-                for index in 0..self.collections.len() {
+                let mut managers = Vec::new();
+                for (index, collection) in self.collections.iter().enumerate() {
                     function_budget::charge(1)?;
-                    candidates_memory.admit(self.collections[index].len())?;
-                    let collection = self.collections[index].clone();
-                    let Some(manager) = self.store.get_collection(&collection) else {
-                        continue;
-                    };
-                    let mut cursor_memory = memory.scratch();
-                    manager.visit_graph_index_batches(
-                        GraphEntityKind::Edge,
-                        &aliases,
-                        || function_budget::charge(1).is_ok(),
-                        |bytes| cursor_memory.admit(bytes),
-                        |ids| {
-                            self.neighbors_batch(
-                                logical,
-                                &collection,
-                                ids,
-                                &mut seen,
-                                &mut selection,
-                                hydrated,
-                                &mut candidates_memory,
-                                memory,
-                                policies,
-                            )?;
-                            Ok(true)
-                        },
-                    )?;
-                    function_budget::charge(0)?;
+                    if let Some(manager) = self.store.get_collection(collection) {
+                        candidates_memory.entry::<(usize, std::sync::Arc<SegmentManager>)>(0)?;
+                        managers.push((index, manager));
+                    }
                 }
+                let mut cursor_memory = memory.scratch();
+                SegmentManager::visit_ordered_graph_index_batches(
+                    &managers,
+                    GraphEntityKind::Edge,
+                    &aliases,
+                    || function_budget::charge(1).is_ok(),
+                    |bytes| cursor_memory.admit(bytes),
+                    |ids| {
+                        self.neighbors_batch(
+                            logical,
+                            ids,
+                            &mut last_seen,
+                            &mut selection,
+                            hydrated,
+                            memory,
+                            policies,
+                        )?;
+                        Ok(true)
+                    },
+                )?;
+                function_budget::charge(0)?;
             }
             let neighbors = selection.finish(self, hydrated, memory, policies)?;
             memory.entry::<(String, Vec<SearchGraphNeighbor>)>(current.len())?;
             self.adjacency.insert(current.to_string(), neighbors);
             // Drop temporary owners before their credit scope is refunded.
-            drop((seen, aliases));
+            drop(aliases);
         }
         function_budget::charge(0)?;
         Ok(self.adjacency.get(current).expect("adjacency resolved"))
@@ -392,28 +392,32 @@ impl SearchGraphRead<'_> {
     fn neighbors_batch<'a>(
         &mut self,
         logical: EntityId,
-        collection: &str,
-        ids: &[EntityId],
-        seen: &mut HashSet<EntityId>,
+        ids: &[(EntityId, usize)],
+        last_seen: &mut Option<EntityId>,
         selection: &mut SearchGraphSelection<'a>,
         hydrated: &mut HashMap<String, Option<UnifiedEntity>>,
-        candidates_memory: &mut GraphMemory<'_>,
         memory: &mut GraphMemory<'a>,
         policies: &mut HashMap<String, Option<reddb_rql::ast::Filter>>,
     ) -> RedDBResult<()> {
         let mut scratch = memory.scratch();
-        for id in ids {
+        for (id, collection_index) in ids {
             function_budget::charge(1)?;
-            if seen.contains(id) {
+            assert!(
+                last_seen.is_none_or(|last| last <= *id),
+                "ordered physical graph candidates"
+            );
+            if *last_seen == Some(*id) {
                 continue;
             }
+            let collection = &self.collections[*collection_index];
             let Some(entity) =
                 scratch.entity_if(self.store, collection, *id, |entity| self.visible(entity))?
             else {
                 continue;
             };
-            candidates_memory.entry::<EntityId>(0)?;
-            seen.insert(*id);
+            // An invisible copy cannot hide a visible copy in a later
+            // collection. A visible but RLS-denied copy still wins precedence.
+            *last_seen = Some(*id);
             if !self.runtime.search_entity_allowed(
                 collection,
                 &entity,
@@ -828,6 +832,270 @@ mod tests {
                     headroom,
                 )
                 .expect("no leaked batch credits");
+        }
+    }
+
+    #[test]
+    fn graph_ordered_dedup_preserves_visible_collection_precedence_across_batches() {
+        for mode in ["hidden", "denied", "visible"] {
+            let (runtime, _) = memory_fixture(0, 0, false);
+            let store = runtime.db().store();
+            for collection in ["earlier_edges", "later_edges", "nodes"] {
+                store.get_or_create_collection(collection);
+            }
+            for id in [100, 200, 300] {
+                store
+                    .insert(
+                        "nodes",
+                        UnifiedEntity::graph_node(
+                            EntityId::new(id),
+                            "node",
+                            "Node",
+                            HashMap::new(),
+                        ),
+                    )
+                    .expect("node");
+            }
+            for id in 1..=255 {
+                let mut edge = UnifiedEntity::graph_edge(
+                    EntityId::new(id),
+                    "hidden",
+                    "100",
+                    "200",
+                    1.0,
+                    HashMap::new(),
+                );
+                edge.xmax = 1;
+                store.insert("earlier_edges", edge).expect("hidden prefix");
+            }
+            let mut first = UnifiedEntity::graph_edge(
+                EntityId::new(1000),
+                "earlier_edges",
+                "100",
+                "200",
+                1.0,
+                HashMap::new(),
+            );
+            if mode == "hidden" {
+                first.xmax = 1;
+            }
+            store
+                .insert("earlier_edges", first)
+                .expect("first copy at batch boundary");
+            store
+                .insert(
+                    "later_edges",
+                    UnifiedEntity::graph_edge(
+                        EntityId::new(1000),
+                        "later_edges",
+                        "100",
+                        "300",
+                        1.0,
+                        HashMap::new(),
+                    ),
+                )
+                .expect("later copy");
+            if mode == "denied" {
+                for query in [
+                    "CREATE POLICY edges ON EDGES OF earlier_edges USING (false)",
+                    "ALTER TABLE earlier_edges ENABLE ROW LEVEL SECURITY",
+                ] {
+                    runtime
+                        .execute_query(query)
+                        .expect("deny first visible copy");
+                }
+            }
+            let mut memory = GraphMemory::new(&runtime);
+            let mut hydrated = HashMap::new();
+            let mut policies = HashMap::new();
+            let mut graph = SearchGraphRead {
+                runtime: &runtime,
+                store: store.as_ref(),
+                snapshot: None,
+                collections: vec!["earlier_edges".into(), "later_edges".into(), "nodes".into()],
+                nodes: HashMap::new(),
+                endpoints: HashMap::new(),
+                adjacency: HashMap::new(),
+            };
+            let neighbors = graph
+                .neighbors("100", 1, &mut hydrated, &mut memory, &mut policies)
+                .expect("ordered read");
+            let actual: Vec<_> = neighbors
+                .iter()
+                .map(|neighbor| neighbor.logical_id.as_str())
+                .collect();
+            let expected = match mode {
+                "hidden" => vec!["300"],
+                "denied" => vec![],
+                _ => vec!["200"],
+            };
+            assert_eq!(actual, expected, "first copy is {mode}");
+        }
+    }
+
+    #[test]
+    fn graph_ordered_dedup_counts_alias_edges_once_and_parallel_edges_separately() {
+        for sealed in [false, true] {
+            let (runtime, _) = memory_fixture(0, 0, false);
+            let store = runtime.db().store();
+            let seed =
+                UnifiedEntity::graph_node(EntityId::new(100), "source", "Node", HashMap::new());
+            store.insert("links", seed.clone()).expect("source");
+            let mut alias =
+                UnifiedEntity::graph_node(EntityId::new(101), "old source", "Node", HashMap::new());
+            alias.set_logical_id(EntityId::new(100));
+            alias.xmax = 1;
+            store.insert("links", alias).expect("retained alias");
+            for id in [200, 300] {
+                store
+                    .insert(
+                        "links",
+                        UnifiedEntity::graph_node(
+                            EntityId::new(id),
+                            "neighbor",
+                            "Node",
+                            HashMap::new(),
+                        ),
+                    )
+                    .expect("destination");
+            }
+            for (id, to) in [(2000, "101"), (2001, "200"), (2002, "200"), (2003, "300")] {
+                store
+                    .insert(
+                        "links",
+                        UnifiedEntity::graph_edge(
+                            EntityId::new(id),
+                            "step",
+                            "100",
+                            to,
+                            1.0,
+                            HashMap::new(),
+                        ),
+                    )
+                    .expect("edge");
+            }
+            if sealed {
+                store
+                    .get_collection("links")
+                    .expect("collection")
+                    .force_seal()
+                    .expect("seal");
+            }
+            for (max_edges, expected) in [
+                (2, vec![100, 200]),
+                (3, vec![100, 200]),
+                (4, vec![100, 200, 300]),
+            ] {
+                let mut scored = HashMap::from([(
+                    100,
+                    (
+                        seed.clone(),
+                        1.0,
+                        DiscoveryMethod::GlobalScan,
+                        "links".into(),
+                    ),
+                )]);
+                runtime
+                    .search_context_expand_graph(
+                        &mut scored,
+                        None,
+                        1,
+                        max_edges,
+                        0.0,
+                        &mut GraphMemory::new(&runtime),
+                        &mut HashMap::new(),
+                    )
+                    .expect("alias-aware expansion");
+                let mut actual: Vec<_> = scored.keys().copied().collect();
+                actual.sort_unstable();
+                assert_eq!(actual, expected, "allowance {max_edges}, sealed {sealed}");
+            }
+        }
+    }
+
+    #[test]
+    fn graph_ordered_dedup_fits_high_degree_without_an_id_set() {
+        use crate::storage::memory_pools::MemoryPool;
+        for sealed in [false, true] {
+            let (runtime, _) = memory_fixture(0, 0, false);
+            let store = runtime.db().store();
+            let seed =
+                UnifiedEntity::graph_node(EntityId::new(100), "source", "Node", HashMap::new());
+            store
+                .insert("links", seed.clone())
+                .expect("explicit source");
+            store
+                .insert(
+                    "links",
+                    UnifiedEntity::graph_node(
+                        EntityId::new(200),
+                        "destination",
+                        "Node",
+                        HashMap::new(),
+                    ),
+                )
+                .expect("destination");
+            let edges = (1000..33768)
+                .map(|id| {
+                    UnifiedEntity::graph_edge(
+                        EntityId::new(id),
+                        "step",
+                        "100",
+                        "200",
+                        1.0,
+                        HashMap::new(),
+                    )
+                })
+                .collect();
+            store
+                .bulk_insert("links", edges)
+                .expect("32768 parallel edges");
+            if sealed {
+                store
+                    .get_collection("links")
+                    .expect("collection")
+                    .force_seal()
+                    .expect("seal");
+            }
+            runtime.refresh_memory_accounting();
+            let headroom = runtime.memory_budget().resolved_bytes
+                - runtime.memory_accounting().total_used_bytes();
+            let held = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "competing query",
+                    headroom - 512 * 1024,
+                )
+                .expect("leave merge scratch");
+            let mut scored = HashMap::from([(
+                100,
+                (seed, 1.0, DiscoveryMethod::GlobalScan, "links".into()),
+            )]);
+            let mut memory = GraphMemory::new(&runtime);
+            assert_eq!(
+                runtime
+                    .search_context_expand_graph(
+                        &mut scored,
+                        None,
+                        1,
+                        1,
+                        0.0,
+                        &mut memory,
+                        &mut HashMap::new(),
+                    )
+                    .expect("deduplication must not retain every incident ID"),
+                1
+            );
+            assert_eq!(scored.len(), 2);
+            assert!(scored.contains_key(&200));
+            drop((scored, memory, held));
+            let _returned = runtime
+                .admit_non_evictable_growth(
+                    MemoryPool::IndexMemory,
+                    "all query credits returned",
+                    headroom,
+                )
+                .expect("no leaked merge credits");
         }
     }
 
