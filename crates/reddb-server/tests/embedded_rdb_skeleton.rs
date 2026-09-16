@@ -227,3 +227,31 @@ fn a_second_writer_process_cannot_open_an_open_embedded_store() {
     let rows = rt.execute_query("SELECT * FROM t").expect("select rows");
     assert_eq!(rows.result.records.len(), 2);
 }
+
+/// Boot re-seeds `red.system.*` and other config keys. `red_config` used to
+/// append a row per write, so every open added ~22 rows (~2 KB) to the
+/// snapshot even when nothing else changed.
+#[test]
+fn reopening_an_embedded_store_does_not_grow_its_config() {
+    let dir = temp_dir("config_reopen");
+    let path = dir.path().join("data.rdb");
+    let config_rows = |rt: &RedDBRuntime| {
+        rt.db()
+            .store()
+            .get_collection("red_config")
+            .map(|m| m.query_all(|_| true).len())
+            .unwrap_or(0)
+    };
+
+    let baseline = {
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("open runtime");
+        rt.execute_query("CREATE TABLE t (id INT)")
+            .expect("create table");
+        config_rows(&rt)
+    };
+    for _ in 0..3 {
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen runtime");
+        assert_eq!(config_rows(&rt), baseline);
+    }
+}

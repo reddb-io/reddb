@@ -484,6 +484,29 @@ mod tests {
     }
 
     #[test]
+    fn set_config_tree_replaces_earlier_rows_for_the_same_key() {
+        let store = UnifiedStore::new();
+        let config_rows = |store: &UnifiedStore| {
+            store
+                .get_collection("red_config")
+                .map(|m| m.query_all(|_| true).len())
+                .unwrap_or(0)
+        };
+
+        store.set_config_tree("red.system", &crate::json!({ "pid": 1_u64, "os": "linux" }));
+        let after_first = config_rows(&store);
+        for pid in 2..=5_u64 {
+            store.set_config_tree("red.system", &crate::json!({ "pid": pid, "os": "linux" }));
+        }
+
+        assert_eq!(config_rows(&store), after_first);
+        assert_eq!(
+            store.get_config("red.system.pid"),
+            Some(reddb_types::Value::UnsignedInteger(5))
+        );
+    }
+
+    #[test]
     fn test_global_ids_unique_across_collections() {
         let store = UnifiedStore::new();
 
