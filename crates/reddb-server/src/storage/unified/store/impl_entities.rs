@@ -339,27 +339,39 @@ impl UnifiedStore {
         let manager = self.get_or_create_collection("red_config");
         let mut pairs = Vec::new();
         flatten_config_json(prefix, json, &mut pairs);
-        let mut previous: HashMap<String, Vec<EntityId>> = pairs
+        // Existing rows per key, with the value each one holds.
+        let mut previous: HashMap<String, Vec<(EntityId, Option<reddb_types::Value>)>> = pairs
             .iter()
             .map(|(key, _)| (key.clone(), Vec::new()))
             .collect();
         for entity in manager.query_all(|_| true) {
             if let EntityData::Row(row) = &entity.data {
-                if let Some(reddb_types::Value::Text(key)) =
-                    row.named.as_ref().and_then(|named| named.get("key"))
-                {
-                    if let Some(ids) = previous.get_mut(key.as_ref()) {
-                        ids.push(entity.id);
+                let Some(named) = row.named.as_ref() else {
+                    continue;
+                };
+                if let Some(reddb_types::Value::Text(key)) = named.get("key") {
+                    if let Some(rows) = previous.get_mut(key.as_ref()) {
+                        rows.push((entity.id, named.get("value").cloned()));
                     }
                 }
             }
         }
         let mut saved = 0;
         for (key, value) in pairs {
+            let stale = previous.remove(&key).unwrap_or_default();
+            // Rewriting a key with the value it already holds is a no-op.
+            // Boot re-seeds the same config every time, and each write is a
+            // durable WAL append with its own fsync.
+            if let [(_, Some(current))] = stale.as_slice() {
+                if *current == value {
+                    saved += 1;
+                    continue;
+                }
+            }
+            let stale: Vec<EntityId> = stale.into_iter().map(|(id, _)| id).collect();
             // Insert before removing the old rows: a failure in between
             // leaves a duplicate that readers resolve to the newest row,
             // never a missing key.
-            let stale = previous.remove(&key).unwrap_or_default();
             let entity = UnifiedEntity::new(
                 EntityId::new(0),
                 EntityKind::TableRow {
