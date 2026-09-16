@@ -203,6 +203,8 @@ fn replica_relay_runtime_write_survives_atomic_crash_points() {
             .expect("relay manifest path");
         let initial = reddb_file::ReplicaRelayLogManifest::read_from_path(&manifest_path)
             .expect("read initial relay manifest");
+        // The child is the next writer; an embedded store admits one at a time.
+        drop(runtime);
 
         let child = Command::new(std::env::current_exe().expect("current test exe"))
             .arg("replica_relay_runtime_crash_child")

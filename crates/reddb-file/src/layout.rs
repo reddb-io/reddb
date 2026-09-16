@@ -36,6 +36,7 @@ pub const SERVERLESS_ROOT_EXTENSION: &str = "serverless";
 pub const SERVERLESS_CACHE_DIR: &str = "cache";
 pub const RESULT_CACHE_L2_EXTENSION: &str = "result-cache.l2";
 pub const LOCAL_CAS_LOCK_SUFFIX: &str = "cas.lock";
+pub const EMBEDDED_WRITER_LOCK_SUFFIX: &str = "writer.lock";
 pub const LOCAL_UPLOAD_TEMP_TAG: &str = "tmp";
 
 /// Storage layout preset for tier-aware RedDB file placement.
@@ -701,6 +702,13 @@ pub fn local_cas_lock_path(dest: &Path) -> PathBuf {
     dest.with_file_name(format!(".{file_name}.{LOCAL_CAS_LOCK_SUFFIX}"))
 }
 
+/// Lock file that fences an embedded single-file store to one writer process
+/// for the writer's whole lifetime (see `EmbeddedRdbWriterLock`).
+pub fn embedded_writer_lock_path(data_path: &Path) -> PathBuf {
+    let file_name = data_file_name(data_path);
+    data_path.with_file_name(format!(".{file_name}.{EMBEDDED_WRITER_LOCK_SUFFIX}"))
+}
+
 pub fn local_upload_temp_path(dest: &Path, pid: u32, unique: u64) -> PathBuf {
     let file_name = data_file_name(dest);
     dest.with_file_name(format!(
@@ -946,6 +954,10 @@ mod tests {
         assert_eq!(
             local_cas_lock_path(path),
             PathBuf::from("/var/lib/reddb/.main.rdb.cas.lock")
+        );
+        assert_eq!(
+            embedded_writer_lock_path(path),
+            PathBuf::from("/var/lib/reddb/.main.rdb.writer.lock")
         );
         assert_eq!(
             local_upload_temp_path(path, 123, 7),

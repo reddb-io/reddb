@@ -439,6 +439,17 @@ impl RedDB {
         let embedded_store_config = store_config
             .clone()
             .with_embedded_wal_path(path_buf.clone());
+        // Taken before reading the snapshot: every writer holds the whole
+        // store in memory and checkpoints it on close, so a second writer
+        // process would silently discard the first one's commits.
+        let embedded_writer_lock = if embedded_single_file_selected(options)
+            && !options.read_only
+            && (path_buf.exists() || options.create_if_missing)
+        {
+            Some(reddb_file::EmbeddedRdbWriterLock::acquire(&path_buf)?)
+        } else {
+            None
+        };
         let embedded_open = if embedded_single_file_selected(options) {
             if path_buf.exists() {
                 match crate::storage::EmbeddedRdbArtifact::open(&path_buf) {
@@ -501,6 +512,7 @@ impl RedDB {
             None
         };
 
+        let embedded_writer_lock = embedded_writer_lock.filter(|_| embedded_open.is_some());
         let (store, path, paged_mode) = if let Some(opened) = embedded_open {
             opened
         } else if path_buf.exists() {
@@ -585,6 +597,7 @@ impl RedDB {
             continuous_aggregates: std::sync::OnceLock::new(),
             turbo_collections: std::sync::OnceLock::new(),
             turbo_rebuild_workers: parking_lot::Mutex::new(Vec::new()),
+            _embedded_writer_lock: embedded_writer_lock,
             _ephemeral_cleanup: ephemeral_cleanup,
         }
         .with_initialized_metadata()

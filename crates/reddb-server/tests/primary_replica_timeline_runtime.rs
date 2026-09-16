@@ -101,6 +101,8 @@ fn runtime_timeline_promotion_survives_atomic_crash_points() {
             .expect("timeline history path");
         let initial =
             reddb_file::TimelineHistory::read_from_path(&path).expect("read initial timeline");
+        // The child is the next writer; an embedded store admits one at a time.
+        drop(runtime);
 
         let child = Command::new(std::env::current_exe().expect("current test exe"))
             .arg("--exact")

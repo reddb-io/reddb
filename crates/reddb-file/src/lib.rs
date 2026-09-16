@@ -133,11 +133,12 @@ pub use control_store::{
 };
 pub use dst::{FaultClass, FaultDecision, FaultRecord, SimulationContext};
 pub use embedded::{
-    EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock, RdbFileError,
-    RdbFileResult, DEFAULT_FORMAT_VERSION, EMBEDDED_RDB_MANIFEST_0_OFFSET,
-    EMBEDDED_RDB_MANIFEST_1_OFFSET, EMBEDDED_RDB_MANIFEST_SLOT_SIZE,
-    EMBEDDED_RDB_MANIFEST_ZONE_END, EMBEDDED_RDB_SUPERBLOCK_0_OFFSET,
-    EMBEDDED_RDB_SUPERBLOCK_1_OFFSET, EMBEDDED_RDB_SUPERBLOCK_SIZE,
+    EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock,
+    EmbeddedRdbWriterLock, RdbFileError, RdbFileResult, DEFAULT_FORMAT_VERSION,
+    EMBEDDED_RDB_MANIFEST_0_OFFSET, EMBEDDED_RDB_MANIFEST_1_OFFSET,
+    EMBEDDED_RDB_MANIFEST_SLOT_SIZE, EMBEDDED_RDB_MANIFEST_ZONE_END,
+    EMBEDDED_RDB_SUPERBLOCK_0_OFFSET, EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
+    EMBEDDED_RDB_SUPERBLOCK_SIZE,
 };
 pub use file_format::{
     clear_paged_page_checksum, database_header_freelist_head, database_header_magic_matches,
@@ -193,20 +194,21 @@ pub use graph_table_index::{
 };
 pub use layout::{
     audit_log_rotated_compressed_path, audit_log_rotated_plain_path, data_file_name,
-    default_database_path, default_service_database_path, engine_wal_path, legacy_audit_log_path,
-    legacy_logical_slots_path, legacy_logical_slots_temp_path, legacy_slow_query_log_path,
-    local_cas_lock_path, local_upload_temp_path, logical_wal_path, logical_wal_path_in,
-    logical_wal_temp_path, pager_dwb_path, pager_dwb_shadow_path, pager_legacy_wal_path,
-    pager_shadow_sidecar_paths, parse_audit_log_rotated_timestamp, physical_export_data_path,
-    physical_metadata_binary_path, physical_metadata_journal_path,
-    physical_metadata_journal_prefix, physical_metadata_json_path, primary_replica_root,
-    primary_wal_segment_file_name, rebootstrap_intent_log_path, rebootstrap_pending_path,
-    rebootstrap_previous_path, rebootstrap_ready_marker_path, rebootstrap_staging_root,
-    relay_segment_relative_path, serverless_cache_root, serverless_namespace, serverless_root,
-    shm_path, sibling_path, sidecar_file_name, store_commit_coord_temp_wal_file_name,
-    store_commit_coord_temp_wal_path, support_dir_for, temp_path, temp_path_in, unified_wal_path,
-    unified_wal_path_in, LayoutOverrides, LayoutToggles, LogDestination, LogRoutingOverrides,
-    StorageLayout, TieredLayoutPaths, DEFAULT_DATABASE_FILE_NAME, DEFAULT_SERVICE_DATABASE_PATH,
+    default_database_path, default_service_database_path, embedded_writer_lock_path,
+    engine_wal_path, legacy_audit_log_path, legacy_logical_slots_path,
+    legacy_logical_slots_temp_path, legacy_slow_query_log_path, local_cas_lock_path,
+    local_upload_temp_path, logical_wal_path, logical_wal_path_in, logical_wal_temp_path,
+    pager_dwb_path, pager_dwb_shadow_path, pager_legacy_wal_path, pager_shadow_sidecar_paths,
+    parse_audit_log_rotated_timestamp, physical_export_data_path, physical_metadata_binary_path,
+    physical_metadata_journal_path, physical_metadata_journal_prefix, physical_metadata_json_path,
+    primary_replica_root, primary_wal_segment_file_name, rebootstrap_intent_log_path,
+    rebootstrap_pending_path, rebootstrap_previous_path, rebootstrap_ready_marker_path,
+    rebootstrap_staging_root, relay_segment_relative_path, serverless_cache_root,
+    serverless_namespace, serverless_root, shm_path, sibling_path, sidecar_file_name,
+    store_commit_coord_temp_wal_file_name, store_commit_coord_temp_wal_path, support_dir_for,
+    temp_path, temp_path_in, unified_wal_path, unified_wal_path_in, LayoutOverrides, LayoutToggles,
+    LogDestination, LogRoutingOverrides, StorageLayout, TieredLayoutPaths,
+    DEFAULT_DATABASE_FILE_NAME, DEFAULT_SERVICE_DATABASE_PATH,
 };
 pub use local_backend::{local_backend_atomic_upload, local_backend_download};
 pub use logical_wal::{
