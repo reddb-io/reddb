@@ -29,7 +29,9 @@ class VectorExplain(unittest.TestCase):
         return json.loads(result.stdout)["data"]
 
     def test_filtered_turbo_execution_reports_observed_work(self):
-        sql = "VECTOR SEARCH places SIMILAR TO [1.0,0.0] WHERE category = 'yes' LIMIT 1"
+        # Search defaults to MODE EXACT; the turbo route is opt-in.
+        sql = ("VECTOR SEARCH places SIMILAR TO [1.0,0.0] WHERE category = 'yes' "
+               "MODE APPROXIMATE LIMIT 1")
         result = self.query("EXPLAIN ANALYZE " + sql)
         row = result["rows"][0]
         self.assertEqual(row["op"], "vector_turbo_search")
