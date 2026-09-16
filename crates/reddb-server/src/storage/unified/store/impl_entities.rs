@@ -331,12 +331,35 @@ impl UnifiedStore {
 
     /// Set multiple config KV pairs at once from a JSON tree.
     /// Keys are flattened with dot-notation: `{"a":{"b":1}}` → `a.b = 1`.
+    ///
+    /// `red_config` is last-writer-wins (ADR 0014): each write replaces the
+    /// key's earlier rows. Appending instead grew the store on every boot,
+    /// since boot re-seeds keys such as `red.system.*`.
     pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {
-        let _ = self.get_or_create_collection("red_config");
+        let manager = self.get_or_create_collection("red_config");
         let mut pairs = Vec::new();
         flatten_config_json(prefix, json, &mut pairs);
+        let mut previous: HashMap<String, Vec<EntityId>> = pairs
+            .iter()
+            .map(|(key, _)| (key.clone(), Vec::new()))
+            .collect();
+        for entity in manager.query_all(|_| true) {
+            if let EntityData::Row(row) = &entity.data {
+                if let Some(reddb_types::Value::Text(key)) =
+                    row.named.as_ref().and_then(|named| named.get("key"))
+                {
+                    if let Some(ids) = previous.get_mut(key.as_ref()) {
+                        ids.push(entity.id);
+                    }
+                }
+            }
+        }
         let mut saved = 0;
         for (key, value) in pairs {
+            // Insert before removing the old rows: a failure in between
+            // leaves a duplicate that readers resolve to the newest row,
+            // never a missing key.
+            let stale = previous.remove(&key).unwrap_or_default();
             let entity = UnifiedEntity::new(
                 EntityId::new(0),
                 EntityKind::TableRow {
@@ -358,14 +381,20 @@ impl UnifiedStore {
             );
             if self.insert_auto("red_config", entity).is_ok() {
                 saved += 1;
+                if !stale.is_empty() {
+                    let _ = self.delete_batch("red_config", &stale);
+                }
             }
         }
         saved
     }
 
     /// Read a single config value from `red_config` by dot-notation key.
+    /// When a key has several rows the newest one wins, like every other
+    /// `red_config` reader.
     pub fn get_config(&self, key: &str) -> Option<reddb_types::Value> {
         let manager = self.get_collection("red_config")?;
+        let mut latest: Option<(u64, reddb_types::Value)> = None;
         for entity in manager.query_all(|_| true) {
             if let EntityData::Row(row) = &entity.data {
                 if let Some(named) = &row.named {
@@ -376,13 +405,15 @@ impl UnifiedStore {
                             _ => None,
                         })
                         .unwrap_or(false);
-                    if key_matches {
-                        return named.get("value").cloned();
+                    if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
+                        if let Some(value) = named.get("value") {
+                            latest = Some((entity.id.raw(), value.clone()));
+                        }
                     }
                 }
             }
         }
-        None
+        latest.map(|(_, value)| value)
     }
 
     /// Replace the opaque store-level auxiliary metadata blob. Persisted
