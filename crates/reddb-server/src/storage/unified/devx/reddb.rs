@@ -144,6 +144,10 @@ pub struct RedDB {
     /// `store`, so a runtime restart on the same database path is
     /// not racy with an in-flight rebuild holding the file lock.
     pub(crate) turbo_rebuild_workers: parking_lot::Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Fences an embedded single-file store to this one writer process for
+    /// as long as it is open. Declared before `_ephemeral_cleanup` so it is
+    /// released before an ephemeral store's directory is removed.
+    _embedded_writer_lock: Option<reddb_file::EmbeddedRdbWriterLock>,
     _ephemeral_cleanup: Option<EphemeralDataPathCleanup>,
 }
 

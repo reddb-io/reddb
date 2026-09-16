@@ -1619,6 +1619,9 @@ fn main() {
             });
             let code = reddb::rpc_stdio::run(&rt);
             let _ = rt.checkpoint();
+            // `exit` skips destructors; close the runtime first so it releases
+            // the embedded writer lock instead of leaving the lock file behind.
+            drop(rt);
             std::process::exit(code);
         }
 

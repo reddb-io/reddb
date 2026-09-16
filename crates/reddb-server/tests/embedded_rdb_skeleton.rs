@@ -25,6 +25,17 @@ fn artifact_names(dir: &Path) -> Vec<String> {
     names
 }
 
+/// Artifact names without the writer lock file, which exists only while a
+/// writer holds the store open or after one exited without closing.
+fn data_artifact_names(dir: &Path) -> Vec<String> {
+    let lock = reddb_file::embedded_writer_lock_path(&dir.join("data.rdb"));
+    let lock = lock.file_name().unwrap().to_string_lossy().to_string();
+    artifact_names(dir)
+        .into_iter()
+        .filter(|name| *name != lock)
+        .collect()
+}
+
 #[test]
 fn embedded_runtime_persists_table_data_inside_single_rdb_file() {
     let dir = temp_dir("runtime_single_file");
@@ -87,7 +98,9 @@ fn embedded_runtime_replays_internal_wal_without_flush_or_drop() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
+    // The child exited without closing, so its writer lock file may remain;
+    // the OS released the lock itself. Everything durable is in `data.rdb`.
+    assert_eq!(data_artifact_names(dir.path()), vec!["data.rdb"]);
     let artifact = EmbeddedRdbArtifact::open(&path).expect("open embedded artifact");
     assert_eq!(artifact.manifest.snapshot_bytes, 0);
     assert!(
@@ -105,7 +118,14 @@ fn embedded_runtime_replays_internal_wal_without_flush_or_drop() {
     let checkpointed = EmbeddedRdbArtifact::open(&path).expect("open checkpointed artifact");
     assert_eq!(checkpointed.manifest.wal_live_bytes, 0);
     assert!(checkpointed.manifest.snapshot_bytes > 0);
-    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
+    assert_eq!(data_artifact_names(dir.path()), vec!["data.rdb"]);
+    drop(rt);
+    #[cfg(unix)]
+    assert_eq!(
+        artifact_names(dir.path()),
+        vec!["data.rdb"],
+        "a clean close after a crash removes the stale writer lock file"
+    );
 }
 
 #[test]
@@ -147,4 +167,63 @@ fn embedded_runtime_checkpoints_expands_and_retries_when_internal_wal_fills() {
 
     let frames = EmbeddedRdbArtifact::read_wal_payloads(&artifact).expect("read wal payloads");
     assert!(!frames.is_empty(), "expected retried wal frame");
+}
+
+/// Two writer processes on one embedded store each checkpointed their own
+/// in-memory image on close, so the last one to close silently discarded the
+/// other's acknowledged commits. The second writer must be refused at open.
+#[test]
+fn a_second_writer_process_cannot_open_an_open_embedded_store() {
+    if let Ok(path) = std::env::var("REDDB_EMBEDDED_RDB_SECOND_WRITER_PATH") {
+        match RedDBRuntime::with_options(RedDBOptions::persistent(path)) {
+            Ok(_) => std::process::exit(0),
+            Err(err) => {
+                eprintln!("second writer refused: {err}");
+                std::process::exit(3);
+            }
+        }
+    }
+
+    let dir = temp_dir("second_writer");
+    let path = dir.path().join("data.rdb");
+    let run_second_writer = || {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("a_second_writer_process_cannot_open_an_open_embedded_store")
+            .arg("--nocapture")
+            .env("REDDB_EMBEDDED_RDB_SECOND_WRITER_PATH", &path)
+            .output()
+            .expect("run second writer process")
+    };
+
+    {
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("open runtime");
+        rt.execute_query("CREATE TABLE t (id INT)")
+            .expect("create table");
+        rt.execute_query("INSERT INTO t (id) VALUES (1)")
+            .expect("insert row");
+
+        let output = run_second_writer();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(3), "stderr:\n{stderr}");
+        assert!(
+            stderr.contains("already open for writing"),
+            "stderr:\n{stderr}"
+        );
+
+        rt.execute_query("INSERT INTO t (id) VALUES (2)")
+            .expect("first writer keeps writing");
+    }
+
+    #[cfg(unix)]
+    assert_eq!(artifact_names(dir.path()), vec!["data.rdb"]);
+    let output = run_second_writer();
+    assert!(
+        output.status.success(),
+        "a closed store opens again\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen runtime");
+    let rows = rt.execute_query("SELECT * FROM t").expect("select rows");
+    assert_eq!(rows.result.records.len(), 2);
 }

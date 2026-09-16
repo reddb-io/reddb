@@ -192,6 +192,92 @@ fn file_mutation_stamp(file: &File) -> std::io::Result<Option<FileMutationStamp>
     }
 }
 
+/// Process-lifetime writer fence for an embedded `.rdb`.
+///
+/// The per-operation lock on the data file only serializes individual appends
+/// and checkpoints. A writer process keeps the whole store in memory and
+/// checkpoints that image on close, so two processes writing the same file
+/// would each publish their own image and the last one to close would
+/// silently discard the other's commits. Holding this lock for the writer's
+/// lifetime makes the second opener fail instead.
+///
+/// It lives in a sibling lock file, not on the data file: the per-operation
+/// lock takes a fresh handle, which under POSIX `flock` would contend with a
+/// lock held through another handle of the same process, and under Windows
+/// `LockFileEx` would be denied outright (see `open_inner_with_file`).
+pub struct EmbeddedRdbWriterLock {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    path: PathBuf,
+    _file: File,
+}
+
+impl EmbeddedRdbWriterLock {
+    pub fn acquire(data_path: impl AsRef<Path>) -> RdbFileResult<Self> {
+        let data_path = data_path.as_ref();
+        let path = crate::layout::embedded_writer_lock_path(data_path);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        loop {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            if let Err(err) = file.try_lock_exclusive() {
+                if err.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+                    return Err(RdbFileError::InvalidOperation(format!(
+                        "{} is already open for writing by another process; an embedded \
+                         single-file store has exactly one writer process",
+                        data_path.display()
+                    )));
+                }
+                return Err(err.into());
+            }
+            // The previous owner unlinks the lock file on release. If that
+            // happened between our open and our lock, we hold an orphaned
+            // inode no later opener can see, so start over on the live path.
+            if lock_file_is_live(&file, &path)? {
+                return Ok(Self { path, _file: file });
+            }
+        }
+    }
+}
+
+impl Drop for EmbeddedRdbWriterLock {
+    fn drop(&mut self) {
+        // Unlink while still holding the lock so a closed store is back to
+        // one operator-visible artifact; `acquire` re-checks the inode to
+        // stay correct across this. Without an inode identity check the
+        // file is left in place instead.
+        #[cfg(unix)]
+        {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn lock_file_is_live(file: &File, path: &Path) -> RdbFileResult<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held = file.metadata()?;
+        match fs::metadata(path) {
+            Ok(current) => Ok(held.dev() == current.dev() && held.ino() == current.ino()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        Ok(true)
+    }
+}
+
 pub struct EmbeddedRdbArtifact;
 
 impl EmbeddedRdbArtifact {
@@ -391,7 +477,7 @@ impl EmbeddedRdbArtifact {
         let checkpoint_boundary = wal_boundary_after_live_bytes(&open, wal_scan.valid_bytes)?;
         let wal_region_bytes =
             grow_wal_region_bytes(open.manifest.wal_region_bytes, min_wal_bytes)?;
-        let snapshot_offset = next_snapshot_offset(&file, &open, wal_region_bytes, snapshot)?;
+        let snapshot_offset = next_snapshot_offset(&mut file, &open, wal_region_bytes, snapshot)?;
         let snapshot_checksum = crc32(snapshot);
         let manifest = EmbeddedRdbManifest {
             wal_region_bytes,
@@ -406,7 +492,12 @@ impl EmbeddedRdbArtifact {
         let manifest_bytes = encode_manifest(manifest);
         let manifest_checksum = trailer_checksum(&manifest_bytes);
 
-        file.set_len(snapshot_offset + snapshot.len() as u64)?;
+        // The image may land in a hole below a live snapshot, so only ever
+        // extend here: shrinking before publish would cut a live image.
+        let snapshot_end = snapshot_offset + snapshot.len() as u64;
+        if file.metadata()?.len() < snapshot_end {
+            file.set_len(snapshot_end)?;
+        }
         if !snapshot.is_empty() {
             write_at(&mut file, snapshot_offset, snapshot)?;
         }
@@ -447,6 +538,17 @@ impl EmbeddedRdbArtifact {
         Self::write_superblock_copy(&mut file, &next_superblock)?;
         crash_inject("snapshot_after_superblock_write");
         file.sync_all()?;
+
+        // Published: the two superblock copies now name this image and the
+        // previous one. Anything past both (and past the WAL region) is
+        // unreachable, so give it back instead of growing on every checkpoint.
+        let retained_end = snapshot_end
+            .max(open.manifest.snapshot_offset + open.manifest.snapshot_bytes)
+            .max(open.manifest.wal_region_offset + wal_region_bytes);
+        if file.metadata()?.len() > retained_end {
+            file.set_len(retained_end)?;
+            file.sync_all()?;
+        }
         // Release before re-opening: `Self::open` takes its own handle, and
         // on Windows it could not open one while this lock is held.
         FileExt::unlock(&file)?;
@@ -759,8 +861,15 @@ fn embedded_path_lock(path: &Path) -> Arc<Mutex<EmbeddedPathState>> {
         .clone()
 }
 
+/// Lowest aligned offset past the WAL region where `snapshot` overlaps no
+/// image either superblock copy still names.
+///
+/// Both images stay intact until the new superblock is durable: the selected
+/// one is the published state, and the other copy's is the fallback when the
+/// newer superblock or its image fails validation. Any other bytes past the
+/// WAL region are unreachable and may be reused.
 fn next_snapshot_offset(
-    file: &File,
+    file: &mut File,
     open: &EmbeddedRdbOpen,
     wal_region_bytes: u64,
     snapshot: &[u8],
@@ -776,16 +885,45 @@ fn next_snapshot_offset(
         return Ok(base);
     }
 
-    let file_len = file.metadata()?.len();
-    let active_snapshot_end = open
-        .manifest
-        .snapshot_offset
-        .checked_add(open.manifest.snapshot_bytes)
-        .ok_or_else(|| RdbFileError::InvalidOperation("embedded snapshot end overflow".into()))?;
-    align_up(
-        file_len.max(active_snapshot_end).max(base),
-        SNAPSHOT_ALIGNMENT,
-    )
+    let other_copy = if open.selected_superblock.copy_index == 0 {
+        1
+    } else {
+        0
+    };
+    let mut live = vec![(open.manifest.snapshot_offset, open.manifest.snapshot_bytes)];
+    if let Some(other) = read_superblock_copy(file, other_copy)? {
+        live.push((other.snapshot_offset, other.snapshot_bytes));
+    }
+    let mut live_ranges = Vec::with_capacity(live.len());
+    for (offset, bytes) in live {
+        if bytes == 0 {
+            continue;
+        }
+        let end = offset.checked_add(bytes).ok_or_else(|| {
+            RdbFileError::InvalidOperation("embedded snapshot end overflow".into())
+        })?;
+        live_ranges.push((offset, end));
+    }
+
+    let len = snapshot.len() as u64;
+    let mut candidates = vec![align_up(base, SNAPSHOT_ALIGNMENT)?];
+    for &(_, end) in &live_ranges {
+        candidates.push(align_up(end.max(base), SNAPSHOT_ALIGNMENT)?);
+    }
+    candidates.sort_unstable();
+    for &candidate in &candidates {
+        let end = candidate.checked_add(len).ok_or_else(|| {
+            RdbFileError::InvalidOperation("embedded snapshot end overflow".into())
+        })?;
+        if live_ranges
+            .iter()
+            .all(|&(start, live_end)| end <= start || candidate >= live_end)
+        {
+            return Ok(candidate);
+        }
+    }
+    // The largest candidate starts past every live image, so it always fits.
+    Ok(candidates[candidates.len() - 1])
 }
 
 fn align_up(value: u64, alignment: u64) -> RdbFileResult<u64> {

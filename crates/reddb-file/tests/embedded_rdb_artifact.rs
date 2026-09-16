@@ -931,3 +931,100 @@ fn writer_paths_open_the_data_file_exactly_once_under_the_lock() {
         );
     }
 }
+
+fn rdst_image(fill: u8, len: usize) -> Vec<u8> {
+    let mut image = b"RDST".to_vec();
+    image.resize(len, fill);
+    image
+}
+
+/// Every checkpoint used to place its image past the end of the file and never
+/// reuse the space, so a store grew by a full image on every open/close cycle
+/// (a 34 MB dataset reached 7.4 GB). Space no superblock copy names must be
+/// reused, while the image the fallback copy names must survive.
+#[test]
+fn repeated_checkpoints_reuse_space_instead_of_growing_the_file() {
+    let dir = temp_dir("checkpoint_reuse");
+    let path = dir.path().join("data.rdb");
+    const IMAGE: usize = 256 * 1024;
+    let created =
+        EmbeddedRdbArtifact::create_with_snapshot(&path, &rdst_image(0, IMAGE)).expect("create");
+    let base = created.manifest.wal_region_offset + created.manifest.wal_region_bytes;
+
+    for round in 1..=40u8 {
+        let open = EmbeddedRdbArtifact::write_snapshot(&path, &rdst_image(round, IMAGE))
+            .expect("checkpoint");
+        assert_eq!(
+            EmbeddedRdbArtifact::read_snapshot(&open)
+                .expect("read")
+                .unwrap(),
+            rdst_image(round, IMAGE)
+        );
+        if round % 3 == 0 {
+            EmbeddedRdbArtifact::append_wal_payloads(&path, &[vec![round]]).expect("append");
+        }
+        let len = fs::metadata(&path).expect("metadata").len();
+        assert!(
+            len <= base + 3 * IMAGE as u64 + 3 * 4096,
+            "round {round}: file is {len} bytes, more than three images past the WAL region"
+        );
+    }
+
+    let reopened = EmbeddedRdbArtifact::open(&path).expect("reopen");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_snapshot(&reopened)
+            .expect("read")
+            .unwrap(),
+        rdst_image(40, IMAGE)
+    );
+}
+
+#[test]
+fn a_reused_checkpoint_slot_keeps_the_fallback_image_intact() {
+    let dir = temp_dir("checkpoint_reuse_fallback");
+    let path = dir.path().join("data.rdb");
+    const IMAGE: usize = 64 * 1024;
+    EmbeddedRdbArtifact::create_with_snapshot(&path, &rdst_image(1, IMAGE)).expect("create");
+    EmbeddedRdbArtifact::write_snapshot(&path, &rdst_image(2, IMAGE)).expect("checkpoint 2");
+    let latest =
+        EmbeddedRdbArtifact::write_snapshot(&path, &rdst_image(3, IMAGE)).expect("checkpoint 3");
+
+    // Tear the newest superblock: open must fall back to image 2, which the
+    // third checkpoint was not allowed to overwrite.
+    let newer_copy_offset = if latest.selected_superblock.copy_index == 0 {
+        EMBEDDED_RDB_SUPERBLOCK_0_OFFSET
+    } else {
+        EMBEDDED_RDB_SUPERBLOCK_1_OFFSET
+    };
+    rot_bit(&path, newer_copy_offset + 64);
+    let recovered = EmbeddedRdbArtifact::open(&path).expect("fallback");
+    assert_eq!(
+        EmbeddedRdbArtifact::read_snapshot(&recovered)
+            .expect("read")
+            .unwrap(),
+        rdst_image(2, IMAGE)
+    );
+}
+
+#[test]
+fn a_second_writer_lock_on_the_same_store_is_refused_until_released() {
+    let dir = temp_dir("writer_lock");
+    let path = dir.path().join("data.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("create");
+
+    let first = reddb_file::EmbeddedRdbWriterLock::acquire(&path).expect("first writer");
+    let err = match reddb_file::EmbeddedRdbWriterLock::acquire(&path) {
+        Ok(_) => panic!("a second writer must not acquire a held store"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains("already open for writing"), "{err}");
+
+    drop(first);
+    #[cfg(unix)]
+    assert_eq!(
+        artifact_names(dir.path()),
+        vec!["data.rdb"],
+        "a closed store is one operator-visible artifact"
+    );
+    let _second = reddb_file::EmbeddedRdbWriterLock::acquire(&path).expect("reacquire");
+}
