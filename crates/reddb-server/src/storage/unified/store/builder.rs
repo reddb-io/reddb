@@ -507,6 +507,41 @@ mod tests {
     }
 
     #[test]
+    fn set_config_tree_skips_keys_that_already_hold_the_value() {
+        let store = UnifiedStore::new();
+        store.set_config_tree("red.system", &crate::json!({ "os": "linux", "pid": 1_u64 }));
+        let ids_of = |store: &UnifiedStore| {
+            let mut ids: Vec<u64> = store
+                .get_collection("red_config")
+                .map(|m| m.query_all(|_| true).iter().map(|e| e.id.raw()).collect())
+                .unwrap_or_default();
+            ids.sort_unstable();
+            ids
+        };
+        let before = ids_of(&store);
+
+        store.set_config_tree("red.system", &crate::json!({ "os": "linux", "pid": 1_u64 }));
+        assert_eq!(
+            ids_of(&store),
+            before,
+            "identical values must not rewrite rows"
+        );
+
+        store.set_config_tree("red.system", &crate::json!({ "os": "linux", "pid": 2_u64 }));
+        let after = ids_of(&store);
+        assert_eq!(after.len(), before.len());
+        assert_ne!(after, before, "a changed value is rewritten");
+        assert_eq!(
+            store.get_config("red.system.pid"),
+            Some(reddb_types::Value::UnsignedInteger(2))
+        );
+        assert_eq!(
+            store.get_config("red.system.os"),
+            Some(reddb_types::Value::text("linux"))
+        );
+    }
+
+    #[test]
     fn test_global_ids_unique_across_collections() {
         let store = UnifiedStore::new();
 
