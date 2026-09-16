@@ -1028,3 +1028,43 @@ fn a_second_writer_lock_on_the_same_store_is_refused_until_released() {
     );
     let _second = reddb_file::EmbeddedRdbWriterLock::acquire(&path).expect("reacquire");
 }
+
+/// Closing a store checkpointed the same unchanged image two or three times,
+/// each a full write plus fsyncs. An identical image over an empty WAL is
+/// already durable and must not be republished; any real change still is.
+#[test]
+fn checkpointing_an_unchanged_image_over_an_empty_wal_writes_nothing() {
+    let dir = temp_dir("checkpoint_unchanged");
+    let path = dir.path().join("data.rdb");
+    let image = rdst_image(7, 64 * 1024);
+    EmbeddedRdbArtifact::create(&path).expect("create");
+    let published = EmbeddedRdbArtifact::write_snapshot(&path, &image).expect("checkpoint");
+    let bytes_before = fs::read(&path).expect("read artifact");
+
+    let again = EmbeddedRdbArtifact::write_snapshot(&path, &image).expect("same checkpoint");
+    assert_eq!(
+        again.selected_superblock.generation,
+        published.selected_superblock.generation
+    );
+    assert_eq!(fs::read(&path).expect("read artifact"), bytes_before);
+
+    // Same length and a different byte: must publish.
+    let mut changed = image.clone();
+    changed[1024] ^= 0xFF;
+    let republished = EmbeddedRdbArtifact::write_snapshot(&path, &changed).expect("changed");
+    assert!(republished.selected_superblock.generation > published.selected_superblock.generation);
+    assert_eq!(
+        EmbeddedRdbArtifact::read_snapshot(&republished)
+            .expect("read")
+            .unwrap(),
+        changed
+    );
+
+    // Live WAL frames must be folded even when the image bytes are unchanged.
+    EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"pending".to_vec()]).expect("append");
+    let folded = EmbeddedRdbArtifact::write_snapshot(&path, &changed).expect("fold wal");
+    assert_eq!(folded.manifest.wal_live_bytes, 0);
+    assert!(EmbeddedRdbArtifact::read_wal_payloads(&folded)
+        .expect("read wal")
+        .is_empty());
+}
