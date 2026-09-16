@@ -477,8 +477,22 @@ impl EmbeddedRdbArtifact {
         let checkpoint_boundary = wal_boundary_after_live_bytes(&open, wal_scan.valid_bytes)?;
         let wal_region_bytes =
             grow_wal_region_bytes(open.manifest.wal_region_bytes, min_wal_bytes)?;
-        let snapshot_offset = next_snapshot_offset(&mut file, &open, wal_region_bytes, snapshot)?;
         let snapshot_checksum = crc32(snapshot);
+        // Nothing to publish when the WAL is empty, its region need not grow,
+        // and the durable image already holds exactly these bytes. A close
+        // used to checkpoint the same image two or three times, each a full
+        // write plus fsyncs.
+        if open.manifest.wal_live_bytes == 0
+            && wal_scan.valid_bytes == 0
+            && wal_region_bytes == open.manifest.wal_region_bytes
+            && open.manifest.snapshot_bytes == snapshot.len() as u64
+            && open.manifest.snapshot_checksum == snapshot_checksum
+            && published_snapshot_matches(&mut file, &open, snapshot)?
+        {
+            FileExt::unlock(&file)?;
+            return Ok(open);
+        }
+        let snapshot_offset = next_snapshot_offset(&mut file, &open, wal_region_bytes, snapshot)?;
         let manifest = EmbeddedRdbManifest {
             wal_region_bytes,
             wal_recovery_boundary: checkpoint_boundary,
@@ -835,6 +849,22 @@ fn snapshot_reference_valid(
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Byte-for-byte comparison with the published image; the checksum match
+/// that gates this call is not proof of equality on its own.
+fn published_snapshot_matches(
+    file: &mut File,
+    open: &EmbeddedRdbOpen,
+    snapshot: &[u8],
+) -> RdbFileResult<bool> {
+    if snapshot.is_empty() {
+        return Ok(true);
+    }
+    let mut published = vec![0u8; snapshot.len()];
+    file.seek(SeekFrom::Start(open.manifest.snapshot_offset))?;
+    file.read_exact(&mut published)?;
+    Ok(published == snapshot)
 }
 
 fn grow_wal_region_bytes(current: u64, min_required: u64) -> RdbFileResult<u64> {
