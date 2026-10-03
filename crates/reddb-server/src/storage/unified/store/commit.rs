@@ -381,13 +381,6 @@ pub(crate) struct StoreCommitCoordinator {
 }
 
 impl StoreCommitCoordinator {
-    pub(crate) fn should_open(path: &Path, mode: DurabilityMode) -> bool {
-        matches!(
-            mode,
-            DurabilityMode::WalDurableGrouped | DurabilityMode::Async
-        ) || path.exists()
-    }
-
     pub(crate) fn open(
         wal_path: impl Into<PathBuf>,
         mode: DurabilityMode,
@@ -865,17 +858,14 @@ impl UnifiedStore {
         if self.config.embedded_wal_path.is_some() {
             return self.append_embedded_store_wal_actions(&actions.actions);
         }
-        match self.config.durability_mode {
-            DurabilityMode::Strict => self.flush_paged_state(),
-            DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {
-                if let Some(commit) = &self.commit {
-                    commit
-                        .append_actions(&actions.actions)
-                        .map_err(StoreError::Io)
-                } else {
-                    self.flush_paged_state()
-                }
-            }
+        // Deferred transactions need a committed WAL batch even in Strict
+        // mode. WAL-only versions have no pager pages to flush yet.
+        if let Some(commit) = &self.commit {
+            commit
+                .append_actions(&actions.actions)
+                .map_err(StoreError::Io)
+        } else {
+            self.flush_paged_state()
         }
     }
 
@@ -935,7 +925,12 @@ impl UnifiedStore {
             return self.append_embedded_store_wal_actions(&actions);
         }
         match self.config.durability_mode {
-            DurabilityMode::Strict => self.flush_paged_state(),
+            DurabilityMode::Strict => {
+                if let Some(commit) = &self.commit {
+                    commit.append_actions(&actions).map_err(StoreError::Io)?;
+                }
+                self.flush_paged_state()
+            }
             DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {
                 if let Some(commit) = &self.commit {
                     commit.append_actions(&actions).map_err(StoreError::Io)?;
@@ -970,6 +965,7 @@ impl UnifiedStore {
             Err(crate::api::RedDBError::InvalidOperation(msg))
                 if msg.contains("embedded wal region full") =>
             {
+                let _vault_guard = self.vault_publication_lock.lock();
                 let snapshot = self.to_binary_dump_bytes();
                 crate::storage::EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(
                     path,

@@ -1431,6 +1431,9 @@ impl RedDBRuntime {
 
                 let (kind, msg) = match ctl {
                     TxnControl::Begin(requested_isolation) => {
+                        if self.inner.transaction_state.in_transaction(conn_id) {
+                            return Err(RedDBError::Query("transaction already active".into()));
+                        }
                         let isolation = requested_isolation
                             .map(IsolationLevel::from)
                             .unwrap_or(IsolationLevel::SnapshotIsolation);
@@ -1438,6 +1441,15 @@ impl RedDBRuntime {
                         ("begin", format!("BEGIN — xid={xid} (snapshot isolation)"))
                     }
                     TxnControl::Commit => {
+                        let has_vault_writes = self
+                            .inner
+                            .pending_vault_writes
+                            .read()
+                            .get(&conn_id)
+                            .is_some_and(|writes| !writes.is_empty());
+                        let vault_store = self.inner.db.store();
+                        let _vault_guard =
+                            has_vault_writes.then(|| vault_store.vault_publication_lock.lock());
                         let context = self.inner.transaction_state.commit(conn_id, |ctx| {
                             let mut own_xids = std::collections::HashSet::new();
                             own_xids.insert(ctx.xid);
@@ -1477,6 +1489,17 @@ impl RedDBRuntime {
                                 undo?;
                                 return Err(err);
                             }
+                            if let Err(err) = self.prepare_pending_vault_writes(conn_id, ctx) {
+                                let undo = self.revive_pending_versioned_updates(conn_id);
+                                self.revive_pending_tombstones(conn_id);
+                                self.discard_pending_queue_dedup(conn_id);
+                                self.discard_pending_kv_watch_events(conn_id);
+                                self.discard_pending_queue_wakes(conn_id);
+                                self.discard_pending_store_wal_actions(conn_id);
+                                self.release_pending_claim_locks(conn_id);
+                                undo?;
+                                return Err(err);
+                            }
                             self.restore_pending_write_stamps(conn_id);
                             if let Err(err) = self.flush_pending_store_wal_actions(conn_id) {
                                 let undo = self.revive_pending_versioned_updates(conn_id);
@@ -1489,9 +1512,14 @@ impl RedDBRuntime {
                                 return Err(err);
                             }
                             Ok(())
-                        })?;
+                        });
+                        if context.is_err() {
+                            self.discard_pending_vault_writes(conn_id)?;
+                        }
+                        let context = context?;
                         match context {
                             Some(ctx) => {
+                                self.finalize_pending_vault_writes(conn_id);
                                 self.finalize_pending_versioned_updates(conn_id);
                                 self.finalize_pending_tombstones(conn_id);
                                 self.finalize_pending_queue_dedup(conn_id);
@@ -1506,28 +1534,13 @@ impl RedDBRuntime {
                             ),
                         }
                     }
-                    TxnControl::Rollback => {
-                        match self.inner.transaction_state.rollback(conn_id) {
-                            Some(ctx) => {
-                                // Phase 2.3.2b: tuples that the txn had
-                                // xmax-stamped become live again — wipe xmax
-                                // back to 0 so later snapshots see them.
-                                let undo = self.revive_pending_versioned_updates(conn_id);
-                                self.revive_pending_tombstones(conn_id);
-                                self.discard_pending_queue_dedup(conn_id);
-                                self.discard_pending_kv_watch_events(conn_id);
-                                self.discard_pending_queue_wakes(conn_id);
-                                self.discard_pending_store_wal_actions(conn_id);
-                                self.release_pending_claim_locks(conn_id);
-                                undo?;
-                                ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
-                            }
-                            None => (
-                                "rollback",
-                                "ROLLBACK outside transaction — no-op (autocommit)".to_string(),
-                            ),
-                        }
-                    }
+                    TxnControl::Rollback => match self.rollback_connection(conn_id)? {
+                        Some(ctx) => ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid)),
+                        None => (
+                            "rollback",
+                            "ROLLBACK outside transaction — no-op (autocommit)".to_string(),
+                        ),
+                    },
                     // Phase 2.3.2e: savepoints map onto sub-xids. Each
                     // SAVEPOINT allocates a fresh xid and pushes it
                     // onto the per-txn stack so subsequent writes can
@@ -1566,6 +1579,7 @@ impl RedDBRuntime {
                             .rollback_to_savepoint(conn_id, name)?
                         {
                             Some(rollback) => {
+                                self.rollback_vault_savepoint(conn_id, rollback.savepoint_xid);
                                 let reverted_updates = self.revive_versioned_updates_since(
                                     conn_id,
                                     rollback.savepoint_xid,

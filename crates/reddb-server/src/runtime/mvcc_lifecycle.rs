@@ -22,6 +22,23 @@ use super::execution_context::current_connection_id;
 use super::*;
 
 impl RedDBRuntime {
+    pub(crate) fn rollback_connection(
+        &self,
+        connection_id: u64,
+    ) -> RedDBResult<Option<crate::storage::transaction::snapshot::TxnContext>> {
+        let context = self.inner.transaction_state.rollback(connection_id);
+        let undo = self.revive_pending_versioned_updates(connection_id);
+        self.revive_pending_tombstones(connection_id);
+        self.discard_pending_queue_dedup(connection_id);
+        self.discard_pending_kv_watch_events(connection_id);
+        self.discard_pending_queue_wakes(connection_id);
+        self.discard_pending_store_wal_actions(connection_id);
+        self.release_pending_claim_locks(connection_id);
+        self.discard_pending_vault_writes(connection_id)?;
+        undo?;
+        Ok(context)
+    }
+
     /// Record that the running transaction has marked `id` in `collection`
     /// for deletion (Phase 2.3.2b MVCC tombstones). `stamper_xid` is the
     /// xid that was written into `xmax` — either the parent txn xid or
@@ -165,7 +182,7 @@ impl RedDBRuntime {
         })
     }
 
-    fn record_pending_store_wal_actions(
+    pub(crate) fn record_pending_store_wal_actions(
         &self,
         conn_id: u64,
         actions: crate::storage::unified::DeferredStoreWalActions,
@@ -617,7 +634,7 @@ impl RedDBRuntime {
         let Some(pending) = self.inner.pending_kv_watch_events.write().remove(&conn_id) else {
             return;
         };
-        for event in pending {
+        for (_, event) in pending {
             self.cdc_emit_kv(
                 event.op,
                 &event.collection,

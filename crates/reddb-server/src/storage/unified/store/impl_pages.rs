@@ -413,6 +413,8 @@ impl UnifiedStore {
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             aux_metadata: RwLock::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),
+            vault_publication_lock: parking_lot::ReentrantMutex::new(()),
+            pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -466,14 +468,12 @@ impl UnifiedStore {
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
         let wal_path = reddb_file::layout::unified_wal_path(path);
-        let commit = if StoreCommitCoordinator::should_open(&wal_path, config.durability_mode) {
-            Some(Arc::new(
-                StoreCommitCoordinator::open(wal_path, config.durability_mode, config.group_commit)
-                    .map_err(StoreError::Io)?,
-            ))
-        } else {
-            None
-        };
+        // Explicit transactions and WAL-only vault versions need committed
+        // batches in every durability mode, including Strict's inline fsync.
+        let commit = Some(Arc::new(
+            StoreCommitCoordinator::open(wal_path, config.durability_mode, config.group_commit)
+                .map_err(StoreError::Io)?,
+        ));
 
         let store = Self {
             config,
@@ -495,6 +495,8 @@ impl UnifiedStore {
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             aux_metadata: RwLock::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),
+            vault_publication_lock: parking_lot::ReentrantMutex::new(()),
+            pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         };
 
         // Load existing data from pages if database exists
@@ -793,6 +795,8 @@ impl UnifiedStore {
     /// Writes all entities to B-tree pages and flushes to disk.
     /// This provides ACID durability guarantees.
     pub fn persist(&self) -> Result<(), StoreError> {
+        let _vault_guard = self.vault_publication_lock.lock();
+        let pending_vault_versions = self.pending_vault_versions.read();
         let pager = match &self.pager {
             Some(p) => p,
             None => {
@@ -865,9 +869,26 @@ impl UnifiedStore {
             }
 
             let mut records: Vec<(Vec<u8>, Vec<u8>)> = manager
-                .query_all(|_| true)
+                .query_all(|entity| {
+                    !pending_vault_versions.contains(&entity.id)
+                        && (!matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
+                            || !self
+                                .snapshot_manager
+                                .get()
+                                .is_some_and(|manager| manager.is_aborted(entity.xmin)))
+                })
                 .into_iter()
-                .map(|entity| {
+                .map(|mut entity| {
+                    // Match binary snapshots: an aborted delete must not be
+                    // reconstructed as a committed tombstone on restart.
+                    if matches!(entity.data, EntityData::Row(_))
+                        && self
+                            .snapshot_manager
+                            .get()
+                            .is_some_and(|manager| manager.is_aborted(entity.xmax))
+                    {
+                        entity.xmax = 0;
+                    }
                     let metadata = manager.get_metadata(entity.id);
                     (
                         entity.id.raw().to_be_bytes().to_vec(),

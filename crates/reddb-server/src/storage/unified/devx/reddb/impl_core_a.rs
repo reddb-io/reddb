@@ -623,6 +623,7 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let _vault_guard = self.store.vault_publication_lock.lock();
         let _ = self.ec_consolidate_all();
         if let Some(path) = &self.path {
             if self.paged_mode {

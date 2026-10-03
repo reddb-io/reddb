@@ -255,6 +255,7 @@ impl Drop for RedDB {
             && !self.options.read_only
         {
             if let Some(path) = &self.path {
+                let _vault_guard = self.store.vault_publication_lock.lock();
                 let snapshot = self.store.to_binary_dump_bytes();
                 let _ = crate::storage::EmbeddedRdbArtifact::write_snapshot(path, &snapshot);
             }

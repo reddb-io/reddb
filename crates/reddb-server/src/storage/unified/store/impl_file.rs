@@ -175,6 +175,8 @@ impl UnifiedStore {
     }
 
     pub(crate) fn to_binary_dump_bytes(&self) -> Vec<u8> {
+        let _vault_guard = self.vault_publication_lock.lock();
+        let pending_vault_versions = self.pending_vault_versions.read();
         let mut buf = Vec::new();
 
         // Version 9 includes explicit table-row logical identity plus MVCC
@@ -191,6 +193,9 @@ impl UnifiedStore {
         for (name, manager) in collections.iter() {
             // Get all entities from this collection
             let entities = manager.query_all(|entity| {
+                if pending_vault_versions.contains(&entity.id) {
+                    return false;
+                }
                 !matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
                     || !self
                         .snapshot_manager

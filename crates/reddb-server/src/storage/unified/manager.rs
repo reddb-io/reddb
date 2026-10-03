@@ -3254,14 +3254,12 @@ mod tests {
             (
                 "runtime/impl_kv.rs",
                 include_str!("../../runtime/impl_kv.rs"),
-                6,
+                4,
                 "two non-versioned-collection fallbacks (the versioned arms scan under \
-                 the captured snapshot) plus the two vault-version readers, which exist \
-                 to expose every physical version. Offline vault export preserves all \
+                 the captured snapshot). Vault reads use snapshot scans. Offline vault \
+                 export preserves all \
                  physical versions across tenants; restore's emptiness check must reject \
-                 every physical row, including versions invisible to a snapshot. \
-                 TODO(#2138 follow-up): vault_versions/latest_vault_entries never \
-                 capture a snapshot",
+                 every physical row, including versions invisible to a snapshot",
             ),
             (
                 "runtime/impl_queue.rs",
