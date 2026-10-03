@@ -87,6 +87,61 @@ fn contains_plaintext(path: &Path, probe: &[u8]) -> bool {
 }
 
 #[test]
+fn sealed_large_tables_filter_secret_columns_in_the_statement_context() {
+    let _scope = scope(None, None, Role::Admin);
+    let directory = tempfile::tempdir().expect("directory");
+    let (runtime, _) = open(&directory.path().join("large.rdb"));
+    runtime
+        .execute_query("SET SECRET token = 'synthetic-large-filter'")
+        .expect("reference");
+    runtime
+        .execute_query("CREATE TABLE typed (id INTEGER, token SECRET)")
+        .expect("typed table");
+    runtime
+        .db()
+        .store()
+        .create_collection("untyped")
+        .expect("untyped collection");
+    for table in ["typed", "untyped"] {
+        let collection = runtime.db().store().get_collection(table).expect("table");
+        for batch in 0..20 {
+            let rows = (batch * 512..(batch + 1) * 512)
+                .map(|id| format!("({id}, SECRET('synthetic-large-filter'))"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            runtime
+                .execute_query(&format!("INSERT INTO {table} (id, token) VALUES {rows}"))
+                .expect("insert batch");
+            collection.force_seal().expect("seal segment");
+        }
+        assert_eq!(collection.count(), 10240);
+        for predicate in [
+            "token = 'synthetic-large-filter'",
+            "token LIKE 'synthetic-large%'",
+            "token = $secrets.default.token",
+        ] {
+            let result = runtime
+                .execute_query(&format!("SELECT id, token FROM {table} WHERE {predicate}"))
+                .expect("large filter");
+            assert_eq!(result.result.records.len(), 10240, "{table}: {predicate}");
+            assert!(result
+                .result
+                .records
+                .iter()
+                .all(|record| { record.get("token").expect("token").display_string() == "***" }));
+        }
+        assert_eq!(
+            value(
+                &runtime,
+                &format!("SELECT id FROM {table} WHERE token = 'synthetic-large-filter' ORDER BY id DESC LIMIT 1"),
+                "id"
+            ),
+            Value::Integer(10239)
+        );
+    }
+}
+
+#[test]
 fn references_and_vault_commands_share_default_and_named_entries() {
     let _scope = scope(None, None, Role::Admin);
     let directory = tempfile::tempdir().expect("directory");
@@ -404,6 +459,22 @@ fn use_and_reveal_are_separate_prefix_grants_can_be_revoked_and_deny_applies_to_
         .expect("rows");
     auth.create_user("reader", "synthetic-password", Role::Read)
         .expect("reader");
+    {
+        let _scope = scope(None, Some("reader"), Role::Read);
+        assert!(runtime
+            .execute_query("VAULT REVEAL acme.a.b.c.token")
+            .expect_err("read role alone does not reveal")
+            .to_string()
+            .contains("vault:reveal"));
+        assert_eq!(
+            value(
+                &runtime,
+                "SELECT $secrets.acme.a.b.c.token AS value",
+                "value"
+            ),
+            Value::Null
+        );
+    }
     auth.create_user("admin", "synthetic-password", Role::Admin)
         .expect("admin");
     grant(
