@@ -368,13 +368,19 @@ async fn tenant_owner_grants_a_bare_local_username_without_granting_other_tenant
         })
         .await;
     assert_eq!(
+        value(&mut platform, "SELECT CURRENT_TENANT() AS value").await,
+        ValueOut::Null,
+        "platform SCRAM login cannot adopt a tenant-local namesake"
+    );
+    assert_eq!(
         value(&mut local, "SELECT $secrets.app.a.b.c.token AS value").await,
         ValueOut::String("***".into())
     );
-    for client in [&mut other, &mut platform] {
+    for (scope, client) in [("globex", &mut other), ("platform", &mut platform)] {
         assert_eq!(
             value(client, "SELECT $secrets.app.a.b.c.token AS value").await,
-            ValueOut::Null
+            ValueOut::Null,
+            "{scope} has no local-use grant"
         );
     }
     assert_eq!(

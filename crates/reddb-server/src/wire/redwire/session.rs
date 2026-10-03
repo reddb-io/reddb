@@ -1288,10 +1288,9 @@ where
             }
             _ => unreachable!("client-final step must authenticate or fail"),
         };
-    let user = store
-        .list_users()
-        .into_iter()
-        .find(|u| u.username == username);
+    // Bind the session to the same platform principal whose verifier was
+    // checked above; a tenant-local namesake is a different identity.
+    let user = store.get_user(None, &username);
     let role = user
         .as_ref()
         .map(|u| u.role)

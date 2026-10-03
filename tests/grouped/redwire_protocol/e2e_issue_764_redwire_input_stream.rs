@@ -28,13 +28,21 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 async fn start_server() -> (std::net::SocketAddr, Arc<RedDBRuntime>) {
+    start_server_with_runtime(Arc::new(
+        RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("rt"),
+    ))
+    .await
+}
+
+async fn start_server_with_runtime(
+    runtime: Arc<RedDBRuntime>,
+) -> (std::net::SocketAddr, Arc<RedDBRuntime>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind redwire");
     let addr = listener.local_addr().expect("local_addr");
     drop(listener);
 
-    let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("rt"));
     runtime
         .execute_query("CREATE TABLE sink (id INTEGER, name TEXT)")
         .expect("create");
@@ -245,12 +253,31 @@ async fn disconnect_with_backpressured_output_stream_rolls_back_the_session() {
     use reddb_types::Value;
 
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        let (addr, runtime) = start_server().await;
-        let auth = Arc::new(reddb::auth::AuthStore::new(
-            reddb::auth::AuthConfig::default(),
-        ));
+        let directory = tempfile::tempdir().expect("stream directory");
+        let options = RedDBOptions::persistent(directory.path().join("stream.rdb"))
+            .with_storage_profile(reddb::storage::StorageProfileSelection {
+                deploy_profile: reddb::storage::DeployProfile::Embedded,
+                packaging: reddb::storage::StoragePackaging::OperationalDirectory,
+                replica_count: 0,
+                managed_backup: false,
+                wal_retention: false,
+            })
+            .expect("paged stream store");
+        let runtime = Arc::new(RedDBRuntime::with_options(options).expect("stream runtime"));
+        let auth = Arc::new(
+            reddb::auth::AuthStore::with_vault_passphrase(
+                reddb::auth::AuthConfig {
+                    vault_enabled: true,
+                    ..reddb::auth::AuthConfig::default()
+                },
+                runtime.db().store().pager().expect("stream pager").clone(),
+                "synthetic-stream-password",
+            )
+            .expect("unsealed stream vault"),
+        );
         auth.ensure_vault_secret_key();
         runtime.set_auth_store(auth);
+        let (addr, runtime) = start_server_with_runtime(runtime).await;
         runtime
             .execute_query("SET SECRET token = 'original'")
             .expect("seed secret");
