@@ -70,9 +70,14 @@ impl crate::server::route_catalog::CommandPolicyEngine for RedWireAuthenticatedS
     }
 }
 
-fn redwire_operation_context(session: &AuthedSession, correlation_id: u64) -> OperationContext {
+fn redwire_operation_context(
+    session: &AuthedSession,
+    connection_id: u64,
+    correlation_id: u64,
+) -> OperationContext {
     OperationContextFactory::build(OperationContextInput {
         request_id: Some(format!("redwire-{}-{correlation_id}", session.session_id)),
+        connection_id: Some(connection_id),
         principal: Some(session.username.clone()),
         tenant: session.tenant.clone(),
         ..OperationContextInput::default()
@@ -152,12 +157,17 @@ pub(crate) const fn redwire_command_id(kind: MessageKind) -> Option<&'static str
 }
 
 struct RedWireExecutionContextGuard {
+    previous_connection_id: u64,
     previous_tenant: Option<String>,
     previous_identity: Option<(String, Role)>,
 }
 
 impl RedWireExecutionContextGuard {
     fn install(ctx: &OperationContext, role: Role) -> Self {
+        let previous_connection_id = crate::runtime::execution_context::current_connection_id();
+        if let Some(connection_id) = ctx.connection_id {
+            crate::runtime::execution_context::set_current_connection_id(connection_id);
+        }
         let previous_tenant = crate::runtime::execution_context::current_tenant();
         let previous_identity = crate::runtime::execution_context::current_auth_identity();
         match &ctx.tenant {
@@ -178,6 +188,7 @@ impl RedWireExecutionContextGuard {
             );
         }
         Self {
+            previous_connection_id,
             previous_tenant,
             previous_identity,
         }
@@ -186,6 +197,7 @@ impl RedWireExecutionContextGuard {
 
 impl Drop for RedWireExecutionContextGuard {
     fn drop(&mut self) {
+        crate::runtime::execution_context::set_current_connection_id(self.previous_connection_id);
         match self.previous_identity.take() {
             Some((username, role)) => {
                 crate::runtime::execution_context::set_current_auth_identity(username, role)
@@ -231,6 +243,11 @@ where
         return Ok(());
     }
     let session = session.unwrap();
+    // Own the runtime lease through EOF/Bye/error so teardown rolls back
+    // this connection's transaction before its ID can be reused.
+    let connection = runtime
+        .acquire_wire_connection()
+        .map_err(|error| io::Error::other(error.to_string()))?;
 
     // Per-connection state for prepared statements + streaming
     // bulk inserts. Owned by the session; dropped on disconnect. The
@@ -263,6 +280,7 @@ where
     // active stream workers so a `StreamCancel` for one stream_id
     // does not disturb the rest of the connection.
     let stream_registry = Arc::new(super::output_stream::StreamRegistry::new());
+    let mut output_stream_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     // Per-connection input-stream registry (issue #764 / S5). Input
     // streams are driven inline from this reader loop — each
@@ -288,6 +306,7 @@ where
     let mut queue_wait_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     loop {
+        while output_stream_tasks.try_join_next().is_some() {}
         // Reap finished wait tasks so the set does not accumulate joined
         // handles over a long-lived connection. Non-blocking — only
         // already-complete tasks are drained.
@@ -303,7 +322,8 @@ where
             Err(err) => return Err(redwire_io_err(err)),
         };
 
-        let operation_context = redwire_operation_context(&session, frame.correlation_id);
+        let operation_context =
+            redwire_operation_context(&session, connection.id(), frame.correlation_id);
         if let Err(error) = authorize_redwire_frame(
             &operation_context,
             frame.kind,
@@ -540,7 +560,7 @@ where
                             continue;
                         }
                     };
-                    let in_tx = runtime.connection_in_transaction(0);
+                    let in_tx = runtime.connection_in_transaction(connection.id());
                     let config = crate::server::output_stream::StreamConfig::load(&runtime);
                     let snapshot_lsn = runtime.cdc_current_lsn();
                     let clock = crate::server::output_stream::SystemClock;
@@ -602,14 +622,18 @@ where
                 let runtime_ref = Arc::clone(&runtime);
                 let registry_ref = Arc::clone(&stream_registry);
                 let send = os::FrameTx::new(out_tx.clone());
-                let stream_context = operation_context.clone();
+                let mut stream_context = operation_context.clone();
                 let stream_role = session.role;
-                // Transactions are still managed per connection using the
-                // default connection id. The stream's authenticated tenant
-                // and principal travel separately in `stream_context` and
-                // are installed only around its synchronous query execution.
-                let in_tx = runtime.connection_in_transaction(0);
-                tokio::spawn(async move {
+                let in_tx = runtime.connection_in_transaction(connection.id());
+                // Streams execute in autocommit independently of a later BEGIN
+                // on the session. The worker owns its ID until safe teardown;
+                // the JoinSet aborts workers when the frame loop disconnects.
+                let stream_connection = runtime
+                    .acquire_wire_connection()
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                stream_context.connection_id = Some(stream_connection.id());
+                output_stream_tasks.spawn(async move {
+                    let _connection = stream_connection;
                     os::run_output_stream(
                         runtime_ref,
                         frame_id,
@@ -767,6 +791,22 @@ where
                         0,
                     )?;
                     queue_send(&out_tx, encode_frame(&err)).await?;
+                    continue;
+                }
+                // BEGIN may arrive after OpenStream. Never report a chunk as
+                // committed if it would instead join the session transaction.
+                if runtime.connection_in_transaction(connection.id()) {
+                    let state = input_registry.remove(sid).expect("stream presence checked");
+                    let error = crate::server::output_stream::OpenStreamError::TransactionActive;
+                    let frame = is::build_input_stream_error_frame(
+                        frame_id,
+                        sid,
+                        error.code(),
+                        error.message(),
+                        state.chunk_count,
+                        state.committed_rid,
+                    )?;
+                    queue_send(&out_tx, encode_frame(&frame)).await?;
                     continue;
                 }
                 let chunk = match is::parse_input_chunk(&frame.payload) {
@@ -1248,10 +1288,9 @@ where
             }
             _ => unreachable!("client-final step must authenticate or fail"),
         };
-    let user = store
-        .list_users()
-        .into_iter()
-        .find(|u| u.username == username);
+    // Bind the session to the same platform principal whose verifier was
+    // checked above; a tenant-local namesake is a different identity.
+    let user = store.get_user(None, &username);
     let role = user
         .as_ref()
         .map(|u| u.role)

@@ -16,12 +16,22 @@ fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolSt
 
 impl RedDBRuntime {
     pub fn acquire(&self) -> RedDBResult<RuntimeConnection> {
+        self.acquire_connection(true)
+    }
+
+    // Transport admission already bounds wire sessions. Share connection IDs
+    // and rollback cleanup without imposing the embedded pool's separate cap.
+    pub(crate) fn acquire_wire_connection(&self) -> RedDBResult<RuntimeConnection> {
+        self.acquire_connection(false)
+    }
+
+    fn acquire_connection(&self, uses_pool_slot: bool) -> RedDBResult<RuntimeConnection> {
         let mut pool = self
             .inner
             .pool
             .lock()
             .map_err(|e| RedDBError::Internal(format!("connection pool lock poisoned: {e}")))?;
-        if pool.active >= self.inner.pool_config.max_connections {
+        if uses_pool_slot && pool.pooled_active >= self.inner.pool_config.max_connections {
             return Err(RedDBError::Internal(
                 "connection pool exhausted".to_string(),
             ));
@@ -35,6 +45,9 @@ impl RedDBRuntime {
             id
         };
         pool.active += 1;
+        if uses_pool_slot {
+            pool.pooled_active += 1;
+        }
         pool.total_checkouts += 1;
         drop(pool);
 
@@ -44,6 +57,7 @@ impl RedDBRuntime {
 
         Ok(RuntimeConnection {
             id,
+            uses_pool_slot,
             inner: Arc::clone(&self.inner),
         })
     }

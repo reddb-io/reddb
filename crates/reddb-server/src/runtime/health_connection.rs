@@ -72,6 +72,9 @@ impl Drop for RuntimeConnection {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         pool.active = pool.active.saturating_sub(1);
+        if self.uses_pool_slot {
+            pool.pooled_active = pool.pooled_active.saturating_sub(1);
+        }
         if reusable && pool.idle.len() < self.inner.pool_config.max_idle {
             pool.idle.push(self.id);
         }

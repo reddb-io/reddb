@@ -112,6 +112,21 @@ pub fn run(args: BootstrapArgs) -> Result<BootstrapOutcome, String> {
         .bootstrap(&args.username, &password)
         .map_err(|err| format!("bootstrap: {err}"))?;
 
+    // Fresh bootstrap uses policy_only. Give the first admin the same
+    // explicit policy as the production preset so it can manage the vault.
+    crate::service_cli::install_allow_all_policy(&store)?;
+    store
+        .attach_policy(
+            crate::auth::store::PrincipalRef::User(crate::auth::UserId::platform(
+                result.user.username.clone(),
+            )),
+            crate::service_cli::FIRST_ADMIN_ALLOW_ALL_POLICY,
+        )
+        .map_err(|err| format!("attach bootstrap policy: {err}"))?;
+    store
+        .persist_to_vault_result()
+        .map_err(|err| format!("persist bootstrap policy: {err}"))?;
+
     let certificate = result.certificate.clone().unwrap_or_default();
     let api_key = result.api_key.key.clone();
 

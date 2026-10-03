@@ -784,7 +784,7 @@ impl AuthStore {
     // -----------------------------------------------------------------
 
     /// Persist the current auth state to the vault pages (if configured).
-    fn persist_to_vault_result(&self) -> Result<(), AuthError> {
+    pub(crate) fn persist_to_vault_result(&self) -> Result<(), AuthError> {
         let vault_guard = self.vault.read().unwrap_or_else(|e| e.into_inner());
         if let (Some(ref vault), Some(ref pager)) = (&*vault_guard, &self.pager) {
             let state = self.snapshot();

@@ -2175,7 +2175,7 @@ fn apply_cloud_preset(
     Ok((head_id.to_string(), certificate))
 }
 
-fn install_allow_all_policy(auth_store: &Arc<AuthStore>) -> Result<(), String> {
+pub(crate) fn install_allow_all_policy(auth_store: &AuthStore) -> Result<(), String> {
     use crate::auth::policies::Policy;
 
     let policy = Policy::from_json_str(&format!(
