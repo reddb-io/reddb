@@ -234,7 +234,8 @@ impl<'a> KvAtomicOps<'a> {
         let rmw_lock = (if_not_exists || vault_model)
             .then(|| self.runtime.inner.rmw_locks.lock_for(collection, &lock_key));
         let _rmw_guard = rmw_lock.as_ref().map(|lock| lock.lock());
-        let _vault_guard = vault_model.then(|| self.runtime.inner.vault_write_lock.lock());
+        let vault_store = self.runtime.inner.db.store();
+        let _vault_guard = vault_model.then(|| vault_store.vault_publication_lock.lock());
         let _snapshot_guard = vault_model.then(|| {
             super::execution_context::CurrentSnapshotGuard::install(
                 self.runtime.vault_write_snapshot(),
@@ -993,6 +994,7 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     fn get_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {
+        self.record_vault_read(collection, Some(key));
         if let Some(entry) = self.pending_vault_entries(collection, Some(key)).pop() {
             return Ok(Some(entry));
         }
@@ -1014,6 +1016,7 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     fn vault_versions(&self, collection: &str, key: &str) -> RedDBResult<Vec<VaultEntry>> {
+        self.record_vault_read(collection, Some(key));
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let store = self.runtime.inner.db.store();
         let manager = store.get_collection(collection);
@@ -1065,6 +1068,8 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         prefix: Option<&str>,
     ) -> RedDBResult<Vec<VaultEntry>> {
+        // Listing protects the tenant's collection, including absent keys.
+        self.record_vault_read(collection, None);
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let store = self.runtime.inner.db.store();
         let manager = store.get_collection(collection);
@@ -1160,7 +1165,8 @@ impl<'a> KvAtomicOps<'a> {
         let lock_key = format!("vault/{}/{}", self.tenant.as_deref().unwrap_or(""), key);
         let lock = self.runtime.inner.rmw_locks.lock_for(collection, &lock_key);
         let _guard = lock.lock();
-        let _vault_guard = self.runtime.inner.vault_write_lock.lock();
+        let vault_store = self.runtime.inner.db.store();
+        let _vault_guard = vault_store.vault_publication_lock.lock();
         let _snapshot_guard = super::execution_context::CurrentSnapshotGuard::install(
             self.runtime.vault_write_snapshot(),
         );
@@ -1232,7 +1238,8 @@ impl<'a> KvAtomicOps<'a> {
         let lock_key = format!("vault/{}/{}", self.tenant.as_deref().unwrap_or(""), key);
         let lock = self.runtime.inner.rmw_locks.lock_for(collection, &lock_key);
         let _guard = lock.lock();
-        let _vault_guard = self.runtime.inner.vault_write_lock.lock();
+        let vault_store = self.runtime.inner.db.store();
+        let _vault_guard = vault_store.vault_publication_lock.lock();
         let _snapshot_guard = super::execution_context::CurrentSnapshotGuard::install(
             self.runtime.vault_write_snapshot(),
         );
@@ -1288,7 +1295,8 @@ impl RedDBRuntime {
     /// Offline dump records retain the native encrypted values, tenant markers,
     /// versions and metadata. They are never formatted as query results.
     pub fn export_vault_collection_records(&self, collection: &str) -> RedDBResult<Vec<String>> {
-        let _vault_guard = self.inner.vault_write_lock.lock();
+        let vault_store = self.inner.db.store();
+        let _vault_guard = vault_store.vault_publication_lock.lock();
         let store = self.inner.db.store();
         let contract = self
             .inner
@@ -1327,7 +1335,8 @@ impl RedDBRuntime {
         format_version: u32,
     ) -> RedDBResult<usize> {
         self.reject_vault_transaction()?;
-        let _vault_guard = self.inner.vault_write_lock.lock();
+        let vault_store = self.inner.db.store();
+        let _vault_guard = vault_store.vault_publication_lock.lock();
         let store = self.inner.db.store();
         if collection.is_empty() || (collection.starts_with("red.") && collection != "red.vault") {
             return Err(RedDBError::Query("invalid vault import collection".into()));
@@ -1388,6 +1397,10 @@ impl RedDBRuntime {
                 self.unseal_vault_value_for_tenant(collection, &version.value, tenant)?;
             }
             entity.id = crate::storage::EntityId::new(0);
+            // Transaction ids belong to the source runtime. Restored Vault
+            // versions are committed maintenance data in the destination.
+            entity.set_xmin(0);
+            entity.set_xmax(0);
             entity.kind = crate::storage::EntityKind::TableRow {
                 table: std::sync::Arc::from(collection),
                 row_id: 0,

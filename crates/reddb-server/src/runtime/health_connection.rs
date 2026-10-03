@@ -54,13 +54,25 @@ impl RuntimeConnection {
 
 impl Drop for RuntimeConnection {
     fn drop(&mut self) {
+        let runtime = RedDBRuntime {
+            inner: Arc::clone(&self.inner),
+        };
+        // Cleanup targets this lease, independently of the dropping thread's
+        // current connection. Never recycle a lease whose cleanup failed.
+        let reusable = match runtime.rollback_connection(self.id) {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::error!(connection_id = self.id, %error, "connection rollback failed");
+                false
+            }
+        };
         let mut pool = self
             .inner
             .pool
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         pool.active = pool.active.saturating_sub(1);
-        if pool.idle.len() < self.inner.pool_config.max_idle {
+        if reusable && pool.idle.len() < self.inner.pool_config.max_idle {
             pool.idle.push(self.id);
         }
         drop(pool);

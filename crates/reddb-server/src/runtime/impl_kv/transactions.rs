@@ -3,6 +3,18 @@ use crate::runtime::execution_context::{CurrentSnapshotGuard, SnapshotContext};
 use crate::storage::transaction::snapshot::TxnContext;
 
 impl KvAtomicOps<'_> {
+    pub(super) fn record_vault_read(&self, collection: &str, key: Option<&str>) {
+        let snapshot = self.runtime.vault_read_snapshot();
+        if let Some(reader) = snapshot.serializable_reader {
+            snapshot.manager.record_serializable_vault_read(
+                reader,
+                collection,
+                self.tenant.as_deref(),
+                key,
+            );
+        }
+    }
+
     pub(super) fn pending_vault_entries(
         &self,
         collection: &str,
@@ -70,7 +82,7 @@ impl KvAtomicOps<'_> {
             return Ok(entry);
         }
 
-        // Publication stays under vault_write_lock until the WAL batch and
+        // Publication stays under vault_publication_lock until the WAL batch and
         // MVCC commit both complete. A reader with an earlier snapshot sees
         // the previous version even while these records are being inserted.
         crate::storage::UnifiedStore::begin_deferred_store_wal_capture();
@@ -90,6 +102,13 @@ impl KvAtomicOps<'_> {
             return Err(error);
         }
         manager.commit(writer_xid);
+        self.runtime
+            .inner
+            .db
+            .store()
+            .pending_vault_versions
+            .write()
+            .remove(&write.entity.id);
         self.runtime.invalidate_result_cache_for_table(collection);
         Ok(write
             .entry()
@@ -162,7 +181,13 @@ impl RedDBRuntime {
         let _snapshot_guard = CurrentSnapshotGuard::install(self.vault_write_snapshot());
         let mut checked = std::collections::HashSet::new();
         let mut write_set = std::collections::HashSet::new();
+        let mut vault_write_set = std::collections::HashSet::new();
         for write in &writes {
+            vault_write_set.insert((
+                write.collection.clone(),
+                write.tenant.clone(),
+                write.key.clone(),
+            ));
             write_set.insert((write.collection.clone(), write.entity.id));
             if let Some(base_id) = write.base_id {
                 write_set.insert((write.collection.clone(), base_id));
@@ -180,9 +205,12 @@ impl RedDBRuntime {
             }
         }
         if context.isolation == crate::storage::transaction::IsolationLevel::Serializable
-            && self
+            && (self
                 .snapshot_manager()
                 .serializable_commit_would_be_dangerous(context.xid, &write_set)
+                || self
+                    .snapshot_manager()
+                    .serializable_vault_commit_would_be_dangerous(context.xid, &vault_write_set))
         {
             return Err(RedDBError::Query(
                 "serialization conflict: serializable vault transaction".into(),
@@ -216,13 +244,12 @@ impl RedDBRuntime {
         let store = self.inner.db.store();
         write.applied = true;
         store
-            .insert(&write.collection, write.entity.clone())
+            .insert_vault_version(
+                &write.collection,
+                write.entity.clone(),
+                write.metadata.clone(),
+            )
             .map_err(|error| RedDBError::Internal(error.to_string()))?;
-        if !write.metadata.fields.is_empty() {
-            store
-                .set_metadata(&write.collection, write.entity.id, write.metadata.clone())
-                .map_err(|error| RedDBError::Internal(error.to_string()))?;
-        }
         write.entity = store
             .get(&write.collection, write.entity.id)
             .ok_or_else(|| RedDBError::Internal("stored vault version disappeared".into()))?;
@@ -230,22 +257,20 @@ impl RedDBRuntime {
     }
 
     fn remove_applied_vault_writes(&self, writes: &[PendingVaultWrite]) -> RedDBResult<()> {
-        // Rollback cleanup must not publish a delete WAL batch for rows whose
-        // insert batch was never committed. It still repairs the pager trees.
-        crate::storage::UnifiedStore::begin_deferred_store_wal_capture();
-        let result = (|| {
-            let store = self.inner.db.store();
-            for write in writes.iter().filter(|write| write.applied) {
-                if store.get_collection(&write.collection).is_some() {
-                    store
-                        .delete(&write.collection, write.entity.id)
-                        .map_err(|error| RedDBError::Internal(error.to_string()))?;
-                }
+        // These live-only rows never entered pager trees or a committed WAL.
+        let store = self.inner.db.store();
+        for write in writes.iter().filter(|write| write.applied) {
+            if let Some(manager) = store.get_collection(&write.collection) {
+                manager
+                    .delete(write.entity.id)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
             }
-            Ok(())
-        })();
-        let _discarded = crate::storage::UnifiedStore::take_deferred_store_wal_capture();
-        result
+            store
+                .pending_vault_versions
+                .write()
+                .remove(&write.entity.id);
+        }
+        Ok(())
     }
 
     pub(crate) fn discard_pending_vault_writes(&self, connection_id: u64) -> RedDBResult<()> {
@@ -266,6 +291,12 @@ impl RedDBRuntime {
             .remove(&connection_id);
         if let Some(writes) = writes {
             for write in writes {
+                self.inner
+                    .db
+                    .store()
+                    .pending_vault_versions
+                    .write()
+                    .remove(&write.entity.id);
                 self.invalidate_result_cache_for_table(&write.collection);
             }
         }
@@ -287,6 +318,130 @@ impl RedDBRuntime {
             .get_mut(&connection_id)
         {
             events.retain(|(xid, _)| *xid < writer_xid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{AuthConfig, AuthStore};
+    use crate::storage::{DeployProfile, StoragePackaging, StorageProfileSelection};
+    use crate::{RedDBOptions, StorageDeployPreset};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    const CHILD_PATH: &str = "REDDB_VAULT_PREPARE_CRASH_PATH";
+    const CHILD_PROFILE: &str = "REDDB_VAULT_PREPARE_CRASH_PROFILE";
+    const TEST: &str = "runtime::impl_kv::transactions::tests::checkpoint_during_vault_prepare_cannot_recover_an_uncommitted_batch";
+
+    fn open(path: &Path, operational: bool) -> RedDBRuntime {
+        let profile = if operational {
+            StorageProfileSelection {
+                deploy_profile: DeployProfile::Embedded,
+                packaging: StoragePackaging::OperationalDirectory,
+                replica_count: 0,
+                managed_backup: false,
+                wal_retention: false,
+            }
+        } else {
+            StorageDeployPreset::Serverless.selection()
+        };
+        let options = RedDBOptions::persistent(path)
+            .with_storage_profile(profile)
+            .unwrap();
+        let runtime = RedDBRuntime::with_options(options).unwrap();
+        let auth = Arc::new(
+            AuthStore::with_vault_certificate(
+                AuthConfig::default(),
+                runtime.db().store().pager().unwrap().clone(),
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            )
+            .unwrap(),
+        );
+        auth.ensure_vault_secret_key();
+        runtime.set_auth_store(auth);
+        runtime
+    }
+
+    #[test]
+    fn checkpoint_during_vault_prepare_cannot_recover_an_uncommitted_batch() {
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let operational = std::env::var(CHILD_PROFILE).unwrap() == "true";
+            let runtime = open(Path::new(&path), operational);
+            runtime
+                .execute_query("SET SECRET token = 'original'")
+                .unwrap();
+            runtime.checkpoint().unwrap();
+            super::super::super::execution_context::set_current_connection_id(121);
+            runtime.execute_query("BEGIN").unwrap();
+            runtime
+                .execute_query("SET SECRET token = 'pending'")
+                .unwrap();
+            runtime
+                .execute_query("SET SECRET absent = 'pending-new-key'")
+                .unwrap();
+            let vault_store = runtime.inner.db.store();
+            let _publication = vault_store.vault_publication_lock.lock();
+            let _: RedDBResult<_> = runtime.inner.transaction_state.commit(121, |context| {
+                runtime.prepare_pending_vault_writes(121, context)?;
+                // Exercise both an incidental pager flush and a full checkpoint
+                // exactly after materialization, before COMMIT's WAL append.
+                runtime.inner.db.store().pager().unwrap().flush().unwrap();
+                runtime.checkpoint()?;
+                if !operational {
+                    runtime.publish_serverless_generation()?;
+                }
+                std::process::exit(0);
+            });
+            panic!("crash injection did not exit");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for operational in [false, true] {
+            let path = directory.path().join(format!("prepare-{operational}.rdb"));
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD_PATH, &path)
+                .env(CHILD_PROFILE, operational.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let runtime = open(&path, operational);
+            if !operational {
+                let ranges = runtime
+                    .hydrate_current_serverless_collection("red.vault")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(ranges.len(), 1);
+                let snapshot = crate::storage::UnifiedStore::load_from_bytes_with_config(
+                    &ranges[0].payload,
+                    crate::storage::UnifiedStoreConfig::default(),
+                )
+                .unwrap();
+                assert_eq!(snapshot.get_collection("red.vault").unwrap().count(), 1);
+            }
+            let revealed = runtime
+                .execute_query("VAULT REVEAL red.vault.token")
+                .unwrap();
+            assert_eq!(
+                revealed.result.records[0].get("value"),
+                Some(&Value::text("original"))
+            );
+            assert!(runtime
+                .execute_query("VAULT REVEAL red.vault.absent")
+                .is_err());
+            assert_eq!(
+                runtime
+                    .execute_query("VAULT HISTORY red.vault.token")
+                    .unwrap()
+                    .result
+                    .len(),
+                1
+            );
         }
     }
 }

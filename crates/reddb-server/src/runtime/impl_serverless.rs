@@ -29,6 +29,9 @@ impl RedDBRuntime {
     }
 
     fn serverless_collection_snapshot_bytes(&self, collection: &str) -> RedDBResult<Vec<u8>> {
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        let pending_vault_versions = store.pending_vault_versions.read();
         let source = self
             .inner
             .db
@@ -42,6 +45,9 @@ impl RedDBRuntime {
         );
         let mut error: Option<RedDBError> = None;
         source.for_each_entity(|entity| {
+            if pending_vault_versions.contains(&entity.id) {
+                return true;
+            }
             let cloned = entity.clone();
             match snapshot.insert_auto(collection, cloned) {
                 Ok(id) => {
@@ -71,6 +77,8 @@ impl RedDBRuntime {
         let Some(base_plan) = self.serverless_file_plan() else {
             return Ok(None);
         };
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         self.flush()?;
         let next_generation = match base_plan.read_current_pointer_verified() {
             Ok(pointer) => base_plan

@@ -352,7 +352,6 @@ impl RedDBRuntime {
                 pending_queue_dedup: parking_lot::RwLock::new(HashMap::new()),
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
                 pending_vault_writes: parking_lot::RwLock::new(HashMap::new()),
-                vault_write_lock: parking_lot::Mutex::new(()),
                 pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
                 pending_claim_locks: parking_lot::RwLock::new(HashMap::new()),
                 queue_wait_registry: std::sync::Arc::new(

@@ -1231,7 +1231,6 @@ struct RuntimeInner {
     pending_kv_watch_events:
         parking_lot::RwLock<HashMap<u64, Vec<(u64, crate::replication::cdc::KvWatchEvent)>>>,
     pending_vault_writes: parking_lot::RwLock<HashMap<u64, Vec<impl_kv::PendingVaultWrite>>>,
-    vault_write_lock: parking_lot::Mutex<()>,
     pending_store_wal_actions:
         parking_lot::RwLock<HashMap<u64, crate::storage::unified::DeferredStoreWalActions>>,
     /// Transaction-scoped table UPDATE CLAIM ownership.

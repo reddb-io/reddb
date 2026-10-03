@@ -150,6 +150,7 @@ pub(crate) type LogicalRowKey = (String, EntityId);
 #[derive(Default)]
 struct SerializableTxnState {
     read_set: HashSet<LogicalRowKey>,
+    vault_reads: HashSet<(String, Option<String>, Option<String>)>,
     incoming_rw: HashSet<Xid>,
     outgoing_rw: HashSet<Xid>,
     committed: bool,
@@ -339,6 +340,51 @@ impl SnapshotManager {
         }
     }
 
+    pub(crate) fn record_serializable_vault_read(
+        &self,
+        reader: Xid,
+        collection: &str,
+        tenant: Option<&str>,
+        key: Option<&str>,
+    ) {
+        if let Some(ssi) = self.state.write().serializable.get_mut(&reader) {
+            ssi.vault_reads.insert((
+                collection.into(),
+                tenant.map(str::to_owned),
+                key.map(str::to_owned),
+            ));
+        }
+    }
+
+    pub(crate) fn serializable_vault_commit_would_be_dangerous(
+        &self,
+        writer: Xid,
+        write_set: &HashSet<(String, Option<String>, String)>,
+    ) -> bool {
+        let mut state = self.state.write();
+        if !state.serializable.contains_key(&writer) {
+            return false;
+        }
+        let readers = state
+            .serializable
+            .iter()
+            .filter_map(|(&reader, ssi)| {
+                (reader != writer
+                    && ssi.vault_reads.iter().any(|(collection, tenant, key)| {
+                        write_set
+                            .iter()
+                            .any(|(written_collection, written_tenant, written_key)| {
+                                collection == written_collection
+                                    && tenant == written_tenant
+                                    && key.as_ref().is_none_or(|key| key == written_key)
+                            })
+                    }))
+                .then_some(reader)
+            })
+            .collect();
+        Self::serializable_readers_would_be_dangerous(&mut state, writer, readers)
+    }
+
     pub(crate) fn serializable_commit_would_be_dangerous(
         &self,
         writer: Xid,
@@ -365,6 +411,14 @@ impl SnapshotManager {
             })
             .collect();
 
+        Self::serializable_readers_would_be_dangerous(&mut state, writer, readers)
+    }
+
+    fn serializable_readers_would_be_dangerous(
+        state: &mut ManagerState,
+        writer: Xid,
+        readers: Vec<Xid>,
+    ) -> bool {
         for reader in readers {
             if let Some(reader_state) = state.serializable.get_mut(&reader) {
                 reader_state.outgoing_rw.insert(writer);

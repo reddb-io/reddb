@@ -1,6 +1,31 @@
 use super::*;
 
 impl UnifiedStore {
+    /// Vault versions are WAL-backed in memory until a committed checkpoint.
+    /// Preparing a commit must not dirty pager pages: eviction or an auth
+    /// flush could otherwise persist a version before its WAL batch exists.
+    pub(crate) fn insert_vault_version(
+        &self,
+        collection: &str,
+        entity: UnifiedEntity,
+        metadata: Metadata,
+    ) -> Result<(), StoreError> {
+        assert!(matches!(entity.data, EntityData::Row(_)));
+        let manager = self
+            .get_collection(collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(collection.into()))?;
+        self.pending_vault_versions.write().insert(entity.id);
+        let id = manager.insert(entity)?;
+        self.register_entity_id(id);
+        if !metadata.fields.is_empty() {
+            manager.set_metadata(id, metadata)?;
+        }
+        let entity = manager
+            .get(id)
+            .expect("inserted vault version remains in memory");
+        self.persist_entities_to_pager_wal_only(collection, &[entity])
+    }
+
     pub(crate) fn persist_entities_to_pager(
         &self,
         collection: &str,

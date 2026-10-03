@@ -380,6 +380,12 @@ pub struct UnifiedStore {
     /// (e.g. `kv`) survives a restart instead of being re-inferred as a table.
     /// The store treats the bytes as opaque; only RedDB interprets them.
     pub(crate) aux_metadata: RwLock<Vec<u8>>,
+    /// Serialize vault publication with snapshot capture and WAL truncation.
+    /// Reentrant because embedded checkpoint calls the snapshot encoder while
+    /// holding the barrier, and storage maintenance may nest those calls.
+    pub(crate) vault_publication_lock: parking_lot::ReentrantMutex<()>,
+    /// Live-only vault rows excluded from a reentrant WAL-full compaction.
+    pub(crate) pending_vault_versions: RwLock<std::collections::HashSet<EntityId>>,
     /// Retain transaction outcomes through embedded snapshot-on-drop. Without
     /// this, aborted physical versions are reopened as committed rows.
     pub(crate) snapshot_manager:
