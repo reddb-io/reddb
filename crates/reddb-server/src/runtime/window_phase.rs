@@ -23,7 +23,6 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::api::RedDBError;
-use crate::storage::query::evaluator;
 use crate::storage::query::unified::UnifiedRecord;
 use reddb_rql::ast::{Projection, WindowFrame, WindowFrameBound, WindowFrameUnit, WindowSpec};
 use reddb_rql::sql_lowering::projection_to_expr;
@@ -66,20 +65,15 @@ pub(crate) fn apply(
             continue;
         };
         let label = projection_name(projection);
-        let sensitive: Vec<bool> = records
-            .iter()
-            .map(|record| {
-                super::join_filter::projection_uses_secret(
-                    projection,
-                    record,
-                    table_name,
-                    table_alias,
-                )
-            })
-            .collect();
+        // A window result may depend on another row (LAG/LEAD or a frame
+        // aggregate). A NULL input on the destination row does not make
+        // the value copied from a secret input public.
+        let sensitive = records.iter().any(|record| {
+            super::join_filter::projection_uses_secret(projection, record, table_name, table_alias)
+        });
         compute_window_column(records, name, args, window, &label, table_name, table_alias)?;
-        for (record, sensitive) in records.iter_mut().zip(sensitive) {
-            if sensitive {
+        if sensitive {
+            for record in records.iter_mut() {
                 if let Some(value) = record.get(&label).cloned() {
                     record.set(
                         &label,
@@ -143,7 +137,7 @@ fn eval_projection_constant(
         super::join_filter::resolve_runtime_field(record, field, table_name, table_alias)
             .and_then(super::execution_context::secret_query_input)
     };
-    evaluator::evaluate(&expr, &row_closure)
+    super::expr_eval::evaluate_typed_expr_with_secret_literals(&expr, &row_closure)
         .ok()
         .or_else(|| super::expr_eval::evaluate_runtime_expr(&expr, record, table_name, table_alias))
 }
@@ -167,7 +161,7 @@ fn eval_expr_on_record(
         super::join_filter::resolve_runtime_field(record, field, table_name, table_alias)
             .and_then(super::execution_context::secret_query_input)
     };
-    evaluator::evaluate(expr, &row_closure)
+    super::expr_eval::evaluate_typed_expr_with_secret_literals(expr, &row_closure)
         .ok()
         .or_else(|| super::expr_eval::evaluate_runtime_expr(expr, record, table_name, table_alias))
         .unwrap_or(Value::Null)

@@ -86,7 +86,9 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
                         table_name,
                         table_alias,
                     };
-                    match crate::storage::query::evaluator::evaluate(&expr, &row) {
+                    match crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(
+                        &expr, &row,
+                    ) {
                         Ok(value) => Some(value),
                         // A shape the typed evaluator does not cover (unknown
                         // function, or an unresolved reference such as a CAST
@@ -134,7 +136,9 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
                         table_name,
                         table_alias,
                     };
-                    match crate::storage::query::evaluator::evaluate(&expr, &row) {
+                    match crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(
+                        &expr, &row,
+                    ) {
                         Ok(value) => Some(value),
                         // A shape the typed evaluator does not cover (unknown
                         // function, or an unresolved reference such as a CAST

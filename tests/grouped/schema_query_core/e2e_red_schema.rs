@@ -1181,7 +1181,7 @@ fn red_policy_actions_virtual_table_surfaces_catalog() {
     assert_eq!(row.get("lifecycle_state"), Some(&Value::text("deprecated")));
     assert_eq!(
         row.get("replacement"),
-        Some(&Value::text("vault:read_metadata"))
+        Some(&Value::text("vault:reveal_history"))
     );
     assert_eq!(row.get("since_version"), Some(&Value::text("0.5.0")));
 
@@ -1238,7 +1238,7 @@ fn lint_policy_json_returns_diagnostic_rows() {
             |r| matches!(r.get("code"), Some(Value::Text(s)) if s.as_ref() == "deprecated_action"),
         )
         .expect("deprecated_action row");
-    assert_eq!(text(dep, "suggested_fix"), "vault:read_metadata");
+    assert_eq!(text(dep, "suggested_fix"), "vault:reveal_history");
     cleanup_scope();
 }
 

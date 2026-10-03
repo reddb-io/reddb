@@ -556,10 +556,20 @@ impl RedDBRuntime {
         // Ensure the collection exists (auto-create on first insert).
         let store = self.inner.db.store();
         let _ = store.get_or_create_collection(&query.table);
-        let declared_model = self
-            .db()
-            .collection_contract_arc(&query.table)
-            .map(|contract| contract.declared_model);
+        let contract = self.db().collection_contract_arc(&query.table);
+        let declared_model = contract.as_ref().map(|contract| contract.declared_model);
+        let secret_columns: Vec<bool> = query
+            .columns
+            .iter()
+            .map(|column| {
+                contract.as_ref().is_some_and(|contract| {
+                    contract.declared_columns.iter().any(|declared| {
+                        declared.name == *column
+                            && declared.data_type.eq_ignore_ascii_case("secret")
+                    })
+                })
+            })
+            .collect();
         if query.on_conflict.is_some()
             && matches!(
                 declared_model,
@@ -657,7 +667,7 @@ impl RedDBRuntime {
                     )));
                 }
                 let (mut fields, mut metadata) =
-                    split_insert_metadata(self, &query.table, &query.columns, row_values)?;
+                    split_insert_metadata(self, &secret_columns, &query.columns, row_values)?;
                 if query
                     .on_conflict
                     .as_ref()
@@ -1093,7 +1103,7 @@ impl RedDBRuntime {
                         InsertEntityType::Node => {
                             let (node_values, mut metadata) = split_insert_metadata(
                                 self,
-                                &query.table,
+                                &secret_columns,
                                 &query.columns,
                                 row_values,
                             )?;
@@ -1178,7 +1188,7 @@ impl RedDBRuntime {
                         InsertEntityType::Edge => {
                             let (edge_values, mut metadata) = split_insert_metadata(
                                 self,
-                                &query.table,
+                                &secret_columns,
                                 &query.columns,
                                 row_values,
                             )?;
@@ -1372,7 +1382,7 @@ impl RedDBRuntime {
                             }
                             let (fields, mut metadata) = split_insert_metadata(
                                 self,
-                                &query.table,
+                                &secret_columns,
                                 &query.columns,
                                 row_values,
                             )?;
@@ -1390,7 +1400,7 @@ impl RedDBRuntime {
                         InsertEntityType::Vector => {
                             let (vector_values, mut metadata) = split_insert_metadata(
                                 self,
-                                &query.table,
+                                &secret_columns,
                                 &query.columns,
                                 row_values,
                             )?;
@@ -1425,7 +1435,7 @@ impl RedDBRuntime {
                         InsertEntityType::Document => {
                             let (document_values, mut metadata) = split_insert_metadata(
                                 self,
-                                &query.table,
+                                &secret_columns,
                                 &query.columns,
                                 row_values,
                             )?;
@@ -1489,7 +1499,7 @@ impl RedDBRuntime {
                         InsertEntityType::Kv => {
                             let (kv_values, mut metadata) = split_insert_metadata(
                                 self,
-                                &query.table,
+                                &secret_columns,
                                 &query.columns,
                                 row_values,
                             )?;

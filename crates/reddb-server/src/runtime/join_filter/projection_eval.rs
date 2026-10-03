@@ -42,7 +42,8 @@ pub(in crate::runtime) fn eval_projection_value(
                     table_name: None,
                     table_alias: None,
                 };
-                crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+                crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(&expr, &row)
+                    .ok()
             })
             .or_else(|| evaluate_scalar_function(name, inner_args, source)),
         Projection::Expression(filter, _) => reddb_rql::sql_lowering::projection_to_expr(proj)
@@ -53,7 +54,8 @@ pub(in crate::runtime) fn eval_projection_value(
                     table_name: None,
                     table_alias: None,
                 };
-                crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+                crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(&expr, &row)
+                    .ok()
             })
             .or_else(|| {
                 Some(Value::Boolean(evaluate_runtime_filter(

@@ -1341,17 +1341,12 @@ impl RedDBRuntime {
         for record in records {
             let bytes = hex::decode(record)
                 .map_err(|_| RedDBError::Query("invalid native vault dump record".into()))?;
-            let frame = reddb_file::decode_native_entity_record_frame(&bytes)
-                .map_err(|error| RedDBError::Query(error.to_string()))?
-                .ok_or_else(|| {
-                    RedDBError::Query("vault dump requires a native record frame".into())
-                })?;
-            if frame.entity.len() < 2 {
-                return Err(RedDBError::Query("truncated native vault record".into()));
-            }
             let (mut entity, metadata) =
-                crate::storage::UnifiedStore::deserialize_entity_record(&bytes, format_version)
-                    .map_err(|error| RedDBError::Query(error.to_string()))?;
+                crate::storage::UnifiedStore::deserialize_vault_entity_record(
+                    &bytes,
+                    format_version,
+                )
+                .map_err(|error| RedDBError::Query(error.to_string()))?;
             let crate::storage::EntityData::Row(row) = &entity.data else {
                 return Err(RedDBError::Query("vault dump requires rows".into()));
             };

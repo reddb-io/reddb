@@ -104,7 +104,9 @@ pub(in crate::runtime) fn evaluate_runtime_filter_result_with_db(
                 table_alias,
             };
             let eval_side = |expr| -> crate::RedDBResult<Option<Value>> {
-                match crate::storage::query::evaluator::evaluate(expr, &row) {
+                match crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(
+                    expr, &row,
+                ) {
                     Ok(value) => Ok(Some(value)),
                     Err(crate::storage::query::evaluator::EvalError::UnknownFunction {
                         ..

@@ -2720,6 +2720,30 @@ impl RedDBRuntime {
                     .collect::<RedDBResult<Vec<_>>>()?;
                 Ok(Expr::FunctionCall { name, args, span })
             }
+            Expr::WindowFunctionCall {
+                name,
+                args,
+                mut window,
+                span,
+            } => {
+                let args = args
+                    .into_iter()
+                    .map(|arg| self.resolve_expr_subqueries(arg, outer_scopes, frame))
+                    .collect::<RedDBResult<Vec<_>>>()?;
+                for expr in &mut window.partition_by {
+                    *expr = self.resolve_expr_subqueries(expr.clone(), outer_scopes, frame)?;
+                }
+                for clause in &mut window.order_by {
+                    clause.expr =
+                        self.resolve_expr_subqueries(clause.expr.clone(), outer_scopes, frame)?;
+                }
+                Ok(Expr::WindowFunctionCall {
+                    name,
+                    args,
+                    window,
+                    span,
+                })
+            }
             Expr::Case {
                 branches,
                 else_,

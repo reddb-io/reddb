@@ -87,6 +87,75 @@ fn contains_plaintext(path: &Path, probe: &[u8]) -> bool {
 }
 
 #[test]
+fn window_outputs_remain_secret_when_the_destination_row_has_null_or_public_input() {
+    let _scope = scope(None, None, Role::Admin);
+    let directory = tempfile::tempdir().expect("directory");
+    let (runtime, _) = open(&directory.path().join("window-null.rdb"));
+    runtime
+        .execute_query("CREATE TABLE typed_windows (id INTEGER, token SECRET)")
+        .expect("typed windows");
+    runtime
+        .db()
+        .store()
+        .create_collection("mixed_windows")
+        .expect("untyped windows");
+    for table in ["typed_windows", "mixed_windows"] {
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO {table} (id, token) VALUES (1, SECRET('synthetic-window-value')), (2, NULL), (3, 'public')"
+            ))
+            .expect("window rows");
+        for expression in [
+            "LAG(token) OVER (ORDER BY id)",
+            "LEAD(token) OVER (ORDER BY id)",
+            "MIN(token) OVER ()",
+            "MAX(token) OVER ()",
+            "LAG(CASE WHEN id = 1 THEN token ELSE 'public' END) OVER (ORDER BY id)",
+        ] {
+            let result = runtime
+                .execute_query(&format!(
+                    "SELECT id, {expression} AS value FROM {table} ORDER BY id"
+                ))
+                .expect("window projection");
+            assert_eq!(result.result.records.len(), 3);
+            let mut has_secret_result = false;
+            for record in &result.result.records {
+                assert!(matches!(record.get("id"), Some(Value::Integer(_))));
+                match record.get("value").expect("window result") {
+                    Value::Secret(_) => has_secret_result = true,
+                    Value::Null => {}
+                    exposed => panic!("{table}: {expression} exposed {exposed:?}"),
+                }
+            }
+            assert!(has_secret_result, "{table}: {expression}");
+        }
+        assert_eq!(
+            runtime
+                .execute_query(&format!(
+                    "WITH w AS (SELECT id, LAG(token) OVER (ORDER BY id) AS prev FROM {table}) SELECT id FROM w WHERE prev = 'synthetic-window-value'"
+                ))
+                .expect("typed masked window result remains usable")
+                .result
+                .records
+                .len(),
+            1
+        );
+        let sql = format!(
+            "WITH w AS (SELECT id, LAG((SELECT token FROM {table} WHERE id = 1), 0) OVER (ORDER BY id) AS value FROM {table}) SELECT id, value FROM w WHERE value = 'synthetic-window-value'"
+        );
+        let result = runtime
+            .execute_query(&sql)
+            .expect("sensitive literal window input");
+        assert_eq!(result.result.records.len(), 3);
+        assert!(result
+            .result
+            .records
+            .iter()
+            .all(|record| { record.get("value").expect("value").display_string() == "***" }));
+    }
+}
+
+#[test]
 fn sealed_large_tables_filter_secret_columns_in_the_statement_context() {
     let _scope = scope(None, None, Role::Admin);
     let directory = tempfile::tempdir().expect("directory");
