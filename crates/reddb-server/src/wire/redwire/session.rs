@@ -70,9 +70,14 @@ impl crate::server::route_catalog::CommandPolicyEngine for RedWireAuthenticatedS
     }
 }
 
-fn redwire_operation_context(session: &AuthedSession, correlation_id: u64) -> OperationContext {
+fn redwire_operation_context(
+    session: &AuthedSession,
+    connection_id: u64,
+    correlation_id: u64,
+) -> OperationContext {
     OperationContextFactory::build(OperationContextInput {
         request_id: Some(format!("redwire-{}-{correlation_id}", session.session_id)),
+        connection_id: Some(connection_id),
         principal: Some(session.username.clone()),
         tenant: session.tenant.clone(),
         ..OperationContextInput::default()
@@ -152,12 +157,17 @@ pub(crate) const fn redwire_command_id(kind: MessageKind) -> Option<&'static str
 }
 
 struct RedWireExecutionContextGuard {
+    previous_connection_id: u64,
     previous_tenant: Option<String>,
     previous_identity: Option<(String, Role)>,
 }
 
 impl RedWireExecutionContextGuard {
     fn install(ctx: &OperationContext, role: Role) -> Self {
+        let previous_connection_id = crate::runtime::execution_context::current_connection_id();
+        if let Some(connection_id) = ctx.connection_id {
+            crate::runtime::execution_context::set_current_connection_id(connection_id);
+        }
         let previous_tenant = crate::runtime::execution_context::current_tenant();
         let previous_identity = crate::runtime::execution_context::current_auth_identity();
         match &ctx.tenant {
@@ -178,6 +188,7 @@ impl RedWireExecutionContextGuard {
             );
         }
         Self {
+            previous_connection_id,
             previous_tenant,
             previous_identity,
         }
@@ -186,6 +197,7 @@ impl RedWireExecutionContextGuard {
 
 impl Drop for RedWireExecutionContextGuard {
     fn drop(&mut self) {
+        crate::runtime::execution_context::set_current_connection_id(self.previous_connection_id);
         match self.previous_identity.take() {
             Some((username, role)) => {
                 crate::runtime::execution_context::set_current_auth_identity(username, role)
@@ -231,6 +243,13 @@ where
         return Ok(());
     }
     let session = session.unwrap();
+    // Own the runtime lease through EOF/Bye/error so teardown rolls back
+    // this connection's transaction before its ID can be reused.
+    let connection = Arc::new(
+        runtime
+            .acquire()
+            .map_err(|error| io::Error::other(error.to_string()))?,
+    );
 
     // Per-connection state for prepared statements + streaming
     // bulk inserts. Owned by the session; dropped on disconnect. The
@@ -303,7 +322,8 @@ where
             Err(err) => return Err(redwire_io_err(err)),
         };
 
-        let operation_context = redwire_operation_context(&session, frame.correlation_id);
+        let operation_context =
+            redwire_operation_context(&session, connection.id(), frame.correlation_id);
         if let Err(error) = authorize_redwire_frame(
             &operation_context,
             frame.kind,
@@ -604,12 +624,12 @@ where
                 let send = os::FrameTx::new(out_tx.clone());
                 let stream_context = operation_context.clone();
                 let stream_role = session.role;
-                // Transactions are still managed per connection using the
-                // default connection id. The stream's authenticated tenant
-                // and principal travel separately in `stream_context` and
-                // are installed only around its synchronous query execution.
-                let in_tx = runtime.connection_in_transaction(0);
+                let in_tx = runtime.connection_in_transaction(connection.id());
+                // A stream can outlive the frame loop. Keep its connection
+                // ID leased until the worker stops using its execution context.
+                let stream_connection = Arc::clone(&connection);
                 tokio::spawn(async move {
+                    let _connection = stream_connection;
                     os::run_output_stream(
                         runtime_ref,
                         frame_id,

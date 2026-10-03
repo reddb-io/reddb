@@ -89,3 +89,6 @@ mod redwire_smoke;
 
 #[path = "ai_local_vector/snowplow_adapter_example.rs"]
 mod snowplow_adapter_example;
+
+#[path = "redwire_protocol/vault_redwire_flow.rs"]
+mod vault_redwire_flow;
