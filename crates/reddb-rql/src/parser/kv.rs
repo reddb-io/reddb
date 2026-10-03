@@ -65,7 +65,9 @@ impl<'a> Parser<'a> {
                     key,
                 }))
             }
-            Token::Ident(ref name) if name.eq_ignore_ascii_case("UNSEAL") => {
+            Token::Ident(ref name)
+                if name.eq_ignore_ascii_case("REVEAL") || name.eq_ignore_ascii_case("UNSEAL") =>
+            {
                 self.advance()?;
                 if model != CollectionModel::Vault {
                     return Err(ParseError::expected(
@@ -76,7 +78,7 @@ impl<'a> Parser<'a> {
                 }
                 let (collection, key) = self.parse_kv_key(model)?;
                 let version = self.parse_optional_vault_version()?;
-                Ok(QueryExpr::KvCommand(KvCommand::Unseal {
+                Ok(QueryExpr::KvCommand(KvCommand::Reveal {
                     collection,
                     key,
                     version,
@@ -178,7 +180,7 @@ impl<'a> Parser<'a> {
             _ => Err(ParseError::expected(
                 if model == CollectionModel::Vault {
                     vec![
-                        "PUT", "GET", "UNSEAL", "ROTATE", "HISTORY", "LIST", "WATCH", "DELETE",
+                        "PUT", "GET", "REVEAL", "ROTATE", "HISTORY", "LIST", "WATCH", "DELETE",
                         "PURGE", "INCR", "DECR", "CAS",
                     ]
                 } else {
@@ -229,9 +231,9 @@ impl<'a> Parser<'a> {
 
     /// Parse `UNSEAL VAULT <collection.key>`.
     pub fn parse_unseal_vault_command(&mut self) -> Result<QueryExpr, ParseError> {
-        if !self.consume_ident_ci("UNSEAL")? {
+        if !self.consume_ident_ci("REVEAL")? && !self.consume_ident_ci("UNSEAL")? {
             return Err(ParseError::expected(
-                vec!["UNSEAL"],
+                vec!["REVEAL"],
                 self.peek(),
                 self.position(),
             ));
@@ -245,7 +247,7 @@ impl<'a> Parser<'a> {
         }
         let (collection, key) = self.parse_kv_key(CollectionModel::Vault)?;
         let version = self.parse_optional_vault_version()?;
-        Ok(QueryExpr::KvCommand(KvCommand::Unseal {
+        Ok(QueryExpr::KvCommand(KvCommand::Reveal {
             collection,
             key,
             version,
@@ -928,7 +930,7 @@ mod tests {
                 .parse_frontend_statement()
                 .unwrap()
                 .into_query_expr(),
-            QueryExpr::KvCommand(KvCommand::Unseal {
+            QueryExpr::KvCommand(KvCommand::Reveal {
                 collection,
                 key,
                 version: Some(2),

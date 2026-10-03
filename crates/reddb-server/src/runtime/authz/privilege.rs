@@ -186,6 +186,42 @@ fn statement_family(expr: &reddb_rql::ast::QueryExpr) -> &'static str {
 }
 
 impl RedDBRuntime {
+    pub(in crate::runtime) fn validate_vault_table_access(
+        &self,
+        expr: &reddb_rql::ast::QueryExpr,
+    ) -> RedDBResult<()> {
+        use reddb_rql::ast::QueryExpr;
+        let mut tables = Vec::new();
+        collect_nested_read_tables(expr, &mut tables);
+        if matches!(
+            expr,
+            QueryExpr::Table(_)
+                | QueryExpr::Join(_)
+                | QueryExpr::Hybrid(_)
+                | QueryExpr::Vector(_)
+                | QueryExpr::Graph(_)
+                | QueryExpr::Path(_)
+                | QueryExpr::Insert(_)
+                | QueryExpr::Update(_)
+                | QueryExpr::Delete(_)
+        ) {
+            tables.extend(crate::runtime::impl_core::collect_table_refs(expr));
+        }
+        if tables.iter().any(|table| {
+            self.inner
+                .db
+                .collection_contract(table)
+                .is_some_and(|contract| {
+                    contract.declared_model == crate::catalog::CollectionModel::Vault
+                })
+        }) {
+            return Err(RedDBError::Query(
+                "access vault entries through $secrets or VAULT commands".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Project a `QueryExpr` to the (action, resource) pair the
     /// privilege engine cares about. Returns `Ok(())` for statements
     /// that don't touch user data (transaction control, SHOW, SET, etc.).
@@ -542,7 +578,7 @@ impl RedDBRuntime {
                 let self_only = matches!(
                     filter,
                     Some(reddb_rql::ast::PolicyPrincipalRef::User(u))
-                        if u.username == username && u.tenant.as_deref() == tenant.as_deref()
+                        if u.username == username && u.tenant.as_deref().or(tenant.as_deref()) == tenant.as_deref()
                 );
                 if self_only {
                     return Ok(());
@@ -563,7 +599,9 @@ impl RedDBRuntime {
                 if role == crate::auth::Role::Admin {
                     return Ok(());
                 }
-                if user.username == username && user.tenant.as_deref() == tenant.as_deref() {
+                if user.username == username
+                    && user.tenant.as_deref().or(tenant.as_deref()) == tenant.as_deref()
+                {
                     return Ok(());
                 }
                 return self.check_policy_management_privilege(
@@ -1134,8 +1172,7 @@ impl RedDBRuntime {
             | QueryExpr::EventsBackfill { .. }
             | QueryExpr::ForkStore { .. }
             | QueryExpr::PromoteFork { .. }
-            | QueryExpr::DropFork { .. }
-            | QueryExpr::ShowSecrets { .. } => {
+            | QueryExpr::DropFork { .. } => {
                 return require_role_tier(
                     &username,
                     role,
@@ -1189,7 +1226,6 @@ impl RedDBRuntime {
                     cmd,
                     KvCommand::Put { .. }
                         | KvCommand::InvalidateTags { .. }
-                        | KvCommand::Unseal { .. }
                         | KvCommand::Rotate { .. }
                 );
                 return if mutation {
@@ -1223,6 +1259,7 @@ impl RedDBRuntime {
             | QueryExpr::ShowConfig { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetKv { .. }
             | QueryExpr::DeleteKv { .. }
             | QueryExpr::SetTenant { .. }

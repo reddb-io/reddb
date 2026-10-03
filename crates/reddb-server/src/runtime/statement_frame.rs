@@ -215,7 +215,10 @@ fn statement_kind(query: &str) -> &'static str {
         return "write";
     }
     if first.eq_ignore_ascii_case("VAULT") {
-        if second.eq_ignore_ascii_case("LIST")
+        if second.eq_ignore_ascii_case("GET")
+            || second.eq_ignore_ascii_case("REVEAL")
+            || second.eq_ignore_ascii_case("UNSEAL")
+            || second.eq_ignore_ascii_case("LIST")
             || second.eq_ignore_ascii_case("WATCH")
             || second.eq_ignore_ascii_case("HISTORY")
         {
@@ -233,15 +236,13 @@ fn statement_kind(query: &str) -> &'static str {
     match &buf[..n] {
         b"SELECT" | b"WITH" | b"SHOW" | b"EXPLAIN" | b"DESCRIBE" | b"DESC" | b"RANK"
         | b"APPROX" | b"APPROXIMATE" | b"ZRANK" | b"ZRANGE" | b"LIST" | b"WATCH" | b"GET"
-        | b"HISTORY" => "read",
+        | b"HISTORY" | b"REVEAL" | b"UNSEAL" => "read",
         b"INSERT" | b"UPDATE" | b"DELETE" | b"UPSERT" | b"MERGE" | b"COPY" | b"TRUNCATE" => "write",
         b"CREATE" | b"ALTER" | b"DROP" | b"PROMOTE" | b"REINDEX" | b"VACUUM" | b"ANALYZE" => "ddl",
         b"GRANT" | b"REVOKE" => "admin",
         b"BEGIN" | b"START" | b"COMMIT" | b"ROLLBACK" | b"SAVEPOINT" | b"RELEASE" | b"END"
         | b"SET" | b"RESET" | b"PREPARE" | b"EXECUTE" | b"DEALLOCATE" | b"USE" => "control",
-        b"PUT" | b"INCR" | b"DECR" | b"ADD" | b"ROTATE" | b"PURGE" | b"UNSEAL" | b"INVALIDATE" => {
-            "write"
-        }
+        b"PUT" | b"INCR" | b"DECR" | b"ADD" | b"ROTATE" | b"PURGE" | b"INVALIDATE" => "write",
         _ => "unknown",
     }
 }
@@ -495,7 +496,7 @@ impl StatementExecutionFrame {
                 Arc::clone(&runtime.inner.db),
                 runtime.inner.auth_store.read().clone(),
             ),
-            _secret_store_guard: SecretStoreGuard::install(runtime.inner.auth_store.read().clone()),
+            _secret_store_guard: SecretStoreGuard::install(runtime),
             _kv_store_guard: KvStoreGuard::install(runtime.inner.auth_store.read().clone()),
             _snapshot_guard: CurrentSnapshotGuard::install(SnapshotContext {
                 snapshot: self.snapshot.clone(),

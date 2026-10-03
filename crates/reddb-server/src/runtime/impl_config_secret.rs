@@ -9,8 +9,7 @@
 //!   `insert_config_json_segments`, `show_config_json_result`.
 //! - **Methods** — `vault_kv_get`, `vault_kv_try_set`, `secret_aes_key`,
 //!   `config_bool`, `binary_document_body_enabled`, `config_u64`, `config_f64`,
-//!   `config_string`, `secret_auto_encrypt`, `secret_auto_decrypt`,
-//!   `apply_secret_decryption`.
+//!   `config_string`, `secret_auto_encrypt`.
 use super::*;
 
 pub(crate) fn seed_storage_deploy_config(
@@ -31,7 +30,15 @@ pub(crate) fn seed_storage_deploy_config(
 }
 
 pub(crate) fn show_secrets_allows_key(key: &str) -> bool {
-    !key.starts_with("red.secret.") && !key.starts_with("red.config.")
+    ![
+        "red.secret.",
+        "red.config.",
+        "red.iam.",
+        "red.acl.",
+        "red.vault.",
+    ]
+    .iter()
+    .any(|prefix| key.starts_with(prefix))
 }
 
 pub(crate) fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
@@ -141,6 +148,31 @@ pub(crate) fn show_config_json_result(
 }
 
 impl RedDBRuntime {
+    pub(crate) fn set_internal_provider_secret(
+        &self,
+        key: &str,
+        value: Option<String>,
+    ) -> RedDBResult<()> {
+        self.reject_vault_transaction()?;
+        if super::execution_context::current_tenant().is_some() {
+            return Err(RedDBError::Query(
+                "system provider credentials are platform-scoped".into(),
+            ));
+        }
+        let auth =
+            self.inner.auth_store.read().clone().ok_or_else(|| {
+                RedDBError::Query("secret storage requires an enabled vault".into())
+            })?;
+        self.check_secret_write_privilege(&auth, key)?;
+        match value {
+            Some(value) => auth.vault_kv_try_set(key.into(), value),
+            None => auth.vault_kv_try_delete(key).map(|_| ()),
+        }
+        .map_err(|err| RedDBError::Query(err.to_string()))?;
+        self.invalidate_result_cache();
+        Ok(())
+    }
+
     /// Read a vault KV secret from the configured AuthStore, if present.
     pub fn vault_kv_get(&self, key: &str) -> Option<String> {
         self.inner
@@ -336,89 +368,5 @@ impl RedDBRuntime {
     /// vault AES key on INSERT. Default `true`.
     pub(crate) fn secret_auto_encrypt(&self) -> bool {
         self.config_bool("red.config.secret.auto_encrypt", true)
-    }
-
-    /// Whether `Value::Secret` columns should be decrypted back to
-    /// plaintext on SELECT when the vault is unsealed. Default `true`.
-    /// Turning this off keeps secrets masked as `***` even while the
-    /// vault is open — useful for audit trails or read-only exports.
-    pub(crate) fn secret_auto_decrypt(&self) -> bool {
-        self.config_bool("red.config.secret.auto_decrypt", true)
-    }
-
-    /// Whether the executing principal may see `SECRET()` columns in clear.
-    ///
-    /// Auto-decryption used to apply to every reader of a table: anyone
-    /// with Select on `users` saw `SECRET()` values in clear, and the
-    /// `secret:read` action only guarded `$secret.*` vault references. Now
-    /// an embedded caller (no identity) and admins decrypt; everyone else
-    /// needs an explicit IAM allow for `secret:read` on the `column`
-    /// resource — the legacy role fallback is deliberately not consulted,
-    /// so a plain read-role grant leaves the column masked as `***`.
-    fn caller_may_read_secret_columns(&self) -> bool {
-        let Some((username, role)) = crate::runtime::impl_core::current_auth_identity() else {
-            return true;
-        };
-        if role == crate::auth::Role::Admin {
-            return true;
-        }
-        let Some(auth_store) = self.inner.auth_store.read().clone() else {
-            return true;
-        };
-        let tenant = crate::runtime::mvcc::current_tenant();
-        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
-        let mut resource =
-            crate::auth::policies::ResourceRef::new("secret".to_string(), "column".to_string());
-        if let Some(tenant) = &tenant {
-            resource = resource.with_tenant(tenant.clone());
-        }
-        let ctx = crate::auth::policies::EvalContext {
-            principal_tenant: tenant.clone(),
-            current_tenant: tenant.clone(),
-            peer_ip: None,
-            mfa_present: false,
-            now_ms: crate::auth::now_ms(),
-            principal_is_admin_role: false,
-            principal_is_platform_scoped: tenant.is_none(),
-        };
-        let policies = auth_store.effective_policies(&principal);
-        let refs: Vec<&crate::auth::policies::Policy> =
-            policies.iter().map(|p| p.as_ref()).collect();
-        matches!(
-            crate::auth::policies::evaluate(&refs, "secret:read", &resource, &ctx),
-            crate::auth::policies::Decision::Allow { .. }
-                | crate::auth::policies::Decision::AdminBypass
-        )
-    }
-
-    /// Walk every record in `result` and swap `Value::Secret(bytes)`
-    /// for the decrypted plaintext when the runtime has the vault
-    /// AES key AND `red.config.secret.auto_decrypt = true`. If the
-    /// key is missing, the vault is sealed, or auto_decrypt is off,
-    /// secrets are left as `Value::Secret` which every formatter
-    /// (Display, JSON) already masks as `***`.
-    pub(crate) fn apply_secret_decryption(&self, result: &mut RuntimeQueryResult) {
-        if !self.secret_auto_decrypt() {
-            return;
-        }
-        if !self.caller_may_read_secret_columns() {
-            return;
-        }
-        let Some(key) = self.secret_aes_key() else {
-            return;
-        };
-        for record in result.result.records.iter_mut() {
-            for value in record.values_mut() {
-                if let Value::Secret(ref bytes) = value {
-                    if let Some(plain) =
-                        super::impl_dml_crypto::decrypt_secret_payload(&key, bytes.as_slice())
-                    {
-                        if let Ok(text) = String::from_utf8(plain) {
-                            *value = Value::text(text);
-                        }
-                    }
-                }
-            }
-        }
     }
 }

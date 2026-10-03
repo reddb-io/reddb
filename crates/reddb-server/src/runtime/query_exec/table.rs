@@ -1446,10 +1446,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // not the sort-ordered slice). Matches the unfiltered fast path's
         // `scan_cap` shape further down in this file.
         let limit = match (query.offset, explicit_limit) {
-            _ if !query.order_by.is_empty() => 10000,
+            _ if !query.order_by.is_empty() => usize::MAX,
             (Some(off), Some(lim)) => (off as usize).saturating_add(lim as usize),
             (None, Some(lim)) => lim as usize,
-            _ => 10000,
+            _ => usize::MAX,
         };
 
         // Bloom filter: extract PK key for segment pruning
@@ -1545,7 +1545,31 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // across sealed segments using std::thread::scope. Sequential path kept
         // for LIMIT queries so the early-exit optimisation still works.
         let entity_count = manager.count();
+        // Secret evaluation uses statement-local key and authorization context,
+        // which storage scan workers do not inherit. Undeclared schemas may
+        // contain SECRET values even when no column type advertises them.
+        let filter_requires_statement_context = residual_filter.as_ref().is_some_and(|filter| {
+            let Some(contract) = db.collection_contract(table_name) else {
+                return true;
+            };
+            if contract.declared_columns.is_empty() {
+                return true;
+            }
+            let mut sensitivity_source = UnifiedRecord::new();
+            for column in &contract.declared_columns {
+                if column.data_type.eq_ignore_ascii_case("secret") {
+                    sensitivity_source.set(&column.name, Value::Secret(Vec::new()));
+                }
+            }
+            crate::runtime::join_filter::filter_uses_secret(
+                filter,
+                &sensitivity_source,
+                Some(table_name),
+                Some(table_alias),
+            )
+        });
         let use_parallel = !crate::runtime::function_budget::active()
+            && !filter_requires_statement_context
             && explicit_limit.is_none()
             && entity_count >= crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
 

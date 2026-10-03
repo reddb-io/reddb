@@ -129,6 +129,7 @@ pub fn tool_capability(tool_name: &str) -> McpCapability {
         // Secrets and principals.
         "reddb_vault_get"
         | "reddb_vault_put"
+        | "reddb_vault_reveal"
         | "reddb_vault_unseal"
         | "reddb_auth_bootstrap"
         | "reddb_auth_create_user"
@@ -162,7 +163,7 @@ pub fn statement_capability(sql: &str) -> McpCapability {
 
     // Vault, secrets and principals are admin regardless of the verb.
     if matches!(first, "VAULT" | "GRANT" | "REVOKE")
-        || matches!(second, "SECRET" | "SECRETS" | "USER" | "POLICY")
+        || matches!(second, "VAULT" | "SECRET" | "SECRETS" | "USER" | "POLICY")
         || (first == "SHOW" && matches!(second, "SECRET" | "SECRETS" | "POLICIES" | "USERS"))
     {
         return McpCapability::Admin;
@@ -236,12 +237,25 @@ mod tests {
             assert_eq!(tool_capability(tool), McpCapability::Write, "{tool}");
         }
         for tool in [
+            "reddb_vault_reveal",
             "reddb_vault_unseal",
             "reddb_vault_get",
             "reddb_auth_bootstrap",
             "reddb_auth_create_api_key",
         ] {
             assert_eq!(tool_capability(tool), McpCapability::Admin, "{tool}");
+        }
+    }
+
+    #[test]
+    fn both_reveal_forms_require_the_admin_surface() {
+        for sql in [
+            "VAULT REVEAL app.token",
+            "REVEAL VAULT app.token",
+            "UNSEAL VAULT app.token",
+            "VAULT UNSEAL app.token",
+        ] {
+            assert_eq!(statement_capability(sql), McpCapability::Admin, "{sql}");
         }
     }
 

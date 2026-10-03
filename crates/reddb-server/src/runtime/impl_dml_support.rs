@@ -22,13 +22,15 @@ use super::impl_dml::{
 
 pub(super) fn split_insert_metadata(
     runtime: &RedDBRuntime,
+    secret_columns: &[bool],
     columns: &[String],
     values: &[Value],
 ) -> RedDBResult<(Vec<(String, Value)>, Vec<(String, MetadataValue)>)> {
     let mut fields = Vec::new();
     let mut metadata = Vec::new();
+    assert_eq!(columns.len(), secret_columns.len());
 
-    for (column, value) in columns.iter().zip(values.iter()) {
+    for ((column, value), secret_column) in columns.iter().zip(values.iter()).zip(secret_columns) {
         // Still support legacy _ttl columns for backward compat
         if let Some(metadata_key) = resolve_sql_ttl_metadata_key(column) {
             let raw_value = sql_literal_to_metadata_value(metadata_key, value)?;
@@ -39,7 +41,7 @@ pub(super) fn split_insert_metadata(
         }
         fields.push((
             column.clone(),
-            runtime.resolve_crypto_sentinel(value.clone())?,
+            runtime.resolve_secret_column_value(value.clone(), *secret_column)?,
         ));
     }
 

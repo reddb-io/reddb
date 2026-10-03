@@ -325,6 +325,7 @@ export class VaultClient {
     options?: { collection?: string; tags?: string[] },
   ): Promise<QueryResult>
   get(key: string, options?: { collection?: string }): Promise<QueryResult>
+  reveal(key: string, options?: { collection?: string }): Promise<QueryResult>
   unseal(key: string, options?: { collection?: string }): Promise<QueryResult>
 }
 

@@ -7708,7 +7708,7 @@ fn test_parse_vault_put_uses_vault_model() {
 #[test]
 fn test_parse_unseal_vault_command() {
     let q = parse("UNSEAL VAULT secrets.api_key").unwrap();
-    if let QueryExpr::KvCommand(KvCommand::Unseal {
+    if let QueryExpr::KvCommand(KvCommand::Reveal {
         collection,
         key,
         version,
@@ -7718,7 +7718,7 @@ fn test_parse_unseal_vault_command() {
         assert_eq!(key, "api_key");
         assert_eq!(version, None);
     } else {
-        panic!("expected Vault KvCommand::Unseal");
+        panic!("expected Vault KvCommand::Reveal");
     }
 }
 
@@ -7727,7 +7727,7 @@ fn test_parse_vault_unseal_command() {
     let q = parse("VAULT UNSEAL secrets.api_key").unwrap();
     assert!(matches!(
         q,
-        QueryExpr::KvCommand(KvCommand::Unseal { collection, key, version })
+        QueryExpr::KvCommand(KvCommand::Reveal { collection, key, version })
             if collection == "secrets" && key == "api_key" && version.is_none()
     ));
 }
@@ -7751,7 +7751,7 @@ fn test_parse_vault_lifecycle_commands() {
     ));
     assert!(matches!(
         parse("UNSEAL VAULT secrets.api_key VERSION 1").unwrap(),
-        QueryExpr::KvCommand(KvCommand::Unseal { collection, key, version: Some(1) })
+        QueryExpr::KvCommand(KvCommand::Reveal { collection, key, version: Some(1) })
             if collection == "secrets" && key == "api_key"
     ));
 }
@@ -7904,4 +7904,37 @@ fn dos_subquery_nesting_at_cap_passes() {
     // 3 levels — well under the default max_depth cap.
     let sql = "SELECT (SELECT (SELECT 1 FROM t) FROM t) FROM t";
     parse(sql).expect("3 levels of subquery nesting must parse");
+}
+
+#[test]
+fn test_parse_canonical_vault_reveal_and_secret_namespaces() {
+    for sql in [
+        "VAULT REVEAL app.api.token VERSION 2",
+        "REVEAL VAULT app.api.token VERSION 2",
+    ] {
+        assert!(
+            matches!(parse(sql).expect("reveal"), QueryExpr::KvCommand(KvCommand::Reveal { collection, key, version: Some(2) }) if collection == "app" && key == "api.token")
+        );
+    }
+    for (reference, expected_path) in [
+        ("$secrets.app.api.token", "app/api.token"),
+        ("$secrets.default.api.token", "red.vault/api.token"),
+        ("$secrets.red.vault.api.token", "red.vault/api.token"),
+        ("$secrets.platform.app.api.token", "platform/app.api.token"),
+        ("$secret.api.token", "red.vault/api.token"),
+    ] {
+        let QueryExpr::Table(query) =
+            parse(&format!("SELECT {reference} AS value")).expect("reference")
+        else {
+            panic!("table query");
+        };
+        let Projection::Function(name, args) = &query.columns[0] else {
+            panic!("secret reference function");
+        };
+        assert_eq!(name, "__SECRET_REF:value");
+        assert!(
+            matches!(&args[0], Projection::Column(path) if path == &format!("LIT:{expected_path}")),
+            "{reference}: {args:?}"
+        );
+    }
 }

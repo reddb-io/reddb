@@ -441,10 +441,11 @@ fn project_scalar_via_evaluator(
             continue;
         };
         let col_name = super::join_filter::projection_name(proj);
+        let sensitive = super::join_filter::expression_uses_secret(expr, source, None, None);
         let value = if let Some(value) = session_context_scalar_value(expr) {
             value
         } else {
-            match evaluator::evaluate(expr, empty_row) {
+            match super::expr_eval::evaluate_typed_expr_with_secret_literals(expr, empty_row) {
                 Ok(v) => v,
                 // Fall back for CONFIG, KV, ML_* and any other special-cased
                 // functions the evaluator does not cover yet.
@@ -462,8 +463,19 @@ fn project_scalar_via_evaluator(
                     .cloned()
                     .unwrap_or(Value::Null)
                 }
-                Err(err) => return Err(RedDBError::Query(err.to_string())),
+                Err(err) => {
+                    return Err(RedDBError::Query(if sensitive {
+                        "secret expression evaluation failed".into()
+                    } else {
+                        err.to_string()
+                    }))
+                }
             }
+        };
+        let value = if sensitive {
+            super::execution_context::secret_query_output(value)?
+        } else {
+            value
         };
         record.set(&col_name, value);
     }

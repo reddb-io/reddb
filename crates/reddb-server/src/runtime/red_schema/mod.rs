@@ -1466,7 +1466,7 @@ mod tests {
         );
         assert_eq!(
             deprecated.get("replacement"),
-            Some(&Value::text("vault:read_metadata"))
+            Some(&Value::text("vault:reveal_history"))
         );
         assert_eq!(deprecated.get("since_version"), Some(&Value::text("0.5.0")));
     }

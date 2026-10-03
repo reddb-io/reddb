@@ -1101,6 +1101,53 @@ fn time_window_contains(tw: &TimeWindow, now_ms: u128) -> bool {
 // Evaluator + simulator
 // ---------------------------------------------------------------------------
 
+/// Existing read/unseal grants remain reveal aliases. Legacy SQL secret
+/// grants map only to the default vault, preserving their original namespace.
+/// Both allow and deny use the same matcher, so aliases cannot bypass a deny.
+fn statement_matches(
+    statement: &Statement,
+    action: &str,
+    resource: &ResourceRef,
+    ctx: &EvalContext,
+) -> bool {
+    let matches = |action: &str, resource: &ResourceRef| {
+        statement
+            .actions
+            .iter()
+            .any(|pattern| action_matches(pattern, action))
+            && statement
+                .resources
+                .iter()
+                .any(|pattern| resource_matches(pattern, resource, ctx))
+    };
+    if matches(action, resource) {
+        return true;
+    }
+    if resource.kind != "vault" {
+        return false;
+    }
+    match action {
+        "vault:reveal" => matches("vault:read", resource),
+        "vault:reveal_history" => matches("vault:unseal_history", resource),
+        "vault:use" | "vault:write" => {
+            let Some(key) = resource.name.strip_prefix("red.vault/") else {
+                return false;
+            };
+            let mut legacy = ResourceRef::new("secret", key);
+            legacy.tenant = resource.tenant.clone();
+            matches(
+                if action == "vault:use" {
+                    "secret:read"
+                } else {
+                    "secret:write"
+                },
+                &legacy,
+            )
+        }
+        _ => false,
+    }
+}
+
 /// Evaluate a request against an ordered list of policies. See the
 /// module-level docs for the algorithm.
 pub fn evaluate(
@@ -1112,18 +1159,19 @@ pub fn evaluate(
     let mut allow_hit: Option<(String, Option<String>)> = None;
 
     for p in policies {
+        // A tenant-owned policy cannot grant authority over platform or
+        // another tenant's resources, even through a wildcard statement.
+        if p.tenant
+            .as_ref()
+            .is_some_and(|tenant| resource.tenant.as_ref() != Some(tenant))
+        {
+            continue;
+        }
         for st in &p.statements {
             if !condition_holds(st.condition.as_ref(), resource, ctx) {
                 continue;
             }
-            if !st.actions.iter().any(|a| action_matches(a, action)) {
-                continue;
-            }
-            if !st
-                .resources
-                .iter()
-                .any(|r| resource_matches(r, resource, ctx))
-            {
+            if !statement_matches(st, action, resource, ctx) {
                 continue;
             }
             match st.effect {
@@ -1195,8 +1243,15 @@ pub fn simulate(
             let mut why: Option<&'static str> = None;
             let mut matched = false;
 
-            if !condition_holds(st.condition.as_ref(), resource, ctx) {
+            if p.tenant
+                .as_ref()
+                .is_some_and(|tenant| resource.tenant.as_ref() != Some(tenant))
+            {
+                why = Some("outside policy tenant");
+            } else if !condition_holds(st.condition.as_ref(), resource, ctx) {
                 why = Some("condition not met");
+            } else if statement_matches(st, action, resource, ctx) {
+                matched = true;
             } else if !st.actions.iter().any(|a| action_matches(a, action)) {
                 why = Some("no action match");
             } else if !st
@@ -1298,6 +1353,73 @@ fn string_field(obj: &Map<String, Value>, key: &str) -> Result<String, PolicyErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_aliases_preserve_allow_deny_and_simulator_decisions() {
+        let context = EvalContext::default();
+        for (old_action, old_resource, new_action, new_resource) in [
+            ("vault:read", "vault:app.token", "vault:reveal", "app.token"),
+            (
+                "vault:unseal_history",
+                "vault:app.token",
+                "vault:reveal_history",
+                "app.token",
+            ),
+            (
+                "secret:read",
+                "secret:acme.*",
+                "vault:use",
+                "red.vault/acme.token",
+            ),
+            (
+                "secret:write",
+                "secret:acme.*",
+                "vault:write",
+                "red.vault/acme.token",
+            ),
+        ] {
+            for effect in ["allow", "deny"] {
+                let policy = Policy::from_json_str(&format!(r#"{{"id":"legacy","version":1,"statements":[{{"effect":"{effect}","actions":["{old_action}"],"resources":["{old_resource}"]}}]}}"#)).expect("policy");
+                let resource = ResourceRef::new("vault", new_resource);
+                let decision = evaluate(&[&policy], new_action, &resource, &context);
+                assert_eq!(
+                    matches!(decision, Decision::Allow { .. }),
+                    effect == "allow"
+                );
+                assert!(matches!(
+                    decision,
+                    Decision::Allow { .. } | Decision::Deny { .. }
+                ));
+                assert_eq!(
+                    simulate(&[&policy], new_action, &resource, &context).decision,
+                    decision
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tenant_owned_wildcards_are_scoped_in_evaluation_and_simulation() {
+        let policy = Policy::from_json_str(r#"{"id":"local","tenant":"acme","version":1,"statements":[{"effect":"allow","actions":["*"],"resources":["*"]}]}"#).expect("policy");
+        let context = EvalContext {
+            principal_tenant: Some("acme".into()),
+            current_tenant: Some("acme".into()),
+            ..EvalContext::default()
+        };
+        for tenant in [None, Some("acme"), Some("globex")] {
+            let mut resource = ResourceRef::new("vault", "app.token");
+            resource.tenant = tenant.map(str::to_owned);
+            let decision = evaluate(&[&policy], "vault:use", &resource, &context);
+            assert_eq!(
+                matches!(decision, Decision::Allow { .. }),
+                tenant == Some("acme")
+            );
+            assert_eq!(
+                simulate(&[&policy], "vault:use", &resource, &context).decision,
+                decision
+            );
+        }
+    }
 
     fn minimal_policy_json() -> &'static str {
         r#"{

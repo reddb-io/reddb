@@ -2393,7 +2393,9 @@ impl<'a> Parser<'a> {
                     )),
                 }
             }
-            Token::Ident(name) if name.eq_ignore_ascii_case("UNSEAL") => {
+            Token::Ident(name)
+                if name.eq_ignore_ascii_case("REVEAL") || name.eq_ignore_ascii_case("UNSEAL") =>
+            {
                 match self.parse_unseal_vault_command()? {
                     QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
                     other => Err(ParseError::new(

@@ -24,6 +24,103 @@ use crate::storage::RedDB;
 use reddb_rql::ast::{BinOp, Expr, FieldRef, UnaryOp};
 use reddb_types::Value;
 
+/// Evaluate typed scalar-subquery literals without changing the original AST.
+/// Its encrypted values remain available to sensitivity checks and plan caches;
+/// the plaintext copy exists only for this evaluator call.
+pub(super) fn evaluate_typed_expr_with_secret_literals(
+    expression: &Expr,
+    row: &dyn crate::storage::query::evaluator::Row,
+) -> Result<Value, crate::storage::query::evaluator::EvalError> {
+    if !expression_contains_secret_literal(expression) {
+        return crate::storage::query::evaluator::evaluate(expression, row);
+    }
+    let mut expression = expression.clone();
+    let mut pending = vec![&mut expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            Expr::Literal {
+                value: value @ Value::Secret(_),
+                ..
+            } => {
+                *value = super::execution_context::secret_query_input(value.clone())
+                    .unwrap_or(Value::Null);
+            }
+            Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => pending.push(operand),
+            Expr::Cast { inner, .. } => pending.push(inner),
+            Expr::BinaryOp { lhs, rhs, .. } => pending.extend([lhs.as_mut(), rhs.as_mut()]),
+            Expr::FunctionCall { args, .. } => pending.extend(args),
+            Expr::WindowFunctionCall { args, window, .. } => {
+                pending.extend(args);
+                pending.extend(&mut window.partition_by);
+                pending.extend(window.order_by.iter_mut().map(|clause| &mut clause.expr));
+            }
+            Expr::Case {
+                branches, else_, ..
+            } => {
+                for (condition, value) in branches {
+                    pending.extend([condition, value]);
+                }
+                if let Some(value) = else_ {
+                    pending.push(value);
+                }
+            }
+            Expr::InList { target, values, .. } => {
+                pending.push(target);
+                pending.extend(values);
+            }
+            Expr::Between {
+                target, low, high, ..
+            } => {
+                pending.extend([target.as_mut(), low.as_mut(), high.as_mut()]);
+            }
+            _ => {}
+        }
+    }
+    crate::storage::query::evaluator::evaluate(&expression, row)
+}
+
+fn expression_contains_secret_literal(expression: &Expr) -> bool {
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            Expr::Literal {
+                value: Value::Secret(_),
+                ..
+            } => return true,
+            Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => pending.push(operand),
+            Expr::Cast { inner, .. } => pending.push(inner),
+            Expr::BinaryOp { lhs, rhs, .. } => pending.extend([lhs.as_ref(), rhs.as_ref()]),
+            Expr::FunctionCall { args, .. } => pending.extend(args),
+            Expr::WindowFunctionCall { args, window, .. } => {
+                pending.extend(args);
+                pending.extend(&window.partition_by);
+                pending.extend(window.order_by.iter().map(|clause| &clause.expr));
+            }
+            Expr::Case {
+                branches, else_, ..
+            } => {
+                for (condition, value) in branches {
+                    pending.extend([condition, value]);
+                }
+                if let Some(value) = else_ {
+                    pending.push(value);
+                }
+            }
+            Expr::InList { target, values, .. } => {
+                pending.push(target);
+                pending.extend(values);
+            }
+            Expr::Between {
+                target, low, high, ..
+            } => {
+                pending.extend([target.as_ref(), low.as_ref(), high.as_ref()]);
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Evaluate an `Expr` against a record and return its resulting
 /// `Value`, or `None` if the expression cannot be resolved (missing
 /// column, type mismatch, unsupported feature for this phase).
@@ -44,9 +141,10 @@ pub(super) fn evaluate_runtime_expr_with_db(
     table_alias: Option<&str>,
 ) -> Option<Value> {
     match expr {
-        Expr::Literal { value, .. } => Some(value.clone()),
+        Expr::Literal { value, .. } => super::execution_context::secret_query_input(value.clone()),
 
-        Expr::Column { field, .. } => resolve_runtime_field(record, field, table_name, table_alias),
+        Expr::Column { field, .. } => resolve_runtime_field(record, field, table_name, table_alias)
+            .and_then(super::execution_context::secret_query_input),
 
         Expr::Parameter { .. } => {
             // Parameter placeholders only appear in prepared-statement
@@ -140,9 +238,7 @@ pub(super) fn evaluate_runtime_expr_with_db(
             }
             if upper == "__SECRET_REF" {
                 let key = expr_path_text(args.first()?)?.to_ascii_lowercase();
-                return crate::runtime::impl_core::current_secret_value(&key)
-                    .map(Value::text)
-                    .or(Some(Value::Null));
+                return crate::runtime::impl_core::current_secret_value(&key).or(Some(Value::Null));
             }
             if upper == "__KV_REF" {
                 let key = expr_path_text(args.first()?)?.to_ascii_lowercase();
@@ -316,6 +412,12 @@ pub(super) fn evaluate_runtime_expr_with_db(
 }
 
 pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) -> Option<Value> {
+    if db
+        .collection_contract(collection)
+        .is_some_and(|contract| contract.declared_model == crate::catalog::CollectionModel::Vault)
+    {
+        return None;
+    }
     let manager = db.store().get_collection(collection)?;
     let mut latest_id: u64 = 0;
     let mut latest_value: Option<Value> = None;

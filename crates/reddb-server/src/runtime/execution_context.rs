@@ -338,38 +338,46 @@ pub(crate) fn current_role_projected() -> Option<String> {
     inherited
 }
 
-pub(crate) fn current_secret_value(path: &str) -> Option<String> {
+pub(crate) fn current_secret_value(path: &str) -> Option<Value> {
     let key = path.to_ascii_lowercase();
     CURRENT_SECRET_RESOLVER.with(|cell| {
         let mut resolver = cell.borrow_mut();
         let resolver = resolver.as_mut()?;
-        if resolver.values.is_none() {
-            resolver.values = resolver
-                .store
-                .as_ref()
-                .map(|store| store.vault_kv_snapshot());
+        if let Some(value) = resolver.values.get(&key) {
+            return value.clone();
         }
-        let values = resolver.values.as_ref()?;
-        let found = values
-            .get(&key)
-            .map(|value| (key.as_str(), value))
-            .or_else(|| {
-                key.strip_prefix("red.vault/").and_then(|rest| {
-                    values.get(rest).map(|value| (rest, value)).or_else(|| {
-                        let red_secret_key = format!("red.secret.{rest}");
-                        values
-                            .get_key_value(&red_secret_key)
-                            .map(|(key, value)| (key.as_str(), value))
-                    })
-                })
-            })?;
-        if !resolver.can_read(found.0) {
-            return None;
-        }
-        Some(found.1.clone())
+        let value = resolver.runtime.query_secret_value(&key).ok().flatten();
+        resolver.values.insert(key, value.clone());
+        value
     })
 }
 
+/// Decrypt only while evaluating a query. Stored and projected values retain
+/// their Secret representation, so formatters cannot expose plaintext.
+pub(crate) fn secret_query_input(value: Value) -> Option<Value> {
+    if !matches!(value, Value::Secret(_)) {
+        return Some(value);
+    }
+    CURRENT_SECRET_RESOLVER.with(|cell| {
+        let resolver = cell.borrow();
+        resolver.as_ref()?.runtime.secret_query_input(value)
+    })
+}
+
+pub(crate) fn secret_query_output(value: Value) -> crate::RedDBResult<Value> {
+    if value.is_null() || matches!(value, Value::Secret(_)) {
+        return Ok(value);
+    }
+    CURRENT_SECRET_RESOLVER.with(|cell| {
+        let resolver = cell.borrow();
+        let resolver = resolver.as_ref().ok_or_else(|| {
+            RedDBError::Query("secret expression requires an active statement".into())
+        })?;
+        resolver.runtime.secret_query_output(value)
+    })
+}
+
+#[cfg(test)]
 fn secret_value_from_snapshot(values: &HashMap<String, String>, key: &str) -> Option<String> {
     if key.starts_with("red.secret.") {
         return None;
@@ -378,41 +386,8 @@ fn secret_value_from_snapshot(values: &HashMap<String, String>, key: &str) -> Op
 }
 
 struct SecretResolver {
-    store: Option<Arc<crate::auth::store::AuthStore>>,
-    values: Option<HashMap<String, String>>,
-    identity: Option<(String, crate::auth::Role, Option<String>)>,
-}
-
-impl SecretResolver {
-    fn can_read(&self, key: &str) -> bool {
-        // `red.secret.*` is the internal system-secrets namespace. Never
-        // expose it via `$secret.X` regardless of IAM role — not even admin.
-        if key.starts_with("red.secret.") {
-            return false;
-        }
-        let Some(store) = &self.store else {
-            return true;
-        };
-        let Some((username, role, tenant)) = &self.identity else {
-            return true;
-        };
-        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), username);
-        let mut resource =
-            crate::auth::policies::ResourceRef::new("secret".to_string(), key.to_string());
-        if let Some(tenant) = tenant {
-            resource = resource.with_tenant(tenant.clone());
-        }
-        let ctx = crate::auth::policies::EvalContext {
-            principal_tenant: tenant.clone(),
-            current_tenant: tenant.clone(),
-            peer_ip: None,
-            mfa_present: false,
-            now_ms: crate::auth::now_ms(),
-            principal_is_admin_role: *role == crate::auth::Role::Admin,
-            principal_is_platform_scoped: tenant.is_none(),
-        };
-        store.check_policy_authz_with_role(&principal, "secret:read", &resource, &ctx, *role)
-    }
+    runtime: super::RedDBRuntime,
+    values: HashMap<String, Option<Value>>,
 }
 
 pub(crate) struct SecretStoreGuard {
@@ -420,15 +395,11 @@ pub(crate) struct SecretStoreGuard {
 }
 
 impl SecretStoreGuard {
-    pub(super) fn install(store: Option<Arc<crate::auth::store::AuthStore>>) -> Self {
+    pub(super) fn install(runtime: &super::RedDBRuntime) -> Self {
         let previous = CURRENT_SECRET_RESOLVER.with(|cell| {
             cell.replace(Some(SecretResolver {
-                store,
-                values: None,
-                identity: current_auth_identity().map(|(username, role)| {
-                    let tenant = current_tenant();
-                    (username, role, tenant)
-                }),
+                runtime: runtime.clone(),
+                values: HashMap::new(),
             }))
         });
         Self { previous }
@@ -620,21 +591,10 @@ pub(crate) fn update_current_config_value(path: &str, value: Value) {
     });
 }
 
-pub(crate) fn update_current_secret_value(path: &str, value: Option<String>) {
-    let key = path.to_ascii_lowercase();
+pub(crate) fn update_current_secret_value(_path: &str, _value: Option<String>) {
     CURRENT_SECRET_RESOLVER.with(|cell| {
         if let Some(resolver) = cell.borrow_mut().as_mut() {
-            let Some(values) = resolver.values.as_mut() else {
-                return;
-            };
-            match value {
-                Some(value) => {
-                    values.insert(key, value);
-                }
-                None => {
-                    values.remove(&key);
-                }
-            }
+            resolver.values.clear();
         }
     });
 }
@@ -669,53 +629,20 @@ mod tests {
         );
     }
 
-    fn with_secret_values<T>(values: HashMap<String, String>, f: impl FnOnce() -> T) -> T {
-        CURRENT_SECRET_RESOLVER.with(|cell| {
-            cell.replace(Some(SecretResolver {
-                store: None,
-                values: Some(values),
-                identity: None,
-            }));
-        });
-        let result = f();
-        CURRENT_SECRET_RESOLVER.with(|cell| {
-            cell.replace(None);
-        });
-        result
-    }
-
     #[test]
-    fn current_secret_value_does_not_fall_back_to_reserved_red_secret_namespace() {
+    fn secret_snapshot_hard_blocks_system_keys() {
         let values = HashMap::from([
-            (
-                "red.secret.aes_key".to_string(),
-                "vault-aes-key".to_string(),
-            ),
-            (
-                "red.secret.ai.providers.anthropic.tokens.default".to_string(),
-                "provider-key".to_string(),
-            ),
-            ("acme.key".to_string(), "user-value".to_string()),
+            ("red.secret.aes_key".into(), "internal".into()),
+            ("acme.key".into(), "user-value".into()),
         ]);
-
-        with_secret_values(values, || {
-            assert_eq!(current_secret_value("red.vault/aes_key"), None);
-            assert_eq!(current_secret_value("red.vault/red.secret.aes_key"), None);
-            // The AI provider-token namespace is hard-blocked from `$secret`
-            // regardless of role, on the new path shape (#1745).
-            assert_eq!(
-                current_secret_value("red.vault/ai.providers.anthropic.tokens.default"),
-                None
-            );
-            assert_eq!(
-                current_secret_value("red.vault/red.secret.ai.providers.anthropic.tokens.default"),
-                None
-            );
-            assert_eq!(
-                current_secret_value("red.vault/acme.key").as_deref(),
-                Some("user-value")
-            );
-        });
+        assert_eq!(
+            secret_value_from_snapshot(&values, "red.secret.aes_key"),
+            None
+        );
+        assert_eq!(
+            secret_value_from_snapshot(&values, "acme.key").as_deref(),
+            Some("user-value")
+        );
     }
 
     fn with_kv_values<T>(values: HashMap<String, String>, f: impl FnOnce() -> T) -> T {

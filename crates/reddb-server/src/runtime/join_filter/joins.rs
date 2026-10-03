@@ -577,3 +577,13 @@ pub(crate) fn execute_runtime_full_scan_join(
         join_type,
     )
 }
+
+fn resolve_runtime_field(
+    record: &UnifiedRecord,
+    field: &FieldRef,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Option<Value> {
+    super::resolve_runtime_field(record, field, table_name, table_alias)
+        .and_then(crate::runtime::execution_context::secret_query_input)
+}

@@ -14,6 +14,76 @@ use super::*;
 pub(crate) const PLAINTEXT_SENTINEL: &str = "@@plain@@";
 
 impl RedDBRuntime {
+    pub(crate) fn resolve_secret_column_value(
+        &self,
+        value: Value,
+        is_secret_column: bool,
+    ) -> RedDBResult<Value> {
+        let value = if is_secret_column {
+            match value {
+                Value::Text(text) => {
+                    let key = self.secret_aes_key().ok_or_else(|| {
+                        RedDBError::Query("SECRET column requires an available vault key".into())
+                    })?;
+                    Value::Secret(encrypt_secret_payload(&key, text.as_bytes()))
+                }
+                Value::Null | Value::Secret(_) => value,
+                _ => {
+                    return Err(RedDBError::Query(
+                        "SECRET columns accept text or encrypted secrets".into(),
+                    ))
+                }
+            }
+        } else {
+            value
+        };
+        self.resolve_crypto_sentinel(value)
+    }
+
+    pub(crate) fn secret_query_input(&self, value: Value) -> Option<Value> {
+        let Value::Secret(payload) = value else {
+            return Some(value);
+        };
+        let key = self.secret_aes_key()?;
+        if let Some(plain) = decrypt_secret_payload(&key, &payload) {
+            return String::from_utf8(plain).ok().map(Value::text);
+        }
+        if payload.len() < 12 {
+            return None;
+        }
+        let nonce: &[u8; 12] = payload[..12].try_into().ok()?;
+        let plain = crate::crypto::aes_gcm::aes256_gcm_decrypt(
+            &key,
+            nonce,
+            b"reddb.secret.value",
+            &payload[12..],
+        )
+        .ok()?;
+        let (value, consumed) = Value::from_bytes(&plain).ok()?;
+        (consumed == plain.len()).then_some(value)
+    }
+
+    /// Intermediate expressions are encrypted as typed values. They can pass
+    /// through CTEs and subqueries without losing their sensitivity or type.
+    pub(crate) fn secret_query_output(&self, value: Value) -> RedDBResult<Value> {
+        let key = self.secret_aes_key().ok_or_else(|| {
+            RedDBError::Query("secret expression requires an available vault key".into())
+        })?;
+        let nonce_bytes = crate::auth::store::random_bytes(12);
+        let nonce: &[u8; 12] = nonce_bytes
+            .as_slice()
+            .try_into()
+            .expect("invariant: generated nonce has twelve bytes");
+        let ciphertext = crate::crypto::aes_gcm::aes256_gcm_encrypt(
+            &key,
+            nonce,
+            b"reddb.secret.value",
+            &value.to_bytes(),
+        );
+        let mut payload = nonce_bytes;
+        payload.extend_from_slice(&ciphertext);
+        Ok(Value::Secret(payload))
+    }
     /// Strip the plaintext sentinel from a `Value::Password` or
     /// `Value::Secret` produced by the parser and apply the real
     /// crypto transform. `Password` is always hashed with argon2id.

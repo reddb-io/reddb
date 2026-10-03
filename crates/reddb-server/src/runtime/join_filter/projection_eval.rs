@@ -5,7 +5,7 @@ pub(in crate::runtime) fn eval_projection_value(
     proj: &Projection,
     source: &UnifiedRecord,
 ) -> Option<Value> {
-    match proj {
+    let value = match proj {
         Projection::Column(col) => {
             if let Some(lit_val) = col.strip_prefix("LIT:") {
                 if lit_val.is_empty() {
@@ -42,7 +42,8 @@ pub(in crate::runtime) fn eval_projection_value(
                     table_name: None,
                     table_alias: None,
                 };
-                crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+                crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(&expr, &row)
+                    .ok()
             })
             .or_else(|| evaluate_scalar_function(name, inner_args, source)),
         Projection::Expression(filter, _) => reddb_rql::sql_lowering::projection_to_expr(proj)
@@ -53,7 +54,8 @@ pub(in crate::runtime) fn eval_projection_value(
                     table_name: None,
                     table_alias: None,
                 };
-                crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+                crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(&expr, &row)
+                    .ok()
             })
             .or_else(|| {
                 Some(Value::Boolean(evaluate_runtime_filter(
@@ -67,7 +69,8 @@ pub(in crate::runtime) fn eval_projection_value(
             let label: String = alias.clone().unwrap_or_else(|| name.clone());
             source.get(label.as_str()).cloned()
         }
-    }
+    };
+    value.and_then(crate::runtime::execution_context::secret_query_input)
 }
 
 pub(in crate::runtime) fn eval_projection_value_with_db(
@@ -287,11 +290,7 @@ pub(in crate::runtime::join_filter) fn evaluate_projection_secret_ref(
     args: &[Projection],
 ) -> Option<Value> {
     let key = projection_path_text(args.first()?)?.to_ascii_lowercase();
-    if crate::runtime::impl_core::current_secret_value(&key).is_some() {
-        Some(Value::text("***"))
-    } else {
-        Some(Value::Null)
-    }
+    crate::runtime::impl_core::current_secret_value(&key).or(Some(Value::Null))
 }
 
 /// Resolve `$kv.*` in a projection. Unlike secrets, plain KV values are

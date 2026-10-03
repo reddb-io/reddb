@@ -267,6 +267,65 @@ pub fn projection_to_expr(projection: &Projection) -> Option<(Expr, Option<Strin
         }
         Projection::Function(name, args) => {
             let (name, alias) = split_projection_function_alias(name);
+            if name == "CASE" {
+                if args.len() < 2 {
+                    return None;
+                }
+                let mut branches = Vec::with_capacity(args.len() / 2);
+                for pair in args.chunks_exact(2) {
+                    let Projection::Expression(filter, None) = &pair[0] else {
+                        return None;
+                    };
+                    let Filter::CompareExpr {
+                        lhs,
+                        op: CompareOp::Eq,
+                        rhs:
+                            Expr::Literal {
+                                value: Value::Boolean(true),
+                                ..
+                            },
+                    } = filter.as_ref()
+                    else {
+                        return None;
+                    };
+                    branches.push((lhs.clone(), projection_to_expr(&pair[1])?.0));
+                }
+                let else_ = if args.len() % 2 == 1 {
+                    Some(Box::new(projection_to_expr(args.last()?)?.0))
+                } else {
+                    None
+                };
+                return Some((
+                    Expr::Case {
+                        branches,
+                        else_,
+                        span: Span::synthetic(),
+                    },
+                    alias,
+                ));
+            }
+            if name == "__SECRET_LITERAL" {
+                let [Projection::Expression(filter, None)] = args.as_slice() else {
+                    return None;
+                };
+                let Filter::CompareExpr {
+                    lhs:
+                        lhs @ Expr::Literal {
+                            value: Value::Secret(_),
+                            ..
+                        },
+                    op: CompareOp::Eq,
+                    rhs:
+                        Expr::Literal {
+                            value: Value::Boolean(true),
+                            ..
+                        },
+                } = filter.as_ref()
+                else {
+                    return None;
+                };
+                return Some((lhs.clone(), alias));
+            }
             let args = args
                 .iter()
                 .map(projection_to_expr)
@@ -692,6 +751,12 @@ pub fn filter_to_expr(filter: &Filter) -> Expr {
 
 pub fn projection_from_literal(value: &Value) -> Option<Projection> {
     match value {
+        // Scalar subqueries return typed encrypted values. Carry the literal
+        // in the existing expression payload instead of rendering it as text.
+        Value::Secret(_) => Some(Projection::Function(
+            "__SECRET_LITERAL".into(),
+            vec![case_condition_projection(Expr::lit(value.clone()))],
+        )),
         Value::Boolean(_) => Some(boolean_expr_projection(Expr::Literal {
             value: value.clone(),
             span: Span::synthetic(),
@@ -1927,5 +1992,63 @@ mod tests {
             "@RL:\"<blob 3 bytes>\""
         );
         assert_eq!(serialize_value_json(&Value::Null), "null");
+    }
+    #[test]
+    fn secret_projection_literals_preserve_ciphertext_and_type() {
+        let secret = Value::Secret(vec![1, 2, 3, 4]);
+        let projection = projection_from_literal(&secret).expect("projection");
+        let (expression, alias) = projection_to_expr(&projection).expect("typed literal");
+        assert_eq!(expression, Expr::lit(secret));
+        assert_eq!(alias, None);
+        assert!(projection_to_expr(&Projection::Function(
+            "__SECRET_LITERAL".into(),
+            vec![Projection::Column("LIT:plaintext".into())],
+        ))
+        .is_none());
+
+        for (value, expected) in [
+            (Value::Integer(8), "LIT:8"),
+            (Value::text("ordinary"), "LIT:ordinary"),
+            (Value::Null, "LIT:"),
+        ] {
+            assert_eq!(
+                projection_from_literal(&value),
+                Some(Projection::Column(expected.into()))
+            );
+        }
+    }
+    #[test]
+    fn case_projection_roundtrip_preserves_nested_case_secret_literals_and_aliases() {
+        let nested = Expr::Case {
+            branches: vec![(col("flag"), lit(Value::Secret(vec![1, 2, 3])))],
+            else_: Some(Box::new(lit(Value::text("fallback")))),
+            span: Span::synthetic(),
+        };
+        for else_ in [None, Some(Box::new(lit(Value::Null)))] {
+            let expression = Expr::Case {
+                branches: vec![
+                    (
+                        bin(BinOp::Eq, col("id"), lit(Value::Integer(1))),
+                        nested.clone(),
+                    ),
+                    (lit(Value::Boolean(false)), lit(Value::Integer(42))),
+                ],
+                else_,
+                span: Span::synthetic(),
+            };
+            let mut projection = expr_to_projection(&expression).expect("CASE projection");
+            let Projection::Function(name, _) = &mut projection else {
+                panic!("CASE projection must have its legacy function carrier");
+            };
+            name.push_str(":result");
+            let (actual, alias) = projection_to_expr(&projection).expect("CASE expression");
+            assert_eq!(actual, expression);
+            assert_eq!(alias.as_deref(), Some("result"));
+        }
+        assert!(projection_to_expr(&Projection::Function(
+            "CASE".into(),
+            vec![Projection::Column("LIT:invalid".into())],
+        ))
+        .is_none());
     }
 }

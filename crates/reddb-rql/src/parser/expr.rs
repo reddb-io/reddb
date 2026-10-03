@@ -393,7 +393,22 @@ impl<'a> Parser<'a> {
             }
             let path = self.parse_dollar_ref_path()?;
             let path_lc = path.to_ascii_lowercase();
-            let (name, key) = if let Some(rest) = path_lc.strip_prefix("secret.") {
+            let (name, key) = if let Some(rest) = path_lc.strip_prefix("secrets.") {
+                let (collection, key) = if let Some(key) = rest.strip_prefix("red.vault.") {
+                    ("red.vault", key)
+                } else {
+                    rest.split_once('.').ok_or_else(|| ParseError::new(
+                        "$secrets expects $secrets.<vault>.<path> (use default for the default vault)",
+                        self.position(),
+                    ))?
+                };
+                let collection = if collection == "default" {
+                    "red.vault"
+                } else {
+                    collection
+                };
+                ("__SECRET_REF", format!("{collection}/{key}"))
+            } else if let Some(rest) = path_lc.strip_prefix("secret.") {
                 ("__SECRET_REF", format!("red.vault/{rest}"))
             } else if let Some(rest) = path_lc
                 .strip_prefix("red.secret.")
@@ -416,7 +431,7 @@ impl<'a> Parser<'a> {
             } else {
                 return Err(ParseError::new(
                     format!(
-                        "unknown $ reference `${path}`; expected $secret.*, $red.secret.*, $red.secrets.*, $config.*, $red.config.*, $kv.*, or $red.kv.*"
+                        "unknown $ reference `${path}`; expected $secrets.<vault>.<path>, $secret.*, $red.secret.*, $red.secrets.*, $config.*, $red.config.*, $kv.*, or $red.kv.*"
                     ),
                     self.position(),
                 ));

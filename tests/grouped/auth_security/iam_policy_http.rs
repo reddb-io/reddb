@@ -99,7 +99,7 @@ fn list_policy_actions_returns_catalog() {
         "body={body}"
     );
     assert!(
-        body.contains("\"replacement\":\"vault:read_metadata\""),
+        body.contains("\"replacement\":\"vault:reveal_history\""),
         "body={body}"
     );
     assert!(body.contains("\"since_version\":\"0.5.0\""), "body={body}");
@@ -133,7 +133,7 @@ fn lint_policy_returns_diagnostics() {
         "body={body}"
     );
     assert!(
-        body.contains("\"suggested_fix\":\"vault:read_metadata\""),
+        body.contains("\"suggested_fix\":\"vault:reveal_history\""),
         "body={body}"
     );
     assert!(

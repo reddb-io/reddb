@@ -133,7 +133,80 @@ pub(crate) fn execute_aggregate_query(
     query: &TableQuery,
 ) -> RedDBResult<UnifiedResult> {
     validate_aggregate_projection_shape(query)?;
+    let mut sensitivity_source = UnifiedRecord::new();
+    let contract = db.collection_contract(&query.table);
+    let declared_schema = contract
+        .as_ref()
+        .is_some_and(|contract| !contract.declared_columns.is_empty());
+    if let Some(contract) = contract {
+        for column in &contract.declared_columns {
+            if column.data_type.eq_ignore_ascii_case("secret") {
+                sensitivity_source.set(&column.name, Value::Secret(Vec::new()));
+            }
+        }
+    }
+    let projections = effective_table_projections(query);
+    let uses_secrets = |sensitivity_source: &UnifiedRecord| {
+        effective_table_filter(query)
+            .as_ref()
+            .is_some_and(|filter| {
+                crate::runtime::join_filter::filter_uses_secret(
+                    filter,
+                    sensitivity_source,
+                    Some(&query.table),
+                    query.alias.as_deref(),
+                )
+            })
+            || effective_table_having_filter(query)
+                .as_ref()
+                .is_some_and(|filter| {
+                    crate::runtime::join_filter::filter_uses_secret(
+                        filter,
+                        sensitivity_source,
+                        Some(&query.table),
+                        query.alias.as_deref(),
+                    )
+                })
+            || projections.iter().any(|projection| {
+                crate::runtime::join_filter::projection_uses_secret(
+                    projection,
+                    sensitivity_source,
+                    Some(&query.table),
+                    query.alias.as_deref(),
+                )
+            })
+            || effective_table_group_by_exprs(query)
+                .iter()
+                .any(|expression| {
+                    crate::runtime::join_filter::expression_uses_secret(
+                        expression,
+                        sensitivity_source,
+                        Some(&query.table),
+                        query.alias.as_deref(),
+                    )
+                })
+            || query.order_by.iter().any(|order| {
+                order.expr.as_ref().is_some_and(|expression| {
+                    crate::runtime::join_filter::expression_uses_secret(
+                        expression,
+                        sensitivity_source,
+                        Some(&query.table),
+                        query.alias.as_deref(),
+                    )
+                }) || crate::runtime::join_filter::resolve_runtime_field(
+                    sensitivity_source,
+                    &order.field,
+                    Some(&query.table),
+                    query.alias.as_deref(),
+                )
+                .is_some_and(|value| matches!(value, Value::Secret(_)))
+            })
+    };
 
+    let mut sensitive_query = uses_secrets(&sensitivity_source);
+
+    // Untyped collections discover sensitive fields while scanning. Their
+    // aggregate values must stay on this path, which tracks those fields.
     // ── Push-down GROUP BY planner — issue #161 ───────────────────────
     // The new `AggregateQueryPlanner` deep module accumulates per-group
     // state directly in the scan loop, materialising one row per group
@@ -143,17 +216,19 @@ pub(crate) fn execute_aggregate_query(
     // Unsupported shapes return None and fall through to the legacy
     // path below — this is a strict subset, so behaviour is identical
     // for queries it accepts.
-    if let Some(result) =
-        super::aggregate_pushdown_dispatch::try_execute_pushdown_aggregate(db, query)?
-    {
-        return Ok(result);
+    if declared_schema && !sensitive_query {
+        if let Some(result) =
+            super::aggregate_pushdown_dispatch::try_execute_pushdown_aggregate(db, query)?
+        {
+            return Ok(result);
+        }
     }
 
     // Fast path — SELECT <col>, COUNT/SUM/AVG(...) FROM t GROUP BY <col>
     // parallelised across segments via rayon. This is the mini-duel
     // aggregate_group shape and avoids the generic Vec<GroupKeyPart> +
     // spill-capable accumulator for low-cardinality group scans.
-    if !crate::runtime::function_budget::active() {
+    if declared_schema && !sensitive_query && !crate::runtime::function_budget::active() {
         if let Some(result) = try_execute_parallel_single_col_numeric_aggs(db, query)? {
             return Ok(result);
         }
@@ -343,6 +418,25 @@ pub(crate) fn execute_aggregate_query(
                 }};
             }
 
+            if !declared_schema {
+                if let Some(record) = get_or_make_record!() {
+                    let mut discovered = false;
+                    for column in record.column_names() {
+                        if record
+                            .get(&column)
+                            .is_some_and(|value| matches!(value, Value::Secret(_)))
+                            && sensitivity_source.get(&column).is_none()
+                        {
+                            sensitivity_source.set(&column, Value::Secret(Vec::new()));
+                            discovered = true;
+                        }
+                    }
+                    if discovered {
+                        sensitive_query = uses_secrets(&sensitivity_source);
+                    }
+                }
+            }
+
             if let Some(c) = compiled_filter.as_ref() {
                 let matches = c.evaluate(entity).resolve_with_fallback(|| {
                     let Some(record) = get_or_make_record!() else {
@@ -369,7 +463,10 @@ pub(crate) fn execute_aggregate_query(
                     let mut values = Vec::with_capacity(effective_group_by.len());
                     for (resolver_opt, expr) in group_by_kinds.iter().zip(&effective_group_by) {
                         let value = if let Some(resolver) = resolver_opt {
-                            resolver.get_value(0, entity).map(|v| v.into_owned())
+                            resolver
+                                .get_value(0, entity)
+                                .map(|v| v.into_owned())
+                                .and_then(crate::runtime::execution_context::secret_query_input)
                         } else {
                             None
                         };
@@ -427,6 +524,12 @@ pub(crate) fn execute_aggregate_query(
                 Entry::Occupied(occ) => occ.into_mut(),
                 Entry::Vacant(vac) => {
                     if need_spill_check {
+                        if sensitive_query {
+                            spill_err = Some(
+                                "secret aggregation exceeded its in-memory group limit".into(),
+                            );
+                            return false;
+                        }
                         // Re-extract the key (consumed by the insert) and
                         // flush every existing group to the spill file,
                         // then start a fresh in-memory batch holding this
@@ -490,6 +593,7 @@ pub(crate) fn execute_aggregate_query(
                         None => continue,
                     }
                 };
+                let val = val.and_then(crate::runtime::execution_context::secret_query_input);
                 let Some(val) = val else { continue };
                 let num = super::aggregate_value_to_f64(&val);
 
@@ -573,14 +677,18 @@ pub(crate) fn execute_aggregate_query(
     // Flush the remaining in-memory groups to spill_agg, then drain all
     // on-disk batches back into a single merged HashMap.
     // When no spill occurred, spill_agg holds only the in-memory table.
-    for (k, v) in groups {
+    let groups = if sensitive_query {
+        groups
+    } else {
+        for (k, v) in groups {
+            spill_agg
+                .accumulate(k, v)
+                .map_err(|e| RedDBError::Query(format!("agg spill flush: {e}")))?;
+        }
         spill_agg
-            .accumulate(k, v)
-            .map_err(|e| RedDBError::Query(format!("agg spill flush: {e}")))?;
-    }
-    let groups = spill_agg
-        .drain()
-        .map_err(|e| RedDBError::Query(format!("agg spill drain: {e}")))?;
+            .drain()
+            .map_err(|e| RedDBError::Query(format!("agg spill drain: {e}")))?
+    };
 
     // Issue #769 — cap the materialized in-memory state. `groups` is the
     // full distinct-group set (in-memory + spilled, merged) so its
@@ -688,6 +796,47 @@ pub(crate) fn execute_aggregate_query(
         records.truncate(limit as usize);
     }
 
+    if sensitive_query {
+        for record in &mut records {
+            for projection in effective_projections
+                .iter()
+                .chain(&runtime_plan.hidden_aggregates)
+            {
+                if crate::runtime::join_filter::projection_uses_secret(
+                    projection,
+                    &sensitivity_source,
+                    Some(table_name),
+                    Some(table_alias),
+                ) {
+                    let label = visible_aggregate_output_name(projection)
+                        .map(|(_, label)| label)
+                        .unwrap_or_else(|| projection_name(projection));
+                    if let Some(value) = record.get(&label).cloned() {
+                        record.set(
+                            &label,
+                            crate::runtime::execution_context::secret_query_output(value)?,
+                        );
+                    }
+                }
+            }
+            for expression in &effective_group_by {
+                if crate::runtime::join_filter::expression_uses_secret(
+                    expression,
+                    &sensitivity_source,
+                    Some(table_name),
+                    Some(table_alias),
+                ) {
+                    let label = group_output_label(query, expression);
+                    if let Some(value) = record.get(&label).cloned() {
+                        record.set(
+                            &label,
+                            crate::runtime::execution_context::secret_query_output(value)?,
+                        );
+                    }
+                }
+            }
+        }
+    }
     Ok(UnifiedResult {
         columns,
         records,
@@ -1704,7 +1853,8 @@ fn resolve_group_by_value(db: &RedDB, group_expr: &Expr, record: &UnifiedRecord)
     }
 
     match group_expr {
-        Expr::Column { field, .. } => resolve_runtime_field(record, field, None, None),
+        Expr::Column { field, .. } => resolve_runtime_field(record, field, None, None)
+            .and_then(crate::runtime::execution_context::secret_query_input),
         _ => {
             let projection = projection_from_expr(group_expr)?;
             let value = eval_projection_value_with_db(Some(db), &projection, record)?;
