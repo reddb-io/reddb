@@ -165,7 +165,7 @@ impl RedDBRuntime {
         })
     }
 
-    fn record_pending_store_wal_actions(
+    pub(crate) fn record_pending_store_wal_actions(
         &self,
         conn_id: u64,
         actions: crate::storage::unified::DeferredStoreWalActions,
@@ -617,7 +617,7 @@ impl RedDBRuntime {
         let Some(pending) = self.inner.pending_kv_watch_events.write().remove(&conn_id) else {
             return;
         };
-        for event in pending {
+        for (_, event) in pending {
             self.cdc_emit_kv(
                 event.op,
                 &event.collection,

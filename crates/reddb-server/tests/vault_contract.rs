@@ -717,7 +717,7 @@ fn tenant_user_grants_use_only_local_entries_and_platform_sharing_is_explicit() 
 }
 
 #[test]
-fn vault_mutations_in_transactions_are_rejected_and_failed_creation_leaves_no_collection() {
+fn vault_administration_in_transactions_is_rejected_and_failed_creation_leaves_no_collection() {
     let _scope = scope(None, None, Role::Admin);
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("transactions.rdb");
@@ -733,11 +733,7 @@ fn vault_mutations_in_transactions_are_rejected_and_failed_creation_leaves_no_co
     runtime.execute_query("CREATE VAULT failed").expect("retry");
     set_current_connection_id(777);
     runtime.execute_query("BEGIN").expect("begin");
-    for sql in [
-        "SET SECRET token = 'tx-value'",
-        "VAULT PUT failed.token = 'tx-value'",
-        "CREATE VAULT tx",
-    ] {
+    for sql in ["CREATE VAULT tx", "VAULT PURGE failed.token"] {
         assert!(runtime
             .execute_query(sql)
             .expect_err("transaction mutation rejected")

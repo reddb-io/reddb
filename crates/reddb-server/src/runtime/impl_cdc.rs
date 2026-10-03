@@ -181,7 +181,7 @@ impl RedDBRuntime {
         before: Option<crate::json::Value>,
         after: Option<crate::json::Value>,
     ) {
-        if self.current_xid().is_some() {
+        if let Some(writer_xid) = self.current_xid() {
             let conn_id = current_connection_id();
             let event = crate::replication::cdc::KvWatchEvent {
                 collection: collection.to_string(),
@@ -198,7 +198,7 @@ impl RedDBRuntime {
                 .write()
                 .entry(conn_id)
                 .or_default()
-                .push(event);
+                .push((writer_xid, event));
             return;
         }
 
