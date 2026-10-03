@@ -434,12 +434,11 @@ pub(in crate::runtime) fn expression_uses_secret(
                 value: Value::Secret(_),
                 ..
             } => return true,
-            Expr::Column { field, .. } => {
+            Expr::Column { field, .. }
                 if resolve_runtime_field(source, field, table_name, table_alias)
-                    .is_some_and(|value| matches!(value, Value::Secret(_)))
-                {
-                    return true;
-                }
+                    .is_some_and(|value| matches!(value, Value::Secret(_))) =>
+            {
+                return true;
             }
             Expr::FunctionCall { name, args, .. } => {
                 if name.eq_ignore_ascii_case("__SECRET_REF") {

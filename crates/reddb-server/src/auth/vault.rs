@@ -662,17 +662,17 @@ impl Vault {
                 .read_page_no_checksum(VAULT_HEADER_PAGE)
                 .map_err(|err| VaultError::Pager(err.to_string()))?;
             let version = page.content()[4];
-            if version == VAULT_VERSION || version == VAULT_PASSPHRASE_VERSION {
-                if version != expected {
-                    return Err(VaultError::InvalidCredential(
-                        if version == VAULT_PASSPHRASE_VERSION {
-                            "this vault requires a passphrase"
-                        } else {
-                            "this vault requires a certificate"
-                        }
-                        .into(),
-                    ));
-                }
+            if (version == VAULT_VERSION || version == VAULT_PASSPHRASE_VERSION)
+                && version != expected
+            {
+                return Err(VaultError::InvalidCredential(
+                    if version == VAULT_PASSPHRASE_VERSION {
+                        "this vault requires a passphrase"
+                    } else {
+                        "this vault requires a certificate"
+                    }
+                    .into(),
+                ));
             }
         }
         Ok(())
