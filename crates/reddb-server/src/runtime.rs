@@ -908,6 +908,7 @@ pub struct ContextSummary {
 struct PoolState {
     next_id: u64,
     active: usize,
+    pooled_active: usize,
     idle: Vec<u64>,
     total_checkouts: u64,
 }
@@ -917,6 +918,7 @@ impl Default for PoolState {
         Self {
             next_id: 1,
             active: 0,
+            pooled_active: 0,
             idle: Vec::new(),
             total_checkouts: 0,
         }
@@ -1411,6 +1413,7 @@ pub struct RedDBRuntime {
 
 pub struct RuntimeConnection {
     id: u64,
+    uses_pool_slot: bool,
     inner: Arc<RuntimeInner>,
 }
 

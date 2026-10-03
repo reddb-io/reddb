@@ -534,6 +534,113 @@ fn spawn_server_with_envs(args: &[&str], stderr_path: &Path, envs: &[(&str, &str
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_password_bootstrap_rejects_sealed_and_wrong_password_restarts() {
+    use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
+    use reddb_client::ValueOut;
+
+    let directory = tempfile::tempdir().expect("server directory");
+    let path = directory.path().join("password.rdb");
+    let path = path.to_str().expect("database path");
+    let login_file = directory.path().join("login.pw");
+    std::fs::write(&login_file, "synthetic-login-password").expect("login password file");
+    let http = format!("127.0.0.1:{}", free_port());
+    let wire_port = free_port();
+    let wire = format!("127.0.0.1:{wire_port}");
+    let password = "minha senha arbitrária ' com espaços";
+    for (phase, credential, should_serve) in [
+        (0, password, true),
+        (1, "wrong-password", false),
+        (2, "", false),
+        (3, password, true),
+    ] {
+        let mut args = vec![
+            "server",
+            "--path",
+            path,
+            "--vault",
+            "true",
+            "--http",
+            "--http-bind",
+            &http,
+            "--wire-bind",
+            &wire,
+        ];
+        if phase == 0 {
+            args.extend_from_slice(&[
+                "--bootstrap-preset",
+                "production",
+                "--bootstrap-admin",
+                "admin",
+                "--bootstrap-admin-password-file",
+                login_file.to_str().expect("password path"),
+            ]);
+        }
+        let mut server = spawn_server_with_envs(
+            &args,
+            &directory.path().join(format!("phase-{phase}.stderr")),
+            &[
+                ("REDDB_AUTH", "true"),
+                ("REDDB_VAULT_PASSPHRASE", credential),
+                ("REDDB_VAULT_PASSPHRASE_FILE", ""),
+            ],
+        );
+        let serving = wait_until_serving(&mut server, &wire, Duration::from_secs(30));
+        assert_eq!(serving, should_serve, "phase {phase}: {}", server.stderr());
+        if !should_serve {
+            assert!(!server
+                .child
+                .try_wait()
+                .expect("failed startup status")
+                .expect("startup must exit")
+                .success());
+            assert!(
+                server.stderr().contains("vault"),
+                "phase {phase}: {}",
+                server.stderr()
+            );
+            continue;
+        }
+        let mut client = tokio::time::timeout(
+            Duration::from_secs(10),
+            RedWireClient::connect(ConnectOptions::new("127.0.0.1", wire_port).with_auth(
+                Auth::Basic {
+                    user: "admin".into(),
+                    pass: "synthetic-login-password".into(),
+                },
+            )),
+        )
+        .await
+        .expect("login deadline")
+        .expect("real server login");
+        let (sql, expected) = if phase == 0 {
+            client
+                .query("CREATE VAULT app")
+                .await
+                .expect("server vault");
+            client
+                .query("VAULT PUT app.token = 'synthetic-persisted-value'")
+                .await
+                .expect("server secret write");
+            ("SELECT $secrets.app.token AS value", "***")
+        } else {
+            ("VAULT REVEAL app.token", "synthetic-persisted-value")
+        };
+        let result = tokio::time::timeout(Duration::from_secs(10), client.query(sql))
+            .await
+            .expect("query deadline")
+            .expect("server secret query");
+        assert_eq!(
+            result.rows[0]
+                .iter()
+                .find(|(name, _)| name == "value")
+                .map(|(_, value)| value),
+            Some(&ValueOut::String(expected.into()))
+        );
+        client.close().await.expect("close server client");
+    }
+}
+
 /// reddb-io/rio-lair#255 catch-22 regression — a static cloud-init config
 /// points `REDDB_CERTIFICATE_FILE` at the SAME path as
 /// `--bootstrap-cert-out` on EVERY boot. On the very first boot the file

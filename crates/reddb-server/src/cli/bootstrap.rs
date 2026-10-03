@@ -123,6 +123,9 @@ pub fn run(args: BootstrapArgs) -> Result<BootstrapOutcome, String> {
             crate::service_cli::FIRST_ADMIN_ALLOW_ALL_POLICY,
         )
         .map_err(|err| format!("attach bootstrap policy: {err}"))?;
+    store
+        .persist_to_vault_result()
+        .map_err(|err| format!("persist bootstrap policy: {err}"))?;
 
     let certificate = result.certificate.clone().unwrap_or_default();
     let api_key = result.api_key.key.clone();

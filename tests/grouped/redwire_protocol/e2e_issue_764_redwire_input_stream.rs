@@ -120,6 +120,244 @@ fn open_output_frame(corr: u64, stream_id: u16, sql: &str) -> Frame {
 }
 
 #[tokio::test]
+async fn streams_check_their_own_connections_transaction() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let (addr, runtime) = start_server().await;
+        let mut transaction = TcpStream::connect(addr).await.expect("transaction socket");
+        handshake_anonymous(&mut transaction).await;
+        let begin = reddb_wire::redwire::build_query_frame(3, "BEGIN").expect("BEGIN frame");
+        transaction
+            .write_all(&encode_frame(&begin))
+            .await
+            .expect("send BEGIN");
+        assert_eq!(read_frame(&mut transaction).await.kind, MessageKind::Result);
+
+        for frame in [
+            open_input_frame(4, 7),
+            open_output_frame(5, 9, "SELECT * FROM sink"),
+        ] {
+            transaction
+                .write_all(&encode_frame(&frame))
+                .await
+                .expect("open stream in transaction");
+            let error = read_frame(&mut transaction).await;
+            assert_eq!(error.kind, MessageKind::StreamError);
+            assert_eq!(error.stream_id, frame.stream_id);
+            let body: serde_json::Value =
+                serde_json::from_slice(&error.payload).expect("stream error");
+            assert_eq!(body["code"], "stream_in_transaction_unsupported");
+        }
+
+        // A transaction on another connection cannot disable autocommit streams.
+        let mut observer = TcpStream::connect(addr).await.expect("observer socket");
+        handshake_anonymous(&mut observer).await;
+        observer
+            .write_all(&encode_frame(&open_input_frame(6, 7)))
+            .await
+            .expect("open observer input stream");
+        assert_eq!(read_frame(&mut observer).await.kind, MessageKind::OpenAck);
+        observer
+            .write_all(&encode_frame(&chunk_frame(
+                6,
+                7,
+                0,
+                serde_json::json!([{"id":1,"name":"committed"}]),
+                true,
+            )))
+            .await
+            .expect("observer input chunk");
+        assert_eq!(read_frame(&mut observer).await.kind, MessageKind::StreamEnd);
+        assert_eq!(
+            runtime
+                .execute_query("SELECT * FROM sink")
+                .expect("committed stream row")
+                .result
+                .records
+                .len(),
+            1
+        );
+        observer
+            .write_all(&encode_frame(&open_output_frame(
+                7,
+                9,
+                "SELECT * FROM sink",
+            )))
+            .await
+            .expect("open observer output stream");
+        assert_eq!(read_frame(&mut observer).await.kind, MessageKind::OpenAck);
+        let chunk = read_frame(&mut observer).await;
+        assert_eq!(chunk.kind, MessageKind::StreamChunk);
+        let body: serde_json::Value = serde_json::from_slice(&chunk.payload).expect("streamed row");
+        assert_eq!(body["rows"].as_array().expect("rows").len(), 1);
+        assert_eq!(read_frame(&mut observer).await.kind, MessageKind::StreamEnd);
+        // Reverse ordering must also reject a chunk instead of staging it.
+        observer
+            .write_all(&encode_frame(&open_input_frame(8, 11)))
+            .await
+            .expect("open input before BEGIN");
+        assert_eq!(read_frame(&mut observer).await.kind, MessageKind::OpenAck);
+        observer
+            .write_all(&encode_frame(
+                &reddb_wire::redwire::build_query_frame(9, "BEGIN").expect("observer BEGIN"),
+            ))
+            .await
+            .expect("BEGIN after open");
+        assert_eq!(read_frame(&mut observer).await.kind, MessageKind::Result);
+        observer
+            .write_all(&encode_frame(&chunk_frame(
+                8,
+                11,
+                0,
+                serde_json::json!([{"id":2,"name":"uncommitted"}]),
+                true,
+            )))
+            .await
+            .expect("chunk after BEGIN");
+        let error = read_frame(&mut observer).await;
+        assert_eq!(error.kind, MessageKind::StreamError);
+        let body: serde_json::Value = serde_json::from_slice(&error.payload).expect("chunk error");
+        assert_eq!(body["code"], "stream_in_transaction_unsupported");
+        assert_eq!(
+            runtime
+                .execute_query("SELECT * FROM sink")
+                .expect("no staged stream row")
+                .result
+                .records
+                .len(),
+            1
+        );
+        let rollback =
+            reddb_wire::redwire::build_query_frame(8, "ROLLBACK").expect("ROLLBACK frame");
+        transaction
+            .write_all(&encode_frame(&rollback))
+            .await
+            .expect("send ROLLBACK");
+        assert_eq!(read_frame(&mut transaction).await.kind, MessageKind::Result);
+    })
+    .await
+    .expect("stream transaction test deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disconnect_with_backpressured_output_stream_rolls_back_the_session() {
+    use reddb::health::HealthProvider;
+    use reddb::{EntityId, UnifiedEntity};
+    use reddb_types::Value;
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (addr, runtime) = start_server().await;
+        let auth = Arc::new(reddb::auth::AuthStore::new(
+            reddb::auth::AuthConfig::default(),
+        ));
+        auth.ensure_vault_secret_key();
+        runtime.set_auth_store(auth);
+        runtime
+            .execute_query("SET SECRET token = 'original'")
+            .expect("seed secret");
+        let store = runtime.db().store();
+        // Exceed TCP buffers and the bounded outbound queue so the worker
+        // remains active after the session's transaction responses arrive.
+        let payload = "x".repeat(32_768);
+        for id in 0..1024_i64 {
+            store
+                .insert_auto(
+                    "sink",
+                    UnifiedEntity::table_row(
+                        EntityId::new(0),
+                        "sink",
+                        u64::try_from(id).expect("positive row ID"),
+                        vec![Value::Integer(id), Value::text(payload.clone())],
+                    ),
+                )
+                .expect("stream row");
+        }
+        let mut socket = TcpStream::connect(addr).await.expect("stream socket");
+        handshake_anonymous(&mut socket).await;
+        for frame in [
+            open_output_frame(
+                20,
+                7,
+                "SELECT * FROM sink WHERE $secrets.default.token = 'original'",
+            ),
+            reddb_wire::redwire::build_query_frame(21, "BEGIN").expect("BEGIN"),
+            reddb_wire::redwire::build_query_frame(22, "SET SECRET token = 'abandoned'")
+                .expect("pending write"),
+        ] {
+            socket
+                .write_all(&encode_frame(&frame))
+                .await
+                .expect("send stream and transaction");
+        }
+        let mut transaction_results = 0;
+        while transaction_results < 2 {
+            let frame = read_frame(&mut socket).await;
+            if matches!(frame.correlation_id, 21 | 22) {
+                assert_eq!(frame.kind, MessageKind::Result);
+                transaction_results += 1;
+            }
+        }
+        assert_eq!(
+            runtime
+                .health()
+                .diagnostics
+                .get("runtime.active_connections"),
+            Some(&"2".to_string()),
+            "session and stream worker must each own a lease"
+        );
+        drop(socket);
+        loop {
+            if runtime
+                .health()
+                .diagnostics
+                .get("runtime.active_connections")
+                == Some(&"0".to_string())
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let revealed = runtime
+            .execute_query("VAULT REVEAL red.vault.token")
+            .expect("rollback on disconnect");
+        assert_eq!(
+            revealed.result.records[0].get("value"),
+            Some(&Value::text("original"))
+        );
+        assert_eq!(
+            runtime
+                .execute_query("VAULT HISTORY red.vault.token")
+                .expect("no abandoned version")
+                .result
+                .records
+                .len(),
+            1
+        );
+        let mut reused = reddb_client::redwire::RedWireClient::connect(
+            reddb_client::redwire::ConnectOptions::new(addr.ip().to_string(), addr.port())
+                .with_auth(reddb_client::redwire::Auth::Anonymous),
+        )
+        .await
+        .expect("reused session");
+        reused.query("BEGIN").await.expect("fresh transaction");
+        let revealed = reused
+            .query("VAULT REVEAL red.vault.token")
+            .await
+            .expect("recycled ID has no pending writes");
+        assert_eq!(
+            revealed.rows[0]
+                .iter()
+                .find(|(name, _)| name == "value")
+                .map(|(_, value)| value),
+            Some(&reddb_client::ValueOut::String("original".into()))
+        );
+        reused.query("COMMIT").await.expect("empty commit");
+        reused.close().await.expect("close recycled session");
+    })
+    .await
+    .expect("backpressured stream disconnect deadline");
+}
+
+#[tokio::test]
 async fn ac1_open_input_write_chunks_then_stream_end() {
     let (addr, runtime) = start_server().await;
     let mut sock = TcpStream::connect(addr).await.unwrap();

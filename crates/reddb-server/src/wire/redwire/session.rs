@@ -245,11 +245,9 @@ where
     let session = session.unwrap();
     // Own the runtime lease through EOF/Bye/error so teardown rolls back
     // this connection's transaction before its ID can be reused.
-    let connection = Arc::new(
-        runtime
-            .acquire()
-            .map_err(|error| io::Error::other(error.to_string()))?,
-    );
+    let connection = runtime
+        .acquire_wire_connection()
+        .map_err(|error| io::Error::other(error.to_string()))?;
 
     // Per-connection state for prepared statements + streaming
     // bulk inserts. Owned by the session; dropped on disconnect. The
@@ -282,6 +280,7 @@ where
     // active stream workers so a `StreamCancel` for one stream_id
     // does not disturb the rest of the connection.
     let stream_registry = Arc::new(super::output_stream::StreamRegistry::new());
+    let mut output_stream_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     // Per-connection input-stream registry (issue #764 / S5). Input
     // streams are driven inline from this reader loop — each
@@ -307,6 +306,7 @@ where
     let mut queue_wait_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     loop {
+        while output_stream_tasks.try_join_next().is_some() {}
         // Reap finished wait tasks so the set does not accumulate joined
         // handles over a long-lived connection. Non-blocking — only
         // already-complete tasks are drained.
@@ -560,7 +560,7 @@ where
                             continue;
                         }
                     };
-                    let in_tx = runtime.connection_in_transaction(0);
+                    let in_tx = runtime.connection_in_transaction(connection.id());
                     let config = crate::server::output_stream::StreamConfig::load(&runtime);
                     let snapshot_lsn = runtime.cdc_current_lsn();
                     let clock = crate::server::output_stream::SystemClock;
@@ -622,13 +622,17 @@ where
                 let runtime_ref = Arc::clone(&runtime);
                 let registry_ref = Arc::clone(&stream_registry);
                 let send = os::FrameTx::new(out_tx.clone());
-                let stream_context = operation_context.clone();
+                let mut stream_context = operation_context.clone();
                 let stream_role = session.role;
                 let in_tx = runtime.connection_in_transaction(connection.id());
-                // A stream can outlive the frame loop. Keep its connection
-                // ID leased until the worker stops using its execution context.
-                let stream_connection = Arc::clone(&connection);
-                tokio::spawn(async move {
+                // Streams execute in autocommit independently of a later BEGIN
+                // on the session. The worker owns its ID until safe teardown;
+                // the JoinSet aborts workers when the frame loop disconnects.
+                let stream_connection = runtime
+                    .acquire_wire_connection()
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                stream_context.connection_id = Some(stream_connection.id());
+                output_stream_tasks.spawn(async move {
                     let _connection = stream_connection;
                     os::run_output_stream(
                         runtime_ref,
@@ -787,6 +791,22 @@ where
                         0,
                     )?;
                     queue_send(&out_tx, encode_frame(&err)).await?;
+                    continue;
+                }
+                // BEGIN may arrive after OpenStream. Never report a chunk as
+                // committed if it would instead join the session transaction.
+                if runtime.connection_in_transaction(connection.id()) {
+                    let state = input_registry.remove(sid).expect("stream presence checked");
+                    let error = crate::server::output_stream::OpenStreamError::TransactionActive;
+                    let frame = is::build_input_stream_error_frame(
+                        frame_id,
+                        sid,
+                        error.code(),
+                        error.message(),
+                        state.chunk_count,
+                        state.committed_rid,
+                    )?;
+                    queue_send(&out_tx, encode_frame(&frame)).await?;
                     continue;
                 }
                 let chunk = match is::parse_input_chunk(&frame.payload) {

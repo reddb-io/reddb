@@ -472,6 +472,29 @@ async fn wire_connections_have_independent_vault_transactions_and_disconnect_rol
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wire_admission_preserves_capacity_without_consuming_embedded_pool_slots() {
+    let directory = tempfile::tempdir().expect("directory");
+    let server = Server::start(&directory.path().join("capacity.rdb"), false).await;
+    let mut clients = Vec::new();
+    for _ in 0..65 {
+        let mut client = server.connect(Auth::Anonymous).await;
+        query(&mut client, "SELECT 1").await;
+        clients.push(client);
+    }
+    let embedded = server
+        .runtime
+        .acquire()
+        .expect("embedded pool remains available");
+    server.wait_for_connections(66).await;
+    for client in clients {
+        client.close().await.expect("close admitted client");
+    }
+    server.wait_for_connections(1).await;
+    drop(embedded);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_bootstrap_password_sealed_restart_and_unlocked_client_round_trip() {
     use std::io::Write;
     use std::process::{Command, Stdio};
