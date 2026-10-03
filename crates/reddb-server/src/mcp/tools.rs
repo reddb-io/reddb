@@ -561,6 +561,15 @@ pub fn all_tools() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "reddb_vault_reveal",
+            command_id: "keyed.v1.vault",
+            description: "Explicitly reveal a Vault secret to a caller with vault:reveal permission.",
+            input_schema: schema(
+                vec![("collection", "string", "Vault collection name"), ("key", "string", "Vault key to reveal")],
+                vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
             name: "reddb_vault_unseal",
             command_id: "keyed.v1.vault",
             description: "Explicitly unseal a Vault secret and return plaintext to an authorized caller.",
@@ -979,6 +988,7 @@ mod tests {
         assert!(names.contains(&"reddb_config_resolve"));
         assert!(names.contains(&"reddb_vault_get"));
         assert!(names.contains(&"reddb_vault_put"));
+        assert!(names.contains(&"reddb_vault_reveal"));
         assert!(names.contains(&"reddb_vault_unseal"));
         assert!(names.contains(&"reddb_delete"));
         assert!(names.contains(&"reddb_search_vector"));

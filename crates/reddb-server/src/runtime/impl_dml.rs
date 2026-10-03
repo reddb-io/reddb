@@ -657,7 +657,7 @@ impl RedDBRuntime {
                     )));
                 }
                 let (mut fields, mut metadata) =
-                    split_insert_metadata(self, &query.columns, row_values)?;
+                    split_insert_metadata(self, &query.table, &query.columns, row_values)?;
                 if query
                     .on_conflict
                     .as_ref()
@@ -1091,8 +1091,12 @@ impl RedDBRuntime {
 
                     match query.entity_type {
                         InsertEntityType::Node => {
-                            let (node_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (node_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &query.table,
+                                &query.columns,
+                                row_values,
+                            )?;
                             if let Some(clause) = &query.on_conflict {
                                 if let Some(conflict_id) = self
                                     .on_conflict_unique_index_conflict_id(
@@ -1172,8 +1176,12 @@ impl RedDBRuntime {
                             });
                         }
                         InsertEntityType::Edge => {
-                            let (edge_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (edge_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &query.table,
+                                &query.columns,
+                                row_values,
+                            )?;
                             if let Some(clause) = &query.on_conflict {
                                 if let Some(conflict_id) = self
                                     .on_conflict_unique_index_conflict_id(
@@ -1362,8 +1370,12 @@ impl RedDBRuntime {
                                     .to_string(),
                             ));
                             }
-                            let (fields, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (fields, mut metadata) = split_insert_metadata(
+                                self,
+                                &query.table,
+                                &query.columns,
+                                row_values,
+                            )?;
                             merge_with_clauses(
                                 &mut metadata,
                                 query.ttl_ms,
@@ -1376,8 +1388,12 @@ impl RedDBRuntime {
                             unreachable!("NODE and EDGE are handled by the prepared graph path")
                         }
                         InsertEntityType::Vector => {
-                            let (vector_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (vector_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &query.table,
+                                &query.columns,
+                                row_values,
+                            )?;
                             merge_with_clauses(
                                 &mut metadata,
                                 query.ttl_ms,
@@ -1407,8 +1423,12 @@ impl RedDBRuntime {
                             entity_outputs.push(self.create_vector(input)?);
                         }
                         InsertEntityType::Document => {
-                            let (document_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (document_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &query.table,
+                                &query.columns,
+                                row_values,
+                            )?;
                             let (columns, values) = pairwise_columns_values(&document_values);
                             let body = find_document_body_json(&columns, &values)?;
                             let conflict_fields =
@@ -1467,8 +1487,12 @@ impl RedDBRuntime {
                             entity_outputs.push(output);
                         }
                         InsertEntityType::Kv => {
-                            let (kv_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (kv_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &query.table,
+                                &query.columns,
+                                row_values,
+                            )?;
                             merge_with_clauses(
                                 &mut metadata,
                                 query.ttl_ms,
@@ -2417,26 +2441,43 @@ impl RedDBRuntime {
             }
             if compound_op.is_none() {
                 if let Ok(value) = fold_expr_to_value(expr.clone()) {
-                    if let Some(metadata_key) = metadata_key {
-                        let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
-                        let (canonical_key, canonical_value) =
-                            canonicalize_sql_ttl_metadata(metadata_key, raw_value);
-                        static_metadata_assignments
-                            .push((canonical_key.to_string(), canonical_value));
-                    } else {
-                        let value = self.resolve_crypto_sentinel(value)?;
-                        static_field_assignments.push((
-                            column.clone(),
-                            normalize_row_update_assignment_with_plan(
-                                &query.table,
-                                column,
-                                value,
-                                row_contract_plan.as_ref(),
-                            )?,
-                        ));
-                        row_modified_columns.push(column.clone());
+                    // Without a declared type, a text constant may overwrite an
+                    // existing Secret. Resolve it per row to preserve encryption.
+                    let unknown_text_target = metadata_key.is_none()
+                        && matches!(value, Value::Text(_))
+                        && row_contract_plan
+                            .as_ref()
+                            .and_then(|plan| plan.declared_rules.get(column))
+                            .is_none();
+                    if !unknown_text_target {
+                        if let Some(metadata_key) = metadata_key {
+                            let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
+                            let (canonical_key, canonical_value) =
+                                canonicalize_sql_ttl_metadata(metadata_key, raw_value);
+                            static_metadata_assignments
+                                .push((canonical_key.to_string(), canonical_value));
+                        } else {
+                            let is_secret_column = row_contract_plan
+                                .as_ref()
+                                .and_then(|plan| plan.declared_rules.get(column))
+                                .is_some_and(|rule| {
+                                    rule.data_type == reddb_types::DataType::Secret
+                                });
+                            let value =
+                                self.resolve_secret_column_value(value, is_secret_column)?;
+                            static_field_assignments.push((
+                                column.clone(),
+                                normalize_row_update_assignment_with_plan(
+                                    &query.table,
+                                    column,
+                                    value,
+                                    row_contract_plan.as_ref(),
+                                )?,
+                            ));
+                            row_modified_columns.push(column.clone());
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
 
@@ -2560,6 +2601,24 @@ impl RedDBRuntime {
                 rhs
             };
 
+            let sensitive = super::join_filter::expression_uses_secret(
+                &assignment.expr,
+                record,
+                Some(&query.table),
+                Some(&query.table),
+            );
+            let secret_target = assignment
+                .row_rule
+                .as_ref()
+                .is_some_and(|rule| rule.data_type == reddb_types::DataType::Secret)
+                || record
+                    .get(&assignment.column)
+                    .is_some_and(|value| matches!(value, Value::Secret(_)));
+            if sensitive && !secret_target {
+                return Err(RedDBError::Query(
+                    "secret-derived UPDATE values require a SECRET target column".into(),
+                ));
+            }
             if let Some(metadata_key) = assignment.metadata_key {
                 let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
                 let (canonical_key, canonical_value) =
@@ -2572,7 +2631,14 @@ impl RedDBRuntime {
                     assignment.column.clone(),
                     normalize_row_update_value_for_rule(
                         &query.table,
-                        self.resolve_crypto_sentinel(value)?,
+                        self.resolve_secret_column_value(
+                            value,
+                            assignment.row_rule.as_ref().is_some_and(|rule| {
+                                rule.data_type == reddb_types::DataType::Secret
+                            }) || record
+                                .get(&assignment.column)
+                                .is_some_and(|value| matches!(value, Value::Secret(_))),
+                        )?,
                         assignment.row_rule.as_ref(),
                     )?,
                 ));

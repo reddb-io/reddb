@@ -1,6 +1,7 @@
 use super::*;
 use crate::auth::column_policy_gate::ColumnAccessRequest;
 use crate::auth::UserId;
+use crate::catalog::CollectionModel;
 use crate::replication::cdc::ChangeRecord;
 use reddb_rql::ast::TableSource;
 // Authorization surface moved to `super::authz` (issue #1622). Re-export the
@@ -44,7 +45,7 @@ pub(crate) use super::impl_audit_control::{
 // Config/secret free helpers still called unqualified from the dispatch here.
 pub(crate) use super::impl_config_secret::{
     insert_config_json_path, secret_sql_value_to_string, seed_storage_deploy_config,
-    show_config_json_result, show_secrets_allows_key,
+    show_config_json_result,
 };
 pub(super) use super::impl_core_outer_scope::{
     first_column_values, query_references_outer_scope, relation_scopes_for_query,
@@ -142,6 +143,7 @@ pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
         // query referencing them as volatile (never result-cache it).
         "$config",
         "$secret",
+        "$red.secret",
         "$kv",
         // NOW() / CURRENT_TIMESTAMP / CURRENT_DATE intentionally
         // omitted for now — they ARE volatile but today's tests rely
@@ -385,14 +387,15 @@ impl RedDBRuntime {
             "delete" => crate::telemetry::slow_query_logger::QueryKind::Delete,
             _ => crate::telemetry::slow_query_logger::QueryKind::Internal,
         };
-        // SQL redaction: pass the raw query through. The slow-query
-        // logger writes structured JSON so embedded literals stay
-        // escape-safe at the JSON boundary (proven by
-        // `adversarial_sql_is_escape_safe` in slow_query_logger.rs).
-        // PII redaction (e.g. literal masking) is a follow-up.
+        let lowered = query.to_ascii_lowercase();
+        let logged_query = if lowered.contains("secret") || lowered.contains("vault") {
+            "secret statement (SQL redacted)".to_string()
+        } else {
+            query.to_string()
+        };
         self.inner
             .slow_query_logger
-            .record(kind, elapsed_ms, query.to_string(), &scope);
+            .record(kind, elapsed_ms, logged_query, &scope);
 
         // Issue #1241 — record latency into the bounded per-`kind`
         // histogram substrate (always, not only above the slow-query
@@ -503,11 +506,7 @@ impl RedDBRuntime {
             }
         };
 
-        let mut result = self.dispatch_expr(expr, query, mode)?;
-        if result.statement_type == "select" {
-            self.apply_secret_decryption(&mut result);
-        }
-        Ok(result)
+        self.dispatch_expr(expr, query, mode)
     }
 
     pub fn causal_session(&self) -> crate::runtime::CausalSession {
@@ -1160,28 +1159,28 @@ impl RedDBRuntime {
                     ));
                 }
                 reject_engine_internal_vault_key(key)?;
-                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
-                    RedDBError::Query("SET SECRET requires an enabled, unsealed vault".to_string())
-                })?;
-                self.check_secret_write_privilege(&auth_store, key)?;
-                if matches!(value, Value::Null) {
-                    auth_store
-                        .vault_kv_try_delete(key)
-                        .map_err(|err| RedDBError::Query(err.to_string()))?;
-                    update_current_secret_value(key, None);
-                    self.invalidate_result_cache();
+                if key.starts_with("red.secret.") {
+                    self.set_internal_provider_secret(
+                        key,
+                        if value.is_null() {
+                            None
+                        } else {
+                            Some(secret_sql_value_to_string(value)?)
+                        },
+                    )?;
                     return Ok(RuntimeQueryResult::ok_message(
                         query.to_string(),
-                        &format!("secret deleted: {key}"),
-                        "delete_secret",
+                        &format!("secret set: {key}"),
+                        "set_secret",
                     ));
                 }
-                let value = secret_sql_value_to_string(value)?;
-                auth_store
-                    .vault_kv_try_set(key.clone(), value.clone())
-                    .map_err(|err| RedDBError::Query(err.to_string()))?;
-                update_current_secret_value(key, Some(value));
-                self.invalidate_result_cache();
+                let value = if value.is_null() {
+                    None
+                } else {
+                    Some(secret_sql_value_to_string(value)?)
+                };
+                self.set_user_secret(key, value.clone())?;
+                update_current_secret_value(key, value);
                 Ok(RuntimeQueryResult::ok_message(
                     query.to_string(),
                     &format!("secret set: {key}"),
@@ -1191,27 +1190,20 @@ impl RedDBRuntime {
             // DELETE SECRET key
             QueryExpr::DeleteSecret { ref key } => {
                 reject_engine_internal_vault_key(key)?;
-                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
-                    RedDBError::Query(
-                        "DELETE SECRET requires an enabled, unsealed vault".to_string(),
-                    )
-                })?;
-                self.check_secret_write_privilege(&auth_store, key)?;
-                let deleted = auth_store
-                    .vault_kv_try_delete(key)
-                    .map_err(|err| RedDBError::Query(err.to_string()))?;
-                if deleted {
-                    update_current_secret_value(key, None);
+                if key.starts_with("red.secret.") {
+                    self.set_internal_provider_secret(key, None)?;
+                    return Ok(RuntimeQueryResult::ok_message(
+                        query.to_string(),
+                        &format!("secret deleted: {key}"),
+                        "delete_secret",
+                    ));
                 }
-                self.invalidate_result_cache();
+                self.set_user_secret(key, None)?;
+                update_current_secret_value(key, None);
                 Ok(RuntimeQueryResult::ok_message(
                     query.to_string(),
                     &format!("secret deleted: {key}"),
-                    if deleted {
-                        "delete_secret"
-                    } else {
-                        "delete_secret_not_found"
-                    },
+                    "delete_secret",
                 ))
             }
             // SET KV key = value — plain (non-encrypted) user KV entry (#1602)
@@ -1267,36 +1259,7 @@ impl RedDBRuntime {
             }
             // SHOW SECRET[S] [prefix]
             QueryExpr::ShowSecrets { ref prefix } => {
-                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
-                    RedDBError::Query("SHOW SECRET requires an enabled, unsealed vault".to_string())
-                })?;
-                if !auth_store.is_vault_backed() {
-                    return Err(RedDBError::Query(
-                        "SHOW SECRET requires an enabled, unsealed vault".to_string(),
-                    ));
-                }
-                let mut keys = auth_store.vault_kv_keys();
-                keys.sort();
-                let mut result = UnifiedResult::with_columns(vec![
-                    "key".into(),
-                    "value".into(),
-                    "status".into(),
-                ]);
-                for key in keys {
-                    if !show_secrets_allows_key(&key) {
-                        continue;
-                    }
-                    if let Some(ref pfx) = prefix {
-                        if !key.starts_with(pfx) {
-                            continue;
-                        }
-                    }
-                    let mut record = UnifiedRecord::new();
-                    record.set("key", Value::text(key));
-                    record.set("value", Value::text("***"));
-                    record.set("status", Value::text("active"));
-                    result.push(record);
-                }
+                let result = self.show_user_secrets(prefix.as_deref())?;
                 Ok(RuntimeQueryResult {
                     query: query.to_string(),
                     mode,
@@ -2388,16 +2351,6 @@ impl RedDBRuntime {
             );
         }
 
-        // Decrypt Value::Secret columns in-place before caching, so
-        // cached results match the post-decrypt shape and repeat
-        // queries skip the per-row AES-GCM pass.
-        let mut query_result = query_result;
-        if let Ok(ref mut result) = query_result {
-            if result.statement_type == "select" {
-                self.apply_secret_decryption(result);
-            }
-        }
-
         // Cache SELECT results for 30s.
         // Skip: pre-serialized JSON (large clone), and result sets > 5 rows.
         // Large multi-row results (range scans, filtered scans) are rarely
@@ -2429,7 +2382,7 @@ impl RedDBRuntime {
     /// statement's snapshot rather than minting a new one, and the frame opts
     /// out of the result cache because there is no stable text key.
     ///
-    /// Applies secret decryption on SELECT results, identical to `execute_query`.
+    /// Keeps secret SELECT results masked, identical to `execute_query`.
     pub fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
         let frame = super::statement_frame::StatementExecutionFrame::build(
             self,
@@ -2453,18 +2406,14 @@ impl RedDBRuntime {
         let mode = detect_mode(statement);
         let query_str = statement;
 
-        let result = self.dispatch_expr(expr, query_str, mode)?;
-        let mut r = result;
-        if r.statement_type == "select" {
-            self.apply_secret_decryption(&mut r);
-        }
-        Ok(r)
+        self.dispatch_expr(expr, query_str, mode)
     }
 
     pub(super) fn validate_model_operations_before_auth(
         &self,
         expr: &QueryExpr,
     ) -> RedDBResult<()> {
+        self.validate_vault_table_access(expr)?;
         use crate::catalog::CollectionModel;
         use crate::runtime::ddl::polymorphic_resolver;
         use reddb_rql::ast::KvCommand;
@@ -2522,7 +2471,7 @@ impl RedDBRuntime {
                     KvCommand::Watch {
                         collection, model, ..
                     } => (collection.as_str(), *model),
-                    KvCommand::Unseal { collection, .. } => {
+                    KvCommand::Reveal { collection, .. } => {
                         (collection.as_str(), CollectionModel::Vault)
                     }
                 };
@@ -3817,16 +3766,13 @@ mod security_gate_tests {
                 .cloned()
                 .expect("token column")
         };
-        // Any table reader used to get the plaintext; now only an admin or
-        // a principal with an explicit `secret:read` allow does.
+        // Ordinary SELECT stays masked for every role. Plaintext retrieval
+        // requires an explicit reveal operation.
         assert!(
             matches!(token_for("ro", Role::Read), Value::Secret(_)),
             "a read-role principal must see the column masked"
         );
-        assert_eq!(
-            token_for("root", Role::Admin),
-            Value::text("sk_live_abc".to_string())
-        );
+        assert!(matches!(token_for("root", Role::Admin), Value::Secret(_)));
     }
 
     #[test]
@@ -3834,8 +3780,8 @@ mod security_gate_tests {
         let runtime = runtime_with_user("bob", Role::Write);
         let _identity = IdentityGuard::install("bob", Role::Write);
         // These fell through the gate's wildcard arm, so a write-role
-        // principal could scrub or vacuum the store and list every secret.
-        for sql in ["VACUUM", "SCRUB", "SHOW SECRETS"] {
+        // principal could scrub or vacuum the store.
+        for sql in ["VACUUM", "SCRUB"] {
             let err = runtime
                 .execute_query(sql)
                 .expect_err("store-wide operation must be refused for a non-admin");

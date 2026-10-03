@@ -112,9 +112,7 @@ pub fn run(args: BootstrapArgs) -> Result<BootstrapOutcome, String> {
         .bootstrap(&args.username, &password)
         .map_err(|err| format!("bootstrap: {err}"))?;
 
-    let certificate = result.certificate.clone().ok_or_else(|| {
-        "bootstrap succeeded but no certificate was issued (vault not configured?)".to_string()
-    })?;
+    let certificate = result.certificate.clone().unwrap_or_default();
     let api_key = result.api_key.key.clone();
 
     // Vault::save() inside bootstrap() already calls pager.flush()
@@ -180,6 +178,13 @@ pub fn render_success(outcome: &BootstrapOutcome, args: &BootstrapArgs) {
     if args.print_certificate {
         // Just the cert — useful for `cert=$(red bootstrap ... --print-certificate)`.
         println!("{}", outcome.certificate);
+        return;
+    }
+    if outcome.certificate.is_empty() {
+        eprintln!(
+            "[reddb] bootstrapped admin user `{}` using the configured vault passphrase",
+            outcome.username
+        );
         return;
     }
     eprintln!(

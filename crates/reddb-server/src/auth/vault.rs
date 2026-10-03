@@ -83,6 +83,7 @@ const VAULT_DATA_MAGIC: &[u8; 4] = b"RDVD";
 /// Current on-disk vault format. v1 was the legacy fixed two-page
 /// format (pages 2 + 3); v2 introduces the dynamic chain.
 const VAULT_VERSION: u8 = 2;
+const VAULT_PASSPHRASE_VERSION: u8 = 3;
 
 /// Last legacy version. Pre-1.0 we refuse to migrate it — operators
 /// re-bootstrap with `red bootstrap` to upgrade.
@@ -215,6 +216,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub enum VaultError {
     /// No certificate available.
     NoKey,
+    InvalidCredential(String),
     /// Encryption failed.
     Encryption,
     /// Decryption failed (wrong key or corrupt data).
@@ -232,8 +234,9 @@ impl std::fmt::Display for VaultError {
         match self {
             Self::NoKey => write!(
                 f,
-                "no vault certificate: set REDDB_CERTIFICATE or REDDB_CERTIFICATE_FILE"
+                "no vault credential: set REDDB_CERTIFICATE or REDDB_VAULT_PASSPHRASE (or their _FILE variants)"
             ),
+            Self::InvalidCredential(reason) => write!(f, "invalid vault credential: {reason}"),
             Self::Encryption => write!(f, "vault encryption failed"),
             Self::Decryption => write!(f, "vault decryption failed (wrong key or corrupt data)"),
             Self::Io(err) => write!(f, "vault I/O error: {err}"),
@@ -252,9 +255,11 @@ impl From<VaultError> for AuthError {
 }
 
 fn decode_certificate_hex(certificate_hex: &str) -> Result<Vec<u8>, VaultError> {
-    let certificate = hex::decode(certificate_hex.trim()).map_err(|_| VaultError::NoKey)?;
+    let certificate = hex::decode(certificate_hex.trim()).map_err(|_| VaultError::InvalidCredential("certificate must contain 64 hexadecimal characters; use REDDB_VAULT_PASSPHRASE for a password".into()))?;
     if certificate.len() != 32 {
-        return Err(VaultError::NoKey);
+        return Err(VaultError::InvalidCredential(
+            "certificate must contain exactly 32 bytes (64 hexadecimal characters)".into(),
+        ));
     }
     Ok(certificate)
 }
@@ -531,6 +536,7 @@ impl VaultState {
 pub struct Vault {
     key: SecureKey,
     salt: [u8; 16],
+    version: u8,
 }
 
 /// Argon2id parameters tuned for vault key derivation.
@@ -566,9 +572,17 @@ impl Vault {
     /// the existing page content.  Otherwise a fresh salt is generated
     /// and will be written on the first `save()` call.
     pub fn open(pager: &Pager) -> Result<Self, VaultError> {
-        let cert_hex =
-            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE").ok_or(VaultError::NoKey)?;
-        Self::with_certificate(pager, &cert_hex)
+        match (
+            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE"),
+            crate::utils::env_with_file_fallback("REDDB_VAULT_PASSPHRASE"),
+        ) {
+            (Some(_), Some(_)) => Err(VaultError::InvalidCredential(
+                "set either REDDB_CERTIFICATE or REDDB_VAULT_PASSPHRASE, not both".into(),
+            )),
+            (Some(certificate), None) => Self::with_certificate(pager, &certificate),
+            (None, Some(passphrase)) => Self::with_passphrase(pager, &passphrase),
+            (None, None) => Err(VaultError::NoKey),
+        }
     }
 
     fn salt_for_open(pager: &Pager) -> Result<[u8; 16], VaultError> {
@@ -593,13 +607,75 @@ impl Vault {
     /// Argon2id.  This is the primary unseal mechanism introduced by the
     /// certificate-based seal system.
     pub fn with_certificate(pager: &Pager, certificate_hex: &str) -> Result<Self, VaultError> {
+        Self::check_credential_format(pager, VAULT_VERSION)?;
         let certificate = decode_certificate_hex(certificate_hex)?;
 
         let key = KeyPair::vault_key_from_certificate(&certificate);
 
         let salt = Self::salt_for_open(pager)?;
 
-        Ok(Self { key, salt })
+        Ok(Self {
+            key,
+            salt,
+            version: VAULT_VERSION,
+        })
+    }
+
+    /// Passphrases use RFC 9106 Argon2id and the persisted random salt.
+    /// Format v3 distinguishes them from the legacy random-certificate KDF.
+    pub fn with_passphrase(pager: &Pager, passphrase: &str) -> Result<Self, VaultError> {
+        Self::check_credential_format(pager, VAULT_PASSPHRASE_VERSION)?;
+        let salt = Self::salt_for_open(pager)?;
+        let key = Self::passphrase_key(passphrase, &salt)?;
+        Ok(Self {
+            key,
+            salt,
+            version: VAULT_PASSPHRASE_VERSION,
+        })
+    }
+
+    fn passphrase_key(passphrase: &str, salt: &[u8; 16]) -> Result<SecureKey, VaultError> {
+        if passphrase.is_empty() || passphrase.len() > 4096 {
+            return Err(VaultError::InvalidCredential(
+                "passphrase must contain 1 to 4096 bytes".into(),
+            ));
+        }
+        let parameters = argon2::Params::new(19 * 1024, 2, 1, Some(32))
+            .expect("invariant: vault Argon2id parameters are valid");
+        let hasher = argon2::Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            parameters,
+        );
+        let mut bytes = [0u8; 32];
+        hasher
+            .hash_password_into(passphrase.as_bytes(), salt, &mut bytes)
+            .map_err(|_| VaultError::Encryption)?;
+        let key = SecureKey::new(&bytes);
+        bytes.fill(0);
+        Ok(key)
+    }
+
+    fn check_credential_format(pager: &Pager, expected: u8) -> Result<(), VaultError> {
+        if Self::has_saved_state(pager) {
+            let page = pager
+                .read_page_no_checksum(VAULT_HEADER_PAGE)
+                .map_err(|err| VaultError::Pager(err.to_string()))?;
+            let version = page.content()[4];
+            if version == VAULT_VERSION || version == VAULT_PASSPHRASE_VERSION {
+                if version != expected {
+                    return Err(VaultError::InvalidCredential(
+                        if version == VAULT_PASSPHRASE_VERSION {
+                            "this vault requires a passphrase"
+                        } else {
+                            "this vault requires a certificate"
+                        }
+                        .into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Open a vault from environment variables.
@@ -614,8 +690,11 @@ impl Vault {
     /// Used during bootstrap when the certificate is freshly generated
     /// and not yet hex-encoded.
     pub fn with_certificate_bytes(pager: &Pager, certificate: &[u8]) -> Result<Self, VaultError> {
+        Self::check_credential_format(pager, VAULT_VERSION)?;
         if certificate.len() != 32 {
-            return Err(VaultError::NoKey);
+            return Err(VaultError::InvalidCredential(
+                "certificate must contain 32 bytes".into(),
+            ));
         }
         let key = KeyPair::vault_key_from_certificate(certificate);
 
@@ -629,7 +708,11 @@ impl Vault {
             }
         };
 
-        Ok(Self { key, salt })
+        Ok(Self {
+            key,
+            salt,
+            version: VAULT_VERSION,
+        })
     }
 
     /// Encrypt a vault state into a self-contained logical export blob.
@@ -659,9 +742,21 @@ impl Vault {
     /// Decrypt a logical export blob using the same certificate env var as
     /// normal vault open.
     pub fn unseal_logical_export(blob_hex: &str) -> Result<VaultState, VaultError> {
-        let cert_hex =
-            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE").ok_or(VaultError::NoKey)?;
-        Self::unseal_logical_export_with_certificate(blob_hex, &cert_hex)
+        match (
+            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE"),
+            crate::utils::env_with_file_fallback("REDDB_VAULT_PASSPHRASE"),
+        ) {
+            (Some(_), Some(_)) => Err(VaultError::InvalidCredential(
+                "set a single vault credential".into(),
+            )),
+            (Some(certificate), None) => {
+                Self::unseal_logical_export_with_certificate(blob_hex, &certificate)
+            }
+            (None, Some(passphrase)) => {
+                Self::unseal_logical_export_with_passphrase(blob_hex, &passphrase)
+            }
+            _ => Err(VaultError::NoKey),
+        }
     }
 
     /// Deterministic helper path that ignores vault env vars.
@@ -672,6 +767,15 @@ impl Vault {
         let (_salt, nonce, ciphertext) = Self::decode_logical_export(blob_hex)?;
         let certificate = decode_certificate_hex(certificate_hex)?;
         let key = KeyPair::vault_key_from_certificate(&certificate);
+        Self::decrypt_logical_export(&key, &nonce, &ciphertext)
+    }
+
+    pub fn unseal_logical_export_with_passphrase(
+        blob_hex: &str,
+        passphrase: &str,
+    ) -> Result<VaultState, VaultError> {
+        let (salt, nonce, ciphertext) = Self::decode_logical_export(blob_hex)?;
+        let key = Self::passphrase_key(passphrase, &salt)?;
         Self::decrypt_logical_export(&key, &nonce, &ciphertext)
     }
 
@@ -872,10 +976,10 @@ impl Vault {
                     .to_string(),
             ));
         }
-        if version != VAULT_VERSION {
+        if version != self.version {
             return Err(VaultError::Corrupt(format!(
-                "unsupported vault version: {} (expected {})",
-                version, VAULT_VERSION
+                "vault credential format mismatch: stored {version}, opened {}",
+                self.version
             )));
         }
 
@@ -1004,7 +1108,7 @@ impl Vault {
             return Ok(Vec::new());
         }
         let version = content[4];
-        if version != VAULT_VERSION {
+        if version != VAULT_VERSION && version != VAULT_PASSPHRASE_VERSION {
             // v1 (legacy) had its overflow at fixed page 3; we don't
             // know if that page is "ours" to free. Safer to leak it
             // — the operator is re-bootstrapping anyway.
@@ -1072,7 +1176,7 @@ impl Vault {
         bytes[off..off + VAULT_MAGIC_SIZE].copy_from_slice(VAULT_MAGIC);
         off += VAULT_MAGIC_SIZE;
 
-        bytes[off] = VAULT_VERSION;
+        bytes[off] = self.version;
         off += VAULT_VERSION_SIZE;
 
         bytes[off..off + VAULT_SALT_SIZE].copy_from_slice(&self.salt);

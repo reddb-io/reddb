@@ -22,6 +22,7 @@ use super::impl_dml::{
 
 pub(super) fn split_insert_metadata(
     runtime: &RedDBRuntime,
+    collection: &str,
     columns: &[String],
     values: &[Value],
 ) -> RedDBResult<(Vec<(String, Value)>, Vec<(String, MetadataValue)>)> {
@@ -39,7 +40,18 @@ pub(super) fn split_insert_metadata(
         }
         fields.push((
             column.clone(),
-            runtime.resolve_crypto_sentinel(value.clone())?,
+            runtime.resolve_secret_column_value(
+                value.clone(),
+                runtime
+                    .db()
+                    .collection_contract(collection)
+                    .is_some_and(|contract| {
+                        contract.declared_columns.iter().any(|declared| {
+                            declared.name == *column
+                                && declared.data_type.eq_ignore_ascii_case("secret")
+                        })
+                    }),
+            )?,
         ));
     }
 

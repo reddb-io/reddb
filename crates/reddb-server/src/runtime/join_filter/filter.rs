@@ -23,7 +23,7 @@ pub(in crate::runtime::join_filter) struct RecordRow<'a> {
 
 impl crate::storage::query::evaluator::Row for RecordRow<'_> {
     fn get(&self, field: &FieldRef) -> Option<Value> {
-        resolve_runtime_field(self.record, field, self.table_name, self.table_alias).or_else(|| {
+        resolve_filter_field(self.record, field, self.table_name, self.table_alias).or_else(|| {
             let FieldRef::TableColumn { table, column } = field else {
                 return None;
             };
@@ -75,19 +75,19 @@ pub(in crate::runtime) fn evaluate_runtime_filter_result_with_db(
 ) -> crate::RedDBResult<bool> {
     match filter {
         Filter::Compare { field, op, value } => Ok({
-            resolve_runtime_field(record, field, table_name, table_alias)
+            resolve_filter_field(record, field, table_name, table_alias)
                 .as_ref()
                 .and_then(|candidate| evaluate_metadata_field_compare(field, candidate, *op, value))
                 .or_else(|| {
-                    resolve_runtime_field(record, field, table_name, table_alias)
+                    resolve_filter_field(record, field, table_name, table_alias)
                         .as_ref()
                         .map(|candidate| compare_runtime_values(candidate, value, *op))
                 })
                 .unwrap_or(false)
         }),
         Filter::CompareFields { left, op, right } => {
-            let left_value = resolve_runtime_field(record, left, table_name, table_alias);
-            let right_value = resolve_runtime_field(record, right, table_name, table_alias);
+            let left_value = resolve_filter_field(record, left, table_name, table_alias);
+            let right_value = resolve_filter_field(record, right, table_name, table_alias);
             Ok(match (left_value, right_value) {
                 (Some(l), Some(r)) => compare_runtime_values(&l, &r, *op),
                 _ => false,
@@ -115,7 +115,13 @@ pub(in crate::runtime) fn evaluate_runtime_filter_result_with_db(
                         table_name,
                         table_alias,
                     )),
-                    Err(error) => Err(crate::RedDBError::Query(error.to_string())),
+                    Err(error) => Err(crate::RedDBError::Query(
+                        if expression_uses_secret(expr, record, table_name, table_alias) {
+                            "secret comparison evaluation failed".into()
+                        } else {
+                            error.to_string()
+                        },
+                    )),
                 }
             };
             Ok(match (eval_side(lhs)?, eval_side(rhs)?) {
@@ -154,20 +160,16 @@ pub(in crate::runtime) fn evaluate_runtime_filter_result_with_db(
             table_name,
             table_alias,
         )?),
-        Filter::IsNull(field) => Ok(
-            resolve_runtime_field(record, field, table_name, table_alias)
-                .map(|value| value == Value::Null)
-                .unwrap_or(true),
-        ),
+        Filter::IsNull(field) => Ok(resolve_filter_field(record, field, table_name, table_alias)
+            .map(|value| value == Value::Null)
+            .unwrap_or(true)),
         Filter::IsNotNull(field) => {
-            Ok(
-                resolve_runtime_field(record, field, table_name, table_alias)
-                    .map(|value| value != Value::Null)
-                    .unwrap_or(false),
-            )
+            Ok(resolve_filter_field(record, field, table_name, table_alias)
+                .map(|value| value != Value::Null)
+                .unwrap_or(false))
         }
         Filter::In { field, values } => Ok({
-            resolve_runtime_field(record, field, table_name, table_alias)
+            resolve_filter_field(record, field, table_name, table_alias)
                 .as_ref()
                 .is_some_and(|candidate| {
                     evaluate_metadata_field_in(field, candidate, values).unwrap_or_else(|| {
@@ -178,7 +180,7 @@ pub(in crate::runtime) fn evaluate_runtime_filter_result_with_db(
                 })
         }),
         Filter::Between { field, low, high } => Ok({
-            resolve_runtime_field(record, field, table_name, table_alias)
+            resolve_filter_field(record, field, table_name, table_alias)
                 .as_ref()
                 .is_some_and(|candidate| {
                     compare_runtime_values(candidate, low, CompareOp::Ge)
@@ -186,25 +188,25 @@ pub(in crate::runtime) fn evaluate_runtime_filter_result_with_db(
                 })
         }),
         Filter::Like { field, pattern } => Ok({
-            resolve_runtime_field(record, field, table_name, table_alias)
+            resolve_filter_field(record, field, table_name, table_alias)
                 .as_ref()
                 .and_then(runtime_value_text)
                 .is_some_and(|value| like_matches(&value, pattern))
         }),
         Filter::StartsWith { field, prefix } => Ok({
-            resolve_runtime_field(record, field, table_name, table_alias)
+            resolve_filter_field(record, field, table_name, table_alias)
                 .as_ref()
                 .and_then(runtime_value_text)
                 .is_some_and(|value| value.starts_with(prefix))
         }),
         Filter::EndsWith { field, suffix } => Ok({
-            resolve_runtime_field(record, field, table_name, table_alias)
+            resolve_filter_field(record, field, table_name, table_alias)
                 .as_ref()
                 .and_then(runtime_value_text)
                 .is_some_and(|value| value.ends_with(suffix))
         }),
         Filter::Contains { field, substring } => Ok({
-            resolve_runtime_field(record, field, table_name, table_alias)
+            resolve_filter_field(record, field, table_name, table_alias)
                 .as_ref()
                 .is_some_and(|value| runtime_value_contains(value, substring))
         }),
@@ -372,4 +374,14 @@ pub(in crate::runtime) fn like_matches_bytes(value: &[u8], pattern: &[u8]) -> bo
     }
 
     pi == pattern.len()
+}
+
+fn resolve_filter_field(
+    record: &UnifiedRecord,
+    field: &FieldRef,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Option<Value> {
+    super::resolve_runtime_field(record, field, table_name, table_alias)
+        .and_then(crate::runtime::execution_context::secret_query_input)
 }

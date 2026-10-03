@@ -66,7 +66,28 @@ pub(crate) fn apply(
             continue;
         };
         let label = projection_name(projection);
+        let sensitive: Vec<bool> = records
+            .iter()
+            .map(|record| {
+                super::join_filter::projection_uses_secret(
+                    projection,
+                    record,
+                    table_name,
+                    table_alias,
+                )
+            })
+            .collect();
         compute_window_column(records, name, args, window, &label, table_name, table_alias)?;
+        for (record, sensitive) in records.iter_mut().zip(sensitive) {
+            if sensitive {
+                if let Some(value) = record.get(&label).cloned() {
+                    record.set(
+                        &label,
+                        super::execution_context::secret_query_output(value)?,
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -120,8 +141,11 @@ fn eval_projection_constant(
     let (expr, _) = projection_to_expr(proj)?;
     let row_closure = |field: &reddb_rql::ast::FieldRef| -> Option<Value> {
         super::join_filter::resolve_runtime_field(record, field, table_name, table_alias)
+            .and_then(super::execution_context::secret_query_input)
     };
-    evaluator::evaluate(&expr, &row_closure).ok()
+    evaluator::evaluate(&expr, &row_closure)
+        .ok()
+        .or_else(|| super::expr_eval::evaluate_runtime_expr(&expr, record, table_name, table_alias))
 }
 
 fn value_as_f64(value: &Value) -> Option<f64> {
@@ -141,8 +165,12 @@ fn eval_expr_on_record(
 ) -> Value {
     let row_closure = |field: &reddb_rql::ast::FieldRef| -> Option<Value> {
         super::join_filter::resolve_runtime_field(record, field, table_name, table_alias)
+            .and_then(super::execution_context::secret_query_input)
     };
-    evaluator::evaluate(expr, &row_closure).unwrap_or(Value::Null)
+    evaluator::evaluate(expr, &row_closure)
+        .ok()
+        .or_else(|| super::expr_eval::evaluate_runtime_expr(expr, record, table_name, table_alias))
+        .unwrap_or(Value::Null)
 }
 
 fn compute_window_column(

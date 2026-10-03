@@ -6,6 +6,16 @@ pub(in crate::runtime) fn compare_runtime_values(
     right: &Value,
     op: CompareOp,
 ) -> bool {
+    if matches!(left, Value::Secret(_)) || matches!(right, Value::Secret(_)) {
+        let Some(left) = crate::runtime::execution_context::secret_query_input(left.clone()) else {
+            return false;
+        };
+        let Some(right) = crate::runtime::execution_context::secret_query_input(right.clone())
+        else {
+            return false;
+        };
+        return compare_runtime_values(&left, &right, op);
+    }
     match op {
         CompareOp::Eq => runtime_values_equal(left, right),
         CompareOp::Ne => !runtime_values_equal(left, right),
@@ -45,6 +55,11 @@ pub(in crate::runtime) fn runtime_values_equal(left: &Value, right: &Value) -> b
 }
 
 pub(in crate::runtime) fn runtime_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
+    if matches!(left, Value::Secret(_)) || matches!(right, Value::Secret(_)) {
+        let left = crate::runtime::execution_context::secret_query_input(left.clone())?;
+        let right = crate::runtime::execution_context::secret_query_input(right.clone())?;
+        return runtime_partial_cmp(&left, &right);
+    }
     if let Some(ordering) = runtime_exact_integer_cmp(left, right) {
         return Some(ordering);
     }

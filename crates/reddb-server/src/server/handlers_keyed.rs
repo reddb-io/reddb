@@ -215,12 +215,12 @@ impl RedDBServer {
                 "GET" => self.execute_keyed_sql(list_sql("VAULT", collection, query)),
                 _ => json_error(405, "method not allowed for Vault collection endpoint"),
             },
-            [collection, key, "unseal"] => match method {
+            [collection, key, "reveal" | "unseal"] => match method {
                 "POST" => match keyed_path(collection, key) {
-                    Ok(path) => self.execute_keyed_sql(format!("UNSEAL VAULT {path}")),
+                    Ok(path) => self.execute_keyed_sql(format!("VAULT REVEAL {path}")),
                     Err(response) => response,
                 },
-                _ => json_error(405, "method not allowed for Vault unseal endpoint"),
+                _ => json_error(405, "method not allowed for Vault reveal endpoint"),
             },
             [collection, key, "history"] => match method {
                 "GET" => match keyed_path(collection, key) {

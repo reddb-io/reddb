@@ -1512,7 +1512,7 @@ impl fmt::Display for Value {
             Value::DocRef(c, id) => write!(f, "doc_ref:{}#{}", c, id),
             Value::TableRef(t) => write!(f, "table_ref:{}", t),
             Value::PageRef(p) => write!(f, "page_ref:{}", p),
-            Value::Secret(b) => write!(f, "<secret {} bytes>", b.len()),
+            Value::Secret(_) => write!(f, "***"),
             Value::Password(_) => write!(f, "***"),
         }
     }

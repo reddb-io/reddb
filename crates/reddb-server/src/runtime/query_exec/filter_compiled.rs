@@ -669,14 +669,14 @@ impl CompiledEntityFilter {
         for op in &self.ops {
             match op {
                 CompiledEntityOp::Compare { kind, op, value } => {
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .as_ref()
                         .map(|candidate| compare_runtime_values(candidate.as_ref(), value, *op))
                         .unwrap_or(false);
                     push!(result);
                 }
                 CompiledEntityOp::Between { kind, low, high } => {
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .as_ref()
                         .map(|candidate| {
                             compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)
@@ -686,7 +686,7 @@ impl CompiledEntityFilter {
                     push!(result);
                 }
                 CompiledEntityOp::InList { kind, values } => {
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .as_ref()
                         .map(|candidate| {
                             values.iter().any(|v| {
@@ -698,7 +698,7 @@ impl CompiledEntityFilter {
                 }
                 CompiledEntityOp::InSet { kind, set } => {
                     // O(1) HashSet::contains — built once at compile time
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .as_ref()
                         .map(|candidate| set.contains(candidate.as_ref()))
                         .unwrap_or(false);
@@ -706,7 +706,7 @@ impl CompiledEntityFilter {
                 }
                 CompiledEntityOp::InBloom { kind, set, bloom } => {
                     // Two-stage: bloom pre-filter eliminates ~99% of misses before HashSet probe.
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .as_ref()
                         .map(|candidate| {
                             let h = crate::storage::primitives::split_block_bloom::hash_value_u32(
@@ -719,40 +719,40 @@ impl CompiledEntityFilter {
                 }
                 CompiledEntityOp::Like { kind, pattern } => {
                     // runtime_value_text_cow: borrow for Text/Email/Url, owned for others
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .as_ref()
                         .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| like_matches(s.as_ref(), pattern));
                     push!(result);
                 }
                 CompiledEntityOp::StartsWith { kind, prefix } => {
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .as_ref()
                         .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| s.starts_with(prefix.as_str()));
                     push!(result);
                 }
                 CompiledEntityOp::EndsWith { kind, suffix } => {
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .as_ref()
                         .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| s.ends_with(suffix.as_str()));
                     push!(result);
                 }
                 CompiledEntityOp::Contains { kind, substring } => {
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .as_ref()
                         .is_some_and(|value| runtime_value_contains(value.as_ref(), substring));
                     push!(result);
                 }
                 CompiledEntityOp::IsNull { kind } => {
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .map(|v| v.as_ref() == &Value::Null)
                         .unwrap_or(true);
                     push!(result);
                 }
                 CompiledEntityOp::IsNotNull { kind } => {
-                    let result = resolve_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)
                         .map(|v| v.as_ref() != &Value::Null)
                         .unwrap_or(false);
                     push!(result);
@@ -1366,5 +1366,17 @@ mod tests {
         let mut mask = Vec::new();
         compiled.evaluate_batch(&entities, &mut mask);
         assert!(mask.is_empty());
+    }
+}
+
+fn resolve_filter_kind<'a>(
+    kind: &'a EntityFieldKind,
+    entity: &'a UnifiedEntity,
+) -> Option<Cow<'a, Value>> {
+    let value = resolve_kind(kind, entity)?;
+    if matches!(value.as_ref(), Value::Secret(_)) {
+        crate::runtime::execution_context::secret_query_input(value.into_owned()).map(Cow::Owned)
+    } else {
+        Some(value)
     }
 }

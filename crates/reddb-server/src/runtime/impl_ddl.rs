@@ -230,11 +230,14 @@ impl RedDBRuntime {
             )));
         }
 
+        if query.collection_model == CollectionModel::Vault {
+            self.reject_vault_transaction()?;
+            self.provision_vault_key_material(&query.name, query.vault_own_master_key)?;
+        }
         store
             .create_collection(&query.name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if query.collection_model == CollectionModel::Vault {
-            self.provision_vault_key_material(&query.name, query.vault_own_master_key)?;
             let key_scope = if query.vault_own_master_key {
                 "own"
             } else {
@@ -602,14 +605,15 @@ impl RedDBRuntime {
             ));
         }
 
-        if auth_store.vault_secret_key().is_none() {
-            let key = crate::auth::store::random_bytes(32);
-            auth_store
-                .vault_kv_try_set("red.secret.aes_key".to_string(), hex::encode(key))
-                .map_err(|err| RedDBError::Query(err.to_string()))?;
-        }
+        auth_store
+            .ensure_vault_secret_key_result()
+            .map_err(|err| RedDBError::Query(err.to_string()))?;
 
-        if own_master_key {
+        if own_master_key
+            && auth_store
+                .vault_kv_get(&vault_master_key_ref(collection))
+                .is_none()
+        {
             let key = crate::auth::store::random_bytes(32);
             auth_store
                 .vault_kv_try_set(vault_master_key_ref(collection), hex::encode(key))

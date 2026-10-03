@@ -23,9 +23,13 @@ export class VaultClient {
   }
 
   unseal(key, options = {}) {
+    return this.reveal(key, options)
+  }
+
+  reveal(key, options = {}) {
     const collection = options.collection ?? this.collection
     return this.client.call('query', {
-      sql: `UNSEAL VAULT ${keyedIdentifier(collection)}.${keyedIdentifier(key)}`,
+      sql: `VAULT REVEAL ${keyedIdentifier(collection)}.${keyedIdentifier(key)}`,
     })
   }
 }

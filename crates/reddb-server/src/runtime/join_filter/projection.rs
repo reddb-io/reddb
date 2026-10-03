@@ -55,6 +55,7 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
         }
 
         let label = projection_name(projection);
+        let sensitive = projection_uses_secret(projection, source, table_name, table_alias);
         let value = match projection {
             Projection::Column(column) => resolve_runtime_projection_value(
                 source,
@@ -104,7 +105,13 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
                                 table_alias,
                             )))
                         }
-                        Err(err) => return Err(crate::RedDBError::Query(err.to_string())),
+                        Err(err) => {
+                            return Err(crate::RedDBError::Query(if sensitive {
+                                "secret expression evaluation failed".into()
+                            } else {
+                                err.to_string()
+                            }))
+                        }
                     }
                 } else {
                     Some(Value::Boolean(evaluate_runtime_filter_with_db(
@@ -140,7 +147,13 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
                         | Err(crate::storage::query::evaluator::EvalError::UnknownColumn(_)) => {
                             evaluate_scalar_function_with_db(db, name, args, source)
                         }
-                        Err(err) => return Err(crate::RedDBError::Query(err.to_string())),
+                        Err(err) => {
+                            return Err(crate::RedDBError::Query(if sensitive {
+                                "secret expression evaluation failed".into()
+                            } else {
+                                err.to_string()
+                            }))
+                        }
                     }
                 } else {
                     evaluate_scalar_function_with_db(db, name, args, source)
@@ -156,7 +169,13 @@ pub(in crate::runtime) fn project_runtime_record_with_db(
             }
         };
 
-        record.set_arc(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
+        let value = value.unwrap_or(Value::Null);
+        let value = if sensitive {
+            crate::runtime::execution_context::secret_query_output(value)?
+        } else {
+            value
+        };
+        record.set_arc(std::sync::Arc::from(label), value);
     }
 
     Ok(record)
@@ -397,4 +416,140 @@ pub(in crate::runtime) fn field_ref_name(field: &FieldRef) -> String {
         FieldRef::EdgeProperty { alias, property } => format!("{alias}.{property}"),
         FieldRef::NodeId { alias } => format!("{alias}.id"),
     }
+}
+
+/// Sensitivity is determined from the complete expression, including untaken
+/// CASE branches. A projected transformation never turns a secret public.
+pub(in crate::runtime) fn expression_uses_secret(
+    expression: &reddb_rql::ast::Expr,
+    source: &UnifiedRecord,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> bool {
+    use reddb_rql::ast::Expr;
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            Expr::Literal {
+                value: Value::Secret(_),
+                ..
+            } => return true,
+            Expr::Column { field, .. } => {
+                if resolve_runtime_field(source, field, table_name, table_alias)
+                    .is_some_and(|value| matches!(value, Value::Secret(_)))
+                {
+                    return true;
+                }
+            }
+            Expr::FunctionCall { name, args, .. } => {
+                if name.eq_ignore_ascii_case("__SECRET_REF") {
+                    return true;
+                }
+                pending.extend(args);
+            }
+            Expr::WindowFunctionCall { args, window, .. } => {
+                pending.extend(args);
+                pending.extend(&window.partition_by);
+                pending.extend(window.order_by.iter().map(|clause| &clause.expr));
+            }
+            Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => pending.push(operand),
+            Expr::Cast { inner, .. } => pending.push(inner),
+            Expr::BinaryOp { lhs, rhs, .. } => {
+                pending.push(lhs);
+                pending.push(rhs);
+            }
+            Expr::Case {
+                branches, else_, ..
+            } => {
+                for (condition, value) in branches {
+                    pending.push(condition);
+                    pending.push(value);
+                }
+                if let Some(value) = else_ {
+                    pending.push(value);
+                }
+            }
+            Expr::InList { target, values, .. } => {
+                pending.push(target);
+                pending.extend(values);
+            }
+            Expr::Between {
+                target, low, high, ..
+            } => {
+                pending.extend([target.as_ref(), low.as_ref(), high.as_ref()]);
+            }
+            Expr::Subquery { .. } => {}
+            _ => {}
+        }
+    }
+    false
+}
+
+pub(in crate::runtime) fn projection_uses_secret(
+    projection: &Projection,
+    source: &UnifiedRecord,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> bool {
+    if let Some((expression, _)) = reddb_rql::sql_lowering::projection_to_expr(projection) {
+        return expression_uses_secret(&expression, source, table_name, table_alias);
+    }
+    match projection {
+        Projection::Function(name, args) => {
+            name.eq_ignore_ascii_case("__SECRET_REF")
+                || args
+                    .iter()
+                    .any(|arg| projection_uses_secret(arg, source, table_name, table_alias))
+        }
+        _ => false,
+    }
+}
+
+pub(in crate::runtime) fn filter_uses_secret(
+    filter: &Filter,
+    source: &UnifiedRecord,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> bool {
+    let mut pending = vec![filter];
+    while let Some(filter) = pending.pop() {
+        match filter {
+            Filter::CompareExpr { lhs, rhs, .. } => {
+                if expression_uses_secret(lhs, source, table_name, table_alias)
+                    || expression_uses_secret(rhs, source, table_name, table_alias)
+                {
+                    return true;
+                }
+            }
+            Filter::And(left, right) | Filter::Or(left, right) => {
+                pending.push(left);
+                pending.push(right);
+            }
+            Filter::Not(inner) => pending.push(inner),
+            Filter::Compare { field, .. }
+            | Filter::In { field, .. }
+            | Filter::Between { field, .. }
+            | Filter::Like { field, .. }
+            | Filter::Contains { field, .. }
+            | Filter::StartsWith { field, .. }
+            | Filter::EndsWith { field, .. }
+            | Filter::IsNull(field)
+            | Filter::IsNotNull(field) => {
+                if resolve_runtime_field(source, field, table_name, table_alias)
+                    .is_some_and(|value| matches!(value, Value::Secret(_)))
+                {
+                    return true;
+                }
+            }
+            Filter::CompareFields { left, right, .. } => {
+                if [left, right].iter().any(|field| {
+                    resolve_runtime_field(source, field, table_name, table_alias)
+                        .is_some_and(|value| matches!(value, Value::Secret(_)))
+                }) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }

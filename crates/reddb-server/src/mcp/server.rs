@@ -330,7 +330,7 @@ impl McpServer {
                 "reddb_config_resolve" => self.tool_config_resolve(args),
                 "reddb_vault_get" => self.tool_vault_get(args),
                 "reddb_vault_put" => self.tool_vault_put(args),
-                "reddb_vault_unseal" => self.tool_vault_unseal(args),
+                "reddb_vault_reveal" | "reddb_vault_unseal" => self.tool_vault_unseal(args),
                 "reddb_delete" => self.tool_delete(args),
                 "reddb_search_vector" => self.tool_search_vector(args),
                 "reddb_search_text" => self.tool_search_text(args),
@@ -828,7 +828,7 @@ impl McpServer {
     fn tool_vault_unseal(&self, args: &JsonValue) -> Result<String, String> {
         let collection = mcp_keyed_ident(get_str_field(args, "collection")?)?;
         let key = mcp_keyed_ident(get_str_field(args, "key")?)?;
-        self.tool_keyed_query(format!("UNSEAL VAULT {collection}.{key}"))
+        self.tool_keyed_query(format!("VAULT REVEAL {collection}.{key}"))
     }
 
     fn tool_keyed_query(&self, sql: String) -> Result<String, String> {

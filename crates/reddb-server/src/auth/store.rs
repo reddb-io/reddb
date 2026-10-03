@@ -133,12 +133,15 @@ pub struct AuthStore {
     vault: RwLock<Option<Vault>>,
     /// Reference to the pager for vault page I/O.
     pager: Option<Arc<Pager>>,
+    /// Existing operator credential; bootstrap must preserve this seal.
+    provided_certificate: Option<String>,
     /// Certificate-based keypair for token signing and vault seal.
     /// Populated after bootstrap or after restoring from a sealed vault.
     keypair: RwLock<Option<KeyPair>>,
     /// Encrypted key-value store for arbitrary secrets.
     /// Persisted to vault alongside users/api_keys.
     vault_kv: RwLock<HashMap<String, String>>,
+    secret_key_init: std::sync::Mutex<()>,
     /// Plain (non-encrypted) user key-value store for `$kv.*` / `SET KV`
     /// (#1602). Deliberately isolated from `vault_kv` (encrypted secrets)
     /// and from the runtime config store — three independent flat-maps,
@@ -415,8 +418,10 @@ impl AuthStore {
             config,
             vault: RwLock::new(None),
             pager: None,
+            provided_certificate: None,
             keypair: RwLock::new(None),
             vault_kv: RwLock::new(HashMap::new()),
+            secret_key_init: std::sync::Mutex::new(()),
             plain_kv: RwLock::new(HashMap::new()),
             grants: RwLock::new(HashMap::new()),
             public_grants: RwLock::new(Vec::new()),
@@ -463,7 +468,16 @@ impl AuthStore {
     /// automatically persisted to the vault pages via the pager.
     pub fn with_vault(config: AuthConfig, pager: Arc<Pager>) -> Result<Self, AuthError> {
         let certificate = crate::utils::env_with_file_fallback("REDDB_CERTIFICATE");
-        Self::with_vault_optional_certificate(config, pager, certificate.as_deref())
+        let passphrase = crate::utils::env_with_file_fallback("REDDB_VAULT_PASSPHRASE");
+        match (certificate, passphrase) {
+            (Some(_), Some(_)) => Err(AuthError::Internal(
+                "set either REDDB_CERTIFICATE or REDDB_VAULT_PASSPHRASE, not both".into(),
+            )),
+            (None, Some(passphrase)) => Self::with_vault_passphrase(config, pager, &passphrase),
+            (certificate, None) => {
+                Self::with_vault_optional_certificate(config, pager, certificate.as_deref())
+            }
+        }
     }
 
     pub fn with_vault_certificate(
@@ -472,6 +486,21 @@ impl AuthStore {
         certificate_hex: &str,
     ) -> Result<Self, AuthError> {
         Self::with_vault_optional_certificate(config, pager, Some(certificate_hex))
+    }
+
+    pub fn with_vault_passphrase(
+        config: AuthConfig,
+        pager: Arc<Pager>,
+        passphrase: &str,
+    ) -> Result<Self, AuthError> {
+        let mut store = Self::new(config);
+        let vault = Vault::with_passphrase(&pager, passphrase)?;
+        if let Some(state) = vault.load(&pager)? {
+            store.restore_from_vault(state);
+        }
+        *store.vault.write().map_err(lock_err)? = Some(vault);
+        store.pager = Some(pager);
+        Ok(store)
     }
 
     fn with_vault_optional_certificate(
@@ -499,6 +528,8 @@ impl AuthStore {
         }
 
         store.pager = Some(pager);
+        store.provided_certificate =
+            certificate_hex.map(|certificate| certificate.trim().to_ascii_lowercase());
         Ok(store)
     }
 
@@ -619,40 +650,44 @@ impl AuthStore {
             None,
         )?;
 
-        // Generate a certificate-based keypair and re-seal the vault.
-        let certificate = if let Some(ref pager) = self.pager {
-            let kp = KeyPair::generate();
-            let cert_hex = kp.certificate_hex();
-
-            // Re-create the vault using the certificate-derived key.
-            let new_vault = Vault::with_certificate_bytes(pager, &kp.certificate)
-                .map_err(|e| AuthError::Internal(format!("vault re-seal failed: {e}")))?;
-
-            // Store the keypair so token signing works immediately.
-            if let Ok(mut kp_guard) = self.keypair.write() {
-                *kp_guard = Some(kp);
+        // Token signing gets a fresh master secret. Preserve an existing
+        // certificate/passphrase seal instead of replacing the operator's key.
+        let credential_result = (|| -> Result<Option<String>, AuthError> {
+            let certificate = if let Some(ref pager) = self.pager {
+                let keypair = KeyPair::generate();
+                let mut vault = self.vault.write().map_err(lock_err)?;
+                let certificate = if vault.is_none() {
+                    let certificate = keypair.certificate_hex();
+                    *vault = Some(Vault::with_certificate_bytes(pager, &keypair.certificate)?);
+                    Some(certificate)
+                } else {
+                    self.provided_certificate.clone()
+                };
+                *self.keypair.write().map_err(lock_err)? = Some(keypair);
+                drop(vault);
+                self.ensure_vault_secret_key_result()?;
+                certificate
+            } else {
+                None
+            };
+            *self.enforcement_mode.write().map_err(lock_err)? =
+                PolicyEnforcementMode::default_fresh_bootstrap();
+            self.vault_kv.write().map_err(lock_err)?.insert(
+                "red.config.policy.enforcement_mode".into(),
+                PolicyEnforcementMode::default_fresh_bootstrap()
+                    .as_str()
+                    .into(),
+            );
+            self.persist_to_vault_result()?;
+            Ok(certificate)
+        })();
+        let certificate = match credential_result {
+            Ok(certificate) => certificate,
+            Err(err) => {
+                self.rollback_bootstrap(&UserId::from_parts(None, username));
+                return Err(err);
             }
-
-            // Replace the vault and persist with the master secret included.
-            if let Ok(mut vault_guard) = self.vault.write() {
-                *vault_guard = Some(new_vault);
-            }
-            // Generate the AES-256 secret key for Value::Secret encryption.
-            self.ensure_vault_secret_key();
-            self.persist_to_vault();
-
-            Some(cert_hex)
-        } else {
-            None
         };
-
-        // #712 / S5A: fresh bootstraps land in the strict posture.
-        // Persist explicitly to vault_kv so subsequent boots
-        // (rehydrate_iam) pick up `policy_only` instead of the
-        // existing-install default. Existing installs upgrading past
-        // this commit never traverse this branch — `bootstrap()` is
-        // sealed once and never re-runs.
-        self.set_enforcement_mode(PolicyEnforcementMode::default_fresh_bootstrap());
 
         Ok(BootstrapResult {
             user,
@@ -1042,9 +1077,30 @@ impl AuthStore {
 
     /// Generate and store the AES-256 secret key on first boot if not present.
     pub fn ensure_vault_secret_key(&self) {
-        if self.vault_kv_get("red.secret.aes_key").is_none() {
-            let key = random_bytes(32);
-            self.vault_kv_set("red.secret.aes_key".to_string(), hex::encode(key));
+        if let Err(err) = self.ensure_vault_secret_key_result() {
+            tracing::error!(error = %err, "vault secret key initialization failed");
+        }
+    }
+
+    pub(crate) fn ensure_vault_secret_key_result(&self) -> Result<(), AuthError> {
+        let _guard = self.secret_key_init.lock().map_err(lock_err)?;
+        if self.vault_secret_key().is_some() {
+            return Ok(());
+        }
+        if self.vault_kv_get("red.secret.aes_key").is_some() {
+            return Err(AuthError::Internal(
+                "stored vault secret key is invalid".into(),
+            ));
+        }
+        let value = hex::encode(random_bytes(32));
+        if self.is_vault_backed() {
+            self.vault_kv_try_set("red.secret.aes_key".into(), value)
+        } else {
+            self.vault_kv
+                .write()
+                .map_err(lock_err)?
+                .insert("red.secret.aes_key".into(), value);
+            Ok(())
         }
     }
 

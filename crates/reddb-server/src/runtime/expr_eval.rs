@@ -46,7 +46,8 @@ pub(super) fn evaluate_runtime_expr_with_db(
     match expr {
         Expr::Literal { value, .. } => Some(value.clone()),
 
-        Expr::Column { field, .. } => resolve_runtime_field(record, field, table_name, table_alias),
+        Expr::Column { field, .. } => resolve_runtime_field(record, field, table_name, table_alias)
+            .and_then(super::execution_context::secret_query_input),
 
         Expr::Parameter { .. } => {
             // Parameter placeholders only appear in prepared-statement
@@ -140,9 +141,7 @@ pub(super) fn evaluate_runtime_expr_with_db(
             }
             if upper == "__SECRET_REF" {
                 let key = expr_path_text(args.first()?)?.to_ascii_lowercase();
-                return crate::runtime::impl_core::current_secret_value(&key)
-                    .map(Value::text)
-                    .or(Some(Value::Null));
+                return crate::runtime::impl_core::current_secret_value(&key).or(Some(Value::Null));
             }
             if upper == "__KV_REF" {
                 let key = expr_path_text(args.first()?)?.to_ascii_lowercase();
@@ -316,6 +315,12 @@ pub(super) fn evaluate_runtime_expr_with_db(
 }
 
 pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) -> Option<Value> {
+    if db
+        .collection_contract(collection)
+        .is_some_and(|contract| contract.declared_model == crate::catalog::CollectionModel::Vault)
+    {
+        return None;
+    }
     let manager = db.store().get_collection(collection)?;
     let mut latest_id: u64 = 0;
     let mut latest_value: Option<Value> = None;

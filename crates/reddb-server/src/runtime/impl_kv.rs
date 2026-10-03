@@ -4,8 +4,10 @@
 //! `KV GET key`, and `KV DELETE key`.
 
 use crate::application::ports::RuntimeEntityPort;
+use crate::catalog::CollectionModel;
 use crate::storage::unified::{Metadata, MetadataValue};
 
+use super::impl_config_secret::show_secrets_allows_key;
 use super::impl_core::{current_auth_identity, current_connection_id, current_tenant};
 use super::*;
 
@@ -37,6 +39,7 @@ struct VaultEntry {
     version: i64,
     tombstone: bool,
     op: String,
+    tenant: Option<String>,
 }
 
 impl super::keyed_spine::KeyedVersion for VaultEntry {
@@ -56,6 +59,7 @@ impl VaultEntry {
         created_at: u64,
         updated_at: u64,
         sequence_id: u64,
+        tenant: Option<String>,
     ) -> Self {
         Self {
             id: version.id,
@@ -68,6 +72,7 @@ impl VaultEntry {
             version: version.version,
             tombstone: version.tombstone,
             op: version.op,
+            tenant,
         }
     }
 }
@@ -78,11 +83,29 @@ impl VaultEntry {
 /// `delete_kv` plumbing; this struct adds the auto-create and upsert logic.
 pub struct KvAtomicOps<'a> {
     runtime: &'a RedDBRuntime,
+    tenant: Option<String>,
 }
 
 impl<'a> KvAtomicOps<'a> {
     pub fn new(runtime: &'a RedDBRuntime) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            tenant: current_tenant(),
+        }
+    }
+
+    fn for_tenant(runtime: &'a RedDBRuntime, tenant: Option<String>) -> Self {
+        Self { runtime, tenant }
+    }
+
+    fn vault_row_in_scope(&self, row: &crate::storage::RowData) -> bool {
+        let tenant = row
+            .get_field("_vault_tenant")
+            .and_then(|value| match value {
+                Value::Text(tenant) => Some(tenant.as_ref()),
+                _ => None,
+            });
+        tenant == self.tenant.as_deref()
     }
 
     /// Insert or update a KV entry. Auto-creates the collection when needed.
@@ -183,8 +206,20 @@ impl<'a> KvAtomicOps<'a> {
         // the primitive callers build locks and once-only initialisation on).
         // Unconditional puts are last-writer-wins by definition and take no
         // lock, so the hot path is unchanged.
-        let rmw_lock =
-            if_not_exists.then(|| self.runtime.inner.rmw_locks.lock_for(collection, key));
+        let vault_model = model == crate::catalog::CollectionModel::Vault;
+        if vault_model {
+            self.runtime.reject_vault_transaction()?;
+            self.runtime
+                .check_vault_capability("vault:write", collection, key)
+                .map_err(RedDBError::Query)?;
+        }
+        let lock_key = if vault_model {
+            format!("vault/{}/{}", self.tenant.as_deref().unwrap_or(""), key)
+        } else {
+            key.to_string()
+        };
+        let rmw_lock = (if_not_exists || vault_model)
+            .then(|| self.runtime.inner.rmw_locks.lock_for(collection, &lock_key));
         let _rmw_guard = rmw_lock.as_ref().map(|lock| lock.lock());
 
         self.ensure_keyed_collection(model, collection)?;
@@ -195,7 +230,8 @@ impl<'a> KvAtomicOps<'a> {
             if if_not_exists && was_present {
                 return Ok((false, latest.expect("checked present").id));
             }
-            let entry = self.append_vault_version(collection, key, value, "put", false, tags)?;
+            let entry =
+                self.append_vault_version_unlocked(collection, key, value, "put", false, tags)?;
             self.runtime.record_kv_watch_event(
                 if latest.is_some() {
                     crate::replication::cdc::ChangeOperation::Update
@@ -338,6 +374,15 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<reddb_types::Value>> {
+        if model == CollectionModel::Vault {
+            self.runtime
+                .check_vault_capability("vault:read_metadata", collection, key)
+                .map_err(RedDBError::Query)?;
+            return Ok(self
+                .get_vault_entry(collection, key)?
+                .filter(|entry| !entry.tombstone)
+                .map(|entry| entry.value));
+        }
         let result = self.get_entry(model, collection, key)?;
         if model == crate::catalog::CollectionModel::Kv {
             self.runtime.inner.kv_stats.incr_gets();
@@ -353,6 +398,17 @@ impl<'a> KvAtomicOps<'a> {
         key: &str,
     ) -> RedDBResult<bool> {
         self.ensure_declared_model(model, collection)?;
+        if model == CollectionModel::Vault {
+            self.runtime.reject_vault_transaction()?;
+            self.runtime
+                .check_vault_capability("vault:write", collection, key)
+                .map_err(RedDBError::Query)?;
+            let existed = self
+                .get_vault_entry(collection, key)?
+                .is_some_and(|entry| !entry.tombstone);
+            self.append_vault_version(collection, key, Value::Null, "delete", true, &[])?;
+            return Ok(existed);
+        }
 
         // Versioned KV deletes tombstone the prior visible version
         // (set_xmax) instead of reclaiming it physically, so history and
@@ -938,15 +994,19 @@ impl<'a> KvAtomicOps<'a> {
     fn vault_versions(&self, collection: &str, key: &str) -> RedDBResult<Vec<VaultEntry>> {
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let store = self.runtime.inner.db.store();
-        let Some(manager) = store.get_collection(collection) else {
-            return Ok(Vec::new());
-        };
-        let entities = manager.query_all(|_| true);
+        let manager = store.get_collection(collection);
+        let entities = manager
+            .as_ref()
+            .map(|manager| manager.query_all(|_| true))
+            .unwrap_or_default();
         let mut versions = Vec::new();
         for entity in entities {
             let crate::storage::EntityData::Row(ref row) = entity.data else {
                 continue;
             };
+            if !self.vault_row_in_scope(row) {
+                continue;
+            }
             let Some(version) =
                 super::keyed_spine::row_version(entity.id, row, entity.sequence_id as i64)
             else {
@@ -955,14 +1015,23 @@ impl<'a> KvAtomicOps<'a> {
             if version.key != key {
                 continue;
             }
-            let metadata = manager.get_metadata(entity.id).unwrap_or_default();
+            let metadata = manager
+                .as_ref()
+                .and_then(|manager| manager.get_metadata(entity.id))
+                .unwrap_or_default();
             versions.push(VaultEntry::from_keyed_row(
                 version,
                 metadata,
                 entity.created_at,
                 entity.updated_at,
                 entity.sequence_id,
+                self.tenant.clone(),
             ));
+        }
+        if versions.is_empty() {
+            if let Some(entry) = self.legacy_vault_entry(collection, key)? {
+                versions.push(entry);
+            }
         }
         Ok(versions)
     }
@@ -974,33 +1043,98 @@ impl<'a> KvAtomicOps<'a> {
     ) -> RedDBResult<Vec<VaultEntry>> {
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let store = self.runtime.inner.db.store();
-        let Some(manager) = store.get_collection(collection) else {
-            return Ok(Vec::new());
-        };
+        let manager = store.get_collection(collection);
         let mut versions = Vec::new();
-        for entity in manager.query_all(|_| true) {
+        for entity in manager
+            .as_ref()
+            .map(|manager| manager.query_all(|_| true))
+            .unwrap_or_default()
+        {
             let crate::storage::EntityData::Row(ref row) = entity.data else {
                 continue;
             };
+            if !self.vault_row_in_scope(row) {
+                continue;
+            }
             let Some(version) =
                 super::keyed_spine::row_version(entity.id, row, entity.sequence_id as i64)
             else {
                 continue;
             };
-            let metadata = manager.get_metadata(entity.id).unwrap_or_default();
+            let metadata = manager
+                .as_ref()
+                .and_then(|manager| manager.get_metadata(entity.id))
+                .unwrap_or_default();
             let entry = VaultEntry::from_keyed_row(
                 version,
                 metadata,
                 entity.created_at,
                 entity.updated_at,
                 entity.sequence_id,
+                self.tenant.clone(),
             );
             versions.push(entry);
+        }
+        if collection == "red.vault" && self.tenant.is_none() {
+            if let Some(auth) = self.runtime.inner.auth_store.read().clone() {
+                let known: std::collections::HashSet<String> =
+                    versions.iter().map(|entry| entry.key.clone()).collect();
+                for key in auth.vault_kv_keys() {
+                    if !known.contains(&key) {
+                        if let Some(entry) = self.legacy_vault_entry(collection, &key)? {
+                            versions.push(entry);
+                        }
+                    }
+                }
+            }
         }
         Ok(super::keyed_spine::latest_versions(versions, prefix))
     }
 
+    fn legacy_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {
+        if collection != "red.vault" || self.tenant.is_some() || !show_secrets_allows_key(key) {
+            return Ok(None);
+        }
+        let Some(value) = self.runtime.vault_kv_get(key) else {
+            return Ok(None);
+        };
+        self.runtime.provision_default_vault_key()?;
+        Ok(Some(VaultEntry {
+            id: crate::storage::EntityId::new(0),
+            key: key.into(),
+            value: self.runtime.seal_vault_value_for_tenant(
+                collection,
+                Value::text(value),
+                None,
+            )?,
+            metadata: Metadata::default(),
+            created_at: 0,
+            updated_at: 0,
+            sequence_id: 0,
+            version: 0,
+            tombstone: false,
+            op: "legacy".into(),
+            tenant: None,
+        }))
+    }
+
     fn append_vault_version(
+        &self,
+        collection: &str,
+        key: &str,
+        value: reddb_types::Value,
+        op: &str,
+        tombstone: bool,
+        tags: &[String],
+    ) -> RedDBResult<VaultEntry> {
+        self.runtime.reject_vault_transaction()?;
+        let lock_key = format!("vault/{}/{}", self.tenant.as_deref().unwrap_or(""), key);
+        let lock = self.runtime.inner.rmw_locks.lock_for(collection, &lock_key);
+        let _guard = lock.lock();
+        self.append_vault_version_unlocked(collection, key, value, op, tombstone, tags)
+    }
+
+    fn append_vault_version_unlocked(
         &self,
         collection: &str,
         key: &str,
@@ -1018,10 +1152,11 @@ impl<'a> KvAtomicOps<'a> {
         let stored_value = if tombstone {
             reddb_types::Value::Null
         } else {
-            self.runtime.seal_vault_value(collection, value)?
+            self.runtime
+                .seal_vault_value_for_tenant(collection, value, self.tenant.as_deref())?
         };
         let now = current_unix_ms() as i64;
-        let fields = vec![
+        let mut fields = vec![
             ("key".to_string(), reddb_types::Value::text(key.to_string())),
             ("value".to_string(), stored_value),
             ("version".to_string(), reddb_types::Value::Integer(version)),
@@ -1035,6 +1170,9 @@ impl<'a> KvAtomicOps<'a> {
                 reddb_types::Value::Integer(now),
             ),
         ];
+        if let Some(tenant) = &self.tenant {
+            fields.push(("_vault_tenant".into(), Value::text(tenant.clone())));
+        }
         let mut row = crate::storage::RowData::new(Vec::new());
         row.named = Some(fields.into_iter().collect());
         let entity = crate::storage::UnifiedEntity::new(
@@ -1073,6 +1211,10 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     fn purge_vault_versions(&self, collection: &str, key: &str) -> RedDBResult<usize> {
+        self.runtime.reject_vault_transaction()?;
+        let lock_key = format!("vault/{}/{}", self.tenant.as_deref().unwrap_or(""), key);
+        let lock = self.runtime.inner.rmw_locks.lock_for(collection, &lock_key);
+        let _guard = lock.lock();
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let versions = self.vault_versions(collection, key)?;
         let store = self.runtime.inner.db.store();
@@ -1084,6 +1226,16 @@ impl<'a> KvAtomicOps<'a> {
             {
                 store.context_index().remove_entity(entry.id);
                 purged += 1;
+            }
+        }
+        if collection == "red.vault" && self.tenant.is_none() && show_secrets_allows_key(key) {
+            if let Some(auth) = self.runtime.inner.auth_store.read().clone() {
+                if auth
+                    .vault_kv_try_delete(key)
+                    .map_err(|err| RedDBError::Query(err.to_string()))?
+                {
+                    purged += 1;
+                }
             }
         }
         Ok(purged)
@@ -1112,17 +1264,400 @@ impl<'a> KvAtomicOps<'a> {
 }
 
 impl RedDBRuntime {
+    /// Offline dump records retain the native encrypted values, tenant markers,
+    /// versions and metadata. They are never formatted as query results.
+    pub fn export_vault_collection_records(&self, collection: &str) -> RedDBResult<Vec<String>> {
+        let store = self.inner.db.store();
+        let contract = self
+            .inner
+            .db
+            .collection_contract(collection)
+            .ok_or_else(|| RedDBError::NotFound(collection.into()))?;
+        if contract.declared_model != CollectionModel::Vault {
+            return Err(RedDBError::Query(
+                "native vault export requires a vault collection".into(),
+            ));
+        }
+        let manager = store
+            .get_collection(collection)
+            .ok_or_else(|| RedDBError::NotFound(collection.into()))?;
+        let mut entities = manager.query_all(|_| true);
+        entities.sort_unstable_by_key(|entity| entity.id.raw());
+        Ok(entities
+            .iter()
+            .map(|entity| {
+                let metadata = manager.get_metadata(entity.id);
+                hex::encode(crate::storage::UnifiedStore::serialize_entity_record(
+                    entity,
+                    metadata.as_ref(),
+                    store.format_version(),
+                ))
+            })
+            .collect())
+    }
+
+    /// Restore an offline native Vault dump into an empty collection. Validate
+    /// every encrypted row against the imported keys before writing any rows.
+    pub fn import_vault_collection_records(
+        &self,
+        collection: &str,
+        records: &[String],
+        format_version: u32,
+    ) -> RedDBResult<usize> {
+        self.reject_vault_transaction()?;
+        let store = self.inner.db.store();
+        if collection.is_empty() || (collection.starts_with("red.") && collection != "red.vault") {
+            return Err(RedDBError::Query("invalid vault import collection".into()));
+        }
+        if let Some(contract) = self.inner.db.collection_contract(collection) {
+            if contract.declared_model != CollectionModel::Vault {
+                return Err(RedDBError::Query(
+                    "cannot restore vault records into another collection model".into(),
+                ));
+            }
+        }
+        if store
+            .get_collection(collection)
+            .is_some_and(|manager| !manager.query_all(|_| true).is_empty())
+        {
+            return Err(RedDBError::Query(
+                "vault restore requires an empty collection".into(),
+            ));
+        }
+        let auth = self.inner.auth_store.read().clone().ok_or_else(|| {
+            RedDBError::Query("vault restore requires imported vault keys".into())
+        })?;
+        if !auth.is_vault_backed() || auth.vault_secret_key().is_none() {
+            return Err(RedDBError::Query(
+                "vault restore requires imported vault keys".into(),
+            ));
+        }
+        if format_version > store.format_version() {
+            return Err(RedDBError::Query(
+                "vault dump uses a newer storage format".into(),
+            ));
+        }
+        let mut decoded = Vec::with_capacity(records.len());
+        for record in records {
+            let bytes = hex::decode(record)
+                .map_err(|_| RedDBError::Query("invalid native vault dump record".into()))?;
+            let frame = reddb_file::decode_native_entity_record_frame(&bytes)
+                .map_err(|error| RedDBError::Query(error.to_string()))?
+                .ok_or_else(|| {
+                    RedDBError::Query("vault dump requires a native record frame".into())
+                })?;
+            if frame.entity.len() < 2 {
+                return Err(RedDBError::Query("truncated native vault record".into()));
+            }
+            let (mut entity, metadata) =
+                crate::storage::UnifiedStore::deserialize_entity_record(&bytes, format_version)
+                    .map_err(|error| RedDBError::Query(error.to_string()))?;
+            let crate::storage::EntityData::Row(row) = &entity.data else {
+                return Err(RedDBError::Query("vault dump requires rows".into()));
+            };
+            let Some(version) =
+                super::keyed_spine::row_version(entity.id, row, entity.sequence_id as i64)
+            else {
+                return Err(RedDBError::Query("invalid vault version record".into()));
+            };
+            if !version.tombstone {
+                let tenant = row
+                    .get_field("_vault_tenant")
+                    .and_then(|value| match value {
+                        Value::Text(tenant) => Some(tenant.as_ref()),
+                        _ => None,
+                    });
+                self.unseal_vault_value_for_tenant(collection, &version.value, tenant)?;
+            }
+            entity.id = crate::storage::EntityId::new(0);
+            entity.kind = crate::storage::EntityKind::TableRow {
+                table: std::sync::Arc::from(collection),
+                row_id: 0,
+            };
+            decoded.push((entity, metadata));
+        }
+        if store.get_collection(collection).is_none() {
+            store
+                .create_collection(collection)
+                .map_err(|error| RedDBError::Internal(error.to_string()))?;
+        }
+        let mut contract = kv_collection_contract(collection);
+        contract.declared_model = CollectionModel::Vault;
+        self.inner
+            .db
+            .save_collection_contract(contract)
+            .map_err(|error| RedDBError::Internal(error.to_string()))?;
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|error| RedDBError::Internal(error.to_string()))?;
+        let count = decoded.len();
+        for (entity, metadata) in decoded {
+            let id = store
+                .insert(collection, entity)
+                .map_err(|error| RedDBError::Internal(error.to_string()))?;
+            if let Some(metadata) = metadata {
+                store
+                    .set_metadata(collection, id, metadata)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
+            }
+        }
+        self.invalidate_result_cache();
+        Ok(count)
+    }
+
+    pub(crate) fn reject_vault_transaction(&self) -> RedDBResult<()> {
+        if self
+            .inner
+            .transaction_state
+            .in_transaction(current_connection_id())
+        {
+            return Err(RedDBError::Query(
+                "vault mutations cannot run inside a transaction; execute after COMMIT or ROLLBACK"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_default_vault(&self) -> RedDBResult<()> {
+        self.provision_default_vault_key()?;
+        let lock = self.inner.rmw_locks.lock_for("red.vault", "initialize");
+        let _guard = lock.lock();
+        let store = self.inner.db.store();
+        if store.get_collection("red.vault").is_none() {
+            store
+                .create_collection("red.vault")
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            let mut contract = kv_collection_contract("red.vault");
+            contract.declared_model = CollectionModel::Vault;
+            self.inner
+                .db
+                .save_collection_contract(contract)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            self.inner
+                .db
+                .persist_metadata()
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn provision_default_vault_key(&self) -> RedDBResult<()> {
+        let auth = self.inner.auth_store.read().clone().ok_or_else(|| {
+            RedDBError::Query("secret storage requires an enabled, unsealed vault".into())
+        })?;
+        if !auth.is_vault_backed() {
+            return Err(RedDBError::Query(
+                "secret storage requires an enabled, unsealed vault".into(),
+            ));
+        }
+        auth.ensure_vault_secret_key_result()
+            .map_err(|err| RedDBError::Query(err.to_string()))?;
+        Ok(())
+    }
+
+    pub(crate) fn set_user_secret(&self, key: &str, value: Option<String>) -> RedDBResult<()> {
+        self.reject_vault_transaction()?;
+        self.check_vault_capability("vault:write", "red.vault", key)
+            .map_err(RedDBError::Query)?;
+        self.ensure_default_vault()?;
+        let command = match value {
+            Some(value) => reddb_rql::ast::KvCommand::Put {
+                model: CollectionModel::Vault,
+                collection: "red.vault".into(),
+                key: key.into(),
+                value: Value::text(value),
+                ttl_ms: None,
+                tags: Vec::new(),
+                if_not_exists: false,
+            },
+            None => reddb_rql::ast::KvCommand::Delete {
+                model: CollectionModel::Vault,
+                collection: "red.vault".into(),
+                key: key.into(),
+            },
+        };
+        self.execute_kv_command("", &command)?;
+        self.invalidate_result_cache();
+        Ok(())
+    }
+
+    /// SQL references and Vault commands resolve the same entries. Legacy root
+    /// KV entries are a platform-only read fallback until rewritten or deleted.
+    pub(crate) fn query_secret_value(&self, path: &str) -> RedDBResult<Option<Value>> {
+        let (collection, key) = path.split_once('/').unwrap_or(("red.vault", path));
+        let (collection, key, owner_tenant) = if collection == "platform" {
+            let (collection, key) = key.split_once('.').ok_or_else(|| {
+                RedDBError::Query("platform secret expects platform.<vault>.<path>".into())
+            })?;
+            (
+                if collection == "default" {
+                    "red.vault"
+                } else {
+                    collection
+                },
+                key,
+                None,
+            )
+        } else {
+            (collection, key, current_tenant())
+        };
+        if collection == "red.vault" && !show_secrets_allows_key(key) {
+            return Ok(None);
+        }
+        let ops = KvAtomicOps::for_tenant(self, owner_tenant.clone());
+        if let Err(reason) = self.check_vault_capability_in_tenant(
+            "vault:use",
+            collection,
+            key,
+            owner_tenant.as_deref(),
+        ) {
+            self.audit_vault_lifecycle(
+                "use",
+                collection,
+                key,
+                crate::runtime::audit_log::Outcome::Denied,
+                &reason,
+                None,
+            );
+            self.emit_vault_control_event(
+                crate::runtime::control_events::EventKind::VaultUse,
+                crate::runtime::control_events::Outcome::Denied,
+                "vault:use",
+                collection,
+                key,
+                &reason,
+                None,
+                Vec::new(),
+            )?;
+            return Err(RedDBError::Query(reason));
+        }
+        let entry = ops.get_vault_entry(collection, key)?;
+        let value = match entry.as_ref() {
+            Some(entry) if entry.tombstone => None,
+            Some(entry) => Some(self.unseal_vault_value_for_tenant(
+                collection,
+                &entry.value,
+                owner_tenant.as_deref(),
+            )?),
+            None if collection == "red.vault" && owner_tenant.is_none() => {
+                self.vault_kv_get(key).map(Value::text)
+            }
+            None => None,
+        };
+        self.audit_vault_lifecycle(
+            "use",
+            collection,
+            key,
+            crate::runtime::audit_log::Outcome::Success,
+            "ok",
+            entry.as_ref(),
+        );
+        self.emit_vault_control_event(
+            crate::runtime::control_events::EventKind::VaultUse,
+            crate::runtime::control_events::Outcome::Allowed,
+            "vault:use",
+            collection,
+            key,
+            "ok",
+            entry.as_ref(),
+            Vec::new(),
+        )?;
+        Ok(value)
+    }
+
+    pub(crate) fn show_user_secrets(&self, prefix: Option<&str>) -> RedDBResult<UnifiedResult> {
+        self.provision_default_vault_key()?;
+        let ops = KvAtomicOps::new(self);
+        let mut result = UnifiedResult::with_columns(vec![
+            "collection".into(),
+            "key".into(),
+            "value".into(),
+            "status".into(),
+        ]);
+        let mut default_keys = std::collections::HashSet::new();
+        for collection in self.inner.db.store().list_collections() {
+            let model = self
+                .inner
+                .db
+                .collection_contract(&collection)
+                .map(|contract| contract.declared_model);
+            if model != Some(CollectionModel::Vault) {
+                continue;
+            }
+            for entry in ops.latest_vault_entries(&collection, None)? {
+                if collection == "red.vault" {
+                    default_keys.insert(entry.key.clone());
+                }
+                let display_key = if collection == "red.vault" {
+                    entry.key.clone()
+                } else {
+                    format!("{collection}.{}", entry.key)
+                };
+                if entry.tombstone
+                    || !show_secrets_allows_key(&entry.key)
+                    || prefix.is_some_and(|prefix| !display_key.starts_with(prefix))
+                    || self
+                        .check_vault_capability("vault:read_metadata", &collection, &entry.key)
+                        .is_err()
+                {
+                    continue;
+                }
+                let mut record = UnifiedRecord::new();
+                record.set("collection", Value::text(collection.clone()));
+                record.set("key", Value::text(display_key));
+                record.set("value", Value::text("***"));
+                record.set("status", Value::text("active"));
+                result.push(record);
+            }
+        }
+        if current_tenant().is_none() {
+            if let Some(auth) = self.inner.auth_store.read().clone() {
+                for key in auth.vault_kv_keys() {
+                    if default_keys.contains(&key)
+                        || !show_secrets_allows_key(&key)
+                        || prefix.is_some_and(|prefix| !key.starts_with(prefix))
+                        || self
+                            .check_vault_capability("vault:read_metadata", "red.vault", &key)
+                            .is_err()
+                    {
+                        continue;
+                    }
+                    let mut record = UnifiedRecord::new();
+                    record.set("collection", Value::text("red.vault"));
+                    record.set("key", Value::text(key));
+                    record.set("value", Value::text("***"));
+                    record.set("status", Value::text("active"));
+                    result.push(record);
+                }
+            }
+        }
+        result
+            .records
+            .sort_by_key(|record| record.get("key").map(Value::display_string));
+        Ok(result)
+    }
     pub(crate) fn seal_vault_value(
         &self,
         collection: &str,
         value: reddb_types::Value,
     ) -> RedDBResult<reddb_types::Value> {
+        self.seal_vault_value_for_tenant(collection, value, current_tenant().as_deref())
+    }
+
+    fn seal_vault_value_for_tenant(
+        &self,
+        collection: &str,
+        value: Value,
+        tenant: Option<&str>,
+    ) -> RedDBResult<Value> {
         let key = self.vault_encryption_key(collection)?;
         let plaintext = value.to_bytes();
         let nonce_bytes = crate::auth::store::random_bytes(12);
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&nonce_bytes[..12]);
-        let aad = format!("reddb.vault.{collection}");
+        let aad = vault_value_aad(collection, tenant);
         let ciphertext =
             crate::crypto::aes_gcm::aes256_gcm_encrypt(&key, &nonce, aad.as_bytes(), &plaintext);
         let mut payload = Vec::with_capacity(12 + ciphertext.len());
@@ -1158,6 +1693,15 @@ impl RedDBRuntime {
         collection: &str,
         sealed: &reddb_types::Value,
     ) -> RedDBResult<reddb_types::Value> {
+        self.unseal_vault_value_for_tenant(collection, sealed, current_tenant().as_deref())
+    }
+
+    fn unseal_vault_value_for_tenant(
+        &self,
+        collection: &str,
+        sealed: &Value,
+        tenant: Option<&str>,
+    ) -> RedDBResult<Value> {
         let reddb_types::Value::Secret(payload) = sealed else {
             return Err(RedDBError::Query(
                 "vault unseal failed: stored value is not sealed".to_string(),
@@ -1171,7 +1715,7 @@ impl RedDBRuntime {
         let key = self.vault_encryption_key(collection)?;
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&payload[..12]);
-        let aad = format!("reddb.vault.{collection}");
+        let aad = vault_value_aad(collection, tenant);
         let plaintext = crate::crypto::aes_gcm::aes256_gcm_decrypt(
             &key,
             &nonce,
@@ -1232,19 +1776,29 @@ impl RedDBRuntime {
         }
     }
 
-    fn check_vault_capability(
+    pub(crate) fn check_vault_capability(
         &self,
         action: &str,
         collection: &str,
         key: &str,
     ) -> Result<(), String> {
+        self.check_vault_capability_in_tenant(action, collection, key, current_tenant().as_deref())
+    }
+
+    fn check_vault_capability_in_tenant(
+        &self,
+        action: &str,
+        collection: &str,
+        key: &str,
+        owner_tenant: Option<&str>,
+    ) -> Result<(), String> {
         let Some(auth_store) = self.inner.auth_store.read().clone() else {
             return Ok(());
         };
-        if !auth_store.iam_authorization_enabled() {
-            return Ok(());
-        }
         let Some((principal, role)) = current_auth_identity() else {
+            if !auth_store.iam_authorization_enabled() {
+                return Ok(());
+            }
             return Err(
                 "IAM authorization is enabled; vault capability check requires an authenticated principal"
                     .to_string(),
@@ -1256,8 +1810,10 @@ impl RedDBRuntime {
             "vault",
             Self::vault_target_resource(collection, key),
         );
-        if let Some(ref tenant) = tenant {
-            resource = resource.with_tenant(tenant.clone());
+        if let Some(owner_tenant) = owner_tenant {
+            resource = resource.with_tenant(owner_tenant.to_string());
+        } else if tenant.is_some() {
+            resource.name = format!("tenant/platform/{}", resource.name);
         }
         let ctx = crate::auth::policies::EvalContext {
             principal_tenant: tenant.clone(),
@@ -1268,7 +1824,14 @@ impl RedDBRuntime {
             principal_is_admin_role: role == crate::auth::Role::Admin,
             principal_is_platform_scoped: principal_id.tenant.is_none(),
         };
-        if auth_store.check_policy_authz_with_role(&principal_id, action, &resource, &ctx, role) {
+        let allowed = if owner_tenant != ctx.principal_tenant.as_deref() {
+            // Legacy admin role is authority inside its own tenant, never an
+            // implicit platform or cross-tenant secret grant.
+            auth_store.check_policy_authz(&principal_id, action, &resource, &ctx)
+        } else {
+            auth_store.check_policy_authz_with_role(&principal_id, action, &resource, &ctx, role)
+        };
+        if allowed {
             Ok(())
         } else {
             Err(format!(
@@ -1286,9 +1849,6 @@ impl RedDBRuntime {
         collection: &str,
         key: &str,
     ) -> Result<(), String> {
-        if collection != "red.vault" {
-            return Ok(());
-        }
         self.check_vault_capability(action, collection, key)
     }
 
@@ -1302,7 +1862,7 @@ impl RedDBRuntime {
     ) {
         let actor = Self::current_vault_actor();
         let request_id = Self::vault_request_id();
-        let mut builder = crate::runtime::audit_log::AuditEvent::builder("vault/unseal")
+        let mut builder = crate::runtime::audit_log::AuditEvent::builder("vault/reveal")
             .principal(actor.clone())
             .source(crate::runtime::audit_log::AuditAuthSource::Password)
             .resource(format!(
@@ -1494,7 +2054,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<Value> {
         let ops = KvAtomicOps::new(self);
         let entry = ops.get_vault_entry(collection, key)?;
-        if let Err(reason) = self.check_vault_capability("vault:read", collection, key) {
+        if let Err(reason) = self.check_vault_capability("vault:reveal", collection, key) {
             self.audit_vault_unseal(
                 collection,
                 key,
@@ -1503,9 +2063,9 @@ impl RedDBRuntime {
                 entry.as_ref(),
             );
             self.emit_vault_control_event(
-                crate::runtime::control_events::EventKind::VaultRead,
+                crate::runtime::control_events::EventKind::VaultReveal,
                 crate::runtime::control_events::Outcome::Denied,
-                "vault:read",
+                "vault:reveal",
                 collection,
                 key,
                 &reason,
@@ -1524,9 +2084,9 @@ impl RedDBRuntime {
                 None,
             );
             self.emit_vault_control_event(
-                crate::runtime::control_events::EventKind::VaultRead,
+                crate::runtime::control_events::EventKind::VaultReveal,
                 crate::runtime::control_events::Outcome::Denied,
-                "vault:read",
+                "vault:reveal",
                 collection,
                 key,
                 reason,
@@ -1548,9 +2108,9 @@ impl RedDBRuntime {
                 Some(&entry),
             );
             self.emit_vault_control_event(
-                crate::runtime::control_events::EventKind::VaultRead,
+                crate::runtime::control_events::EventKind::VaultReveal,
                 crate::runtime::control_events::Outcome::Denied,
-                "vault:read",
+                "vault:reveal",
                 collection,
                 key,
                 reason,
@@ -1572,9 +2132,9 @@ impl RedDBRuntime {
                     Some(&entry),
                 );
                 self.emit_vault_control_event(
-                    crate::runtime::control_events::EventKind::VaultRead,
+                    crate::runtime::control_events::EventKind::VaultReveal,
                     crate::runtime::control_events::Outcome::Allowed,
-                    "vault:read",
+                    "vault:reveal",
                     collection,
                     key,
                     "ok",
@@ -1593,9 +2153,9 @@ impl RedDBRuntime {
                     Some(&entry),
                 );
                 self.emit_vault_control_event(
-                    crate::runtime::control_events::EventKind::VaultRead,
+                    crate::runtime::control_events::EventKind::VaultReveal,
                     crate::runtime::control_events::Outcome::Error,
-                    "vault:read",
+                    "vault:reveal",
                     collection,
                     key,
                     &reason,
@@ -2182,7 +2742,7 @@ impl RedDBRuntime {
                 })
             }
 
-            KvCommand::Unseal {
+            KvCommand::Reveal {
                 collection,
                 key,
                 version,
@@ -2193,15 +2753,13 @@ impl RedDBRuntime {
                     None => latest.clone(),
                 };
                 let action = match (version, latest.as_ref()) {
-                    (Some(requested), Some(latest)) if *requested == latest.version => "vault:read",
-                    (Some(_), _) => "vault:unseal_history",
-                    _ => "vault:read",
+                    (Some(requested), Some(latest)) if *requested == latest.version => {
+                        "vault:reveal"
+                    }
+                    (Some(_), _) => "vault:reveal_history",
+                    _ => "vault:reveal",
                 };
-                let event_kind = if action == "vault:read" {
-                    crate::runtime::control_events::EventKind::VaultRead
-                } else {
-                    crate::runtime::control_events::EventKind::VaultUnseal
-                };
+                let event_kind = crate::runtime::control_events::EventKind::VaultReveal;
                 if let Err(reason) = self.check_vault_capability(action, collection, key) {
                     self.audit_vault_unseal(
                         collection,
@@ -2302,7 +2860,7 @@ impl RedDBRuntime {
                         Ok(RuntimeQueryResult {
                             query: raw_query.to_string(),
                             mode: reddb_rql::modes::QueryMode::Sql,
-                            statement: "vault_unseal",
+                            statement: "vault_reveal",
                             engine: "vault",
                             result,
                             affected_rows: 0,
@@ -2499,8 +3057,14 @@ impl RedDBRuntime {
         self.kv_watch_events_since(collection, key, since_lsn, max_count)
             .into_iter()
             .filter(|event| {
-                self.check_vault_capability("vault:read_metadata", &event.collection, &event.key)
-                    .is_ok()
+                vault_watch_in_scope(event, current_tenant().as_deref())
+                    && self
+                        .check_vault_capability(
+                            "vault:read_metadata",
+                            &event.collection,
+                            &event.key,
+                        )
+                        .is_ok()
             })
             .map(vault_filter_watch_event)
             .collect()
@@ -2516,8 +3080,14 @@ impl RedDBRuntime {
         self.kv_watch_events_since_prefix(collection, prefix, since_lsn, max_count)
             .into_iter()
             .filter(|event| {
-                self.check_vault_capability("vault:read_metadata", &event.collection, &event.key)
-                    .is_ok()
+                vault_watch_in_scope(event, current_tenant().as_deref())
+                    && self
+                        .check_vault_capability(
+                            "vault:read_metadata",
+                            &event.collection,
+                            &event.key,
+                        )
+                        .is_ok()
             })
             .map(vault_filter_watch_event)
             .collect()
@@ -2766,6 +3336,14 @@ fn vault_entry_metadata_json(entry: &VaultEntry) -> crate::json::Value {
         } else {
             crate::json::Value::String(vault_fingerprint(&entry.value))
         },
+    );
+    object.insert(
+        "tenant".to_string(),
+        entry
+            .tenant
+            .as_ref()
+            .map(|tenant| crate::json::Value::String(tenant.clone()))
+            .unwrap_or(crate::json::Value::Null),
     );
     object.insert("tags".to_string(), vault_tags_json(&entry.metadata));
     object.insert(
@@ -3848,4 +4426,24 @@ mod tests {
 
         assert!(stream.poll_next().is_none());
     }
+}
+
+fn vault_value_aad(collection: &str, tenant: Option<&str>) -> String {
+    match tenant {
+        Some(tenant) => format!("reddb.vault.{collection}.tenant/{}", hex::encode(tenant)),
+        None => format!("reddb.vault.{collection}"),
+    }
+}
+
+fn vault_watch_in_scope(
+    event: &crate::replication::cdc::KvWatchEvent,
+    tenant: Option<&str>,
+) -> bool {
+    let stored_tenant = event
+        .after
+        .as_ref()
+        .or(event.before.as_ref())
+        .and_then(|metadata| metadata.get("tenant"))
+        .and_then(|value| value.as_str());
+    stored_tenant == tenant
 }

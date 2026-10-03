@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn deprecated_action_carries_replacement_hint() {
         // The catalog ships `vault:unseal_history` with replacement
-        // `vault:read_metadata` since 0.5.0.
+        // `vault:reveal_history` since 0.5.0.
         let p = r#"{"id":"p","version":1,"statements":[
             {"effect":"allow","actions":["vault:unseal_history"],"resources":["vault:secret/foo"]}
         ]}"#;
@@ -524,8 +524,8 @@ mod tests {
             .find(|d| d.code == DiagnosticCode::DeprecatedAction)
             .expect("deprecated diagnostic");
         assert_eq!(d.severity, Severity::Warning);
-        assert_eq!(d.suggested_fix.as_deref(), Some("vault:read_metadata"));
-        assert!(d.message.contains("vault:read_metadata"));
+        assert_eq!(d.suggested_fix.as_deref(), Some("vault:reveal_history"));
+        assert!(d.message.contains("vault:reveal_history"));
         assert!(d.message.contains("0.5.0"));
     }
 

@@ -795,6 +795,7 @@ fn mcp_tool_text_result(id: Option<&reddb::json::Value>, result: Result<String, 
 
 fn has_cli_vault_key() -> bool {
     reddb::utils::env_with_file_fallback("REDDB_CERTIFICATE").is_some()
+        || reddb::utils::env_with_file_fallback("REDDB_VAULT_PASSPHRASE").is_some()
 }
 
 fn attach_cli_vault(
@@ -814,7 +815,7 @@ fn attach_cli_vault(
     if !has_cli_vault_key() {
         if required || has_saved_vault {
             return Err(
-                "vault export/import requires REDDB_CERTIFICATE or REDDB_CERTIFICATE_FILE"
+                "vault export/import requires REDDB_CERTIFICATE or REDDB_VAULT_PASSPHRASE (or their _FILE variants)"
                     .to_string(),
             );
         }
@@ -2043,44 +2044,16 @@ fn main() {
             targets.dedup();
             // Virtual system rows are rebuilt by the runtime, not writable imports.
             targets.retain(|name| {
-                name != "red" && !name.starts_with("red.") && !name.starts_with("__red_schema_")
+                name == "red.vault"
+                    || (name != "red"
+                        && !name.starts_with("red.")
+                        && !name.starts_with("__red_schema_"))
             });
             let output_path = flag_string(&result.flags, "output");
 
             let mut buf = String::new();
             let mut total_rows = 0usize;
             let mut secret_keys = 0usize;
-            for collection in &targets {
-                let manager = match store.get_collection(collection) {
-                    Some(m) => m,
-                    None => continue,
-                };
-                // Config resolves repeated keys by newest entity id. Preserve
-                // that insertion order when restore assigns fresh entity ids.
-                let mut entities = manager.query_all(|_| true);
-                entities.sort_unstable_by_key(|entity| entity.id.raw());
-                for entity in entities {
-                    let mut row_obj = reddb::json::Map::new();
-                    if let reddb::storage::EntityData::Row(ref row) = entity.data {
-                        if let Some(named) = &row.named {
-                            for (k, v) in named {
-                                row_obj.insert(k.clone(), v.to_json());
-                            }
-                        }
-                    }
-                    let mut wrapper = reddb::json::Map::new();
-                    wrapper.insert(
-                        "collection".to_string(),
-                        reddb::json::Value::String(collection.clone()),
-                    );
-                    wrapper.insert("fields".to_string(), reddb::json::Value::Object(row_obj));
-                    let line = reddb::json::Value::Object(wrapper).to_string_compact();
-                    buf.push_str(&line);
-                    buf.push('\n');
-                    total_rows += 1;
-                }
-            }
-
             if let Some(auth_store) = auth_store.as_ref() {
                 match auth_store.vault_kv_export_encrypted() {
                     Ok(Some(blob)) => {
@@ -2110,6 +2083,82 @@ fn main() {
                         eprintln!("dump error: {err}");
                         std::process::exit(1);
                     }
+                }
+            }
+
+            for collection in &targets {
+                let manager = match store.get_collection(collection) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                if rt
+                    .db()
+                    .collection_contract(collection)
+                    .is_some_and(|contract| {
+                        contract.declared_model == reddb::catalog::CollectionModel::Vault
+                    })
+                {
+                    let records = rt
+                        .export_vault_collection_records(collection)
+                        .unwrap_or_else(|error| {
+                            eprintln!("dump error: {error}");
+                            std::process::exit(1);
+                        });
+                    total_rows += records.len();
+                    let exported = (|| -> Result<String, String> {
+                        let pager = store
+                            .pager()
+                            .ok_or("vault dump requires persistent storage")?;
+                        let vault = reddb::auth::vault::Vault::open(pager)
+                            .map_err(|error| error.to_string())?;
+                        let state = reddb::auth::vault::VaultState {
+                            kv: std::collections::HashMap::from([
+                                ("collection".into(), collection.clone()),
+                                ("format_version".into(), store.format_version().to_string()),
+                                ("records".into(), reddb::json!(records).to_string_compact()),
+                            ]),
+                            ..Default::default()
+                        };
+                        vault
+                            .seal_logical_export(&state)
+                            .map_err(|error| error.to_string())
+                    })()
+                    .unwrap_or_else(|error| {
+                        eprintln!("dump error: {error}");
+                        std::process::exit(1);
+                    });
+                    let wrapper = reddb::json!({
+                        "kind": "reddb.vault_entries.v1",
+                        "encrypted": true,
+                        "blob": exported,
+                    });
+                    buf.push_str(&wrapper.to_string_compact());
+                    buf.push('\n');
+                    continue;
+                }
+                // Config resolves repeated keys by newest entity id. Preserve
+                // that insertion order when restore assigns fresh entity ids.
+                let mut entities = manager.query_all(|_| true);
+                entities.sort_unstable_by_key(|entity| entity.id.raw());
+                for entity in entities {
+                    let mut row_obj = reddb::json::Map::new();
+                    if let reddb::storage::EntityData::Row(ref row) = entity.data {
+                        if let Some(named) = &row.named {
+                            for (k, v) in named {
+                                row_obj.insert(k.clone(), v.to_json());
+                            }
+                        }
+                    }
+                    let mut wrapper = reddb::json::Map::new();
+                    wrapper.insert(
+                        "collection".to_string(),
+                        reddb::json::Value::String(collection.clone()),
+                    );
+                    wrapper.insert("fields".to_string(), reddb::json::Value::Object(row_obj));
+                    let line = reddb::json::Value::Object(wrapper).to_string_compact();
+                    buf.push_str(&line);
+                    buf.push('\n');
+                    total_rows += 1;
                 }
             }
 
@@ -2215,6 +2264,72 @@ fn main() {
                     }
                 };
                 if let reddb::json::Value::Object(map) = &parsed {
+                    if map.get("kind").and_then(|value| value.as_str())
+                        == Some("reddb.vault_entries.v1")
+                    {
+                        let imported = (|| -> Result<usize, String> {
+                            if auth_store.is_none() {
+                                auth_store = attach_cli_vault(&rt, true)?;
+                            }
+                            let blob = map
+                                .get("blob")
+                                .and_then(|value| value.as_str())
+                                .ok_or("vault dump requires an encrypted blob")?;
+                            // Authenticate the complete native records before passing them to
+                            // the storage decoder, which expects trusted physical snapshots.
+                            let state = reddb::auth::vault::Vault::unseal_logical_export(blob)
+                                .map_err(|error| error.to_string())?;
+                            let collection = state
+                                .kv
+                                .get("collection")
+                                .ok_or("vault dump requires a collection")?;
+                            if !restore_identifier_is_safe(collection) {
+                                return Err("invalid vault collection identifier".into());
+                            }
+                            if override_collection
+                                .as_deref()
+                                .is_some_and(|name| name != collection)
+                            {
+                                return Err(
+                                    "encrypted vault collections cannot be renamed during restore"
+                                        .into(),
+                                );
+                            }
+                            let format_version = state
+                                .kv
+                                .get("format_version")
+                                .and_then(|version| version.parse::<u32>().ok())
+                                .ok_or("invalid vault dump format version")?;
+                            let records: reddb::json::Value = reddb::json::from_str(
+                                state
+                                    .kv
+                                    .get("records")
+                                    .ok_or("vault dump requires native records")?,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            let records = records
+                                .as_array()
+                                .ok_or("vault dump requires native records")?
+                                .iter()
+                                .map(|value| {
+                                    value
+                                        .as_str()
+                                        .map(str::to_owned)
+                                        .ok_or("invalid vault dump record")
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            rt.import_vault_collection_records(collection, &records, format_version)
+                                .map_err(|error| error.to_string())
+                        })();
+                        match imported {
+                            Ok(count) => restored += count,
+                            Err(error) => {
+                                errors += 1;
+                                eprintln!("line {}: vault import failed: {error}", line_no + 1);
+                            }
+                        }
+                        continue;
+                    }
                     if map.get("kind").and_then(|v| v.as_str()) == Some("reddb.vault_kv.v1") {
                         let keys: Vec<String> = map
                             .get("keys")
