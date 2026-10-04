@@ -329,10 +329,13 @@ impl RedDBServer {
             _ => return json_error(400, "field 'question' must be a non-empty string"),
         };
 
-        let provider_str =
-            json_string_field(&payload, "provider").unwrap_or_else(|| "openai".to_string());
-        let provider = match crate::ai::parse_provider(&provider_str) {
-            Ok(p) => p,
+        let provider = match json_string_field(&payload, "provider") {
+            Some(name) => crate::ai::parse_provider(&name),
+            None => crate::ai::resolve_defaults_from_runtime(&self.runtime)
+                .map(|(provider, _)| provider),
+        };
+        let provider = match provider {
+            Ok(provider) => provider,
             Err(err) => return json_error(400, err.to_string()),
         };
         if matches!(provider, AiProvider::Local) {
@@ -341,10 +344,15 @@ impl RedDBServer {
             return json_error(status, msg);
         }
         let credential = json_string_field(&payload, "credential");
-        let api_key = match self.resolve_provider_api_key(&provider, credential.as_deref()) {
-            Ok(key) => key,
-            Err(err) => return json_error(400, err),
-        };
+        let crate::ai::AiConnection { api_key, api_base } =
+            match crate::ai::resolve_connection_from_runtime(
+                &provider,
+                credential.as_deref(),
+                &self.runtime,
+            ) {
+                Ok(connection) => connection,
+                Err(err) => return json_error(400, err.to_string()),
+            };
 
         // Search context
         let context_input = crate::application::SearchContextInput {
@@ -377,12 +385,12 @@ impl RedDBServer {
         let context_str =
             crate::json::to_string(&context_json).unwrap_or_else(|_| "{}".to_string());
 
-        let model = json_string_field(&payload, "model").unwrap_or_else(|| {
-            std::env::var(provider.prompt_model_env_name())
-                .ok()
-                .unwrap_or_else(|| provider.default_prompt_model().to_string())
-        });
-        let api_base = provider.resolve_api_base();
+        let explicit_model = json_string_field(&payload, "model");
+        let model = crate::ai::resolve_prompt_model_from_runtime(
+            &self.runtime,
+            &provider,
+            explicit_model.as_deref(),
+        );
 
         let system_prompt = format!(
             "You are an AI assistant answering questions based on data from a multi-modal database. \
@@ -475,10 +483,15 @@ impl RedDBServer {
                 Err(err) => return json_error(400, err.to_string()),
             }
         };
+        if matches!(provider, AiProvider::Groq | AiProvider::DeepSeek) {
+            if let Err(err) = crate::ai::ensure_provider_supports_embeddings(&provider) {
+                return json_error(400, err.to_string());
+            }
+        }
         // Provider routing for embeddings:
         //
-        // * OpenAI-compatible providers (Groq, Ollama, OpenRouter,
-        //   Together, Venice, DeepSeek, Custom, OpenAI itself) all
+        // * OpenAI-compatible embedding providers (Ollama, OpenRouter,
+        //   Together, Venice, RedRouter, Custom, OpenAI itself) all
         //   speak the same `POST /embeddings` shape, so they go
         //   through the shared transport below.
         // * HuggingFace has its own wire shape — feature-extraction
@@ -495,8 +508,8 @@ impl RedDBServer {
                     400,
                     "Anthropic does not offer an embeddings API. \
                      Re-issue the request against an OpenAI-compatible \
-                     provider (openai, groq, ollama, openrouter, \
-                     together, venice, deepseek), HuggingFace, or a \
+                     provider (openai, ollama, openrouter, \
+                     together, venice, red-router), HuggingFace, or a \
                      custom base URL — RedDB does not silently route \
                      embeddings to a different provider than the one \
                      you named."
@@ -548,13 +561,15 @@ impl RedDBServer {
         };
 
         let credential = json_string_field(&payload, "credential");
-        let api_key = match self.resolve_provider_api_key(&provider, credential.as_deref()) {
-            Ok(api_key) => api_key,
-            Err(err) => return json_error(400, err),
-        };
-
-        let api_base = std::env::var(provider.api_base_env_name())
-            .unwrap_or_else(|_| provider.default_api_base().to_string());
+        let crate::ai::AiConnection { api_key, api_base } =
+            match crate::ai::resolve_connection_from_runtime(
+                &provider,
+                credential.as_deref(),
+                &self.runtime,
+            ) {
+                Ok(connection) => connection,
+                Err(err) => return json_error(400, err.to_string()),
+            };
 
         let response = match &provider {
             crate::ai::AiProvider::HuggingFace => {
@@ -889,9 +904,14 @@ impl RedDBServer {
             Err(response) => return response,
         };
 
-        let provider = match parse_ai_provider(&payload) {
+        let provider = match json_string_field(&payload, "provider") {
+            Some(name) => crate::ai::parse_provider(&name),
+            None => crate::ai::resolve_defaults_from_runtime(&self.runtime)
+                .map(|(provider, _)| provider),
+        };
+        let provider = match provider {
             Ok(provider) => provider,
-            Err(err) => return json_error(400, err),
+            Err(err) => return json_error(400, err.to_string()),
         };
         if matches!(provider, AiProvider::Local) {
             let err = crate::ai::local_prompt_unavailable_error();
@@ -899,13 +919,12 @@ impl RedDBServer {
             return json_error(status, msg);
         }
 
-        let model = json_string_field(&payload, "model").unwrap_or_else(|| {
-            std::env::var(provider.prompt_model_env_name())
-                .ok()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| provider.default_prompt_model().to_string())
-        });
+        let explicit_model = json_string_field(&payload, "model");
+        let model = crate::ai::resolve_prompt_model_from_runtime(
+            &self.runtime,
+            &provider,
+            explicit_model.as_deref(),
+        );
         if model.trim().is_empty() {
             return json_error(400, "field 'model' cannot be empty");
         }
@@ -935,12 +954,15 @@ impl RedDBServer {
         };
 
         let credential = json_string_field(&payload, "credential");
-        let api_key = match self.resolve_provider_api_key(&provider, credential.as_deref()) {
-            Ok(key) => key,
-            Err(err) => return json_error(400, err),
-        };
-        let api_base = std::env::var(provider.api_base_env_name())
-            .unwrap_or_else(|_| provider.default_api_base().to_string());
+        let crate::ai::AiConnection { api_key, api_base } =
+            match crate::ai::resolve_connection_from_runtime(
+                &provider,
+                credential.as_deref(),
+                &self.runtime,
+            ) {
+                Ok(connection) => connection,
+                Err(err) => return json_error(400, err.to_string()),
+            };
         let anthropic_version = std::env::var("REDDB_ANTHROPIC_VERSION")
             .unwrap_or_else(|_| crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string());
 
@@ -1137,10 +1159,20 @@ impl RedDBServer {
             .or_else(|| json_string_field(&payload, "key"))
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        let api_base = json_string_field(&payload, "api_base")
+        let api_base = json_string_field(&payload, "endpoint")
+            .or_else(|| json_string_field(&payload, "api_base"))
             .or_else(|| json_string_field(&payload, "base_url"))
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
+
+        if provider.requires_explicit_endpoint() && (api_key.is_none() || api_base.is_none()) {
+            return json_error(400, "gateway registration requires both 'api_key' and 'endpoint' (or 'api_base'/'base_url')");
+        }
+        if let Some(endpoint) = &api_base {
+            if let Err(err) = crate::ai::validate_custom_provider_url(endpoint) {
+                return json_error(400, err.to_string());
+            }
+        }
 
         if api_key.is_none() && api_base.is_none() {
             return json_error(400, "at least 'api_key' or 'api_base' must be provided");
@@ -1241,31 +1273,48 @@ impl RedDBServer {
                 let _ = self
                     .entity_use_cases()
                     .delete_kv(RED_CONFIG_COLLECTION, &key);
-                let _ = self.entity_use_cases().create_kv(CreateKvInput {
-                    collection: RED_CONFIG_COLLECTION.to_string(),
-                    key,
-                    value: Value::text(value),
-                    metadata: Vec::new(),
-                });
+                self.entity_use_cases()
+                    .create_kv(CreateKvInput {
+                        collection: RED_CONFIG_COLLECTION.to_string(),
+                        key,
+                        value: Value::text(value),
+                        metadata: Vec::new(),
+                    })
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())
             };
 
-            set_pointer(
-                "red.config.ai.inference.provider".to_string(),
-                provider.token().to_string(),
-            );
+            for (key, value) in [
+                (
+                    format!("red.config.ai.providers.{}.credential", provider.token()),
+                    alias.to_string(),
+                ),
+                (
+                    "red.config.ai.inference.provider".to_string(),
+                    provider.token().to_string(),
+                ),
+            ] {
+                if let Err(err) = set_pointer(key, value) {
+                    return json_error(400, format!("failed to store default AI config: {err}"));
+                }
+            }
 
             let model = json_string_field(&payload, "model")
                 .unwrap_or_else(|| provider.default_prompt_model().to_string());
-            set_pointer(
+            if let Err(err) = set_pointer(
                 crate::ai::provider_models_key(&provider, "inference"),
                 model.clone(),
-            );
+            ) {
+                return json_error(400, format!("failed to store default model: {err}"));
+            }
 
             if provider.supports_embeddings() {
-                set_pointer(
+                if let Err(err) = set_pointer(
                     "red.config.ai.embeddings.provider".to_string(),
                     provider.token().to_string(),
-                );
+                ) {
+                    return json_error(400, format!("failed to store embeddings provider: {err}"));
+                }
             }
 
             object.insert("is_default".to_string(), JsonValue::Bool(true));
@@ -1534,29 +1583,6 @@ impl RedDBServer {
                 Ok(vec![prompt])
             }
         }
-    }
-
-    fn resolve_provider_api_key(
-        &self,
-        provider: &AiProvider,
-        credential_alias: Option<&str>,
-    ) -> Result<String, String> {
-        crate::ai::resolve_api_key(provider, credential_alias, |kv_key| {
-            if kv_key.starts_with("red.secret.") {
-                return Ok(self.runtime().vault_kv_get(kv_key));
-            }
-            match self
-                .entity_use_cases()
-                .get_kv(RED_CONFIG_COLLECTION, kv_key)
-            {
-                Ok(Some((Value::Text(secret), _))) => Ok(Some(secret.to_string())),
-                Ok(_) => Ok(None),
-                Err(err) => Err(crate::RedDBError::Query(format!(
-                    "failed to read AI credential store: {err}"
-                ))),
-            }
-        })
-        .map_err(|e| e.to_string())
     }
 
     /// POST /ai/models — register a local AI embedding model.
@@ -2396,6 +2422,35 @@ mod tests {
                 }
             });
         assert_eq!(rendered, "Summarize host 10.0.0.4 seen on port 443");
+    }
+
+    #[test]
+    fn gateway_credentials_require_key_and_endpoint_before_any_write() {
+        let (server, path) = make_server("gateway_pair");
+        for provider in ["openai-compat", "red-router"] {
+            for fields in [
+                r#""api_key":"test-key""#,
+                r#""endpoint":"https://example.com/v1""#,
+            ] {
+                let body = format!(r#"{{"provider":"{provider}",{fields}}}"#);
+                let response = server.handle_ai_credentials(body.into_bytes());
+                assert_eq!(response.status, 400);
+                let body = String::from_utf8(response.body).expect("body");
+                assert!(
+                    body.contains("api_key") && body.contains("endpoint"),
+                    "{body}"
+                );
+                assert!(server
+                    .entity_use_cases()
+                    .get_kv(
+                        RED_CONFIG_COLLECTION,
+                        &format!("red.config.ai.providers.{provider}.base_url")
+                    )
+                    .expect("read config")
+                    .is_none());
+            }
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

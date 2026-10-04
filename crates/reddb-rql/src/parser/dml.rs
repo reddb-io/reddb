@@ -362,7 +362,10 @@ impl<'a> Parser<'a> {
                 // it via the embeddings task pointer (ADR-0068 §5). Only an
                 // explicit `USING` names a provider here.
                 let provider = if self.consume(&Token::Using)? {
-                    self.expect_ident()?
+                    match self.peek() {
+                        Token::String(_) => self.parse_string()?,
+                        _ => self.expect_ident()?,
+                    }
                 } else {
                     String::new()
                 };

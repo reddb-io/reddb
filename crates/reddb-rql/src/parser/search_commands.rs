@@ -100,7 +100,10 @@ impl<'a> Parser<'a> {
         // matches `Token::Ident`) would never fire. Use the typed
         // consumer. See bug #108.
         let provider = if self.consume(&Token::Using)? {
-            Some(self.expect_ident()?)
+            Some(match self.peek() {
+                Token::String(_) => self.parse_string()?,
+                _ => self.expect_ident()?,
+            })
         } else {
             None
         };

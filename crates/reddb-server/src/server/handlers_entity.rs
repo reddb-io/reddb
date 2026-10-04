@@ -247,15 +247,6 @@ impl RedDBServer {
         if fields.is_empty() {
             return json_error(400, "auto_embed.fields cannot be empty");
         }
-        let model = auto_embed_json
-            .get("model")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
-                    .ok()
-                    .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string())
-            });
 
         let provider = match crate::ai::parse_provider(provider_str) {
             Ok(p) => p,
@@ -266,11 +257,19 @@ impl RedDBServer {
             let (status, msg) = crate::server::transport::map_runtime_error(&err);
             return json_error(status, msg);
         }
-        let api_key = match crate::ai::resolve_api_key_from_runtime(&provider, None, &self.runtime)
-        {
-            Ok(k) => k,
-            Err(e) => return json_error(400, e.to_string()),
-        };
+        if let Err(err) = crate::ai::ensure_provider_supports_embeddings(&provider) {
+            return json_error(400, err.to_string());
+        }
+        let model = crate::ai::resolve_embeddings_model_from_runtime(
+            &self.runtime,
+            &provider,
+            auto_embed_json.get("model").and_then(JsonValue::as_str),
+        );
+        let crate::ai::AiConnection { api_key, api_base } =
+            match crate::ai::resolve_connection_from_runtime(&provider, None, &self.runtime) {
+                Ok(k) => k,
+                Err(e) => return json_error(400, e.to_string()),
+            };
 
         // Collect one text per row by joining the requested fields.
         let texts: Vec<String> = rows
@@ -297,10 +296,11 @@ impl RedDBServer {
             crate::runtime::ai::batch_client::AiBatchClient::from_runtime(&self.runtime);
         let embeddings = match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(batch_client.embed_batch(
+                handle.block_on(batch_client.embed_batch_at(
                     &provider,
                     &model,
                     &api_key,
+                    &api_base,
                     texts.clone(),
                 ))
             }),

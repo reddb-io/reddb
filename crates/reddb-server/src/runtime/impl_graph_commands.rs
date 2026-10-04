@@ -536,7 +536,8 @@ impl RedDBRuntime {
                     // before the credential resolver so the resolver
                     // audit event is not emitted when policy denies.
                     crate::runtime::ai::provider_gate::enforce(self, &provider)?;
-                    let api_key = crate::ai::resolve_api_key_from_runtime(&provider, None, self)?;
+                    let crate::ai::AiConnection { api_key, api_base } =
+                        crate::ai::resolve_connection_from_runtime(&provider, None, self)?;
                     let model = crate::ai::resolve_embeddings_model(&provider, &kv_getter);
                     let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
                     let request = crate::ai::OpenAiEmbeddingRequest {
@@ -544,7 +545,7 @@ impl RedDBRuntime {
                         model,
                         inputs: vec![query_text.clone()],
                         dimensions: None,
-                        api_base: provider.resolve_api_base(),
+                        api_base,
                     };
                     let response = crate::runtime::ai::block_on_ai(async move {
                         crate::ai::openai_embeddings_async(&transport, request).await

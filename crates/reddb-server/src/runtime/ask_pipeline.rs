@@ -1028,19 +1028,20 @@ fn embed_question(runtime: &RedDBRuntime, question: &str) -> Option<Vec<f32>> {
             None => Ok(None),
         }
     };
-    let provider = crate::ai::resolve_default_provider(&kv_getter);
+    let provider = crate::ai::resolve_embeddings_provider(&kv_getter).ok()?;
     if !provider.is_openai_compatible() {
         return None;
     }
-    let model = crate::ai::resolve_default_model(&provider, &kv_getter);
-    let api_key = crate::ai::resolve_api_key(&provider, None, kv_getter).ok()?;
+    let model = crate::ai::resolve_embeddings_model(&provider, &kv_getter);
+    let crate::ai::AiConnection { api_key, api_base } =
+        crate::ai::resolve_connection_from_runtime(&provider, None, runtime).ok()?;
     let transport = crate::runtime::ai::transport::AiTransport::from_runtime(runtime);
     let request = crate::ai::OpenAiEmbeddingRequest {
         api_key,
         model,
         inputs: vec![question.to_string()],
         dimensions: None,
-        api_base: provider.resolve_api_base(),
+        api_base,
     };
     let response = crate::runtime::ai::block_on_ai(async move {
         crate::ai::openai_embeddings_async(&transport, request).await

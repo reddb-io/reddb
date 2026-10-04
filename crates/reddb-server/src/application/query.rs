@@ -156,15 +156,16 @@ impl RedDBRuntime {
                 if !provider.is_openai_compatible() {
                     return Err(crate::RedDBError::Query(format!(
                         "SEARCH SIMILAR: embeddings are not yet available for provider '{}'. \
-                         Use an OpenAI-compatible provider (openai, groq, ollama, openrouter, \
-                         together, venice, deepseek, or a custom base URL).",
+                         Use an OpenAI-compatible provider (openai, ollama, openrouter, \
+                         together, venice, red-router, or a custom base URL).",
                         provider.token()
                     )));
                 }
-                let api_key = crate::ai::resolve_api_key_from_runtime(&provider, None, self)?;
+                let crate::ai::AiConnection { api_key, api_base } =
+                    crate::ai::resolve_connection_from_runtime(&provider, None, self)?;
                 let model = std::env::var(format!(
                     "REDDB_{}_EMBEDDING_MODEL",
-                    provider.token().to_ascii_uppercase()
+                    provider.token().replace('-', "_").to_ascii_uppercase()
                 ))
                 .ok()
                 .or_else(|| std::env::var("REDDB_OPENAI_EMBEDDING_MODEL").ok())
@@ -178,7 +179,7 @@ impl RedDBRuntime {
                     model,
                     inputs: vec![text],
                     dimensions: None,
-                    api_base: provider.resolve_api_base(),
+                    api_base,
                 };
                 let response = crate::runtime::ai::block_on_ai(async move {
                     crate::ai::openai_embeddings_async(&transport, request).await

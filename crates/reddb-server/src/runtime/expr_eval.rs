@@ -734,17 +734,17 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
         return None;
     }
 
-    let api_key = crate::ai::resolve_api_key(&provider, None, |kv_key| {
-        Ok(
-            lookup_latest_kv_value(db, "red_config", kv_key).and_then(|v| match v {
-                Value::Text(s) => Some(s.to_string()),
-                _ => None,
-            }),
-        )
-    })
-    .ok()?;
+    let crate::ai::AiConnection { api_key, api_base } =
+        crate::ai::resolve_connection(&provider, None, &|kv_key| {
+            Ok(
+                lookup_latest_kv_value(db, "red_config", kv_key).and_then(|v| match v {
+                    Value::Text(s) => Some(s.to_string()),
+                    _ => None,
+                }),
+            )
+        })
+        .ok()?;
 
-    let api_base = provider.resolve_api_base_with_kv("default", &kv_getter);
     let model = crate::ai::resolve_embeddings_model(&provider, &kv_getter);
 
     let transport = crate::runtime::ai::transport::AiTransport::new(
