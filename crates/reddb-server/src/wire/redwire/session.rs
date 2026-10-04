@@ -245,9 +245,11 @@ where
     let session = session.unwrap();
     // Own the runtime lease through EOF/Bye/error so teardown rolls back
     // this connection's transaction before its ID can be reused.
-    let connection = runtime
-        .acquire_wire_connection()
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let connection = Arc::new(
+        runtime
+            .acquire_wire_connection()
+            .map_err(|error| io::Error::other(error.to_string()))?,
+    );
 
     // Per-connection state for prepared statements + streaming
     // bulk inserts. Owned by the session; dropped on disconnect. The
@@ -365,18 +367,54 @@ where
                 )?);
                 queue_send(&out_tx, pong).await?;
             }
-            MessageKind::Query => {
-                let response =
-                    execute_with_redwire_context(&operation_context, session.role, || {
-                        run_query(&runtime, prepared_stmts.registry(), &frame)
+            MessageKind::Query
+            | MessageKind::QueryWithParams
+            | MessageKind::QueryBinary
+            | MessageKind::ExecutePrepared => {
+                // The synchronous engine can park on QUEUE READ WAIT. Keep
+                // it off Tokio's I/O workers, and install its thread-local
+                // security/transaction context on the blocking worker itself.
+                let runtime = Arc::clone(&runtime);
+                let connection = Arc::clone(&connection);
+                let statements = std::mem::take(&mut prepared_stmts);
+                let role = session.role;
+                let (response, statements) = tokio::task::spawn_blocking(move || {
+                    // A started blocking task cannot be aborted. Retain the
+                    // lease until execution ends, even if the session is dropped.
+                    let _connection = connection;
+                    let response = execute_with_redwire_context(&operation_context, role, || {
+                        match frame.kind {
+                            MessageKind::Query => {
+                                run_query(&runtime, statements.registry(), &frame)
+                            }
+                            MessageKind::QueryWithParams => {
+                                run_query_with_params(&runtime, statements.registry(), &frame)
+                            }
+                            MessageKind::QueryBinary => rewrap_length_prefixed_handler_response(
+                                &crate::wire::listener::handle_query_binary(
+                                    &runtime,
+                                    &frame.payload,
+                                ),
+                                frame.correlation_id,
+                            ),
+                            MessageKind::ExecutePrepared => {
+                                rewrap_length_prefixed_handler_response(
+                                    &crate::wire::listener::handle_execute_prepared(
+                                        &runtime,
+                                        &frame.payload,
+                                        &statements,
+                                    ),
+                                    frame.correlation_id,
+                                )
+                            }
+                            _ => unreachable!("only query frames enter the blocking dispatcher"),
+                        }
                     });
-                queue_send(&out_tx, encode_frame(&response)).await?;
-            }
-            MessageKind::QueryWithParams => {
-                let response =
-                    execute_with_redwire_context(&operation_context, session.role, || {
-                        run_query_with_params(&runtime, prepared_stmts.registry(), &frame)
-                    });
+                    (response, statements)
+                })
+                .await
+                .map_err(io::Error::other)?;
+                prepared_stmts = statements;
                 queue_send(&out_tx, encode_frame(&response)).await?;
             }
             // BulkInsert handles both single-row and bulk shapes off
@@ -408,19 +446,6 @@ where
                         &runtime,
                         &frame.payload,
                     )
-                });
-                queue_send(
-                    &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
-                )
-                .await?;
-            }
-            MessageKind::QueryBinary => {
-                let raw = execute_with_redwire_context(&operation_context, session.role, || {
-                    crate::wire::listener::handle_query_binary(&runtime, &frame.payload)
                 });
                 queue_send(
                     &out_tx,
@@ -482,23 +507,6 @@ where
                         &runtime,
                         &frame.payload,
                         &mut prepared_stmts,
-                    )
-                });
-                queue_send(
-                    &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
-                )
-                .await?;
-            }
-            MessageKind::ExecutePrepared => {
-                let raw = execute_with_redwire_context(&operation_context, session.role, || {
-                    crate::wire::listener::handle_execute_prepared(
-                        &runtime,
-                        &frame.payload,
-                        &prepared_stmts,
                     )
                 });
                 queue_send(
