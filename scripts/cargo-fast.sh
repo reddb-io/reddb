@@ -3,6 +3,12 @@ set -euo pipefail
 
 CARGO_BIN="${REDDB_CARGO_BIN:-cargo}"
 RUSTC_BIN="${RUSTC:-rustc}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# A host-wide RUSTUP_TOOLCHAIN (e.g. mise's latest) must not silently
+# override this project's pin. Explicit cargo +toolchain still wins.
+export RUSTUP_TOOLCHAIN="${REDDB_RUST_TOOLCHAIN:-$(awk -F '"' '/^channel[[:space:]]*=/{print $2; exit}' "$ROOT/rust-toolchain.toml")}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 
 if [ "$#" -eq 0 ]; then
   set -- build
@@ -24,10 +30,6 @@ append_rustflag() {
   fi
 }
 
-if [ -z "${CARGO_INCREMENTAL:-}" ]; then
-  export CARGO_INCREMENTAL=1
-fi
-
 USE_SCCACHE="${REDB_USE_SCCACHE:-auto}"
 if command -v sccache >/dev/null 2>&1; then
   case "${USE_SCCACHE}" in
@@ -39,11 +41,11 @@ if command -v sccache >/dev/null 2>&1; then
     0|false|no)
       ;;
     *)
-      if [ "${CARGO_INCREMENTAL}" = "0" ]; then
+      if [ "${CARGO_INCREMENTAL:-}" = "0" ]; then
         export RUSTC_WRAPPER="sccache"
         note "using sccache"
       else
-        note "sccache available but skipped because incremental is enabled"
+        note "sccache skipped; set CARGO_INCREMENTAL=0 to enable it"
       fi
       ;;
   esac
@@ -68,6 +70,23 @@ if [ -n "${LINKER_CHOICE}" ]; then
   esac
   append_rustflag "-C link-arg=-fuse-ld=${LINKER_CHOICE}"
   note "using ${LINKER_CHOICE} via clang"
+fi
+
+# Keep independent worktree targets from multiplying the host's build load.
+# Hold the lease through test execution too, while its binaries are in use.
+# Long-lived cargo run servers must not hold up future builds.
+if [ "${REDDB_CARGO_LOCK:-1}" != "0" ] && command -v flock >/dev/null 2>&1; then
+  for arg in "$@"; do
+    case "$arg" in
+      build|check|clippy|test|rustc|bench|nextest|install|clean|package|publish)
+        LOCK_DIR="${XDG_RUNTIME_DIR:-${HOME}/.cache/reddb}"
+        mkdir -p "$LOCK_DIR"
+        note "using host build/test lease (REDDB_CARGO_LOCK=0 to opt out)"
+        # flock owns the descriptor; Cargo and its children do not inherit it.
+        exec flock --close "$LOCK_DIR/reddb-cargo-${UID}.lock" "$CARGO_BIN" "$@"
+        ;;
+    esac
+  done
 fi
 
 exec "$CARGO_BIN" "$@"

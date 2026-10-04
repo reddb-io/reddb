@@ -50,7 +50,7 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 # the wrapper only for CI or for one-off local builds where you also
 # run with `CARGO_INCREMENTAL=0`.
 
-# [build]
+# Conservative local default; CARGO_BUILD_JOBS or cargo --jobs can override it.
+[build]
+jobs = 2
 # rustc-wrapper = "sccache"
-# Optional: cap parallelism if your machine OOMs on heavy crates.
-# jobs = 8

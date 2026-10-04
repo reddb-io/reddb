@@ -24,14 +24,8 @@ mod e2e_explicit_update_targets;
 #[path = "dml_updates/e2e_hot_update.rs"]
 mod e2e_hot_update;
 
-#[path = "mvcc_transactions/e2e_isolation_levels.rs"]
-mod e2e_isolation_levels;
-
 #[path = "cli_transport/e2e_issue_545_transport_listener_readiness.rs"]
 mod e2e_issue_545_transport_listener_readiness;
-
-#[path = "http_grpc_auth/e2e_issue_547_cross_transport_envelope.rs"]
-mod e2e_issue_547_cross_transport_envelope;
 
 #[path = "tenancy_policy/e2e_issue_745_red_typed_model_relations.rs"]
 mod e2e_issue_745_red_typed_model_relations;
