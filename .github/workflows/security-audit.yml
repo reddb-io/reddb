@@ -52,10 +52,14 @@ jobs:
         # cannot silently break the gate again.
         run: cargo install cargo-audit --locked --version ^0.22
 
-      # The workspace lockfile plus the Python driver's standalone one, which
-      # resolves its own dependency graph and has drifted behind before.
+      # The workspace lockfile plus the standalone ones of the Python driver and
+      # the Node addon, which resolve their own dependency graphs and have
+      # drifted behind before.
       - name: Audit workspace
         run: cargo audit --deny warnings
 
       - name: Audit python driver lockfile
         run: cargo audit --deny warnings --file drivers/python/Cargo.lock
+
+      - name: Audit node addon lockfile
+        run: cargo audit --deny warnings --file drivers/node/Cargo.lock
