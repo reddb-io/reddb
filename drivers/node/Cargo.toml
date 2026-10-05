@@ -1,0 +1,25 @@
+# Keep this crate out of the top-level workspace — it is a cdylib loaded by
+# Node, built on its own (like drivers/python) so it does not change the
+# workspace lockfile or the workspace-wide lint/test gates.
+[workspace]
+
+[package]
+name = "reddb-io-node"
+version = "1.23.4"
+edition = "2021"
+description = "Node addon that embeds the RedDB engine in-process (no subprocess)"
+license = "MIT"
+repository = "https://github.com/reddb-io/reddb"
+publish = false
+
+[lib]
+name = "reddb_node"
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = "3"
+napi-derive = "3"
+reddb = { package = "reddb-io", version = "1.0", path = "../.." }
+
+[build-dependencies]
+napi-build = "2"
