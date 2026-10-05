@@ -15,7 +15,6 @@ const npmPublicPackages = [
 const npmPrivateWorkspacePackages = [
   "packages/internal-asset-fetcher/package.json",
   "packages/internal-bin-resolver/package.json",
-  "packages/internal-version-compare/package.json",
 ];
 
 function cargoManifestsIn(relativeDir) {

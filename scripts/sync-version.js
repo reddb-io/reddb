@@ -125,11 +125,6 @@ const targets = [
     type: 'package-json',
   },
   {
-    label: 'packages/internal-version-compare/package.json',
-    file: path.join(root, 'packages', 'internal-version-compare', 'package.json'),
-    type: 'package-json',
-  },
-  {
     label: 'packages/mcp/package.json (@reddb-io/mcp)',
     file: path.join(root, 'packages', 'mcp', 'package.json'),
     type: 'package-json',
@@ -262,7 +257,6 @@ const stageList = [
   'drivers/js/package.json',
   'packages/internal-asset-fetcher/package.json',
   'packages/internal-bin-resolver/package.json',
-  'packages/internal-version-compare/package.json',
   'packages/mcp/package.json',
   'charts/reddb/Chart.yaml',
   // drivers/js-client/package.json comes from Lane T (#136); the

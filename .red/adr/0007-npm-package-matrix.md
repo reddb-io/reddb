@@ -250,8 +250,9 @@ path becomes a sustained reliability problem") has been met.
   The CLI additionally falls back to `PATH`. Linux prefers the package matching
   the host libc and falls back to the other variant.
 - The asset-fetcher / bin-resolver / version-compare vendored copies in
-  `drivers/js` are removed; `packages/internal-*` and `packages/mcp` are
-  untouched (`@reddb-io/mcp` still fetches lazily at first run).
+  `drivers/js` are removed, and so is `packages/internal-version-compare`, which
+  only the removed CLI postinstall used; `packages/internal-asset-fetcher`,
+  `packages/internal-bin-resolver` and `packages/mcp` are untouched (`@reddb-io/mcp` still fetches lazily at first run).
 
 ### Addendum — in-process addon in the platform packages
 
