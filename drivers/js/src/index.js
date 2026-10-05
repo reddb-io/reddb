@@ -19,6 +19,7 @@
  */
 
 import { spawnRed } from './spawn.js'
+import { NativeRpcClient, openNativeEngine, resolveNativeAddon } from './native-engine.js'
 import { resolveSdkBinary } from './binary.js'
 import { RpcClient, RedDBError } from './protocol.js'
 import { parseUri } from './url.js'
@@ -82,6 +83,15 @@ export async function connect(uri, options = {}) {
         'AUTH_NOT_APPLICABLE',
         'auth is only meaningful for remote connections; embedded modes inherit caller privileges.',
       )
+    }
+    // In-process addon when one is installed for this host (and the caller
+    // did not ask for a specific binary); otherwise the `red rpc --stdio`
+    // subprocess. Both serve the same JSON-RPC protocol.
+    const addon = options.binary ? null : resolveNativeAddon()
+    if (addon) {
+      const client = new NativeRpcClient(openNativeEngine(parsed.path || undefined, addon))
+      await client.call('version', {})
+      return new RedDB(client, { transport: 'embedded' })
     }
     const args = embeddedArgs(parsed)
     const binary = options.binary ?? resolveSdkBinary()

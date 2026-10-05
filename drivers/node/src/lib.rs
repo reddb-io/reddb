@@ -85,7 +85,9 @@ impl Engine {
     /// Serve one JSON-RPC 2.0 request (a single JSON document, no trailing
     /// newline) and resolve with the single-line JSON response. Runs on the
     /// libuv thread pool, so a long query does not block the event loop.
-    /// Requests on one engine are served one at a time, in call order.
+    /// Requests on one engine are served one at a time, but not necessarily
+    /// in call order if several are in flight; a caller that needs ordering
+    /// across un-awaited calls must chain them (the SDK's client does).
     #[napi(ts_return_type = "Promise<string>")]
     pub fn call(&self, request: String) -> AsyncTask<CallTask> {
         AsyncTask::new(CallTask {
