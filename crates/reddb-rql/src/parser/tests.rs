@@ -1948,6 +1948,22 @@ fn test_parse_insert_with_secret_literal_constructor() {
 }
 
 #[test]
+fn quoted_gateway_providers_preserve_identity_in_ai_clauses() {
+    let QueryExpr::Insert(insert) = parse(
+        "INSERT INTO docs (body) VALUES ('hello') WITH AUTO EMBED (body) USING 'red-router' MODEL 'Provider/Embedding'",
+    ).expect("insert") else { panic!("expected insert") };
+    let auto_embed = insert.auto_embed.expect("auto embed");
+    assert_eq!(auto_embed.provider, "red-router");
+    assert_eq!(auto_embed.model.as_deref(), Some("Provider/Embedding"));
+    let QueryExpr::SearchCommand(crate::ast::SearchCommand::Similar { provider, .. }) =
+        parse("SEARCH SIMILAR TEXT 'hello' COLLECTION docs USING 'openai-compat'").expect("search")
+    else {
+        panic!("expected similar search")
+    };
+    assert_eq!(provider.as_deref(), Some("openai-compat"));
+}
+
+#[test]
 fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     use crate::ast::{Expr, ReturningItem};
     use reddb_types::types::Value;

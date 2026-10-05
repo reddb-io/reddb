@@ -1,6 +1,6 @@
 //! Embedding dedup cache — issue #277.
 //!
-//! Optional LRU cache keyed by SHA-256(text) → Vec<f32>.
+//! Optional LRU cache keyed by SHA-256(scope, text) → Vec<f32>.
 //! Off by default; opt-in via `runtime.ai.embedding_dedup_enabled = true`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,7 +49,12 @@ impl EmbeddingDedupCache {
 
     /// Look up `text` in the cache. Returns `Some(embedding)` on hit.
     pub fn get(&self, text: &str) -> Option<Vec<f32>> {
-        let key = hash(text);
+        self.get_scoped(&[], text)
+    }
+
+    /// Partition entries by connection/model identity; only the digest is stored.
+    pub fn get_scoped(&self, scope: &[&str], text: &str) -> Option<Vec<f32>> {
+        let key = hash(scope, text);
         let mut guard = self.inner.lock();
         match guard.get(&key) {
             Some(entry) if entry.inserted_at.elapsed() < self.ttl => {
@@ -74,7 +79,11 @@ impl EmbeddingDedupCache {
 
     /// Insert `embedding` for `text`.
     pub fn insert(&self, text: &str, embedding: Vec<f32>) {
-        let key = hash(text);
+        self.insert_scoped(&[], text, embedding);
+    }
+
+    pub fn insert_scoped(&self, scope: &[&str], text: &str, embedding: Vec<f32>) {
+        let key = hash(scope, text);
         self.inner.lock().put(
             key,
             Entry {
@@ -93,9 +102,12 @@ impl EmbeddingDedupCache {
     }
 }
 
-fn hash(text: &str) -> HashKey {
+fn hash(scope: &[&str], text: &str) -> HashKey {
     let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
+    for part in scope.iter().copied().chain(std::iter::once(text)) {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
     hasher.finalize().into()
 }
 

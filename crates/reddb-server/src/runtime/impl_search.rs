@@ -1451,7 +1451,7 @@ impl RedDBRuntime {
             &mut dyn FnMut(crate::runtime::ai::sse_frame_encoder::Frame) -> RedDBResult<()>,
         >,
     ) -> RedDBResult<RuntimeQueryResult> {
-        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::ai::parse_provider;
 
         // ADR 0068 / #1751: `ASK ... PLAN` returns the typed plan (routed
         // intent + candidate query) without executing the candidate and
@@ -1490,7 +1490,7 @@ impl RedDBRuntime {
         // audit event is not emitted. Failover providers are gated
         // again inside the `attempt_provider` closure below.
         {
-            let (default_provider_pre, _) = crate::ai::resolve_defaults_from_runtime(self);
+            let (default_provider_pre, _) = crate::ai::resolve_defaults_from_runtime(self)?;
             let provider_names_pre =
                 self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider_pre)?;
             if let Some(first) = provider_names_pre.first() {
@@ -1564,7 +1564,7 @@ impl RedDBRuntime {
         }
 
         // Step 3: Call LLM — use configured defaults if no provider/model specified
-        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self)?;
         let provider_names =
             self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
         let provider_refs: Vec<&str> = provider_names.iter().map(String::as_str).collect();
@@ -1649,8 +1649,8 @@ impl RedDBRuntime {
             let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
             let mut retry_count = 0_u32;
             let mut prompt_for_call = full_prompt.clone();
-            let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
-            let api_base = provider.resolve_api_base();
+            let crate::ai::AiConnection { api_key, api_base } =
+                crate::ai::resolve_connection_from_runtime(&provider, None, self)?;
             let (
                 answer,
                 answer_tokens,
@@ -1980,11 +1980,11 @@ impl RedDBRuntime {
         ask: &reddb_rql::ast::AskQuery,
         plan_only: bool,
     ) -> RedDBResult<PlannerPrepass> {
-        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::ai::parse_provider;
         use crate::runtime::ai::ask_planner;
 
         // Provider gate + failover order (mirrors the RAG path).
-        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self)?;
         let provider_names =
             self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
         let planner_provider_name = provider_names
@@ -2064,8 +2064,10 @@ impl RedDBRuntime {
 
         let settings = self.ask_cost_guard_settings();
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
-        let planner_api_key = resolve_api_key_from_runtime(&planner_provider, None, self)?;
-        let planner_api_base = planner_provider.resolve_api_base();
+        let crate::ai::AiConnection {
+            api_key: planner_api_key,
+            api_base: planner_api_base,
+        } = crate::ai::resolve_connection_from_runtime(&planner_provider, None, self)?;
 
         // The closure-model seam: the planner LLM behind a `PlannerModel`.
         // Deterministic by default (temperature 0). The narrowed slice is
@@ -2364,7 +2366,7 @@ impl RedDBRuntime {
         transport: &crate::runtime::ai::transport::AiTransport,
         tenant_key: &str,
     ) -> RedDBResult<PlannerSynthesis> {
-        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::ai::parse_provider;
 
         let provider = parse_provider(provider_name)?;
         crate::runtime::ai::provider_gate::enforce(self, &provider)?;
@@ -2392,8 +2394,8 @@ impl RedDBRuntime {
             },
         );
 
-        let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
-        let api_base = provider.resolve_api_base();
+        let crate::ai::AiConnection { api_key, api_base } =
+            crate::ai::resolve_connection_from_runtime(&provider, None, self)?;
         let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
         let mut retry_count = 0_u32;
         let mut prompt_for_call = base_prompt.to_string();
@@ -2912,10 +2914,10 @@ impl RedDBRuntime {
         ask: &reddb_rql::ast::AskQuery,
         slice: &crate::runtime::ai::ask_planner::NarrowedSlice,
     ) -> RedDBResult<crate::runtime::ai::ask_planner::PlannedRoute> {
-        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::ai::parse_provider;
         use crate::runtime::ai::ask_planner;
 
-        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self)?;
         let provider_names =
             self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
         let planner_provider_name = provider_names
@@ -2929,8 +2931,10 @@ impl RedDBRuntime {
         let planner_model = crate::ai::resolve_ask_planner_model_from_runtime(self, &synth_model);
         let settings = self.ask_cost_guard_settings();
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
-        let planner_api_key = resolve_api_key_from_runtime(&planner_provider, None, self)?;
-        let planner_api_base = planner_provider.resolve_api_base();
+        let crate::ai::AiConnection {
+            api_key: planner_api_key,
+            api_base: planner_api_base,
+        } = crate::ai::resolve_connection_from_runtime(&planner_provider, None, self)?;
 
         let planner_closure = |prompt: &str| -> RedDBResult<String> {
             let response = call_ask_llm(
@@ -2960,7 +2964,7 @@ impl RedDBRuntime {
         source_urns: &[String],
         settings: &crate::runtime::ai::cost_guard::Settings,
     ) -> RedDBResult<RuntimeQueryResult> {
-        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self)?;
         let provider_names =
             self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
         let provider_name = provider_names

@@ -1474,13 +1474,14 @@ pub(super) fn resolve_runtime_vector_source(
         }
         VectorSource::Text(text) => {
             eprintln!("DEBUG resolve_runtime_vector_source Text({text:?})");
-            embed_runtime_vector_text(db, text)
+            embed_runtime_vector_text(runtime, text)
         }
         VectorSource::Subquery(expr) => resolve_runtime_vector_subquery(runtime, expr.as_ref()),
     }
 }
 
-fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
+fn embed_runtime_vector_text(runtime: &RedDBRuntime, text: &str) -> RedDBResult<Vec<f32>> {
+    let db = &runtime.inner.db;
     let kv_getter = |key: &str| -> RedDBResult<Option<String>> {
         match db.get_kv("red_config", key) {
             Some((Value::Text(value), _)) => Ok(Some(value.to_string())),
@@ -1513,7 +1514,8 @@ fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
         });
     }
 
-    let api_key = crate::ai::resolve_api_key(&provider, None, kv_getter)?;
+    let crate::ai::AiConnection { api_key, api_base } =
+        crate::ai::resolve_connection_from_runtime(&provider, None, runtime)?;
     let transport = crate::runtime::ai::transport::AiTransport::new(
         crate::runtime::ai::transport::AiTransportConfig::default(),
     );
@@ -1522,7 +1524,7 @@ fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
         model,
         inputs: vec![text.to_string()],
         dimensions: None,
-        api_base: provider.resolve_api_base(),
+        api_base,
     };
     let response = crate::runtime::ai::block_on_ai(async move {
         crate::ai::openai_embeddings_async(&transport, request).await

@@ -214,6 +214,25 @@ impl<S: SubBatchSender> AiBatchClient<S> {
         api_key: &str,
         texts: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, AiTransportError> {
+        self.embed_batch_at(
+            provider,
+            model,
+            api_key,
+            &provider.resolve_api_base(),
+            texts,
+        )
+        .await
+    }
+
+    /// Embed using an already resolved connection rather than re-resolving its endpoint.
+    pub async fn embed_batch_at(
+        &self,
+        provider: &AiProvider,
+        model: &str,
+        api_key: &str,
+        api_base: &str,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, AiTransportError> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
@@ -221,7 +240,7 @@ impl<S: SubBatchSender> AiBatchClient<S> {
         let max_batch = self
             .max_batch_size_override
             .unwrap_or_else(|| default_max_batch_size(provider));
-        let api_base = provider.resolve_api_base();
+        let cache_scope = [provider.token(), api_base, model, api_key];
         let started = Instant::now();
         let mut local_dedup_hits = 0u64;
         let mut any_chunked = false;
@@ -264,7 +283,7 @@ impl<S: SubBatchSender> AiBatchClient<S> {
             // that were already cached in a prior iteration of this loop after
             // the provider returned).
             if let Some(cache) = &self.dedup_cache {
-                if let Some(cached) = cache.get(text) {
+                if let Some(cached) = cache.get_scoped(&cache_scope, text) {
                     local_dedup_hits = local_dedup_hits.saturating_add(1);
                     result[i] = Some(cached);
                     continue;
@@ -299,7 +318,7 @@ impl<S: SubBatchSender> AiBatchClient<S> {
             let request = SubBatchRequest {
                 provider: provider.token().to_string(),
                 api_key: api_key.to_string(),
-                api_base: api_base.clone(),
+                api_base: api_base.to_string(),
                 model: model.to_string(),
                 inputs: chunk.to_vec(),
             };
@@ -351,7 +370,11 @@ impl<S: SubBatchSender> AiBatchClient<S> {
                 let unique_idx = chunk_start + j;
                 // Insert into dedup cache
                 if let Some(cache) = &self.dedup_cache {
-                    cache.insert(&unique_texts_to_embed[unique_idx], embedding.clone());
+                    cache.insert_scoped(
+                        &cache_scope,
+                        &unique_texts_to_embed[unique_idx],
+                        embedding.clone(),
+                    );
                 }
                 unique_embeddings[unique_idx] = embedding;
             }
@@ -507,6 +530,8 @@ fn default_max_batch_size(provider: &AiProvider) -> usize {
     match provider {
         AiProvider::OpenAi
         | AiProvider::OpenRouter
+        | AiProvider::OpenAiCompat
+        | AiProvider::RedRouter
         | AiProvider::Together
         | AiProvider::Venice
         | AiProvider::Groq
@@ -799,6 +824,66 @@ mod tests {
     }
 
     // ── Issue #277: dedup cache tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn dedup_cache_never_reuses_vectors_across_connections_or_models() {
+        let (client, counter) = mock_client(2);
+        let client = client.with_dedup_cache(Arc::new(EmbeddingDedupCache::new(
+            32,
+            Duration::from_secs(60),
+        )));
+        let connections = [
+            (
+                AiProvider::OpenAi,
+                "model-a",
+                "key-a",
+                "https://a.example/v1",
+            ),
+            (
+                AiProvider::OpenAi,
+                "model-b",
+                "key-a",
+                "https://a.example/v1",
+            ),
+            (
+                AiProvider::OpenAi,
+                "model-a",
+                "key-b",
+                "https://a.example/v1",
+            ),
+            (
+                AiProvider::OpenAi,
+                "model-a",
+                "key-a",
+                "https://b.example/v1",
+            ),
+            (
+                AiProvider::RedRouter,
+                "model-a",
+                "key-a",
+                "https://a.example/v1",
+            ),
+        ];
+        for (index, (provider, model, key, endpoint)) in connections.iter().enumerate() {
+            for _ in 0..2 {
+                client
+                    .embed_batch_at(
+                        provider,
+                        model,
+                        key,
+                        endpoint,
+                        vec!["same text".to_string()],
+                    )
+                    .await
+                    .expect("embedding");
+                assert_eq!(
+                    counter.load(Ordering::SeqCst),
+                    index + 1,
+                    "new connection misses, same connection hits"
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn dedup_on_1000_inputs_10_unique_sends_10_to_provider() {

@@ -504,7 +504,7 @@ impl RedDBRuntime {
             ));
         }
         self.check_insert_column_policy(query)?;
-        if let Some(ref embed_config) = query.auto_embed {
+        let resolved_auto_embed = if let Some(ref embed_config) = query.auto_embed {
             // Empty provider → resolve via the embeddings task pointer
             // (ADR-0068 §5); an explicit `USING` overrides it. A modality-
             // incapable provider fails didactically here.
@@ -536,7 +536,22 @@ impl RedDBRuntime {
                     model_name,
                 )?;
             }
-        }
+            let connection = if matches!(provider, crate::ai::AiProvider::Local) {
+                None
+            } else {
+                Some(crate::ai::resolve_connection_from_runtime(
+                    &provider, None, self,
+                )?)
+            };
+            let model = crate::ai::resolve_embeddings_model_from_runtime(
+                self,
+                &provider,
+                embed_config.model.as_deref(),
+            );
+            Some((provider, model, connection, &embed_config.fields))
+        } else {
+            None
+        };
 
         let mut inserted_count: u64 = 0;
         let effective_rows =
@@ -1544,27 +1559,13 @@ impl RedDBRuntime {
         }
 
         // Auto-embed pipeline: batch-embed fields across all inserted rows via AiBatchClient.
-        if let Some(ref embed_config) = query.auto_embed {
+        if let Some((provider, model, connection, fields)) = resolved_auto_embed.as_ref() {
             let store = self.inner.db.store();
-            let provider =
-                crate::ai::resolve_embeddings_provider_from_runtime(self, &embed_config.provider)?;
             let is_local_provider = matches!(provider, crate::ai::AiProvider::Local);
-            // Local provider runs in-process — no API key path applies.
-            // The pre-flight above already required `MODEL '<name>'`
-            // for the local case, so the unwrap_or default below only
-            // ever fires for OpenAI-compatible providers.
-            let api_key = if is_local_provider {
-                String::new()
-            } else {
-                crate::ai::resolve_api_key_from_runtime(&provider, None, self)?
-            };
-            // Explicit `MODEL '<name>'` wins; otherwise resolve via the
-            // provider models block then the built-in default (ADR-0068 §5).
-            let model = crate::ai::resolve_embeddings_model_from_runtime(
-                self,
-                &provider,
-                embed_config.model.as_deref(),
-            );
+            let (api_key, api_base) = connection
+                .as_ref()
+                .map(|connection| (connection.api_key.as_str(), connection.api_base.as_str()))
+                .unwrap_or(("", ""));
 
             // Read only this INSERT's returned IDs. A pre-write statement
             // snapshot correctly excludes newly committed rows; a fresh/global
@@ -1580,8 +1581,7 @@ impl RedDBRuntime {
                 .enumerate()
                 .filter_map(|(i, entity)| {
                     if let EntityData::Row(ref row) = entity.data {
-                        let texts: Vec<String> = embed_config
-                            .fields
+                        let texts: Vec<String> = fields
                             .iter()
                             .filter_map(|field| match row.get_field(field) {
                                 Some(Value::Text(t)) if !t.is_empty() => Some(t.to_string()),
@@ -1613,7 +1613,7 @@ impl RedDBRuntime {
                 let embeddings = if is_local_provider {
                     let response = crate::runtime::ai::local_embedding::embed_local_with_db(
                         &self.inner.db,
-                        &model,
+                        model,
                         batch_texts,
                     )?;
                     response.embeddings
@@ -1623,10 +1623,11 @@ impl RedDBRuntime {
 
                     match tokio::runtime::Handle::try_current() {
                         Ok(handle) => tokio::task::block_in_place(|| {
-                            handle.block_on(batch_client.embed_batch(
-                                &provider,
-                                &model,
-                                &api_key,
+                            handle.block_on(batch_client.embed_batch_at(
+                                provider,
+                                model,
+                                api_key,
+                                api_base,
                                 batch_texts,
                             ))
                         }),

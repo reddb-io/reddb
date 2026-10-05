@@ -1494,6 +1494,159 @@ mod tests {
         (format!("http://{}", addr), captured)
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gateway_registration_drives_http_grpc_and_batch_with_saved_connection() {
+        use crate::auth::{AuthConfig, AuthStore};
+        use crate::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+        let path = std::env::temp_dir().join(format!(
+            "reddb_gateway_roundtrip_{}_{}.rdb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos(),
+        ));
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path)
+                .with_storage_profile(StorageDeployPreset::Serverless.selection())
+                .expect("profile"),
+        )
+        .expect("runtime");
+        let db = runtime.db();
+        let store = db.store();
+        let pager = store.pager().expect("pager");
+        let auth = Arc::new(
+            AuthStore::with_vault_certificate(
+                AuthConfig::default(),
+                Arc::clone(pager),
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            )
+            .expect("vault"),
+        );
+        let server = crate::server::RedDBServer::new(runtime.clone()).with_auth(auth);
+        let embedding_body =
+            r#"{"data":[{"index":0,"embedding":[0.1,0.2]}],"model":"Gateway/Embedding"}"#;
+        for operation in [
+            "prompt",
+            "ask",
+            "http-embeddings",
+            "grpc-embeddings",
+            "batch",
+            "auto-embed",
+        ] {
+            let response_body = if matches!(operation, "prompt" | "ask") {
+                r#"{"choices":[{"message":{"content":"hello"}}],"model":"Gateway/Chat"}"#
+            } else {
+                embedding_body
+            };
+            let (base, captured) = spawn_mock(200, response_body);
+            let endpoint = format!("{base}/Gateway/v1");
+            let registration = format!(
+                r#"{{"provider":"red-router","alias":"mine","api_key":"synthetic-gateway-key","endpoint":"{endpoint}","default":true,"model":"Gateway/Chat"}}"#
+            );
+            let response = server.handle_ai_credentials(registration.into_bytes());
+            assert_eq!(
+                response.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&response.body)
+            );
+            assert!(!String::from_utf8_lossy(&response.body).contains("synthetic-gateway-key"));
+            match operation {
+                "prompt" => {
+                    let response = server.handle_ai_prompt(br#"{"prompt":"hi"}"#.to_vec());
+                    assert_eq!(
+                        response.status,
+                        200,
+                        "{}",
+                        String::from_utf8_lossy(&response.body)
+                    );
+                }
+                "ask" => {
+                    let response = server.handle_ai_ask(br#"{"question":"hi"}"#.to_vec());
+                    assert_eq!(
+                        response.status,
+                        200,
+                        "{}",
+                        String::from_utf8_lossy(&response.body)
+                    );
+                }
+                "auto-embed" => {
+                    runtime.execute_query("INSERT INTO gateway_batch (body) VALUES ('hi') WITH AUTO EMBED (body) USING 'red-router' MODEL 'Gateway/Embedding'").expect("auto embed");
+                    let rows = runtime
+                        .execute_query("SELECT * FROM gateway_batch")
+                        .expect("rows");
+                    assert_eq!(
+                        rows.result.records.len(),
+                        2,
+                        "one row and its embedding vector"
+                    );
+                }
+                "http-embeddings" => {
+                    let response = server.handle_ai_embeddings(
+                        br#"{"model":"Gateway/Embedding","input":"hi"}"#.to_vec(),
+                    );
+                    assert_eq!(
+                        response.status,
+                        200,
+                        "{}",
+                        String::from_utf8_lossy(&response.body)
+                    );
+                }
+                "grpc-embeddings" => {
+                    let payload =
+                        crate::serde_json::json!({"model":"Gateway/Embedding","input":"hi"});
+                    grpc_embeddings(&runtime, &payload).expect("gRPC embedding");
+                }
+                "batch" => {
+                    let connection =
+                        resolve_connection_from_runtime(&AiProvider::RedRouter, None, &runtime)
+                            .expect("connection");
+                    let client =
+                        crate::runtime::ai::batch_client::AiBatchClient::from_runtime(&runtime);
+                    let vectors = client
+                        .embed_batch_at(
+                            &AiProvider::RedRouter,
+                            "Gateway/Embedding",
+                            &connection.api_key,
+                            &connection.api_base,
+                            vec!["hi".to_string()],
+                        )
+                        .await
+                        .expect("batch");
+                    assert_eq!(vectors, vec![vec![0.1, 0.2]]);
+                }
+                _ => unreachable!("listed operation"),
+            }
+            let request = captured
+                .lock()
+                .expect("capture lock")
+                .take()
+                .expect("request");
+            let suffix = if matches!(operation, "prompt" | "ask") {
+                "chat/completions"
+            } else {
+                "embeddings"
+            };
+            assert_eq!(request.path, format!("/Gateway/v1/{suffix}"));
+            assert!(request
+                .headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+                    && value == "Bearer synthetic-gateway-key"));
+            let model = if matches!(operation, "prompt" | "ask") {
+                "Gateway/Chat"
+            } else {
+                "Gateway/Embedding"
+            };
+            assert!(request.body.contains(model), "{}", request.body);
+        }
+        drop(server);
+        drop(runtime);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn openai_compat_chat_roundtrip_honors_arbitrary_api_base_and_headers() {
         let body = r#"{
@@ -1651,8 +1804,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_default_provider_honors_mode_key() {
-        // The wire-protocol mode selector still wins over the task pointer.
+    fn resolve_default_provider_keeps_vendor_when_mode_is_configured() {
+        // A wire protocol must not replace the configured provider identity.
         let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
                 "red.config.ai.provider" => Ok(Some("anthropic-native".to_string())),
@@ -1660,10 +1813,133 @@ mod tests {
                 _ => Ok(None),
             }
         };
-        assert_eq!(resolve_default_provider(&kv), AiProvider::Anthropic);
+        assert_eq!(
+            resolve_default_provider(&kv).expect("provider"),
+            AiProvider::Groq
+        );
+    }
+
+    #[test]
+    fn auto_embed_missing_gateway_connection_fails_before_row_write() {
+        let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE gateway_docs (id INT, body TEXT)")
+            .expect("table");
+        let error = runtime.execute_query(
+            "INSERT INTO gateway_docs (id, body) VALUES (1, 'hello') WITH AUTO EMBED (body) USING 'red-router' MODEL 'Gateway/Embedding'",
+        ).expect_err("missing connection");
+        assert!(error.to_string().contains("endpoint"), "{error}");
+        let result = runtime
+            .execute_query("SELECT * FROM gateway_docs")
+            .expect("rows");
+        assert!(
+            result.result.records.is_empty(),
+            "invalid connection must leave no rows"
+        );
+    }
+
+    #[test]
+    fn gateway_connections_fail_closed_when_either_part_is_missing() {
+        let provider = parse_provider("red-router").expect("router");
+        let no_endpoint = |key: &str| -> crate::RedDBResult<Option<String>> {
+            assert!(
+                !key.starts_with("red.secret."),
+                "validate endpoint before reading secrets"
+            );
+            Ok(None)
+        };
+        let err = resolve_connection(&provider, None, &no_endpoint)
+            .err()
+            .expect("endpoint required");
+        assert!(err.to_string().contains("endpoint"));
+        let endpoint_only = |key: &str| -> crate::RedDBResult<Option<String>> {
+            Ok((key == "red.config.ai.providers.red-router.base_url")
+                .then(|| "https://example.com/v1".to_string()))
+        };
+        let err = resolve_connection(&provider, None, &endpoint_only)
+            .err()
+            .expect("key required");
+        assert!(err.to_string().contains("API key"));
+    }
+
+    #[test]
+    fn gateway_connections_preserve_endpoint_and_selected_credential() {
+        let provider = parse_provider("openai-compat").expect("gateway");
+        let getter = |key: &str| -> crate::RedDBResult<Option<String>> {
+            Ok(match key {
+                "red.config.ai.providers.openai-compat.base_url" => {
+                    Some("https://example.com/Gateway/v1".to_string())
+                }
+                "red.config.ai.providers.openai-compat.credential" => Some("my-key".to_string()),
+                "red.secret.ai.providers.openai-compat.tokens.my-key" => {
+                    Some("synthetic-key".to_string())
+                }
+                _ => None,
+            })
+        };
+        let connection = resolve_connection(&provider, None, &getter).expect("connection");
+        assert_eq!(connection.api_base, "https://example.com/Gateway/v1");
+        assert_eq!(connection.api_key, "synthetic-key");
+    }
+
+    #[test]
+    fn endpoint_validation_rejects_malformed_and_credential_bearing_urls() {
+        for endpoint in [
+            "local",
+            "ftp://example.com/v1",
+            "https://",
+            "https://user:pass@example.com/v1",
+            "https://example.com/v1?key=secret",
+            "https://example.com/v1#fragment",
+        ] {
+            assert!(
+                validate_custom_provider_url(endpoint).is_err(),
+                "{endpoint}"
+            );
+        }
+        assert!(validate_custom_provider_url("http://127.0.0.1:8000/MyGateway/v1").is_ok());
+    }
+
+    #[test]
+    fn gateway_provider_names_and_url_paths_keep_their_identity() {
+        for name in ["openai-compat", "red-router"] {
+            let provider = parse_provider(name).expect("named gateway");
+            assert_eq!(provider.token(), name);
+            assert!(provider.is_openai_compatible());
+            assert!(provider.requires_api_key());
+            assert_eq!(provider.default_api_base(), "");
+            assert!(!provider.default_key_env_name().contains('-'));
+        }
+        let url = "https://example.com/MyGateway/v1";
+        let provider = parse_provider(url).expect("URL provider");
+        assert_eq!(provider.default_api_base(), url);
+    }
+
+    #[test]
+    fn implicit_credentials_reject_non_ai_secret_refs_before_reading_secret() {
+        let provider = AiProvider::Custom("invalid_secret_ref_test".to_string());
+        let key = ai_api_secret_ref_config_key(&provider, "default");
+        let err = resolve_api_key(&provider, None, |path| {
+            if path == key {
+                return Ok(Some("red.secret.aes_key".to_string()));
+            }
+            assert_ne!(path, "red.secret.aes_key", "must not read engine secret");
+            Ok(None)
+        })
+        .expect_err("non-AI secret ref must fail");
+        assert!(err.to_string().contains("must reference"));
     }
 
     // ---- ADR-0068 §5 config schema (issue #1746) --------------------------
+
+    #[test]
+    fn invalid_provider_selection_does_not_fall_back_to_vendor_credentials() {
+        let getter = |key: &str| -> crate::RedDBResult<Option<String>> {
+            Ok((key == "red.config.ai.inference.provider").then(|| "typo-provider".to_string()))
+        };
+        assert!(resolve_default_provider(&getter).is_err());
+        assert!(resolve_embeddings_provider(&getter).is_err());
+    }
 
     #[test]
     fn inference_provider_ask_specific_beats_task_pointer() {
@@ -1674,7 +1950,10 @@ mod tests {
                 _ => Ok(None),
             }
         };
-        assert_eq!(resolve_default_provider(&kv), AiProvider::Groq);
+        assert_eq!(
+            resolve_default_provider(&kv).expect("provider"),
+            AiProvider::Groq
+        );
     }
 
     #[test]
@@ -1685,10 +1964,16 @@ mod tests {
                 _ => Ok(None),
             }
         };
-        assert_eq!(resolve_default_provider(&pointer), AiProvider::DeepSeek);
+        assert_eq!(
+            resolve_default_provider(&pointer).expect("provider"),
+            AiProvider::DeepSeek
+        );
 
         let empty = |_: &str| -> crate::RedDBResult<Option<String>> { Ok(None) };
-        assert_eq!(resolve_default_provider(&empty), AiProvider::OpenAi);
+        assert_eq!(
+            resolve_default_provider(&empty).expect("provider"),
+            AiProvider::OpenAi
+        );
     }
 
     #[test]
@@ -1742,6 +2027,19 @@ mod tests {
             resolve_embeddings_provider(&empty).unwrap(),
             AiProvider::OpenAi
         );
+    }
+
+    #[test]
+    fn embeddings_selection_rejects_chat_only_providers_and_accepts_routers() {
+        for token in ["anthropic", "groq", "deepseek"] {
+            let provider = parse_provider(token).expect("provider");
+            assert!(!provider.supports_embeddings());
+            assert!(ensure_provider_supports_embeddings(&provider).is_err());
+        }
+        for token in ["openrouter", "venice", "openai-compat", "red-router"] {
+            let provider = parse_provider(token).expect("provider");
+            assert!(ensure_provider_supports_embeddings(&provider).is_ok());
+        }
     }
 
     #[test]
@@ -1814,7 +2112,9 @@ mod tests {
             }
         };
         assert_eq!(
-            AiProvider::OpenAi.resolve_api_base_with_kv("default", &kv),
+            AiProvider::OpenAi
+                .resolve_api_base_checked(&kv)
+                .expect("endpoint"),
             "https://proxy.example/v1"
         );
     }
@@ -1895,6 +2195,8 @@ pub enum AiProvider {
     Anthropic,
     Groq,
     OpenRouter,
+    OpenAiCompat,
+    RedRouter,
     Together,
     Venice,
     Ollama,
@@ -1912,6 +2214,8 @@ impl AiProvider {
             Self::Anthropic => "anthropic",
             Self::Groq => "groq",
             Self::OpenRouter => "openrouter",
+            Self::OpenAiCompat => "openai-compat",
+            Self::RedRouter => "red-router",
             Self::Together => "together",
             Self::Venice => "venice",
             Self::Ollama => "ollama",
@@ -1936,17 +2240,22 @@ impl AiProvider {
             Self::MiniMax => "abab6.5s-chat",
             Self::HuggingFace => "mistralai/Mistral-7B-Instruct-v0.3",
             Self::Local => "sentence-transformers/all-MiniLM-L6-v2",
-            Self::Custom(_) => DEFAULT_OPENAI_PROMPT_MODEL,
+            Self::Custom(_) | Self::OpenAiCompat | Self::RedRouter => DEFAULT_OPENAI_PROMPT_MODEL,
         }
     }
 
     pub fn prompt_model_env_name(&self) -> String {
-        format!("REDDB_{}_PROMPT_MODEL", self.token().to_ascii_uppercase())
+        format!(
+            "REDDB_{}_PROMPT_MODEL",
+            self.token().replace('-', "_").to_ascii_uppercase()
+        )
     }
 
     pub fn default_embedding_model(&self) -> &str {
         match self {
             Self::Ollama => "nomic-embed-text",
+            Self::OpenRouter => "openai/text-embedding-3-small",
+            Self::Venice => "text-embedding-bge-m3",
             Self::MiniMax => "embo-01",
             Self::HuggingFace | Self::Local => "sentence-transformers/all-MiniLM-L6-v2",
             _ => DEFAULT_OPENAI_EMBEDDING_MODEL,
@@ -1967,22 +2276,29 @@ impl AiProvider {
             Self::HuggingFace => "https://api-inference.huggingface.co",
             Self::Local => "local",
             Self::Custom(base) => base.as_str(),
+            Self::OpenAiCompat | Self::RedRouter => "",
         }
     }
 
     pub fn api_base_env_name(&self) -> String {
-        format!("REDDB_{}_API_BASE", self.token().to_ascii_uppercase())
+        format!(
+            "REDDB_{}_API_BASE",
+            self.token().replace('-', "_").to_ascii_uppercase()
+        )
     }
 
     pub fn default_key_env_name(&self) -> String {
-        format!("REDDB_{}_API_KEY", self.token().to_ascii_uppercase())
+        format!(
+            "REDDB_{}_API_KEY",
+            self.token().replace('-', "_").to_ascii_uppercase()
+        )
     }
 
     pub fn alias_key_env_name(&self, alias: &str) -> String {
         let normalized = normalize_alias_token(alias);
         format!(
             "REDDB_{}_API_KEY_{normalized}",
-            self.token().to_ascii_uppercase()
+            self.token().replace('-', "_").to_ascii_uppercase()
         )
     }
 
@@ -1996,30 +2312,35 @@ impl AiProvider {
         self.default_api_base().to_string()
     }
 
-    /// Resolve API base URL checking KV store too (for custom base_url
-    /// config). ADR-0068 §5 clean break: the base URL now lives at
-    /// `red.config.ai.providers.<provider>.base_url` (per provider, no
-    /// credential alias). The old `red.config.ai.<provider>.<alias>.base_url`
-    /// shape is rejected on write; see [`validate_ai_config_key_on_write`].
-    pub fn resolve_api_base_with_kv<F>(&self, _alias: &str, kv_getter: &F) -> String
+    /// Resolve and validate the endpoint before any provider credential is read.
+    pub fn resolve_api_base_checked<F>(&self, kv_getter: &F) -> crate::RedDBResult<String>
     where
         F: Fn(&str) -> crate::RedDBResult<Option<String>>,
     {
-        // 1. Env var
-        if let Ok(value) = std::env::var(self.api_base_env_name()) {
-            let value = value.trim().to_string();
-            if !value.is_empty() {
-                return value;
+        let endpoint = match std::env::var(self.api_base_env_name()) {
+            Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+            _ => kv_getter(&provider_base_url_key(self))?
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.trim().to_string())
+                .unwrap_or_else(|| self.default_api_base().to_string()),
+        };
+        if !matches!(self, Self::Local) {
+            if endpoint.is_empty() {
+                return Err(crate::RedDBError::Query(format!(
+                    "missing {} endpoint; set {} or '{}' alongside the API key",
+                    self.token(),
+                    self.api_base_env_name(),
+                    provider_base_url_key(self),
+                )));
             }
+            validate_custom_provider_url(&endpoint)?;
         }
-        // 2. Provider block: red.config.ai.providers.<provider>.base_url
-        if let Ok(Some(value)) = kv_getter(&provider_base_url_key(self)) {
-            let value = value.trim().to_string();
-            if !value.is_empty() {
-                return value;
-            }
-        }
-        self.default_api_base().to_string()
+        Ok(endpoint)
+    }
+
+    /// Gateways have no trusted built-in endpoint; registration requires the pair.
+    pub fn requires_explicit_endpoint(&self) -> bool {
+        matches!(self, Self::OpenAiCompat | Self::RedRouter | Self::Custom(_))
     }
 
     /// Whether this provider uses the OpenAI-compatible API format.
@@ -2029,6 +2350,8 @@ impl AiProvider {
             Self::OpenAi
                 | Self::Groq
                 | Self::OpenRouter
+                | Self::OpenAiCompat
+                | Self::RedRouter
                 | Self::Together
                 | Self::Venice
                 | Self::Ollama
@@ -2043,22 +2366,22 @@ impl AiProvider {
         !matches!(self, Self::Ollama | Self::Local)
     }
 
-    /// Whether this provider offers an embeddings API. Anthropic famously
-    /// does not; every other provider RedDB speaks does (Local embeds
-    /// in-process). Used to fail an embeddings task pointer loudly rather
-    /// than silently re-routing to a different provider (ADR-0068 §5).
+    /// Embeddings routing and policy validation share one modality matrix.
     pub fn supports_embeddings(&self) -> bool {
-        !matches!(self, Self::Anthropic)
+        crate::runtime::ai::provider_capabilities::Modalities::for_provider(self.token()).embed
     }
 }
 
 /// Parse a provider string into AiProvider.
 pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
-    match name.trim().to_ascii_lowercase().as_str() {
+    let name = name.trim();
+    match name.to_ascii_lowercase().as_str() {
         "openai" => Ok(AiProvider::OpenAi),
         "anthropic" => Ok(AiProvider::Anthropic),
         "groq" => Ok(AiProvider::Groq),
         "openrouter" | "open_router" => Ok(AiProvider::OpenRouter),
+        "openai-compat" | "openai_compat" => Ok(AiProvider::OpenAiCompat),
+        "red-router" | "red_router" => Ok(AiProvider::RedRouter),
         "together" => Ok(AiProvider::Together),
         "venice" => Ok(AiProvider::Venice),
         "ollama" => Ok(AiProvider::Ollama),
@@ -2069,12 +2392,12 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
         other => {
             // Treat as custom provider if it looks like a URL
             if other.starts_with("http://") || other.starts_with("https://") {
-                validate_custom_provider_url(other)?;
-                Ok(AiProvider::Custom(other.to_string()))
+                validate_custom_provider_url(name)?;
+                Ok(AiProvider::Custom(name.to_string()))
             } else {
                 Err(crate::RedDBError::Query(format!(
                     "unsupported AI provider '{other}'; expected: openai, anthropic, groq, \
-                     openrouter, together, venice, ollama, deepseek, minimax, huggingface, local"
+                     openrouter, openai-compat, red-router, together, venice, ollama, deepseek, minimax, huggingface, local"
                 )))
             }
         }
@@ -2101,7 +2424,7 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
 
 /// Providers that can serve embeddings, listed for didactic errors.
 pub const EMBEDDING_CAPABLE_PROVIDERS: &str =
-    "openai, groq, ollama, openrouter, together, venice, deepseek, minimax, huggingface, local";
+    "openai, ollama, openrouter, openai-compat, red-router, together, venice, minimax, huggingface, local";
 
 /// KV key for a provider's base URL under the new schema.
 pub fn provider_base_url_key(provider: &AiProvider) -> String {
@@ -2155,43 +2478,33 @@ pub fn validate_ai_config_key_on_write(key: &str) -> crate::RedDBResult<()> {
 }
 
 /// Resolve the inference (generation) provider. Precedence:
-/// 0. Wire-protocol mode selector (`red.config.ai.provider`) when set.
 /// 1. `REDDB_AI_PROVIDER` env var.
 /// 2. ASK-specific config `red.config.ai.ask.provider`.
 /// 3. Inference task pointer `red.config.ai.inference.provider`.
-/// 4. Falls back to OpenAI.
-pub fn resolve_default_provider<F>(kv_getter: &F) -> AiProvider
+/// 4. Legacy wire-protocol mode selector when no provider was selected.
+/// 5. Falls back to OpenAI.
+pub fn resolve_default_provider<F>(kv_getter: &F) -> crate::RedDBResult<AiProvider>
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
 {
-    // 0. Wire-protocol mode selector takes precedence when explicitly set.
-    if let Some(mode) = resolve_provider_mode(kv_getter) {
-        return provider_mode_to_provider(mode);
-    }
-    // 1. Env var
     if let Ok(value) = std::env::var("REDDB_AI_PROVIDER") {
-        let value = value.trim().to_string();
-        if !value.is_empty() {
-            if let Ok(provider) = parse_provider(&value) {
-                return provider;
-            }
+        if !value.trim().is_empty() {
+            return parse_provider(&value);
         }
     }
-    // 2. ASK-specific config, then 3. inference task pointer.
     for key in [
         "red.config.ai.ask.provider",
         "red.config.ai.inference.provider",
     ] {
-        if let Ok(Some(value)) = kv_getter(key) {
-            let value = value.trim().to_string();
-            if !value.is_empty() {
-                if let Ok(provider) = parse_provider(&value) {
-                    return provider;
-                }
+        if let Some(value) = kv_getter(key)? {
+            if !value.trim().is_empty() {
+                return parse_provider(&value);
             }
         }
     }
-    AiProvider::OpenAi
+    Ok(resolve_provider_mode(kv_getter)
+        .map(provider_mode_to_provider)
+        .unwrap_or(AiProvider::OpenAi))
 }
 
 /// Resolve the inference (generation) model for `provider`. Precedence:
@@ -2254,9 +2567,7 @@ where
         .filter(|v| !v.is_empty())
     {
         parse_provider(&value)?
-    } else if let Some(value) = kv_getter("red.config.ai.embeddings.provider")
-        .ok()
-        .flatten()
+    } else if let Some(value) = kv_getter("red.config.ai.embeddings.provider")?
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
     {
@@ -2265,7 +2576,7 @@ where
         // No embeddings-specific override: follow the general default
         // provider so the historical global `REDDB_AI_PROVIDER` selector
         // keeps driving embeddings when the task pointer is unset.
-        resolve_default_provider(kv_getter)
+        resolve_default_provider(kv_getter)?
     };
     ensure_provider_supports_embeddings(&provider)?;
     Ok(provider)
@@ -2303,7 +2614,7 @@ where
 {
     if let Ok(value) = std::env::var(format!(
         "REDDB_{}_EMBEDDING_MODEL",
-        provider.token().to_ascii_uppercase()
+        provider.token().replace('-', "_").to_ascii_uppercase()
     )) {
         let value = value.trim().to_string();
         if !value.is_empty() {
@@ -2365,7 +2676,7 @@ where
 /// Resolve default provider + model from runtime KV store.
 pub fn resolve_defaults_from_runtime(
     runtime: &crate::runtime::RedDBRuntime,
-) -> (AiProvider, String) {
+) -> crate::RedDBResult<(AiProvider, String)> {
     use crate::application::ports::RuntimeEntityPort;
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
         match runtime.get_kv("red_config", key)? {
@@ -2373,9 +2684,24 @@ pub fn resolve_defaults_from_runtime(
             _ => Ok(None),
         }
     };
-    let provider = resolve_default_provider(&kv_getter);
+    let provider = resolve_default_provider(&kv_getter)?;
     let model = resolve_default_model(&provider, &kv_getter);
-    (provider, model)
+    Ok((provider, model))
+}
+
+pub fn resolve_prompt_model_from_runtime(
+    runtime: &crate::runtime::RedDBRuntime,
+    provider: &AiProvider,
+    explicit: Option<&str>,
+) -> String {
+    use crate::application::ports::RuntimeEntityPort;
+    if let Some(model) = explicit {
+        return model.to_string();
+    }
+    resolve_default_model(provider, &|key| match runtime.get_kv("red_config", key)? {
+        Some((reddb_types::Value::Text(value), _)) => Ok(Some(value.to_string())),
+        _ => Ok(None),
+    })
 }
 
 /// Resolve the ASK planner model from runtime KV (`red.config.ai.ask.planner_model`),
@@ -2401,16 +2727,16 @@ pub fn resolve_defaults_from_runtime_port<
     P: crate::application::ports::RuntimeEntityPort + ?Sized,
 >(
     runtime: &P,
-) -> (AiProvider, String) {
+) -> crate::RedDBResult<(AiProvider, String)> {
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
         match runtime.get_kv("red_config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
     };
-    let provider = resolve_default_provider(&kv_getter);
+    let provider = resolve_default_provider(&kv_getter)?;
     let model = resolve_default_model(&provider, &kv_getter);
-    (provider, model)
+    Ok((provider, model))
 }
 
 /// Resolve the embeddings provider for an AUTO EMBED / embeddings call from
@@ -2471,8 +2797,8 @@ pub fn resolve_embeddings_model_from_runtime<
 ///    `red.config.ai.providers.<provider>.tokens.<alias>.secret_ref`
 /// 3. Env fallback: `REDDB_<PROVIDER>_API_KEY[_<ALIAS>]`
 ///
-/// The alias `default` is implicit when `credential_alias = None`. First
-/// non-empty source wins per request.
+/// With no explicit alias, use `providers.<provider>.credential`, then `default`.
+/// First non-empty source wins per request.
 ///
 /// The old vault path shape (`red.secret.ai.<provider>.<alias>.api_key`)
 /// and the legacy plaintext config path (`red.config.ai.<provider>.<alias>.key`)
@@ -2494,19 +2820,19 @@ pub fn resolve_api_key<F>(
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
 {
-    // Providers that don't require API keys
-    if !provider.requires_api_key() {
-        // Still try to find a key (user may have one for auth'd Ollama)
-        if let Ok(value) = std::env::var(provider.default_key_env_name()) {
-            let value = value.trim().to_string();
-            if !value.is_empty() {
-                return Ok(value);
-            }
-        }
-        return Ok(String::new());
-    }
-
-    if let Some(alias) = credential_alias.map(str::trim).filter(|a| !a.is_empty()) {
+    let configured_alias = if credential_alias.is_none() {
+        kv_getter(&format!(
+            "red.config.ai.providers.{}.credential",
+            provider.token()
+        ))?
+    } else {
+        None
+    };
+    let credential_alias = credential_alias.or(configured_alias.as_deref());
+    if let Some(alias) = credential_alias
+        .map(str::trim)
+        .filter(|a| !a.is_empty() && *a != "default")
+    {
         // 1. Vault token path (managed, encrypted at rest).
         if let Some(key) = kv_getter(&ai_api_secret_path(provider, alias))? {
             if !key.trim().is_empty() {
@@ -2519,14 +2845,7 @@ where
             // The indirection may only name an AI provider credential.
             // Pointing it at `red.secret.aes_key` or an IAM blob would send
             // engine-internal key material as a bearer to the provider URL.
-            if !secret_ref
-                .to_ascii_lowercase()
-                .starts_with("red.secret.ai.")
-            {
-                return Err(crate::RedDBError::Query(format!(
-                    "secret_ref '{secret_ref}' must reference a vault key under red.secret.ai.*"
-                )));
-            }
+            validate_ai_secret_ref(secret_ref)?;
             if let Some(key) = kv_getter(secret_ref)? {
                 if !key.trim().is_empty() {
                     return Ok(key);
@@ -2556,7 +2875,9 @@ where
     }
     // 2. Vault token reachable through a configured indirection ref.
     if let Some(secret_ref) = kv_getter(&ai_api_secret_ref_config_key(provider, "default"))? {
-        if let Some(key) = kv_getter(secret_ref.trim())? {
+        let secret_ref = secret_ref.trim();
+        validate_ai_secret_ref(secret_ref)?;
+        if let Some(key) = kv_getter(secret_ref)? {
             if !key.trim().is_empty() {
                 return Ok(key);
             }
@@ -2574,6 +2895,9 @@ where
     // Clean break: reject a credential still sitting at a removed path
     // instead of silently reading it (issue #1745).
     reject_removed_credential_paths(provider, "default", &kv_getter)?;
+    if !provider.requires_api_key() {
+        return Ok(String::new());
+    }
 
     Err(crate::RedDBError::Query(format!(
         "missing {} API key. Set {} or store it in the vault at '{}'",
@@ -2581,6 +2905,18 @@ where
         provider.default_key_env_name(),
         ai_api_secret_path(provider, "default"),
     )))
+}
+
+fn validate_ai_secret_ref(secret_ref: &str) -> crate::RedDBResult<()> {
+    if !secret_ref
+        .to_ascii_lowercase()
+        .starts_with("red.secret.ai.")
+    {
+        return Err(crate::RedDBError::Query(format!(
+            "secret_ref '{secret_ref}' must reference a vault key under red.secret.ai.*"
+        )));
+    }
+    Ok(())
 }
 
 /// Vault token path (issue #1745): the sole credential source in the vault.
@@ -2683,6 +3019,41 @@ fn normalize_alias_token(alias: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
+/// A validated endpoint and its resolved credential. Deliberately has no Debug
+/// implementation because the credential must not appear in diagnostics.
+pub struct AiConnection {
+    pub api_base: String,
+    pub api_key: String,
+}
+
+pub fn resolve_connection<F>(
+    provider: &AiProvider,
+    credential_alias: Option<&str>,
+    kv_getter: &F,
+) -> crate::RedDBResult<AiConnection>
+where
+    F: Fn(&str) -> crate::RedDBResult<Option<String>>,
+{
+    let api_base = provider.resolve_api_base_checked(kv_getter)?;
+    let api_key = resolve_api_key(provider, credential_alias, kv_getter)?;
+    Ok(AiConnection { api_base, api_key })
+}
+
+pub fn resolve_connection_from_runtime(
+    provider: &AiProvider,
+    credential_alias: Option<&str>,
+    runtime: &crate::runtime::RedDBRuntime,
+) -> crate::RedDBResult<AiConnection> {
+    use crate::application::ports::RuntimeEntityPort;
+    let api_base =
+        provider.resolve_api_base_checked(&|key| match runtime.get_kv("red_config", key)? {
+            Some((reddb_types::Value::Text(value), _)) => Ok(Some(value.to_string())),
+            _ => Ok(None),
+        })?;
+    let api_key = resolve_api_key_from_runtime(provider, credential_alias, runtime)?;
+    Ok(AiConnection { api_base, api_key })
+}
+
 /// Convenience: resolve API key using a RedDBRuntime's KV store.
 ///
 /// Emits an `ai.credential.resolve` audit event so operators can answer
@@ -2698,6 +3069,18 @@ pub fn resolve_api_key_from_runtime(
     runtime: &crate::runtime::RedDBRuntime,
 ) -> crate::RedDBResult<String> {
     use crate::application::ports::RuntimeEntityPort;
+    let configured_alias = if credential_alias.is_none() {
+        match runtime.get_kv(
+            "red_config",
+            &format!("red.config.ai.providers.{}.credential", provider.token()),
+        )? {
+            Some((reddb_types::Value::Text(value), _)) => Some(value.to_string()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let credential_alias = credential_alias.or(configured_alias.as_deref());
     let alias_for_audit = credential_alias.unwrap_or("default").to_string();
     let provider_token = provider.token().to_string();
     let audited_paths: std::cell::RefCell<Vec<(String, bool)>> =
@@ -3073,6 +3456,9 @@ pub fn grpc_embeddings(
         Some(name) => parse_provider(name)?,
         None => resolve_embeddings_provider_from_runtime(runtime, "")?,
     };
+    if matches!(provider, AiProvider::Groq | AiProvider::DeepSeek) {
+        ensure_provider_supports_embeddings(&provider)?;
+    }
     // Routing matrix mirrors `handle_ai_embeddings`. See that function
     // for the rationale; in short: HuggingFace gets its own wire
     // shape, Anthropic fails fast (no embeddings product), and Local
@@ -3082,8 +3468,8 @@ pub fn grpc_embeddings(
             return Err(crate::RedDBError::Query(
                 "Anthropic does not offer an embeddings API. \
                  Re-issue the request against an OpenAI-compatible \
-                 provider (openai, groq, ollama, openrouter, together, \
-                 venice, deepseek), HuggingFace, or a custom base URL — \
+                 provider (openai, ollama, openrouter, together, \
+                 venice, red-router), HuggingFace, or a custom base URL — \
                  RedDB does not silently route embeddings to a \
                  different provider than the one you named."
                     .to_string(),
@@ -3104,7 +3490,8 @@ pub fn grpc_embeddings(
         .get("credential")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let api_key = resolve_api_key_from_runtime(&provider, credential.as_deref(), runtime)?;
+    let AiConnection { api_key, api_base } =
+        resolve_connection_from_runtime(&provider, credential.as_deref(), runtime)?;
 
     let dimensions = payload
         .get("dimensions")
@@ -3113,9 +3500,7 @@ pub fn grpc_embeddings(
         .filter(|v| *v > 0);
 
     let response = match &provider {
-        AiProvider::HuggingFace => {
-            huggingface_embeddings(&api_key, &model, &inputs, &provider.resolve_api_base())?
-        }
+        AiProvider::HuggingFace => huggingface_embeddings(&api_key, &model, &inputs, &api_base)?,
         _ => {
             let transport = crate::runtime::ai::transport::AiTransport::from_runtime(runtime);
             let request = OpenAiEmbeddingRequest {
@@ -3123,7 +3508,7 @@ pub fn grpc_embeddings(
                 model,
                 inputs,
                 dimensions,
-                api_base: provider.resolve_api_base(),
+                api_base,
             };
             crate::runtime::ai::block_on_ai(async move {
                 openai_embeddings_async(&transport, request).await
@@ -3493,13 +3878,12 @@ where
 }
 
 /// Map a mode to the matching [`AiProvider`] variant. `OpenAiCompat`
-/// stays as a `Custom("")` marker — callers must resolve the actual
-/// api_base separately (typically via `resolve_api_base_with_kv`).
+/// uses the named gateway provider, which requires an explicit endpoint.
 pub fn provider_mode_to_provider(mode: AiProviderMode) -> AiProvider {
     match mode {
         AiProviderMode::OpenAiNative => AiProvider::OpenAi,
         AiProviderMode::AnthropicNative => AiProvider::Anthropic,
-        AiProviderMode::OpenAiCompat => AiProvider::Custom(String::new()),
+        AiProviderMode::OpenAiCompat => AiProvider::OpenAiCompat,
     }
 }
 
@@ -3513,6 +3897,22 @@ pub fn provider_mode_to_provider(mode: AiProviderMode) -> AiProvider {
 /// `REDDB_AI_ALLOW_PRIVATE_PROVIDERS=1` lifts both restrictions for
 /// deployments that run providers on a private network.
 pub(crate) fn validate_custom_provider_url(url: &str) -> crate::RedDBResult<()> {
+    let uri = url.parse::<http::Uri>().map_err(|_| {
+        crate::RedDBError::Query("AI endpoint must be an absolute http(s) URL".to_string())
+    })?;
+    if !matches!(uri.scheme_str(), Some("http" | "https"))
+        || uri.host().is_none_or(str::is_empty)
+        || uri
+            .authority()
+            .is_some_and(|authority| authority.as_str().contains('@'))
+        || uri.query().is_some()
+        || url.contains('#')
+    {
+        return Err(crate::RedDBError::Query(
+            "AI endpoint must be an absolute http(s) URL without userinfo, query or fragment"
+                .to_string(),
+        ));
+    }
     if std::env::var("REDDB_AI_ALLOW_PRIVATE_PROVIDERS")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false)
