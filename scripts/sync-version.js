@@ -228,7 +228,6 @@ syncCargoLock(path.join(root, 'drivers', 'node', 'Cargo.lock'), [
   'reddb-io-grpc-proto',
   'reddb-io-server',
   'reddb-io-client',
-  'reddb-io-client-connector',
   'reddb-io-node',
 ])
 syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), [

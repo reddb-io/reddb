@@ -398,6 +398,52 @@ jobs:
         working-directory: drivers/python
         run: cargo check --locked
 
+  drivers-node:
+    # The Node addon (`drivers/node`) embeds the engine in-process for
+    # @reddb-io/sdk. Like `drivers/python` it is a cdylib outside the Rust
+    # workspace with its own lockfile, so nothing else compiles it: build it
+    # here and run the SDK's integration test against the real `.node`.
+    name: Drivers / Node (addon build + e2e)
+    needs: gate
+    if: needs.gate.outputs.run_heavy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: drivers-node-rust-1.91.0
+          cache-on-failure: "true"
+          save-if: ${{ github.event_name != 'pull_request' }}
+          workspaces: drivers/node -> target
+      # Regenerate the intentionally separate lockfile with: cd drivers/node && cargo check
+      - name: Verify drivers/node/Cargo.lock is current
+        working-directory: drivers/node
+        run: |
+          if ! cargo metadata --locked --format-version 1 > /dev/null 2>&1; then
+            echo "::error::drivers/node/Cargo.lock is stale; regenerate with: cd drivers/node && cargo check"
+            exit 1
+          fi
+      - name: Build the addon
+        working-directory: drivers/node
+        run: cargo build --locked
+      - name: SDK integration test against the built addon
+        working-directory: drivers/js
+        run: |
+          cp ../node/target/debug/libreddb_node.so "$RUNNER_TEMP/reddb.node"
+          REDDB_NATIVE_ADDON="$RUNNER_TEMP/reddb.node" node --test test/native-engine.e2e.test.mjs
+
   feature-matrix:
     # PLAN.md B5 — compile every supported feature combination that
     # operators may select for release artifacts.
