@@ -23,3 +23,12 @@ reddb = { package = "reddb-io", version = "1.0", path = "../.." }
 
 [build-dependencies]
 napi-build = "2"
+
+# Same policy as the `red` binary (root Cargo.toml): after a panic the process
+# dies and WAL recovery guarantees consistency, instead of unwinding through
+# write paths and continuing with half-mutated state. Inside the addon this
+# means an engine panic takes the host Node process down; that is deliberate
+# (data integrity over availability) and was chosen explicitly.
+[profile.release]
+panic = "abort"
+strip = "symbols"
