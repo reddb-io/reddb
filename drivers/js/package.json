@@ -1,7 +1,7 @@
 {
   "name": "@reddb-io/sdk",
   "version": "1.23.4",
-  "description": "Official embedded RedDB SDK — launches a local red binary over stdio JSON-RPC. Use @reddb-io/client for remote HTTP, gRPC, and RedWire.",
+  "description": "Official embedded RedDB SDK — launches a local red binary over stdio JSON-RPC. The binary arrives as a per-platform optionalDependency — no install script. Use @reddb-io/client for remote HTTP, gRPC, and RedWire.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -14,13 +14,11 @@
   "files": [
     "src/",
     "index.d.ts",
-    "postinstall.js",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "postinstall": "node postinstall.js",
-    "test": "node --test test/ask.test.mjs test/cache.test.mjs test/db-helpers.test.mjs test/embedded-only.test.mjs test/helpers.test.mjs test/insert-ids.test.mjs test/kv.test.mjs test/params.test.mjs test/postinstall.test.mjs test/queue.test.mjs test/redwire.params.test.mjs test/transaction.test.mjs test/url.test.mjs && node test/smoke.test.mjs && node test/conformance.test.mjs && node test/readme-examples.test.mjs"
+    "test": "node --test test/ask.test.mjs test/cache.test.mjs test/db-helpers.test.mjs test/embedded-only.test.mjs test/helpers.test.mjs test/insert-ids.test.mjs test/kv.test.mjs test/params.test.mjs test/platform-binary.test.mjs test/queue.test.mjs test/redwire.params.test.mjs test/transaction.test.mjs test/url.test.mjs && node test/smoke.test.mjs && node test/conformance.test.mjs && node test/readme-examples.test.mjs"
   },
   "engines": {
     "node": ">=18"
