@@ -14,13 +14,13 @@
 # Required assets are the cross-product of:
 #   - bins:      red, red_client
 #   - suffixes:  linux-x86_64, linux-aarch64, linux-armv7,
+#                linux-x86_64-static, linux-aarch64-static,
 #                windows-x86_64.exe
-# The suffix list mirrors `composeAssetName()` in
-# `drivers/js/src/internal/asset-fetcher/asset-name.js` for release-blocking
-# platforms. macOS assets are temporarily optional because the hosted macOS
-# runners have been the least stable part of the release path. `aarch64-static`
-# (musl) is intentionally NOT required here: the JS postinstall does not
-# request it.
+# The suffix list mirrors the required entries of `PLATFORMS` in
+# `scripts/npm-platform-packages.mjs`, which builds the `@reddb-io/red-*` npm
+# packages from these assets. macOS assets are temporarily optional because
+# the hosted macOS runners have been the least stable part of the release
+# path. The `-static` (musl) assets back the `-musl` npm packages.
 #
 # Usage:
 #   GH_TOKEN=...  scripts/verify-release-assets.sh v1.0.8
@@ -43,6 +43,8 @@ SUFFIXES=(
   linux-x86_64
   linux-aarch64
   linux-armv7
+  linux-x86_64-static
+  linux-aarch64-static
   windows-x86_64.exe
 )
 EXTRA_ASSETS=(
@@ -77,7 +79,7 @@ if (( ${#MISSING[@]} > 0 )); then
     echo "ERROR: release ${TAG} is missing ${#MISSING[@]} required asset(s):"
     for m in "${MISSING[@]}"; do echo "  - $m"; done
     echo
-    echo "These assets back the SDK postinstall, checksum verification, artifact attestations, and curl-based installer."
+    echo "These assets back the npm platform packages, checksum verification, artifact attestations, and curl-based installer."
     echo "Do NOT publish to npm without them — see docs/release-runbook.md"
     echo "(\"Release asset contract\")."
   } >&2
