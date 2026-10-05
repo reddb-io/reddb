@@ -26,6 +26,8 @@
  *   - drivers/js-client/package.json  (@reddb-io/client npm — optional, Lane T #136)
  *   - drivers/bun/package.json        (@reddb-io/client-bun npm)
  *   - packages/internal-*.package.json (private npm workspace support packages)
+ *   - drivers/node/Cargo.toml         (reddb-io-node addon)
+ *   - drivers/node/Cargo.lock         (path package versions)
  *   - drivers/python/Cargo.toml       (reddb-io-python internal name)
  *   - drivers/python/Cargo.lock       (path package versions)
  *   - drivers/python/pyproject.toml   (reddb PyPI)
@@ -157,6 +159,11 @@ const targets = [
     type: 'package-json',
   },
   {
+    label: 'drivers/node/Cargo.toml',
+    file: path.join(root, 'drivers', 'node', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
     label: 'drivers/python/Cargo.toml',
     file: path.join(root, 'drivers', 'python', 'Cargo.toml'),
     type: 'cargo-toml',
@@ -211,6 +218,19 @@ syncCargoLock(path.join(root, 'Cargo.lock'), [
   'reddb-io-client',
   'reddb-io-client-connector',
 ])
+syncCargoLock(path.join(root, 'drivers', 'node', 'Cargo.lock'), [
+  'reddb-io',
+  'reddb-io-types',
+  'reddb-io-crypto',
+  'reddb-io-file',
+  'reddb-io-rql',
+  'reddb-io-wire',
+  'reddb-io-grpc-proto',
+  'reddb-io-server',
+  'reddb-io-client',
+  'reddb-io-client-connector',
+  'reddb-io-node',
+])
 syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), [
   'reddb-io',
   'reddb-io-types',
@@ -250,6 +270,8 @@ const stageList = [
   // .filter() below drops it from the stage list when absent.
   'drivers/js-client/package.json',
   'drivers/bun/package.json',
+  'drivers/node/Cargo.toml',
+  'drivers/node/Cargo.lock',
   'drivers/python/Cargo.toml',
   'drivers/python/Cargo.lock',
   'drivers/python/pyproject.toml',
