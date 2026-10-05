@@ -25,7 +25,6 @@ importers:
 
   packages/internal-bin-resolver: {}
 
-  packages/internal-version-compare: {}
 
   packages/mcp: {}
 
