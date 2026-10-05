@@ -9,6 +9,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # override this project's pin. Explicit cargo +toolchain still wins.
 export RUSTUP_TOOLCHAIN="${REDDB_RUST_TOOLCHAIN:-$(awk -F '"' '/^channel[[:space:]]*=/{print $2; exit}' "$ROOT/rust-toolchain.toml")}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+export NEXTEST_TEST_THREADS="${NEXTEST_TEST_THREADS:-2}"
 
 if [ "$#" -eq 0 ]; then
   set -- build
@@ -78,6 +80,9 @@ fi
 if [ "${REDDB_CARGO_LOCK:-1}" != "0" ] && command -v flock >/dev/null 2>&1; then
   for arg in "$@"; do
     case "$arg" in
+      run|fmt|metadata|help|--)
+        break
+        ;;
       build|check|clippy|test|rustc|bench|nextest|install|clean|package|publish)
         LOCK_DIR="${XDG_RUNTIME_DIR:-${HOME}/.cache/reddb}"
         mkdir -p "$LOCK_DIR"

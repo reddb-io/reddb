@@ -25,6 +25,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 const call = { args, start: Date.now(), toolchain: process.env.RUSTUP_TOOLCHAIN,
   jobs: process.env.CARGO_BUILD_JOBS, incremental: process.env.CARGO_INCREMENTAL,
+  testThreads: process.env.RUST_TEST_THREADS, nextestThreads: process.env.NEXTEST_TEST_THREADS,
   target: process.env.CARGO_TARGET_DIR };
 if (process.env.FAKE_HOLD_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_HOLD_MS));
 call.end = Date.now();
@@ -44,7 +45,7 @@ process.exit(Number(process.env.FAKE_EXIT || 0));
     FAKE_CARGO_LOG: log,
     REDB_USE_SCCACHE: "0",
   };
-  for (const key of ["CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "REDDB_RUST_TOOLCHAIN",
+  for (const key of ["CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS", "REDDB_RUST_TOOLCHAIN",
     "REDDB_CARGO_LOCK", "REDDB_FAST_SHARED_TARGET", "REDDB_FAST_TARGET_DIR",
     "REDDB_FAST_TESTS", "REDDB_FAST_EXTRA_TESTS", "REDDB_FAST_VERBOSE"]) delete env[key];
   return { dir, env, log };
@@ -65,6 +66,8 @@ test("wrapper respects profile incremental settings and defaults to the project 
   });
   assert.equal(call.toolchain, pin);
   assert.equal(call.jobs, "2");
+  assert.equal(call.testThreads, "2");
+  assert.equal(call.nextestThreads, "2");
   assert.equal(call.incremental, undefined);
 });
 
@@ -74,10 +77,14 @@ test("explicit compiler, job and incremental choices remain available", (t) => {
     REDDB_RUST_TOOLCHAIN: "nightly",
     CARGO_BUILD_JOBS: "4",
     CARGO_INCREMENTAL: "0",
+    RUST_TEST_THREADS: "3",
+    NEXTEST_TEST_THREADS: "4",
   });
   assert.equal(call.toolchain, "nightly");
   assert.equal(call.jobs, "4");
   assert.equal(call.incremental, "0");
+  assert.equal(call.testThreads, "3");
+  assert.equal(call.nextestThreads, "4");
   assert.deepEqual(call.args, ["+nightly", "check", "--jobs", "1"]);
 });
 
@@ -141,6 +148,22 @@ test("Cargo failures propagate through the lease", (t) => {
     cwd: f.dir, env: { ...f.env, FAKE_EXIT: "42" }, encoding: "utf8",
   });
   assert.equal(result.status, 42);
+});
+
+test("cargo run arguments do not accidentally acquire the build lease", async (t) => {
+  if (spawnSync("flock", ["--version"]).status !== 0) return t.skip("flock unavailable");
+  const f = fixture(t);
+  const lease = path.join(f.dir, `reddb-cargo-${process.getuid()}.lock`);
+  const holder = spawn("flock", ["--close", lease, "bash", "-c", "echo locked; sleep 2"]);
+  t.after(() => holder.kill());
+  await new Promise((resolve, reject) => {
+    holder.stdout.once("data", resolve);
+    holder.once("error", reject);
+  });
+  const result = spawnSync("bash", [path.join(f.dir, "scripts/cargo-fast.sh"), "run", "--", "test"], {
+    cwd: f.dir, env: f.env, encoding: "utf8", timeout: 1000,
+  });
+  assert.equal(result.status, 0, "long-lived run would wait for/hold the build lease");
 });
 
 // Inspect the declared harness graph without compiling the engine. This catches

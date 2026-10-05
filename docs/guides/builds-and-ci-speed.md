@@ -111,6 +111,7 @@ The build/test/check/clippy commands in the Makefile and AFK validation use the 
 
 - selects the Rust version in `rust-toolchain.toml`, even when a host-wide `RUSTUP_TOOLCHAIN` points at a different version
 - defaults to two Cargo jobs, adjustable through `CARGO_BUILD_JOBS` or Cargo's `--jobs`
+- defaults to two concurrent Rust tests and two nextest test processes, adjustable through `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS`, or the runners' CLI options
 - serializes participating build/test commands across worktrees for the same user when `flock` is available
 - leaves incremental settings to the selected Cargo profile
 - uses `sccache` automatically when `CARGO_INCREMENTAL=0`
@@ -221,7 +222,7 @@ So the goal is not "every build becomes instant". The goal is:
 Use this decision table:
 
 - editing code normally: `make build` or `make check`
-- opening a session or switching branch: `make warm`
+- opening a session or switching branch: `make check`; optional `make warm` for tests/benches
 - smoke testing optimized behavior: `make build-fast`
 - shipping artifact: `make release`
 - only checking types or borrow errors: `make check`
@@ -246,6 +247,8 @@ REDDB_FAST_TESTS='grouped_sql_core:e2e_ddl_drop_foundation::' make test-fast
 ```
 
 `CARGO_TARGET_DIR` selects the reusable target for builds and tests. Use `REDDB_FAST_TARGET_DIR` for an explicit fast-lane target, or `REDDB_FAST_SHARED_TARGET=0` to restore the separate `test-fast` directory. Isolation duplicates caches; use it when needed, and retire inactive targets rather than retaining one forever per branch. AFK worktree target isolation remains enabled.
+
+Nextest's separate execution budget uses its documented [environment override](https://nexte.st/docs/configuration/env-vars/); the compiler job count alone does not limit test execution.
 
 Each test-bearing source file belongs to one grouped harness. Cross-domain selection uses filters instead of including the same file in another binary. CI checks this and the curated target/module names with:
 
