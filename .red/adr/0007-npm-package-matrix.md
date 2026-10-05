@@ -252,3 +252,22 @@ path becomes a sustained reliability problem") has been met.
 - The asset-fetcher / bin-resolver / version-compare vendored copies in
   `drivers/js` are removed; `packages/internal-*` and `packages/mcp` are
   untouched (`@reddb-io/mcp` still fetches lazily at first run).
+
+### Addendum — in-process addon in the platform packages
+
+**Date:** 2026-10-05
+
+`@reddb-io/sdk`'s embedded mode no longer has to spawn `red rpc --stdio`: the
+`drivers/node` addon runs the same JSON-RPC dispatcher in process
+(`rpc_stdio::EmbeddedRpcSession`). When a platform package carries
+`reddb.node`, the SDK loads it (`REDDB_NATIVE_ADDON` overrides the lookup) and
+otherwise falls back to the `red` subprocess. The addon is built in the release
+matrix only where it can be loaded on the runner and shipped only after it
+answered a request; cross-compiled and musl platforms keep the subprocess path.
+
+The addon uses `panic = "abort"`, like `red`: after a panic the process dies and
+WAL recovery guarantees consistency. Inside the addon that takes the host Node
+process down, which differs from the subprocess case (the app only saw
+`CLIENT_CLOSED`). That was chosen deliberately over unwinding, which would keep
+running on possibly half-mutated state.
+

@@ -202,6 +202,22 @@ test("npm platform packages publish before cli/sdk and no package runs an instal
   }
 });
 
+test("the Node addon is only shipped after it loaded on its own runner, and never blocks the release", () => {
+  const workflow = read(".github/workflows/release.yml");
+  const buildJob = workflow.slice(workflow.indexOf("\n  build:\n"), workflow.indexOf("\n  artifact-sizes:\n"));
+  const step = buildJob.slice(buildJob.indexOf("- name: Build + smoke-test Node addon"));
+  const stepBody = step.slice(0, step.indexOf("\n      - name: Strip"));
+
+  assert.match(stepBody, /if: "!matrix\.cross"/, "cross/musl legs must not build an addon they cannot load");
+  assert.match(stepBody, /continue-on-error: true/, "an addon failure must not block the release");
+  assert.match(stepBody, /cargo build --locked --release --target \$\{\{ matrix\.target \}\}/);
+  assert.match(stepBody, /Engine\.open\(\)/, "the addon must be loaded and opened before it ships");
+  assert.match(stepBody, /rm -f "\$\{OUT\}"/, "an addon that fails to load must be dropped");
+  assert.match(buildJob, /reddb-node-\$\{\{ matrix\.asset_name \}\}\*/, "addon is uploaded with the leg's assets");
+  assert.match(buildJob, /timeout-minutes: 60/, "the second engine compile needs the longer timeout");
+  assert.match(workflow, /-name 'reddb-node-\*'/, "the addon must be in SHA256SUMS so the platform package can verify it");
+});
+
 test("release workflows publish aggregate checksum manifests for installers", () => {
   const releaseWorkflow = read(".github/workflows/release.yml");
   const rcWorkflow = read(".github/workflows/release-candidate.yml");

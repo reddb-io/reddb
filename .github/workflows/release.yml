@@ -155,7 +155,8 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The Node addon is a second engine compile on the legs that build it.
+    timeout-minutes: 60
     continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
@@ -216,6 +217,9 @@ jobs:
         with:
           shared-key: release-${{ runner.os }}-${{ matrix.target }}
           cache-on-failure: "true"
+          workspaces: |
+            . -> target
+            drivers/node -> target
 
       - name: Add cross-compile target
         if: matrix.cross
@@ -266,6 +270,50 @@ jobs:
               cargo build --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
             '
           sudo chown -R "$(id -u):$(id -g)" target/${{ matrix.target }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: "!matrix.cross"
+        with:
+          node-version: '22'
+
+      - name: Build + smoke-test Node addon (in-process embedded engine)
+        # `@reddb-io/sdk` loads this as `reddb.node` instead of spawning `red`.
+        # Only legs that run on their own architecture build it, because an
+        # addon is only shipped once it has been LOADED and answered a request
+        # on the runner: a cross-compiled or musl `.node` that was never loaded
+        # must not reach users. Legs without one ship the plain package and the
+        # SDK keeps using the `red` subprocess there. Best effort: a failure
+        # here never blocks the release, it only leaves the asset out.
+        # `drivers/node` is outside the workspace (own lockfile/target).
+        if: "!matrix.cross"
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          case "${{ matrix.target }}" in
+            *windows*) LIB=reddb_node.dll ;;
+            *apple*)   LIB=libreddb_node.dylib ;;
+            *)         LIB=libreddb_node.so ;;
+          esac
+          OUT="reddb-node-${{ matrix.asset_name }}.node"
+          if ! (cd drivers/node && cargo build --locked --release --target ${{ matrix.target }}); then
+            echo "::warning::Node addon failed to build for ${{ matrix.asset_name }}; shipping without it"
+            exit 0
+          fi
+          cp "drivers/node/target/${{ matrix.target }}/release/${LIB}" "${OUT}"
+          if node -e '
+            const { Engine } = require(require("path").resolve(process.argv[1]))
+            const e = Engine.open()
+            const r = JSON.parse(e.callSync(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "version", params: {} })))
+            e.close()
+            if (!r.result) { console.error(JSON.stringify(r)); process.exit(1) }
+          ' "${OUT}"; then
+            shasum -a 256 "${OUT}" > "${OUT}.sha256" 2>/dev/null || certutil -hashfile "${OUT}" SHA256 > "${OUT}.sha256"
+            echo "Node addon ${OUT} loaded and answered a request"
+          else
+            echo "::warning::Node addon ${OUT} built but failed to load/answer; NOT shipping it"
+            rm -f "${OUT}"
+          fi
 
       - name: Strip (Linux native)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -321,6 +369,7 @@ jobs:
           path: |
             red-${{ matrix.asset_name }}*
             red_client-${{ matrix.asset_name }}*
+            reddb-node-${{ matrix.asset_name }}*
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
@@ -416,7 +465,7 @@ jobs:
           set -euo pipefail
           (
             cd release
-            find . -maxdepth 1 -type f \( -name 'red-*' -o -name 'red_client-*' \) ! -name '*.sha256' -print0 \
+            find . -maxdepth 1 -type f \( -name 'red-*' -o -name 'red_client-*' -o -name 'reddb-node-*' \) ! -name '*.sha256' -print0 \
               | sort -z \
               | xargs -0 sha256sum \
               | sed 's#  \./#  #'

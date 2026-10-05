@@ -40,6 +40,19 @@ install script and no download**: it works with `--ignore-scripts`, behind a
 registry mirror, and offline once the packages are cached. Don't install with
 `--omit=optional` / `--no-optional`, or the binary is skipped.
 
+### In-process engine
+
+On platforms whose package includes `reddb.node`, `connect('memory://')` and
+`connect('file://...')` run the engine **inside your process** — no subprocess,
+same API and transaction semantics. Elsewhere (and when you pass
+`options.binary`) the SDK spawns `red rpc --stdio` as before. Set
+`REDDB_NATIVE_ADDON=/path/to/reddb.node` to point at a specific addon.
+
+Because the engine shares your process, an engine panic aborts the process (the
+engine's crash-safety model relies on WAL recovery, not unwinding). A file-backed
+database allows one writer: a second `connect('file://...')` on the same file
+fails until the first is closed.
+
 ## Using your own binary
 
 To use a `red` you provide (a custom build, an unsupported platform), point

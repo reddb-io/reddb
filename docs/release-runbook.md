@@ -346,6 +346,17 @@ The static musl variants (`linux-x86_64-static`, `linux-aarch64-static`)
 are also required: they back the `-musl` npm platform packages and the thin
 `Dockerfile.client` image.
 
+The in-process Node addon is a separate, **optional** asset per platform,
+`reddb-node-<suffix>.node` (e.g. `reddb-node-linux-x86_64.node`). It is built
+only on legs that run on their own architecture and is uploaded only after the
+build job loaded it and got a response to a `version` request; it is covered by
+`checksums.txt` / `SHA256SUMS` like the binaries. `scripts/npm-platform-packages.mjs`
+ships it inside the matching `@reddb-io/red-*` package as `reddb.node`, and
+`@reddb-io/sdk` prefers it over spawning `red`. A missing addon is not a release
+failure: that platform keeps the subprocess path. Currently not built (cross-
+compiled, so never loaded in CI): `linux-armv7`, `macos-x86_64`, and the `-static`
+musl variants.
+
 Every stable release also publishes two aggregate SHA-256 manifests for the
 downloadable binaries and SBOMs:
 
