@@ -69,10 +69,10 @@ updates:
     # not by action version. Dependabot mistakes the tag for an action
     # version and tries to bump to nonexistent toolchains (e.g. 1.100.0).
     # Manage this pin manually in the workflow files.
-    # `changesets/action` v2 is a breaking rewrite (different inputs, and it
-    # requires Changesets CLI v3 / pnpm >= 10; we run CLI v2). The v2 bump in
-    # bump (d292f7166) broke the release PR workflow on main. Stay on v1.x until the CLI is
-    # migrated on purpose.
+    # `changesets/action` v2 is a breaking rewrite: different inputs, and it
+    # requires Changesets CLI v3 / pnpm >= 10 while we run CLI v2. Its bump
+    # (d292f7166) broke the Version Packages workflow on main. Stay on v1.x
+    # until the CLI is migrated on purpose.
     ignore:
       - dependency-name: "dtolnay/rust-toolchain"
       - dependency-name: "changesets/action"
