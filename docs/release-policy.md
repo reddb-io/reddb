@@ -43,7 +43,7 @@ Stable GitHub Releases publish:
 - `artifact-sizes.md` as release-gate evidence.
 
 Official JavaScript package publication is gated on the GitHub Release carrying
-the postinstall-required binary assets and checksum manifests. Release artifacts
+every binary asset (the npm platform packages are built from them) and checksum manifests. Release artifacts
 and SBOMs are attested with GitHub Artifact Attestations from the aggregate
 checksum manifest.
 

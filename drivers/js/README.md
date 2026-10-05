@@ -1,7 +1,8 @@
 # @reddb-io/sdk
 
 Official RedDB SDK for JavaScript and TypeScript. Speaks JSON-RPC 2.0 over
-stdio to a local `red` binary, which is downloaded automatically on install.
+stdio to a local `red` binary, which npm installs for your platform automatically
+(no install script, no download).
 Works in **Node 18+**, **Bun** and **Deno** (via `npm:` specifier) — same
 package, no per-runtime fork.
 
@@ -30,24 +31,21 @@ In Deno:
 import { connect } from 'npm:@reddb-io/sdk'
 ```
 
-The `postinstall` script downloads the matching `red` binary from GitHub
-Releases into `node_modules/@reddb-io/sdk/bin/`. If the download fails (no
-network, 404, unsupported platform) the install now **fails loud** with an
-actionable multi-line message — it no longer silently ships an empty `bin/`
-that explodes the first time you call `connect()`. See the next section
-for the supported offline paths.
+The `red` binary ships as a per-platform package
+(`@reddb-io/red-linux-x64`, `-linux-x64-musl`, `-linux-arm64`,
+`-linux-arm64-musl`, `-linux-arm`, `-darwin-x64`, `-darwin-arm64`,
+`-win32-x64`) listed as an `optionalDependency` of this package. Your package
+manager installs only the one matching your OS, CPU and libc, so there is **no
+install script and no download**: it works with `--ignore-scripts`, behind a
+registry mirror, and offline once the packages are cached. Don't install with
+`--omit=optional` / `--no-optional`, or the binary is skipped.
 
-## Offline / restricted-network installs
+## Using your own binary
 
-If your CI or workstation has no network during `npm install`, or your
-environment blocks postinstall scripts entirely, opt out explicitly and
-point the driver at a binary you provide yourself:
+To use a `red` you provide (a custom build, an unsupported platform), point
+the driver at it:
 
 ```bash
-# 1. Install the SDK without trying to download the engine.
-REDDB_SKIP_POSTINSTALL=1 npm install @reddb-io/sdk
-
-# 2. At runtime, tell connect() where the red binary lives.
 export REDDB_BIN=/path/to/red          # canonical, per ADR 0006
 # (REDDB_BINARY_PATH is a deprecated alias kept for the rollout window.)
 ```
@@ -64,15 +62,11 @@ Three ways to get a `red` binary:
   cargo build --release --bin red
   export REDDB_BIN="$PWD/target/release/red"
   ```
-- Download a prebuilt asset from the releases page and drop it at
-  `<package>/bin/red[.exe]`:
+- Download a prebuilt asset from the releases page:
   <https://github.com/reddb-io/reddb/releases>
 
-When `REDDB_SKIP_POSTINSTALL=1` is set the postinstall script prints a one-line
-notice and exits 0; without it, any download failure exits non-zero so the
-install surfaces the problem immediately. If you forget to provide the
-binary, `connect()` raises a clear `binary "red" not found` error that names
-`REDDB_BIN` as the override.
+If no binary can be found, `connect()` raises a clear `binary "red" not found`
+error that names the expected package and `REDDB_BIN` as the override.
 
 ## Quickstart
 

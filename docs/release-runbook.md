@@ -8,7 +8,8 @@ maintenance.
 > The previous `pnpm version <patch|minor|major>` flow ran the bump
 > **locally** before CI built anything, which opened a window where
 > `package.json` on `main` had a version that no GitHub Release covered.
-> The `postinstall` hook in `@reddb-io/sdk` would `404` in that window.
+> The `@reddb-io/red-*` platform packages are built from the GitHub Release
+> assets, so they would have nothing to build from in that window.
 > The Changesets flow described below eliminates that race: the version
 > bump and the release tag are produced atomically by CI.
 
@@ -330,19 +331,20 @@ flipping the switch.
 ## Release asset contract
 
 Every `v<x.y.z>` stable GitHub Release **must** carry the following
-twelve binary assets before any npm package at the same version may
-ship. The list mirrors the platform/arch matrix served by the SDK
-postinstall (`drivers/js/src/internal/asset-fetcher/asset-name.js`)
-plus the `red_client` thin-client variant of each:
+binary assets before any npm package at the same version may
+ship. The npm `@reddb-io/red-<os>-<cpu>[-musl]` platform packages are built
+from these assets by `scripts/npm-platform-packages.mjs` (the `PLATFORMS`
+table there is the source of truth), plus the `red_client` thin-client
+variant of each:
 
 | Bin          | linux-x86_64 | linux-aarch64 | linux-armv7 | macos-x86_64 | macos-aarch64 | windows-x86_64.exe |
 |--------------|--------------|---------------|-------------|--------------|---------------|---------------------|
 | `red`        | required     | required      | required    | required     | required      | required            |
 | `red_client` | required     | required      | required    | required     | required      | required            |
 
-The musl variant (`linux-aarch64-static`) is built but **not** part of
-the contract — it backs the thin `Dockerfile.client` image, not npm
-postinstall.
+The static musl variants (`linux-x86_64-static`, `linux-aarch64-static`)
+are also required: they back the `-musl` npm platform packages and the thin
+`Dockerfile.client` image.
 
 Every stable release also publishes two aggregate SHA-256 manifests for the
 downloadable binaries and SBOMs:
@@ -407,7 +409,7 @@ The release workflow enforces the contract automatically:
 
 1.0.5 shipped `@reddb-io/sdk@1.0.5` to npm without
 `red-linux-x86_64` on the GitHub Release. Every fresh Linux x86_64
-install hit a 404 in postinstall and had to fall back to `REDDB_BIN`.
+install failed to get a binary and had to fall back to `REDDB_BIN`.
 The recovery playbook for any future repeat:
 
 1. Run `scripts/verify-release-assets.sh v<x.y.z>` to enumerate
@@ -422,13 +424,11 @@ The recovery playbook for any future repeat:
    npm deprecate @reddb-io/sdk@<x.y.z> \
      "missing red-<suffix> binary — install v<x.y.z+1> or set REDDB_BIN"
    ```
-4. The SDK postinstall already prints an actionable error
-   (`drivers/js/postinstall.js`, `formatFailure` for the
-   `ASSET_NOT_FOUND` code) — verify the message renders correctly
-   once with a deliberately bad tag:
-   ```bash
-   REDDB_POSTINSTALL_VERSION=v0.0.0-does-not-exist npm rebuild @reddb-io/sdk
-   ```
+4. The `publish-npm-platforms` job builds the platform packages from the
+   release assets and verifies every binary against `SHA256SUMS`; it fails
+   before publishing anything if an asset is missing or does not match. It
+   skips versions already on the registry, so re-running a partially failed
+   release is safe.
 
 ## macOS x86_64 binary
 
