@@ -335,7 +335,6 @@ test("vendored asset-fetcher copies match the source package byte for byte", () 
   const sourceDir = "packages/internal-asset-fetcher/src";
   const vendored = [
     "drivers/js/src/internal/asset-fetcher",
-    "drivers/js-client/src/internal/asset-fetcher",
     "packages/mcp/src/internal/asset-fetcher",
   ];
   const files = ["index.js", "download.js", "checksum.js", "asset-name.js"];
