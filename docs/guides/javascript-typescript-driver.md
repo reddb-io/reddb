@@ -23,9 +23,9 @@ and each has a distinct binary-acquisition contract (see
 
 | Package              | What it ships                                                          | Install size budget | Transports supported                          | Embedded mode | Env override        |
 | -------------------- | ---------------------------------------------------------------------- | ------------------- | --------------------------------------------- | ------------- | ------------------- |
-| `@reddb-io/cli`      | CLI launcher; downloads full `red` binary on postinstall to global `PATH` | ≤ 12 MB compressed  | n/a (CLI subcommands wrap the server binary)  | n/a           | `REDDB_BIN`         |
-| `@reddb-io/sdk`      | Full JS SDK; downloads full `red` binary into `node_modules` on postinstall | ≤ 12 MB compressed  | embedded (stdio JSON-RPC), gRPC, HTTP         | yes           | `REDDB_BIN`         |
-| `@reddb-io/client`   | Thin remote-only JS driver; downloads `red_client` thin binary on postinstall | ≤ 5 MB compressed   | gRPC, HTTP (remote endpoints only)            | no — rejects `memory://` and `file:///...` | `REDDB_CLIENT_BIN`  |
+| `@reddb-io/cli`      | CLI launcher; the `red` binary comes from a per-platform `optionalDependency` (no install script) | ≤ 12 MB compressed  | n/a (CLI subcommands wrap the server binary)  | n/a           | `REDDB_BIN`         |
+| `@reddb-io/sdk`      | Full JS SDK; the `red` binary comes from a per-platform `optionalDependency` (no install script) | ≤ 12 MB compressed  | embedded (stdio JSON-RPC), gRPC, HTTP         | yes           | `REDDB_BIN`         |
+| `@reddb-io/client`   | Thin remote-only JS driver; pure JavaScript, no binary and no install script | ≤ 5 MB compressed   | gRPC, HTTP (remote endpoints only)            | no — rejects `memory://` and `file:///...` | n/a                 |
 
 > **Performance check before you commit.** RedDB's measured wins (and
 > the gaps where it still loses) are catalogued in
@@ -59,9 +59,11 @@ In Deno:
 import { connect } from 'npm:@reddb-io/sdk'
 ```
 
-The package downloads the matching `red` binary during `postinstall`. If your
-environment blocks install scripts, set `REDDB_BIN=/path/to/red` (the legacy
-name `REDDB_BINARY_PATH` is still honoured during the deprecation window).
+The matching `red` binary arrives as a per-platform package
+(`@reddb-io/red-<os>-<cpu>[-musl]`) that npm installs automatically — there is
+no install script, so it works with `--ignore-scripts`. To use your own build,
+set `REDDB_BIN=/path/to/red` (the legacy name `REDDB_BINARY_PATH` is still
+honoured during the deprecation window).
 
 ### `@reddb-io/cli`
 
@@ -78,10 +80,9 @@ Or install globally so `reddb-cli` is on `PATH`:
 pnpm add -g @reddb-io/cli
 ```
 
-The CLI postinstall consults the `red` already on `PATH` and decides
-between `install`, `upgrade`, and `skip`. Set `REDDB_SKIP_POSTINSTALL=1`
-to short-circuit the network round-trip in CI cache-warming or air-gapped
-installs.
+The launcher runs the `red` from the installed platform package. Set
+`REDDB_BIN=/path/to/red` to use a different binary; if no platform package is
+installed it falls back to a `red` on `PATH`.
 
 ### `@reddb-io/client`
 
@@ -93,11 +94,10 @@ edge containers, CI smoke tests):
 pnpm add @reddb-io/client
 ```
 
-Only `grpc://...` and `http://...` URIs are accepted. Embedded URIs
-(`memory://`, `file:///...`) throw at `connect()` time — by design, the
-thin `red_client` binary cannot host an engine. Override the binary
-location with `REDDB_CLIENT_BIN=/path/to/red_client` when postinstall
-is blocked.
+Only remote URIs are accepted. Embedded URIs (`memory://`,
+`file:///...`) throw at `connect()` time — this package cannot host an
+engine. It is pure JavaScript: installing it runs no script and downloads no
+binary. For the `red_client` / `red` CLI, install `@reddb-io/cli`.
 
 ## 2. Connect
 

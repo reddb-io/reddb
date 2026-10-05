@@ -246,6 +246,20 @@ jobs:
           node scripts/sync-version.js
           bash scripts/check-versions.sh
 
+      - name: Build platform packages from RC release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/assets"
+          gh release download "${{ needs.plan.outputs.rc_tag }}" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/assets" --pattern 'red-*' --pattern SHA256SUMS
+          # RCs only build linux-x86_64, hence --allow-missing.
+          node scripts/npm-platform-packages.mjs build --allow-missing \
+            --version "${{ needs.plan.outputs.rc_version }}" --assets "$RUNNER_TEMP/assets" \
+            --out "$RUNNER_TEMP/platform-packages" | tee "$RUNNER_TEMP/platform-dirs.txt"
+          node scripts/npm-platform-packages.mjs inject \
+            --version "${{ needs.plan.outputs.rc_version }}" package.json drivers/js/package.json
+
       - name: Publish all public packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -254,6 +268,11 @@ jobs:
             echo "::warning::NPM_TOKEN not set — skipping npm @rc publish."
             exit 0
           fi
+          # Platform packages first: cli/sdk list them as optionalDependencies.
+          while read -r dir; do
+            echo "==> publishing ${dir}"
+            pnpm publish "${dir}" --tag rc --access public --no-git-checks
+          done < "$RUNNER_TEMP/platform-dirs.txt"
           for PKG_DIR in . drivers/js drivers/js-client drivers/bun; do
             echo "==> publishing ${PKG_DIR}"
             pnpm publish --filter "./${PKG_DIR}" --tag rc --access public --no-git-checks

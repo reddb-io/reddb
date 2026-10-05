@@ -498,7 +498,7 @@ jobs:
           ## Compatibility
 
           - Server, CLI, client packages, crates, and container images are published from the same tag: \`${TAG}\`.
-          - Official JavaScript packages are published only after the GitHub Release carries every postinstall-required binary asset and checksum manifest.
+          - Official JavaScript packages are published only after the GitHub Release carries every binary asset (packaged into the `@reddb-io/red-*` platform packages) and checksum manifest.
           - Client/transport compatibility details live in [SDK & Client Compatibility](https://github.com/${REPO}/blob/${TAG}/docs/clients/sdk-compatibility.md).
 
           ## Installation
@@ -607,9 +607,9 @@ jobs:
 
   verify-release-assets:
     # Gate every npm publish on the GitHub Release carrying the binary
-    # assets the SDK postinstall expects. Closes #418 — 1.0.5 shipped to
-    # npm without `red-linux-x86_64`, which broke every Linux x86_64
-    # postinstall with a 404 until users discovered `REDDB_BIN`. The
+    # assets the npm platform packages are built from. Closes #418 — 1.0.5
+    # shipped to npm without `red-linux-x86_64`, which broke every Linux
+    # x86_64 install with a 404 until users discovered `REDDB_BIN`. The
     # `needs: [build]` chain on `publish-github` was supposed to make
     # this impossible (matrix failure blocks the release), but defense
     # in depth: explicitly check the assets are listed on the Release
@@ -622,15 +622,69 @@ jobs:
       needs.plan.outputs.release_channel == 'stable'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Assert every postinstall-required asset is published
+      - name: Assert every npm-package-required asset is published
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
         run: bash scripts/verify-release-assets.sh "$RELEASE_TAG"
 
+  publish-npm-platforms:
+    # ADR 0007 (amendment, alternative D): the `red` binary ships to npm as
+    # per-platform packages (@reddb-io/red-<os>-<cpu>[-musl]) that
+    # @reddb-io/cli and @reddb-io/sdk list as optionalDependencies, so
+    # installing needs no postinstall download. Built from the GitHub Release
+    # assets (verified against SHA256SUMS) and published BEFORE the packages
+    # that depend on them.
+    name: Publish @reddb-io/red-* platform packages (npm)
+    needs: [plan, publish-github, verify-release-assets]
+    runs-on: ubuntu-latest
+    if: |
+      needs.plan.outputs.should_skip != 'true' &&
+      needs.plan.outputs.release_channel == 'stable'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Build platform packages from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+          VERSION: ${{ needs.plan.outputs.package_version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/assets"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/assets" --pattern 'red-*' --pattern SHA256SUMS
+          node scripts/npm-platform-packages.mjs build \
+            --version "$VERSION" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/platform-packages" \
+            | tee "$RUNNER_TEMP/platform-dirs.txt"
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.plan.outputs.package_version }}
+        run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
+            exit 0
+          fi
+          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          while read -r dir; do
+            name="$(node -p "require('${dir}/package.json').name")"
+            # Re-runs must not fail on the packages a previous attempt already published.
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "==> ${name}@${VERSION} already published — skipping"
+              continue
+            fi
+            echo "==> publishing ${name}@${VERSION}"
+            pnpm publish "${dir}" --tag "${TAG}" --access public --no-git-checks
+          done < "$RUNNER_TEMP/platform-dirs.txt"
+
   publish-npm:
     name: Publish CLI npm package
-    needs: [plan, publish-github, verify-release-assets]
+    needs: [plan, publish-github, verify-release-assets, publish-npm-platforms]
     runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
@@ -649,6 +703,8 @@ jobs:
           node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
           node scripts/sync-version.js
           bash scripts/check-versions.sh
+      - name: Add platform packages as optionalDependencies
+        run: node scripts/npm-platform-packages.mjs inject --version "${{ needs.plan.outputs.package_version }}" package.json
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -729,7 +785,7 @@ jobs:
 
   publish-js-driver:
     name: Publish @reddb-io/sdk (npm)
-    needs: [plan, publish-github, verify-release-assets]
+    needs: [plan, publish-github, verify-release-assets, publish-npm-platforms]
     runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
@@ -748,6 +804,8 @@ jobs:
           node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
           node scripts/sync-version.js
           bash scripts/check-versions.sh
+      - name: Add platform packages as optionalDependencies
+        run: node scripts/npm-platform-packages.mjs inject --version "${{ needs.plan.outputs.package_version }}" drivers/js/package.json
       - name: Verify pack
         working-directory: drivers/js
         run: pnpm pack --pack-destination "$RUNNER_TEMP"

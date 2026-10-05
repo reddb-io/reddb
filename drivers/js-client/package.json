@@ -1,7 +1,7 @@
 {
   "name": "@reddb-io/client",
   "version": "1.23.4",
-  "description": "Thin remote-only RedDB driver. Downloads the `red_client` binary on install. Speaks RedWire/gRPC/HTTP. Embedded URIs (memory://, file://, red:///path) are rejected — use @reddb-io/sdk for those.",
+  "description": "Thin remote-only RedDB driver. Pure JavaScript — no install scripts, no native binary. Speaks RedWire/gRPC/HTTP. Embedded URIs (memory://, file://, red:///path) are rejected — use @reddb-io/sdk for those.",
   "type": "module",
   "main": "src/index.js",
   "browser": "./src/index.browser.js",
@@ -51,12 +51,10 @@
     "src/",
     "index.d.ts",
     "index.browser.d.ts",
-    "postinstall.js",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "postinstall": "node postinstall.js",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {

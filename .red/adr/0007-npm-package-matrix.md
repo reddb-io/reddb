@@ -219,3 +219,36 @@ plumbing changes. The CLI `bin` entry (`reddb-cli`) is unchanged.
 - Format match against `0004-red-client-container-image.md` and
   `0005-entity-cache-sharded-lru.md` (Status / Date / Context /
   Decision / Alternatives / Consequences / Validation).
+
+## Amendment — alternative D adopted (per-platform packages)
+
+**Date:** 2026-10-05
+
+Alternative D above ("publish binaries to npm directly, esbuild-style") was
+rejected for cost. The sustained complaint is now the install itself: a
+`postinstall` that downloads a platform-specific binary breaks under
+`--ignore-scripts`, in air-gapped or proxied environments, and when the GitHub
+download fails. The reconsideration trigger ("if the GitHub-release download
+path becomes a sustained reliability problem") has been met.
+
+- **`@reddb-io/client`** never needed a binary (it is pure JS and its own
+  postinstall said `connect()` does not use `red_client`). Its postinstall,
+  `REDDB_CLIENT_BIN` and the vendored asset-fetcher are removed. The matrix row
+  above no longer applies: it ships no binary.
+- **`@reddb-io/cli` and `@reddb-io/sdk`** drop their postinstall. The `red`
+  binary ships as `@reddb-io/red-<os>-<cpu>[-musl]` packages (`os`/`cpu`/`libc`
+  constrained, no scripts) listed as exact-version `optionalDependencies`, so
+  the package manager installs only the matching one. They are built from the
+  GitHub Release assets, verified against `SHA256SUMS`, and published before
+  the packages that depend on them (`scripts/npm-platform-packages.mjs`,
+  `publish-npm-platforms` in `release.yml`). The `optionalDependencies` are
+  injected at publish time, because the platform packages do not exist in the
+  registry until the release publishes them and declaring them in the
+  workspace would break `pnpm-lock.yaml`.
+- **Runtime lookup** (SDK): `REDDB_BIN` (or the `REDDB_BINARY_PATH` alias), then
+  the installed platform package, then an error. `PATH` is still never consulted.
+  The CLI additionally falls back to `PATH`. Linux prefers the package matching
+  the host libc and falls back to the other variant.
+- The asset-fetcher / bin-resolver / version-compare vendored copies in
+  `drivers/js` are removed; `packages/internal-*` and `packages/mcp` are
+  untouched (`@reddb-io/mcp` still fetches lazily at first run).

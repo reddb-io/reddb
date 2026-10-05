@@ -4,7 +4,8 @@
  * SDK lookup (`resolveSdkBinary`):
  *   1. `REDDB_BIN` env var (the canonical override per ADR 0006).
  *   2. `REDDB_BINARY_PATH` env var (legacy alias, deprecation window).
- *   3. `<package>/bin/red[.exe]` — where postinstall.js dropped it.
+ *   3. The `@reddb-io/red-<platform>` package npm installed for this host
+ *      (see `platform-binary.js`).
  *   4. Otherwise throw an actionable error.
  *
  *   PATH is **never** consulted. The wire-format coupling between the
@@ -13,19 +14,12 @@
  *
  * CLI lookup (`resolveCliBinary`):
  *   1. `REDDB_BIN` env var.
- *   2. `<package>/bin/red[.exe]`.
+ *   2. The `@reddb-io/red-<platform>` package.
  *   3. PATH-resolved bare `red[.exe]` — appropriate for the CLI which
  *      *targets* PATH.
  */
 
-import { existsSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, resolve, join } from 'node:path'
-
-import { resolveBin } from './internal/bin-resolver/index.js'
-
-const HERE = dirname(fileURLToPath(import.meta.url))
-const PACKAGE_ROOT = resolve(HERE, '..')
+import { platformPackageNames, resolvePlatformBinary } from './platform-binary.js'
 
 function defaultBinaryName() {
   if (typeof process !== 'undefined' && process.platform === 'win32') {
@@ -36,15 +30,27 @@ function defaultBinaryName() {
 
 /** SDK runtime lookup. Throws actionable error when binary cannot be located. */
 export function resolveSdkBinary() {
+  const override = process.env?.REDDB_BIN
+  if (typeof override === 'string' && override !== '') {
+    return override
+  }
   const legacy = process.env?.REDDB_BINARY_PATH
-  if (typeof legacy === 'string' && legacy !== '' && !process.env?.REDDB_BIN) {
+  if (typeof legacy === 'string' && legacy !== '') {
     return legacy
   }
-  return resolveBin({
-    name: defaultBinaryName(),
-    packageRoot: PACKAGE_ROOT,
-    envVar: 'REDDB_BIN',
-  })
+  const packaged = resolvePlatformBinary()
+  if (packaged) {
+    return packaged
+  }
+  const wanted = platformPackageNames()[0]
+  throw new Error(
+    `reddb: binary "${defaultBinaryName()}" not found.\n` +
+      `  expected:    the ${wanted} package (an optionalDependency of @reddb-io/sdk)\n` +
+      `  override:    set REDDB_BIN=/path/to/${defaultBinaryName()}\n` +
+      `  fix:         reinstall without --no-optional / --omit=optional, and make sure\n` +
+      `               ${process.platform}/${process.arch} is a supported platform;\n` +
+      `               or build it: cargo build --release --bin red`,
+  )
 }
 
 /** CLI runtime lookup. Allowed to fall back to PATH per ADR 0006. */
@@ -53,14 +59,5 @@ export function resolveCliBinary() {
   if (typeof override === 'string' && override !== '') {
     return override
   }
-  const local = join(PACKAGE_ROOT, 'bin', defaultBinaryName())
-  if (existsSync(local)) {
-    return local
-  }
-  return defaultBinaryName()
-}
-
-/** Used by postinstall.js to know where to drop the downloaded binary. */
-export function packageBinaryDir() {
-  return join(PACKAGE_ROOT, 'bin')
+  return resolvePlatformBinary() ?? defaultBinaryName()
 }

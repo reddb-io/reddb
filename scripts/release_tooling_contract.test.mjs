@@ -139,7 +139,7 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
   const script = read("scripts/verify-release-assets.sh");
   const workflow = read(".github/workflows/release.yml");
   const runbook = read("docs/release-runbook.md");
-  const assetName = read("drivers/js/src/internal/asset-fetcher/asset-name.js");
+  const assetName = read("packages/internal-asset-fetcher/src/asset-name.js");
 
   for (const suffix of [
     "linux-x86_64",
@@ -168,13 +168,38 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
     "publish-js-client",
     "publish-bun-client",
   ]) {
-    const re = new RegExp(`${job}:[\\s\\S]*?needs: \\[plan, publish-github, verify-release-assets\\]`);
+    const re = new RegExp(`${job}:[\\s\\S]*?needs: \\[plan, publish-github, verify-release-assets(, publish-npm-platforms)?\\]`);
     assert.match(workflow, re, `${job} must depend on verify-release-assets`);
   }
 
   assert.match(runbook, /Release asset contract/);
   assert.match(runbook, /checksums\.txt/);
   assert.match(runbook, /verify-release-assets\.sh/);
+});
+
+test("npm platform packages publish before cli/sdk and no package runs an install script", () => {
+  const workflow = read(".github/workflows/release.yml");
+  const rc = read(".github/workflows/release-candidate.yml");
+
+  assert.match(workflow, /publish-npm-platforms:[\s\S]*?needs: \[plan, publish-github, verify-release-assets\]/);
+  for (const job of ["publish-npm", "publish-js-driver"]) {
+    assert.match(
+      workflow,
+      new RegExp(`  ${job}:[\\s\\S]*?needs: \\[plan, publish-github, verify-release-assets, publish-npm-platforms\\]`),
+      `${job} must wait for the platform packages it depends on`,
+    );
+  }
+  assert.match(workflow, /npm-platform-packages\.mjs inject --version "[^"]+" package\.json/);
+  assert.match(workflow, /npm-platform-packages\.mjs inject --version "[^"]+" drivers\/js\/package\.json/);
+  assert.match(rc, /npm-platform-packages\.mjs build --allow-missing/);
+  assert.match(rc, /npm-platform-packages\.mjs inject/);
+
+  for (const manifest of ["package.json", "drivers/js/package.json", "drivers/js-client/package.json"]) {
+    const scripts = JSON.parse(read(manifest)).scripts ?? {};
+    for (const hook of ["preinstall", "install", "postinstall"]) {
+      assert.equal(scripts[hook], undefined, `${manifest} must not define ${hook}`);
+    }
+  }
 });
 
 test("release workflows publish aggregate checksum manifests for installers", () => {
@@ -335,7 +360,6 @@ test("vendored asset-fetcher copies match the source package byte for byte", () 
   const sourceDir = "packages/internal-asset-fetcher/src";
   const vendored = [
     "drivers/js/src/internal/asset-fetcher",
-    "drivers/js-client/src/internal/asset-fetcher",
     "packages/mcp/src/internal/asset-fetcher",
   ];
   const files = ["index.js", "download.js", "checksum.js", "asset-name.js"];

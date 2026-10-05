@@ -1,14 +1,13 @@
 {
   "name": "@reddb-io/cli",
   "version": "1.23.4",
-  "description": "CLI launcher for RedDB. The JS/TS app driver is published as @reddb-io/sdk.",
+  "description": "CLI launcher for RedDB. The red binary arrives as a per-platform optionalDependency (no install script). The JS/TS app driver is published as @reddb-io/sdk.",
   "type": "commonjs",
   "bin": {
     "reddb-cli": "./drivers/js/src/cli.js"
   },
   "files": [
     "drivers/js/src/",
-    "drivers/js/cli-postinstall.js",
     "drivers/js/package.json"
   ],
   "engines": {
@@ -16,7 +15,6 @@
   },
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "postinstall": "node drivers/js/cli-postinstall.js",
     "test": "node scripts/docs-analytics-boundaries.test.mjs && node --test scripts/connection-quality.test.mjs && node drivers/js/test/smoke.test.mjs",
     "typecheck": "cargo check --workspace --locked",
     "lint": "cargo fmt --all -- --check && cargo clippy --workspace --locked -- -D warnings",
