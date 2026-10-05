@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   PLATFORMS,
+  addonAssetName,
   buildPackages,
   injectOptionalDependencies,
   packageName,
@@ -70,6 +71,43 @@ test('buildPackages skips absent optional platforms but not required ones', () =
   assert.equal(
     buildPackages({ version: '1.0.0', assetsDir: missing, outDir: out, allowMissing: true }).length,
     required.length - 1,
+  )
+})
+
+test('addonAssetName follows the release asset scheme', () => {
+  const by = (key) => PLATFORMS.find((p) => p.key === key)
+  assert.equal(addonAssetName(by('linux-x64')), 'reddb-node-linux-x86_64.node')
+  assert.equal(addonAssetName(by('linux-x64-musl')), 'reddb-node-linux-x86_64-static.node')
+  assert.equal(addonAssetName(by('darwin-arm64')), 'reddb-node-macos-aarch64.node')
+  assert.equal(addonAssetName(by('win32-x64')), 'reddb-node-windows-x86_64.node')
+})
+
+test('buildPackages ships a verified addon as reddb.node and lists it in files', () => {
+  const assets = stageAssets([...required, 'reddb-node-linux-x86_64.node'])
+  const out = mkdtempSync(path.join(tmpdir(), 'reddb-out-'))
+  buildPackages({ version: '1.0.0', assetsDir: assets, outDir: out })
+
+  const withAddon = JSON.parse(readFileSync(path.join(out, 'red-linux-x64', 'package.json'), 'utf8'))
+  assert.deepEqual(withAddon.files, ['bin/', 'reddb.node'])
+  assert.equal(readFileSync(path.join(out, 'red-linux-x64', 'reddb.node'), 'utf8'), 'binary:reddb-node-linux-x86_64.node')
+
+  const without = JSON.parse(readFileSync(path.join(out, 'red-linux-arm64', 'package.json'), 'utf8'))
+  assert.deepEqual(without.files, ['bin/'], 'a platform with no addon asset still gets a plain package')
+  assert.equal(existsSync(path.join(out, 'red-linux-arm64', 'reddb.node')), false)
+})
+
+test('buildPackages refuses an addon that does not match SHA256SUMS or has no entry', () => {
+  const tampered = stageAssets([...required, 'reddb-node-linux-x86_64.node'], { tamper: 'reddb-node-linux-x86_64.node' })
+  assert.throws(
+    () => buildPackages({ version: '1.0.0', assetsDir: tampered, outDir: mkdtempSync(path.join(tmpdir(), 'reddb-out-')) }),
+    /sha256 mismatch for reddb-node-linux-x86_64\.node/,
+  )
+
+  const unlisted = stageAssets(required)
+  writeFileSync(path.join(unlisted, 'reddb-node-linux-x86_64.node'), 'x')
+  assert.throws(
+    () => buildPackages({ version: '1.0.0', assetsDir: unlisted, outDir: mkdtempSync(path.join(tmpdir(), 'reddb-out-')) }),
+    /no SHA256SUMS entry for reddb-node-linux-x86_64\.node/,
   )
 })
 

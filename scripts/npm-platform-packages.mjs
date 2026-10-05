@@ -17,6 +17,11 @@
  *     Missing optional platforms (macOS, Windows) are skipped; a missing
  *     required one is an error unless --allow-missing (release candidates
  *     only build linux-x86_64).
+ *     When the release also carries the in-process Node addon for a platform
+ *     (`reddb-node-<suffix>.node`) it is verified the same way and shipped in
+ *     the package as `reddb.node`, which `@reddb-io/sdk` loads instead of
+ *     spawning `red`. The addon is optional: a platform without one still
+ *     gets its package, and the SDK falls back to the `red` subprocess.
  *
  *   inject --version X.Y.Z <package.json>...
  *     Add every platform package as an exact-version `optionalDependency`.
@@ -48,6 +53,9 @@ export const PLATFORMS = [
 
 export const packageName = (p) => `@reddb-io/red-${p.key}`
 
+/** Release asset name of the Node addon built for platform `p`. */
+export const addonAssetName = (p) => `${p.asset.replace(/^red-/, 'reddb-node-').replace(/\.exe$/, '')}.node`
+
 export function parseSha256Sums(text) {
   const sums = new Map()
   for (const line of text.split('\n')) {
@@ -57,7 +65,7 @@ export function parseSha256Sums(text) {
   return sums
 }
 
-export function platformManifest(p, version) {
+export function platformManifest(p, version, { addon = false } = {}) {
   const manifest = {
     name: packageName(p),
     version,
@@ -65,7 +73,7 @@ export function platformManifest(p, version) {
     os: [p.os],
     cpu: [p.cpu],
     ...(p.libc ? { libc: [p.libc] } : {}),
-    files: ['bin/'],
+    files: addon ? ['bin/', 'reddb.node'] : ['bin/'],
     license: 'MIT',
     homepage: 'https://github.com/reddb-io/reddb',
     repository: { type: 'git', url: 'git+https://github.com/reddb-io/reddb.git' },
@@ -97,7 +105,21 @@ export function buildPackages({ version, assetsDir, outDir, allowMissing = false
     const binary = join(dir, 'bin', p.os === 'win32' ? 'red.exe' : 'red')
     writeFileSync(binary, body)
     chmodSync(binary, 0o755)
-    writeFileSync(join(dir, 'package.json'), JSON.stringify(platformManifest(p, version), null, 2) + '\n')
+
+    let addon = false
+    const addonName = addonAssetName(p)
+    const addonPath = join(assetsDir, addonName)
+    if (existsSync(addonPath)) {
+      const addonBody = readFileSync(addonPath)
+      const addonExpected = sums.get(addonName)
+      if (!addonExpected) throw new Error(`no SHA256SUMS entry for ${addonName}; refusing to package an unverified addon`)
+      const addonActual = createHash('sha256').update(addonBody).digest('hex')
+      if (addonActual !== addonExpected) throw new Error(`sha256 mismatch for ${addonName}: expected ${addonExpected}, got ${addonActual}`)
+      writeFileSync(join(dir, 'reddb.node'), addonBody)
+      addon = true
+    }
+
+    writeFileSync(join(dir, 'package.json'), JSON.stringify(platformManifest(p, version, { addon }), null, 2) + '\n')
     built.push(dir)
   }
   return built
