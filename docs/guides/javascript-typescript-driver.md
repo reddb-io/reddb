@@ -25,7 +25,7 @@ and each has a distinct binary-acquisition contract (see
 | -------------------- | ---------------------------------------------------------------------- | ------------------- | --------------------------------------------- | ------------- | ------------------- |
 | `@reddb-io/cli`      | CLI launcher; the `red` binary comes from a per-platform `optionalDependency` (no install script) | ≤ 12 MB compressed  | n/a (CLI subcommands wrap the server binary)  | n/a           | `REDDB_BIN`         |
 | `@reddb-io/sdk`      | Full JS SDK; the `red` binary comes from a per-platform `optionalDependency` (no install script) | ≤ 12 MB compressed  | embedded (stdio JSON-RPC), gRPC, HTTP         | yes           | `REDDB_BIN`         |
-| `@reddb-io/client`   | Thin remote-only JS driver; pure JavaScript, no binary and no install script | ≤ 5 MB compressed   | gRPC, HTTP (remote endpoints only)            | no — rejects `memory://` and `file:///...` | `REDDB_CLIENT_BIN`  |
+| `@reddb-io/client`   | Thin remote-only JS driver; pure JavaScript, no binary and no install script | ≤ 5 MB compressed   | gRPC, HTTP (remote endpoints only)            | no — rejects `memory://` and `file:///...` | n/a                 |
 
 > **Performance check before you commit.** RedDB's measured wins (and
 > the gaps where it still loses) are catalogued in
