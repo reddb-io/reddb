@@ -303,6 +303,8 @@ jobs:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
           save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Build workflow contracts
+        run: node --test scripts/build_workflow_contract.test.mjs
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --all
       - run: cargo clippy --locked --all -- -D warnings

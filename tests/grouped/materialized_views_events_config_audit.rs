@@ -24,9 +24,6 @@ mod audit_structured;
 #[path = "control_feedback/control_evidence_matrix_docs.rs"]
 mod control_evidence_matrix_docs;
 
-#[path = "mvcc_transactions/docs_transaction_guarantees.rs"]
-mod docs_transaction_guarantees;
-
 #[path = "audit/e2e_audit_slow_routing.rs"]
 mod e2e_audit_slow_routing;
 
@@ -77,9 +74,3 @@ mod e2e_views;
 
 #[path = "control_feedback/feedback_regression.rs"]
 mod feedback_regression;
-
-#[path = "surface_contracts/public_surface_contract_matrix.rs"]
-mod public_surface_contract_matrix;
-
-#[path = "surface_contracts/regress.rs"]
-mod regress;

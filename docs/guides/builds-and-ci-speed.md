@@ -35,9 +35,8 @@ At the time this guide was written, the root crate exposed these Cargo target gr
 
 - 1 library
 - 1 binary
-- 9 tests
+- 19 integration tests, mostly grouped domain harnesses
 - 3 benches
-- 1 build script
 
 That is separate from the release matrix in GitHub Actions, which builds the same binary for multiple platform triples.
 
@@ -88,7 +87,6 @@ This repository already enables incremental compilation where it matters for dev
 
 - `profile.dev`: incremental on, high `codegen-units`
 - `profile.test`: incremental on, high `codegen-units`
-- `profile.bench`: incremental on
 - `profile.release-fast`: incremental on, lower optimization cost, high `codegen-units`
 
 `release-fast` exists for local smoke builds. It is intentionally not the shipping profile.
@@ -109,11 +107,19 @@ make release
 
 The repo now has a wrapper at [`scripts/cargo-fast.sh`](../../scripts/cargo-fast.sh).
 
-It does three things:
+The build/test/check/clippy commands in the Makefile and AFK validation use the same wrapper. It:
 
-- enables incremental builds when not already set
-- uses `sccache` automatically when incremental is disabled
+- selects the Rust version in `rust-toolchain.toml`, even when a host-wide `RUSTUP_TOOLCHAIN` points at a different version
+- defaults to two Cargo jobs, adjustable through `CARGO_BUILD_JOBS` or Cargo's `--jobs`
+- defaults to two concurrent Rust tests and two nextest test processes, adjustable through `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS`, or the runners' CLI options
+- serializes participating build/test commands across worktrees for the same user when `flock` is available
+- leaves incremental settings to the selected Cargo profile
+- uses `sccache` automatically when `CARGO_INCREMENTAL=0`
 - uses `mold` or `lld` automatically via `clang` if present
+
+Use `REDDB_RUST_TOOLCHAIN=<version>` or an explicit `cargo +toolchain` argument through the wrapper for a deliberate toolchain experiment. `REDDB_CARGO_LOCK=0` disables the host lease when an external scheduler already admits builds. Long-lived `cargo run` servers receive the same jobs/toolchain/linker configuration but do not hold the build lease. On platforms without `flock`, only the job limit applies. Direct Cargo commands bypass the wrapper's toolchain selection and host lease.
+
+The lease covers test execution as well as compilation, protecting the binaries that the test uses. Cargo's per-target lock alone does not bound independent worktree builds. The wrapper closes its lease descriptor in child processes so a subprocess cannot retain the lease after Cargo exits.
 
 For direct `cargo` commands, you can also activate the local Cargo config:
 
@@ -121,7 +127,7 @@ For direct `cargo` commands, you can also activate the local Cargo config:
 cp .cargo/config.toml.example .cargo/config.toml
 ```
 
-That file is local-only and gitignored. It makes plain `cargo` use the fast linker setup without depending on the wrapper script.
+That file is local-only and gitignored. It gives plain `cargo` the linker setup and a two-job default. Direct Cargo still follows rustup's normal override rules and does not take the wrapper's host lease. If you customize these settings, keep them consistent with the wrapper to preserve artifact reuse.
 
 Important:
 
@@ -131,11 +137,11 @@ Important:
 
 Recommended local routine:
 
-1. Run `make warm` once per branch or working session.
+1. Start with `make check`; use `make warm` only when you need to prebuild tests and benches.
 2. During normal development, use `make build` and `make check`.
-3. Use `make test-fast` when validating behavior.
+3. Use `make test-fast` for workspace unit/bin tests and the curated integration modules. It uses the normal target directory by default.
 4. Use `make build-fast` when you want an optimized smoke binary without paying full release cost.
-5. Avoid `cargo clean` unless the cache is actually wrong.
+5. Inspect cache size before cleaning. Use `make clean-package PACKAGE=reddb-io-server` to reclaim that package's artifacts while keeping other packages' caches; a full `cargo clean` forces a cold build.
 
 ## 6. Installing the local accelerators
 
@@ -166,7 +172,7 @@ That prewarms:
 - test-only codepaths
 - benchmark-only codepaths
 
-So when you later run `make build`, `make check`, or bench-related commands, you are no longer paying the first-hit cost.
+Prewarming is optional: it trades work now for reuse later. Do not run it automatically after every branch switch when you only need a check.
 
 ## 8. CI/CD acceleration
 
@@ -216,7 +222,7 @@ So the goal is not "every build becomes instant". The goal is:
 Use this decision table:
 
 - editing code normally: `make build` or `make check`
-- opening a session or switching branch: `make warm`
+- opening a session or switching branch: `make check`; optional `make warm` for tests/benches
 - smoke testing optimized behavior: `make build-fast`
 - shipping artifact: `make release`
 - only checking types or borrow errors: `make check`
@@ -228,3 +234,32 @@ If builds suddenly get much slower, check these first:
 - did the target dir change?
 - is `.cargo/config.toml` active locally?
 - are `mold` and `sccache` available on the machine?
+
+
+## 11. Test selection and cache retention
+
+`make test-fast` runs workspace unit/bin tests, builds the standalone `red_client` needed by cross-binary smoke tests, then selects the existing curated modules inside the grouped integration targets. A filter reduces execution, not compilation of that harness. Engine unit tests are included; cold compilation can take longer than the default 300-second step timeout. Set `REDDB_FAST_STEP_TIMEOUT=1200s` explicitly for that case.
+
+`REDDB_FAST_TESTS` and `REDDB_FAST_EXTRA_TESTS` accept space-separated target names or `target:filter` entries. For example:
+
+```bash
+REDDB_FAST_TESTS='grouped_sql_core:e2e_ddl_drop_foundation::' make test-fast
+```
+
+`CARGO_TARGET_DIR` selects the reusable target for builds and tests. Use `REDDB_FAST_TARGET_DIR` for an explicit fast-lane target, or `REDDB_FAST_SHARED_TARGET=0` to restore the separate `test-fast` directory. Isolation duplicates caches; use it when needed, and retire inactive targets rather than retaining one forever per branch. AFK worktree target isolation remains enabled.
+
+Nextest's separate execution budget uses its documented [environment override](https://nexte.st/docs/configuration/env-vars/); the compiler job count alone does not limit test execution.
+
+Each test-bearing source file belongs to one grouped harness. Cross-domain selection uses filters instead of including the same file in another binary. CI checks this and the curated target/module names with:
+
+```bash
+node --test scripts/build_workflow_contract.test.mjs
+```
+
+Cargo's automatic cache cleanup covers downloaded sources, not accumulated build artifacts. The default workflow preserves incremental reuse and does not remove caches automatically. Package-scoped cleanup is explicit:
+
+```bash
+make clean-package PACKAGE=reddb-io-server
+```
+
+That uses Cargo's own artifact ownership rather than deleting arbitrary files. It can reclaim package variants across profiles, but subsequent builds of that package lose reuse. On WSL, inspect both `df -h /` and `df -h /mnt/c`: free capacity inside a VHD does not guarantee free physical storage on its Windows volume. A tmpfs `TMPDIR` uses RAM/swap; moving compiler temporaries into `/dev/shm` does not solve memory pressure.

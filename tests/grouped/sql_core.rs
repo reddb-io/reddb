@@ -15,9 +15,6 @@ mod e2e_composite_index;
 #[path = "sql_window/e2e_explain.rs"]
 mod e2e_explain;
 
-#[path = "mvcc_transactions/e2e_cross_model_tx.rs"]
-mod e2e_cross_model_tx;
-
 #[path = "schema_query_core/e2e_h3_index.rs"]
 mod e2e_h3_index;
 
@@ -36,27 +33,6 @@ mod e2e_issue_753_ddl_policy_aware;
 #[path = "locking_concurrency/e2e_locking_reads.rs"]
 mod e2e_locking_reads;
 
-#[path = "mvcc_transactions/e2e_mvcc_delete_tombstones.rs"]
-mod e2e_mvcc_delete_tombstones;
-
-#[path = "mvcc_transactions/e2e_mvcc_dml_target_scans.rs"]
-mod e2e_mvcc_dml_target_scans;
-
-#[path = "mvcc_transactions/e2e_mvcc_first_committer_wins.rs"]
-mod e2e_mvcc_first_committer_wins;
-
-#[path = "mvcc_transactions/e2e_mvcc_index_recheck.rs"]
-mod e2e_mvcc_index_recheck;
-
-#[path = "mvcc_transactions/e2e_mvcc_logical_lookup.rs"]
-mod e2e_mvcc_logical_lookup;
-
-#[path = "mvcc_transactions/e2e_mvcc_read_resolver_conformance.rs"]
-mod e2e_mvcc_read_resolver_conformance;
-
-#[path = "mvcc_transactions/e2e_mvcc_vacuum.rs"]
-mod e2e_mvcc_vacuum;
-
 #[path = "dml_updates/e2e_ordered_row_update_batches.rs"]
 mod e2e_ordered_row_update_batches;
 
@@ -74,12 +50,6 @@ mod e2e_returning;
 
 #[path = "schema_query_core/e2e_rid_row_envelope.rs"]
 mod e2e_rid_row_envelope;
-
-#[path = "mvcc_transactions/e2e_savepoint_update_reversal.rs"]
-mod e2e_savepoint_update_reversal;
-
-#[path = "mvcc_transactions/e2e_savepoints.rs"]
-mod e2e_savepoints;
 
 #[path = "schema_query_core/e2e_select_range_after_index.rs"]
 mod e2e_select_range_after_index;

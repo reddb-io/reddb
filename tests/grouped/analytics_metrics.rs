@@ -24,12 +24,6 @@ mod e2e_document_sql_analytics;
 #[path = "../e2e_issue_1241_query_latency_histogram.rs"]
 mod e2e_issue_1241_query_latency_histogram;
 
-#[path = "probabilistic/e2e_issue_542_probabilistic_commands.rs"]
-mod e2e_issue_542_probabilistic_commands;
-
-#[path = "probabilistic/e2e_issue_554_probabilistic_sql_read_forms.rs"]
-mod e2e_issue_554_probabilistic_sql_read_forms;
-
 #[path = "timeseries_remaining/e2e_issue_747_red_typed_timeseries_metrics.rs"]
 mod e2e_issue_747_red_typed_timeseries_metrics;
 
@@ -83,9 +77,6 @@ mod e2e_metrics_rollup_retention;
 
 #[path = "multimodel_query/e2e_postgres_math_functions.rs"]
 mod e2e_postgres_math_functions;
-
-#[path = "probabilistic/e2e_probabilistic_public_contract.rs"]
-mod e2e_probabilistic_public_contract;
 
 #[path = "timeseries_remaining/e2e_sessionize_operator.rs"]
 mod e2e_sessionize_operator;
