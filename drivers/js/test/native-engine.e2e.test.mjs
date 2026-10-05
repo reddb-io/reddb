@@ -95,6 +95,55 @@ test('file:// persists across close/open and holds the single-writer lock', opts
   }
 })
 
+/** Run `fn` with env vars set, restoring them afterwards. */
+async function withEnv(vars, fn) {
+  const saved = {}
+  for (const k of Object.keys(vars)) saved[k] = process.env[k]
+  Object.assign(process.env, vars)
+  try {
+    return await fn()
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+}
+
+test('file:// honours REDDB_STORAGE_PROFILE like `red rpc --stdio --path` did', opts, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'reddb-native-env-'))
+  try {
+    // An invalid profile fails the open, as it does for the CLI, instead of being ignored.
+    await withEnv({ REDDB_STORAGE_PROFILE: 'definitely-not-a-profile' }, async () => {
+      await assert.rejects(connect(`file://${path.join(dir, 'bad.rdb')}`), /storage profile.*not recognised/i)
+    })
+    // A valid one is accepted and the database works.
+    await withEnv({ REDDB_STORAGE_PROFILE: 'embedded' }, async () => {
+      const db = await connect(`file://${path.join(dir, 'ok.rdb')}`)
+      try {
+        await db.query('CREATE TABLE e (id INTEGER)')
+        await db.query('INSERT INTO e (id) VALUES (1)')
+        assert.equal(rows(await db.query('SELECT id FROM e')).length, 1)
+      } finally {
+        await db.close()
+      }
+    })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('memory:// ignores the storage-profile environment', opts, async () => {
+  await withEnv({ REDDB_STORAGE_PROFILE: 'definitely-not-a-profile' }, async () => {
+    const db = await connect('memory://')
+    try {
+      assert.equal(rows(await db.query('SELECT 1 AS one'))[0].one, 1)
+    } finally {
+      await db.close()
+    }
+  })
+})
+
 test('calls after close reject with CLIENT_CLOSED', opts, async () => {
   const db = await connect('memory://')
   await db.close()
