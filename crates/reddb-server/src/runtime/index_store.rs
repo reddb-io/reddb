@@ -2662,6 +2662,131 @@ mod tests {
     }
 
     #[test]
+    fn unique_index_key_never_reserves_a_null_column() {
+        let single = vec!["id".to_string()];
+        assert_eq!(
+            unique_index_key(&single, &row(&[("id", Value::Null)])),
+            None,
+            "a NULL never equals another NULL"
+        );
+        assert_eq!(
+            unique_index_key(&single, &row(&[("id", Value::Integer(7))])),
+            hash_index_key(&single, &row(&[("id", Value::Integer(7))])),
+            "non-NULL keys keep the physical encoding"
+        );
+        let composite = vec!["a".to_string(), "b".to_string()];
+        let full = row(&[("a", Value::text("x")), ("b", Value::text("1"))]);
+        assert_eq!(
+            unique_index_key(&composite, &full),
+            hash_index_key(&composite, &full)
+        );
+    }
+
+    #[test]
+    fn first_duplicate_unique_key_reports_the_colliding_pair_and_skips_nulls() {
+        let single = vec!["id".to_string()];
+        let rows = vec![
+            (EntityId::new(1), row(&[("id", Value::Null)])),
+            (EntityId::new(2), row(&[("id", Value::Null)])),
+            (EntityId::new(3), row(&[("id", Value::Integer(5))])),
+            (EntityId::new(4), row(&[("id", Value::Integer(6))])),
+            (EntityId::new(5), row(&[("id", Value::Integer(5))])),
+        ];
+        assert_eq!(
+            first_duplicate_unique_key(&single, &rows),
+            Some((EntityId::new(3), EntityId::new(5)))
+        );
+        assert_eq!(first_duplicate_unique_key(&single, &rows[..2]), None);
+
+        let composite = vec!["a".to_string(), "b".to_string()];
+        let tuples = vec![
+            (
+                EntityId::new(1),
+                row(&[("a", Value::text("x")), ("b", Value::text("1"))]),
+            ),
+            (
+                EntityId::new(2),
+                row(&[("a", Value::text("x")), ("b", Value::text("2"))]),
+            ),
+        ];
+        assert_eq!(first_duplicate_unique_key(&composite, &tuples), None);
+    }
+
+    #[test]
+    fn rebuilding_a_unique_btree_index_over_existing_duplicates_never_refuses() {
+        // Reopening a database rebuilds its indexes through `create_index`.
+        // Data an older release let duplicate must not stop it from opening;
+        // only `CREATE UNIQUE INDEX` (DDL) refuses duplicates.
+        for columns in [
+            vec!["id".to_string()],
+            vec!["id".to_string(), "grp".to_string()],
+        ] {
+            let store = IndexStore::new();
+            let rows = vec![
+                (
+                    EntityId::new(1),
+                    row(&[("id", Value::Integer(1)), ("grp", Value::text("g"))]),
+                ),
+                (
+                    EntityId::new(2),
+                    row(&[("id", Value::Integer(1)), ("grp", Value::text("g"))]),
+                ),
+            ];
+            store
+                .create_index("dup", "rows", &columns, IndexMethodKind::BTree, true, &rows)
+                .expect("rebuild keeps the duplicates instead of refusing");
+            let key = hash_index_key(&columns, &rows[0].1).expect("key");
+            assert_eq!(
+                store
+                    .hash_lookup("rows", "dup_hash", &key)
+                    .expect("pocket")
+                    .len(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn composite_unique_btree_pocket_follows_insert_update_delete_and_drop() {
+        let store = IndexStore::new();
+        let columns = vec!["a".to_string(), "b".to_string()];
+        store
+            .create_index("ab", "rows", &columns, IndexMethodKind::BTree, true, &[])
+            .expect("composite unique btree index");
+        store.register(RegisteredIndex {
+            name: "ab".to_string(),
+            collection: "rows".to_string(),
+            columns: columns.clone(),
+            method: IndexMethodKind::BTree,
+            unique: true,
+        });
+        let old = row(&[("a", Value::text("x")), ("b", Value::text("1"))]);
+        let new = row(&[("a", Value::text("x")), ("b", Value::text("2"))]);
+        let old_key = hash_index_key(&columns, &old).expect("old key");
+        let new_key = hash_index_key(&columns, &new).expect("new key");
+        let id = EntityId::new(7);
+        let lookup = |key: &[u8]| store.hash_lookup("rows", "ab_hash", key).expect("pocket");
+
+        store.index_entity_insert("rows", id, &old).expect("insert");
+        assert_eq!(lookup(&old_key), vec![id]);
+
+        store
+            .index_entity_update("rows", id, &old, &new)
+            .expect("update");
+        assert!(lookup(&old_key).is_empty(), "the old tuple is released");
+        assert_eq!(lookup(&new_key), vec![id]);
+
+        store.index_entity_delete("rows", id, &new).expect("delete");
+        assert!(lookup(&new_key).is_empty());
+
+        assert!(store.drop_index("ab", "rows"));
+        assert!(
+            store.hash_lookup("rows", "ab_hash", &new_key).is_err(),
+            "dropping the index drops its pocket so the name can be reused"
+        );
+    }
+
+    #[test]
     fn composite_hash_index_is_rekeyed_from_the_full_rows_on_update_and_delete() {
         let store = IndexStore::new();
         let columns = vec!["a".to_string(), "b".to_string()];
