@@ -500,8 +500,16 @@ fn unique_index_rejects_an_update_onto_an_existing_key() {
                 .is_err(),
             "[{using}] id 1 is taken"
         );
-        assert_eq!(count(&runtime, "SELECT * FROM uq WHERE id = 1"), 1, "[{using}]");
-        assert_eq!(count(&runtime, "SELECT * FROM uq WHERE id = 2"), 1, "[{using}]");
+        assert_eq!(
+            count(&runtime, "SELECT * FROM uq WHERE id = 1"),
+            1,
+            "[{using}]"
+        );
+        assert_eq!(
+            count(&runtime, "SELECT * FROM uq WHERE id = 2"),
+            1,
+            "[{using}]"
+        );
         assert_eq!(count(&runtime, "SELECT * FROM uq"), 2, "[{using}]");
 
         // Updates that keep the key stay legal, whether or not they name it.
@@ -539,7 +547,11 @@ fn unique_index_rejects_a_statement_that_collides_with_itself() {
             runtime.execute_query("UPDATE uq SET id = 9").is_err(),
             "[{using}] two rows cannot both become 9"
         );
-        assert_eq!(count(&runtime, "SELECT * FROM uq WHERE id = 9"), 0, "[{using}]");
+        assert_eq!(
+            count(&runtime, "SELECT * FROM uq WHERE id = 9"),
+            0,
+            "[{using}]"
+        );
         assert_eq!(count(&runtime, "SELECT * FROM uq"), 2, "[{using}]");
     }
 }
@@ -563,7 +575,9 @@ fn composite_unique_runtime(using: &str) -> RedDBRuntime {
         .execute_query("INSERT INTO pairs (a,b) VALUES ('x','1')")
         .expect("seed implicit collection");
     runtime
-        .execute_query(&format!("CREATE UNIQUE INDEX pairs_ab ON pairs (a, b){using}"))
+        .execute_query(&format!(
+            "CREATE UNIQUE INDEX pairs_ab ON pairs (a, b){using}"
+        ))
         .expect("composite unique index");
     runtime
 }
@@ -651,7 +665,9 @@ fn creating_a_unique_index_checks_existing_rows_for_every_method() {
         }
         assert!(
             runtime
-                .execute_query(&format!("CREATE UNIQUE INDEX dups_key ON dups ({columns}){using}"))
+                .execute_query(&format!(
+                    "CREATE UNIQUE INDEX dups_key ON dups ({columns}){using}"
+                ))
                 .is_err(),
             "[{using}] ({columns}) 1 exists twice"
         );
@@ -681,7 +697,9 @@ fn creating_a_unique_index_ignores_dead_row_versions_for_every_method() {
             .execute_query("INSERT INTO versions (id,body) VALUES (1,'live')")
             .expect("a live row on the same key");
         runtime
-            .execute_query(&format!("CREATE UNIQUE INDEX versions_id ON versions (id){using}"))
+            .execute_query(&format!(
+                "CREATE UNIQUE INDEX versions_id ON versions (id){using}"
+            ))
             .unwrap_or_else(|error| panic!("[{using}] dead versions are not duplicates: {error}"));
         assert!(runtime
             .execute_query("INSERT INTO versions (id,body) VALUES (1,'dup')")
@@ -731,7 +749,9 @@ fn unique_index_survives_reopen_for_every_method() {
                 .execute_query("INSERT INTO keep (id,grp,body) VALUES (1,'g','existing')")
                 .expect("seed");
             runtime
-                .execute_query(&format!("CREATE UNIQUE INDEX keep_key ON keep ({columns}){using}"))
+                .execute_query(&format!(
+                    "CREATE UNIQUE INDEX keep_key ON keep ({columns}){using}"
+                ))
                 .expect("index");
         }
         let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
@@ -774,6 +794,9 @@ fn unique_btree_serializes_concurrent_inserts() {
             .filter(|won| *won)
             .count();
         assert_eq!(winners, 1, "exactly one writer owns key {key}");
-        assert_eq!(count(&runtime, &format!("SELECT * FROM uq WHERE id = {key}")), 1);
+        assert_eq!(
+            count(&runtime, &format!("SELECT * FROM uq WHERE id = {key}")),
+            1
+        );
     }
 }

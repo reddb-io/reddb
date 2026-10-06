@@ -1218,6 +1218,18 @@ impl RegisteredIndex {
             }
         }
     }
+
+    /// Multi-column key pocket in the hash store: a composite HASH index, or a
+    /// composite UNIQUE BTREE index (whose `sorted` half cannot be probed by
+    /// the byte key admission uses). Plain composite BTREE indexes have none.
+    fn composite_key_pocket(&self) -> Option<std::borrow::Cow<'_, str>> {
+        let has_pocket = match self.method {
+            IndexMethodKind::Hash => true,
+            IndexMethodKind::BTree => self.unique,
+            IndexMethodKind::Bitmap | IndexMethodKind::H3 { .. } => false,
+        };
+        (has_pocket && self.columns.len() > 1).then(|| self.hash_lookup_name())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1464,7 +1476,12 @@ impl IndexStore {
                 // Index existing entities
                 let mut count = 0;
                 for (entity_id, fields) in entities {
-                    if let Some(key) = hash_index_key(columns, fields) {
+                    let key = if unique {
+                        unique_index_key(columns, fields)
+                    } else {
+                        hash_index_key(columns, fields)
+                    };
+                    if let Some(key) = key {
                         self.hash
                             .insert(collection, name, key, *entity_id)
                             .map_err(|err| err.to_string())?;
@@ -1506,6 +1523,26 @@ impl IndexStore {
                 // instead of intersecting two single-col results.
                 if columns.len() > 1 {
                     let count = self.sorted.build_composite(collection, columns, entities);
+                    if unique {
+                        // Admission probes the byte key, not the sorted tuple
+                        // index; keep a multi-valued pocket beside it.
+                        let pocket = format!("{name}_hash");
+                        self.hash
+                            .create_index(&HashIndexConfig {
+                                name: pocket.clone(),
+                                collection: collection.to_string(),
+                                columns: columns.to_vec(),
+                                unique: false,
+                            })
+                            .map_err(|err| err.to_string())?;
+                        for (entity_id, fields) in entities {
+                            if let Some(key) = hash_index_key(columns, fields) {
+                                self.hash
+                                    .insert(collection, &pocket, key, *entity_id)
+                                    .map_err(|err| err.to_string())?;
+                            }
+                        }
+                    }
                     return Ok(count);
                 }
                 // Build sorted in-memory index for range scans (single col).
@@ -1553,8 +1590,10 @@ impl IndexStore {
                 }
                 // Sorted-backed indexes (BTree / H3) are removed from the
                 // registry above; the sorted manager has no per-index drop
-                // (mirrors the pre-existing BTree behaviour).
-                IndexMethodKind::BTree | IndexMethodKind::H3 { .. } => false,
+                // (mirrors the pre-existing BTree behaviour). A BTree's hash
+                // pocket is dropped so a same-named index can be rebuilt.
+                IndexMethodKind::BTree => self.hash.drop_index(collection, &format!("{name}_hash")),
+                IndexMethodKind::H3 { .. } => false,
             };
             true
         } else {
@@ -1635,21 +1674,35 @@ impl IndexStore {
             .collect()
     }
 
-    pub(crate) fn unique_hash_indexes(&self, collection: &str) -> Vec<RegisteredIndex> {
+    /// Standalone UNIQUE indexes enforced at admission. Both are backed by a
+    /// hash-store key (`hash_lookup_name`) that admission probes.
+    pub(crate) fn unique_indexes(&self, collection: &str) -> Vec<RegisteredIndex> {
         read_unpoisoned(&self.registry)
             .values()
-            .filter(|index| {
-                index.collection == collection
-                    && index.unique
-                    && index.method == IndexMethodKind::Hash
-            })
+            .filter(|index| is_enforced_unique(collection, index))
             .cloned()
             .collect()
     }
 
-    pub(crate) fn has_unique_hash_index(&self, collection: &str) -> bool {
+    pub(crate) fn has_unique_index(&self, collection: &str) -> bool {
+        read_unpoisoned(&self.registry)
+            .values()
+            .any(|index| is_enforced_unique(collection, index))
+    }
+
+    /// Does an update of `modified_columns` change a standalone UNIQUE key?
+    pub(crate) fn touches_unique_index(
+        &self,
+        collection: &str,
+        modified_columns: &[String],
+    ) -> bool {
         read_unpoisoned(&self.registry).values().any(|index| {
-            index.collection == collection && index.unique && index.method == IndexMethodKind::Hash
+            is_enforced_unique(collection, index)
+                && index.columns.iter().any(|column| {
+                    modified_columns
+                        .iter()
+                        .any(|modified| modified.eq_ignore_ascii_case(column))
+                })
         })
     }
 
@@ -1758,21 +1811,25 @@ impl IndexStore {
         // OLTP schema), because the inner `break` keeps string
         // compares short and amortised.
         for idx in &relevant {
-            if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
+            let composite_btree =
+                matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1;
+            if composite_btree {
                 self.sorted
                     .composite_insert_batch(collection, &idx.columns, rows);
-                continue;
             }
 
-            // Composite HASH keys span several columns.
-            if matches!(idx.method, IndexMethodKind::Hash) && idx.columns.len() > 1 {
+            // Composite HASH / UNIQUE BTREE keys span several columns.
+            if let Some(pocket) = idx.composite_key_pocket() {
                 for (entity_id, fields) in rows {
                     if let Some(key) = hash_index_key(&idx.columns, fields) {
                         self.hash
-                            .insert(collection, &idx.name, key, *entity_id)
+                            .insert(collection, &pocket, key, *entity_id)
                             .map_err(|err| err.to_string())?;
                     }
                 }
+                continue;
+            }
+            if composite_btree {
                 continue;
             }
 
@@ -1787,6 +1844,10 @@ impl IndexStore {
                     let key = value_to_bytes(value.as_ref());
                     match idx.method {
                         IndexMethodKind::Hash => {
+                            // A NULL never equals another NULL: no unique key.
+                            if idx.unique && matches!(value.as_ref(), Value::Null) {
+                                continue;
+                            }
                             self.hash
                                 .insert(collection, &idx.name, key, *entity_id)
                                 .map_err(|err| err.to_string())?;
@@ -1839,19 +1900,23 @@ impl IndexStore {
             }
 
             // Composite BTree (multi-column) — maintain the tuple index.
-            if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
+            let composite_btree =
+                matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1;
+            if composite_btree {
                 self.sorted
                     .composite_insert_one(collection, &idx.columns, entity_id, fields);
-                continue;
             }
 
-            // Composite HASH keys span several columns.
-            if matches!(idx.method, IndexMethodKind::Hash) && idx.columns.len() > 1 {
+            // Composite HASH / UNIQUE BTREE keys span several columns.
+            if let Some(pocket) = idx.composite_key_pocket() {
                 if let Some(key) = hash_index_key(&idx.columns, fields) {
                     self.hash
-                        .insert(collection, &idx.name, key, entity_id)
+                        .insert(collection, &pocket, key, entity_id)
                         .map_err(|err| err.to_string())?;
                 }
+                continue;
+            }
+            if composite_btree {
                 continue;
             }
 
@@ -1860,6 +1925,10 @@ impl IndexStore {
                 let key = value_to_bytes(value.as_ref());
                 match idx.method {
                     IndexMethodKind::Hash => {
+                        // A NULL never equals another NULL: no unique key.
+                        if idx.unique && matches!(value.as_ref(), Value::Null) {
+                            continue;
+                        }
                         self.hash
                             .insert(collection, &idx.name, key, entity_id)
                             .map_err(|err| err.to_string())?;
@@ -1916,7 +1985,9 @@ impl IndexStore {
             // Composite BTree — drop the entry under the old tuple, if
             // present. Swap with None-fields on the update side flushes
             // it out cleanly.
-            if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
+            let composite_btree =
+                matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1;
+            if composite_btree {
                 self.sorted.composite_entity_update(
                     collection,
                     &idx.columns,
@@ -1924,15 +1995,17 @@ impl IndexStore {
                     fields,
                     &[],
                 );
-                continue;
             }
 
-            // Composite HASH: drop the entry under the full tuple key. Missing
-            // index on delete is non-fatal.
-            if matches!(idx.method, IndexMethodKind::Hash) && idx.columns.len() > 1 {
+            // Composite HASH / UNIQUE BTREE: drop the entry under the full
+            // tuple key. Missing index on delete is non-fatal.
+            if let Some(pocket) = idx.composite_key_pocket() {
                 if let Some(key) = hash_index_key(&idx.columns, fields) {
-                    let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
+                    let _ = self.hash.remove(collection, &pocket, &key, entity_id);
                 }
+                continue;
+            }
+            if composite_btree {
                 continue;
             }
 
@@ -2010,32 +2083,31 @@ impl IndexStore {
             return Ok(());
         }
 
-        // Composite HASH keys span several columns, which the per-column
-        // delete/insert below cannot rebuild (each call carries a single
-        // field), so re-key those indexes here from the full old/new rows.
-        let composite_hash: Vec<RegisteredIndex> = self
+        // Composite HASH / UNIQUE BTREE keys span several columns, which the
+        // per-column delete/insert below cannot rebuild (each call carries a
+        // single field), so re-key those indexes here from the full old/new rows.
+        let composite_pockets: Vec<(RegisteredIndex, String)> = self
             .registry
             .read()
             .values()
-            .filter(|idx| {
-                idx.collection == collection
-                    && matches!(idx.method, IndexMethodKind::Hash)
-                    && idx.columns.len() > 1
+            .filter(|idx| idx.collection == collection)
+            .filter_map(|idx| {
+                let pocket = idx.composite_key_pocket()?.into_owned();
+                Some((idx.clone(), pocket))
             })
-            .cloned()
             .collect();
-        for idx in &composite_hash {
+        for (idx, pocket) in &composite_pockets {
             let old_key = hash_index_key(&idx.columns, old_fields);
             let new_key = hash_index_key(&idx.columns, new_fields);
             if old_key == new_key {
                 continue;
             }
             if let Some(key) = old_key {
-                let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
+                let _ = self.hash.remove(collection, pocket, &key, entity_id);
             }
             if let Some(key) = new_key {
                 self.hash
-                    .insert(collection, &idx.name, key, entity_id)
+                    .insert(collection, pocket, key, entity_id)
                     .map_err(|err| err.to_string())?;
             }
         }
@@ -2474,6 +2546,47 @@ pub(crate) fn hash_index_key(columns: &[String], fields: &[(String, Value)]) -> 
             Some(key)
         }
     }
+}
+
+/// Key a standalone UNIQUE index reserves for `fields`, or `None` when the row
+/// reserves nothing. Same bytes as [`hash_index_key`], except that a NULL
+/// single column reserves no key either: a NULL never equals another NULL, as
+/// in a composite key and in a declared UNIQUE constraint.
+pub(crate) fn unique_index_key(columns: &[String], fields: &[(String, Value)]) -> Option<Vec<u8>> {
+    if let [column] = columns {
+        if matches!(
+            index_field_value(fields, column).as_deref(),
+            Some(Value::Null)
+        ) {
+            return None;
+        }
+    }
+    hash_index_key(columns, fields)
+}
+
+/// The first row among `rows` that reserves the same unique key as an earlier
+/// one, as `(earlier, later)`. Used to refuse `CREATE UNIQUE INDEX` over
+/// existing duplicates.
+pub(crate) fn first_duplicate_unique_key(
+    columns: &[String],
+    rows: &[(EntityId, Vec<(String, Value)>)],
+) -> Option<(EntityId, EntityId)> {
+    let mut seen = std::collections::HashMap::with_capacity(rows.len());
+    for (entity_id, fields) in rows {
+        let Some(key) = unique_index_key(columns, fields) else {
+            continue;
+        };
+        if let Some(earlier) = seen.insert(key, *entity_id) {
+            return Some((earlier, *entity_id));
+        }
+    }
+    None
+}
+
+fn is_enforced_unique(collection: &str, index: &RegisteredIndex) -> bool {
+    index.collection == collection
+        && index.unique
+        && matches!(index.method, IndexMethodKind::Hash | IndexMethodKind::BTree)
 }
 
 /// Convert a Value to bytes for index key

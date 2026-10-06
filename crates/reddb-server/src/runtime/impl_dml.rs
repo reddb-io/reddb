@@ -74,6 +74,8 @@ pub(super) struct CompiledUpdatePlan {
     row_contract_plan: Option<RowUpdateContractPlan>,
     row_modified_columns: Vec<String>,
     row_touches_unique_columns: bool,
+    /// The SET list names a column of a standalone UNIQUE index.
+    touches_unique_index: bool,
 }
 
 #[derive(Default)]
@@ -2258,6 +2260,9 @@ impl RedDBRuntime {
         let affected = prepared.len() as u64;
         let mut published = 0;
         let persistence = (|| -> RedDBResult<()> {
+            // Standalone UNIQUE keys are admitted for the whole statement
+            // before any chunk is published.
+            self.enforce_unique_update_post_images(&query.table, &compiled_plan, &prepared)?;
             for chunk in prepared.chunks(UPDATE_APPLY_CHUNK_SIZE) {
                 if compiled_plan.row_touches_unique_columns
                     || compiled_plan
@@ -2413,6 +2418,7 @@ impl RedDBRuntime {
 
         let affected = applied_chunk.len() as u64;
         if !applied_chunk.is_empty() {
+            self.enforce_unique_update_post_images(&query.table, compiled_plan, &applied_chunk)?;
             self.persist_update_chunk(&applied_chunk)?;
             let lsns = self.flush_update_chunk(&applied_chunk, topology_guard)?;
             if !query.suppress_events {
@@ -2433,6 +2439,27 @@ impl RedDBRuntime {
             ),
             touched_ids,
         ))
+    }
+
+    fn enforce_unique_update_post_images(
+        &self,
+        collection: &str,
+        compiled_plan: &CompiledUpdatePlan,
+        applied: &[AppliedEntityMutation],
+    ) -> RedDBResult<()> {
+        if !compiled_plan.touches_unique_index {
+            return Ok(());
+        }
+        let post_images: Vec<_> = applied
+            .iter()
+            .map(|item| {
+                (
+                    item.replaced_entity.as_ref().map_or(item.id, |old| old.id),
+                    crate::application::ports::entity_row_fields_snapshot(&item.entity),
+                )
+            })
+            .collect();
+        self.enforce_unique_updates(collection, &post_images)
     }
 
     fn compile_update_plan(&self, query: &UpdateQuery) -> RedDBResult<CompiledUpdatePlan> {
@@ -2538,6 +2565,10 @@ impl RedDBRuntime {
             })
         });
 
+        let touches_unique_index = self
+            .index_store_ref()
+            .touches_unique_index(&query.table, &row_modified_columns);
+
         if let Some(ttl_ms) = query.ttl_ms {
             static_metadata_assignments
                 .push(("_ttl_ms".to_string(), metadata_u64_to_value(ttl_ms)));
@@ -2559,6 +2590,7 @@ impl RedDBRuntime {
             row_contract_plan,
             row_modified_columns,
             row_touches_unique_columns,
+            touches_unique_index,
         })
     }
 

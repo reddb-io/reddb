@@ -1597,7 +1597,7 @@ mod statement_frame;
 mod table_row_mvcc_resolver;
 pub(crate) mod transaction_state;
 pub mod turbo_crash_inject;
-mod unique_hash_admission;
+mod unique_index_admission;
 mod vcs_command;
 mod vector_index;
 pub mod vector_turbo_kind;

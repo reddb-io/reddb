@@ -146,10 +146,7 @@ impl<'rt> MutationEngine<'rt> {
                 RowIndexTopologyGuard::Read(read_guard)
             };
             if constraint_lock.is_none()
-                && self
-                    .runtime
-                    .index_store_ref()
-                    .has_unique_hash_index(&collection)
+                && self.runtime.index_store_ref().has_unique_index(&collection)
             {
                 // UNIQUE may have appeared while we waited for topology.
                 // Retry in constraint -> topology order before validating keys.
@@ -166,7 +163,7 @@ impl<'rt> MutationEngine<'rt> {
         mut rows: Vec<MutationRow>,
         topology_guard: RowIndexTopologyGuard<'_>,
     ) -> RedDBResult<MutationResult> {
-        self.runtime.enforce_unique_hash_rows(&collection, &rows)?;
+        self.runtime.enforce_unique_rows(&collection, &rows)?;
 
         let growth_bytes = rows
             .iter()

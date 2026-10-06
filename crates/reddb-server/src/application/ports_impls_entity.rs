@@ -748,6 +748,15 @@ impl RedDBRuntime {
                     if contract.requires_uniqueness_check(&modified_columns) {
                         contract.enforce_row_uniqueness(&normalized_fields, Some(id))?;
                     }
+                    if self
+                        .index_store_ref()
+                        .touches_unique_index(&collection, &modified_columns)
+                    {
+                        self.enforce_unique_updates(
+                            &collection,
+                            &[(id, normalized_fields.clone())],
+                        )?;
+                    }
                     row.named = Some(normalized_fields.into_iter().collect());
                 }
             }
@@ -1815,7 +1824,7 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     }
     // Schema prevalidation does not admit standalone index keys. Route these
     // collections through the guarded row kernel before installing any row.
-    if runtime.index_store_ref().has_unique_hash_index(&collection) {
+    if runtime.index_store_ref().has_unique_index(&collection) {
         return runtime.create_rows_batch_columnar_with_outputs(collection, column_names, rows);
     }
     runtime.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
@@ -2057,7 +2066,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // without the wasted (String, Value) clones. This is the
         // bench `bench_users` shape (no contract declared by the
         // adapter's `setup_schema`).
-        let needs_normalisation = self.index_store_ref().has_unique_hash_index(&collection)
+        let needs_normalisation = self.index_store_ref().has_unique_index(&collection)
             || match db.collection_contract(&collection) {
                 Some(c) => {
                     c.declared_model == crate::catalog::CollectionModel::Table

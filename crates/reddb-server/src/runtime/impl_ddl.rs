@@ -1637,7 +1637,7 @@ impl RedDBRuntime {
         // a zero-entity index over HTTP-inserted data even though the
         // data was queryable via `SELECT`.
         let entities = manager.query_all(|_| true);
-        let entity_fields: Vec<(crate::storage::unified::EntityId, Vec<(String, Value)>)> =
+        let mut entity_fields: Vec<(crate::storage::unified::EntityId, Vec<(String, Value)>)> =
             entities
                 .iter()
                 .map(|e| {
@@ -1673,6 +1673,37 @@ impl RedDBRuntime {
                     (e.id, fields)
                 })
                 .collect();
+
+        if query.unique
+            && matches!(
+                method_kind,
+                super::index_store::IndexMethodKind::Hash
+                    | super::index_store::IndexMethodKind::BTree
+            )
+        {
+            // Only live rows reserve a key: the dead versions of an updated or
+            // deleted row share its key but are not duplicates. This is DDL
+            // only — reopening must still rebuild an index over data that an
+            // older release let duplicate.
+            let snapshots = self.snapshot_manager();
+            let own_xids = self.own_transaction_xids();
+            let mut live = entities.iter().map(|entity| {
+                snapshots.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids)
+            });
+            entity_fields.retain(|_| live.next().unwrap_or(false));
+            if let Some((earlier, later)) =
+                super::index_store::first_duplicate_unique_key(&query.columns, &entity_fields)
+            {
+                return Err(RedDBError::Query(format!(
+                    "cannot create unique index '{}' on '{}': rows {} and {} share the same ({}) key",
+                    query.name,
+                    query.table,
+                    earlier.raw(),
+                    later.raw(),
+                    query.columns.join(", ")
+                )));
+            }
+        }
 
         let index_growth_rows = entity_fields
             .iter()
