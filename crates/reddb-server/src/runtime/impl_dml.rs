@@ -2488,8 +2488,12 @@ impl RedDBRuntime {
         scanned: UnifiedEntity,
         filter: Option<&Filter>,
     ) -> Option<UnifiedEntity> {
-        let current =
-            resolve_update_entity_by_logical_id(self, &query.table, scanned.logical_id())?;
+        // Only table rows are versioned: other entities are updated in place
+        // and have no newer version to follow.
+        if !matches!(scanned.kind, crate::storage::EntityKind::TableRow { .. }) {
+            return Some(scanned);
+        }
+        let current = resolve_current_table_row(self, &query.table, scanned.logical_id())?;
         if current.id == scanned.id {
             return Some(scanned);
         }

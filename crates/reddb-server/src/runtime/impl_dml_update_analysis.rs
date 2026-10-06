@@ -90,6 +90,23 @@ pub(super) fn resolve_update_entity_by_logical_id(
     table: &str,
     logical_id: EntityId,
 ) -> Option<UnifiedEntity> {
+    if let Some(entity) = resolve_current_table_row(runtime, table, logical_id) {
+        return Some(entity);
+    }
+    // Fallback for non-table-row entities (graph nodes/edges, etc.) where
+    // entity_id == logical_id and the MVCC table-row resolver doesn't apply.
+    runtime.inner.db.store().get(table, logical_id)
+}
+
+/// The current committed version of a table row, or `None` when the row is
+/// gone. Unlike [`resolve_update_entity_by_logical_id`] this never falls back
+/// to the physical entity whose id equals the logical id, which for a deleted
+/// or replaced row is a dead version.
+pub(super) fn resolve_current_table_row(
+    runtime: &RedDBRuntime,
+    table: &str,
+    logical_id: EntityId,
+) -> Option<UnifiedEntity> {
     let store = runtime.inner.db.store();
 
     // Read-modify-write pre-image resolution.
@@ -122,15 +139,10 @@ pub(super) fn resolve_update_entity_by_logical_id(
         };
         let resolver =
             crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::captured(Some(ctx));
-        if let Some(entity) = resolver.resolve_logical_id(&store, table, logical_id) {
-            return Some(entity);
-        }
-    } else if let Some(entity) = store.get_table_row_by_logical_id(table, logical_id) {
-        return Some(entity);
+        resolver.resolve_logical_id(&store, table, logical_id)
+    } else {
+        store.get_table_row_by_logical_id(table, logical_id)
     }
-    // Fallback for non-table-row entities (graph nodes/edges, etc.) where
-    // entity_id == logical_id and the MVCC table-row resolver doesn't apply.
-    store.get(table, logical_id)
 }
 
 pub(super) fn update_cdc_item_kind(
