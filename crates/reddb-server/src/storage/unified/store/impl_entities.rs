@@ -901,6 +901,21 @@ impl UnifiedStore {
             self.index_cross_refs(&entity, collection)?;
         }
 
+        // #2376: `persist()` rebuilds every collection B-tree from the
+        // manager under `btree_indices.write()`. Hold the read side from the
+        // manager insert through the B-tree insert so a rebuild observes
+        // both or neither. Otherwise the rebuild re-inserts this row from the
+        // manager and one of the two B-tree inserts fails on a duplicate key,
+        // or lands mid-rebuild and tears the tree.
+        let paged_btree = if serialized_record.is_some() {
+            self.get_or_create_btree(collection)
+        } else {
+            None
+        };
+        let persist_fence = paged_btree
+            .as_ref()
+            .map(|_| self.btree_indices.read_recursive());
+
         let id = manager.insert(entity)?;
         debug_assert_eq!(id, id_for_serialize);
         // `register_entity_id` already advances the atomic counter on
@@ -915,19 +930,18 @@ impl UnifiedStore {
         }
 
         let mut registry_dirty = false;
-        if let (Some(_pager), Some(record)) = (&self.pager, serialized_record.as_ref()) {
-            if let Some(btree) = self.get_or_create_btree(collection) {
-                let root_before = btree.root_page_id();
+        if let (Some(btree), Some(record)) = (paged_btree.as_ref(), serialized_record.as_ref()) {
+            let root_before = btree.root_page_id();
 
-                let key = id.raw().to_be_bytes();
-                btree.insert(&key, record).map_err(|e| {
-                    StoreError::Io(std::io::Error::other(format!(
-                        "B-tree insert error while inserting '{collection}'/{id}: {e}"
-                    )))
-                })?;
-                registry_dirty = root_before != btree.root_page_id();
-            }
+            let key = id.raw().to_be_bytes();
+            btree.insert(&key, record).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!(
+                    "B-tree insert error while inserting '{collection}'/{id}: {e}"
+                )))
+            })?;
+            registry_dirty = root_before != btree.root_page_id();
         }
+        drop(persist_fence);
 
         // Perf: pagerless → skip WAL-action construction (saves a
         // third manager.get + entity serialize per insert). For

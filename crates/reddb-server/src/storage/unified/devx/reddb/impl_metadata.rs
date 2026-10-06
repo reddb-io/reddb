@@ -21,6 +21,7 @@ impl RedDB {
                 return Ok(());
             };
 
+            let _publication = self.store.vault_publication_lock.lock();
             let Ok(mut metadata) = self.load_or_bootstrap_physical_metadata(true) else {
                 return Ok(());
             };
@@ -435,6 +436,7 @@ impl RedDB {
             return Ok(());
         };
 
+        let _publication = self.store.vault_publication_lock.lock();
         let previous = self.load_or_bootstrap_physical_metadata(false).ok();
         let collection_roots = self.physical_collection_roots();
         let indexes = self
@@ -472,6 +474,7 @@ impl RedDB {
             return Ok(false);
         }
 
+        let _publication = self.store.vault_publication_lock.lock();
         let previous = PhysicalMetadataFile::load_for_data_path(path).ok();
         let metadata = self.metadata_from_native_state(&native_state, previous.as_ref());
         metadata.save_for_data_path(path)?;
@@ -519,6 +522,7 @@ impl RedDB {
         let Some(path) = self.path() else {
             return Err("database path is not available".into());
         };
+        let _publication = self.store.vault_publication_lock.lock();
         let native_state = self.native_physical_state();
 
         match PhysicalMetadataFile::load_for_data_path(path) {
@@ -1250,6 +1254,13 @@ impl RedDB {
             return Err("database path is not available".into());
         };
 
+        // #2376: the metadata sidecar and the native header pages are
+        // published read-modify-write. Two unserialised publishers lost each
+        // other's collection contracts and double-freed the header pages
+        // (a freed page came back as a B-tree page). Every publisher takes
+        // the store's reentrant publication lock, which `persist()` already
+        // takes, so this adds no lock-order edge.
+        let _publication = self.store.vault_publication_lock.lock();
         let mut metadata = self.load_or_bootstrap_physical_metadata(true)?;
 
         if metadata.indexes.is_empty() {
@@ -1271,6 +1282,7 @@ impl RedDB {
             return Ok(());
         }
 
+        let _publication = self.store.vault_publication_lock.lock();
         let existing_page = self
             .store
             .physical_file_header()

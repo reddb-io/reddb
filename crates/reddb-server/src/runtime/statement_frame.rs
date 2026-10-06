@@ -789,36 +789,52 @@ impl StatementExecutionFrame {
     ) -> RedDBResult<Option<crate::runtime::locking::LockerGuard>> {
         runtime.validate_model_operations_before_auth(expr)?;
         self.check_query_privilege(runtime, expr)?;
-        Ok(self.acquire_intent_locks(runtime, expr))
+        self.acquire_intent_locks(runtime, expr)
     }
 
     pub(super) fn acquire_intent_locks(
         &self,
         runtime: &RedDBRuntime,
         expr: &QueryExpr,
-    ) -> Option<crate::runtime::locking::LockerGuard> {
+    ) -> RedDBResult<Option<crate::runtime::locking::LockerGuard>> {
+        use crate::runtime::lock_manager::LockMode;
+        use crate::runtime::locking::{LockerGuard, Resource};
+
         if !runtime.config_bool("concurrency.locking.enabled", true) {
-            return None;
+            return Ok(None);
         }
         // Frame-level short-circuit: if the statement carries no lock
         // intent (transaction control, SET, SHOW), skip the lock
         // manager entirely instead of letting `intent_lock_modes_for`
         // walk the parsed expression to reach the same conclusion.
         if matches!(<Self as ReadFrame>::lock_intent(self), LockIntent::None) {
-            return None;
+            return Ok(None);
         }
-        intent_lock_modes_for(expr).map(|(global_mode, coll_mode)| {
-            let mut guard =
-                crate::runtime::locking::LockerGuard::new(runtime.inner.lock_manager.clone());
-            let _ = guard.acquire(crate::runtime::locking::Resource::Global, global_mode);
-            for collection in collections_referenced(expr) {
-                let _ = guard.acquire(
-                    crate::runtime::locking::Resource::Collection(collection),
-                    coll_mode,
-                );
-            }
-            guard
-        })
+        let Some((global_mode, coll_mode)) = intent_lock_modes_for(expr) else {
+            return Ok(None);
+        };
+        // A failed acquire (timeout, deadlock) used to be discarded and the
+        // statement ran unlocked (#2376). Fail it instead; the client retries.
+        let acquire = |guard: &mut LockerGuard, resource: Resource, mode: LockMode| {
+            guard.acquire(resource.clone(), mode).map_err(|err| {
+                RedDBError::Query(format!(
+                    "could not acquire {mode:?} lock on {resource:?}: {err}; retry the statement"
+                ))
+            })
+        };
+        let mut guard = LockerGuard::new(runtime.inner.lock_manager.clone());
+        acquire(&mut guard, Resource::Global, global_mode)?;
+        // DDL takes X on its own collection, but every DDL also rewrites
+        // shared catalog state the collection lock does not cover: the
+        // system collections, the physical metadata and a full-store
+        // `persist()`. Serialise all DDL on the catalog (#2376).
+        if coll_mode == LockMode::Exclusive {
+            acquire(&mut guard, Resource::Catalog, LockMode::Exclusive)?;
+        }
+        for collection in collections_referenced(expr) {
+            acquire(&mut guard, Resource::Collection(collection), coll_mode)?;
+        }
+        Ok(Some(guard))
     }
 }
 
@@ -1705,7 +1721,9 @@ mod tests {
         // the guard.
         use reddb_rql::ast::{QueryExpr, TableQuery};
         let expr = QueryExpr::Table(TableQuery::new("t"));
-        let guard = frame.acquire_intent_locks(&rt, &expr);
+        let guard = frame
+            .acquire_intent_locks(&rt, &expr)
+            .expect("no lock is attempted");
         assert!(
             guard.is_none(),
             "BEGIN frame's lock_intent=None must short-circuit lock acquisition"

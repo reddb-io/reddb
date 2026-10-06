@@ -447,6 +447,87 @@ mod tests {
         }));
     }
 
+    /// #2376: every DDL ends in `persist()`, which deletes and re-inserts
+    /// every key of every collection B-tree. Concurrent `insert_auto` calls
+    /// into the same tree (control events, index registry) raced that
+    /// rebuild: duplicate-key errors on both sides and torn trees that
+    /// broke every later DDL and the reopen.
+    #[test]
+    fn concurrent_insert_auto_and_persist_keep_paged_btree_consistent() {
+        const WRITER_COUNT: usize = 4;
+        const ROW_COUNT_PER_WRITER: usize = 150;
+        const COLLECTION: &str = "red.control_events";
+
+        let (_guard, path) = temp_path("concurrent_persist_2376");
+        let store = Arc::new(UnifiedStore::open(&path).unwrap());
+        let writers_done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let persister = {
+            let store = Arc::clone(&store);
+            let writers_done = Arc::clone(&writers_done);
+            std::thread::spawn(move || {
+                let mut errors = Vec::new();
+                while writers_done.load(std::sync::atomic::Ordering::Acquire) < WRITER_COUNT {
+                    if let Err(err) = store.persist() {
+                        errors.push(format!("persist: {err}"));
+                    }
+                }
+                errors
+            })
+        };
+        let writers: Vec<_> = (0..WRITER_COUNT)
+            .map(|writer| {
+                let store = Arc::clone(&store);
+                let writers_done = Arc::clone(&writers_done);
+                std::thread::spawn(move || {
+                    let mut errors = Vec::new();
+                    for i in 0..ROW_COUNT_PER_WRITER {
+                        let row = UnifiedEntity::table_row(
+                            EntityId::new(0),
+                            COLLECTION,
+                            0,
+                            vec![Value::text(format!("writer{writer}-row{i}"))],
+                        );
+                        if let Err(err) = store.insert_auto(COLLECTION, row) {
+                            errors.push(format!("insert_auto: {err}"));
+                        }
+                    }
+                    writers_done.fetch_add(1, std::sync::atomic::Ordering::Release);
+                    errors
+                })
+            })
+            .collect();
+        let mut errors: Vec<String> = writers
+            .into_iter()
+            .flat_map(|writer| writer.join().expect("writer thread panicked"))
+            .collect();
+        errors.extend(persister.join().expect("persist thread panicked"));
+        assert!(
+            errors.is_empty(),
+            "race produced errors:\n{}",
+            errors.join("\n")
+        );
+
+        store.persist().expect("final persist");
+        let row_count = WRITER_COUNT * ROW_COUNT_PER_WRITER;
+        let btree = store
+            .btree_indices
+            .read()
+            .get(COLLECTION)
+            .cloned()
+            .expect("collection B-tree exists");
+        assert_eq!(btree.count().expect("B-tree count"), row_count);
+        drop(btree);
+        drop(Arc::try_unwrap(store).ok().expect("all threads joined"));
+
+        let reopened = UnifiedStore::open(&path).expect("reopen after concurrent persist");
+        let reopened_count = reopened
+            .get_collection(COLLECTION)
+            .map(|manager| manager.query_all(|_| true).len())
+            .unwrap_or(0);
+        assert_eq!(reopened_count, row_count);
+    }
+
     #[test]
     fn test_paged_mode_survives_multiple_reopens() {
         let (_guard, path) = temp_path("paged_multi_reopen");
