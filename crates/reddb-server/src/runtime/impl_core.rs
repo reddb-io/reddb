@@ -3465,10 +3465,10 @@ fn strip_explain_analyze_prefix(sql: &str) -> Option<&str> {
 }
 
 fn strip_keyword_ci<'a>(sql: &'a str, keyword: &str) -> Option<&'a str> {
-    if sql.len() < keyword.len() {
-        return None;
-    }
-    let (head, rest) = sql.split_at(keyword.len());
+    // `get` is None past the end or inside a multi-byte character, where
+    // `split_at` would panic (and a release build aborts on panic).
+    let head = sql.get(..keyword.len())?;
+    let rest = &sql[keyword.len()..];
     if !head.eq_ignore_ascii_case(keyword) {
         return None;
     }
@@ -3568,6 +3568,71 @@ fn walk_analyze_plan_node(
 
     for child in &node.children {
         walk_analyze_plan_node(child, depth + 1, 0, 0.0, out);
+    }
+}
+
+#[cfg(test)]
+mod multibyte_sql_tests {
+    use super::*;
+
+    #[test]
+    fn explain_analyze_prefix_ignores_multibyte_text_at_the_keyword_boundary() {
+        // `strip_keyword_ci` used `split_at(keyword.len())`, which panics when
+        // that byte offset is inside a multi-byte character.
+        for pad in 0..16 {
+            for wide in ["é", "日", "😀"] {
+                let sql = format!("{}{wide}llo", "a".repeat(pad));
+                assert_eq!(strip_explain_analyze_prefix(&sql), None, "{sql:?}");
+            }
+        }
+        assert_eq!(
+            strip_explain_analyze_prefix("explain  analyze DELETE FROM t"),
+            Some("DELETE FROM t")
+        );
+    }
+
+    /// One malformed or unusual statement must never take the process down:
+    /// release builds abort on panic, so any panic reachable from
+    /// `execute_query` is a remote denial of service. Put a multi-byte
+    /// character at every byte offset a keyword matcher might slice at.
+    #[test]
+    fn multibyte_sql_never_panics_execute_query() {
+        let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+        let seeds = [
+            "",
+            "SELECT ",
+            "SELECT '",
+            "EXPLAIN ",
+            "EXPLAIN ANALYZE ",
+            "CHECKPOINT ",
+            "CHECKOUT ",
+            "RESET ",
+            "MERGE ",
+            "CHERRY PICK ",
+            "REVERT ",
+            "RESOLVE CONFLICT ",
+            "INSERT INTO t VALUES ('",
+        ];
+        let mut panicked = Vec::new();
+        for seed in seeds {
+            for pad in 0..16 {
+                for wide in ["é", "日", "😀"] {
+                    let sql = format!("{seed}{}{wide}llo", "a".repeat(pad));
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = rt.execute_query(&sql);
+                    }));
+                    if outcome.is_err() {
+                        panicked.push(sql);
+                    }
+                }
+            }
+        }
+        assert!(
+            panicked.is_empty(),
+            "execute_query panicked on {} statement(s), first: {:?}",
+            panicked.len(),
+            panicked.first()
+        );
     }
 }
 

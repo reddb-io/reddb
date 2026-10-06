@@ -118,7 +118,10 @@ pub(crate) enum RuntimeVcsConflictResolution {
 
 fn strip_keyword_ci<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
     let trimmed = input.trim_start();
-    if trimmed.len() < keyword.len() || !trimmed[..keyword.len()].eq_ignore_ascii_case(keyword) {
+    // `get` is None when the offset is past the end or inside a multi-byte
+    // character: indexing there panics, and a release build aborts on panic.
+    let head = trimmed.get(..keyword.len())?;
+    if !head.eq_ignore_ascii_case(keyword) {
         return None;
     }
     let rest = &trimmed[keyword.len()..];
@@ -543,5 +546,35 @@ impl RedDBRuntime {
             result.push(record);
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `strip_keyword_ci` sliced `trimmed[..keyword.len()]`: a byte-index slice
+    /// that panics (and, with `panic = "abort"`, kills the server) when the
+    /// offset lands inside a multi-byte character, e.g. `SELECT 'héllo'`.
+    #[test]
+    fn multibyte_text_never_panics_the_vcs_keyword_matcher() {
+        for pad in 0..24 {
+            for wide in ["é", "日", "😀"] {
+                for query in [
+                    format!("{}{wide}llo", "a".repeat(pad)),
+                    format!("SELECT '{}{wide}'", "h".repeat(pad)),
+                    format!("CHECKPOINT '{}{wide}' AUTHOR '{wide}'", "m".repeat(pad)),
+                ] {
+                    let _ = parse_runtime_vcs_command(&query);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vcs_keywords_still_match_case_insensitively() {
+        assert!(parse_runtime_vcs_command("checkpoint 'msg'").is_some());
+        assert!(parse_runtime_vcs_command("  CHECKOUT main").is_some());
+        assert!(parse_runtime_vcs_command("SELECT 1").is_none());
     }
 }
