@@ -977,7 +977,10 @@ mod tests {
     fn a_character_no_branch_recognises_is_not_a_term() {
         // Direct and bounded: parse_term used to return an empty "success".
         for junk in [";", "!", ",", "(", ")", "😀", "\u{00A0}x;"] {
-            let mut p = SparqlParser { input: junk, pos: 0 };
+            let mut p = SparqlParser {
+                input: junk,
+                pos: 0,
+            };
             let before = p.pos;
             let term = p.parse_term();
             assert!(
