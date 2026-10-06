@@ -2185,6 +2185,11 @@ impl RedDBRuntime {
             let _topology_guard = topology_lock.read();
             target_scan.find_target_ids()?
         };
+        #[cfg(test)]
+        self.index_store_ref().mutation_test_hook(
+            &query.table,
+            super::index_store::MutationTestPhase::TargetsScanned,
+        );
         let order_limit = if query.claim_limit.is_some() {
             None
         } else {
