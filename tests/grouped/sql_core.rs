@@ -12,6 +12,9 @@ mod e2e_advisory_locks;
 #[path = "schema_query_core/e2e_composite_index.rs"]
 mod e2e_composite_index;
 
+#[path = "dml_updates/e2e_concurrent_update_versions.rs"]
+mod e2e_concurrent_update_versions;
+
 #[path = "sql_window/e2e_explain.rs"]
 mod e2e_explain;
 

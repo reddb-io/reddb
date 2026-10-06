@@ -956,18 +956,41 @@ impl RmwLockTable {
     }
 
     fn lock_for(&self, collection: &str, key: &str) -> Arc<parking_lot::Mutex<()>> {
+        let (shard_idx, map_key) = self.slot(collection, key);
+        let mut shard = self.shards[shard_idx].lock();
+        shard
+            .entry(map_key)
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone()
+    }
+
+    /// Give back a handle from `lock_for` whose mutex the caller already
+    /// unlocked, and drop the entry once no other handle exists. Per-row
+    /// UPDATE locks (#2373) are taken for every updated row, so without
+    /// eviction the table would grow with every row ever updated. Handles
+    /// are cloned (`lock_for`) and dropped (here) only under the shard lock,
+    /// so the count seen here is exact: the last holder to return its handle
+    /// sees two (the table's and its own) and removes the entry.
+    fn release(&self, collection: &str, key: &str, lock: Arc<parking_lot::Mutex<()>>) {
+        let (shard_idx, map_key) = self.slot(collection, key);
+        let mut shard = self.shards[shard_idx].lock();
+        let idle = shard
+            .get(&map_key)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &lock) && Arc::strong_count(&lock) == 2);
+        if idle {
+            shard.remove(&map_key);
+        }
+        drop(lock);
+    }
+
+    fn slot(&self, collection: &str, key: &str) -> (usize, String) {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         collection.hash(&mut hasher);
         key.hash(&mut hasher);
         let shard_idx = (hasher.finish() as usize) % self.shards.len();
-        let map_key = format!("{collection}\u{1f}{key}");
-        let mut shard = self.shards[shard_idx].lock();
-        shard
-            .entry(map_key)
-            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
-            .clone()
+        (shard_idx, format!("{collection}\u{1f}{key}"))
     }
 }
 
