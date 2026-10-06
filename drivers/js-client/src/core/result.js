@@ -7,8 +7,8 @@
  * (`QueryWithParams`) replies are an envelope
  * `{ ok, statement, affected_rows, result: { columns, records: [{ values, meta }], stats } }`,
  * and the gRPC reply carries `records` as well. This turns any of them into
- * the canonical shape; a value that is already canonical is returned as is,
- * so the function is safe to apply more than once.
+ * the canonical shape. A value that is already canonical normalizes to an
+ * equivalent value, so the function is safe to apply more than once.
  *
  * Pure: no `node:` imports, no I/O.
  */
