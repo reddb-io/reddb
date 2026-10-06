@@ -38,6 +38,7 @@
 
 import { RedDBError } from './protocol.js'
 import { classifyNdjsonFrame, splitLines } from './core/ndjson.js'
+import { normalizeQueryResult } from './core/result.js'
 import { normalizeExactNumbers, serializeJsonValue } from './core/serialization.js'
 
 export class HttpRpcClient {
@@ -76,6 +77,11 @@ export class HttpRpcClient {
     }
     const { url, init } = route(this.baseUrl, params)
     const response = await fetch(url, this.attachAuth(init))
+    if (method === 'query') {
+      // Keep the whole envelope: `statement` and `affected_rows` sit next to
+      // `result`, which is all the generic unwrap below would return.
+      return normalizeQueryResult(await parseResponse(response, { envelope: true }))
+    }
     return parseResponse(response)
   }
 
@@ -281,7 +287,7 @@ async function readInputTerminal(response) {
   return end
 }
 
-async function parseResponse(response) {
+async function parseResponse(response, { envelope = false } = {}) {
   const text = await response.text()
   let body = null
   if (text) {
@@ -303,7 +309,7 @@ async function parseResponse(response) {
       const code = body.error_code || 'RPC_ERROR'
       throw new RedDBError(code, body.error || 'unknown error', body)
     }
-    return normalizeExactNumbers(body.result ?? body)
+    return normalizeExactNumbers(envelope ? body : (body.result ?? body))
   }
   return normalizeExactNumbers(body)
 }
@@ -326,7 +332,9 @@ const ROUTES = {
   }),
   insert: (base, { collection, payload }) => ({
     url: `${base}/collections/${encodeURIComponent(collection)}/rows`,
-    init: { method: 'POST', body: JSON.stringify(serializeJsonValue(payload)) },
+    // The server reads the row from `fields` (`row create payload must contain
+    // an object field named 'fields'`); a bare object is a 400.
+    init: { method: 'POST', body: JSON.stringify({ fields: serializeJsonValue(payload) }) },
   }),
   bulk_insert: (base, { collection, payloads }) => ({
     url: `${base}/collections/${encodeURIComponent(collection)}/bulk/rows`,
