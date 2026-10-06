@@ -1,6 +1,8 @@
-//! Admission for standalone UNIQUE HASH indexes, before row/WAL installation.
+//! Admission for standalone UNIQUE indexes (HASH and BTREE), before row/WAL
+//! installation.
 
-use super::index_store::{hash_index_key, RegisteredIndex};
+use super::index_store::{unique_index_key, RegisteredIndex};
+use crate::storage::EntityId;
 use crate::{RedDBError, RedDBResult, RedDBRuntime};
 use reddb_types::Value;
 use std::collections::HashSet;
@@ -18,32 +20,39 @@ fn matches_target(index: &RegisteredIndex, target: Option<&[String]>) -> bool {
 }
 
 fn index_key(index: &RegisteredIndex, fields: &[(String, Value)]) -> Option<Vec<u8>> {
-    // Match the physical HASH writer exactly, including NULL and legacy
-    // numeric encodings. Logical SQL equality is not its key representation.
-    // A composite index keys on every column (see `hash_index_key`).
-    hash_index_key(&index.columns, fields)
+    // Match the physical writer exactly, including legacy numeric encodings.
+    // Logical SQL equality is not its key representation. A composite index
+    // keys on every column; a NULL column reserves no key (`unique_index_key`).
+    unique_index_key(&index.columns, fields)
+}
+
+fn duplicate_key_error(index: &RegisteredIndex, collection: &str) -> RedDBError {
+    RedDBError::Query(format!(
+        "duplicate key violates unique index '{}' on collection '{}'",
+        index.name, collection
+    ))
 }
 
 impl RedDBRuntime {
-    pub(crate) fn has_unique_hash_target(&self, collection: &str, target: &[String]) -> bool {
+    pub(crate) fn has_unique_target(&self, collection: &str, target: &[String]) -> bool {
         self.index_store_ref()
-            .unique_hash_indexes(collection)
+            .unique_indexes(collection)
             .iter()
             .any(|index| matches_target(index, Some(target)))
     }
 
-    pub(crate) fn unique_hash_conflict_id(
+    pub(crate) fn unique_conflict_id(
         &self,
         collection: &str,
         fields: &[(String, Value)],
         target: Option<&[String]>,
-    ) -> RedDBResult<Option<crate::storage::EntityId>> {
-        for index in self.index_store_ref().unique_hash_indexes(collection) {
+    ) -> RedDBResult<Option<EntityId>> {
+        for index in self.index_store_ref().unique_indexes(collection) {
             if !matches_target(&index, target) {
                 continue;
             }
             if let Some(key) = index_key(&index, fields) {
-                if let Some(id) = self.unique_hash_key_conflict(&index, &key)? {
+                if let Some(id) = self.unique_key_conflict(&index, &key, None)? {
                     return Ok(Some(id));
                 }
             }
@@ -51,19 +60,26 @@ impl RedDBRuntime {
         Ok(None)
     }
 
-    fn unique_hash_key_conflict(
+    /// A row other than `exclude` that reserves `key` in `index`. `exclude` is
+    /// the version an UPDATE replaces: it never conflicts with its successor.
+    fn unique_key_conflict(
         &self,
         index: &RegisteredIndex,
         key: &[u8],
-    ) -> RedDBResult<Option<crate::storage::EntityId>> {
+        exclude: Option<EntityId>,
+    ) -> RedDBResult<Option<EntityId>> {
         let store = self.db().store();
         let snapshots = self.snapshot_manager();
         let own_xids = self.own_transaction_xids();
+        let pocket = index.hash_lookup_name();
         for id in self
             .index_store_ref()
-            .hash_lookup(&index.collection, &index.name, key)
+            .hash_lookup(&index.collection, &pocket, key)
             .map_err(RedDBError::Internal)?
         {
+            if exclude == Some(id) {
+                continue;
+            }
             if let Some(entity) = store.get(&index.collection, id) {
                 if snapshots.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids) {
                     if snapshots.is_active(entity.xmin) && !own_xids.contains(&entity.xmin) {
@@ -80,13 +96,13 @@ impl RedDBRuntime {
             // the eventual insertion by all row mutation callers.
             self.index_store_ref()
                 .hash
-                .remove(&index.collection, &index.name, key, id)
+                .remove(&index.collection, &pocket, key, id)
                 .map_err(|error| RedDBError::Internal(error.to_string()))?;
         }
         Ok(None)
     }
 
-    pub(crate) fn has_unique_hash_batch_conflict(
+    pub(crate) fn has_unique_batch_conflict(
         &self,
         collection: &str,
         fields: &[(String, Value)],
@@ -94,7 +110,7 @@ impl RedDBRuntime {
         target: Option<&[String]>,
     ) -> bool {
         self.index_store_ref()
-            .unique_hash_indexes(collection)
+            .unique_indexes(collection)
             .iter()
             .any(|index| {
                 matches_target(index, target)
@@ -106,22 +122,45 @@ impl RedDBRuntime {
             })
     }
 
-    pub(crate) fn enforce_unique_hash_rows(
+    pub(crate) fn enforce_unique_rows(
         &self,
         collection: &str,
         rows: &[super::mutation::MutationRow],
     ) -> RedDBResult<()> {
-        for index in self.index_store_ref().unique_hash_indexes(collection) {
+        for index in self.index_store_ref().unique_indexes(collection) {
             let mut proposed = HashSet::with_capacity(rows.len());
             for row in rows {
                 let Some(key) = index_key(&index, &row.fields) else {
                     continue;
                 };
-                if self.unique_hash_key_conflict(&index, &key)?.is_some() || !proposed.insert(key) {
-                    return Err(RedDBError::Query(format!(
-                        "duplicate key violates unique index '{}' on collection '{}'",
-                        index.name, collection
-                    )));
+                if self.unique_key_conflict(&index, &key, None)?.is_some() || !proposed.insert(key)
+                {
+                    return Err(duplicate_key_error(&index, collection));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Admit the post-images of one UPDATE: `(replaced version, new fields)`.
+    /// Each must stay clear of every other live row, and of each other.
+    pub(crate) fn enforce_unique_updates(
+        &self,
+        collection: &str,
+        rows: &[(EntityId, Vec<(String, Value)>)],
+    ) -> RedDBResult<()> {
+        for index in self.index_store_ref().unique_indexes(collection) {
+            let mut proposed = HashSet::with_capacity(rows.len());
+            for (previous, fields) in rows {
+                let Some(key) = index_key(&index, fields) else {
+                    continue;
+                };
+                if self
+                    .unique_key_conflict(&index, &key, Some(*previous))?
+                    .is_some()
+                    || !proposed.insert(key)
+                {
+                    return Err(duplicate_key_error(&index, collection));
                 }
             }
         }

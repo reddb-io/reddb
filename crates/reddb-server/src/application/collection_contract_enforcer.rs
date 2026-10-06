@@ -411,7 +411,7 @@ mod write_adapter {
                 return Ok(Some(conflict.entity_id));
             }
             self.runtime
-                .unique_hash_conflict_id(self.collection, fields, target)
+                .unique_conflict_id(self.collection, fields, target)
         }
 
         pub(crate) fn has_row_uniqueness_conflict_with_rows(
@@ -420,7 +420,7 @@ mod write_adapter {
             existing_fields: &[Vec<(String, Value)>],
             target: Option<&[String]>,
         ) -> RedDBResult<bool> {
-            if self.runtime.has_unique_hash_batch_conflict(
+            if self.runtime.has_unique_batch_conflict(
                 self.collection,
                 fields,
                 existing_fields,
@@ -432,7 +432,7 @@ mod write_adapter {
                 return Ok(false);
             };
             if target.is_some_and(|target| {
-                self.runtime.has_unique_hash_target(self.collection, target)
+                self.runtime.has_unique_target(self.collection, target)
                     && !resolved_uniqueness_rules(&contract)
                         .iter()
                         .any(|rule| uniqueness_columns_match(&rule.columns, target))
@@ -661,7 +661,7 @@ pub(crate) fn row_constraint_lock(
                 crate::catalog::CollectionModel::Table | crate::catalog::CollectionModel::Mixed
             ) && !resolved_uniqueness_rules(&contract).is_empty()
         });
-    if !constrained && !runtime.index_store_ref().has_unique_hash_index(collection) {
+    if !constrained && !runtime.index_store_ref().has_unique_index(collection) {
         return None;
     }
     db.store()
@@ -711,7 +711,7 @@ fn find_row_uniqueness_conflict(
         if !rules
             .iter()
             .any(|rule| uniqueness_columns_match(&rule.columns, target))
-            && !runtime.has_unique_hash_target(collection, target)
+            && !runtime.has_unique_target(collection, target)
         {
             return Err(crate::RedDBError::Query(format!(
                 "no unique or primary-key constraint on collection '{}' matches ON CONFLICT ({})",
