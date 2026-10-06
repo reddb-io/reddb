@@ -118,7 +118,10 @@ pub(crate) enum RuntimeVcsConflictResolution {
 
 fn strip_keyword_ci<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
     let trimmed = input.trim_start();
-    if trimmed.len() < keyword.len() || !trimmed[..keyword.len()].eq_ignore_ascii_case(keyword) {
+    // `get` is None when the offset is past the end or inside a multi-byte
+    // character: indexing there panics, and a release build aborts on panic.
+    let head = trimmed.get(..keyword.len())?;
+    if !head.eq_ignore_ascii_case(keyword) {
         return None;
     }
     let rest = &trimmed[keyword.len()..];

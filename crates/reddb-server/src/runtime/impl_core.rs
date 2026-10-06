@@ -3465,10 +3465,10 @@ fn strip_explain_analyze_prefix(sql: &str) -> Option<&str> {
 }
 
 fn strip_keyword_ci<'a>(sql: &'a str, keyword: &str) -> Option<&'a str> {
-    if sql.len() < keyword.len() {
-        return None;
-    }
-    let (head, rest) = sql.split_at(keyword.len());
+    // `get` is None past the end or inside a multi-byte character, where
+    // `split_at` would panic (and a release build aborts on panic).
+    let head = sql.get(..keyword.len())?;
+    let rest = &sql[keyword.len()..];
     if !head.eq_ignore_ascii_case(keyword) {
         return None;
     }
