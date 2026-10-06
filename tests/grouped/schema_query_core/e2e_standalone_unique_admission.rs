@@ -800,3 +800,111 @@ fn unique_btree_serializes_concurrent_inserts() {
         );
     }
 }
+
+#[test]
+fn unique_index_rejects_self_referencing_updates_onto_an_existing_key() {
+    // `SET id = id + 1` reads the column it writes, which takes the
+    // row-by-row read-modify-write UPDATE path.
+    for using in METHODS {
+        let runtime = unique_runtime(using);
+        runtime
+            .execute_query("INSERT INTO uq (id,body) VALUES (2,'second')")
+            .expect("second row");
+        assert!(
+            runtime
+                .execute_query("UPDATE uq SET id = id + 1 WHERE id = 1")
+                .is_err(),
+            "[{using}] id 2 is taken"
+        );
+        assert_eq!(
+            count(&runtime, "SELECT * FROM uq WHERE id = 1"),
+            1,
+            "[{using}]"
+        );
+        assert!(
+            runtime
+                .execute_query("UPDATE uq SET id = id * 0 + 9")
+                .is_err(),
+            "[{using}] two rows cannot both become 9"
+        );
+        assert_eq!(
+            count(&runtime, "SELECT * FROM uq WHERE id = 9"),
+            0,
+            "[{using}]"
+        );
+        runtime
+            .execute_query("UPDATE uq SET id = id + 10 WHERE id = 1")
+            .unwrap_or_else(|error| panic!("[{using}] a free key is accepted: {error}"));
+        assert_eq!(
+            count(&runtime, "SELECT * FROM uq WHERE id = 11"),
+            1,
+            "[{using}]"
+        );
+    }
+}
+
+#[test]
+fn unique_index_rejects_a_patch_by_id_onto_an_existing_key() {
+    use reddb::application::{
+        CreateRowInput, PatchEntityInput, PatchEntityOperation, PatchEntityOperationType,
+    };
+    for using in METHODS {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let entity = reddb::EntityUseCases::new(&runtime);
+        let mut ids = Vec::new();
+        for key in [1, 2] {
+            ids.push(
+                entity
+                    .create_row(CreateRowInput {
+                        collection: "patched".into(),
+                        fields: vec![
+                            ("id".into(), reddb_types::Value::Integer(key)),
+                            ("body".into(), reddb_types::Value::text("row")),
+                        ],
+                        metadata: vec![],
+                        node_links: vec![],
+                        vector_links: vec![],
+                    })
+                    .expect("create row")
+                    .id,
+            );
+        }
+        runtime
+            .execute_query(&format!(
+                "CREATE UNIQUE INDEX patched_id ON patched (id){using}"
+            ))
+            .expect("unique index");
+        let set_id = |id, value| {
+            entity.patch(PatchEntityInput {
+                collection: "patched".into(),
+                id,
+                payload: reddb::json::Value::Object(Default::default()),
+                operations: vec![PatchEntityOperation {
+                    op: PatchEntityOperationType::Set,
+                    path: vec!["fields".into(), "id".into()],
+                    value: Some(reddb::json::Value::Number(value)),
+                }],
+            })
+        };
+        assert!(
+            set_id(ids[1], 1.0).is_err(),
+            "[{using}] patching row 2 onto key 1 must be rejected"
+        );
+        assert_eq!(
+            count(&runtime, "SELECT * FROM patched WHERE id = 1"),
+            1,
+            "[{using}]"
+        );
+        assert_eq!(
+            count(&runtime, "SELECT * FROM patched WHERE id = 2"),
+            1,
+            "[{using}]"
+        );
+        set_id(ids[1], 3.0).unwrap_or_else(|error| panic!("[{using}] free key: {error:?}"));
+        assert_eq!(
+            count(&runtime, "SELECT * FROM patched WHERE id = 3"),
+            1,
+            "[{using}]"
+        );
+    }
+}
