@@ -43,6 +43,21 @@ impl<'a> Parser<'a> {
             IndexMethod::BTree // default
         };
 
+        if unique && !matches!(method, IndexMethod::BTree | IndexMethod::Hash) {
+            let method_name = match method {
+                IndexMethod::Bitmap => "BITMAP",
+                IndexMethod::Spatial => "SPATIAL",
+                IndexMethod::H3 { .. } => "H3",
+                _ => "this",
+            };
+            return Err(ParseError::new(
+                format!(
+                    "UNIQUE is only supported for BTREE and HASH indexes: a {method_name} index cannot enforce uniqueness"
+                ),
+                self.position(),
+            ));
+        }
+
         Ok(QueryExpr::CreateIndex(CreateIndexQuery {
             name,
             table,

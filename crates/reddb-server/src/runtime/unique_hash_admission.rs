@@ -1,6 +1,6 @@
 //! Admission for standalone UNIQUE HASH indexes, before row/WAL installation.
 
-use super::index_store::{index_field_value, value_to_bytes, RegisteredIndex};
+use super::index_store::{hash_index_key, RegisteredIndex};
 use crate::{RedDBError, RedDBResult, RedDBRuntime};
 use reddb_types::Value;
 use std::collections::HashSet;
@@ -20,11 +20,8 @@ fn matches_target(index: &RegisteredIndex, target: Option<&[String]>) -> bool {
 fn index_key(index: &RegisteredIndex, fields: &[(String, Value)]) -> Option<Vec<u8>> {
     // Match the physical HASH writer exactly, including NULL and legacy
     // numeric encodings. Logical SQL equality is not its key representation.
-    index
-        .columns
-        .first()
-        .and_then(|column| index_field_value(fields, column))
-        .map(|value| value_to_bytes(value.as_ref()))
+    // A composite index keys on every column (see `hash_index_key`).
+    hash_index_key(&index.columns, fields)
 }
 
 impl RedDBRuntime {

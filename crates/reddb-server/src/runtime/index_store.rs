@@ -1464,8 +1464,7 @@ impl IndexStore {
                 // Index existing entities
                 let mut count = 0;
                 for (entity_id, fields) in entities {
-                    if let Some(value) = index_field_value(fields, col) {
-                        let key = value_to_bytes(value.as_ref());
+                    if let Some(key) = hash_index_key(columns, fields) {
                         self.hash
                             .insert(collection, name, key, *entity_id)
                             .map_err(|err| err.to_string())?;
@@ -1765,6 +1764,18 @@ impl IndexStore {
                 continue;
             }
 
+            // Composite HASH keys span several columns.
+            if matches!(idx.method, IndexMethodKind::Hash) && idx.columns.len() > 1 {
+                for (entity_id, fields) in rows {
+                    if let Some(key) = hash_index_key(&idx.columns, fields) {
+                        self.hash
+                            .insert(collection, &idx.name, key, *entity_id)
+                            .map_err(|err| err.to_string())?;
+                    }
+                }
+                continue;
+            }
+
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
             // Hoist the "{name}_hash" auxiliary index name out of
             // the per-row inner loop for BTree indexes. Previously
@@ -1831,6 +1842,16 @@ impl IndexStore {
             if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
                 self.sorted
                     .composite_insert_one(collection, &idx.columns, entity_id, fields);
+                continue;
+            }
+
+            // Composite HASH keys span several columns.
+            if matches!(idx.method, IndexMethodKind::Hash) && idx.columns.len() > 1 {
+                if let Some(key) = hash_index_key(&idx.columns, fields) {
+                    self.hash
+                        .insert(collection, &idx.name, key, entity_id)
+                        .map_err(|err| err.to_string())?;
+                }
                 continue;
             }
 
@@ -1906,6 +1927,15 @@ impl IndexStore {
                 continue;
             }
 
+            // Composite HASH: drop the entry under the full tuple key. Missing
+            // index on delete is non-fatal.
+            if matches!(idx.method, IndexMethodKind::Hash) && idx.columns.len() > 1 {
+                if let Some(key) = hash_index_key(&idx.columns, fields) {
+                    let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
+                }
+                continue;
+            }
+
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
             if let Some(value) = index_field_value(fields, col) {
                 let key = value_to_bytes(value.as_ref());
@@ -1978,6 +2008,36 @@ impl IndexStore {
         };
         if indexed_cols.is_empty() {
             return Ok(());
+        }
+
+        // Composite HASH keys span several columns, which the per-column
+        // delete/insert below cannot rebuild (each call carries a single
+        // field), so re-key those indexes here from the full old/new rows.
+        let composite_hash: Vec<RegisteredIndex> = self
+            .registry
+            .read()
+            .values()
+            .filter(|idx| {
+                idx.collection == collection
+                    && matches!(idx.method, IndexMethodKind::Hash)
+                    && idx.columns.len() > 1
+            })
+            .cloned()
+            .collect();
+        for idx in &composite_hash {
+            let old_key = hash_index_key(&idx.columns, old_fields);
+            let new_key = hash_index_key(&idx.columns, new_fields);
+            if old_key == new_key {
+                continue;
+            }
+            if let Some(key) = old_key {
+                let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
+            }
+            if let Some(key) = new_key {
+                self.hash
+                    .insert(collection, &idx.name, key, entity_id)
+                    .map_err(|err| err.to_string())?;
+            }
         }
 
         // Compute the full damage-vector once, then filter to the
@@ -2322,7 +2382,9 @@ fn estimate_index_entry_bytes(value: &Value) -> u64 {
 
 fn estimate_registered_index_growth(index: &RegisteredIndex, fields: &[(String, Value)]) -> u64 {
     let canonical_bytes = std::mem::size_of::<CanonicalKey>() as u64;
-    if index.method == IndexMethodKind::BTree && index.columns.len() > 1 {
+    if matches!(index.method, IndexMethodKind::BTree | IndexMethodKind::Hash)
+        && index.columns.len() > 1
+    {
         return index
             .columns
             .iter()
@@ -2381,6 +2443,35 @@ fn value_to_bytes_len(value: &Value) -> u64 {
             std::fmt::Write::write_fmt(&mut count, format_args!("{value:?}"))
                 .expect("invariant: counting formatted bytes cannot fail");
             count.0
+        }
+    }
+}
+
+/// Physical HASH key of `fields` for an index over `columns`, or `None` when
+/// the row has no entry in that index.
+///
+/// A single-column index keeps its historical key (`value_to_bytes` of the
+/// column, an explicit NULL included), so existing single-column indexes and
+/// lookups are unchanged. A composite index keys on **every** column: each
+/// column's bytes are length-prefixed, so distinct tuples cannot collide
+/// (`('ab','c')` vs `('a','bc')`), and a row with an absent or NULL column has
+/// no key, because a NULL never equals anything and so cannot conflict.
+pub(crate) fn hash_index_key(columns: &[String], fields: &[(String, Value)]) -> Option<Vec<u8>> {
+    match columns {
+        [] => None,
+        [column] => index_field_value(fields, column).map(|value| value_to_bytes(value.as_ref())),
+        _ => {
+            let mut key = Vec::new();
+            for column in columns {
+                let value = index_field_value(fields, column)?;
+                if matches!(value.as_ref(), Value::Null) {
+                    return None;
+                }
+                let bytes = value_to_bytes(value.as_ref());
+                key.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                key.extend_from_slice(&bytes);
+            }
+            Some(key)
         }
     }
 }
