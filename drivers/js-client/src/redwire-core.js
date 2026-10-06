@@ -17,6 +17,7 @@
  */
 
 import { RedDBError } from './protocol.js'
+import { normalizeQueryResult } from './core/result.js'
 
 const MAGIC = 0xfe
 const SUPPORTED_VERSION = 0x01
@@ -344,6 +345,14 @@ export class RedWireClient {
       }
       kind = MessageKind.QueryWithParams
       payload = encodeQueryWithParams(sql, params)
+    } else if (this.supportsParams()) {
+      // Always QueryWithParams, with an empty list when there is nothing to
+      // bind. The legacy Query frame answers a bare summary with no rows for
+      // anything but a binary SELECT, and QueryBinary mis-decodes some
+      // replies (a one-row table came back as all NULLs on 1.23.4);
+      // QueryWithParams returns the full envelope for every statement.
+      kind = MessageKind.QueryWithParams
+      payload = encodeQueryWithParams(sql, [])
     } else {
       kind = isSelectQuery(sql) ? MessageKind.QueryBinary : MessageKind.Query
       payload = new TextEncoder().encode(sql)
@@ -351,7 +360,7 @@ export class RedWireClient {
     await writeFrame(this.socket, kind, corr, payload)
     const resp = await this.reader.next()
     if (resp.kind === MessageKind.Result) {
-      return decodeResultPayload(resp.payload)
+      return normalizeQueryResult(decodeResultPayload(resp.payload))
     }
     if (resp.kind === MessageKind.Error) {
       throw new RedDBError(

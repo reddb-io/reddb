@@ -30,6 +30,12 @@ export interface QueryResult {
   affected: number
   columns: string[]
   rows: Array<Record<string, unknown>>
+  /** Present when the server reports it. */
+  ok?: boolean
+  /** Causal-consistency token returned by a write; pass it to a later read. */
+  bookmark?: string
+  /** Execution statistics, when the server reports them. */
+  stats?: Record<string, unknown>
 }
 
 export type QueryParam =
