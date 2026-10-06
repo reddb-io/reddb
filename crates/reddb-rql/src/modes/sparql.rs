@@ -531,11 +531,11 @@ impl<'a> SparqlParser<'a> {
     fn skip_whitespace(&mut self) {
         while let Some(c) = self.peek() {
             if c.is_whitespace() {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else if c == '#' {
                 // Skip comment
                 while let Some(c) = self.peek() {
-                    self.pos += 1;
+                    self.pos += c.len_utf8();
                     if c == '\n' {
                         break;
                     }
@@ -547,7 +547,7 @@ impl<'a> SparqlParser<'a> {
     }
 
     fn peek(&self) -> Option<char> {
-        self.input[self.pos..].chars().next()
+        self.input.get(self.pos..)?.chars().next()
     }
 
     fn is_at_end(&self) -> bool {
@@ -567,7 +567,7 @@ impl<'a> SparqlParser<'a> {
     fn expect(&mut self, c: char) -> Result<(), SparqlError> {
         self.skip_whitespace();
         if self.peek() == Some(c) {
-            self.pos += 1;
+            self.pos += c.len_utf8();
             Ok(())
         } else {
             Err(self.error(&format!("Expected '{}', found {:?}", c, self.peek())))
@@ -576,16 +576,16 @@ impl<'a> SparqlParser<'a> {
 
     fn peek_keyword(&self, keyword: &str) -> bool {
         let remaining = &self.input[self.pos..].trim_start();
-        if remaining.len() >= keyword.len() {
-            let word = &remaining[..keyword.len()];
-            word.eq_ignore_ascii_case(keyword)
-                && remaining
-                    .chars()
-                    .nth(keyword.len())
-                    .map(|c| !c.is_alphanumeric())
-                    .unwrap_or(true)
-        } else {
-            false
+        match remaining.get(..keyword.len()) {
+            Some(word) => {
+                word.eq_ignore_ascii_case(keyword)
+                    && remaining
+                        .chars()
+                        .nth(keyword.len())
+                        .map(|c| !c.is_alphanumeric())
+                        .unwrap_or(true)
+            }
+            None => false,
         }
     }
 
@@ -603,7 +603,7 @@ impl<'a> SparqlParser<'a> {
     fn skip_identifier(&mut self) {
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else {
                 break;
             }
@@ -620,7 +620,7 @@ impl<'a> SparqlParser<'a> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else {
                 break;
             }
@@ -634,7 +634,7 @@ impl<'a> SparqlParser<'a> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' || c == '-' {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else {
                 break;
             }
@@ -646,7 +646,7 @@ impl<'a> SparqlParser<'a> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else {
                 break;
             }
@@ -664,7 +664,7 @@ impl<'a> SparqlParser<'a> {
                 self.pos += 1;
                 return Ok(iri);
             }
-            self.pos += 1;
+            self.pos += c.len_utf8();
         }
         Err(self.error("Unterminated IRI"))
     }
@@ -684,10 +684,11 @@ impl<'a> SparqlParser<'a> {
                 self.pos += 1;
                 return Ok(s);
             }
+            self.pos += c.len_utf8();
             if c == '\\' {
-                self.pos += 2;
-            } else {
-                self.pos += 1;
+                if let Some(escaped) = self.peek() {
+                    self.pos += escaped.len_utf8();
+                }
             }
         }
         Err(self.error("Unterminated string"))
