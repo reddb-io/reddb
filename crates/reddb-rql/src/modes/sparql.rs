@@ -277,7 +277,11 @@ impl<'a> SparqlParser<'a> {
             }
 
             // Parse triple pattern
+            let start = self.pos;
             if let Ok(pattern) = self.parse_triple_pattern() {
+                if self.pos == start {
+                    break; // consumed nothing: stop rather than loop forever
+                }
                 query.where_patterns.push(pattern);
 
                 // Optional dot separator
@@ -300,7 +304,11 @@ impl<'a> SparqlParser<'a> {
                 break;
             }
 
+            let start = self.pos;
             if let Ok(pattern) = self.parse_triple_pattern() {
+                if self.pos == start {
+                    break; // consumed nothing: stop rather than loop forever
+                }
                 patterns.push(pattern);
                 self.skip_whitespace();
                 self.consume_if(".");
@@ -402,7 +410,13 @@ impl<'a> SparqlParser<'a> {
             return Ok(SparqlTerm::PrefixedName(prefix, local));
         }
 
-        // Just a local name with empty prefix
+        // Just a local name with empty prefix. An empty token (`;`, `!`, an emoji,
+        // anything no branch above recognises) is not a term: returning success
+        // without consuming input made the pattern loops spin forever, pushing
+        // empty patterns until memory ran out.
+        if prefix.is_empty() {
+            return Err(self.error("Expected term"));
+        }
         Ok(SparqlTerm::PrefixedName(String::new(), prefix))
     }
 
@@ -956,6 +970,31 @@ mod tests {
                 let input = format!("SELECT ?x WHERE {{ ?x :{}{wide} ?y }}", "p".repeat(pad));
                 let _ = SparqlParser::parse(&input);
             }
+        }
+    }
+
+    #[test]
+    fn a_character_no_branch_recognises_is_not_a_term() {
+        // Direct and bounded: parse_term used to return an empty "success".
+        for junk in [";", "!", ",", "(", ")", "😀", "\u{00A0}x;"] {
+            let mut p = SparqlParser { input: junk, pos: 0 };
+            let before = p.pos;
+            let term = p.parse_term();
+            assert!(
+                term.is_err() || p.pos > before,
+                "parse_term({junk:?}) succeeded without consuming input: {term:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognised_characters_end_the_pattern_list_instead_of_spinning() {
+        // Each used to loop forever pushing empty patterns until memory ran out.
+        for junk in [";", "!", ",", "😀"] {
+            let q = format!("SELECT ?x WHERE {{ ?x :p ?y . {junk} }}");
+            let _ = SparqlParser::parse(&q); // must return (Ok or Err), not hang
+            let q = format!("SELECT ?x WHERE {{ OPTIONAL {{ ?x :p ?y . {junk} }} }}");
+            let _ = SparqlParser::parse(&q);
         }
     }
 
