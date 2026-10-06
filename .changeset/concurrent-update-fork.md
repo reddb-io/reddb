@@ -1,0 +1,5 @@
+---
+"@reddb-io/cli": patch
+---
+
+Concurrent autocommit `UPDATE`s of one row no longer fork it into several live versions, and a conditional `UPDATE ... WHERE id = ? AND v = 0` is now compare-and-set: of the callers whose predicate matched the same version, one gets `affected_rows = 1` and the others get `0`. A table without constraints, or with only a BTREE `CREATE UNIQUE INDEX`, was exposed; a table with a PRIMARY KEY or column UNIQUE was already serialized. An autocommit UPDATE now latches the rows it chose, re-reads each at its current version, and judges its `WHERE` again against that version before replacing it, so it also no longer resurrects a row a peer deleted in the meantime. Inside a transaction nothing changes: the statement keeps its snapshot and a conflicting peer is still caught at COMMIT. Rows already forked by older releases are not repaired. Not covered here: `DELETE`, the PATCH-by-id API and KV `SET` do not take the latch, and a statement whose scan lands in the instant between a peer retiring the old version and inserting the new one can still see no row and update nothing.
