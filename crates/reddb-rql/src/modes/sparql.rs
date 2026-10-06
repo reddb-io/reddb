@@ -945,6 +945,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn multibyte_input_never_panics_the_keyword_matcher() {
+        // `peek_keyword` compared `remaining[..keyword.len()]`, a byte-index
+        // slice that panics when that offset lands inside a multi-byte char.
+        for pad in 0..24 {
+            for wide in ["é", "日", "😀"] {
+                let input = format!("{}{wide}llo", "a".repeat(pad));
+                let _ = SparqlParser::parse(&input);
+                let input = format!("SELECT ?x WHERE {{ ?x :{}{wide} ?y }}", "p".repeat(pad));
+                let _ = SparqlParser::parse(&input);
+            }
+        }
+    }
+
+    #[test]
+    fn keywords_still_match_case_insensitively_before_multibyte_text() {
+        let q = SparqlParser::parse("select ?x where { ?x :p \"héllo\" }").unwrap();
+        assert_eq!(q.select, vec!["x"]);
+    }
+
+    #[test]
     fn test_parse_simple_select() {
         let q = SparqlParser::parse("SELECT ?host WHERE { ?host :hasIP ?ip }").unwrap();
         assert_eq!(q.select, vec!["host"]);
