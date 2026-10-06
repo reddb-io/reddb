@@ -413,4 +413,3 @@ fn creating_a_composite_unique_hash_index_checks_existing_tuples() {
     ok.execute_query("CREATE UNIQUE INDEX pairs_ab ON pairs (a, b) USING HASH")
         .expect("(x,1) and (x,2) are distinct tuples");
 }
-
