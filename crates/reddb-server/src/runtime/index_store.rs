@@ -2492,6 +2492,108 @@ pub(crate) fn value_to_bytes(value: &Value) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn row(pairs: &[(&str, Value)]) -> Vec<(String, Value)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn hash_index_key_single_column_keeps_the_historical_encoding() {
+        let columns = vec!["id".to_string()];
+        assert_eq!(
+            hash_index_key(&columns, &row(&[("id", Value::Integer(7))])),
+            Some(7i64.to_le_bytes().to_vec())
+        );
+        assert_eq!(
+            hash_index_key(&columns, &row(&[("name", Value::text("x"))])),
+            None
+        );
+        // An explicit NULL has always keyed a single-column index.
+        assert!(hash_index_key(&columns, &row(&[("id", Value::Null)])).is_some());
+    }
+
+    #[test]
+    fn hash_index_key_composite_covers_every_column_and_cannot_collide() {
+        let columns = vec!["a".to_string(), "b".to_string()];
+        let key = |a: &str, b: &str| {
+            hash_index_key(
+                &columns,
+                &row(&[("a", Value::text(a)), ("b", Value::text(b))]),
+            )
+            .expect("both columns present")
+        };
+        assert_ne!(
+            key("x", "1"),
+            key("x", "2"),
+            "the second column is part of the key"
+        );
+        assert_ne!(
+            key("ab", "c"),
+            key("a", "bc"),
+            "length prefixes keep tuples apart"
+        );
+        assert_eq!(key("x", "1"), key("x", "1"));
+    }
+
+    #[test]
+    fn hash_index_key_composite_has_no_key_for_null_or_absent_columns() {
+        let columns = vec!["a".to_string(), "b".to_string()];
+        let null_b = row(&[("a", Value::text("x")), ("b", Value::Null)]);
+        assert_eq!(hash_index_key(&columns, &null_b), None);
+        assert_eq!(
+            hash_index_key(&columns, &row(&[("a", Value::text("x"))])),
+            None
+        );
+    }
+
+    #[test]
+    fn composite_hash_index_is_rekeyed_from_the_full_rows_on_update_and_delete() {
+        let store = IndexStore::new();
+        let columns = vec!["a".to_string(), "b".to_string()];
+        store
+            .create_index("ab", "rows", &columns, IndexMethodKind::Hash, false, &[])
+            .expect("composite hash index");
+        store.register(RegisteredIndex {
+            name: "ab".to_string(),
+            collection: "rows".to_string(),
+            columns: columns.clone(),
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+        let old = row(&[("a", Value::text("x")), ("b", Value::text("1"))]);
+        let new = row(&[("a", Value::text("x")), ("b", Value::text("2"))]);
+        let key = |fields: &[(String, Value)]| hash_index_key(&columns, fields).expect("key");
+        let id = EntityId::new(1);
+
+        store.index_entity_insert("rows", id, &old).expect("insert");
+        assert_eq!(
+            store.hash_lookup("rows", "ab", &key(&old)).expect("lookup"),
+            vec![id]
+        );
+
+        // The per-column delete/insert inside an update cannot rebuild a tuple;
+        // the index must follow the change through the full old/new rows.
+        store
+            .index_entity_update("rows", id, &old, &new)
+            .expect("update");
+        assert!(store
+            .hash_lookup("rows", "ab", &key(&old))
+            .expect("lookup")
+            .is_empty());
+        assert_eq!(
+            store.hash_lookup("rows", "ab", &key(&new)).expect("lookup"),
+            vec![id]
+        );
+
+        store.index_entity_delete("rows", id, &new).expect("delete");
+        assert!(store
+            .hash_lookup("rows", "ab", &key(&new))
+            .expect("lookup")
+            .is_empty());
+    }
+
     #[test]
     fn row_index_single_insert_updates_each_composite_once() {
         let store = IndexStore::new();

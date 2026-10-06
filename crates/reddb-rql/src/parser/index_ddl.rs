@@ -237,6 +237,36 @@ mod tests {
     }
 
     #[test]
+    fn unique_is_rejected_for_methods_that_cannot_enforce_it() {
+        // BITMAP, SPATIAL and H3 were accepted with UNIQUE and then silently
+        // ignored it; reject instead of advertising a constraint nobody checks.
+        for method in ["BITMAP", "SPATIAL", "H3"] {
+            let input = format!("CREATE UNIQUE INDEX idx ON t (c) USING {method}");
+            let mut parser = parser(&input);
+            parser.expect(Token::Create).expect("CREATE");
+            let err = parser
+                .parse_create_index_query()
+                .expect_err("UNIQUE must be rejected");
+            assert!(
+                format!("{err:?}").contains("UNIQUE is only supported for BTREE and HASH"),
+                "{method}: {err:?}"
+            );
+        }
+        for method in ["BTREE", "HASH"] {
+            let query = parse_create_index(&format!(
+                "CREATE UNIQUE INDEX idx ON t (a, b) USING {method}"
+            ));
+            assert!(query.unique, "{method}");
+        }
+        assert!(parse_create_index("CREATE UNIQUE INDEX idx ON t (c)").unique);
+        // Non-unique indexes of every method are unaffected.
+        for method in ["BITMAP", "SPATIAL", "H3"] {
+            let query = parse_create_index(&format!("CREATE INDEX idx ON t (c) USING {method}"));
+            assert!(!query.unique, "{method}");
+        }
+    }
+
+    #[test]
     fn parse_create_index_on_document_path() {
         let query = parse_create_index("CREATE INDEX idx_docs_tier ON docs (body.service.tier)");
         assert_eq!(query.name, "idx_docs_tier");
