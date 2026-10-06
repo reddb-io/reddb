@@ -317,3 +317,99 @@ fn standalone_unique_do_update_targets_existing_row() {
         Some(&reddb_types::Value::text("updated"))
     );
 }
+
+fn composite_runtime() -> RedDBRuntime {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    runtime
+        .execute_query("INSERT INTO pairs (a,b) VALUES ('x','1')")
+        .expect("seed implicit collection");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX pairs_ab ON pairs (a, b) USING HASH")
+        .expect("composite unique hash index");
+    runtime
+}
+
+#[test]
+fn composite_unique_hash_keys_on_every_column() {
+    let runtime = composite_runtime();
+    // Same first column, different second column: not a duplicate. The index
+    // used to key on the first column only and rejected (x,'2').
+    runtime
+        .execute_query("INSERT INTO pairs (a,b) VALUES ('x','2')")
+        .expect("(x,2) differs from (x,1)");
+    runtime
+        .execute_query("INSERT INTO pairs (a,b) VALUES ('y','1')")
+        .expect("(y,1) differs from (x,1)");
+    // The same tuple is still a duplicate, across statements and within one.
+    assert!(runtime
+        .execute_query("INSERT INTO pairs (a,b) VALUES ('x','1')")
+        .is_err());
+    assert!(runtime
+        .execute_query("INSERT INTO pairs (a,b) VALUES ('z','9'),('z','9')")
+        .is_err());
+    let rows = runtime
+        .execute_query("SELECT * FROM pairs")
+        .expect("read")
+        .result
+        .records
+        .len();
+    assert_eq!(rows, 3, "rejected writes must leave no rows");
+}
+
+#[test]
+fn composite_unique_hash_never_conflicts_on_null() {
+    let runtime = composite_runtime();
+    for _ in 0..2 {
+        runtime
+            .execute_query("INSERT INTO pairs (a,b) VALUES ('n', NULL)")
+            .expect("a NULL column never equals another NULL");
+    }
+}
+
+#[test]
+fn composite_unique_hash_follows_updates_and_deletes() {
+    let runtime = composite_runtime();
+    runtime
+        .execute_query("INSERT INTO pairs (a,b) VALUES ('x','2')")
+        .expect("(x,2)");
+    runtime
+        .execute_query("UPDATE pairs SET b = '3' WHERE a = 'x' AND b = '2'")
+        .expect("move (x,2) to (x,3)");
+    runtime
+        .execute_query("INSERT INTO pairs (a,b) VALUES ('x','2')")
+        .expect("the update released the old tuple");
+    assert!(runtime
+        .execute_query("INSERT INTO pairs (a,b) VALUES ('x','3')")
+        .is_err());
+    runtime
+        .execute_query("DELETE FROM pairs WHERE a = 'x' AND b = '3'")
+        .expect("delete (x,3)");
+    runtime
+        .execute_query("INSERT INTO pairs (a,b) VALUES ('x','3')")
+        .expect("the delete released the tuple");
+}
+
+#[test]
+fn creating_a_composite_unique_hash_index_checks_existing_tuples() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    for row in ["('x','1')", "('x','2')", "('x','1')"] {
+        runtime
+            .execute_query(&format!("INSERT INTO pairs (a,b) VALUES {row}"))
+            .expect("seed");
+    }
+    assert!(
+        runtime
+            .execute_query("CREATE UNIQUE INDEX pairs_ab ON pairs (a, b) USING HASH")
+            .is_err(),
+        "(x,1) exists twice"
+    );
+
+    // Distinct tuples that share a first column are accepted.
+    let ok = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    for row in ["('x','1')", "('x','2')"] {
+        ok.execute_query(&format!("INSERT INTO pairs (a,b) VALUES {row}"))
+            .expect("seed");
+    }
+    ok.execute_query("CREATE UNIQUE INDEX pairs_ab ON pairs (a, b) USING HASH")
+        .expect("(x,1) and (x,2) are distinct tuples");
+}

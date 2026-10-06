@@ -1464,8 +1464,7 @@ impl IndexStore {
                 // Index existing entities
                 let mut count = 0;
                 for (entity_id, fields) in entities {
-                    if let Some(value) = index_field_value(fields, col) {
-                        let key = value_to_bytes(value.as_ref());
+                    if let Some(key) = hash_index_key(columns, fields) {
                         self.hash
                             .insert(collection, name, key, *entity_id)
                             .map_err(|err| err.to_string())?;
@@ -1765,6 +1764,18 @@ impl IndexStore {
                 continue;
             }
 
+            // Composite HASH keys span several columns.
+            if matches!(idx.method, IndexMethodKind::Hash) && idx.columns.len() > 1 {
+                for (entity_id, fields) in rows {
+                    if let Some(key) = hash_index_key(&idx.columns, fields) {
+                        self.hash
+                            .insert(collection, &idx.name, key, *entity_id)
+                            .map_err(|err| err.to_string())?;
+                    }
+                }
+                continue;
+            }
+
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
             // Hoist the "{name}_hash" auxiliary index name out of
             // the per-row inner loop for BTree indexes. Previously
@@ -1831,6 +1842,16 @@ impl IndexStore {
             if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
                 self.sorted
                     .composite_insert_one(collection, &idx.columns, entity_id, fields);
+                continue;
+            }
+
+            // Composite HASH keys span several columns.
+            if matches!(idx.method, IndexMethodKind::Hash) && idx.columns.len() > 1 {
+                if let Some(key) = hash_index_key(&idx.columns, fields) {
+                    self.hash
+                        .insert(collection, &idx.name, key, entity_id)
+                        .map_err(|err| err.to_string())?;
+                }
                 continue;
             }
 
@@ -1906,6 +1927,15 @@ impl IndexStore {
                 continue;
             }
 
+            // Composite HASH: drop the entry under the full tuple key. Missing
+            // index on delete is non-fatal.
+            if matches!(idx.method, IndexMethodKind::Hash) && idx.columns.len() > 1 {
+                if let Some(key) = hash_index_key(&idx.columns, fields) {
+                    let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
+                }
+                continue;
+            }
+
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
             if let Some(value) = index_field_value(fields, col) {
                 let key = value_to_bytes(value.as_ref());
@@ -1978,6 +2008,36 @@ impl IndexStore {
         };
         if indexed_cols.is_empty() {
             return Ok(());
+        }
+
+        // Composite HASH keys span several columns, which the per-column
+        // delete/insert below cannot rebuild (each call carries a single
+        // field), so re-key those indexes here from the full old/new rows.
+        let composite_hash: Vec<RegisteredIndex> = self
+            .registry
+            .read()
+            .values()
+            .filter(|idx| {
+                idx.collection == collection
+                    && matches!(idx.method, IndexMethodKind::Hash)
+                    && idx.columns.len() > 1
+            })
+            .cloned()
+            .collect();
+        for idx in &composite_hash {
+            let old_key = hash_index_key(&idx.columns, old_fields);
+            let new_key = hash_index_key(&idx.columns, new_fields);
+            if old_key == new_key {
+                continue;
+            }
+            if let Some(key) = old_key {
+                let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
+            }
+            if let Some(key) = new_key {
+                self.hash
+                    .insert(collection, &idx.name, key, entity_id)
+                    .map_err(|err| err.to_string())?;
+            }
         }
 
         // Compute the full damage-vector once, then filter to the
@@ -2322,7 +2382,9 @@ fn estimate_index_entry_bytes(value: &Value) -> u64 {
 
 fn estimate_registered_index_growth(index: &RegisteredIndex, fields: &[(String, Value)]) -> u64 {
     let canonical_bytes = std::mem::size_of::<CanonicalKey>() as u64;
-    if index.method == IndexMethodKind::BTree && index.columns.len() > 1 {
+    if matches!(index.method, IndexMethodKind::BTree | IndexMethodKind::Hash)
+        && index.columns.len() > 1
+    {
         return index
             .columns
             .iter()
@@ -2385,6 +2447,35 @@ fn value_to_bytes_len(value: &Value) -> u64 {
     }
 }
 
+/// Physical HASH key of `fields` for an index over `columns`, or `None` when
+/// the row has no entry in that index.
+///
+/// A single-column index keeps its historical key (`value_to_bytes` of the
+/// column, an explicit NULL included), so existing single-column indexes and
+/// lookups are unchanged. A composite index keys on **every** column: each
+/// column's bytes are length-prefixed, so distinct tuples cannot collide
+/// (`('ab','c')` vs `('a','bc')`), and a row with an absent or NULL column has
+/// no key, because a NULL never equals anything and so cannot conflict.
+pub(crate) fn hash_index_key(columns: &[String], fields: &[(String, Value)]) -> Option<Vec<u8>> {
+    match columns {
+        [] => None,
+        [column] => index_field_value(fields, column).map(|value| value_to_bytes(value.as_ref())),
+        _ => {
+            let mut key = Vec::new();
+            for column in columns {
+                let value = index_field_value(fields, column)?;
+                if matches!(value.as_ref(), Value::Null) {
+                    return None;
+                }
+                let bytes = value_to_bytes(value.as_ref());
+                key.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                key.extend_from_slice(&bytes);
+            }
+            Some(key)
+        }
+    }
+}
+
 /// Convert a Value to bytes for index key
 pub(crate) fn value_to_bytes(value: &Value) -> Vec<u8> {
     match value {
@@ -2400,6 +2491,108 @@ pub(crate) fn value_to_bytes(value: &Value) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(pairs: &[(&str, Value)]) -> Vec<(String, Value)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn hash_index_key_single_column_keeps_the_historical_encoding() {
+        let columns = vec!["id".to_string()];
+        assert_eq!(
+            hash_index_key(&columns, &row(&[("id", Value::Integer(7))])),
+            Some(7i64.to_le_bytes().to_vec())
+        );
+        assert_eq!(
+            hash_index_key(&columns, &row(&[("name", Value::text("x"))])),
+            None
+        );
+        // An explicit NULL has always keyed a single-column index.
+        assert!(hash_index_key(&columns, &row(&[("id", Value::Null)])).is_some());
+    }
+
+    #[test]
+    fn hash_index_key_composite_covers_every_column_and_cannot_collide() {
+        let columns = vec!["a".to_string(), "b".to_string()];
+        let key = |a: &str, b: &str| {
+            hash_index_key(
+                &columns,
+                &row(&[("a", Value::text(a)), ("b", Value::text(b))]),
+            )
+            .expect("both columns present")
+        };
+        assert_ne!(
+            key("x", "1"),
+            key("x", "2"),
+            "the second column is part of the key"
+        );
+        assert_ne!(
+            key("ab", "c"),
+            key("a", "bc"),
+            "length prefixes keep tuples apart"
+        );
+        assert_eq!(key("x", "1"), key("x", "1"));
+    }
+
+    #[test]
+    fn hash_index_key_composite_has_no_key_for_null_or_absent_columns() {
+        let columns = vec!["a".to_string(), "b".to_string()];
+        let null_b = row(&[("a", Value::text("x")), ("b", Value::Null)]);
+        assert_eq!(hash_index_key(&columns, &null_b), None);
+        assert_eq!(
+            hash_index_key(&columns, &row(&[("a", Value::text("x"))])),
+            None
+        );
+    }
+
+    #[test]
+    fn composite_hash_index_is_rekeyed_from_the_full_rows_on_update_and_delete() {
+        let store = IndexStore::new();
+        let columns = vec!["a".to_string(), "b".to_string()];
+        store
+            .create_index("ab", "rows", &columns, IndexMethodKind::Hash, false, &[])
+            .expect("composite hash index");
+        store.register(RegisteredIndex {
+            name: "ab".to_string(),
+            collection: "rows".to_string(),
+            columns: columns.clone(),
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+        let old = row(&[("a", Value::text("x")), ("b", Value::text("1"))]);
+        let new = row(&[("a", Value::text("x")), ("b", Value::text("2"))]);
+        let key = |fields: &[(String, Value)]| hash_index_key(&columns, fields).expect("key");
+        let id = EntityId::new(1);
+
+        store.index_entity_insert("rows", id, &old).expect("insert");
+        assert_eq!(
+            store.hash_lookup("rows", "ab", &key(&old)).expect("lookup"),
+            vec![id]
+        );
+
+        // The per-column delete/insert inside an update cannot rebuild a tuple;
+        // the index must follow the change through the full old/new rows.
+        store
+            .index_entity_update("rows", id, &old, &new)
+            .expect("update");
+        assert!(store
+            .hash_lookup("rows", "ab", &key(&old))
+            .expect("lookup")
+            .is_empty());
+        assert_eq!(
+            store.hash_lookup("rows", "ab", &key(&new)).expect("lookup"),
+            vec![id]
+        );
+
+        store.index_entity_delete("rows", id, &new).expect("delete");
+        assert!(store
+            .hash_lookup("rows", "ab", &key(&new))
+            .expect("lookup")
+            .is_empty());
+    }
 
     #[test]
     fn row_index_single_insert_updates_each_composite_once() {
