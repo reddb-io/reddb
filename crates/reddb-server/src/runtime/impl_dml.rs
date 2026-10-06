@@ -2489,8 +2489,12 @@ impl RedDBRuntime {
         filter: Option<&Filter>,
     ) -> Option<UnifiedEntity> {
         // Only table rows are versioned: other entities are updated in place
-        // and have no newer version to follow.
-        if !matches!(scanned.kind, crate::storage::EntityKind::TableRow { .. }) {
+        // and have no newer version to follow. `scanned` was re-read after the
+        // latch was taken, and replacing a version stamps its `xmax` before the
+        // replacer releases the latch: still unstamped means nobody replaced
+        // or deleted it, so there is nothing to resolve (the common case).
+        if !matches!(scanned.kind, crate::storage::EntityKind::TableRow { .. }) || scanned.xmax == 0
+        {
             return Some(scanned);
         }
         let current = resolve_current_table_row(self, &query.table, scanned.logical_id())?;
