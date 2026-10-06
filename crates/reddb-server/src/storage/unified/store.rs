@@ -381,6 +381,7 @@ pub struct UnifiedStore {
     /// The store treats the bytes as opaque; only RedDB interprets them.
     pub(crate) aux_metadata: RwLock<Vec<u8>>,
     /// Serialize vault publication with snapshot capture and WAL truncation.
+    /// Physical metadata and native header publication take it too (#2376).
     /// Reentrant because embedded checkpoint calls the snapshot encoder while
     /// holding the barrier, and storage maintenance may nest those calls.
     pub(crate) vault_publication_lock: parking_lot::ReentrantMutex<()>,
