@@ -37,6 +37,7 @@ pub mod primary;
 pub mod quorum;
 pub mod reconnect;
 pub mod replica;
+pub(crate) mod request_auth;
 pub mod rollback;
 pub mod scheduler;
 pub mod signal_plane;
