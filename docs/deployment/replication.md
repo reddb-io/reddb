@@ -48,6 +48,31 @@ Recommended topology:
 - Replicas expose gRPC for service clients and HTTP for health, query, and observability
 - All writes go to the primary
 
+### Authenticated replication
+
+For authenticated primaries, create a dedicated platform principal with only
+`cluster:replication:stream` and `cluster:replication:ack` on
+`cluster:replication`. Supply its API key and principal name to the replica with
+`REDDB_REPLICATION_API_KEY` and `REDDB_REPLICATION_USERNAME`, or the corresponding
+`_FILE` variables. Set both values; do not set an inline value and its file
+alternative together. These credentials authenticate outbound snapshot, WAL
+pull and acknowledgment RPCs. They are separate from client credentials on the
+replica and are never inferred from its local login settings.
+
+The principal is also the stable replica ID used for acknowledgments. Use a
+distinct principal for each follower, and keep it stable across restarts. An
+existing persisted replica ID must agree with this principal; an identity
+conflict stops replication and reports `auth_error` rather than forging an ack.
+A failed authenticated first bootstrap stops startup instead of creating an
+empty database. A successful snapshot persists its WAL position before the
+background follower starts, so snapshot rows are not replayed twice.
+
+Snapshot and WAL clients use the same bounded gRPC message size as the server
+(`REDDB_GRPC_MAX_MESSAGE_BYTES`, default 32 MiB). Physical snapshot hex encoding
+increases response size; stores exceeding that limit need an explicitly sized
+limit on both ends or an independently validated recovery path. Raising the
+limit does not replace recovery, restart and failover verification.
+
 ## How It Works
 
 1. Writes go to the primary
