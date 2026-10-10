@@ -187,7 +187,7 @@ impl crate::serde_json::JsonDecode for TemporaryCredentials {
     fn from_json_value(value: crate::serde_json::Value) -> Result<Self, String> {
         let invalid = || "invalid temporary credential schema".to_string();
         let fields = value.as_object().ok_or_else(invalid)?;
-        if fields.len() != 8 {
+        if fields.len() != 7 {
             return Err(invalid());
         }
         let text = |name: &str| {
