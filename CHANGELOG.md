@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.24.0
+
+### Minor Changes
+
+- [#2357](https://github.com/reddb-io/reddb/pull/2357) [`88dfc21`](https://github.com/reddb-io/reddb/commit/88dfc2183a40f462557694e476cab1ca83513d53) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Drop the `postinstall` download from `@reddb-io/cli` and `@reddb-io/sdk`. The `red` binary now ships as per-platform npm packages (`@reddb-io/red-linux-x64`, `-linux-x64-musl`, `-linux-arm64`, `-linux-arm64-musl`, `-linux-arm`, `-darwin-x64`, `-darwin-arm64`, `-win32-x64`) declared as `optionalDependencies`, so the package manager installs only the one for your OS/CPU/libc. Installs run no script and need no network beyond the registry, and work with `--ignore-scripts`. Don't install with `--omit=optional`. `REDDB_BIN` still overrides; `REDDB_SKIP_POSTINSTALL`, `REDDB_POSTINSTALL_VERSION` and `REDDB_POSTINSTALL_REPO` are gone.
+
+### Patch Changes
+
+- [#2337](https://github.com/reddb-io/reddb/pull/2337) [`5554c50`](https://github.com/reddb-io/reddb/commit/5554c5049bbf40440330cb956b2bf4c064528e85) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Refuse a second writer process on an embedded single-file `.rdb` instead of letting the last one to close silently discard the other's commits, and reuse checkpoint space so the file no longer grows by a full snapshot on every open/close.
+
+- [#2339](https://github.com/reddb-io/reddb/pull/2339) [`8481d83`](https://github.com/reddb-io/reddb/commit/8481d831a7461e3f2111f8bb2cd9a14b46d7dfbd) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Skip republishing an embedded `.rdb` snapshot that is byte-identical to the durable one over an empty WAL, so closing a store no longer rewrites the whole image two or three times.
+
+- [#2371](https://github.com/reddb-io/reddb/pull/2371) [`c59f367`](https://github.com/reddb-io/reddb/commit/c59f3677205d0685b0f261d35124adbb7bf95c62) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix an unauthenticated remote crash: a SQL statement containing a multi-byte character (for example `SELECT 'héllo'`) made the server panic and, because release builds abort on panic, exit. The keyword matchers that sliced the statement at a fixed byte offset now return "no match" instead. The SPARQL parser had the same class of bug (its byte cursor advanced by 1 after reading a multi-byte character) and could additionally loop forever, growing memory without bound, on any token it did not recognise (`;`, `!`, an emoji); both are fixed.
+
+- [#2338](https://github.com/reddb-io/reddb/pull/2338) [`9acffe7`](https://github.com/reddb-io/reddb/commit/9acffe78f0dfa0999e37c391acfb045380bcd36c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Stop an embedded store from growing on every open: config writes now replace a key's earlier value instead of appending a row, and reading a config key returns its latest value.
+
+- [#2340](https://github.com/reddb-io/reddb/pull/2340) [`f94069f`](https://github.com/reddb-io/reddb/commit/f94069fc4c6596bc8fd69dd0dcf3f4cd751100d1) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Skip config writes that would store the value a key already holds, so opening an embedded store no longer issues dozens of durable WAL appends and fsyncs to re-seed unchanged config.
+
+- [#2384](https://github.com/reddb-io/reddb/pull/2384) [`2e44b72`](https://github.com/reddb-io/reddb/commit/2e44b72adb3831940deafe6ffe66d21d9d3f2aae) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Standalone RedWire TLS now uses the runtime authentication store. Valid session tokens work over `reds://`, and authenticated servers reject anonymous connections instead of treating the TLS listener as an unauthenticated server.
+
+- [#2387](https://github.com/reddb-io/reddb/pull/2387) [`ce1d71b`](https://github.com/reddb-io/reddb/commit/ce1d71b6d2958b3c8c2bf64de82a30b21b73e0df) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Refuse online operational-directory backups that would omit the required physical sidecars, while retaining the existing single-file backup and restore path.
+
+- [#2385](https://github.com/reddb-io/reddb/pull/2385) [`05e7f58`](https://github.com/reddb-io/reddb/commit/05e7f589e37ac1ada27cb9b3d3fc554c36118105) Thanks [@filipeforattini](https://github.com/filipeforattini)! - S3 backup requests can use a mounted, atomically rotated JSON file with scoped temporary credentials. Each request signs the current session token and rejects unavailable, expired or mismatched credentials without falling back to static keys.
+
+- [#2377](https://github.com/reddb-io/reddb/pull/2377) [`3c55719`](https://github.com/reddb-io/reddb/commit/3c55719795ae5b3784b8b6260bee8f2f65a392c3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - `CREATE UNIQUE INDEX` is now enforced for BTREE, the default method, as well as HASH, for single-column and composite keys. It was accepted and listed as unique but never checked, so duplicate keys went in silently. The check covers INSERT, `ON CONFLICT`, bulk and columnar inserts, and now UPDATE: an UPDATE onto an existing key is rejected, as is a statement whose rows would collide with each other (`UPDATE t SET id = 9`). A NULL key never conflicts with another NULL, as in a composite key and in a declared UNIQUE constraint; a single-column unique HASH index used to reserve the NULL key. `CREATE UNIQUE INDEX` over rows that already hold a duplicate key is refused, and the dead versions left by earlier UPDATEs or DELETEs no longer count as duplicates. Dropping a BTREE index also drops its lookup pocket, so an index of the same name can be recreated. Reopening a database never refuses: an index created by an older release over data that already holds duplicates is rebuilt as it was, and the duplicates stay until they are fixed. Data already duplicated by older releases is not repaired.
+
+- [#2375](https://github.com/reddb-io/reddb/pull/2375) [`e69edf1`](https://github.com/reddb-io/reddb/commit/e69edf1d948a091319aedecafb3657918c47a988) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A composite `CREATE UNIQUE INDEX … USING HASH` now keys on every column. It keyed on the first column only, so `(x,'2')` was rejected as a duplicate of `(x,'1')`. A row with a NULL or missing column has no key and never conflicts, as with declared UNIQUE constraints. `UNIQUE` combined with `USING BITMAP`, `SPATIAL` or `H3` is now a parse error instead of being accepted and never enforced. Single-column indexes keep their key encoding, so existing indexes, which are rebuilt from the table rows when a database opens, are unaffected.
+
 ## 1.23.4
 
 ### Patch Changes
