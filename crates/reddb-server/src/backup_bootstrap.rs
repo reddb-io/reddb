@@ -13,6 +13,8 @@
 //!   * `REDDB_BACKUP_S3_PREFIX`     (required)
 //!   * `REDDB_BACKUP_S3_ACCESS_KEY_ID`     (required)
 //!   * `REDDB_BACKUP_S3_SECRET_ACCESS_KEY` (required)
+//!   * `REDDB_BACKUP_S3_CREDENTIALS_FILE` (optional alternative to both keys;
+//!     absolute path to atomically rotated, scoped temporary credentials)
 //!   * `REDDB_BACKUP_S3_REGION`     (default `auto`)
 //!   * `REDDB_BACKUP_CHECKPOINT_INTERVAL_SECS` (default 3600, must be > 0)
 //!   * `REDDB_BACKUP_WAL_FLUSH_INTERVAL_SECS`  (default 30,   must be > 0)
@@ -38,6 +40,7 @@ pub struct BackupConfig {
     pub region: String,
     pub access_key_id: String,
     pub secret_access_key: String,
+    pub credentials_file: Option<String>,
     pub prefix: String,
     pub checkpoint_interval_secs: u64,
     pub wal_flush_interval_secs: u64,
@@ -58,6 +61,7 @@ const REQUIRED_VARS: &[&str] = &[
 ];
 
 const REGION_VAR: &str = "REDDB_BACKUP_S3_REGION";
+const CREDENTIALS_FILE_VAR: &str = "REDDB_BACKUP_S3_CREDENTIALS_FILE";
 const CHECKPOINT_VAR: &str = "REDDB_BACKUP_CHECKPOINT_INTERVAL_SECS";
 const WAL_FLUSH_VAR: &str = "REDDB_BACKUP_WAL_FLUSH_INTERVAL_SECS";
 const PAUSE_ON_LAG_VAR: &str = "REDDB_BACKUP_PAUSE_ON_LAG_SECS";
@@ -73,18 +77,35 @@ pub fn from_env<F>(env: F) -> Result<Option<BackupConfig>, String>
 where
     F: Fn(&str) -> Option<String>,
 {
-    let presence: Vec<(&str, Option<String>)> = REQUIRED_VARS
+    let credentials_file = env(CREDENTIALS_FILE_VAR).filter(|v| !v.trim().is_empty());
+    if let Some(path) = &credentials_file {
+        if !std::path::Path::new(path).is_absolute() {
+            return Err(format!("{CREDENTIALS_FILE_VAR} must be an absolute path"));
+        }
+        if REQUIRED_VARS[3..]
+            .iter()
+            .any(|name| env(name).is_some_and(|v| !v.trim().is_empty()))
+        {
+            return Err("backup credentials file and static keys are mutually exclusive".into());
+        }
+    }
+    let required_vars = if credentials_file.is_some() {
+        &REQUIRED_VARS[..3]
+    } else {
+        REQUIRED_VARS
+    };
+    let presence: Vec<(&str, Option<String>)> = required_vars
         .iter()
         .map(|name| (*name, env(name).filter(|v| !v.trim().is_empty())))
         .collect();
 
     let present_count = presence.iter().filter(|(_, v)| v.is_some()).count();
 
-    if present_count == 0 {
+    if present_count == 0 && credentials_file.is_none() {
         return Ok(None);
     }
 
-    if present_count < REQUIRED_VARS.len() {
+    if present_count < required_vars.len() {
         let missing: Vec<&str> = presence
             .iter()
             .filter_map(|(n, v)| v.is_none().then_some(*n))
@@ -99,8 +120,8 @@ where
     let endpoint = required.next().unwrap();
     let bucket = required.next().unwrap();
     let prefix = required.next().unwrap();
-    let access_key_id = required.next().unwrap();
-    let secret_access_key = required.next().unwrap();
+    let access_key_id = required.next().unwrap_or_default();
+    let secret_access_key = required.next().unwrap_or_default();
 
     let region = env(REGION_VAR)
         .filter(|v| !v.trim().is_empty())
@@ -116,6 +137,7 @@ where
         region,
         access_key_id,
         secret_access_key,
+        credentials_file,
         prefix,
         checkpoint_interval_secs,
         wal_flush_interval_secs,
@@ -169,6 +191,52 @@ where
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn mounted_credentials_replace_static_keys_without_fallback() {
+        let mut map: HashMap<&str, &str> = [
+            ("REDDB_BACKUP_S3_ENDPOINT", "https://s3.example.com"),
+            ("REDDB_BACKUP_S3_BUCKET", "synthetic-bucket"),
+            ("REDDB_BACKUP_S3_PREFIX", "org/db/"),
+            (
+                "REDDB_BACKUP_S3_CREDENTIALS_FILE",
+                "/var/run/secrets/backup/credentials.json",
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let lookup_map = |key: &str| map.get(key).map(|v| v.to_string());
+        let config = from_env(lookup_map)
+            .expect("valid file mode")
+            .expect("backup configured");
+        assert_eq!(
+            config.credentials_file.as_deref(),
+            Some("/var/run/secrets/backup/credentials.json")
+        );
+        assert!(config.access_key_id.is_empty() && config.secret_access_key.is_empty());
+        map.insert("REDDB_BACKUP_S3_ACCESS_KEY_ID", "must-not-fall-back");
+        assert!(from_env(|key| map.get(key).map(|v| v.to_string())).is_err());
+        map.remove("REDDB_BACKUP_S3_ACCESS_KEY_ID");
+        map.insert(
+            "REDDB_BACKUP_S3_CREDENTIALS_FILE",
+            "relative/credentials.json",
+        );
+        assert!(from_env(|key| map.get(key).map(|v| v.to_string())).is_err());
+        map.insert(
+            "REDDB_BACKUP_S3_CREDENTIALS_FILE",
+            "/absolute/credentials.json",
+        );
+        map.remove("REDDB_BACKUP_S3_BUCKET");
+        assert!(from_env(|key| map.get(key).map(|v| v.to_string())).is_err());
+    }
+
+    #[test]
+    fn credentials_file_alone_is_partial_configuration() {
+        assert!(
+            from_env(|key| (key == CREDENTIALS_FILE_VAR).then(|| "/absolute/file.json".into()))
+                .is_err()
+        );
+    }
 
     fn lookup<'a>(
         map: &'a HashMap<&'static str, &'static str>,

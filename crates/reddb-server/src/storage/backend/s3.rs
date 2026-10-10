@@ -36,7 +36,8 @@ use super::{
 use crate::crypto;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
@@ -169,12 +170,120 @@ impl S3Config {
 /// delegates HTTP transport to `curl(1)`.
 pub struct S3Backend {
     config: S3Config,
+    credentials_file: Option<PathBuf>,
+}
+
+struct TemporaryCredentials {
+    schema_version: u64,
+    bucket: String,
+    prefix: String,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: String,
+    expires_at_unix_seconds: u64,
+}
+
+impl crate::serde_json::JsonDecode for TemporaryCredentials {
+    fn from_json_value(value: crate::serde_json::Value) -> Result<Self, String> {
+        let invalid = || "invalid temporary credential schema".to_string();
+        let fields = value.as_object().ok_or_else(invalid)?;
+        if fields.len() != 8 {
+            return Err(invalid());
+        }
+        let text = |name: &str| {
+            fields
+                .get(name)
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .ok_or_else(invalid)
+        };
+        let integer = |name: &str| match fields.get(name) {
+            Some(crate::serde_json::Value::Integer(n)) if *n >= 0 => Ok(*n as u64),
+            Some(crate::serde_json::Value::Number(n))
+                if n.is_finite()
+                    && *n >= 0.0
+                    && n.fract() == 0.0
+                    && *n <= 9_007_199_254_740_991.0 =>
+            {
+                Ok(*n as u64)
+            }
+            Some(crate::serde_json::Value::Decimal(n)) => n.parse::<u64>().map_err(|_| invalid()),
+            _ => Err(invalid()),
+        };
+        Ok(Self {
+            schema_version: integer("schema_version")?,
+            bucket: text("bucket")?,
+            prefix: text("prefix")?,
+            access_key_id: text("access_key_id")?,
+            secret_access_key: text("secret_access_key")?,
+            session_token: text("session_token")?,
+            expires_at_unix_seconds: integer("expires_at_unix_seconds")?,
+        })
+    }
 }
 
 impl S3Backend {
     /// Create a new S3 backend with the given configuration.
     pub fn new(config: S3Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            credentials_file: None,
+        }
+    }
+
+    /// Reopen one atomically rotated JSON credential file for every request.
+    /// Missing, expired or differently scoped credentials never fall back to
+    /// the static keys in the configuration. Projected Kubernetes Secrets must
+    /// mount the directory rather than a non-rotating `subPath` file.
+    pub fn with_credentials_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.credentials_file = Some(path.into());
+        self
+    }
+
+    fn temporary_credentials(
+        &self,
+        now: u64,
+    ) -> Result<Option<TemporaryCredentials>, BackendError> {
+        let Some(path) = &self.credentials_file else {
+            return Ok(None);
+        };
+        let invalid = || {
+            BackendError::Internal(
+                "temporary S3 credentials unavailable, expired or outside configured scope".into(),
+            )
+        };
+        if !path.is_absolute() || !self.config.endpoint.starts_with("https://") {
+            return Err(invalid());
+        }
+        const MAX_BYTES: u64 = 32 * 1024;
+        let mut bytes = Vec::new();
+        fs::File::open(path)
+            .map_err(|_| invalid())?
+            .take(MAX_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| invalid())?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(invalid());
+        }
+        let credentials: TemporaryCredentials =
+            crate::serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if credentials.schema_version != 1
+            || credentials.bucket != self.config.bucket
+            || credentials.prefix != self.config.key_prefix
+            || credentials.prefix.is_empty()
+            || !credentials.prefix.ends_with('/')
+            || credentials.expires_at_unix_seconds <= now.saturating_add(30)
+            || [
+                &credentials.access_key_id,
+                &credentials.secret_access_key,
+                &credentials.session_token,
+            ]
+            .iter()
+            .any(|v| v.is_empty() || !v.bytes().all(|b| (33..=126).contains(&b)))
+        {
+            return Err(invalid());
+        }
+        Ok(Some(credentials))
     }
 
     // -----------------------------------------------------------------------
@@ -224,6 +333,7 @@ impl S3Backend {
             .map_err(|e| BackendError::Internal(format!("clock error: {e}")))?;
 
         let secs = now.as_secs();
+        let credentials = self.temporary_credentials(secs)?;
         let (timestamp, datestamp) = format_iso8601(secs);
 
         let body_hash = sha256_hex(body);
@@ -248,13 +358,19 @@ impl S3Backend {
             headers.insert(name.to_ascii_lowercase(), value.trim().to_string());
         }
 
+        let mut request_config = self.config.clone();
+        if let Some(credentials) = credentials {
+            request_config.access_key = credentials.access_key_id;
+            request_config.secret_key = credentials.secret_access_key;
+            headers.insert("x-amz-security-token".into(), credentials.session_token);
+        }
         let auth = sign_s3v4(
             method,
             object_key,
             canonical_querystring,
             &headers,
             &body_hash,
-            &self.config,
+            &request_config,
             &timestamp,
             &datestamp,
         );
@@ -886,6 +1002,121 @@ fn civil_from_days(mut days: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scoped_credentials() -> serde_json::Value {
+        serde_json::json!({"schema_version": 1, "bucket": "synthetic-bucket", "prefix": "org/db/",
+            "access_key_id": "temporary-access", "secret_access_key": "temporary-secret",
+            "session_token": "temporary-session", "expires_at_unix_seconds":
+                SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_secs() + 3600})
+    }
+
+    #[test]
+    fn temporary_file_rotates_all_signing_material_without_restart() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("credentials.json");
+        let config = S3Config::generic(
+            "https://synthetic.invalid",
+            "synthetic-bucket",
+            "fallback-access",
+            "fallback-secret",
+        )
+        .with_prefix("org/db/");
+        let backend = S3Backend::new(config).with_credentials_file(&path);
+        let mut credentials = scoped_credentials();
+        fs::write(&path, serde_json::to_vec(&credentials).expect("JSON"))
+            .expect("credentials file");
+        let first = backend
+            .build_signed_request("PUT", "org/db/example", b"data")
+            .expect("signed request");
+        assert_eq!(first["x-amz-security-token"], "temporary-session");
+        assert!(first["Authorization"].contains("Credential=temporary-access/"));
+        assert!(first["Authorization"].contains("x-amz-security-token"));
+        assert!(!first["Authorization"].contains("fallback-access"));
+        credentials["access_key_id"] = "rotated-access".into();
+        credentials["secret_access_key"] = "rotated-secret".into();
+        credentials["session_token"] = "rotated-session".into();
+        let replacement = directory.path().join("replacement.json");
+        fs::write(
+            &replacement,
+            serde_json::to_vec(&credentials).expect("JSON"),
+        )
+        .expect("replacement file");
+        fs::rename(&replacement, &path).expect("atomic rotation");
+        let second = backend
+            .build_signed_request("PUT", "org/db/example", b"data")
+            .expect("rotated request");
+        assert_eq!(second["x-amz-security-token"], "rotated-session");
+        assert!(second["Authorization"].contains("Credential=rotated-access/"));
+        assert_ne!(first["Authorization"], second["Authorization"]);
+        fs::remove_file(&path).expect("remove credentials");
+        assert!(backend
+            .build_signed_request("GET", "org/db/example", b"")
+            .is_err());
+    }
+
+    #[test]
+    fn invalid_temporary_file_never_falls_back_or_exposes_material() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("credentials.json");
+        let backend = S3Backend::new(
+            S3Config::generic(
+                "https://synthetic.invalid",
+                "synthetic-bucket",
+                "fallback",
+                "fallback",
+            )
+            .with_prefix("org/db/"),
+        )
+        .with_credentials_file(&path);
+        for (field, value) in [
+            ("schema_version", serde_json::json!(2)),
+            ("schema_version", serde_json::json!(1.5)),
+            ("bucket", serde_json::json!("other-bucket")),
+            ("prefix", serde_json::json!("org/other/")),
+            ("access_key_id", serde_json::json!("")),
+            ("secret_access_key", serde_json::json!("secret\r\ninjected")),
+            ("session_token", serde_json::json!("secret\ninjected")),
+            ("expires_at_unix_seconds", serde_json::json!(0)),
+            (
+                "expires_at_unix_seconds",
+                serde_json::json!(9_000_000_000.5),
+            ),
+            ("unknown", serde_json::json!("secret-unknown")),
+        ] {
+            let mut value_object = scoped_credentials();
+            value_object[field] = value;
+            fs::write(&path, serde_json::to_vec(&value_object).expect("JSON")).expect("file");
+            let error = backend
+                .build_signed_request("GET", "org/db/example", b"")
+                .expect_err("reject invalid credentials");
+            let message = error.to_string();
+            assert!(!message.contains("secret") && !message.contains(path.to_str().expect("path")));
+        }
+        for bytes in [b"malformed-secret-json".to_vec(), vec![b'x'; 32 * 1024 + 1]] {
+            fs::write(&path, bytes).expect("file");
+            assert!(backend
+                .build_signed_request("GET", "org/db/example", b"")
+                .is_err());
+        }
+        fs::write(
+            &path,
+            serde_json::to_vec(&scoped_credentials()).expect("JSON"),
+        )
+        .expect("file");
+        let insecure = S3Backend::new(
+            S3Config::generic(
+                "http://synthetic.invalid",
+                "synthetic-bucket",
+                "fallback",
+                "fallback",
+            )
+            .with_prefix("org/db/"),
+        )
+        .with_credentials_file(path);
+        assert!(insecure
+            .build_signed_request("GET", "org/db/example", b"")
+            .is_err());
+    }
 
     #[test]
     fn test_sha256_hex_empty() {

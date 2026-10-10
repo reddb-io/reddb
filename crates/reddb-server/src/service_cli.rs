@@ -644,7 +644,11 @@ fn apply_backup_config(options: &mut RedDBOptions, cfg: &crate::backup_bootstrap
             region: cfg.region.clone(),
             path_style: true,
         };
-        let backend = Arc::new(crate::storage::backend::S3Backend::new(s3_cfg));
+        let mut backend = crate::storage::backend::S3Backend::new(s3_cfg);
+        if let Some(path) = &cfg.credentials_file {
+            backend = backend.with_credentials_file(path);
+        }
+        let backend = Arc::new(backend);
         options.remote_backend = Some(backend.clone());
         options.remote_backend_atomic = Some(backend);
         // Use the operator-supplied prefix as the snapshot key root.
