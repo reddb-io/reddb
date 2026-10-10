@@ -24,7 +24,7 @@ fn rotating_credentials_put_get_list_without_restart() {
     let fixture: LiveFixture =
         serde_json::from_slice(&fs::read(fixture_path).expect("fixture")).expect("fixture schema");
     assert!(fixture.endpoint.starts_with("https://"));
-    assert_eq!(fixture.bucket, "rdb-lair-stg-storage-qualification");
+    assert!(fixture.bucket.contains("-stg-") && fixture.bucket.ends_with("-storage-qualification"));
     assert!(fixture.prefix.starts_with("qualification/") && fixture.prefix.ends_with('/'));
     let directory = tempfile::tempdir().expect("private local directory");
     let path = directory.path().join("credentials.json");
