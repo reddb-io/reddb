@@ -1,6 +1,13 @@
 # Rotating scoped backup credentials
 
 Build the engine with `backend-s3` and provide `curl` in its runtime image.
+Online backup of `operational-directory` stores is currently refused: the
+single-file archive path omits required `.ops` files and cannot restore that
+layout. Until a checkpoint-consistent physical bundle is implemented, stop and
+fence every writer, flush the store, and back up its complete physical layout.
+Validate a restore into an independent path before treating that offline backup
+as usable. Rotating credentials do not remove this storage-format restriction.
+
 Set `REDDB_BACKUP_S3_ENDPOINT`, `REDDB_BACKUP_S3_BUCKET`,
 `REDDB_BACKUP_S3_PREFIX` and `REDDB_BACKUP_S3_CREDENTIALS_FILE` (absolute path).
 File mode replaces both static key environment variables; mixing them is an
@@ -56,3 +63,23 @@ The fixture contains `endpoint`, `bucket`, `prefix`, `first_credentials_file` an
 `second_credentials_file`. The test writes two synthetic objects in that unique
 prefix and preserves them for independent review; it removes only its local
 temporary credential file.
+
+On Linux, an additional opt-in test restores an independently fenced synthetic
+operational archive through real native S3 upload/download and a fresh client:
+
+```sh
+REDDB_OFFLINE_R2_FIXTURE=/absolute/private-offline-fixture.json \
+  cargo test -p reddb-io-server --features backend-s3 \
+  --test operational_offline_r2_live -- --ignored
+```
+
+This requires Python 3.12+ and the same staging bucket/scope checks. The private
+fixture adds `snapshot_archive`, `expected_archive_sha256` and
+`db_relative_path` (`data.rdb`) to the rotation fixture. The source must be an
+immutable, complete physical archive of the Standard qualification fixture
+(125 synthetic `standard_persistence` records) made after independently proving
+all writers stopped. The test verifies the archive digest before extraction,
+rejects links/unsafe member paths, reopens the restored operational store and
+compares every ID and value. It preserves the remote synthetic object, removes
+only its independent local restore directory, and does not qualify online
+checkpoints, scheduling, renewal, WAL/PITR replay or commercial activation.

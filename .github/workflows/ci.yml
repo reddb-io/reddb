@@ -311,7 +311,9 @@ jobs:
         run: |
           cargo check --locked --all --features backend-s3
           cargo test --locked -p reddb-io-server --lib --features backend-s3 storage::backend::s3::tests
+          cargo test --locked -p reddb-io-server --features backend-s3 --test operational_backup_restore
           cargo test --locked -p reddb-io-server --features backend-s3 --test s3_rotating_credentials_live --no-run
+          cargo test --locked -p reddb-io-server --features backend-s3 --test operational_offline_r2_live --no-run
       - run: cargo clippy --locked --all -- -D warnings
       - name: Generate command coverage matrix
         run: cargo run --locked -p reddb-io-server --bin command-coverage > command-coverage.md

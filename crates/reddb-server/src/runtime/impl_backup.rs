@@ -49,6 +49,16 @@ impl RedDBRuntime {
             // explicitly so dashboards distinguish "lease lost" from a
             // generic read-only refusal.
             self.assert_remote_write_allowed("admin/backup")?;
+            // This transport archives only the main file. Operational stores
+            // also own manifest/collection/index files in .ops; reporting a
+            // successful backup here would publish an unrestorable snapshot.
+            // A checkpoint-consistent physical bundle is required before this
+            // online path can support operational-directory packaging.
+            if self.inner.db.remote_backend.is_some() && !self.inner.embedded_single_file {
+                return Err(RedDBError::InvalidOperation(
+                    "online backup of operational-directory stores requires a checkpoint-consistent physical bundle; use a fenced offline backup of the complete store layout".into(),
+                ));
+            }
             let started = std::time::Instant::now();
             let snapshot = self.create_snapshot()?;
             let mut uploaded = false;
