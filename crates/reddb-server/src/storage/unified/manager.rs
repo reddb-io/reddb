@@ -179,11 +179,59 @@ struct SourceProgress {
     tombstones_at_open: Option<usize>,
 }
 
+/// Latch stripes per collection. Fixed memory; a stripe may cover several rows,
+/// which only costs waiting, never correctness.
+const ROW_LATCH_STRIPES: usize = 512;
+
+/// Serializes autocommit read-modify-write of a logical row: a writer holds the
+/// stripe of every row it will replace from re-reading the row's current
+/// version until the successor is installed, so two writers can never both
+/// replace the same version.
+struct RowLatches {
+    stripes: Box<[parking_lot::Mutex<()>]>,
+}
+
+/// The stripes held for one statement; they are released on drop.
+pub(crate) struct RowLatchGuard<'a> {
+    _held: Vec<parking_lot::MutexGuard<'a, ()>>,
+}
+
+impl RowLatches {
+    fn new() -> Self {
+        Self {
+            stripes: (0..ROW_LATCH_STRIPES)
+                .map(|_| parking_lot::Mutex::new(()))
+                .collect(),
+        }
+    }
+
+    /// Stripes are taken in ascending order, each once, so two statements can
+    /// never wait on each other.
+    fn lock_rows(&self, logical_ids: impl IntoIterator<Item = EntityId>) -> RowLatchGuard<'_> {
+        let mut stripes: Vec<usize> = logical_ids
+            .into_iter()
+            .map(|id| {
+                (id.raw().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize % ROW_LATCH_STRIPES
+            })
+            .collect();
+        stripes.sort_unstable();
+        stripes.dedup();
+        RowLatchGuard {
+            _held: stripes
+                .into_iter()
+                .map(|stripe| self.stripes[stripe].lock())
+                .collect(),
+        }
+    }
+}
+
 /// Segment manager for a collection
 pub struct SegmentManager {
     /// Statement-scoped constraint admission. Reentrant because SQL upserts
     /// invoke the same typed mutation APIs while holding this collection gate.
     row_constraint_lock: Arc<parking_lot::ReentrantMutex<()>>,
+    /// Per-row latches for autocommit UPDATE; see [`RowLatches`].
+    row_latches: RowLatches,
     /// Collection name
     collection: String,
     /// Configuration
@@ -236,6 +284,7 @@ impl SegmentManager {
     pub fn with_config(collection: impl Into<String>, config: ManagerConfig) -> Self {
         Self {
             row_constraint_lock: Arc::new(parking_lot::ReentrantMutex::new(())),
+            row_latches: RowLatches::new(),
             collection: collection.into(),
             config,
             next_segment_id: AtomicU64::new(1),
@@ -257,6 +306,15 @@ impl SegmentManager {
 
     pub(crate) fn row_constraint_lock(&self) -> Arc<parking_lot::ReentrantMutex<()>> {
         Arc::clone(&self.row_constraint_lock)
+    }
+
+    /// Latch the given logical rows against other autocommit writers. Lock
+    /// order: row constraint -> topology -> row latches -> storage/index.
+    pub(crate) fn lock_row_latches(
+        &self,
+        logical_ids: impl IntoIterator<Item = EntityId>,
+    ) -> RowLatchGuard<'_> {
+        self.row_latches.lock_rows(logical_ids)
     }
 
     /// Get or create the shared column schema from first row's named fields.

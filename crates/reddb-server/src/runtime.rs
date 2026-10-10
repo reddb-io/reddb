@@ -1598,6 +1598,8 @@ mod table_row_mvcc_resolver;
 pub(crate) mod transaction_state;
 pub mod turbo_crash_inject;
 mod unique_index_admission;
+#[cfg(test)]
+mod update_row_latch_tests;
 mod vcs_command;
 mod vector_index;
 pub mod vector_turbo_kind;
