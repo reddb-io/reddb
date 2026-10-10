@@ -1,5 +1,15 @@
 # @reddb-io/client
 
+## 1.24.0
+
+### Minor Changes
+
+- [#2357](https://github.com/reddb-io/reddb/pull/2357) [`46b9e15`](https://github.com/reddb-io/reddb/commit/46b9e15078c324422b4fae3dc0f0c670601decfc) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Drop the `postinstall` script from `@reddb-io/client`. The package is pure JavaScript and never needed the `red_client` binary it downloaded, so installs no longer touch the network, no longer depend on the platform/architecture, and work with `--ignore-scripts`. The `REDDB_CLIENT_BIN`, `REDDB_SKIP_POSTINSTALL`, `REDDB_POSTINSTALL_VERSION` and `REDDB_POSTINSTALL_REPO` overrides are gone; install `@reddb-io/cli` if you want the `red_client` CLI.
+
+### Patch Changes
+
+- [#2372](https://github.com/reddb-io/reddb/pull/2372) [`bf1a41c`](https://github.com/reddb-io/reddb/commit/bf1a41cb234c2641e74441a61793fd1b726a228a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - `query()` now returns the documented `{ statement, affected, columns, rows }` over every transport. Over HTTP it returned the server envelope's bare `result` (`{ columns, records, stats }`, no `rows`, and `affected`/`statement` dropped); over RedWire a parameterized query returned the raw envelope. `rows` are plain objects keyed by column, so `kv`, `documents` and the quickstart now work. RedWire sends every query as `QueryWithParams` (with an empty list when nothing is bound): the legacy `Query` frame returned only a summary and `QueryBinary` returned all-NULL columns for a one-row table on 1.23.4. HTTP `insert()` now sends the row under `fields`, as the server requires. `bookmark` and `stats` are passed through when the server sends them.
+
 ## 1.23.4
 
 ## 1.23.3

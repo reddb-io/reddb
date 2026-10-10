@@ -1,5 +1,13 @@
 # @reddb-io/sdk
 
+## 1.24.0
+
+### Minor Changes
+
+- [#2357](https://github.com/reddb-io/reddb/pull/2357) [`88dfc21`](https://github.com/reddb-io/reddb/commit/88dfc2183a40f462557694e476cab1ca83513d53) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Drop the `postinstall` download from `@reddb-io/cli` and `@reddb-io/sdk`. The `red` binary now ships as per-platform npm packages (`@reddb-io/red-linux-x64`, `-linux-x64-musl`, `-linux-arm64`, `-linux-arm64-musl`, `-linux-arm`, `-darwin-x64`, `-darwin-arm64`, `-win32-x64`) declared as `optionalDependencies`, so the package manager installs only the one for your OS/CPU/libc. Installs run no script and need no network beyond the registry, and work with `--ignore-scripts`. Don't install with `--omit=optional`. `REDDB_BIN` still overrides; `REDDB_SKIP_POSTINSTALL`, `REDDB_POSTINSTALL_VERSION` and `REDDB_POSTINSTALL_REPO` are gone.
+
+- [#2360](https://github.com/reddb-io/reddb/pull/2360) [`302cb07`](https://github.com/reddb-io/reddb/commit/302cb0758c2db1c5e9e27ef12c577ae9b5873e86) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Embedded mode can now run the engine in process. On platforms whose `@reddb-io/red-*` package ships `reddb.node`, `connect('memory://')` / `connect('file://…')` load it instead of spawning `red rpc --stdio` — same API and transaction semantics, no subprocess. Platforms without an addon, and calls that pass `options.binary`, keep the subprocess path. `REDDB_NATIVE_ADDON=/path/to/reddb.node` overrides the lookup. The addon aborts the process on an engine panic, like `red`.
+
 ## 1.23.4
 
 ## 1.23.3
