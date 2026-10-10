@@ -5,7 +5,7 @@
 //!
 //! - Read dispatch: `(Global, IS) → (Collection, IS)`
 //! - Write dispatch: `(Global, IX) → (Collection, IX)`
-//! - DDL dispatch: `(Global, IX) → (Collection, X)`
+//! - DDL dispatch: `(Global, IX) → (Catalog, X) → (Collection, X)`
 //!
 //! The adapter owns:
 //!
@@ -34,6 +34,10 @@ use crate::runtime::lock_manager::{LockManager, LockMode, LockResult, TxnId};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Resource {
     Global,
+    /// Shared catalog state every DDL rewrites (system collections,
+    /// physical metadata, full-store persist). DDL holds it exclusively
+    /// between `Global` and `Collection`, which serialises DDL (#2376).
+    Catalog,
     Collection(String),
 }
 
@@ -42,6 +46,7 @@ impl Resource {
     pub fn key(&self) -> Vec<u8> {
         match self {
             Resource::Global => b"G/".to_vec(),
+            Resource::Catalog => b"K/".to_vec(),
             Resource::Collection(name) => {
                 let mut out = Vec::with_capacity(2 + name.len());
                 out.extend_from_slice(b"C/");

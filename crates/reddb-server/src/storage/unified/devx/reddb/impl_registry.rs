@@ -1140,6 +1140,7 @@ impl RedDB {
 
         self.flush()?;
 
+        let _publication = self.store.vault_publication_lock.lock();
         let mut metadata = match self.load_or_bootstrap_physical_metadata(true) {
             Ok(metadata) => metadata,
             Err(_)
