@@ -2181,6 +2181,12 @@ impl RedDBRuntime {
         if needs_rmw_lock {
             target_scan = target_scan.with_live_table_rows();
         }
+        // Both apply paths below re-resolve each candidate's head under its
+        // row lock (#2373). A bounded scan (LIMIT / CLAIM) keeps strict
+        // visibility so a candidate skipped there cannot displace a row.
+        if self.current_xid().is_none() && limit_cap.is_none() {
+            target_scan = target_scan.with_locked_head_resolution();
+        }
         let ids_to_update = {
             let _topology_guard = topology_lock.read();
             target_scan.find_target_ids()?
@@ -2240,10 +2246,31 @@ impl RedDBRuntime {
         // published until all targets fit; a later denial cannot leave earlier
         // autocommit chunks visible. Prepared payload is bounded by admission.
         let topology_guard = topology_lock.read();
+        // #2373: hold every target row's lock until its successor is
+        // published, and build each successor from the row's head version
+        // re-read under that lock, re-checking WHERE against it. A writer
+        // that read the same version before a concurrent writer published
+        // its successor would otherwise install a second live version, and a
+        // conditional UPDATE would match a value that is no longer current.
+        let row_locks = UpdateRowLocks::for_candidates(self, &query.table, &ids_to_update);
+        let _row_guards = row_locks.lock();
+        let head_resolver = locked_update_head_resolver();
+        let head_predicate = target_scan.head_predicate();
+        let mut updated_logical_ids = std::collections::HashSet::new();
         let mut prepared = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            for entity in manager.get_many(chunk).into_iter().flatten() {
+            for candidate in manager.get_many(chunk).into_iter().flatten() {
+                let Some(entity) =
+                    resolve_locked_update_head(self, &query.table, candidate, &head_resolver)
+                else {
+                    continue;
+                };
+                if !head_predicate.matches(&entity)
+                    || !updated_logical_ids.insert(entity.logical_id())
+                {
+                    continue;
+                }
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
                 let applied = self.apply_materialized_update_for_entity(
@@ -2368,26 +2395,18 @@ impl RedDBRuntime {
         let topology_guard = topology_lock.read();
         let store = self.inner.db.store();
         let mut touched_ids = Vec::new();
-        let mut lock_entries = Vec::new();
-
-        for id in ids_to_update {
-            let Some(candidate) = store.get(&query.table, *id) else {
-                continue;
-            };
-            let logical_id = candidate.logical_id();
-            let lock_key = format!("row:{}", logical_id.raw());
-            let rmw_lock = self.inner.rmw_locks.lock_for(&query.table, &lock_key);
-            lock_entries.push((lock_key, logical_id, rmw_lock));
-        }
-
-        lock_entries.sort_by(|left, right| left.0.cmp(&right.0));
-        lock_entries.dedup_by(|left, right| left.0 == right.0);
-        let _rmw_guards: Vec<_> = lock_entries.iter().map(|entry| entry.2.lock()).collect();
+        let row_locks = UpdateRowLocks::for_candidates(self, &query.table, ids_to_update);
+        let _rmw_guards = row_locks.lock();
+        let head_resolver = locked_update_head_resolver();
 
         let mut applied_chunk = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
-        for (_, logical_id, _) in &lock_entries {
-            let Some(entity) = resolve_update_entity_by_logical_id(self, &query.table, *logical_id)
+        for candidate_id in row_locks.candidate_ids() {
+            let Some(candidate) = store.get(&query.table, candidate_id) else {
+                continue;
+            };
+            let Some(entity) =
+                resolve_locked_update_head(self, &query.table, candidate, &head_resolver)
             else {
                 continue;
             };
@@ -3462,6 +3481,78 @@ mod tests {
             1,
             "skipped-lock labels stay bounded to collection/model"
         );
+    }
+
+    /// #2373: an UPDATE that scans while another writer of the same row has
+    /// published its successor but not yet re-indexed it finds the index
+    /// pointing at the superseded version. It must wait on the row lock and
+    /// apply to the successor, not drop the row and report 0 rows.
+    #[test]
+    fn update_scanning_during_peer_publish_waits_and_applies_to_successor() {
+        use crate::runtime::index_store::MutationTestPhase;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::Duration;
+
+        const TABLE: &str = "publish_window";
+        const TIMEOUT: Duration = Duration::from_secs(10);
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        rt.execute_query("CREATE TABLE publish_window (id TEXT, n INT, tag INT)")
+            .expect("create table");
+        rt.execute_query("INSERT INTO publish_window (id, n, tag) VALUES ('row1', 0, 0)")
+            .expect("insert row");
+
+        let (published_send, published_receive) = mpsc::channel();
+        let (release_send, release_receive) = mpsc::channel::<()>();
+        let release_receive = Mutex::new(release_receive);
+        let first_publish = AtomicBool::new(true);
+        *rt.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+            if collection == TABLE
+                && phase == MutationTestPhase::StoragePublished
+                && first_publish.swap(false, Ordering::SeqCst)
+            {
+                published_send.send(()).expect("publish signal");
+                release_receive
+                    .lock()
+                    .expect("release receiver")
+                    .recv_timeout(TIMEOUT)
+                    .expect("release publisher");
+            }
+        }));
+
+        let (plain_rows, increment_rows) = std::thread::scope(|scope| {
+            let plain = scope.spawn(|| {
+                rt.execute_query("UPDATE publish_window SET tag = 1 WHERE id = 'row1'")
+                    .expect("plain update")
+                    .affected_rows
+            });
+            published_receive
+                .recv_timeout(TIMEOUT)
+                .expect("plain writer paused after publishing");
+            let increment = scope.spawn(|| {
+                rt.execute_query("UPDATE publish_window SET n = n + 1 WHERE id = 'row1'")
+                    .expect("increment")
+                    .affected_rows
+            });
+            // Let the increment scan while the plain writer is paused.
+            std::thread::sleep(Duration::from_millis(200));
+            release_send.send(()).expect("release");
+            (
+                plain.join().expect("plain thread"),
+                increment.join().expect("increment thread"),
+            )
+        });
+        assert_eq!(plain_rows, 1);
+        assert_eq!(increment_rows, 1, "the increment must not drop the row");
+
+        let rows = rt
+            .execute_query("SELECT n, tag FROM publish_window WHERE id = 'row1'")
+            .expect("select")
+            .result
+            .records;
+        assert_eq!(rows.len(), 1, "one live version: {rows:?}");
+        assert_eq!(rows[0].get("n"), Some(&Value::Integer(1)));
+        assert_eq!(rows[0].get("tag"), Some(&Value::Integer(1)));
     }
 
     fn queue_payloads(rt: &RedDBRuntime, queue: &str) -> Vec<crate::json::Value> {

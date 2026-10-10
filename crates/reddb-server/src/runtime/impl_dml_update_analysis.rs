@@ -85,52 +85,155 @@ pub(super) fn field_ref_matches_update_column(
     }
 }
 
-pub(super) fn resolve_update_entity_by_logical_id(
-    runtime: &RedDBRuntime,
-    table: &str,
-    logical_id: EntityId,
-) -> Option<UnifiedEntity> {
-    let store = runtime.inner.db.store();
+/// Per-row write locks (`row:<logical_id>`) an UPDATE statement holds from
+/// re-reading each target's head version until its successor is published
+/// (#2373). Every UPDATE path locks its rows through this type, so plain,
+/// conditional and read-modify-write statements on one row serialize on the
+/// same mutex and each successor is built from the version its predecessor
+/// installed. Dropping the set returns the handles so idle entries leave the
+/// lock table.
+pub(super) struct UpdateRowLocks<'a> {
+    runtime: &'a RedDBRuntime,
+    table: &'a str,
+    /// Sorted by key and deduplicated: concurrent statements take their rows
+    /// in one global order and cannot deadlock on each other.
+    entries: Vec<UpdateRowLock>,
+}
 
-    // Read-modify-write pre-image resolution.
-    //
-    // A compound assignment (`n = n + 1`) folds the pre-image value into the
-    // written row, so the pre-image MUST be the LATEST COMMITTED version,
-    // re-evaluated *now* — this call runs while we hold the per-row RMW lock,
-    // so every earlier same-row writer has already committed. Two failure
-    // modes must both be avoided:
-    //   * `get_table_row_by_logical_id` returns whichever physical version
-    //     currently carries `xmax == 0`, which under concurrent same-row
-    //     writes can be another transaction's still-uncommitted version —
-    //     folding a later-aborted write into committed state (dirty read).
-    //   * the pinned *statement* snapshot was captured before this statement
-    //     acquired the RMW lock, so it can miss a value a peer committed in
-    //     the meantime — every concurrent increment then reads the same stale
-    //     pre-image and overwrites its predecessor (lost update).
-    // A snapshot taken at this instant, paired with this connection's own
-    // in-flight xids, threads both: it sees the freshest committed version
-    // (no lost update) and this transaction's own writes, while hiding every
-    // other transaction's uncommitted version (no dirty read).
-    if let Some(base) = crate::runtime::impl_core::capture_current_snapshot() {
-        let snapshot = base.manager.fresh_read_snapshot();
-        let ctx = crate::runtime::impl_core::SnapshotContext {
-            snapshot,
+struct UpdateRowLock {
+    key: String,
+    /// The first scan candidate (physical version) seen for the row.
+    candidate_id: EntityId,
+    lock: Arc<parking_lot::Mutex<()>>,
+}
+
+impl<'a> UpdateRowLocks<'a> {
+    /// Lock handles for the logical rows behind the candidate physical ids
+    /// of a target scan. Candidates that no longer exist are skipped.
+    pub(super) fn for_candidates(
+        runtime: &'a RedDBRuntime,
+        table: &'a str,
+        candidate_ids: &[EntityId],
+    ) -> Self {
+        let mut entries = Vec::with_capacity(candidate_ids.len());
+        if let Some(manager) = runtime.inner.db.store().get_collection(table) {
+            for id in candidate_ids {
+                let Some(logical_id) = manager.get_with(*id, |entity| entity.logical_id()) else {
+                    continue;
+                };
+                let key = format!("row:{}", logical_id.raw());
+                let lock = runtime.inner.rmw_locks.lock_for(table, &key);
+                entries.push(UpdateRowLock {
+                    key,
+                    candidate_id: *id,
+                    lock,
+                });
+            }
+        }
+        // Stable sort, so `dedup_by` keeps the first candidate per row.
+        entries.sort_by(|left, right| left.key.cmp(&right.key));
+        entries.dedup_by(|later, earlier| later.key == earlier.key);
+        Self {
+            runtime,
+            table,
+            entries,
+        }
+    }
+
+    /// Acquire every row lock, in key order. Callers must take the
+    /// collection topology read guard first, as the UPDATE paths do.
+    pub(super) fn lock(&self) -> Vec<parking_lot::MutexGuard<'_, ()>> {
+        self.entries.iter().map(|entry| entry.lock.lock()).collect()
+    }
+
+    /// One scan candidate per locked row, in lock order.
+    pub(super) fn candidate_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.entries.iter().map(|entry| entry.candidate_id)
+    }
+}
+
+impl Drop for UpdateRowLocks<'_> {
+    fn drop(&mut self) {
+        // Guards from `lock` borrow `self`, so every mutex is unlocked here.
+        for entry in self.entries.drain(..) {
+            self.runtime
+                .inner
+                .rmw_locks
+                .release(self.table, &entry.key, entry.lock);
+        }
+    }
+}
+
+/// Resolver for the head version of rows an UPDATE holds per-row locks on
+/// (#2373). Capture it after the locks are taken.
+///
+/// The successor's pre-image MUST be the LATEST COMMITTED version, evaluated
+/// *now*: a compound assignment (`n = n + 1`) folds it into the written row,
+/// and a conditional UPDATE compares against it. Two failure modes must both
+/// be avoided:
+///   * the physical version that currently carries `xmax == 0` can be another
+///     transaction's still-uncommitted version — folding a later-aborted
+///     write into committed state (dirty read).
+///   * the pinned *statement* snapshot was captured before this statement
+///     acquired the row locks, so it can miss a value a peer committed in the
+///     meantime — every concurrent writer then reads the same stale pre-image
+///     and installs its own successor (lost update, forked row).
+///
+/// A snapshot taken once every earlier writer of these rows has committed,
+/// paired with this connection's own in-flight xids, threads both: it sees
+/// the freshest committed version and this transaction's own writes, while
+/// hiding every other transaction's uncommitted version.
+pub(super) fn locked_update_head_resolver(
+) -> crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver {
+    let context = crate::runtime::impl_core::capture_current_snapshot().map(|base| {
+        crate::runtime::impl_core::SnapshotContext {
+            snapshot: base.manager.fresh_read_snapshot(),
             manager: Arc::clone(&base.manager),
             own_xids: base.own_xids.clone(),
             requires_index_fallback: true,
             serializable_reader: base.serializable_reader,
-        };
-        let resolver =
-            crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::captured(Some(ctx));
-        if let Some(entity) = resolver.resolve_logical_id(&store, table, logical_id) {
-            return Some(entity);
         }
-    } else if let Some(entity) = store.get_table_row_by_logical_id(table, logical_id) {
-        return Some(entity);
+    });
+    crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::captured(context)
+}
+
+/// The version of `candidate` an UPDATE holding its per-row lock must build
+/// the successor from: the latest committed version (#2373). `candidate` is
+/// a fresh read taken under the lock. While it is still the head it is
+/// returned as is, which is the uncontended case; when a concurrent writer
+/// superseded it after the target scan, the head is looked up by logical id.
+/// `None` means no version is visible any more (the row was deleted).
+///
+/// Only table rows carry logical-id version chains here; other entity kinds
+/// are returned unchanged.
+pub(super) fn resolve_locked_update_head(
+    runtime: &RedDBRuntime,
+    table: &str,
+    candidate: UnifiedEntity,
+    head_resolver: &crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver,
+) -> Option<UnifiedEntity> {
+    if !matches!(candidate.kind, EntityKind::TableRow { .. }) {
+        return Some(candidate);
     }
-    // Fallback for non-table-row entities (graph nodes/edges, etc.) where
-    // entity_id == logical_id and the MVCC table-row resolver doesn't apply.
-    store.get(table, logical_id)
+    let store = runtime.inner.db.store();
+    if !head_resolver.has_snapshot() {
+        if candidate.xmax == 0 {
+            return Some(candidate);
+        }
+        return store
+            .get_table_row_by_logical_id(table, candidate.logical_id())
+            .filter(|head| head.xmax == 0);
+    }
+    if head_resolver.resolve_candidate(&candidate).is_some() {
+        return Some(candidate);
+    }
+    // An invisible first version of a row (physical id == logical id) with
+    // no successor is another transaction's uncommitted insert: there is no
+    // committed version to update, and no version chain worth scanning.
+    if candidate.xmax == 0 && candidate.id == candidate.logical_id() {
+        return None;
+    }
+    head_resolver.resolve_logical_id(&store, table, candidate.logical_id())
 }
 
 pub(super) fn update_cdc_item_kind(
