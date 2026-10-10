@@ -251,7 +251,7 @@ impl RedDB {
     fn bootstrap_replica_snapshot(
         primary_addr: &str,
         local_path: &Path,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+    ) -> Result<Option<u64>, Box<dyn std::error::Error>> {
         let endpoint = if primary_addr.starts_with("http") {
             primary_addr.to_string()
         } else {
@@ -261,12 +261,15 @@ impl RedDB {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
+        let request_auth = crate::replication::request_auth::ReplicaRequestAuth::from_env()?;
         let payload = runtime.block_on(async move {
             use crate::grpc::proto::red_db_client::RedDbClient;
             use crate::grpc::proto::Empty;
-            let mut client = RedDbClient::connect(endpoint).await?;
+            let mut client = RedDbClient::connect(endpoint)
+                .await?
+                .max_decoding_message_size(crate::grpc::RedDBGrpcServer::max_message_bytes());
             let response = client
-                .replication_snapshot(tonic::Request::new(Empty {}))
+                .replication_snapshot(request_auth.request(Empty {}))
                 .await?;
             Ok::<String, Box<dyn std::error::Error>>(response.into_inner().payload)
         })?;
@@ -276,8 +279,13 @@ impl RedDB {
             .get("snapshot_hex")
             .and_then(crate::json::Value::as_str)
         else {
-            return Ok(false);
+            return Ok(None);
         };
+
+        let snapshot_lsn = json
+            .get("snapshot_lsn")
+            .and_then(crate::json::Value::as_u64)
+            .ok_or("replication snapshot omitted its WAL position")?;
 
         let bytes = hex::decode(snapshot_hex)?;
         if let Some(parent) = local_path.parent() {
@@ -292,7 +300,7 @@ impl RedDB {
         let metadata_json_path =
             crate::physical::PhysicalMetadataFile::metadata_path_for(local_path);
         write_optional_snapshot_sidecar(&json, "metadata_json_hex", &metadata_json_path)?;
-        Ok(true)
+        Ok(Some(snapshot_lsn))
     }
 
     /// Construct an ephemeral RedDB instance backed by a unique tempfile.
@@ -341,10 +349,21 @@ impl RedDB {
             }
         }
 
+        let mut replica_snapshot_lsn = None;
         if let ReplicationRole::Replica { primary_addr } = &options.replication.role {
+            let request_auth = crate::replication::request_auth::ReplicaRequestAuth::from_env()?;
             let local_path = options.resolved_path(reddb_file::default_database_path());
             if !local_path.exists() {
-                let _ = Self::bootstrap_replica_snapshot(primary_addr, &local_path);
+                let snapshot = Self::bootstrap_replica_snapshot(primary_addr, &local_path);
+                if request_auth.principal().is_some() || options.auth.require_auth {
+                    replica_snapshot_lsn = Some(
+                        snapshot
+                            .map_err(|_| "authenticated replica snapshot bootstrap failed")?
+                            .ok_or("authenticated replica snapshot was unavailable")?,
+                    );
+                } else {
+                    replica_snapshot_lsn = snapshot.ok().flatten();
+                }
             }
         }
 
@@ -548,6 +567,15 @@ impl RedDB {
             )
         };
 
+        if let Some(snapshot_lsn) = replica_snapshot_lsn {
+            store.set_config_tree(
+                "red.replication",
+                &crate::json!({
+                    "last_applied_lsn": snapshot_lsn,
+                }),
+            );
+        }
+
         let remote_key = options.remote_key.clone();
 
         // Initialize primary replication state if configured as primary.
@@ -575,7 +603,7 @@ impl RedDB {
             .cloned()
             .map(super::EphemeralDataPathCleanup::new);
 
-        Self {
+        let db = Self {
             store: Arc::new(store),
             preprocessors: Arc::new(RwLock::new(Vec::new())),
             index_config: IndexConfig::default(),
@@ -601,7 +629,11 @@ impl RedDB {
             _ephemeral_cleanup: ephemeral_cleanup,
         }
         .with_initialized_metadata()
-        .map_err(|err| format!("initialize RedDB metadata: {err}").into())
+        .map_err(|err| format!("initialize RedDB metadata: {err}"))?;
+        if replica_snapshot_lsn.is_some() {
+            db.flush_local_only()?;
+        }
+        Ok(db)
     }
 
     /// Flush changes to disk (if persistence is enabled).
