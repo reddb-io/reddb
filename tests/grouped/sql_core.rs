@@ -6,6 +6,9 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+#[path = "schema_query_core/e2e_park_migration_metadata.rs"]
+mod e2e_park_migration_metadata;
+
 #[path = "locking_concurrency/e2e_advisory_locks.rs"]
 mod e2e_advisory_locks;
 

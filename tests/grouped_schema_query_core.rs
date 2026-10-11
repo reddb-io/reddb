@@ -1,8 +1,5 @@
 #![allow(dead_code)]
 
-#[path = "grouped/schema_query_core/e2e_park_migration_metadata.rs"]
-mod e2e_park_migration_metadata;
-
 #[path = "grouped/schema_query_core/e2e_append_only.rs"]
 mod e2e_append_only;
 
