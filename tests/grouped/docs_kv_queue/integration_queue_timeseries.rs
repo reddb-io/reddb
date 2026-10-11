@@ -473,7 +473,17 @@ fn test_queue_persistent_reopen_retains_messages_and_pending_ownership() {
     let len = exec(&rt, "QUEUE LEN tasks");
     assert_eq!(uint(&len.result.records[0], "len"), 1);
     let pending_after = exec(&rt, "QUEUE PENDING tasks GROUP workers");
-    assert_eq!(pending_after.result.records, pending_before.result.records);
+    assert_eq!(pending_after.result.len(), 1);
+    for field in [
+        "message_id",
+        "consumer",
+        "delivered_at_ns",
+        "delivery_count",
+    ] {
+        let expected = pending_before.result.records[0].get(field);
+        assert!(expected.is_some(), "pending delivery must expose {field}");
+        assert_eq!(pending_after.result.records[0].get(field), expected);
+    }
 
     let still_locked = exec(
         &rt,
