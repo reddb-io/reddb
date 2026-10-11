@@ -1,4 +1,5 @@
-use reddb::{RedDBOptions, RedDBRuntime, Value};
+use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 #[test]
 fn park_migration_catalog_commands_survive_cache_hits_and_switching_tables() {
