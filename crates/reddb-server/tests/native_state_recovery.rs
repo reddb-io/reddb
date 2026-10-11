@@ -16,7 +16,7 @@ fn query(
 ) -> reddb_server::storage::query::unified::UnifiedResult {
     runtime
         .execute_query(sql)
-        .expect("native queue query")
+        .unwrap_or_else(|error| panic!("native query {sql:?}: {error:?}"))
         .result
 }
 
@@ -147,6 +147,36 @@ fn unexpired_pending_delivery_and_ack_survive_reopen_and_offline_restore() {
         "QUEUE READ restore_jobs GROUP workers CONSUMER restored COUNT 10"
     )
     .is_empty());
+}
+
+#[test]
+fn empty_queue_and_group_survive_reopen_and_accept_new_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.rdb");
+    {
+        let runtime = open(&path);
+        query(
+            &runtime,
+            "CREATE QUEUE restore_jobs LOCK_DEADLINE_MS 600000",
+        );
+        query(&runtime, "QUEUE GROUP CREATE restore_jobs workers");
+    }
+    let reopened = open(&path);
+    assert!(query(
+        &reopened,
+        "QUEUE READ restore_jobs GROUP workers CONSUMER restored COUNT 1"
+    )
+    .is_empty());
+    query(&reopened, "QUEUE PUSH restore_jobs 'new-work'");
+    let delivered = query(
+        &reopened,
+        "QUEUE READ restore_jobs GROUP workers CONSUMER restored COUNT 1",
+    );
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered.records[0].get("payload"),
+        Some(&Value::text("new-work"))
+    );
 }
 
 #[test]

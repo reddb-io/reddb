@@ -434,13 +434,13 @@ fn test_queue_ttl_expires_messages_after_retention() {
 }
 
 #[test]
-fn test_queue_persistent_reopen_retains_messages_and_recovers_pending() {
+fn test_queue_persistent_reopen_retains_messages_and_pending_ownership() {
     let path = PersistentDbPath::new("queue_reopen");
     let rt = path.open_runtime();
 
     exec(
         &rt,
-        "CREATE QUEUE tasks PRIORITY WITH DLQ failed_tasks MAX_ATTEMPTS 5",
+        "CREATE QUEUE tasks PRIORITY WITH DLQ failed_tasks MAX_ATTEMPTS 5 LOCK_DEADLINE_MS 600000",
     );
     exec(&rt, "QUEUE GROUP CREATE tasks workers");
     exec(&rt, "QUEUE PUSH tasks 'job-1' PRIORITY 10");
@@ -450,6 +450,8 @@ fn test_queue_persistent_reopen_retains_messages_and_recovers_pending() {
         "QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1",
     );
     assert_eq!(payloads(&first_read), vec!["job-1"]);
+    let pending_before = exec(&rt, "QUEUE PENDING tasks GROUP workers");
+    assert_eq!(pending_before.result.len(), 1);
 
     let rt = checkpoint_and_reopen(&path, rt);
 
@@ -470,12 +472,29 @@ fn test_queue_persistent_reopen_retains_messages_and_recovers_pending() {
 
     let len = exec(&rt, "QUEUE LEN tasks");
     assert_eq!(uint(&len.result.records[0], "len"), 1);
+    let pending_after = exec(&rt, "QUEUE PENDING tasks GROUP workers");
+    assert_eq!(pending_after.result.records, pending_before.result.records);
 
-    let recovered = exec(
+    let still_locked = exec(
         &rt,
         "QUEUE READ tasks GROUP workers CONSUMER worker2 COUNT 1",
     );
-    assert_eq!(payloads(&recovered), vec!["job-1"]);
+    assert!(
+        still_locked.result.is_empty(),
+        "unexpired work retains its owner"
+    );
+    let message_id = text(&first_read.result.records[0], "message_id");
+    exec(
+        &rt,
+        &format!("QUEUE ACK tasks GROUP workers '{message_id}'"),
+    );
+    assert!(exec(&rt, "QUEUE PENDING tasks GROUP workers")
+        .result
+        .is_empty());
+    assert_eq!(
+        uint(&exec(&rt, "QUEUE LEN tasks").result.records[0], "len"),
+        0
+    );
 }
 
 #[test]

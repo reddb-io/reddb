@@ -130,6 +130,11 @@ impl UnifiedStore {
                 reddb_file::decode_native_dump_collection_header(&buf, &mut pos)
                     .map_err(|e| e.to_string())?;
 
+            // The registry is persisted even when the last entity was removed.
+            // Restore it independently of the entity loop so empty queues and
+            // other collections survive reopening without emitting new WAL.
+            store.get_or_create_collection(&collection_header.name);
+
             // Read each entity — V7+ includes metadata alongside entity data.
             for _ in 0..collection_header.entity_count {
                 if version >= STORE_VERSION_V7 {
