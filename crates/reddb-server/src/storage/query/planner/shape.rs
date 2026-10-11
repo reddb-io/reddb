@@ -84,6 +84,20 @@ fn parameterize_query_expr_inner(expr: &QueryExpr, next_index: &mut usize) -> Op
 }
 
 fn parameterize_table_query(query: &TableQuery, next_index: &mut usize) -> Option<TableQuery> {
+    // DESCRIBE/SHOW CREATE carry the identifier as a synthetic filter literal.
+    // It has no matching SQL literal for the cache hit's lexer to rebind, and
+    // their catalog readers require that filter, not a parameterized WHERE.
+    if [
+        "red.describe",
+        "__red_schema_describe",
+        "red.show_create",
+        "__red_schema_show_create",
+    ]
+    .iter()
+    .any(|name| query.table.eq_ignore_ascii_case(name))
+    {
+        return None;
+    }
     let source = match &query.source {
         Some(TableSource::Name(name)) => Some(TableSource::Name(name.clone())),
         Some(TableSource::Subquery(inner)) => Some(TableSource::Subquery(Box::new(

@@ -679,11 +679,9 @@ impl StatementExecutionFrame {
                         )
                     {
                         bound
-                    } else if exact_query.as_deref() == Some(query) {
-                        // Bind failed but exact query matches — use as-is.
-                        optimized
                     } else {
-                        // Bind failed and literals differ: re-parse fresh.
+                        // A failed bind leaves placeholders in the cached AST,
+                        // even for the same exact SQL. Never execute it unbound.
                         parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
                     }
                 } else {
