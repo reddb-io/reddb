@@ -534,13 +534,29 @@ impl<'rt> MutationEngine<'rt> {
             );
             return;
         }
-        index_store.register(super::index_store::RegisteredIndex {
+        let descriptor = super::index_store::RegisteredIndex {
             name: "idx_id".to_string(),
             collection: collection.to_string(),
             columns,
             method: super::index_store::IndexMethodKind::Hash,
             unique: false,
-        });
+        };
+        // Use the same durable registry as explicit CREATE INDEX. Without it
+        // the implicit index disappears after reopen or physical restore.
+        if let Err(err) = self
+            .runtime
+            .persist_runtime_index_descriptor(descriptor.clone())
+        {
+            index_store.drop_index("idx_id", collection);
+            tracing::debug!(
+                target: "reddb::runtime::auto_index_id",
+                collection = %collection,
+                error = %err,
+                "auto_index_id: failed to persist implicit hash index on `id`"
+            );
+            return;
+        }
+        index_store.register(descriptor);
         // Plan-cache invalidation so subsequent SELECT/UPDATE/DELETE
         // pickers see the new index when planning. Mirrors the explicit
         // `CREATE INDEX` path in `impl_ddl::execute_create_index`.

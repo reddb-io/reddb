@@ -1,0 +1,40 @@
+name: Park migration engine regressions
+on:
+  pull_request:
+    paths:
+      - 'crates/reddb-server/src/runtime/mutation.rs'
+      - 'crates/reddb-server/src/runtime/statement_frame.rs'
+      - 'crates/reddb-server/src/storage/query/planner/shape.rs'
+      - 'tests/grouped/schema_query_core/e2e_park_migration_metadata.rs'
+      - 'scripts/test-park-migration-regressions.py'
+      - '.github/workflows/park-migration-regressions.yml'
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: park-migration-engine-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  persisted-metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e
+      - uses: ./.github/actions/install-protoc
+        with: {version: '28.3'}
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: ubuntu-rust-1.91.0
+          save-if: 'false'
+      - run: cargo test --locked --test grouped_schema_query_core park_migration_
+      - run: cargo build --locked --bin red
+      - name: Exercise HTTP and persistent restart
+        run: REDDB_TEST_BINARY=target/debug/red python3 scripts/test-park-migration-regressions.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: park-migration-qualified-red-linux
+          path: target/debug/red
+          retention-days: 7
