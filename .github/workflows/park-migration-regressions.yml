@@ -5,6 +5,10 @@ on:
       - 'crates/reddb-server/src/runtime/mutation.rs'
       - 'crates/reddb-server/src/runtime/statement_frame.rs'
       - 'crates/reddb-server/src/storage/query/planner/shape.rs'
+      - 'crates/reddb-server/src/storage/unified/devx/reddb/impl_metadata.rs'
+      - 'crates/reddb-server/src/storage/unified/store/impl_file.rs'
+      - 'crates/reddb-server/src/storage/unified/manager.rs'
+      - 'crates/reddb-server/tests/native_state_recovery.rs'
       - 'tests/grouped/schema_query_core/e2e_park_migration_metadata.rs'
       - 'scripts/test-park-migration-regressions.py'
       - '.github/workflows/park-migration-regressions.yml'
@@ -31,6 +35,7 @@ jobs:
           save-if: 'false'
       - run: cargo test --locked --test grouped_sql_core park_migration_
       - run: cargo test --locked --test docs_spatial_guide
+      - run: cargo test --locked -p reddb-io-server --test native_state_recovery
       - run: cargo build --locked --bin red
       - name: Exercise HTTP and persistent restart
         run: REDDB_TEST_BINARY=target/debug/red python3 scripts/test-park-migration-regressions.py

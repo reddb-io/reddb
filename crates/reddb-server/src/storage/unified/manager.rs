@@ -489,6 +489,27 @@ impl SegmentManager {
         Ok(entity_id)
     }
 
+    /// Restore a snapshot image without allocating a new sequence identity.
+    pub(crate) fn restore_snapshot_entity(
+        &self,
+        entity: UnifiedEntity,
+    ) -> Result<EntityId, SegmentError> {
+        self.maybe_seal_growing()?;
+        if self.get(entity.id).is_some() {
+            return Err(SegmentError::AlreadyExists(entity.id));
+        }
+        let segment_arc = self.get_or_create_growing();
+        let mut segment = segment_arc.write();
+        let entity_id = entity.id;
+        let segment_id = segment.id();
+        // Adoption rebuilds derived indexes and advances the allocator past
+        // the stored sequence, including gaps and the legitimate value zero.
+        segment.adopt_entity(entity, None);
+        self.total_entities_atomic.fetch_add(1, Ordering::Relaxed);
+        self.emit(LifecycleEvent::EntityInserted(entity_id, segment_id));
+        Ok(entity_id)
+    }
+
     /// Insert multiple entities (batch) — sequential, one lock per item.
     pub fn insert_batch(
         &self,

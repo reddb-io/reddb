@@ -42,6 +42,42 @@ impl UnifiedStore {
         }
     }
 
+    /// Load a persisted image and rebuild its derived indexes, retaining the
+    /// stored sequence instead of assigning one from snapshot iteration order.
+    fn restore_snapshot_entity(
+        &self,
+        collection: &str,
+        mut entity: UnifiedEntity,
+    ) -> Result<EntityId, StoreError> {
+        let manager = self.get_or_create_collection(collection);
+        if entity.id.raw() == 0 {
+            entity.id = self.next_entity_id();
+        } else {
+            self.register_entity_id(entity.id);
+        }
+        if let EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
+            if *row_id == 0 {
+                *row_id = manager.next_row_id();
+            } else {
+                manager.register_row_id(*row_id);
+            }
+        }
+        entity.ensure_table_logical_id();
+        self.context_index.index_entity(collection, &entity);
+        if self.config.auto_index_refs {
+            self.index_cross_refs(&entity, collection)?;
+        }
+        let graph_label = match &entity.kind {
+            EntityKind::GraphNode(node) => Some(node.label.clone()),
+            _ => None,
+        };
+        let id = manager.restore_snapshot_entity(entity)?;
+        if let Some(label) = graph_label {
+            self.update_graph_label_index(collection, &label, id);
+        }
+        Ok(id)
+    }
+
     /// Load store from binary file
     ///
     /// Binary dump framing is defined by `reddb_file::native_store`.
@@ -104,7 +140,7 @@ impl UnifiedStore {
                     let (entity, metadata) = Self::deserialize_entity_record(record_bytes, version)
                         .map_err(|e| format!("Entity record deserialization error: {e}"))?;
 
-                    store.insert_auto(&collection_header.name, entity.clone())?;
+                    store.restore_snapshot_entity(&collection_header.name, entity.clone())?;
 
                     if let Some(metadata) = metadata {
                         if let Some(manager) = store.get_collection(&collection_header.name) {
@@ -114,7 +150,7 @@ impl UnifiedStore {
                 } else {
                     // V1–V6: entity only, no metadata
                     let entity = Self::read_entity_binary(&buf, &mut pos, version)?;
-                    store.insert_auto(&collection_header.name, entity)?;
+                    store.restore_snapshot_entity(&collection_header.name, entity)?;
                 }
             }
         }

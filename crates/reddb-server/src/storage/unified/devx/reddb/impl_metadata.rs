@@ -417,7 +417,9 @@ impl RedDB {
         // API opens so chunk routing / pruning / TTL work immediately
         // after a restart.
         self.load_hypertables_from_metadata();
-        self.recover_queue_pending_state();
+        // Pending deliveries retain their persisted lock deadlines on recovery
+        // (ADR 0020). The lifecycle lazily reclaims expired locks on delivery;
+        // deleting every pending row here would redeliver still-owned work.
         Ok(self)
     }
 
@@ -1400,28 +1402,6 @@ impl RedDB {
             metadata_state_checksum: 0,
             vector_artifact_page: 0,
             vector_artifact_checksum: 0,
-        }
-    }
-
-    fn recover_queue_pending_state(&self) {
-        const QUEUE_META_COLLECTION: &str = "red_queue_meta";
-
-        let Some(manager) = self.store.get_collection(QUEUE_META_COLLECTION) else {
-            return;
-        };
-
-        let pending_rows = manager.query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                matches!(
-                    row.get_field("kind"),
-                    Some(reddb_types::Value::Text(kind))
-                        if matches!(&**kind, "queue_pending" | "queue_pending_lc")
-                )
-            })
-        });
-
-        for row in pending_rows {
-            let _ = self.store.delete(QUEUE_META_COLLECTION, row.id);
         }
     }
 }
