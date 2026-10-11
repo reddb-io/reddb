@@ -30,6 +30,7 @@ jobs:
           shared-key: ubuntu-rust-1.91.0
           save-if: 'false'
       - run: cargo test --locked --test grouped_sql_core park_migration_
+      - run: cargo test --locked --test docs_spatial_guide
       - run: cargo build --locked --bin red
       - name: Exercise HTTP and persistent restart
         run: REDDB_TEST_BINARY=target/debug/red python3 scripts/test-park-migration-regressions.py

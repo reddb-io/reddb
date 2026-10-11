@@ -473,7 +473,7 @@ fn guide_worked_example_prints_the_real_output() {
     }
     assert_eq!(radius.len(), 2, "the guide shows two hits within 3 km");
     // ...and the two the guide names as absent really are.
-    assert!(!radius.iter().any(|(id, _)| *id == 1027 || *id == 1028));
+    assert!(!radius.iter().any(|(id, _)| *id == 1028 || *id == 1029));
 
     // NEAREST K 2 is the same two rows, as the guide claims.
     let nearest = rows(
