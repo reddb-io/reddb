@@ -146,14 +146,16 @@ The plan cache saves ~100us per query for repeated SQL patterns. It is especiall
 └──────────────────────────────────────────────────────┘
 ```
 
-## Proposed Blob Cache
+## Blob Cache
 
-RedDB also has a proposed native **Blob Cache** module for Redis-adjacent cache
+RedDB also has a native **Blob Cache** module for exact-key cache
 workloads. Unlike the page cache, result cache, and entity cache, Blob Cache is
 designed around arbitrary byte values, rich TTL policy, durable L2 storage, fast
 existence checks, and explicit invalidation by key, prefix, tag, dependency, or
 namespace generation.
 
-See [Cache](/data-models/cache.md) and
-[ADR 0006](/adr/0006-tiered-blob-cache.md) for the proposed Interface and
-rollout plan.
+Applications can access the native module through the HTTP data plane and
+`db.cache.*` in the remote JavaScript client using HTTP. See
+[Remote Blob Cache](/api/cache.md) for supported policies, tenant isolation,
+limits and node-local invalidation behavior, and
+[ADR 0006](/adr/0006-tiered-blob-cache.md) for the architecture.

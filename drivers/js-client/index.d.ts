@@ -97,9 +97,12 @@ export interface CachePutOptions {
   ttl_ms?: number
   tags?: string[]
   policy?: {
-    idle_evict_ms?: number
-    stale_while_revalidate_ms?: number
-    jitter_ms?: number
+    ttl_ms?: number
+    expires_at_unix_ms?: number
+    max_blob_bytes?: number
+    l1_admission?: 'auto' | 'always' | 'never'
+    priority?: number
+    version?: number
   }
 }
 

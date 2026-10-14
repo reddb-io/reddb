@@ -211,6 +211,13 @@ jobs:
           fi
       - name: Build RedWire server
         run: cargo build --locked --bin red
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - name: Remote HTTP native Blob Cache regression
+        env:
+          RED_BIN: ${{ github.workspace }}/target/debug/red
+        run: node scripts/test-remote-cache.mjs
       - name: Run Rust driver conformance over RedWire
         env:
           RED_BIN: ${{ github.workspace }}/target/debug/red
