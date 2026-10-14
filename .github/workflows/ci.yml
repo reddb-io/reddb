@@ -699,6 +699,10 @@ jobs:
           python-version: '3.x'
       - name: Build red (embedded engine for the JS SDK)
         run: cargo build --locked --bin red
+      - name: Remote SDK native Blob Cache regression
+        env:
+          RED_BIN: ${{ github.workspace }}/target/debug/red
+        run: node scripts/test-remote-cache.mjs
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: '1.4.1'

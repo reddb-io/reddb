@@ -2940,6 +2940,7 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "axum",
+ "base64 0.22.1",
  "blake3",
  "bytes",
  "crc32fast",

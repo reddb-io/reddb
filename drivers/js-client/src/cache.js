@@ -2,9 +2,9 @@
  * Cache client — exposes cache.{get,put,exists,invalidate,invalidatePrefix,
  * invalidateTags,flushNamespace} via the underlying HTTP transport.
  *
- * NOTE: These methods require server-side HTTP endpoints under /cache/ns/*.
- * flushNamespace routes to the existing POST /admin/blob_cache/flush_namespace.
- * All others target endpoints planned for a future server release.
+ * The HTTP data-plane endpoints under /cache/ns/* authorize the caller's
+ * tenant and cache namespace. Invalidation is local to the addressed server.
+ * Use the HTTP transport for remote cache operations.
  *
  * Values are base64-encoded in transit so binary payloads survive JSON.
  */
@@ -93,7 +93,7 @@ export class CacheClient {
 
   /**
    * Remove all entries in a namespace.
-   * Routes to POST /admin/blob_cache/flush_namespace (live endpoint).
+   * Uses the caller-scoped POST /cache/ns/:namespace/flush endpoint.
    * @param {string} namespace
    * @returns {Promise<void>}
    */

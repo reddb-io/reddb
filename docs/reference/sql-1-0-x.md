@@ -195,7 +195,7 @@ columns or top-level document, KV, node, or edge properties named `rid`,
 | `LIST CONFIG` / `WATCH CONFIG` / `INVALIDATE CONFIG` | `LIST CONFIG durability` | supported |
 | `CREATE VAULT` / `SET SECRET` / `SHOW SECRET` / `DELETE SECRET` | `SET SECRET openai.api_key = 'sk-...'` | supported |
 | `UNSEAL VAULT` / `WATCH VAULT` / `LIST VAULT` | `UNSEAL VAULT red.vault` | partial |
-| Blob `CACHE` API | HTTP `/cache/*`, SDK `db.cache.*` | supported over HTTP/gRPC clients; unsupported on embedded stdio |
+| Blob `CACHE` API | HTTP `/cache/*`, SDK `db.cache.*` | supported over HTTP; unsupported on RedWire, gRPC and embedded stdio; see [Remote Blob Cache](/api/cache.md) |
 
 ## QUEUE
 

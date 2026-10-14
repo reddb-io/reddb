@@ -157,6 +157,24 @@ pub struct ActionEntry {
 /// delete the row. To remove one: change it to `Removed` (and only
 /// delete after a release cycle).
 pub const ACTIONS: &[ActionEntry] = &[
+    ActionEntry {
+        name: "cache:read",
+        category: ActionCategory::Other,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read or probe a native Blob Cache namespace",
+    },
+    ActionEntry {
+        name: "cache:write",
+        category: ActionCategory::Other,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "write values to a native Blob Cache namespace",
+    },
+    ActionEntry {
+        name: "cache:invalidate",
+        category: ActionCategory::Other,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "invalidate or flush a native Blob Cache namespace",
+    },
     // -- DML / DDL / privilege management --------------------------------
     ActionEntry {
         name: "select",

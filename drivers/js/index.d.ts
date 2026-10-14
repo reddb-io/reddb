@@ -167,15 +167,18 @@ export class RedDBError extends Error {
 
 /** Options for cache.put(). Maps to Rust BlobCachePolicy fields. */
 export interface CachePutOptions {
-  /** Entry TTL in milliseconds. Omit to use the namespace default. */
+  /** Hard TTL in milliseconds. Omit for no time-based expiry. */
   ttl_ms?: number
   /** Tags for group invalidation via cache.invalidateTags(). */
   tags?: string[]
-  /** Extended TTL policy (idle eviction, stale-while-revalidate, jitter). */
+  /** Native hard-expiry and admission policy for remote HTTP cache entries. */
   policy?: {
-    idle_evict_ms?: number
-    stale_while_revalidate_ms?: number
-    jitter_ms?: number
+    ttl_ms?: number
+    expires_at_unix_ms?: number
+    max_blob_bytes?: number
+    l1_admission?: 'auto' | 'always' | 'never'
+    priority?: number
+    version?: number
   }
 }
 

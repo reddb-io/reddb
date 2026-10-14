@@ -115,6 +115,7 @@ mod handlers_ai_model_cache;
 pub(crate) mod handlers_auth;
 mod handlers_backup;
 mod handlers_browser_auth;
+mod handlers_cache;
 mod handlers_capabilities;
 mod handlers_collection_policy;
 mod handlers_ec;
