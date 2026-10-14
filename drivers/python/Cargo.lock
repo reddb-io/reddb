@@ -2435,6 +2435,7 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "axum",
+ "base64",
  "blake3",
  "bytes",
  "crc32fast",
