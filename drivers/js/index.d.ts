@@ -218,7 +218,7 @@ export class CacheClient {
   invalidatePrefix(namespace: string, prefix: string): Promise<number>
   /** Remove all entries tagged with any of the given tags. Returns count removed. */
   invalidateTags(namespace: string, tags: string[]): Promise<number>
-  /** Remove all entries in a namespace (routes to POST /admin/blob_cache/flush_namespace). */
+  /** Remove entries through the caller-scoped POST /cache/ns/:namespace/flush endpoint. */
   flushNamespace(namespace: string): Promise<void>
 }
 
