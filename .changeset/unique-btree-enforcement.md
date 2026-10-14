@@ -1,5 +1,0 @@
----
-"@reddb-io/cli": patch
----
-
-`CREATE UNIQUE INDEX` is now enforced for BTREE, the default method, as well as HASH, for single-column and composite keys. It was accepted and listed as unique but never checked, so duplicate keys went in silently. The check covers INSERT, `ON CONFLICT`, bulk and columnar inserts, and now UPDATE: an UPDATE onto an existing key is rejected, as is a statement whose rows would collide with each other (`UPDATE t SET id = 9`). A NULL key never conflicts with another NULL, as in a composite key and in a declared UNIQUE constraint; a single-column unique HASH index used to reserve the NULL key. `CREATE UNIQUE INDEX` over rows that already hold a duplicate key is refused, and the dead versions left by earlier UPDATEs or DELETEs no longer count as duplicates. Dropping a BTREE index also drops its lookup pocket, so an index of the same name can be recreated. Reopening a database never refuses: an index created by an older release over data that already holds duplicates is rebuilt as it was, and the duplicates stay until they are fixed. Data already duplicated by older releases is not repaired.
