@@ -1,6 +1,6 @@
 use crate::server::route_catalog::{
-    RouteAudience, RouteAuth, RouteEntry, RouteGroupDefaults, RouteMethod, RouteRegistry,
-    RouteRequest, RouteStability,
+    RouteAlias, RouteAudience, RouteAuth, RouteEntry, RouteGroupDefaults, RouteMethod,
+    RouteRegistry, RouteRequest, RouteStability,
 };
 use crate::server::routes::common::{PUBLIC_SURFACES, STANDARD_MIDDLEWARE};
 use crate::server::{HttpResponse, RedDBServer};
@@ -14,47 +14,64 @@ const CACHE_USER: RouteGroupDefaults = RouteGroupDefaults {
     middlewares: STANDARD_MIDDLEWARE,
 };
 
+macro_rules! cache_aliases {
+    ($method:expr, $pattern:expr) => {
+        &[RouteAlias::canonical(
+            $method,
+            $pattern,
+            "canonical v1 cache path",
+        )]
+    };
+}
+
 const CACHE_ROUTES: &[RouteEntry] = &[
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "cache.get",
         RouteMethod::Get,
         "/cache/ns/:namespace/:key",
+        cache_aliases!(RouteMethod::Get, "/v1/cache/ns/:namespace/:key"),
         get,
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "cache.put",
         RouteMethod::Put,
         "/cache/ns/:namespace/:key",
+        cache_aliases!(RouteMethod::Put, "/v1/cache/ns/:namespace/:key"),
         put,
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "cache.exists",
         RouteMethod::Get,
         "/cache/ns/:namespace/:key/exists",
+        cache_aliases!(RouteMethod::Get, "/v1/cache/ns/:namespace/:key/exists"),
         exists,
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "cache.invalidate",
         RouteMethod::Delete,
         "/cache/ns/:namespace/:key",
+        cache_aliases!(RouteMethod::Delete, "/v1/cache/ns/:namespace/:key"),
         invalidate,
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "cache.invalidate_prefix",
         RouteMethod::Delete,
         "/cache/ns/:namespace",
+        cache_aliases!(RouteMethod::Delete, "/v1/cache/ns/:namespace"),
         invalidate_prefix,
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "cache.invalidate_tags",
         RouteMethod::Post,
         "/cache/ns/:namespace/invalidate-tags",
+        cache_aliases!(RouteMethod::Post, "/v1/cache/ns/:namespace/invalidate-tags"),
         invalidate_tags,
     ),
-    RouteEntry::new(
+    RouteEntry::with_aliases(
         "cache.flush_namespace",
         RouteMethod::Post,
         "/cache/ns/:namespace/flush",
+        cache_aliases!(RouteMethod::Post, "/v1/cache/ns/:namespace/flush"),
         flush,
     ),
 ];

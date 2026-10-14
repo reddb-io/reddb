@@ -45,6 +45,9 @@ try {
   const payload = Buffer.from(JSON.stringify({ days: [{ day: '2026-10-14', tokens: 123 }] }))
   assert.equal(await cache.get(namespace, key), null)
   await cache.put(namespace, key, payload, { ttl_ms: 600_000, tags: ['organization:fixture', 'daily'] })
+  const canonical = await fetch(`${origin}/v1/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`)
+  assert.equal(canonical.status, 200)
+  assert.equal((await canonical.json()).value, payload.toString('base64'))
   assert.deepEqual(Buffer.from(await cache.get(namespace, key)), payload)
   assert.equal(await cache.exists(namespace, key), 'present')
   for (const name of ['tags', 'flush', 'invalidate-tags']) {

@@ -46,6 +46,9 @@ Path components are percent-encoded by the SDK. Arbitrary key names, including
 values as standard base64; misses return `{ "value": null }` with HTTP 200.
 Responses use `Cache-Control: no-store`.
 
+Every route also has a canonical `/v1/cache/ns/...` alias with the same
+authentication, namespace partition and behavior.
+
 The authenticated credential determines the tenant partition; a tenant header
 cannot select another partition. With IAM enabled, authorize `cache:read`,
 `cache:write` and `cache:invalidate` against `cache:<namespace>` resources.
