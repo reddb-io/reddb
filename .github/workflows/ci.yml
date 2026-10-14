@@ -211,6 +211,13 @@ jobs:
           fi
       - name: Build RedWire server
         run: cargo build --locked --bin red
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - name: Remote HTTP native Blob Cache regression
+        env:
+          RED_BIN: ${{ github.workspace }}/target/debug/red
+        run: node scripts/test-remote-cache.mjs
       - name: Run Rust driver conformance over RedWire
         env:
           RED_BIN: ${{ github.workspace }}/target/debug/red
@@ -699,10 +706,6 @@ jobs:
           python-version: '3.x'
       - name: Build red (embedded engine for the JS SDK)
         run: cargo build --locked --bin red
-      - name: Remote SDK native Blob Cache regression
-        env:
-          RED_BIN: ${{ github.workspace }}/target/debug/red
-        run: node scripts/test-remote-cache.mjs
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: '1.4.1'

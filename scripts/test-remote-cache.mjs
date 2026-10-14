@@ -17,7 +17,7 @@ reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening')
 const port = reservation.address().port
 await new Promise(resolve => reservation.close(resolve))
 const origin = `http://127.0.0.1:${port}`
-const server = spawn(binary, ['server', '--path', join(directory, 'cache.rdb'), '--http-bind', `127.0.0.1:${port}`, '--bind', '127.0.0.1:0'], {
+const server = spawn(binary, ['server', '--path', join(directory, 'cache.rdb'), '--http-bind', `127.0.0.1:${port}`], {
   stdio: ['ignore', 'pipe', 'pipe'],
 })
 let logs = '', db
