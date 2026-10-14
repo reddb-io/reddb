@@ -206,8 +206,12 @@ impl RedDBServer {
                     .query
                     .get("prefix")
                     .ok_or_else(|| json_error(400, "prefix is required"))?;
-                validate_cache_text(prefix, KEY_BYTES_MAX, true)?;
-                crate::json!({ "removed": cache.invalidate_prefix(&namespace, prefix) })
+                // The transport keeps query values encoded; decode exactly once,
+                // including form-style spaces, before matching literal key bytes.
+                let prefix = percent_decode_path_segment(&prefix.replace('+', " "))
+                    .map_err(|_| json_error(400, "invalid cache prefix encoding"))?;
+                validate_cache_text(&prefix, KEY_BYTES_MAX, true)?;
+                crate::json!({ "removed": cache.invalidate_prefix(&namespace, &prefix) })
             }
             "invalidate_tags" => {
                 let input: CacheTagsInput = cache_json(request.body)?;
@@ -550,7 +554,7 @@ mod tests {
             value(request(
                 &server,
                 "DELETE",
-                "/cache/ns/reports?prefix=daily:",
+                "/cache/ns/reports?prefix=daily%3A",
                 "",
                 None
             ))["removed"],
@@ -644,6 +648,19 @@ mod tests {
             request(&server, "DELETE", "/cache/ns/reports", "", None).status,
             400
         );
+        for prefix in ["%FF", "%00", "%GG"] {
+            assert_eq!(
+                request(
+                    &server,
+                    "DELETE",
+                    &format!("/cache/ns/reports?prefix={prefix}"),
+                    "",
+                    None,
+                )
+                .status,
+                400
+            );
+        }
         assert!(
             value(request(&server, "GET", "/cache/ns/reports/key", "", None))["value"].is_null()
         );
