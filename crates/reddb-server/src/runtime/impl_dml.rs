@@ -2185,6 +2185,11 @@ impl RedDBRuntime {
             let _topology_guard = topology_lock.read();
             target_scan.find_target_ids()?
         };
+        #[cfg(test)]
+        self.index_store_ref().mutation_test_hook(
+            &query.table,
+            super::index_store::MutationTestPhase::TargetsScanned,
+        );
         let order_limit = if query.claim_limit.is_some() {
             None
         } else {
@@ -2240,10 +2245,41 @@ impl RedDBRuntime {
         // published until all targets fit; a later denial cannot leave earlier
         // autocommit chunks visible. Prepared payload is bounded by admission.
         let topology_guard = topology_lock.read();
+        // An autocommit UPDATE chose its targets from a snapshot a peer may
+        // have outdated since: replacing the version it saw would fork the row
+        // (#2373). Latch every target row, then act on each row's current
+        // version. The latches are held through persistence, index
+        // maintenance and events, so the next writer re-reads our successor.
+        // Inside a transaction the statement keeps its snapshot pre-image and
+        // a conflicting peer is caught at COMMIT (first committer wins).
+        let autocommit = self.current_xid().is_none();
+        let _row_latches = autocommit.then(|| {
+            let mut logical_ids = Vec::with_capacity(ids_to_update.len());
+            for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+                logical_ids.extend(
+                    manager
+                        .get_many(chunk)
+                        .into_iter()
+                        .flatten()
+                        .map(|entity| entity.logical_id()),
+                );
+            }
+            manager.lock_row_latches(logical_ids)
+        });
         let mut prepared = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
             for entity in manager.get_many(chunk).into_iter().flatten() {
+                let entity = if autocommit {
+                    let Some(current) =
+                        self.latched_update_target(query, entity, effective_filter.as_ref())
+                    else {
+                        continue;
+                    };
+                    current
+                } else {
+                    entity
+                };
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
                 let applied = self.apply_materialized_update_for_entity(
@@ -2439,6 +2475,44 @@ impl RedDBRuntime {
             ),
             touched_ids,
         ))
+    }
+
+    /// With the row latched, the version an autocommit UPDATE should replace.
+    /// `scanned` is the version the scan chose; a peer may have replaced or
+    /// deleted it since. A replaced row is judged again, as READ COMMITTED
+    /// does, against its current version: `None` when the row is gone or no
+    /// longer matches the WHERE.
+    fn latched_update_target(
+        &self,
+        query: &UpdateQuery,
+        scanned: UnifiedEntity,
+        filter: Option<&Filter>,
+    ) -> Option<UnifiedEntity> {
+        // Only table rows are versioned: other entities are updated in place
+        // and have no newer version to follow. `scanned` was re-read after the
+        // latch was taken, and replacing a version stamps its `xmax` before the
+        // replacer releases the latch: still unstamped means nobody replaced
+        // or deleted it, so there is nothing to resolve (the common case).
+        if !matches!(scanned.kind, crate::storage::EntityKind::TableRow { .. }) || scanned.xmax == 0
+        {
+            return Some(scanned);
+        }
+        let current = resolve_current_table_row(self, &query.table, scanned.logical_id())?;
+        if current.id == scanned.id {
+            return Some(scanned);
+        }
+        if let Some(filter) = filter {
+            if !crate::runtime::query_exec::evaluate_entity_filter_with_db(
+                Some(self.inner.db.as_ref()),
+                &current,
+                filter,
+                &query.table,
+                &query.table,
+            ) {
+                return None;
+            }
+        }
+        Some(current)
     }
 
     fn enforce_unique_update_post_images(

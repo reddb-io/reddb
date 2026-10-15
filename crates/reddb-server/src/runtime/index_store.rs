@@ -1279,6 +1279,9 @@ type MutationTestHook = std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + 
 pub(crate) enum MutationTestPhase {
     StoragePublished,
     BeforeEvents,
+    /// An UPDATE has chosen its target rows from a snapshot and has not
+    /// locked or re-read any of them yet.
+    TargetsScanned,
 }
 
 /// Unified index store aggregating all secondary index managers.
