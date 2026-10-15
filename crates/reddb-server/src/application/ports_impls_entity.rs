@@ -1378,6 +1378,18 @@ impl RedDBRuntime {
         let mut ordinary = Vec::with_capacity(applied.len());
         for item in applied {
             if let Some(old_version) = item.replaced_entity.as_ref() {
+                // #2373: a successor may only supersede the version its writer
+                // read. If another writer stamped that version since, installing
+                // would leave two live versions of one logical row. SQL UPDATE
+                // holds the row lock across read and install, so this cannot
+                // fire there; it stops writers that do not take it from forking.
+                let stored_xmax = manager.get_with(old_version.id, |stored| stored.xmax);
+                if stored_xmax != Some(item.replaced_entity_previous_xmax) {
+                    return Err(crate::RedDBError::Query(format!(
+                        "serialization conflict: row {collection}/{} was modified by a concurrent writer",
+                        old_version.logical_id().raw()
+                    )));
+                }
                 store
                     .install_versioned_table_row_update(
                         collection,

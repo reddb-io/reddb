@@ -27,6 +27,7 @@ pub(super) struct DmlTargetScan<'a> {
     target: Option<UpdateTarget>,
     table_row_resolver: TableRowMvccReadResolver,
     live_table_rows: bool,
+    locked_head_resolution: bool,
     declared_table: bool,
 }
 
@@ -45,6 +46,7 @@ impl<'a> DmlTargetScan<'a> {
             target: None,
             table_row_resolver: TableRowMvccReadResolver::current_statement(),
             live_table_rows: false,
+            locked_head_resolution: false,
             declared_table: false,
         }
     }
@@ -64,6 +66,7 @@ impl<'a> DmlTargetScan<'a> {
             target: Some(target),
             table_row_resolver: TableRowMvccReadResolver::current_statement(),
             live_table_rows: false,
+            locked_head_resolution: false,
             declared_table: runtime
                 .db()
                 .collection_contract_arc(table)
@@ -76,6 +79,56 @@ impl<'a> DmlTargetScan<'a> {
     pub(super) fn with_live_table_rows(mut self) -> Self {
         self.live_table_rows = true;
         self
+    }
+
+    /// The caller re-resolves every candidate to its head version and
+    /// re-checks WHERE under per-row locks before writing (#2373), so a
+    /// table-row index or identity candidate this scan's visibility check
+    /// rejects is kept instead of dropped. Such a candidate is a version a
+    /// concurrent writer superseded but has not yet re-indexed, or one that
+    /// committed after this statement's snapshot; dropping it would make the
+    /// row invisible to the UPDATE and report 0 rows for a row that exists.
+    /// Only for autocommit statements: an explicit transaction must not
+    /// target rows outside its snapshot.
+    pub(super) fn with_locked_head_resolution(mut self) -> Self {
+        self.locked_head_resolution = true;
+        self
+    }
+
+    /// The entity id of a `WHERE _entity_id = N`-shaped filter, which
+    /// `find_target_ids` answers as an identity lookup instead of evaluating
+    /// the filter. Graph node/edge targets never take that path.
+    fn identity_filter_entity_id(&self) -> Option<u64> {
+        if matches!(
+            self.target,
+            Some(UpdateTarget::Nodes) | Some(UpdateTarget::Edges)
+        ) {
+            return None;
+        }
+        if matches!(self.target, Some(UpdateTarget::Documents)) {
+            extract_document_entity_id_from_filter(self.filter)
+        } else {
+            query_exec::extract_entity_id_from_filter(&self.filter.cloned())
+        }
+    }
+
+    /// The predicate `find_target_ids` applied, for re-checking the head
+    /// version an UPDATE re-reads under its per-row lock (#2373): a row
+    /// that a concurrent writer changed after this scan must still satisfy
+    /// the statement's WHERE in its new version. An identity filter stays an
+    /// identity match (a logical id never changes between versions); every
+    /// other filter is evaluated against the head exactly as the scan did.
+    pub(super) fn head_predicate(&self) -> DmlHeadPredicate<'_, 'a> {
+        let identity = self.identity_filter_entity_id().is_some();
+        DmlHeadPredicate {
+            scan: self,
+            compiled_filter: if identity {
+                None
+            } else {
+                self.compiled_filter()
+            },
+            identity,
+        }
     }
 
     /// Walk the source collection, apply the (compiled) WHERE clause,
@@ -97,39 +150,29 @@ impl<'a> DmlTargetScan<'a> {
         // Skip for graph node/edge targets — the table-row resolver only
         // knows TableRow entities, so a graph node whose logical_id == N
         // would be lost and yield zero matches.
-        if !matches!(
-            self.target,
-            Some(UpdateTarget::Nodes) | Some(UpdateTarget::Edges)
-        ) {
-            let entity_id = if matches!(self.target, Some(UpdateTarget::Documents)) {
-                extract_document_entity_id_from_filter(self.filter)
+        if let Some(entity_id) = self.identity_filter_entity_id() {
+            let logical_id = EntityId::new(entity_id);
+            let entity = if self.live_table_rows {
+                store.get_table_row_by_logical_id(self.table, logical_id)
             } else {
-                query_exec::extract_entity_id_from_filter(&self.filter.cloned())
+                self.table_row_resolver
+                    .resolve_logical_id(&store, self.table, logical_id)
             };
-            if let Some(entity_id) = entity_id {
-                let logical_id = EntityId::new(entity_id);
-                let entity = if self.live_table_rows {
-                    store.get_table_row_by_logical_id(self.table, logical_id)
-                } else {
-                    self.table_row_resolver
-                        .resolve_logical_id(&store, self.table, logical_id)
-                };
-                if let Some(entity) = entity {
+            if let Some(entity) = entity {
+                return Ok(self.target_ids_from_entities([entity]));
+            }
+            // Non-table-row entities (e.g. vectors) carry their
+            // physical id as their identity and are invisible to the
+            // table-row logical-id resolver above. Fall back to a
+            // direct physical-id lookup so `DELETE FROM <vector>
+            // WHERE rid = N` actually targets the vector instead of
+            // silently matching nothing.
+            if let Some(entity) = store.get(self.table, logical_id) {
+                if !matches!(entity.kind, EntityKind::TableRow { .. }) {
                     return Ok(self.target_ids_from_entities([entity]));
                 }
-                // Non-table-row entities (e.g. vectors) carry their
-                // physical id as their identity and are invisible to the
-                // table-row logical-id resolver above. Fall back to a
-                // direct physical-id lookup so `DELETE FROM <vector>
-                // WHERE rid = N` actually targets the vector instead of
-                // silently matching nothing.
-                if let Some(entity) = store.get(self.table, logical_id) {
-                    if !matches!(entity.kind, EntityKind::TableRow { .. }) {
-                        return Ok(self.target_ids_from_entities([entity]));
-                    }
-                }
-                return Ok(Vec::new());
             }
+            return Ok(Vec::new());
         }
 
         if !matches!(self.target, Some(UpdateTarget::Documents))
@@ -280,7 +323,7 @@ impl<'a> DmlTargetScan<'a> {
 
         let mut ids = Vec::with_capacity(entity_ids.len());
         for entity in manager.get_many(&entity_ids).into_iter().flatten() {
-            if self.visible_candidate(&entity)
+            if self.point_candidate_visible(&entity)
                 && self.matches_update_target(&entity)
                 && self.matches_filter(&entity, compiled_filter)
             {
@@ -299,10 +342,21 @@ impl<'a> DmlTargetScan<'a> {
     {
         entities
             .into_iter()
-            .filter(|entity| self.visible_candidate(entity))
+            .filter(|entity| self.point_candidate_visible(entity))
             .filter(|entity| self.matches_update_target(entity))
             .map(|entity| entity.id)
             .collect()
+    }
+
+    /// Visibility for candidates found by an index or identity lookup. See
+    /// [`Self::with_locked_head_resolution`].
+    fn point_candidate_visible(&self, entity: &crate::storage::UnifiedEntity) -> bool {
+        if self.visible_candidate(entity) {
+            return true;
+        }
+        self.locked_head_resolution
+            && matches!(entity.kind, EntityKind::TableRow { .. })
+            && !crate::runtime::ai::moderation::entity_moderation_hidden(entity)
     }
 
     fn visible_candidate(&self, entity: &crate::storage::UnifiedEntity) -> bool {
@@ -401,6 +455,27 @@ impl<'a> DmlTargetScan<'a> {
             ),
             (None, None) => true,
         }
+    }
+}
+
+/// See [`DmlTargetScan::head_predicate`].
+pub(super) struct DmlHeadPredicate<'scan, 'a> {
+    scan: &'scan DmlTargetScan<'a>,
+    compiled_filter: Option<query_exec::CompiledEntityFilter>,
+    identity: bool,
+}
+
+impl DmlHeadPredicate<'_, '_> {
+    pub(super) fn matches(&self, head: &crate::storage::UnifiedEntity) -> bool {
+        if crate::runtime::ai::moderation::entity_moderation_hidden(head)
+            || !self.scan.matches_update_target(head)
+        {
+            return false;
+        }
+        self.identity
+            || self
+                .scan
+                .matches_filter(head, self.compiled_filter.as_ref())
     }
 }
 
