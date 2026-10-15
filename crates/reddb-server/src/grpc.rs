@@ -325,7 +325,7 @@ impl RedDBGrpcServer {
     /// 256 MiB: that let one request pin a quarter gigabyte of decoded
     /// protobuf per stream before any handler ran. Override with
     /// `REDDB_GRPC_MAX_MESSAGE_BYTES`; a malformed value keeps the default.
-    fn max_message_bytes() -> usize {
+    pub(crate) fn max_message_bytes() -> usize {
         const DEFAULT: usize = 32 * 1024 * 1024;
         std::env::var("REDDB_GRPC_MAX_MESSAGE_BYTES")
             .ok()
