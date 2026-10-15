@@ -27,6 +27,7 @@ impl BTree {
             pager,
             root_page_id: RwLock::new(0),
             rightmost_leaf: RwLock::new(None),
+            writer: parking_lot::ReentrantMutex::new(()),
         }
     }
 
@@ -36,6 +37,7 @@ impl BTree {
             pager,
             root_page_id: RwLock::new(root_page_id),
             rightmost_leaf: RwLock::new(None),
+            writer: parking_lot::ReentrantMutex::new(()),
         }
     }
 
@@ -120,6 +122,7 @@ impl BTree {
     /// inline compressed or spill into an [`crate::storage::engine::overflow::OverflowChain`].
     /// The encoded bytes are then committed through [`Self::insert_encoded`].
     pub fn insert(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         if key.len() > MAX_KEY_SIZE {
             return Err(BTreeError::KeyTooLarge(key.len()));
         }
@@ -135,6 +138,7 @@ impl BTree {
     /// generic insert machinery for fallback. Public callers should go
     /// through [`Self::insert`] which encodes for them.
     pub(crate) fn insert_encoded(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         let root_id = self.root_page_id();
 
         // Empty tree - create root leaf
@@ -265,6 +269,7 @@ impl BTree {
     /// eliminating the `BTree::delete + rebalance` cost that previously
     /// dominated UPDATE workloads (~50% of `bulk_update` CPU).
     pub fn upsert(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         let root_id = self.root_page_id();
         if root_id == 0 {
             return self.insert(key, value);
@@ -314,6 +319,7 @@ impl BTree {
     /// Callers pass lex-sorted `(key, value)` pairs. For the entity
     /// UPDATE path, IDs are big-endian so u64 ordering = lex ordering.
     pub fn upsert_batch_sorted(&self, items: &[(Vec<u8>, Vec<u8>)]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         if items.is_empty() {
             return Ok(());
         }
@@ -392,6 +398,7 @@ impl BTree {
     ///
     /// Falls back to per-entity `insert` on splits.
     pub fn bulk_insert_sorted(&self, items: &[(Vec<u8>, Vec<u8>)]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         if items.is_empty() {
             return Ok(());
         }
@@ -588,6 +595,7 @@ impl BTree {
 
     /// Delete a key
     pub fn delete(&self, key: &[u8]) -> BTreeResult<bool> {
+        let _writer = self.writer.lock();
         let root_id = self.root_page_id();
         if root_id == 0 {
             return Ok(false);

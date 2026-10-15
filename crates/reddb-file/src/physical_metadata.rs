@@ -400,8 +400,7 @@ pub fn read_physical_metadata_document(path: &Path) -> RdbFileResult<String> {
 
 pub fn write_physical_metadata_json_document(path: &Path, pretty_json: &str) -> RdbFileResult<()> {
     let bytes = encode_physical_metadata_json_document(pretty_json)?;
-    fs::write(path, bytes)?;
-    Ok(())
+    write_physical_metadata_bytes_atomically(path, &bytes)
 }
 
 pub fn write_physical_metadata_binary_document(
@@ -409,7 +408,52 @@ pub fn write_physical_metadata_binary_document(
     compact_json: &str,
 ) -> RdbFileResult<()> {
     let bytes = encode_physical_metadata_binary_document(compact_json)?;
-    fs::write(path, bytes)?;
+    write_physical_metadata_bytes_atomically(path, &bytes)
+}
+
+/// Publish a metadata document so a concurrent reader or a crash sees the
+/// old document or the new one, never a truncated one (#2376): write a
+/// temporary sibling, fsync it, rename it over `path`, fsync the directory.
+///
+/// The temporary name is unique per call so two unserialised writers can
+/// never interleave inside one temporary file.
+fn write_physical_metadata_bytes_atomically(path: &Path, bytes: &[u8]) -> RdbFileResult<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            RdbFileError::InvalidOperation(format!(
+                "physical metadata path has no file name: {}",
+                path.display()
+            ))
+        })?;
+    let temp_path = path.with_file_name(format!(
+        "{file_name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| -> std::io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp_path, path)
+    })();
+    if let Err(err) = written {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
 }
 
