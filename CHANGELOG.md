@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.1
+
+### Patch Changes
+
+- [#2392](https://github.com/reddb-io/reddb/pull/2392) [`f4c2a02`](https://github.com/reddb-io/reddb/commit/f4c2a02cfbde85db3c0129e73383e73fb499e1f3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Concurrent DDL no longer corrupts the internal B-trees (`red.control_events`, `red_index_registry`, `red_stats`). Several processes running the same idempotent migration at once could leave every later `CREATE TABLE` / `ALTER TABLE` failing, or wedge the server at capacity. DDL statements now run one at a time; a DDL that cannot get the catalog lock within `concurrency.locking.deadlock_timeout_ms` fails with a retryable error instead of running unlocked. Single-row writes into one table no longer race each other inside its B-tree, and the physical metadata file is replaced atomically.
+
 ## 1.24.0
 
 ### Minor Changes

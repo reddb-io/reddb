@@ -1,5 +1,7 @@
 # @reddb-io/internal-asset-fetcher
 
+## 1.24.1
+
 ## 1.24.0
 
 ## 1.23.4
