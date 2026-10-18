@@ -174,6 +174,11 @@ impl BTreeCursor {
         }
 
         let page = self.pager.read_page(self.leaf_page_id)?;
+        if page.page_type()? != PageType::BTreeLeaf {
+            return Err(BTreeError::Corrupted(
+                "cursor reached a non-leaf page".into(),
+            ));
+        }
         let cell_count = page.cell_count() as usize;
 
         // A6 — prefetch the next leaf when we cross the halfway point of
@@ -203,6 +208,7 @@ impl BTreeCursor {
             self.leaf_page_id = 0;
             return Ok(None);
         }
+        let previous_high_key = leaf_high_key(&page)?;
 
         self.leaf_page_id = next_leaf;
         self.position = 0;
@@ -210,11 +216,28 @@ impl BTreeCursor {
 
         // Read from new leaf
         let page = self.pager.read_page(self.leaf_page_id)?;
+        if page.page_type()? != PageType::BTreeLeaf {
+            return Err(BTreeError::Corrupted(
+                "leaf chain reached a non-leaf page".into(),
+            ));
+        }
         if page.cell_count() == 0 {
             return Ok(None);
         }
 
         let (key, stored) = read_leaf_cell(&page, 0)?;
+        // Every leaf transition must advance the key range. This bounds a
+        // corrupt cyclic chain without growing a visited-page set or an
+        // unbounded checkpoint buffer (#2376).
+        if previous_high_key
+            .as_ref()
+            .is_some_and(|previous| key <= *previous)
+        {
+            self.leaf_page_id = 0;
+            return Err(BTreeError::Corrupted(
+                "leaf chain does not advance its key range".into(),
+            ));
+        }
         let value = value_layout::decode(&self.pager, &stored)?;
         self.position = 1;
         Ok(Some((key, value)))
@@ -254,6 +277,14 @@ pub struct BTree {
     /// Mirrors `BTPageCacheIsValid` / `BTREE_FASTPATH_MIN_LEVEL` in
     /// `nbtinsert.c:31`.
     rightmost_leaf: RwLock<Option<(u32, Vec<u8>)>>,
+    /// Serialises structural writers (insert / upsert / delete / bulk).
+    ///
+    /// Writers copy a page, modify the copy and write it back, and there
+    /// are no page latches, so two writers on one tree would lose each
+    /// other's leaf updates or tear a split (#2376). Reentrant because the
+    /// public mutators call each other (`upsert` -> `insert`, the bulk
+    /// paths -> `insert_encoded`). Readers do not take it.
+    writer: parking_lot::ReentrantMutex<()>,
 }
 
 #[path = "btree/impl.rs"]
@@ -1448,6 +1479,65 @@ mod tests {
                 assert!(p < &key, "Keys not in sorted order");
             }
             prev = Some(key);
+        }
+
+        cleanup(&path);
+    }
+
+    /// #2376: several threads writing one tree (the shape of concurrent
+    /// DDL emitting `red.control_events` rows) must not lose keys or tear
+    /// the tree through a racing copy-modify-write of the same leaf or a
+    /// racing split.
+    #[test]
+    fn concurrent_writers_on_one_tree_keep_every_key() {
+        const WRITER_COUNT: u32 = 4;
+        const KEY_COUNT_PER_WRITER: u32 = 2_000;
+
+        let path = temp_db_path();
+        cleanup(&path);
+        let pager = Arc::new(Pager::open_default(&path).expect("open_default() should succeed"));
+        let tree = Arc::new(BTree::new(pager));
+        let value = vec![7u8; 96];
+
+        let writers: Vec<_> = (0..WRITER_COUNT)
+            .map(|writer| {
+                let tree = Arc::clone(&tree);
+                let value = value.clone();
+                std::thread::spawn(move || {
+                    for i in 0..KEY_COUNT_PER_WRITER {
+                        // Interleave the writers' key spaces so they share leaves.
+                        let key = (i * WRITER_COUNT + writer).to_be_bytes();
+                        tree.insert(&key, &value).expect("insert() should succeed");
+                        // Churn: delete and re-insert every fourth key.
+                        if i % 4 == 0 {
+                            assert!(tree.delete(&key).expect("delete() should succeed"));
+                            tree.upsert(&key, &value).expect("upsert() should succeed");
+                        }
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("writer thread panicked");
+        }
+
+        let key_count = WRITER_COUNT * KEY_COUNT_PER_WRITER;
+        let mut cursor = tree.cursor_first().expect("cursor_first() should succeed");
+        let mut seen = Vec::new();
+        while let Some((key, _)) = cursor.next().expect("next() should succeed") {
+            seen.push(u32::from_be_bytes(
+                key.as_slice().try_into().expect("invariant: 4-byte keys"),
+            ));
+        }
+        let expected: Vec<u32> = (0..key_count).collect();
+        assert_eq!(seen, expected, "every key exactly once, in order");
+        for key in 0..key_count {
+            assert!(
+                tree.get(&key.to_be_bytes())
+                    .expect("get() should succeed")
+                    .is_some(),
+                "key {key} must be reachable from the root"
+            );
         }
 
         cleanup(&path);

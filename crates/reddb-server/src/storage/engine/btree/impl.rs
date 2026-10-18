@@ -27,6 +27,7 @@ impl BTree {
             pager,
             root_page_id: RwLock::new(0),
             rightmost_leaf: RwLock::new(None),
+            writer: parking_lot::ReentrantMutex::new(()),
         }
     }
 
@@ -36,6 +37,7 @@ impl BTree {
             pager,
             root_page_id: RwLock::new(root_page_id),
             rightmost_leaf: RwLock::new(None),
+            writer: parking_lot::ReentrantMutex::new(()),
         }
     }
 
@@ -120,6 +122,7 @@ impl BTree {
     /// inline compressed or spill into an [`crate::storage::engine::overflow::OverflowChain`].
     /// The encoded bytes are then committed through [`Self::insert_encoded`].
     pub fn insert(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         if key.len() > MAX_KEY_SIZE {
             return Err(BTreeError::KeyTooLarge(key.len()));
         }
@@ -135,6 +138,7 @@ impl BTree {
     /// generic insert machinery for fallback. Public callers should go
     /// through [`Self::insert`] which encodes for them.
     pub(crate) fn insert_encoded(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         let root_id = self.root_page_id();
 
         // Empty tree - create root leaf
@@ -192,9 +196,7 @@ impl BTree {
                     let page_id = page.page_id();
                     self.pager.write_page(page_id, page.clone())?;
                     // Cache the new rightmost leaf after split
-                    *self.rightmost_leaf.write().map_err(|e| {
-                        BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}"))
-                    })? = Some((new_leaf_id, key.to_vec()));
+                    self.cache_rightmost_leaf(&new_leaf)?;
                     // Get parent path for the split propagation.
                     // The left child is the original cached leaf.
                     let (_, path) = self.find_leaf(root_id, &separator_key)?;
@@ -226,9 +228,7 @@ impl BTree {
             let page_id = page.page_id();
             // If this is the rightmost leaf (right_sibling == 0), cache it.
             if leaf_right_sibling(&page) == 0 {
-                *self.rightmost_leaf.write().map_err(|e| {
-                    BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}"))
-                })? = Some((page_id, key.to_vec()));
+                self.cache_rightmost_leaf(&page)?;
             }
             self.pager.write_page(page_id, page)?;
             return Ok(());
@@ -241,11 +241,7 @@ impl BTree {
         let page_id = page.page_id();
         self.pager.write_page(page_id, page.clone())?;
         // Cache the new rightmost leaf (split result gets the larger keys)
-        *self
-            .rightmost_leaf
-            .write()
-            .map_err(|e| BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}")))? =
-            Some((new_leaf_id, key.to_vec()));
+        self.cache_rightmost_leaf(&new_leaf)?;
 
         // Propagate split up the tree
         self.insert_into_parent(path, page_id, &separator_key, new_leaf_id)?;
@@ -265,6 +261,7 @@ impl BTree {
     /// eliminating the `BTree::delete + rebalance` cost that previously
     /// dominated UPDATE workloads (~50% of `bulk_update` CPU).
     pub fn upsert(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         let root_id = self.root_page_id();
         if root_id == 0 {
             return self.insert(key, value);
@@ -314,6 +311,7 @@ impl BTree {
     /// Callers pass lex-sorted `(key, value)` pairs. For the entity
     /// UPDATE path, IDs are big-endian so u64 ordering = lex ordering.
     pub fn upsert_batch_sorted(&self, items: &[(Vec<u8>, Vec<u8>)]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         if items.is_empty() {
             return Ok(());
         }
@@ -392,6 +390,7 @@ impl BTree {
     ///
     /// Falls back to per-entity `insert` on splits.
     pub fn bulk_insert_sorted(&self, items: &[(Vec<u8>, Vec<u8>)]) -> BTreeResult<()> {
+        let _writer = self.writer.lock();
         if items.is_empty() {
             return Ok(());
         }
@@ -462,7 +461,11 @@ impl BTree {
                     let sib_page = self.pager.read_page(sibling)?;
                     match leaf_high_key(&sib_page)? {
                         None => Some(sibling), // empty sibling — free real estate
-                        Some(hk) if items[i].0 > hk.as_slice() => Some(sibling),
+                        Some(hk)
+                            if leaf_right_sibling(&sib_page) == 0 && items[i].0 > hk.as_slice() =>
+                        {
+                            Some(sibling)
+                        }
                         Some(_) => None,
                     }
                 } else {
@@ -556,6 +559,7 @@ impl BTree {
                 page.set_cell_count(new_count as u16);
                 page.set_free_start((LEAF_SLOT_ARRAY_OFFSET + new_count * 2) as u16);
                 page.update_checksum();
+                self.cache_rightmost_leaf(&page)?;
                 self.pager.write_page(leaf_id, page)?;
                 i += inserted;
                 // Remember this leaf; the next outer iteration will
@@ -588,6 +592,7 @@ impl BTree {
 
     /// Delete a key
     pub fn delete(&self, key: &[u8]) -> BTreeResult<bool> {
+        let _writer = self.writer.lock();
         let root_id = self.root_page_id();
         if root_id == 0 {
             return Ok(false);
@@ -732,12 +737,29 @@ impl BTree {
 
     // ==================== Internal Methods ====================
 
+    fn cache_rightmost_leaf(&self, page: &Page) -> BTreeResult<()> {
+        // A split's incoming key may land in its left half. Caching that
+        // key as the right half's maximum sends later inserts to the wrong
+        // leaf, even with a single writer (#2376).
+        let cached = if leaf_right_sibling(page) == 0 {
+            leaf_high_key(page)?.map(|high| (page.page_id(), high))
+        } else {
+            None
+        };
+        *self.rightmost_leaf.write().map_err(|error| {
+            BTreeError::LockPoisoned(format!("rightmost_leaf write: {error}"))
+        })? = cached;
+        Ok(())
+    }
+
     /// Find the leaf page containing the key
     fn find_leaf(&self, page_id: u32, key: &[u8]) -> BTreeResult<(u32, Vec<u32>)> {
         let mut current_id = page_id;
         let mut path = Vec::new();
 
-        loop {
+        // A u32 page address space cannot contain a valid B-tree this deep.
+        // Bound corrupt child cycles before they grow the descent path.
+        for _ in 0..64 {
             let page = self.pager.read_page(current_id)?;
 
             match page.page_type()? {
@@ -756,13 +778,16 @@ impl BTree {
                 }
             }
         }
+        Err(BTreeError::Corrupted(
+            "B-tree descent exceeds maximum depth".into(),
+        ))
     }
 
     /// Find the leftmost leaf page
     pub(crate) fn find_first_leaf(&self, page_id: u32) -> BTreeResult<u32> {
         let mut current_id = page_id;
 
-        loop {
+        for _ in 0..64 {
             let page = self.pager.read_page(current_id)?;
 
             match page.page_type()? {
@@ -776,6 +801,9 @@ impl BTree {
                 }
             }
         }
+        Err(BTreeError::Corrupted(
+            "leftmost-leaf descent exceeds maximum depth".into(),
+        ))
     }
 
     /// Split a leaf page
