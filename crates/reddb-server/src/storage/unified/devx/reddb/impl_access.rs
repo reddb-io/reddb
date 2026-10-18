@@ -1000,10 +1000,7 @@ impl RedDB {
             fnv1a_hash_value(&mut root, &stats.consolidation.runs_completed);
 
             let root = manager.cached_physical_root(root, || {
-                let mut entities = manager.query_all(|_| true);
-                entities.sort_by_key(|entity| entity.id.raw());
-
-                for entity in entities {
+                manager.for_each_entity_in_id_order(|entity| {
                     fnv1a_hash_value(&mut root, &entity.id.raw());
                     fnv1a_hash_value(&mut root, &entity.kind);
                     fnv1a_hash_value(&mut root, &entity.created_at);
@@ -1012,7 +1009,8 @@ impl RedDB {
                     fnv1a_hash_value(&mut root, &entity.sequence_id);
                     fnv1a_hash_value(&mut root, &entity.embeddings().len());
                     fnv1a_hash_value(&mut root, &entity.cross_refs().len());
-                }
+                    true
+                });
                 root
             });
 

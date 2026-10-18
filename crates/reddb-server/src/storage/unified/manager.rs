@@ -1477,6 +1477,37 @@ impl SegmentManager {
         root
     }
 
+    /// Visit rows in the same stable ID order as sorting `query_all`, without
+    /// cloning their payloads. The caller fences mutations while fingerprinting.
+    /// Pin source segments, but hold only one segment guard during each visit.
+    /// Callbacks must not re-enter storage while that guard is held.
+    pub(crate) fn for_each_entity_in_id_order(
+        &self,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) {
+        let segments: Vec<_> = {
+            let growing = self.growing.read();
+            let sealed = self.sealed.read();
+            growing.iter().chain(sealed.iter()).cloned().collect()
+        };
+        let mut order = Vec::new();
+        for (source, segment) in segments.iter().enumerate() {
+            segment.read().for_each_fast(|entity| {
+                order.push((entity.id, source));
+                true
+            });
+        }
+        order.sort_by_key(|(id, _)| id.raw());
+        for (id, source) in order {
+            let segment = segments[source].read();
+            if let Some(entity) = segment.get(id) {
+                if !visit(entity) {
+                    break;
+                }
+            }
+        }
+    }
+
     /// Visit borrowed rows with metadata under the same segment read guard.
     /// Callbacks must not re-enter this manager while the guard is held.
     pub(crate) fn for_each_entity_with_metadata(
@@ -2621,6 +2652,85 @@ mod tests {
     use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityData, EntityKind, RowData};
     use reddb_types::Value;
+
+    #[test]
+    fn ordered_fingerprint_scan_matches_legacy_sort_without_cloning_rows() {
+        let manager = SegmentManager::new("fingerprint");
+        let row = |id, label: &str| {
+            UnifiedEntity::table_row(
+                EntityId::new(id),
+                "fingerprint",
+                id,
+                vec![Value::text(label)],
+            )
+        };
+        manager
+            .bulk_insert(vec![row(8, "eight"), row(2, "sealed-two"), row(5, "five")])
+            .expect("sealed rows");
+        manager.force_seal().expect("seal");
+        manager
+            .bulk_insert(vec![row(7, "seven"), row(2, "growing-two"), row(1, "one")])
+            .expect("growing rows");
+
+        let mut expected = manager.query_all(|_| true);
+        expected.sort_by_key(|entity| entity.id.raw());
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|entity| format!("{entity:?}"))
+            .collect();
+        let mut stored_addresses = HashSet::new();
+        manager.for_each_entity(|entity| {
+            stored_addresses.insert(entity as *const UnifiedEntity as usize);
+            true
+        });
+
+        let mut actual = Vec::new();
+        manager.for_each_entity_in_id_order(|entity| {
+            assert!(stored_addresses.contains(&(entity as *const UnifiedEntity as usize)));
+            assert!(
+                manager.growing.try_write().is_some(),
+                "topology guard retained"
+            );
+            assert!(
+                manager.sealed.try_write().is_some(),
+                "topology guard retained"
+            );
+            actual.push(format!("{entity:?}"));
+            true
+        });
+        assert_eq!(
+            actual, expected,
+            "equal IDs retain their original segment order"
+        );
+    }
+
+    #[test]
+    fn ordered_fingerprint_scan_stops_early_and_releases_sources() {
+        let manager = SegmentManager::new("fingerprint");
+        for id in [3, 1, 2] {
+            manager
+                .insert(UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "fingerprint",
+                    id,
+                    vec![Value::Integer(id as i64)],
+                ))
+                .expect("row");
+        }
+        let source = manager.growing.read().as_ref().expect("source").clone();
+        let handles = Arc::strong_count(&source);
+        let mut seen = Vec::new();
+        manager.for_each_entity_in_id_order(|entity| {
+            seen.push(entity.id.raw());
+            false
+        });
+        assert_eq!(seen, vec![1]);
+        assert_eq!(Arc::strong_count(&source), handles);
+        assert!(
+            source.try_write().is_some(),
+            "segment guard retained after early stop"
+        );
+    }
 
     #[test]
     fn bounded_scan_survives_sealing_consolidation_and_new_writes() {

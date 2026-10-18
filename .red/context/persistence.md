@@ -38,6 +38,9 @@ fingerprints additionally retain their existing statistics seed. The caches do
 not change persistent formats or release the checkpoint writer fence. A first
 metadata fingerprint or a changed collection still requires work proportional
 to that collection; unchanged history is not serialized on every checkpoint.
+Fingerprint scans sort compact entity ID/source references and borrow one row at
+a time. They preserve the existing hash order and values without materializing
+a second collection of payloads; source segments remain pinned for the scan.
 
 ## Fault model & integrity tooling
 
