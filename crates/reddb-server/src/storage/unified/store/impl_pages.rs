@@ -574,8 +574,11 @@ impl UnifiedStore {
                 continue;
             }
             let tree = Arc::new(BTree::new(Arc::clone(pager)));
-            tree.bulk_insert_sorted(&records)
-                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            tree.bulk_insert_sorted(&records).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!(
+                    "WAL tree rebuild for '{name}': {e}"
+                )))
+            })?;
             indices.insert(name.clone(), tree);
             self.mark_paged_registry_dirty();
         }
