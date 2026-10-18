@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.4
+
+### Patch Changes
+
+- [`b11be99`](https://github.com/reddb-io/reddb/commit/b11be992a97462c37c5b24929772379f31caf7b6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve dirty data pages evicted while publishing freelist trunks during checkpoint. Include them in the WAL-first, double-write-protected flush batch to prevent acknowledged data from reverting after a cold reopen.
+
 ## 1.24.3
 
 ### Patch Changes
