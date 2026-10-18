@@ -417,45 +417,9 @@ pub fn write_physical_metadata_binary_document(
 ///
 /// The temporary name is unique per call so two unserialised writers can
 /// never interleave inside one temporary file.
-fn write_physical_metadata_bytes_atomically(path: &Path, bytes: &[u8]) -> RdbFileResult<()> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            RdbFileError::InvalidOperation(format!(
-                "physical metadata path has no file name: {}",
-                path.display()
-            ))
-        })?;
-    let temp_path = path.with_file_name(format!(
-        "{file_name}.{}.{}.tmp",
-        std::process::id(),
-        NEXT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = (|| -> std::io::Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp_path)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp_path, path)
-    })();
-    if let Err(err) = written {
-        let _ = fs::remove_file(&temp_path);
-        return Err(err.into());
-    }
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
-    Ok(())
-}
+#[path = "physical_metadata/atomic.rs"]
+mod atomic;
+use atomic::write_physical_metadata_bytes_atomically;
 
 pub fn copy_physical_metadata_binary_to_journal(
     data_path: &Path,

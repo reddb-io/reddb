@@ -174,6 +174,11 @@ impl BTreeCursor {
         }
 
         let page = self.pager.read_page(self.leaf_page_id)?;
+        if page.page_type()? != PageType::BTreeLeaf {
+            return Err(BTreeError::Corrupted(
+                "cursor reached a non-leaf page".into(),
+            ));
+        }
         let cell_count = page.cell_count() as usize;
 
         // A6 — prefetch the next leaf when we cross the halfway point of
@@ -203,6 +208,7 @@ impl BTreeCursor {
             self.leaf_page_id = 0;
             return Ok(None);
         }
+        let previous_high_key = leaf_high_key(&page)?;
 
         self.leaf_page_id = next_leaf;
         self.position = 0;
@@ -210,11 +216,28 @@ impl BTreeCursor {
 
         // Read from new leaf
         let page = self.pager.read_page(self.leaf_page_id)?;
+        if page.page_type()? != PageType::BTreeLeaf {
+            return Err(BTreeError::Corrupted(
+                "leaf chain reached a non-leaf page".into(),
+            ));
+        }
         if page.cell_count() == 0 {
             return Ok(None);
         }
 
         let (key, stored) = read_leaf_cell(&page, 0)?;
+        // Every leaf transition must advance the key range. This bounds a
+        // corrupt cyclic chain without growing a visited-page set or an
+        // unbounded checkpoint buffer (#2376).
+        if previous_high_key
+            .as_ref()
+            .is_some_and(|previous| key <= *previous)
+        {
+            self.leaf_page_id = 0;
+            return Err(BTreeError::Corrupted(
+                "leaf chain does not advance its key range".into(),
+            ));
+        }
         let value = value_layout::decode(&self.pager, &stored)?;
         self.position = 1;
         Ok(Some((key, value)))

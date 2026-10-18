@@ -172,3 +172,159 @@ fn concurrent_migration_replay_keeps_system_trees_and_ddl_healthy() {
         }
     }
 }
+
+#[test]
+fn rejected_migration_keeps_existing_rows_and_subsequent_ddl_healthy() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("data.rdb");
+    {
+        let runtime = open_paged(&path);
+        runtime
+            .execute_query("CREATE TABLE accounts (id TEXT, balance INT)")
+            .expect("create");
+        runtime
+            .execute_query("INSERT INTO accounts (id, balance) VALUES ('kept', 42)")
+            .expect("insert");
+        for statement in [
+            "ALTER TABLE missing_accounts ADD COLUMN balance TEXT",
+            "CREATE TABLE accounts (id TEXT)",
+        ] {
+            assert!(
+                runtime.execute_query(statement).is_err(),
+                "must reject {statement}"
+            );
+            let result = runtime
+                .execute_query("SELECT balance FROM accounts WHERE id = 'kept'")
+                .expect("read after failed DDL");
+            assert_eq!(result.result.records.len(), 1);
+        }
+        runtime
+            .execute_query("ALTER TABLE accounts ADD COLUMN label TEXT")
+            .expect("successful DDL after failures");
+        runtime
+            .execute_query("INSERT INTO accounts (id, balance) VALUES ('after', 7)")
+            .expect("write after failures");
+        runtime.checkpoint().expect("checkpoint");
+    }
+    let runtime = open_paged(&path);
+    let result = runtime
+        .execute_query("SELECT * FROM accounts")
+        .expect("read after reopen");
+    assert_eq!(result.result.records.len(), 2);
+    runtime
+        .execute_query("CREATE INDEX accounts_id ON accounts (id)")
+        .expect("DDL after reopen");
+}
+
+#[test]
+fn migration_lock_timeout_rejects_the_statement_without_creating_its_table() {
+    use reddb_server::runtime::lock_manager::LockMode;
+    use reddb_server::runtime::locking::{LockerGuard, Resource};
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let runtime = open_paged(&directory.path().join("data.rdb"));
+    let mut blocker = LockerGuard::new(runtime.lock_manager());
+    blocker
+        .acquire(Resource::Collection("blocked".into()), LockMode::Exclusive)
+        .expect("hold conflicting lock");
+    let error = runtime
+        .execute_query("CREATE TABLE blocked (id TEXT)")
+        .expect_err("DDL must not run without its lock");
+    assert!(error.to_string().contains("retry the statement"), "{error}");
+    runtime
+        .execute_query("CREATE TABLE unrelated (id TEXT)")
+        .expect("unrelated DDL remains usable");
+    drop(blocker);
+    runtime
+        .execute_query("CREATE TABLE blocked (id TEXT)")
+        .expect("timed out DDL made no partial table");
+    runtime
+        .execute_query("INSERT INTO blocked (id) VALUES ('after')")
+        .expect("write after timeout");
+    runtime.checkpoint().expect("checkpoint after timeout");
+}
+
+#[test]
+fn interleaved_key_ranges_survive_split_delete_and_reinsert() {
+    use reddb_server::storage::engine::{BTree, Pager};
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("tree.rdb");
+    let pager = Arc::new(Pager::open_default(&path).expect("open pager"));
+    let tree = BTree::new(pager);
+    let value = vec![7u8; 96];
+    let mut next = [0u32; 4];
+    let mut state = 1u64;
+    for step in 0..8_000 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let writer = usize::try_from((state >> 33) % 4).expect("four writers");
+        let key_number = next[writer] * 4 + u32::try_from(writer).expect("four writers");
+        next[writer] += 1;
+        let key = key_number.to_be_bytes();
+        tree.insert(&key, &value).expect("insert");
+        assert_eq!(
+            tree.get(&key).expect("get"),
+            Some(value.clone()),
+            "step {step}, key {key_number}"
+        );
+        if next[writer] % 4 == 1 {
+            assert!(
+                tree.delete(&key).expect("delete"),
+                "step {step}, key {key_number}"
+            );
+            tree.upsert(&key, &value).expect("reinsert");
+        }
+    }
+    for (writer, count) in next.into_iter().enumerate() {
+        for index in 0..count {
+            let key = (index * 4 + u32::try_from(writer).expect("four writers")).to_be_bytes();
+            assert_eq!(tree.get(&key).expect("final read"), Some(value.clone()));
+        }
+    }
+}
+
+#[test]
+fn cyclic_leaf_chain_returns_corruption_instead_of_growing_a_scan_forever() {
+    use reddb_server::storage::engine::page::HEADER_SIZE;
+    use reddb_server::storage::engine::{BTree, PageType, Pager};
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let pager = Arc::new(Pager::open_default(directory.path().join("tree.rdb")).expect("pager"));
+    let tree = BTree::new(Arc::clone(&pager));
+    for key in 0u32..2_000 {
+        tree.insert(&key.to_be_bytes(), &[7; 96]).expect("insert");
+    }
+    let mut first = 0;
+    let mut last = 0;
+    for id in 1..pager.page_count().expect("page count") {
+        let page = pager.read_page(id).expect("page");
+        if page.page_type().expect("type") != PageType::BTreeLeaf {
+            continue;
+        }
+        let links = &page.as_bytes()[HEADER_SIZE..HEADER_SIZE + 8];
+        if links[..4] == [0; 4] {
+            first = id;
+        }
+        if links[4..] == [0; 4] {
+            last = id;
+        }
+    }
+    assert_ne!(first, 0);
+    assert_ne!(last, first);
+    let mut tail = pager.read_page(last).expect("last leaf");
+    tail.as_bytes_mut()[HEADER_SIZE + 4..HEADER_SIZE + 8].copy_from_slice(&first.to_le_bytes());
+    pager
+        .write_page(last, tail)
+        .expect("inject checksummed logical cycle");
+    let mut cursor = tree.cursor_first().expect("cursor");
+    for _ in 0..=2_000 {
+        match cursor.next() {
+            Err(error) => {
+                assert!(error.to_string().contains("leaf"), "{error}");
+                return;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("cycle must be reported, not silently truncated"),
+        }
+    }
+    panic!("scan followed a cyclic chain instead of returning a storage error");
+}
