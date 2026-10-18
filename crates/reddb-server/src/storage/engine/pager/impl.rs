@@ -565,8 +565,27 @@ impl Pager {
     fn load_header(&self) -> Result<(), PagerError> {
         let (_, image) = self.newest_superblock()?;
 
-        let decoded_header = reddb_file::decode_database_header(&image)
+        let mut decoded_header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        // Cache eviction (or DWB recovery) can persist pages before the next
+        // superblock publication. After a crash the allocation counter may
+        // therefore lag behind live pages already in the file. Reserve the
+        // entire physical extent before allocating; never overwrite that tail.
+        // A partial last page is reserved too, without treating it as verified.
+        let physical_pages = self
+            .file_lock()?
+            .metadata()?
+            .len()
+            .div_ceil(PAGE_SIZE as u64);
+        let physical_pages = u32::try_from(physical_pages).map_err(|_| {
+            PagerError::InvalidDatabase("data file exceeds the page address space".into())
+        })?;
+        if decoded_header.page_count < physical_pages {
+            decoded_header.page_count = physical_pages;
+            if !self.config.read_only {
+                *self.header_dirty_lock()? = true;
+            }
+        }
         let freelist_head = decoded_header.freelist_head;
 
         {
