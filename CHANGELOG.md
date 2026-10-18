@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.6
+
+### Patch Changes
+
+- [#2400](https://github.com/reddb-io/reddb/pull/2400) [`0873711`](https://github.com/reddb-io/reddb/commit/0873711ffb2a1468ad3c71a387d530edc996d049) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reuse unchanged paged collection trees and physical metadata fingerprints during checkpoints. Track segment mutations, rollback visibility and pending vault publication so checkpoint reuse preserves acknowledged data and existing durable publication ordering.
+
 ## 1.24.5
 
 ### Patch Changes
