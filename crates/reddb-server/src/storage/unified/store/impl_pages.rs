@@ -27,6 +27,26 @@ const META_V3_OVERFLOW_HEADER: usize = reddb_file::METADATA_OVERFLOW_CONTINUATIO
 const META_V3_FIRST_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_PAGE1_HEADER;
 const META_V3_OVERFLOW_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_OVERFLOW_HEADER;
 
+fn tree_matches_records(tree: &BTree, records: &[(Vec<u8>, Vec<u8>)]) -> Result<bool, StoreError> {
+    let mut cursor = tree
+        .cursor_first()
+        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+    for record in records {
+        if cursor
+            .next()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+            .as_ref()
+            != Some(record)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(cursor
+        .next()
+        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+        .is_none())
+}
+
 fn existing_overflow_chain(pager: &Pager) -> Result<Vec<u32>, PagerError> {
     let cs = crate::storage::engine::HEADER_SIZE;
     let page = match pager.read_page(1) {
@@ -548,25 +568,7 @@ impl UnifiedStore {
                 .collect();
             records.sort_by(|left, right| left.0.cmp(&right.0));
             let matches = if let Some(tree) = indices.get(name) {
-                let mut cursor = tree
-                    .cursor_first()
-                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-                let mut same = true;
-                for record in &records {
-                    if cursor
-                        .next()
-                        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
-                        .as_ref()
-                        != Some(record)
-                    {
-                        same = false;
-                        break;
-                    }
-                }
-                same && cursor
-                    .next()
-                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
-                    .is_none()
+                tree_matches_records(tree, &records)?
             } else {
                 records.is_empty()
             };
@@ -915,70 +917,53 @@ impl UnifiedStore {
         // Collect collection names and their B-tree root pages
         let mut collection_roots: Vec<(String, u32)> = Vec::new();
 
-        // For each collection, rebuild the B-tree from the live manager state.
-        // A checkpoint must preserve deletes too, not just upsert the current rows.
+        // Build unpublished replacements. Deleting from the current trees here
+        // would destroy the last checkpoint if a write fails before publication.
+        let mut rebuilt_indices = HashMap::with_capacity(collections.len());
         for (name, manager) in collections.iter() {
-            let btree = btree_indices
-                .entry(name.clone())
-                .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
-
-            let mut existing_keys = Vec::new();
-            if !btree.is_empty() {
-                let mut cursor = btree.cursor_first().map_err(|e| {
-                    StoreError::Io(std::io::Error::other(format!(
-                        "B-tree cursor error while rebuilding '{name}': {e}"
-                    )))
-                })?;
-                while let Some((key, _)) = cursor.next().map_err(|e| {
-                    StoreError::Io(std::io::Error::other(format!(
-                        "B-tree scan error while rebuilding '{name}': {e}"
-                    )))
-                })? {
-                    existing_keys.push(key);
-                }
-            }
-
-            for key in existing_keys {
-                btree.delete(&key).map_err(|e| {
-                    StoreError::Io(std::io::Error::other(format!(
-                        "B-tree delete error while rebuilding '{name}': {e}"
-                    )))
-                })?;
-            }
-
-            let mut records: Vec<(Vec<u8>, Vec<u8>)> = manager
-                .query_all(|entity| {
-                    !pending_vault_versions.contains(&entity.id)
-                        && (!matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                            || !self
-                                .snapshot_manager
-                                .get()
-                                .is_some_and(|manager| manager.is_aborted(entity.xmin)))
-                })
-                .into_iter()
-                .map(|mut entity| {
-                    // Match binary snapshots: an aborted delete must not be
-                    // reconstructed as a committed tombstone on restart.
-                    if matches!(entity.data, EntityData::Row(_))
+            let mut records = Vec::new();
+            manager.for_each_entity_with_metadata(|entity, metadata| {
+                if pending_vault_versions.contains(&entity.id)
+                    || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
                         && self
                             .snapshot_manager
                             .get()
-                            .is_some_and(|manager| manager.is_aborted(entity.xmax))
-                    {
-                        entity.xmax = 0;
-                    }
-                    let metadata = manager.get_metadata(entity.id);
-                    (
-                        entity.id.raw().to_be_bytes().to_vec(),
-                        Self::serialize_entity_record(
-                            &entity,
-                            metadata.as_ref(),
-                            self.format_version(),
-                        ),
-                    )
-                })
-                .collect();
+                            .is_some_and(|m| m.is_aborted(entity.xmin)))
+                {
+                    return true;
+                }
+                // Borrow ordinary rows instead of materializing a second full
+                // collection of cloned entities alongside the encoded records.
+                let mut normalized = std::borrow::Cow::Borrowed(entity);
+                if matches!(entity.data, EntityData::Row(_))
+                    && self
+                        .snapshot_manager
+                        .get()
+                        .is_some_and(|m| m.is_aborted(entity.xmax))
+                {
+                    normalized.to_mut().xmax = 0;
+                }
+                records.push((
+                    entity.id.raw().to_be_bytes().to_vec(),
+                    Self::serialize_entity_record(
+                        &normalized,
+                        metadata.as_ref(),
+                        self.format_version(),
+                    ),
+                ));
+                true
+            });
             records.sort_by(|left, right| left.0.cmp(&right.0));
+
+            if let Some(tree) = btree_indices.get(name) {
+                if tree_matches_records(tree, &records)? {
+                    collection_roots.push((name.clone(), tree.root_page_id()));
+                    rebuilt_indices.insert(name.clone(), Arc::clone(tree));
+                    continue;
+                }
+            }
+
+            let btree = Arc::new(BTree::new(Arc::clone(pager)));
 
             // Slice G (#704): no per-row skip. Oversized values are
             // spilled through the slice-E write ladder inside
@@ -996,6 +981,7 @@ impl UnifiedStore {
             }
 
             collection_roots.push((name.clone(), btree.root_page_id()));
+            rebuilt_indices.insert(name.clone(), btree);
         }
 
         // Write collection metadata to page 1
@@ -1035,6 +1021,10 @@ impl UnifiedStore {
 
         publish_paged_metadata(pager, &meta_data)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+
+        // Only the now-durable catalog may replace the live tree handles. Keep
+        // previous tree pages retained for recovery; do not recycle them early.
+        *btree_indices = rebuilt_indices;
 
         if let Some(commit) = &self.commit {
             commit.truncate().map_err(StoreError::Io)?;
