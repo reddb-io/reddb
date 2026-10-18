@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.5
+
+### Patch Changes
+
+- [`441547f`](https://github.com/reddb-io/reddb/commit/441547f17c5ba1428027d3f3e5bca3e70321d3de) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve the published tree generation when a paged checkpoint fails. Build changed trees separately, synchronize their pages before publishing the catalog, and reuse unchanged trees to avoid rewriting the database on every checkpoint. Serialize borrowed entities to reduce checkpoint memory overhead.
+
 ## 1.24.4
 
 ### Patch Changes
