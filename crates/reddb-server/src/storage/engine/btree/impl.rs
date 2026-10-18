@@ -825,8 +825,26 @@ impl BTree {
         let insert_pos = entries.partition_point(|(k, _)| k.as_slice() < new_key);
         entries.insert(insert_pos, (new_key.to_vec(), new_value.to_vec()));
 
-        // Split in half
-        let mid = entries.len() / 2;
+        // Balance occupied bytes, including slots. A count midpoint can put
+        // almost every wide cell on one side of a mixed-width leaf.
+        let capacity = PAGE_SIZE - LEAF_SLOT_ARRAY_OFFSET;
+        let total = leaf_entries_size(&entries);
+        let mut left_bytes = 0;
+        let mut split = None;
+        let mut best_balance = usize::MAX;
+        for index in 1..entries.len() {
+            left_bytes += leaf_entry_size(&entries[index - 1]);
+            let right_bytes = total - left_bytes;
+            if left_bytes <= capacity && right_bytes <= capacity {
+                let balance = left_bytes.abs_diff(right_bytes);
+                if balance < best_balance {
+                    split = Some(index);
+                    best_balance = balance;
+                }
+            }
+        }
+        let mid = split
+            .ok_or_else(|| BTreeError::Corrupted("leaf entries cannot fit in two pages".into()))?;
 
         // Create new leaf
         let mut new_page = self.pager.allocate_page(PageType::BTreeLeaf)?;

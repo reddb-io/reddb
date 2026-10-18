@@ -27,25 +27,32 @@ const META_V3_OVERFLOW_HEADER: usize = reddb_file::METADATA_OVERFLOW_CONTINUATIO
 const META_V3_FIRST_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_PAGE1_HEADER;
 const META_V3_OVERFLOW_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_OVERFLOW_HEADER;
 
-fn free_existing_overflow_chain(pager: &Pager) -> Result<(), PagerError> {
+fn existing_overflow_chain(pager: &Pager) -> Result<Vec<u32>, PagerError> {
     let cs = crate::storage::engine::HEADER_SIZE;
     let page = match pager.read_page(1) {
         Ok(p) => p,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(Vec::new()),
     };
     let bytes = page.as_bytes();
     if bytes.len() < cs + META_V3_PAGE1_HEADER {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let Some(header) =
         reddb_file::decode_native_metadata_overflow_header(&bytes[cs..]).map_err(|err| {
             PagerError::InvalidDatabase(format!("invalid metadata overflow header: {err}"))
         })?
     else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let mut next = header.next_overflow_page_id;
+    let mut pages = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     while next != 0 {
+        if !seen.insert(next) || pages.len() >= pager.page_count()? as usize {
+            return Err(PagerError::InvalidDatabase(
+                "cyclic metadata overflow chain".into(),
+            ));
+        }
         let ov = match pager.read_page(next) {
             Ok(p) => p,
             Err(_) => break,
@@ -55,8 +62,21 @@ fn free_existing_overflow_chain(pager: &Pager) -> Result<(), PagerError> {
             Ok(header) => header.next_overflow_page_id,
             Err(_) => 0,
         };
-        let _ = pager.free_page(next);
+        pages.push(next);
         next = nn;
+    }
+    Ok(pages)
+}
+
+fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerError> {
+    let retired = existing_overflow_chain(pager)?;
+    let page = build_meta_page1_with_overflow(pager, meta_data)?;
+    // Cache eviction order must not publish a root before its children.
+    pager.sync()?;
+    pager.write_page(1, page)?;
+    pager.sync()?;
+    for id in retired {
+        pager.free_page(id)?;
     }
     Ok(())
 }
@@ -66,7 +86,6 @@ fn build_meta_page1_with_overflow(
     meta_data: &[u8],
 ) -> Result<crate::storage::engine::Page, PagerError> {
     use crate::storage::engine::{Page, PageType, HEADER_SIZE};
-    free_existing_overflow_chain(pager)?;
 
     let mut page1 = Page::new(PageType::Header, 1);
     let cs = HEADER_SIZE;
@@ -337,14 +356,7 @@ impl UnifiedStore {
             }
         }
 
-        let meta_page = build_meta_page1_with_overflow(pager, &meta_data)
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-
-        pager
-            .write_page(1, meta_page)
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-        pager
-            .flush()
+        publish_paged_metadata(pager, &meta_data)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(())
@@ -507,6 +519,72 @@ impl UnifiedStore {
         store.recover_operational_manifest()?;
 
         Ok(store)
+    }
+
+    /// Replay changes the authoritative managers first. Build replacement trees
+    /// only for changed collections, leaving every published tree untouched until
+    /// all replacement pages are durable. Retain the WAL for auxiliary recovery.
+    pub(crate) fn reconcile_replayed_btrees(&self) -> Result<(), StoreError> {
+        let Some(pager) = &self.pager else {
+            return Ok(());
+        };
+        let collections = self.collections.read();
+        let mut indices = self.btree_indices.write();
+        for (name, manager) in collections.iter() {
+            let mut records: Vec<_> = manager
+                .query_all(|_| true)
+                .into_iter()
+                .map(|entity| {
+                    let metadata = manager.get_metadata(entity.id);
+                    (
+                        entity.id.raw().to_be_bytes().to_vec(),
+                        Self::serialize_entity_record(
+                            &entity,
+                            metadata.as_ref(),
+                            self.format_version(),
+                        ),
+                    )
+                })
+                .collect();
+            records.sort_by(|left, right| left.0.cmp(&right.0));
+            let matches = if let Some(tree) = indices.get(name) {
+                let mut cursor = tree
+                    .cursor_first()
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+                let mut same = true;
+                for record in &records {
+                    if cursor
+                        .next()
+                        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                        .as_ref()
+                        != Some(record)
+                    {
+                        same = false;
+                        break;
+                    }
+                }
+                same && cursor
+                    .next()
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                    .is_none()
+            } else {
+                records.is_empty()
+            };
+            if matches {
+                continue;
+            }
+            let tree = Arc::new(BTree::new(Arc::clone(pager)));
+            tree.bulk_insert_sorted(&records).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!(
+                    "WAL tree rebuild for '{name}': {e}"
+                )))
+            })?;
+            indices.insert(name.clone(), tree);
+            self.mark_paged_registry_dirty();
+        }
+        drop(indices);
+        drop(collections);
+        self.flush_paged_state()
     }
 
     pub(crate) fn recover_operational_manifest(&self) -> Result<(), StoreError> {
@@ -955,20 +1033,7 @@ impl UnifiedStore {
             }
         }
 
-        // Build page 1 (+ overflow chain when needed) for the metadata blob.
-        let meta_page = build_meta_page1_with_overflow(pager, &meta_data)
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-
-        // Write the manifest zone (page 1 + overflow chain). It is rooted by
-        // the superblock and carries its own page checksum; there is no
-        // sidecar copy to keep in step.
-        pager
-            .write_page(1, meta_page)
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-
-        // Flush and fsync all pages to disk
-        pager
-            .sync()
+        publish_paged_metadata(pager, &meta_data)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
         if let Some(commit) = &self.commit {
