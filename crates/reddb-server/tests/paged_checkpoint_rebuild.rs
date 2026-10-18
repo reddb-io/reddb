@@ -118,10 +118,10 @@ fn physical_metadata_fingerprint_changes_after_an_update_without_a_row_count_cha
         .expect("paged profile");
     let runtime = RedDBRuntime::with_options(options).expect("runtime");
     runtime
-        .execute_query("CREATE TABLE rows (value INT)")
+        .execute_query("CREATE TABLE checkpoint_rows (value INT)")
         .expect("table");
     runtime
-        .execute_query("INSERT INTO rows (value) VALUES (1)")
+        .execute_query("INSERT INTO checkpoint_rows (value) VALUES (1)")
         .expect("row");
     runtime.checkpoint().expect("initial checkpoint");
     let physical_root = || {
@@ -130,13 +130,17 @@ fn physical_metadata_fingerprint_changes_after_an_update_without_a_row_count_cha
             .physical_metadata()
             .expect("metadata")
             .superblock
-            .collection_roots["rows"]
+            .collection_roots["checkpoint_rows"]
     };
     let before = physical_root();
     runtime.checkpoint().expect("reuse fingerprint");
     assert_eq!(physical_root(), before);
 
-    let manager = runtime.db().store().get_collection("rows").expect("rows");
+    let manager = runtime
+        .db()
+        .store()
+        .get_collection("checkpoint_rows")
+        .expect("rows");
     let mut entity = manager.query_all(|_| true).remove(0);
     entity.updated_at += 1;
     manager.update(entity).expect("same-sized mutation");
