@@ -179,6 +179,12 @@ struct SourceProgress {
     tombstones_at_open: Option<usize>,
 }
 
+struct PhysicalRootCacheEntry {
+    segments: Vec<(u64, u64)>,
+    seed: u64,
+    root: u64,
+}
+
 /// Segment manager for a collection
 pub struct SegmentManager {
     /// Statement-scoped constraint admission. Reentrant because SQL upserts
@@ -224,6 +230,7 @@ pub struct SegmentManager {
     /// Growing segment is never all-visible (writes are in-flight).
     /// Used by index-only scan decisions.
     visibility_map: VisibilityMap,
+    physical_root_cache: parking_lot::Mutex<Option<PhysicalRootCacheEntry>>,
 }
 
 impl SegmentManager {
@@ -236,6 +243,7 @@ impl SegmentManager {
     pub fn with_config(collection: impl Into<String>, config: ManagerConfig) -> Self {
         Self {
             row_constraint_lock: Arc::new(parking_lot::ReentrantMutex::new(())),
+            physical_root_cache: parking_lot::Mutex::new(None),
             collection: collection.into(),
             config,
             next_segment_id: AtomicU64::new(1),
@@ -1435,6 +1443,38 @@ impl SegmentManager {
         F: FnMut(&UnifiedEntity) -> bool,
     {
         self.for_each_entity_in_segments(|_| true, || true, callback);
+    }
+
+    /// Segment identities and mutation counters, sampled without scanning rows.
+    pub(crate) fn checkpoint_revisions(&self) -> Vec<(u64, u64)> {
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        growing
+            .iter()
+            .chain(sealed.iter())
+            .map(|segment| {
+                let segment = segment.read();
+                (segment.id(), segment.checkpoint_revision())
+            })
+            .collect()
+    }
+
+    /// Reuse the derived metadata fingerprint only while its rows and stats match.
+    pub(crate) fn cached_physical_root(&self, seed: u64, compute: impl FnOnce() -> u64) -> u64 {
+        let segments = self.checkpoint_revisions();
+        let mut cache = self.physical_root_cache.lock();
+        if let Some(previous) = cache.as_ref() {
+            if previous.seed == seed && previous.segments == segments {
+                return previous.root;
+            }
+        }
+        let root = compute();
+        *cache = Some(PhysicalRootCacheEntry {
+            segments,
+            seed,
+            root,
+        });
+        root
     }
 
     /// Visit borrowed rows with metadata under the same segment read guard.

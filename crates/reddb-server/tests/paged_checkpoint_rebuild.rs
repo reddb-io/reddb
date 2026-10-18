@@ -109,6 +109,49 @@ fn checkpoint_retains_the_previously_published_tree_generation() {
 }
 
 #[test]
+fn physical_metadata_fingerprint_changes_after_an_update_without_a_row_count_change() {
+    use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("data.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("paged profile");
+    let runtime = RedDBRuntime::with_options(options).expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE rows (value INT)")
+        .expect("table");
+    runtime
+        .execute_query("INSERT INTO rows (value) VALUES (1)")
+        .expect("row");
+    runtime.checkpoint().expect("initial checkpoint");
+    let physical_root = || {
+        runtime
+            .db()
+            .physical_metadata()
+            .expect("metadata")
+            .superblock
+            .collection_roots["rows"]
+    };
+    let before = physical_root();
+    runtime.checkpoint().expect("reuse fingerprint");
+    assert_eq!(physical_root(), before);
+
+    let manager = runtime.db().store().get_collection("rows").expect("rows");
+    let mut entity = manager.query_all(|_| true).remove(0);
+    entity.updated_at += 1;
+    manager.update(entity).expect("same-sized mutation");
+    runtime.checkpoint().expect("invalidate fingerprint");
+    assert_ne!(
+        physical_root(),
+        before,
+        "a cached root must not hide a same-sized update"
+    );
+    let after = physical_root();
+    runtime.checkpoint().expect("reuse updated fingerprint");
+    assert_eq!(physical_root(), after);
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn failed_checkpoint_preserves_all_previously_committed_rows() {
     const CHILD: &str = "REDDB_TEST_CHECKPOINT_FSIZE_PATH";

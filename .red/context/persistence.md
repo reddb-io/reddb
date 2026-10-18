@@ -25,6 +25,20 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 - **Paced maintenance** — per [ADR 0038](../adr/0038-embedded-single-file-zoned-rdb.md) §3, the rule that all storage maintenance (consolidation, scrub, append-only compaction, archival) runs as incremental tick-paced work with bounded per-tick cost. Bursty background maintenance threads (the Cassandra compaction model) are prohibited in every profile.
 - **Scale contract** — the per-profile promise about dataset size vs memory: embedded contracts working set ≤ memory budget; the server profile carries the disk-residency roadmap (dataset > RAM, ADR 0038 phase 4); serverless contracts strict boundedness. Documented in ADR 0038 §1.
 
+## Checkpoint reuse
+
+Paged checkpoints reuse unchanged collection trees using volatile segment mutation
+revisions and manager identity. Aborted transaction visibility, pending vault
+versions and record format also participate in reuse admission. WAL replay and
+every entity or metadata mutation invalidate the corresponding generation. New
+mutation paths must advance the segment revision before exposing mutable data.
+Cached generations are accepted only after durable catalog publication; current
+format roots loaded from disk are seeded before WAL replay. Physical metadata
+fingerprints additionally retain their existing statistics seed. The caches do
+not change persistent formats or release the checkpoint writer fence. A first
+metadata fingerprint or a changed collection still requires work proportional
+to that collection; unchanged history is not serialized on every checkpoint.
+
 ## Fault model & integrity tooling
 
 - **Storage fault model** — per [ADR 0074](../adr/0074-storage-fault-model.md), the explicit list of modeled physical faults: torn writes, misdirected writes, bit rot, lost writes, and crash-at-any-point. Each zone (superblock, manifest, WAL region, pages/blocks) has a written detection contract; out-of-model faults are documented as such.

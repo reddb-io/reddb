@@ -999,19 +999,22 @@ impl RedDB {
             fnv1a_hash_value(&mut root, &stats.seal_ops);
             fnv1a_hash_value(&mut root, &stats.consolidation.runs_completed);
 
-            let mut entities = manager.query_all(|_| true);
-            entities.sort_by_key(|entity| entity.id.raw());
+            let root = manager.cached_physical_root(root, || {
+                let mut entities = manager.query_all(|_| true);
+                entities.sort_by_key(|entity| entity.id.raw());
 
-            for entity in entities {
-                fnv1a_hash_value(&mut root, &entity.id.raw());
-                fnv1a_hash_value(&mut root, &entity.kind);
-                fnv1a_hash_value(&mut root, &entity.created_at);
-                fnv1a_hash_value(&mut root, &entity.updated_at);
-                fnv1a_hash_value(&mut root, &entity.data);
-                fnv1a_hash_value(&mut root, &entity.sequence_id);
-                fnv1a_hash_value(&mut root, &entity.embeddings().len());
-                fnv1a_hash_value(&mut root, &entity.cross_refs().len());
-            }
+                for entity in entities {
+                    fnv1a_hash_value(&mut root, &entity.id.raw());
+                    fnv1a_hash_value(&mut root, &entity.kind);
+                    fnv1a_hash_value(&mut root, &entity.created_at);
+                    fnv1a_hash_value(&mut root, &entity.updated_at);
+                    fnv1a_hash_value(&mut root, &entity.data);
+                    fnv1a_hash_value(&mut root, &entity.sequence_id);
+                    fnv1a_hash_value(&mut root, &entity.embeddings().len());
+                    fnv1a_hash_value(&mut root, &entity.cross_refs().len());
+                }
+                root
+            });
 
             roots.insert(name, root);
         }
