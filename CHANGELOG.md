@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.24.3
+
+### Patch Changes
+
+- [#2396](https://github.com/reddb-io/reddb/pull/2396) [`fbf420c`](https://github.com/reddb-io/reddb/commit/fbf420c9386325a3528757e53e4ec8a5349c8916) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Replay committed paged WAL actions into memory before building replacement trees, and synchronize replacement pages before publishing their catalog roots. Interrupted recovery no longer spills intermediate historical tree mutations over the published checkpoint. Unchanged trees are retained, auxiliary WAL records remain available to runtime recovery, and old metadata overflow pages are recycled only after the replacement catalog is durable.
+
+  Balance leaf splits by occupied bytes so mixed-width records fit on both pages during replay and live writes.
+
 ## 1.24.2
 
 ### Patch Changes
