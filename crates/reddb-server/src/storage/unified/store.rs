@@ -288,6 +288,14 @@ impl StoreStats {
 // UnifiedStore - The Main API
 // ============================================================================
 
+struct CheckpointVersion {
+    manager: std::sync::Weak<SegmentManager>,
+    segments: Vec<(u64, u64)>,
+    aborted_revision: u64,
+    pending_vault: Arc<std::collections::HashSet<EntityId>>,
+    format_version: u32,
+}
+
 /// Unified storage for tables, graphs, and vectors
 ///
 /// UnifiedStore provides a single coherent interface for all data types:
@@ -344,6 +352,8 @@ pub struct UnifiedStore {
     /// btree mutation, serialising every concurrent insert across every
     /// collection into one global write lock.
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
+    /// Reuse only a successfully published generation with the same live rows.
+    checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
     /// Cross-structure context index for unified search
     context_index: ContextIndex,
     /// Hot entity cache — sharded bounded LRU for `get_any` lookups.

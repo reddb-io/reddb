@@ -2,6 +2,11 @@ use super::*;
 use crate::storage::unified::entity_cache::EntityCache;
 use parking_lot::RwLock;
 
+#[cfg(test)]
+thread_local! {
+    static CHECKPOINT_SERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 // ── Pager-meta overflow chain (gh-477) ──────────────────────────────────────
 // When the serialized collection registry + cross-refs exceed a single page,
 // page 1 carries a native metadata-overflow header pointing at an overflow chain of
@@ -435,6 +440,7 @@ impl UnifiedStore {
             pager: None,
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
+            checkpoint_versions: RwLock::new(HashMap::new()),
             context_index: ContextIndex::new(),
             entity_cache: EntityCache::new(),
             graph_label_index: RwLock::new(HashMap::new()),
@@ -517,6 +523,7 @@ impl UnifiedStore {
             pager: Some(Arc::new(pager)),
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
+            checkpoint_versions: RwLock::new(HashMap::new()),
             context_index: ContextIndex::new(),
             entity_cache: EntityCache::new(),
             graph_label_index: RwLock::new(HashMap::new()),
@@ -741,7 +748,23 @@ impl UnifiedStore {
                             }
 
                             // Store the B-tree for future lookups
-                            self.btree_indices.write().insert(name, Arc::new(btree));
+                            self.btree_indices
+                                .write()
+                                .insert(name.clone(), Arc::new(btree));
+                            if format_version == STORE_VERSION_V11 {
+                                if let Some(manager) = &manager {
+                                    self.checkpoint_versions.write().insert(
+                                        name,
+                                        CheckpointVersion {
+                                            manager: Arc::downgrade(manager),
+                                            segments: manager.checkpoint_revisions(),
+                                            aborted_revision: 0,
+                                            pending_vault: Arc::default(),
+                                            format_version,
+                                        },
+                                    );
+                                }
+                            }
                         }
                     } else {
                         break;
@@ -920,9 +943,41 @@ impl UnifiedStore {
         // Build unpublished replacements. Deleting from the current trees here
         // would destroy the last checkpoint if a write fails before publication.
         let mut rebuilt_indices = HashMap::with_capacity(collections.len());
+        let previous_versions = self.checkpoint_versions.read();
+        let mut checkpoint_versions = HashMap::with_capacity(collections.len());
+        let pending_vault = Arc::new(pending_vault_versions.clone());
+        let aborted_revision = self
+            .snapshot_manager
+            .get()
+            .map_or(0, |manager| manager.checkpoint_aborted_revision());
         for (name, manager) in collections.iter() {
+            let version = CheckpointVersion {
+                manager: Arc::downgrade(manager),
+                segments: manager.checkpoint_revisions(),
+                aborted_revision,
+                pending_vault: Arc::clone(&pending_vault),
+                format_version: self.format_version(),
+            };
+            if let (Some(previous), Some(tree)) =
+                (previous_versions.get(name), btree_indices.get(name))
+            {
+                if previous.manager.ptr_eq(&version.manager)
+                    && previous.segments == version.segments
+                    && previous.aborted_revision == version.aborted_revision
+                    && previous.pending_vault == version.pending_vault
+                    && previous.format_version == version.format_version
+                {
+                    collection_roots.push((name.clone(), tree.root_page_id()));
+                    rebuilt_indices.insert(name.clone(), Arc::clone(tree));
+                    checkpoint_versions.insert(name.clone(), version);
+                    continue;
+                }
+            }
+            checkpoint_versions.insert(name.clone(), version);
             let mut records = Vec::new();
             manager.for_each_entity_with_metadata(|entity, metadata| {
+                #[cfg(test)]
+                CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
                 if pending_vault_versions.contains(&entity.id)
                     || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
                         && self
@@ -1025,6 +1080,8 @@ impl UnifiedStore {
         // Only the now-durable catalog may replace the live tree handles. Keep
         // previous tree pages retained for recovery; do not recycle them early.
         *btree_indices = rebuilt_indices;
+        drop(previous_versions);
+        *self.checkpoint_versions.write() = checkpoint_versions;
 
         if let Some(commit) = &self.commit {
             commit.truncate().map_err(StoreError::Io)?;
@@ -1336,5 +1393,142 @@ fn read_metadata_value(data: &[u8], pos: &mut usize) -> Result<MetadataValue, St
         tag => Err(StoreError::Serialization(format!(
             "unknown metadata value tag {tag}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_work_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_checkpoint_does_not_serialize_collection_rows() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(&directory.path().join("data.rdb")).expect("paged store");
+        store.create_collection("rows").expect("collection");
+        for id in 1..=40 {
+            store
+                .insert(
+                    "rows",
+                    UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "rows",
+                        id,
+                        vec![Value::Integer(id as i64)],
+                    ),
+                )
+                .expect("seed row");
+        }
+        store.persist().expect("initial checkpoint");
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store.persist().expect("unchanged checkpoint");
+        assert_eq!(
+            CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()),
+            0,
+            "unchanged collections must not hold the writer fence while serializing every row"
+        );
+        drop(store);
+        let reopened = UnifiedStore::open(&directory.path().join("data.rdb")).expect("reopen");
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        reopened.persist().expect("unchanged recovered generation");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+    }
+
+    fn row(id: u64, value: i64) -> UnifiedEntity {
+        UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![Value::Integer(value)])
+    }
+
+    #[test]
+    fn checkpoint_reuse_tracks_manager_updates_metadata_deletes_and_bulk_inserts() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        store.create_collection("rows").expect("collection");
+        store.insert("rows", row(1, 1)).expect("seed");
+        store.persist().expect("initial checkpoint");
+        let manager = store.get_collection("rows").expect("rows");
+        manager.update(row(1, 2)).expect("direct update");
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store.persist().expect("updated row checkpoint");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 1);
+        let mut metadata = Metadata::new();
+        metadata.set("verified", MetadataValue::Bool(true));
+        manager
+            .set_metadata(EntityId::new(1), metadata)
+            .expect("metadata");
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store.persist().expect("metadata-only checkpoint");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 1);
+        manager
+            .bulk_insert(vec![row(2, 2), row(3, 3)])
+            .expect("bulk insert");
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store.persist().expect("bulk insert checkpoint");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 3);
+        manager.delete(EntityId::new(2)).expect("delete");
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store.persist().expect("changed checkpoint");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 2);
+        drop(store);
+        let recovered = UnifiedStore::open(&path).expect("recover changed rows");
+        let manager = recovered.get_collection("rows").expect("rows");
+        assert_eq!(manager.count(), 2);
+        assert_eq!(
+            manager
+                .get(EntityId::new(1))
+                .expect("row")
+                .data
+                .as_row()
+                .expect("table")
+                .columns,
+            vec![Value::Integer(2)]
+        );
+        assert!(manager.get(EntityId::new(2)).is_none());
+        assert!(manager
+            .get_metadata(EntityId::new(1))
+            .expect("metadata")
+            .get("verified")
+            .is_some());
+    }
+
+    #[test]
+    fn rollback_invalidates_reuse_without_a_segment_mutation() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        let snapshots = Arc::new(crate::storage::transaction::snapshot::SnapshotManager::new());
+        assert!(store.snapshot_manager.set(Arc::clone(&snapshots)).is_ok());
+        store.create_collection("rows").expect("collection");
+        let xid = snapshots.begin();
+        let mut pending = row(1, 1);
+        pending.xmin = xid;
+        store.insert("rows", pending).expect("version");
+        store.persist().expect("before rollback");
+        snapshots.rollback(xid);
+        store.persist().expect("after rollback");
+        drop(store);
+        let recovered = UnifiedStore::open(&path).expect("recover");
+        assert_eq!(recovered.get_collection("rows").expect("rows").count(), 0);
+    }
+
+    #[test]
+    fn publishing_a_pending_vault_version_invalidates_reuse() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        store.create_collection("rows").expect("collection");
+        store.insert("rows", row(1, 1)).expect("row");
+        store
+            .pending_vault_versions
+            .write()
+            .insert(EntityId::new(1));
+        store.persist().expect("exclude pending vault version");
+        store
+            .pending_vault_versions
+            .write()
+            .remove(&EntityId::new(1));
+        store.persist().expect("include published vault version");
+        drop(store);
+        let recovered = UnifiedStore::open(&path).expect("recover");
+        assert_eq!(recovered.get_collection("rows").expect("rows").count(), 1);
     }
 }
