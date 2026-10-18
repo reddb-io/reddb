@@ -995,14 +995,19 @@ impl Pager {
             }
         };
 
+        let mut dirty_pages = Vec::new();
         for trunk in trunks {
             let page_id = trunk.page_id();
-            self.cache.insert(page_id, trunk);
+            if let Some(evicted) = self.cache.insert(page_id, trunk) {
+                // Trunk publication can evict dirty data. Keep it in the same
+                // WAL-first, double-write-protected batch as resident pages.
+                dirty_pages.push((evicted.page_id(), evicted));
+            }
             self.cache.mark_dirty(page_id);
         }
 
         // Flush dirty pages from cache (through DWB if enabled)
-        let dirty_pages = self.cache.flush_dirty();
+        dirty_pages.extend(self.cache.flush_dirty());
         if !dirty_pages.is_empty() {
             // WAL-FIRST: ensure every WAL record describing a dirty
             // page is durable BEFORE the page itself reaches disk.
