@@ -603,6 +603,7 @@ impl StoreCommitCoordinator {
 
         let mut tx_states = std::collections::HashMap::<u64, bool>::new();
         let mut pending = Vec::<(u64, Vec<u8>)>::new();
+        let mut applied = false;
 
         for record in reader.iter() {
             let (_lsn, record) = match record {
@@ -614,7 +615,8 @@ impl StoreCommitCoordinator {
                 WalRecord::TxCommitBatch { actions, .. } => {
                     for payload in actions {
                         let action = StoreWalAction::decode(&payload)?;
-                        store.apply_replayed_action(&action).map_err(|err| {
+                        applied = true;
+                        store.apply_replayed_action(&action, false).map_err(|err| {
                             io::Error::other(format!("failed to replay store wal action: {err}"))
                         })?;
                     }
@@ -667,11 +669,17 @@ impl StoreCommitCoordinator {
                 continue;
             }
             let action = StoreWalAction::decode(&payload)?;
-            store.apply_replayed_action(&action).map_err(|err| {
+            applied = true;
+            store.apply_replayed_action(&action, false).map_err(|err| {
                 io::Error::other(format!("failed to replay store wal action: {err}"))
             })?;
         }
 
+        if applied {
+            store
+                .reconcile_replayed_btrees()
+                .map_err(|err| io::Error::other(err.to_string()))?;
+        }
         Ok(())
     }
 
@@ -944,7 +952,7 @@ impl UnifiedStore {
 
     pub(crate) fn apply_encoded_store_wal_action(&self, payload: &[u8]) -> Result<(), StoreError> {
         let action = StoreWalAction::decode(payload).map_err(StoreError::Io)?;
-        self.apply_replayed_action(&action)
+        self.apply_replayed_action(&action, true)
     }
 
     fn append_embedded_store_wal_actions(
@@ -981,7 +989,11 @@ impl UnifiedStore {
         }
     }
 
-    pub(crate) fn apply_replayed_action(&self, action: &StoreWalAction) -> Result<(), StoreError> {
+    pub(crate) fn apply_replayed_action(
+        &self,
+        action: &StoreWalAction,
+        update_btrees: bool,
+    ) -> Result<(), StoreError> {
         match action {
             StoreWalAction::CreateCollection { name } => {
                 if self.get_collection(name).is_none() {
@@ -991,25 +1003,25 @@ impl UnifiedStore {
             }
             StoreWalAction::DropCollection { name } => self.drop_collection_in_memory(name),
             StoreWalAction::UpsertEntityRecord { collection, record } => {
-                self.apply_replayed_upsert(collection, record)
+                self.apply_replayed_upsert(collection, record, update_btrees)
             }
             StoreWalAction::DeleteEntityRecord {
                 collection,
                 entity_id,
-            } => self.apply_replayed_delete(collection, EntityId::new(*entity_id)),
+            } => self.apply_replayed_delete(collection, EntityId::new(*entity_id), update_btrees),
             StoreWalAction::BulkUpsertEntityRecords {
                 collection,
                 records,
             } => {
                 for record in records {
-                    self.apply_replayed_upsert(collection, record)?;
+                    self.apply_replayed_upsert(collection, record, update_btrees)?;
                 }
                 Ok(())
             }
             StoreWalAction::RefreshCollection {
                 collection,
                 records,
-            } => self.apply_replayed_refresh_collection(collection, records),
+            } => self.apply_replayed_refresh_collection(collection, records, update_btrees),
         }
     }
 
@@ -1071,7 +1083,7 @@ impl UnifiedStore {
             )))
         })?;
 
-        self.swap_collection_state(name, new_manager, &prepared, &serialized);
+        self.swap_collection_state(name, new_manager, &prepared, &serialized, true);
 
         self.finish_paged_write([StoreWalAction::RefreshCollection {
             collection: name.to_string(),
@@ -1092,6 +1104,7 @@ impl UnifiedStore {
         new_manager: Arc<SegmentManager>,
         prepared: &[UnifiedEntity],
         serialized: &[Vec<u8>],
+        update_btrees: bool,
     ) {
         {
             let mut collections = self.collections.write();
@@ -1105,7 +1118,7 @@ impl UnifiedStore {
             &prepared.iter().map(|e| e.id).collect::<Vec<_>>(),
         );
 
-        if let Some(pager) = &self.pager {
+        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees) {
             let new_btree = Arc::new(BTree::new(Arc::clone(pager)));
             let mut sorted: Vec<(Vec<u8>, Vec<u8>)> = prepared
                 .iter()
@@ -1127,6 +1140,7 @@ impl UnifiedStore {
         &self,
         collection: &str,
         records: &[Vec<u8>],
+        update_btrees: bool,
     ) -> Result<(), StoreError> {
         let new_manager = Arc::new(SegmentManager::with_config(
             collection,
@@ -1152,7 +1166,7 @@ impl UnifiedStore {
             })?;
         }
 
-        self.swap_collection_state(collection, new_manager, &prepared, records);
+        self.swap_collection_state(collection, new_manager, &prepared, records, update_btrees);
         Ok(())
     }
 
@@ -1174,7 +1188,7 @@ impl UnifiedStore {
         name: &str,
         records: Vec<Vec<u8>>,
     ) -> Result<(), StoreError> {
-        self.apply_replayed_refresh_collection(name, &records)?;
+        self.apply_replayed_refresh_collection(name, &records, true)?;
         self.finish_paged_write([StoreWalAction::RefreshCollection {
             collection: name.to_string(),
             records,
@@ -1217,7 +1231,12 @@ impl UnifiedStore {
         Ok(())
     }
 
-    fn apply_replayed_upsert(&self, collection: &str, record: &[u8]) -> Result<(), StoreError> {
+    fn apply_replayed_upsert(
+        &self,
+        collection: &str,
+        record: &[u8],
+        update_btrees: bool,
+    ) -> Result<(), StoreError> {
         self.create_collection_in_memory(collection)?;
         let (entity, metadata) = Self::deserialize_entity_record(record, self.format_version())?;
         let manager = self
@@ -1250,7 +1269,7 @@ impl UnifiedStore {
         }
         self.index_cross_refs(&entity, collection)?;
 
-        if let Some(pager) = &self.pager {
+        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees) {
             let mut btree_indices = self.btree_indices.write();
             let btree = btree_indices
                 .entry(collection.to_string())
@@ -1277,7 +1296,12 @@ impl UnifiedStore {
         Ok(())
     }
 
-    fn apply_replayed_delete(&self, collection: &str, id: EntityId) -> Result<(), StoreError> {
+    fn apply_replayed_delete(
+        &self,
+        collection: &str,
+        id: EntityId,
+        update_btrees: bool,
+    ) -> Result<(), StoreError> {
         self.entity_cache.remove(id.raw());
         if let Some(manager) = self.get_collection(collection) {
             let deleted = manager.delete(id)?;
@@ -1288,7 +1312,7 @@ impl UnifiedStore {
             return Ok(());
         }
 
-        if let Some(_pager) = &self.pager {
+        if self.pager.is_some() && update_btrees {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 let root_before = btree.root_page_id();
@@ -1336,6 +1360,96 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
         path
+    }
+
+    fn replay_crash_payload(id: u64, round: u64) -> String {
+        let mut state = id * 31 + round * 13 + 1;
+        (0..600)
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                char::from(b'!' + ((state >> 24) % 90) as u8)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn paged_wal_replay_survives_immediate_process_exit() {
+        const CHILD_PATH: &str = "REDDB_TEST_REPLAY_CRASH_PATH";
+        let config = || UnifiedStoreConfig::default().with_page_cache_slots(4);
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let store = UnifiedStore::open_with_config(path, config()).expect("replay child");
+            assert_eq!(store.get_collection("rows").unwrap().count(), 400);
+            // No Rust destructors or graceful checkpoint may repair the image.
+            std::process::exit(0);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            store.create_collection("rows").unwrap();
+            for id in 1..=400 {
+                store
+                    .insert(
+                        "rows",
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(format!("initial-{id}"))],
+                        ),
+                    )
+                    .unwrap();
+            }
+            store.persist().unwrap();
+        }
+        {
+            let coordinator = StoreCommitCoordinator::open(
+                reddb_file::layout::unified_wal_path(&path),
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .unwrap();
+            for round in 0..3 {
+                let actions = (1..=400)
+                    .map(|id| {
+                        let payload = replay_crash_payload(id, round);
+                        let entity = UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(payload)],
+                        );
+                        StoreWalAction::upsert_entity("rows", &entity, None, STORE_VERSION_V11)
+                    })
+                    .collect::<Vec<_>>();
+                coordinator.append_actions(&actions).unwrap();
+            }
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "storage::unified::store::commit::tests::paged_wal_replay_survives_immediate_process_exit", "--nocapture"])
+            .env(CHILD_PATH, &path).status().unwrap();
+        assert!(status.success(), "replay process failed");
+        let reopened = UnifiedStore::open_with_config(&path, config())
+            .expect("cold reopen after replay crash");
+        assert_eq!(reopened.get_collection("rows").unwrap().count(), 400);
+        for id in 1..=400 {
+            let entity = reopened
+                .get("rows", EntityId::new(id))
+                .expect("retained entity");
+            let EntityData::Row(row) = entity.data else {
+                panic!("expected row")
+            };
+            assert_eq!(row.columns, vec![Value::text(replay_crash_payload(id, 2))]);
+        }
+        drop(reopened);
+        let stable_bytes = std::fs::metadata(&path).unwrap().len();
+        let repeated = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(repeated.get_collection("rows").unwrap().count(), 400);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            stable_bytes,
+            "idempotent replay must not allocate another tree generation"
+        );
     }
 
     /// Concurrent autocommits MUST coalesce into far fewer fsyncs
