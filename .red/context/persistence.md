@@ -45,6 +45,15 @@ Fingerprint scans sort compact entity ID/source references and borrow one row at
 a time. They preserve the existing hash order and values without materializing
 a second collection of payloads; source segments remain pinned for the scan.
 
+Paged loading and WAL replay preserve stored sequence identities. Automatic
+inserts encode the segment-assigned identity and fence the complete inline
+mutation plus WAL append against checkpoint publication. A completed inline
+insert may advance its existing tree-reuse proof only when the before/after
+segment revisions show exactly that one mutation. Untracked edits, sealing,
+visibility changes and versioned rows retain conservative validation. Durable
+replay reconciliation seeds the current raw tree generation before runtime
+visibility normalization is attached.
+
 ## Fault model & integrity tooling
 
 - **Storage fault model** — per [ADR 0074](../adr/0074-storage-fault-model.md), the explicit list of modeled physical faults: torn writes, misdirected writes, bit rot, lost writes, and crash-at-any-point. Each zone (superblock, manifest, WAL region, pages/blocks) has a written detection contract; out-of-model faults are documented as such.

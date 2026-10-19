@@ -1257,7 +1257,7 @@ impl UnifiedStore {
                 .update_with_metadata(entity.clone(), metadata.as_ref())
                 .map_err(StoreError::from)?;
         } else {
-            manager.insert(entity.clone())?;
+            manager.restore_snapshot_entity(entity.clone())?;
             if let Some(metadata) = metadata.as_ref() {
                 manager.set_metadata(entity.id, metadata.clone())?;
             }
