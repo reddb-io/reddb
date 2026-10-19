@@ -318,6 +318,9 @@ mod tests {
         let backend = Arc::new(LocalBackend);
         let mut options = RedDBOptions::persistent(data_path)
             .with_replication(ReplicationConfig::replica("http://primary:5050"))
+            // The handler fixture owns replication state; a background pull
+            // loop can race its configured replica identity and applied LSN.
+            .with_replica_loop_enabled(false)
             .with_atomic_remote_backend(backend);
         options.remote_key = Some(database_key.to_string());
         let runtime = RedDBRuntime::with_options(options).expect("runtime boots");
