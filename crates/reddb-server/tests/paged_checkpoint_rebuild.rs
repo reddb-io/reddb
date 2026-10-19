@@ -310,3 +310,109 @@ fn crash_during_freelist_reuse_preserves_allocator() {
         .allocate_page(reddb_server::storage::engine::PageType::BTreeLeaf)
         .expect("a crash during page reuse must not destroy the allocator");
 }
+
+#[test]
+fn document_indexes_survive_reused_checkpoints_and_uncheckpointed_wal_recovery() {
+    use reddb_server::{RedDBOptions, RedDBRuntime, RuntimeQueryResult, StorageDeployPreset};
+
+    const CHILD: &str = "REDDB_TEST_INDEX_RECOVERY_PATH";
+    let runtime = |path: &Path| {
+        RedDBRuntime::with_options(
+            RedDBOptions::persistent(path)
+                .with_storage_profile(StorageDeployPreset::Serverless.selection())
+                .expect("paged profile"),
+        )
+        .expect("persistent runtime")
+    };
+    let names = |result: RuntimeQueryResult| {
+        result
+            .result
+            .records
+            .iter()
+            .map(|row| match row.get("name") {
+                Some(Value::Text(name)) => name.to_string(),
+                other => panic!("expected document name, got {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    if let Some(path) = std::env::var_os(CHILD) {
+        let rt = runtime(Path::new(&path));
+        for revision in 1..=12 {
+            rt.execute_query(&format!(
+                "UPDATE indexed_docs SET score = {} WHERE name = 'bob'",
+                100 + revision
+            ))
+            .expect("indexed update");
+            rt.checkpoint().expect("changed checkpoint");
+            assert_eq!(
+                names(
+                    rt.execute_query(
+                        "SELECT name FROM indexed_docs WHERE score > 40 ORDER BY score ASC"
+                    )
+                    .expect("ordered range during page reuse")
+                ),
+                vec!["carol", "bob"]
+            );
+        }
+        rt.execute_query("UPDATE indexed_docs SET score = 200 WHERE name = 'alice'")
+            .expect("acknowledged write after the last checkpoint");
+        // Skip all destructors: recovery must use the durable checkpoint + WAL,
+        // rather than an orderly shutdown rebuilding/persisting the indexes.
+        std::process::exit(0);
+    }
+
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("indexes.rdb");
+    {
+        let rt = runtime(&path);
+        rt.execute_query("CREATE DOCUMENT indexed_docs")
+            .expect("document collection");
+        for (name, score) in [("alice", 30), ("bob", 10), ("carol", 50), ("dave", 20)] {
+            rt.execute_query(&format!(
+                "INSERT INTO indexed_docs DOCUMENT VALUES ({{\"name\":\"{name}\",\"score\":{score}}})"
+            ))
+            .expect("seed document");
+        }
+        rt.execute_query("CREATE INDEX idx_score ON indexed_docs (score) USING BTREE")
+            .expect("ordered index");
+        rt.execute_query("CREATE INDEX idx_name ON indexed_docs (name) USING HASH")
+            .expect("hash index");
+        rt.checkpoint().expect("seed checkpoint");
+    }
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "document_indexes_survive_reused_checkpoints_and_uncheckpointed_wal_recovery",
+        ])
+        .env(CHILD, &path)
+        .status()
+        .expect("crash child");
+    assert!(status.success(), "checkpoint child failed: {status}");
+
+    let rt = runtime(&path);
+    assert!(rt
+        .index_store_ref()
+        .sorted
+        .has_index("indexed_docs", "score"));
+    assert_eq!(
+        names(
+            rt.execute_query("SELECT name FROM indexed_docs WHERE name = 'alice' AND score = 200")
+                .expect("hash lookup after WAL recovery")
+        ),
+        vec!["alice"]
+    );
+    assert_eq!(
+        names(
+            rt.execute_query("SELECT name FROM indexed_docs WHERE score > 40 ORDER BY score ASC")
+                .expect("ordered range after WAL recovery")
+        ),
+        vec!["carol", "bob", "alice"]
+    );
+    assert_eq!(
+        names(
+            rt.execute_query("SELECT name FROM indexed_docs ORDER BY score DESC LIMIT 2")
+                .expect("top-N after WAL recovery")
+        ),
+        vec!["alice", "bob"]
+    );
+}
