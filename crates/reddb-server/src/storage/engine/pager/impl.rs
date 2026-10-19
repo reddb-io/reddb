@@ -267,6 +267,7 @@ impl Pager {
             cache: PageCache::new(config.cache_size),
             freelist: RwLock::new(FreeList::new()),
             allocation_reused: std::sync::atomic::AtomicBool::new(false),
+            allocation_fence_pending: std::sync::atomic::AtomicBool::new(false),
             header: RwLock::new(DatabaseHeader::default()),
             config,
             header_dirty: Mutex::new(false),
@@ -806,6 +807,9 @@ impl Pager {
         // Try to get from freelist first
         let page_id = {
             let mut freelist = self.freelist_write()?;
+            // A previous fence can fail after loading the trunk into memory.
+            // Retry it before the fast path can consume any of those pages.
+            self.complete_allocation_fence()?;
             if let Some(id) = freelist.allocate() {
                 self.allocation_reused
                     .store(true, std::sync::atomic::Ordering::Release);
@@ -831,8 +835,9 @@ impl Pager {
                 // allocator role durably before cache eviction can overwrite it.
                 // Keep the allocator locked so another allocator cannot race
                 // ahead of this fence. A failed fence leaves allocation stopped.
-                self.write_header_and_sync()?;
-                self.write_header_and_sync()?;
+                self.allocation_fence_pending
+                    .store(true, std::sync::atomic::Ordering::Release);
+                self.complete_allocation_fence()?;
                 let id = freelist.allocate().ok_or_else(|| {
                     PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
                 })?;
@@ -1340,6 +1345,22 @@ impl Pager {
         self.clear_dwb_zone()
     }
 
+    /// Finish a consumed trunk's durable ownership change, retaining errors
+    /// across allocation attempts until both copies have been synchronized.
+    /// Called with the freelist locked when consuming or retrying a trunk.
+    fn complete_allocation_fence(&self) -> Result<(), PagerError> {
+        if self
+            .allocation_fence_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.write_header_and_sync()?;
+            self.write_header_and_sync()?;
+            self.allocation_fence_pending
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        Ok(())
+    }
+
     /// Write header and sync to disk (public for checkpointer).
     pub fn write_header_and_sync(&self) -> Result<(), PagerError> {
         self.write_header()?;
@@ -1525,6 +1546,47 @@ mod tests {
             Some(before.generation)
         );
 
+        drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn failed_trunk_fence_is_completed_before_retrying_allocation() {
+        let path = temp_db_path("retry-trunk-fence");
+        let pager = Pager::open_default(&path).expect("pager");
+        let mut pages = Vec::new();
+        for _ in 0..8 {
+            pages.push(pager.allocate_page(PageType::BTreeLeaf).unwrap().page_id());
+        }
+        pager.sync().unwrap();
+        for id in pages {
+            pager.free_page(id).unwrap();
+        }
+        pager.sync().unwrap();
+        let trunk = pager.header().unwrap().freelist_head;
+        assert_ne!(trunk, 0);
+
+        // A real write error after the trunk has been read must not turn a
+        // subsequent allocation into an unfenced fast-path reuse.
+        let writable = {
+            let mut file = pager.file_lock().unwrap();
+            std::mem::replace(&mut *file, File::open(&path).unwrap())
+        };
+        assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+        *pager.file_lock().unwrap() = writable;
+        pager.allocate_page(PageType::BTreeLeaf).unwrap();
+
+        let zone = read_zone(&path);
+        for copy in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+            let start = copy * SUPERBLOCK_SLOT_SIZE;
+            let header =
+                reddb_file::decode_database_header(&zone[start..start + SUPERBLOCK_SLOT_SIZE])
+                    .unwrap();
+            assert_ne!(
+                header.freelist_head, trunk,
+                "copy {copy} still owns consumed trunk"
+            );
+        }
         drop(pager);
         cleanup(&path);
     }
