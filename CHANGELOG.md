@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.8
+
+### Patch Changes
+
+- [#2405](https://github.com/reddb-io/reddb/pull/2405) [`725daac`](https://github.com/reddb-io/reddb/commit/725daacc9cd760b8cd56c32b24b5b4033b4a4e94) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve stored segment sequence identities when opening and replaying paged stores. Serialize automatic inserts after the segment assigns their identity, borrowing the final row instead of cloning its payload. Keep completed inline inserts reusable at checkpoints only when exactly that fenced mutation changed the manager; retain full comparison for untracked edits, publication changes and versioned rows. Seed reuse after durable WAL tree reconciliation to avoid immediately rebuilding recovered history. WAL acknowledgement, visibility checks and durable catalog publication remain required.
+
 ## 1.24.7
 
 ### Patch Changes
