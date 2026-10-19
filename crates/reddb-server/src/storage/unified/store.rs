@@ -292,6 +292,7 @@ struct CheckpointVersion {
     manager: std::sync::Weak<SegmentManager>,
     segments: Vec<(u64, u64)>,
     aborted_revision: u64,
+    aborted: Arc<std::collections::HashSet<u64>>,
     pending_vault: Arc<std::collections::HashSet<EntityId>>,
     format_version: u32,
 }
