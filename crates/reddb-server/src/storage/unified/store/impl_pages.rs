@@ -312,6 +312,49 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 impl UnifiedStore {
+    /// A completed inline insert already made this tree match its manager.
+    /// Advance the reuse proof only for that single, fenced mutation. Any
+    /// untracked edit or segment publication keeps the full comparison path.
+    pub(crate) fn note_paged_insert(
+        &self,
+        collection: &str,
+        manager: &Arc<SegmentManager>,
+        before: &[(u64, u64)],
+        id: EntityId,
+    ) {
+        let after = manager.checkpoint_revisions();
+        if before.len() != after.len() {
+            return;
+        }
+        let mut changed = 0;
+        for ((old_id, old_revision), (new_id, new_revision)) in before.iter().zip(&after) {
+            if old_id != new_id {
+                return;
+            }
+            if old_revision != new_revision {
+                if old_revision.checked_add(1) != Some(*new_revision) {
+                    return;
+                }
+                changed += 1;
+            }
+        }
+        if changed != 1 {
+            return;
+        }
+        let mut versions = self.checkpoint_versions.write();
+        let Some(previous) = versions.get_mut(collection) else {
+            return;
+        };
+        if previous.manager.ptr_eq(&Arc::downgrade(manager))
+            && previous.segments == before
+            && previous.format_version == self.format_version()
+            && !previous.pending_vault.contains(&id)
+            && !previous.aborted.contains(&0)
+        {
+            previous.segments = after;
+        }
+    }
+
     pub(crate) fn mark_paged_registry_dirty(&self) {
         self.paged_registry_dirty.store(true, Ordering::Release);
     }
@@ -624,7 +667,27 @@ impl UnifiedStore {
         }
         drop(indices);
         drop(collections);
-        self.flush_paged_state()
+        self.flush_paged_state()?;
+        // Opening has no concurrent writers. Replay has now durably reconciled
+        // these raw trees; do not immediately rebuild them at the first flush.
+        if self.snapshot_manager.get().is_none() && self.pending_vault_versions.read().is_empty() {
+            let collections = self.collections.read();
+            let mut versions = self.checkpoint_versions.write();
+            for (name, manager) in collections.iter() {
+                versions.insert(
+                    name.clone(),
+                    CheckpointVersion {
+                        manager: Arc::downgrade(manager),
+                        segments: manager.checkpoint_revisions(),
+                        aborted_revision: 0,
+                        aborted: Arc::default(),
+                        pending_vault: Arc::default(),
+                        format_version: self.format_version(),
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn recover_operational_manifest(&self) -> Result<(), StoreError> {
@@ -766,7 +829,7 @@ impl UnifiedStore {
                                             m.register_row_id(*row_id);
                                         }
                                         self.context_index.index_entity(&name, &entity);
-                                        let _ = m.insert(entity.clone());
+                                        m.restore_snapshot_entity(entity.clone())?;
                                         if let Some(metadata) = metadata {
                                             let _ = m.set_metadata(id, metadata);
                                         }
@@ -1455,6 +1518,122 @@ mod checkpoint_work_tests {
         let reopened = UnifiedStore::open(&directory.path().join("data.rdb")).expect("reopen");
         CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
         reopened.persist().expect("unchanged recovered generation");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+    }
+
+    #[test]
+    fn paged_reopen_preserves_stored_sequence_identity() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        store.create_collection("rows").expect("collection");
+        for id in [30, 10, 20] {
+            store.insert("rows", row(id, id as i64)).expect("insert");
+        }
+        store.persist().expect("checkpoint");
+        let sequences = [10, 20, 30].map(|id| {
+            store
+                .get("rows", EntityId::new(id))
+                .expect("row")
+                .sequence_id
+        });
+        drop(store);
+        let reopened = UnifiedStore::open(&path).expect("reopen");
+        let recovered = [10, 20, 30].map(|id| {
+            reopened
+                .get("rows", EntityId::new(id))
+                .expect("row")
+                .sequence_id
+        });
+        assert_eq!(
+            recovered, sequences,
+            "opening a checkpoint must not rewrite stored row identities"
+        );
+    }
+
+    #[test]
+    fn auto_insert_persists_the_assigned_sequence_identity() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(&directory.path().join("data.rdb")).expect("paged store");
+        for id in 1u64..=3 {
+            store
+                .insert_auto("rows", row(id, id as i64))
+                .expect("insert");
+        }
+        let manager = store.get_collection("rows").expect("rows");
+        let tree = store
+            .btree_indices
+            .read()
+            .get("rows")
+            .cloned()
+            .expect("tree");
+        for id in 1u64..=3 {
+            let bytes = tree
+                .get(&id.to_be_bytes())
+                .expect("lookup")
+                .expect("stored row");
+            let (persisted, _) =
+                UnifiedStore::deserialize_entity_record(&bytes, store.format_version())
+                    .expect("decode");
+            assert_eq!(
+                persisted.sequence_id,
+                manager
+                    .get(EntityId::new(id))
+                    .expect("live row")
+                    .sequence_id
+            );
+        }
+    }
+
+    #[test]
+    fn completed_inline_insert_reuses_history_but_not_untracked_edits() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        store.insert_auto("rows", row(1, 1)).expect("seed");
+        store.persist().expect("checkpoint");
+        store.insert_auto("rows", row(2, 2)).expect("append");
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store.persist().expect("inline append checkpoint");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+        store
+            .get_collection("rows")
+            .expect("rows")
+            .update(row(1, 99))
+            .expect("untracked edit");
+        store.insert_auto("rows", row(3, 3)).expect("next append");
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store.persist().expect("untracked edit checkpoint");
+        assert!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()) > 0);
+        drop(store);
+        let reopened = UnifiedStore::open(&path).expect("reopen");
+        assert_eq!(
+            reopened
+                .get("rows", EntityId::new(1))
+                .expect("row")
+                .data
+                .as_row()
+                .expect("table")
+                .columns,
+            vec![Value::Integer(99)]
+        );
+    }
+
+    #[test]
+    fn replayed_trees_are_reusable_after_durable_reconciliation() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        store.insert_auto("rows", row(1, 1)).expect("seed");
+        store.persist().expect("checkpoint");
+        store
+            .insert_auto("rows", row(2, 2))
+            .expect("WAL-backed append");
+        drop(store);
+        let reopened = UnifiedStore::open(&path).expect("replay");
+        assert!(reopened.get("rows", EntityId::new(2)).is_some());
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        reopened.persist().expect("checkpoint reconciled tree");
         assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
     }
 

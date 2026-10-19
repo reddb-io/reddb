@@ -845,6 +845,8 @@ impl UnifiedStore {
         collection: &str,
         entity: UnifiedEntity,
     ) -> Result<EntityId, StoreError> {
+        // Include the WAL append in the checkpoint publication fence.
+        let _publication = self.vault_publication_lock.lock();
         let manager = self.get_or_create_collection(collection);
         let mut entity = entity;
         if entity.id.raw() == 0 {
@@ -872,31 +874,9 @@ impl UnifiedStore {
         // Index into context index before consuming the entity
         self.context_index.index_entity(collection, &entity);
 
-        // Pre-serialize the entity record (B-tree image == WAL action body)
-        // and index cross-refs while we still own the entity. Mirrors the
-        // bulk_insert path (see line 559-580 above): segment.insert assigns
-        // a fresh `sequence_id`, but the bulk path already accepts a
-        // sequence_id=0 on-disk image (replay calls manager.insert which
-        // re-assigns sequence_id from the segment's allocator), so the
-        // single-row path can do the same. Fresh inserts never carry
-        // metadata — set_metadata is a separate call — so we pass None,
-        // matching how the bulk path serializes records.
-        //
-        // Eliminates the post-insert `manager.get(id)` clone of the just-
-        // inserted UnifiedEntity (HashMap<String, Value> + per-field
-        // Strings). Per `docs/perf/insert_sequential-2026-05-05.md` P2 this
-        // was the dominant clone in the insert_sequential hot path.
-        let id_for_serialize = entity.id;
-        let serialized_record: Option<Vec<u8>> =
-            if self.pager.is_some() || self.config.embedded_wal_path.is_some() {
-                Some(Self::serialize_entity_record(
-                    &entity,
-                    None,
-                    self.format_version(),
-                ))
-            } else {
-                None
-            };
+        // Serialize the canonical segment image after insertion: the segment
+        // assigns its sequence identity. Borrow it instead of cloning payloads.
+        let persist_record = self.pager.is_some() || self.config.embedded_wal_path.is_some();
         if self.config.auto_index_refs {
             self.index_cross_refs(&entity, collection)?;
         }
@@ -907,7 +887,7 @@ impl UnifiedStore {
         // both or neither. Otherwise the rebuild re-inserts this row from the
         // manager and one of the two B-tree inserts fails on a duplicate key,
         // or lands mid-rebuild and tears the tree.
-        let paged_btree = if serialized_record.is_some() {
+        let paged_btree = if persist_record {
             self.get_or_create_btree(collection)
         } else {
             None
@@ -915,9 +895,21 @@ impl UnifiedStore {
         let persist_fence = paged_btree
             .as_ref()
             .map(|_| self.btree_indices.read_recursive());
+        let before = paged_btree.as_ref().map(|_| manager.checkpoint_revisions());
+        let unversioned = entity.xmin == 0 && entity.xmax == 0;
 
         let id = manager.insert(entity)?;
-        debug_assert_eq!(id, id_for_serialize);
+        let serialized_record = if persist_record {
+            Some(
+                manager
+                    .get_with(id, |entity| {
+                        Self::serialize_entity_record(entity, None, self.format_version())
+                    })
+                    .ok_or(StoreError::EntityNotFound(id))?,
+            )
+        } else {
+            None
+        };
         // `register_entity_id` already advances the atomic counter on
         // the allocation path above (`self.next_entity_id()`), so the
         // second call here is a no-op CAS loop on the hot path. Only
@@ -959,6 +951,11 @@ impl UnifiedStore {
                 self.mark_paged_registry_dirty();
             }
             self.finish_paged_write(actions)?;
+        }
+        if unversioned && !Self::deferred_store_wal_capture_active() {
+            if let Some(before) = before {
+                self.note_paged_insert(collection, &manager, &before, id);
+            }
         }
         Ok(id)
     }
