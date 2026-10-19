@@ -29,7 +29,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e
       - uses: ./.github/actions/install-protoc
         with: {version: '28.3'}
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           shared-key: ubuntu-rust-1.91.0
@@ -41,7 +41,7 @@ jobs:
       - run: cargo build --locked --bin red
       - name: Exercise HTTP and persistent restart
         run: REDDB_TEST_BINARY=target/debug/red python3 scripts/test-park-migration-regressions.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: park-migration-qualified-red-linux
           path: target/debug/red
