@@ -10,7 +10,7 @@ use crate::physical::{
 };
 use crate::storage::queue::QueueMode;
 use crate::storage::unified::UnifiedStore;
-use crate::storage::{EntityKind, UnifiedEntity};
+use crate::storage::{EntityKind, SegmentManager, UnifiedEntity};
 use reddb_types::Value;
 
 /// Per-collection analytical-storage seam (PRD #850, Phase 1).
@@ -259,31 +259,26 @@ pub fn snapshot_store_with_declarations(
     let graph_projection_statuses = graph_projection_statuses(declarations);
     let analytics_job_statuses = analytics_job_statuses(declarations);
 
-    let mut grouped: HashMap<String, Vec<UnifiedEntity>> = HashMap::new();
-    for (collection, entity) in store.query_all(|_| true) {
-        grouped.entry(collection).or_default().push(entity);
-    }
-    let queue_policies = queue_policies_from_grouped(&grouped);
+    let queue_policies = store
+        .get_collection("red_queue_meta")
+        .map(|manager| queue_policies_from_entities(&manager.query_all(|_| true)))
+        .unwrap_or_default();
 
     let mut stats_by_collection = BTreeMap::new();
     let mut collections = Vec::new();
 
     for collection_name in store.list_collections() {
-        let entities = grouped.remove(&collection_name).unwrap_or_default();
-        let inferred_model = infer_model(&entities);
+        let manager = store.get_collection(&collection_name);
+        let (inferred_model, entity_count, cross_refs) = manager
+            .as_ref()
+            .map(|manager| collection_observations(manager))
+            .unwrap_or((CollectionModel::Mixed, 0, 0));
         let inferred_schema_mode = infer_schema_mode(inferred_model);
         let contract = collection_contract(&collection_name, contracts);
         let model = contract
             .map(|contract| contract.declared_model)
             .unwrap_or(inferred_model);
-        let cross_refs = entities
-            .iter()
-            .map(|entity| entity.cross_refs().len())
-            .sum();
-        let entity_count = entities.len();
-        let manager_stats = store
-            .get_collection(&collection_name)
-            .map(|manager| manager.stats());
+        let manager_stats = manager.map(|manager| manager.stats());
         let segments = manager_stats
             .map(|stats| stats.growing_count + stats.sealed_count + stats.archived_count)
             .unwrap_or(0);
@@ -522,13 +517,7 @@ pub struct QueuePolicySnapshot {
     pub dlq_target: Option<String>,
 }
 
-fn queue_policies_from_grouped(
-    grouped: &HashMap<String, Vec<UnifiedEntity>>,
-) -> HashMap<String, QueuePolicySnapshot> {
-    let Some(meta) = grouped.get("red_queue_meta") else {
-        return HashMap::new();
-    };
-
+fn queue_policies_from_entities(meta: &[UnifiedEntity]) -> HashMap<String, QueuePolicySnapshot> {
     let mut policies = HashMap::new();
     for entity in meta {
         let Some(row) = entity.data.as_row() else {
@@ -593,26 +582,32 @@ fn collection_contract<'a>(
     })
 }
 
-fn infer_model(entities: &[UnifiedEntity]) -> CollectionModel {
+fn collection_observations(manager: &SegmentManager) -> (CollectionModel, usize, usize) {
     let mut has_table = false;
     let mut has_graph = false;
     let mut has_vector = false;
+    let mut entity_count = 0;
+    let mut cross_refs = 0;
 
-    for entity in entities {
+    manager.for_each_entity(|entity| {
+        entity_count += 1;
+        cross_refs += entity.cross_refs().len();
         match &entity.kind {
             EntityKind::TableRow { .. } => has_table = true,
             EntityKind::GraphNode(_) | EntityKind::GraphEdge(_) => has_graph = true,
             EntityKind::Vector { .. } => has_vector = true,
             EntityKind::TimeSeriesPoint(_) | EntityKind::QueueMessage { .. } => {}
         }
-    }
+        true
+    });
 
-    match (has_table, has_graph, has_vector) {
+    let model = match (has_table, has_graph, has_vector) {
         (true, false, false) => CollectionModel::Table,
         (false, true, false) => CollectionModel::Graph,
         (false, false, true) => CollectionModel::Vector,
         _ => CollectionModel::Mixed,
-    }
+    };
+    (model, entity_count, cross_refs)
 }
 
 fn infer_schema_mode(model: CollectionModel) -> SchemaMode {
@@ -1410,4 +1405,79 @@ pub fn analytics_job_attention(snapshot: &CatalogModelSnapshot) -> Vec<CatalogAn
             .then_with(|| left.id.cmp(&right.id))
     });
     statuses
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use crate::storage::{CrossRef, EntityId, RefType};
+
+    #[test]
+    fn borrowed_catalog_preserves_models_counts_and_cross_references() {
+        let store = UnifiedStore::new();
+        for name in ["rows", "graph", "vectors", "mixed", "empty"] {
+            store.create_collection(name).expect("collection");
+        }
+        let mut row = UnifiedEntity::table_row(
+            EntityId::new(1),
+            "rows",
+            1,
+            vec![Value::text("payload".repeat(10_000))],
+        );
+        row.add_cross_ref(CrossRef::new(
+            EntityId::new(1),
+            EntityId::new(2),
+            "graph",
+            RefType::RowToNode,
+        ));
+        store.insert("rows", row).expect("row");
+        store
+            .insert(
+                "graph",
+                UnifiedEntity::graph_node(EntityId::new(2), "label", "type", HashMap::new()),
+            )
+            .expect("node");
+        store
+            .insert(
+                "vectors",
+                UnifiedEntity::vector(EntityId::new(3), "vectors", vec![1.0, 0.0]),
+            )
+            .expect("vector");
+        store
+            .insert(
+                "mixed",
+                UnifiedEntity::table_row(EntityId::new(4), "mixed", 4, vec![Value::Integer(4)]),
+            )
+            .expect("mixed row");
+        store
+            .insert(
+                "mixed",
+                UnifiedEntity::vector(EntityId::new(5), "mixed", vec![0.0, 1.0]),
+            )
+            .expect("mixed vector");
+
+        let snapshot = snapshot_store("test", &store, None);
+        assert_eq!(snapshot.summary.total_entities, 5);
+        for (name, model, count, references) in [
+            ("rows", CollectionModel::Table, 1, 1),
+            ("graph", CollectionModel::Graph, 1, 0),
+            ("vectors", CollectionModel::Vector, 1, 0),
+            ("mixed", CollectionModel::Mixed, 2, 0),
+            ("empty", CollectionModel::Mixed, 0, 0),
+        ] {
+            let descriptor = snapshot
+                .collections
+                .iter()
+                .find(|item| item.name == name)
+                .expect("descriptor");
+            assert_eq!(
+                (
+                    descriptor.observed_model,
+                    descriptor.entities,
+                    descriptor.cross_refs
+                ),
+                (model, count, references)
+            );
+        }
+    }
 }
