@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.24.9
+
+### Patch Changes
+
+- [#2408](https://github.com/reddb-io/reddb/pull/2408) [`45979e9`](https://github.com/reddb-io/reddb/commit/45979e95214af10014b609e07c6ce4cacea71838) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reuse retired paged checkpoint generations after durable catalog publication,
+  preserving active readers and retirement roots across restarts. Bound checkpoint
+  and WAL-reconciliation payload batches, reuse free pages for allocator metadata,
+  and fence consumed freelist ownership before reuse and superblock recovery.
+
 ## 1.24.8
 
 ### Patch Changes
