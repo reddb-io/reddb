@@ -84,6 +84,87 @@ pub struct NativePagedCollectionRoot {
     pub root_page: u32,
 }
 
+/// Optional, checksummed-with-the-manifest retirement ledger. Older readers
+/// stop after cross references and can still read all live collection roots.
+const PAGED_RETIRED_TREES_MAGIC: &[u8; 4] = b"RDR1";
+
+pub fn encode_native_paged_retired_trees(out: &mut Vec<u8>, roots: &[u32]) -> RdbFileResult<()> {
+    let count = u32::try_from(roots.len())
+        .map_err(|_| RdbFileError::InvalidOperation("too many retired trees".into()))?;
+    out.extend_from_slice(PAGED_RETIRED_TREES_MAGIC);
+    out.extend_from_slice(&count.to_le_bytes());
+    for root in roots {
+        if *root == 0 {
+            return Err(RdbFileError::InvalidOperation(
+                "zero retired tree root".into(),
+            ));
+        }
+        out.extend_from_slice(&root.to_le_bytes());
+    }
+    Ok(())
+}
+
+pub fn decode_native_paged_retired_trees(data: &[u8], pos: &mut usize) -> RdbFileResult<Vec<u32>> {
+    if data.get(*pos..pos.saturating_add(4)) != Some(PAGED_RETIRED_TREES_MAGIC.as_slice()) {
+        return Ok(Vec::new());
+    }
+    *pos += 4;
+    let count = read_native_u32(data, pos, "truncated retired tree count")? as usize;
+    if count > data.len().saturating_sub(*pos) / 4 {
+        return Err(RdbFileError::InvalidOperation(
+            "truncated retired tree roots".into(),
+        ));
+    }
+    let mut roots = Vec::with_capacity(count);
+    let mut seen = std::collections::HashSet::with_capacity(count);
+    for _ in 0..count {
+        let root = read_native_u32(data, pos, "truncated retired tree root")?;
+        if root == 0 || !seen.insert(root) {
+            return Err(RdbFileError::InvalidOperation(
+                "invalid retired tree root".into(),
+            ));
+        }
+        roots.push(root);
+    }
+    Ok(roots)
+}
+
+#[cfg(test)]
+mod paged_retirement_tests {
+    use super::*;
+
+    #[test]
+    fn retirement_extension_accepts_legacy_padding_and_roundtrips() {
+        let mut pos = 0;
+        assert!(decode_native_paged_retired_trees(&[0; 32], &mut pos)
+            .expect("legacy")
+            .is_empty());
+        assert_eq!(pos, 0);
+        let mut bytes = Vec::new();
+        encode_native_paged_retired_trees(&mut bytes, &[70, 90]).expect("encode");
+        bytes.resize(32, 0);
+        assert_eq!(
+            decode_native_paged_retired_trees(&bytes, &mut pos).expect("decode"),
+            [70, 90]
+        );
+        assert_eq!(pos, 16);
+    }
+
+    #[test]
+    fn retirement_extension_rejects_truncation_duplicates_and_zero_roots() {
+        let mut valid = Vec::new();
+        encode_native_paged_retired_trees(&mut valid, &[70, 90]).expect("encode");
+        for length in 4..valid.len() {
+            assert!(decode_native_paged_retired_trees(&valid[..length], &mut 0).is_err());
+        }
+        let mut duplicate = Vec::new();
+        encode_native_paged_retired_trees(&mut duplicate, &[70, 70]).expect("encode duplicate");
+        assert!(decode_native_paged_retired_trees(&duplicate, &mut 0).is_err());
+        valid[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_native_paged_retired_trees(&valid, &mut 0).is_err());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativePagedCrossRef {
     pub source_id: u64,

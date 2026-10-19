@@ -80,6 +80,49 @@ fn unchanged_checkpoint_reuses_the_published_tree_without_growing_the_file() {
 }
 
 #[test]
+fn repeated_changed_checkpoints_reuse_retired_pages() {
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("data.rdb");
+    seed(&path);
+    let store = open(&path);
+    let manager = store.get_collection("rows").expect("rows");
+    let initial_bytes = std::fs::metadata(&path).expect("database file").len();
+    for revision in 1..=24 {
+        let mut entity = manager.get(EntityId::new(1)).expect("seeded row");
+        entity.updated_at += 1;
+        manager.update(entity).expect("same-sized update");
+        store.persist().expect("changed checkpoint");
+        let bytes = std::fs::metadata(&path).expect("database file").len();
+        assert!(
+            bytes <= initial_bytes * 4,
+            "checkpoint {revision} grew a fixed dataset from {initial_bytes} to {bytes} bytes"
+        );
+    }
+    drop(manager);
+    drop(store);
+    let recovered = open(&path);
+    assert_eq!(recovered.get_collection("rows").expect("rows").count(), 400);
+}
+
+#[test]
+fn retired_generations_are_reused_across_restarts() {
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("data.rdb");
+    seed(&path);
+    let initial_bytes = std::fs::metadata(&path).expect("database file").len();
+    for _ in 0..12 {
+        let store = open(&path);
+        let manager = store.get_collection("rows").expect("rows");
+        let mut entity = manager.get(EntityId::new(1)).expect("seeded row");
+        entity.updated_at += 1;
+        manager.update(entity).expect("same-sized update");
+        store.persist().expect("checkpoint before restart");
+        assert!(std::fs::metadata(&path).expect("database file").len() <= initial_bytes * 4);
+        assert_eq!(manager.count(), 400);
+    }
+}
+
+#[test]
 fn checkpoint_retains_the_previously_published_tree_generation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("data.rdb");
@@ -212,4 +255,58 @@ fn failed_checkpoint_preserves_all_previously_committed_rows() {
             vec![Value::text(payload(id))]
         );
     }
+}
+
+#[test]
+fn crash_during_freelist_reuse_preserves_allocator() {
+    const CHILD: &str = "REDDB_TEST_RECLAIM_ALLOCATOR_PATH";
+    let open_pager = |path: &Path| {
+        reddb_server::storage::engine::Pager::open(
+            path,
+            reddb_server::storage::engine::PagerConfig {
+                cache_size: 1,
+                ..Default::default()
+            },
+        )
+        .expect("pager")
+    };
+    if let Some(path) = std::env::var_os(CHILD) {
+        let pager = open_pager(Path::new(&path));
+        for _ in 0..2048 {
+            pager
+                .allocate_page(reddb_server::storage::engine::PageType::BTreeLeaf)
+                .expect("reuse");
+        }
+        std::process::exit(0);
+    }
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("data.rdb");
+    let pager = open_pager(&path);
+    let mut pages = Vec::new();
+    for _ in 0..32 {
+        pages.push(
+            pager
+                .allocate_page(reddb_server::storage::engine::PageType::BTreeLeaf)
+                .expect("allocate")
+                .page_id(),
+        );
+    }
+    pager.sync().expect("seed");
+    for id in pages {
+        pager.free_page(id).expect("free");
+    }
+    pager.sync().expect("publish free list");
+    drop(pager);
+    assert!(
+        std::process::Command::new(std::env::current_exe().expect("self"))
+            .args(["--exact", "crash_during_freelist_reuse_preserves_allocator"])
+            .env(CHILD, &path)
+            .status()
+            .expect("crash child")
+            .success()
+    );
+    let pager = open_pager(&path);
+    pager
+        .allocate_page(reddb_server::storage::engine::PageType::BTreeLeaf)
+        .expect("a crash during page reuse must not destroy the allocator");
 }

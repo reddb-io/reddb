@@ -266,6 +266,7 @@ impl Pager {
             dwb_enabled,
             cache: PageCache::new(config.cache_size),
             freelist: RwLock::new(FreeList::new()),
+            allocation_reused: std::sync::atomic::AtomicBool::new(false),
             header: RwLock::new(DatabaseHeader::default()),
             config,
             header_dirty: Mutex::new(false),
@@ -806,10 +807,11 @@ impl Pager {
         let page_id = {
             let mut freelist = self.freelist_write()?;
             if let Some(id) = freelist.allocate() {
+                self.allocation_reused
+                    .store(true, std::sync::atomic::Ordering::Release);
                 id
             } else if freelist.trunk_head() != 0 {
                 let trunk_id = freelist.trunk_head();
-                drop(freelist);
 
                 let trunk = self.read_page(trunk_id).map_err(|e| match e {
                     PagerError::PageNotFound(_) => {
@@ -818,18 +820,24 @@ impl Pager {
                     other => other,
                 })?;
 
-                let mut freelist = self.freelist_write()?;
                 freelist
                     .load_from_trunk(&trunk)
                     .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {}", e)))?;
-                let id = freelist.allocate().ok_or_else(|| {
-                    PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
-                })?;
-
                 let mut header = self.header_write()?;
                 header.freelist_head = freelist.trunk_head();
                 *self.header_dirty_lock()? = true;
-
+                drop(header);
+                // The consumed trunk itself becomes reusable. Forget its old
+                // allocator role durably before cache eviction can overwrite it.
+                // Keep the allocator locked so another allocator cannot race
+                // ahead of this fence. A failed fence leaves allocation stopped.
+                self.write_header_and_sync()?;
+                self.write_header_and_sync()?;
+                let id = freelist.allocate().ok_or_else(|| {
+                    PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
+                })?;
+                self.allocation_reused
+                    .store(true, std::sync::atomic::Ordering::Release);
                 id
             } else {
                 // No free pages, extend file
@@ -915,6 +923,30 @@ impl Pager {
 
         *self.header_dirty_lock()? = true;
 
+        Ok(())
+    }
+
+    /// Return a fully validated, unpublished tree generation in one allocator
+    /// mutation. Call only after its removal from the manifest is durable.
+    pub(crate) fn free_retired_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        let page_count = self.page_count()?;
+        if pages
+            .iter()
+            .any(|id| *id < FIRST_ALLOCATABLE_PAGE || *id >= page_count)
+        {
+            return Err(PagerError::InvalidDatabase(
+                "invalid retired page range".into(),
+            ));
+        }
+        let mut freelist = self.freelist_write()?;
+        for id in pages {
+            self.cache.remove(*id);
+        }
+        freelist.free_batch(pages);
+        *self.header_dirty_lock()? = true;
         Ok(())
     }
 
@@ -1045,6 +1077,20 @@ impl Pager {
     /// Sync file to disk (fsync)
     pub fn sync(&self) -> Result<(), PagerError> {
         self.flush()?;
+
+        if self
+            .allocation_reused
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            // flush published the current allocator in one slot. Mirror that
+            // ownership before callers publish roots that use reclaimed pages;
+            // recovery through the sibling slot must never allocate them again.
+            if let Err(error) = self.write_header_and_sync() {
+                self.allocation_reused
+                    .store(true, std::sync::atomic::Ordering::Release);
+                return Err(error);
+            }
+        }
 
         let file = self.file_lock()?;
         file.sync_all()?;
@@ -1480,6 +1526,51 @@ mod tests {
         );
 
         drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn sibling_superblock_recovery_does_not_reallocate_live_reused_pages() {
+        let path = temp_db_path("reused-allocator-pair");
+        let pager = Pager::open_default(&path).expect("pager");
+        let mut pages = Vec::new();
+        for _ in 0..32 {
+            pages.push(
+                pager
+                    .allocate_page(PageType::BTreeLeaf)
+                    .expect("allocate")
+                    .page_id(),
+            );
+        }
+        pager.sync().expect("seed");
+        for id in pages {
+            pager.free_page(id).expect("free");
+        }
+        pager.sync().expect("publish free list");
+        let mut live = std::collections::HashSet::new();
+        for _ in 0..8 {
+            let page = pager.allocate_page(PageType::BTreeLeaf).expect("reuse");
+            live.insert(page.page_id());
+            pager
+                .write_page(page.page_id(), page)
+                .expect("write valid page");
+        }
+        pager.sync().expect("publish reused ownership");
+        drop(pager);
+        let selection = reddb_file::select_paged_superblock(&read_zone(&path)).expect("superblock");
+        poke_slot(&path, selection.copy_index, &[0; SUPERBLOCK_SLOT_SIZE]);
+        let recovered = Pager::open_default(&path).expect("sibling recovery");
+        for _ in 0..64 {
+            let id = recovered
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate after recovery")
+                .page_id();
+            assert!(
+                !live.contains(&id),
+                "sibling allocator still considers live page {id} free"
+            );
+        }
+        drop(recovered);
         cleanup(&path);
     }
 

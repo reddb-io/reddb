@@ -1222,7 +1222,9 @@ impl UnifiedStore {
             self.context_index.remove_entity(*entity_id);
             let _ = self.unindex_cross_refs(*entity_id);
         }
-        self.btree_indices.write().remove(name);
+        if let Some(tree) = self.btree_indices.write().remove(name) {
+            self.retire_btree(tree);
+        }
         self.entity_cache.retain(|entity_id, (collection, _)| {
             collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
         });

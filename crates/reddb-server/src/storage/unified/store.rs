@@ -355,6 +355,9 @@ pub struct UnifiedStore {
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
+    /// The immediately previous published trees and any older reader-pinned
+    /// trees. Root identities are persisted with the paged catalog.
+    retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
     /// Cross-structure context index for unified search
     context_index: ContextIndex,
     /// Hot entity cache — sharded bounded LRU for `get_any` lookups.
@@ -402,6 +405,11 @@ pub struct UnifiedStore {
     /// this, aborted physical versions are reopened as committed rows.
     pub(crate) snapshot_manager:
         std::sync::OnceLock<Arc<crate::storage::transaction::snapshot::SnapshotManager>>,
+}
+
+struct RetiredBTree {
+    tree: Arc<BTree>,
+    published: bool,
 }
 
 mod builder;

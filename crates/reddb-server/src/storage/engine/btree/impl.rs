@@ -24,6 +24,7 @@ impl BTree {
     /// Create a new B+ tree using the given pager
     pub fn new(pager: Arc<Pager>) -> Self {
         Self {
+            retirement_pin: Arc::new(()),
             pager,
             root_page_id: RwLock::new(0),
             rightmost_leaf: RwLock::new(None),
@@ -34,6 +35,7 @@ impl BTree {
     /// Create a B+ tree with an existing root
     pub fn with_root(pager: Arc<Pager>, root_page_id: u32) -> Self {
         Self {
+            retirement_pin: Arc::new(()),
             pager,
             root_page_id: RwLock::new(root_page_id),
             rightmost_leaf: RwLock::new(None),
@@ -658,6 +660,7 @@ impl BTree {
         let root_id = self.root_page_id();
         if root_id == 0 {
             return Ok(BTreeCursor {
+                _retirement_pin: Arc::clone(&self.retirement_pin),
                 leaf_page_id: 0,
                 position: 0,
                 pager: self.pager.clone(),
@@ -669,6 +672,7 @@ impl BTree {
         let first_leaf = self.find_first_leaf(root_id)?;
 
         Ok(BTreeCursor {
+            _retirement_pin: Arc::clone(&self.retirement_pin),
             leaf_page_id: first_leaf,
             position: 0,
             pager: self.pager.clone(),
@@ -681,6 +685,7 @@ impl BTree {
         let root_id = self.root_page_id();
         if root_id == 0 {
             return Ok(BTreeCursor {
+                _retirement_pin: Arc::clone(&self.retirement_pin),
                 leaf_page_id: 0,
                 position: 0,
                 pager: self.pager.clone(),
@@ -697,6 +702,7 @@ impl BTree {
         };
 
         Ok(BTreeCursor {
+            _retirement_pin: Arc::clone(&self.retirement_pin),
             leaf_page_id: leaf_id,
             position,
             pager: self.pager.clone(),

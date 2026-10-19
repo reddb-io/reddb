@@ -154,6 +154,8 @@ pub type BTreeResult<T> = Result<T, BTreeError>;
 
 /// B+ Tree cursor for iteration
 pub struct BTreeCursor {
+    /// A cursor can outlive the tree handle that created it.
+    _retirement_pin: Arc<()>,
     /// Current leaf page ID
     leaf_page_id: u32,
     /// Current position within leaf
@@ -264,6 +266,7 @@ impl BTreeCursor {
 
 /// B+ Tree implementation
 pub struct BTree {
+    retirement_pin: Arc<()>,
     /// Pager for page I/O
     pager: Arc<Pager>,
     /// Root page ID (0 = empty tree)
@@ -289,6 +292,9 @@ pub struct BTree {
 
 #[path = "btree/impl.rs"]
 mod btree_impl;
+
+#[path = "btree/reclaim.rs"]
+mod reclaim;
 
 #[path = "btree/lehman_yao.rs"]
 pub mod lehman_yao;

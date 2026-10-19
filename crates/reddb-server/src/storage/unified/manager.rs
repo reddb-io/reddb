@@ -1485,6 +1485,22 @@ impl SegmentManager {
         &self,
         mut visit: impl FnMut(&UnifiedEntity) -> bool,
     ) {
+        self.for_each_entity_source_in_id_order(|_, entity| visit(entity));
+    }
+
+    pub(crate) fn for_each_entity_with_metadata_in_id_order(
+        &self,
+        mut visit: impl FnMut(&UnifiedEntity, Option<Metadata>) -> bool,
+    ) {
+        self.for_each_entity_source_in_id_order(|segment, entity| {
+            visit(entity, segment.get_metadata(entity.id))
+        });
+    }
+
+    fn for_each_entity_source_in_id_order(
+        &self,
+        mut visit: impl FnMut(&GrowingSegment, &UnifiedEntity) -> bool,
+    ) {
         let segments: Vec<_> = {
             let growing = self.growing.read();
             let sealed = self.sealed.read();
@@ -1501,7 +1517,7 @@ impl SegmentManager {
         for (id, source) in order {
             let segment = segments[source].read();
             if let Some(entity) = segment.get(id) {
-                if !visit(entity) {
+                if !visit(&segment, entity) {
                     break;
                 }
             }
