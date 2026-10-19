@@ -416,3 +416,201 @@ fn document_indexes_survive_reused_checkpoints_and_uncheckpointed_wal_recovery()
         vec!["alice", "bob"]
     );
 }
+
+#[test]
+fn malformed_entity_payload_fails_open_instead_of_silently_losing_the_row() {
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("payload.rdb");
+    seed(&path);
+    let root_page = {
+        let store = open(&path);
+        root(&store)
+    };
+    let pager = Arc::new(
+        reddb_server::storage::engine::Pager::open(
+            &path,
+            reddb_server::storage::engine::PagerConfig::default(),
+        )
+        .expect("pager"),
+    );
+    let tree = BTree::with_root(Arc::clone(&pager), root_page);
+    tree.upsert(&1_u64.to_be_bytes(), &[0xff])
+        .expect("checksum-valid page with an invalid entity payload");
+    pager.sync().expect("publish diagnostic damage");
+    drop(tree);
+    drop(pager);
+
+    let damaged = std::fs::read(&path).expect("damaged fixture");
+    let error = UnifiedStore::open(&path)
+        .err()
+        .expect("invalid entity bytes must not become a successfully opened partial collection");
+    assert!(error.to_string().contains("rows"), "{error}");
+    assert_eq!(std::fs::read(&path).expect("preserved fixture"), damaged);
+}
+
+#[test]
+fn malformed_collection_name_fails_open_instead_of_truncating_the_catalog() {
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("catalog.rdb");
+    seed(&path);
+    let pager = reddb_server::storage::engine::Pager::open(
+        &path,
+        reddb_server::storage::engine::PagerConfig::default(),
+    )
+    .expect("pager");
+    let mut page = pager.read_manifest_page().expect("catalog page");
+    let mut payload = Vec::new();
+    reddb_file::encode_native_paged_metadata_header(
+        &mut payload,
+        reddb_file::NativePagedMetadataHeader {
+            format_version: reddb_file::STORE_VERSION_CURRENT,
+            collection_count: 1,
+        },
+    );
+    reddb_file::encode_native_paged_collection_root(&mut payload, "rows", 2);
+    payload[reddb_file::METADATA_HEADER_BYTES + 4] = 0xff;
+    page.content_mut().fill(0);
+    page.content_mut()[..payload.len()].copy_from_slice(&payload);
+    pager.write_page(1, page).expect("write diagnostic damage");
+    pager.sync().expect("sync catalog page");
+    drop(pager);
+
+    let damaged = std::fs::read(&path).expect("damaged fixture");
+    UnifiedStore::open(&path)
+        .err()
+        .expect("a malformed collection root must fail instead of opening an empty catalog");
+    assert_eq!(std::fs::read(&path).expect("preserved fixture"), damaged);
+}
+
+#[test]
+fn existing_unique_index_if_not_exists_does_not_revalidate_legacy_duplicates() {
+    use reddb_server::RedDBRuntime;
+    let rt = RedDBRuntime::in_memory().expect("runtime");
+    rt.execute_query("CREATE TABLE lease_rows (id TEXT, holder TEXT)")
+        .expect("table");
+    rt.execute_query("INSERT INTO lease_rows (id,holder) VALUES ('worker','first')")
+        .expect("row");
+    rt.execute_query("CREATE UNIQUE INDEX idx_lease_rows_id ON lease_rows (id)")
+        .expect("initial index");
+    let store = rt.db().store();
+    let manager = store.get_collection("lease_rows").expect("manager");
+    // Model data retained from an older writer, bypassing today's DML admission.
+    // Reopening deliberately preserves such data instead of discarding rows.
+    let mut duplicate = manager.query_all(|_| true).remove(0);
+    duplicate.id = EntityId::new(100_000);
+    duplicate.set_logical_id(duplicate.id);
+    manager.insert(duplicate).expect("legacy duplicate fixture");
+    let registry = store
+        .get_collection("red_index_registry")
+        .expect("index registry");
+    let before = registry.count();
+    for _ in 0..3 {
+        rt.execute_query("CREATE UNIQUE INDEX IF NOT EXISTS idx_lease_rows_id ON lease_rows (id)")
+            .expect("existing index is a no-op, not a new uniqueness validation");
+    }
+    assert_eq!(
+        registry.count(),
+        before,
+        "no-op DDL must not append registry history"
+    );
+    assert_eq!(manager.count(), 2, "legacy rows must be preserved");
+    assert!(
+        rt.execute_query("CREATE UNIQUE INDEX another_lease_id ON lease_rows (id)")
+            .is_err(),
+        "a genuinely new unique index must still reject duplicate live keys"
+    );
+}
+
+#[test]
+fn catalog_observation_does_not_publish_missing_metadata() {
+    use reddb_server::{PhysicalMetadataFile, RedDBOptions, RedDBRuntime, StorageDeployPreset};
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("catalog.rdb");
+    let rt = RedDBRuntime::with_options(
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile"),
+    )
+    .expect("runtime");
+    rt.execute_query("CREATE TABLE observed_rows (id INT)")
+        .expect("table");
+    rt.execute_query("INSERT INTO observed_rows (id) VALUES (1)")
+        .expect("row");
+    rt.checkpoint().expect("checkpoint");
+    let metadata_paths = [
+        PhysicalMetadataFile::metadata_path_for(&path),
+        PhysicalMetadataFile::metadata_binary_path_for(&path),
+    ];
+    for metadata_path in &metadata_paths {
+        if metadata_path.exists() {
+            std::fs::remove_file(metadata_path).expect("remove fixture sidecar");
+        }
+    }
+    let before = std::fs::read(&path).expect("published database");
+    let snapshot = rt.catalog();
+    assert!(snapshot
+        .collections
+        .iter()
+        .any(|collection| collection.name == "observed_rows"));
+    assert!(
+        metadata_paths.iter().all(|path| !path.exists()),
+        "catalog reads must not recreate metadata sidecars"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("observed database"),
+        before,
+        "catalog reads must not publish native artifacts"
+    );
+}
+
+#[test]
+fn metadata_only_health_detects_artifact_descriptor_drift() {
+    use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+    let directory = tempfile::tempdir().expect("temporary database");
+    let rt = RedDBRuntime::with_options(
+        RedDBOptions::persistent(directory.path().join("health.rdb"))
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile"),
+    )
+    .expect("runtime");
+    rt.execute_query("CREATE TABLE artifact_rows (body TEXT)")
+        .expect("table");
+    rt.execute_query("INSERT INTO artifact_rows (body) VALUES ('searchable text')")
+        .expect("row");
+    rt.checkpoint().expect("checkpoint");
+    let db = rt.db();
+    let before = db.health();
+    assert_eq!(
+        before
+            .diagnostics
+            .get("native_vector_artifacts.validation_scope")
+            .map(String::as_str),
+        Some("metadata-only")
+    );
+    assert!(!before
+        .issues
+        .iter()
+        .any(|issue| issue.component == "native_vector_artifacts"));
+    let store = db.store();
+    let mut header = store.physical_file_header().expect("header");
+    let mut registry = store
+        .read_native_registry_summary(header.registry_page)
+        .expect("registry");
+    assert!(
+        !registry.vector_artifacts.is_empty(),
+        "fixture must publish artifacts"
+    );
+    registry.vector_artifacts[0].checksum ^= 1;
+    let (page, checksum) = store
+        .write_native_registry_summary(&registry, Some(header.registry_page))
+        .expect("alter fixture descriptor");
+    header.registry_page = page;
+    header.registry_checksum = checksum;
+    store.update_physical_file_header(header).expect("header");
+    let after = db.health();
+    assert!(after
+        .issues
+        .iter()
+        .any(|issue| issue.component == "native_vector_artifacts"
+            && issue.message.contains("descriptors diverge")));
+}

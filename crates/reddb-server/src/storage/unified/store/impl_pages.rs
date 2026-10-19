@@ -965,78 +965,79 @@ impl UnifiedStore {
 
                 // Read collection names and their B-tree root pages
                 for _ in 0..collection_count {
-                    if let Ok(root) =
-                        reddb_file::decode_native_paged_collection_root(content, &mut pos)
-                    {
-                        // Root page ID for this collection's B-tree
-                        let root_page = root.root_page;
-                        let name = root.collection;
+                    let root = reddb_file::decode_native_paged_collection_root(content, &mut pos)
+                        .map_err(|err| page_integrity(1, None, err.to_string()))?;
+                    // Root page ID for this collection's B-tree
+                    let root_page = root.root_page;
+                    let name = root.collection;
 
-                        // Hydrate the collection in memory only. Loading must
-                        // not emit WAL entries or rewrite the on-disk registry
-                        // before the existing B-tree roots are attached.
-                        let _ = self.create_collection_in_memory(&name);
+                    // Hydrate the collection in memory only. Loading must
+                    // not emit WAL entries or rewrite the on-disk registry
+                    // before the existing B-tree roots are attached.
+                    let _ = self.create_collection_in_memory(&name);
 
-                        // Load B-tree with root page if it exists
-                        if root_page > 0 {
-                            let btree = BTree::with_root(Arc::clone(pager), root_page);
+                    // Load B-tree with root page if it exists
+                    if root_page > 0 {
+                        let btree = BTree::with_root(Arc::clone(pager), root_page);
 
-                            // Load all entities from B-tree into the collection
-                            let mut cursor = btree.cursor_first().map_err(|err| {
+                        // Load all entities from B-tree into the collection
+                        let mut cursor = btree.cursor_first().map_err(|err| {
+                            page_integrity(root_page, Some(name.clone()), err.to_string())
+                        })?;
+                        let manager = self.get_collection(&name);
+                        loop {
+                            let next = cursor.next().map_err(|err| {
                                 page_integrity(root_page, Some(name.clone()), err.to_string())
                             })?;
-                            let manager = self.get_collection(&name);
-                            loop {
-                                let next = cursor.next().map_err(|err| {
-                                    page_integrity(root_page, Some(name.clone()), err.to_string())
-                                })?;
-                                let Some((key, value)) = next else {
-                                    break;
-                                };
-                                // Deserialize entity from value bytes
-                                if let Ok((entity, metadata)) =
-                                    Self::deserialize_entity_record(&value, self.format_version())
-                                {
-                                    if let Some(m) = &manager {
-                                        let id = entity.id;
-                                        if let EntityKind::TableRow { row_id, .. } = &entity.kind {
-                                            m.register_row_id(*row_id);
-                                        }
-                                        self.context_index.index_entity(&name, &entity);
-                                        m.restore_snapshot_entity(entity.clone())?;
-                                        if let Some(metadata) = metadata {
-                                            let _ = m.set_metadata(id, metadata);
-                                        }
-                                        self.register_entity_id(id);
-                                        if self.config.auto_index_refs {
-                                            self.index_cross_refs(&entity, &name)?;
-                                        }
-                                    }
+                            let Some((key, value)) = next else {
+                                break;
+                            };
+                            // Deserialize entity from value bytes
+                            let (entity, metadata) =
+                                Self::deserialize_entity_record(&value, self.format_version())
+                                    .map_err(|err| {
+                                        page_integrity(
+                                            root_page,
+                                            Some(name.clone()),
+                                            err.to_string(),
+                                        )
+                                    })?;
+                            if let Some(m) = &manager {
+                                let id = entity.id;
+                                if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+                                    m.register_row_id(*row_id);
                                 }
-                            }
-
-                            // Store the B-tree for future lookups
-                            self.btree_indices
-                                .write()
-                                .insert(name.clone(), Arc::new(btree));
-                            if format_version == STORE_VERSION_V11 {
-                                if let Some(manager) = &manager {
-                                    self.checkpoint_versions.write().insert(
-                                        name,
-                                        CheckpointVersion {
-                                            manager: Arc::downgrade(manager),
-                                            segments: manager.checkpoint_revisions(),
-                                            aborted_revision: 0,
-                                            aborted: Arc::default(),
-                                            pending_vault: Arc::default(),
-                                            format_version,
-                                        },
-                                    );
+                                self.context_index.index_entity(&name, &entity);
+                                m.restore_snapshot_entity(entity.clone())?;
+                                if let Some(metadata) = metadata {
+                                    let _ = m.set_metadata(id, metadata);
+                                }
+                                self.register_entity_id(id);
+                                if self.config.auto_index_refs {
+                                    self.index_cross_refs(&entity, &name)?;
                                 }
                             }
                         }
-                    } else {
-                        break;
+
+                        // Store the B-tree for future lookups
+                        self.btree_indices
+                            .write()
+                            .insert(name.clone(), Arc::new(btree));
+                        if format_version == STORE_VERSION_V11 {
+                            if let Some(manager) = &manager {
+                                self.checkpoint_versions.write().insert(
+                                    name,
+                                    CheckpointVersion {
+                                        manager: Arc::downgrade(manager),
+                                        segments: manager.checkpoint_revisions(),
+                                        aborted_revision: 0,
+                                        aborted: Arc::default(),
+                                        pending_vault: Arc::default(),
+                                        format_version,
+                                    },
+                                );
+                            }
+                        }
                     }
                 }
 

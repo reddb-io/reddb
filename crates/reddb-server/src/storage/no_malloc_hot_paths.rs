@@ -775,3 +775,85 @@ fn row_topology_lock_reuse_does_not_allocate() {
     );
     assert_eq!(count.deallocs, 0);
 }
+
+#[test]
+fn catalog_snapshot_allocations_do_not_scale_with_collection_rows() {
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    let db = runtime.db();
+    let store = db.store();
+    store
+        .create_collection("catalog_payloads")
+        .expect("collection");
+    let manager = store.get_collection("catalog_payloads").expect("manager");
+    let insert = |id: u64| {
+        manager
+            .insert(UnifiedEntity::table_row(
+                EntityId::new(100_000 + id),
+                "catalog_payloads",
+                id,
+                (0..64).map(reddb_types::Value::Integer).collect(),
+            ))
+            .expect("row");
+    };
+    for id in 0..100 {
+        insert(id);
+    }
+    let (small, baseline) = measure_allocations(|| db.catalog_snapshot());
+    assert_eq!(small.stats_by_collection["catalog_payloads"].entities, 100);
+    for id in 100..2_000 {
+        insert(id);
+    }
+    let (large, measured) = measure_allocations(|| db.catalog_snapshot());
+    assert_eq!(
+        large.stats_by_collection["catalog_payloads"].entities,
+        2_000
+    );
+    assert_eq!(large.stats_by_collection["catalog_payloads"].cross_refs, 0);
+    assert!(
+        measured.allocs <= baseline.allocs + 128,
+        "catalog observation must allocate by collection count, not payload rows: {baseline:?} -> {measured:?}"
+    );
+}
+
+#[test]
+fn health_observation_does_not_rebuild_artifacts_from_collection_rows() {
+    use crate::{RedDBOptions, StorageDeployPreset};
+    let directory = tempfile::tempdir().expect("temporary database");
+    let runtime = crate::RedDBRuntime::with_options(
+        RedDBOptions::persistent(directory.path().join("health.rdb"))
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile"),
+    )
+    .expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE health_payloads (value INT)")
+        .expect("table");
+    let db = runtime.db();
+    let manager = db
+        .store()
+        .get_collection("health_payloads")
+        .expect("manager");
+    let insert = |id: u64| {
+        manager
+            .insert(UnifiedEntity::table_row(
+                EntityId::new(100_000 + id),
+                "health_payloads",
+                id,
+                (0..64).map(reddb_types::Value::Integer).collect(),
+            ))
+            .expect("row");
+    };
+    for id in 0..100 {
+        insert(id);
+    }
+    runtime.checkpoint().expect("published metadata");
+    let (_, baseline) = measure_allocations(|| db.health());
+    for id in 100..2_000 {
+        insert(id);
+    }
+    let (_, measured) = measure_allocations(|| db.health());
+    assert!(
+        measured.allocs <= baseline.allocs + 128,
+        "health observation must not rebuild artifacts from payload rows: {baseline:?} -> {measured:?}"
+    );
+}
