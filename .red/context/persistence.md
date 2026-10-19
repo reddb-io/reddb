@@ -29,15 +29,21 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 
 Paged checkpoints reuse unchanged collection trees using volatile segment mutation
 revisions and manager identity. Aborted transaction visibility, pending vault
-versions and record format also participate in reuse admission. WAL replay and
-every entity or metadata mutation invalidate the corresponding generation. New
-mutation paths must advance the segment revision before exposing mutable data.
+versions and record format also participate in reuse admission.
+Visibility changes outside a collection are checked against borrowed row headers
+without serializing its payloads. Each checkpoint shares one frozen aborted-XID
+set across collections for both reuse admission and row normalization.
+WAL replay and every entity or metadata mutation invalidate the corresponding
+generation. New mutation paths must advance the segment revision before exposing mutable data.
 Cached generations are accepted only after durable catalog publication; current
 format roots loaded from disk are seeded before WAL replay. Physical metadata
 fingerprints additionally retain their existing statistics seed. The caches do
 not change persistent formats or release the checkpoint writer fence. A first
 metadata fingerprint or a changed collection still requires work proportional
 to that collection; unchanged history is not serialized on every checkpoint.
+Fingerprint scans sort compact entity ID/source references and borrow one row at
+a time. They preserve the existing hash order and values without materializing
+a second collection of payloads; source segments remain pinned for the scan.
 
 ## Fault model & integrity tooling
 

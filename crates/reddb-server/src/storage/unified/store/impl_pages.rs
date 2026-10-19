@@ -7,6 +7,37 @@ thread_local! {
     static CHECKPOINT_SERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+fn checkpoint_visibility_matches(
+    previous: &CheckpointVersion,
+    current: &CheckpointVersion,
+    manager: &SegmentManager,
+) -> bool {
+    if previous.aborted_revision == current.aborted_revision
+        && previous.pending_vault == current.pending_vault
+    {
+        return true;
+    }
+    // A rollback or vault publication in another collection must not force
+    // payload serialization here. Only the persisted visibility matters.
+    let mut matches = true;
+    manager.for_each_entity(|entity| {
+        let skipped = |version: &CheckpointVersion| {
+            version.pending_vault.contains(&entity.id)
+                || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
+                    && version.aborted.contains(&entity.xmin))
+        };
+        let previous_skipped = skipped(previous);
+        let current_skipped = skipped(current);
+        matches = previous_skipped == current_skipped
+            && (current_skipped
+                || !matches!(entity.data, EntityData::Row(_))
+                || previous.aborted.contains(&entity.xmax)
+                    == current.aborted.contains(&entity.xmax));
+        matches
+    });
+    matches
+}
+
 // ── Pager-meta overflow chain (gh-477) ──────────────────────────────────────
 // When the serialized collection registry + cross-refs exceed a single page,
 // page 1 carries a native metadata-overflow header pointing at an overflow chain of
@@ -759,6 +790,7 @@ impl UnifiedStore {
                                             manager: Arc::downgrade(manager),
                                             segments: manager.checkpoint_revisions(),
                                             aborted_revision: 0,
+                                            aborted: Arc::default(),
                                             pending_vault: Arc::default(),
                                             format_version,
                                         },
@@ -946,15 +978,17 @@ impl UnifiedStore {
         let previous_versions = self.checkpoint_versions.read();
         let mut checkpoint_versions = HashMap::with_capacity(collections.len());
         let pending_vault = Arc::new(pending_vault_versions.clone());
-        let aborted_revision = self
-            .snapshot_manager
-            .get()
-            .map_or(0, |manager| manager.checkpoint_aborted_revision());
+        let (aborted_revision, aborted) = self.snapshot_manager.get().map_or_else(
+            || (0, Default::default()),
+            |manager| manager.checkpoint_aborted_state(),
+        );
+        let aborted = Arc::new(aborted);
         for (name, manager) in collections.iter() {
             let version = CheckpointVersion {
                 manager: Arc::downgrade(manager),
                 segments: manager.checkpoint_revisions(),
                 aborted_revision,
+                aborted: Arc::clone(&aborted),
                 pending_vault: Arc::clone(&pending_vault),
                 format_version: self.format_version(),
             };
@@ -963,9 +997,8 @@ impl UnifiedStore {
             {
                 if previous.manager.ptr_eq(&version.manager)
                     && previous.segments == version.segments
-                    && previous.aborted_revision == version.aborted_revision
-                    && previous.pending_vault == version.pending_vault
                     && previous.format_version == version.format_version
+                    && checkpoint_visibility_matches(previous, &version, manager)
                 {
                     collection_roots.push((name.clone(), tree.root_page_id()));
                     rebuilt_indices.insert(name.clone(), Arc::clone(tree));
@@ -980,22 +1013,14 @@ impl UnifiedStore {
                 CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
                 if pending_vault_versions.contains(&entity.id)
                     || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                        && self
-                            .snapshot_manager
-                            .get()
-                            .is_some_and(|m| m.is_aborted(entity.xmin)))
+                        && aborted.contains(&entity.xmin))
                 {
                     return true;
                 }
                 // Borrow ordinary rows instead of materializing a second full
                 // collection of cloned entities alongside the encoded records.
                 let mut normalized = std::borrow::Cow::Borrowed(entity);
-                if matches!(entity.data, EntityData::Row(_))
-                    && self
-                        .snapshot_manager
-                        .get()
-                        .is_some_and(|m| m.is_aborted(entity.xmax))
-                {
+                if matches!(entity.data, EntityData::Row(_)) && aborted.contains(&entity.xmax) {
                     normalized.to_mut().xmax = 0;
                 }
                 records.push((
@@ -1491,6 +1516,38 @@ mod checkpoint_work_tests {
     }
 
     #[test]
+    fn unrelated_visibility_changes_do_not_serialize_collection_rows() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(&directory.path().join("data.rdb")).expect("paged store");
+        let snapshots = Arc::new(crate::storage::transaction::snapshot::SnapshotManager::new());
+        assert!(store.snapshot_manager.set(Arc::clone(&snapshots)).is_ok());
+        store.create_collection("rows").expect("collection");
+        for id in 1..=40 {
+            store.insert("rows", row(id, id as i64)).expect("seed");
+        }
+        store.persist().expect("initial checkpoint");
+        let unrelated = snapshots.begin();
+        snapshots.rollback(unrelated);
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store.persist().expect("unrelated rollback checkpoint");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+
+        store
+            .pending_vault_versions
+            .write()
+            .insert(EntityId::new(100));
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store.persist().expect("unrelated vault checkpoint");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+        store.pending_vault_versions.write().clear();
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        store
+            .persist()
+            .expect("unrelated vault publication checkpoint");
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+    }
+
+    #[test]
     fn rollback_invalidates_reuse_without_a_segment_mutation() {
         let directory = tempfile::tempdir().expect("temporary store");
         let path = directory.path().join("data.rdb");
@@ -1508,6 +1565,27 @@ mod checkpoint_work_tests {
         drop(store);
         let recovered = UnifiedStore::open(&path).expect("recover");
         assert_eq!(recovered.get_collection("rows").expect("rows").count(), 0);
+    }
+
+    #[test]
+    fn rolled_back_delete_is_normalized_without_a_segment_mutation() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        let snapshots = Arc::new(crate::storage::transaction::snapshot::SnapshotManager::new());
+        assert!(store.snapshot_manager.set(Arc::clone(&snapshots)).is_ok());
+        store.create_collection("rows").expect("collection");
+        let xid = snapshots.begin();
+        let mut deleted = row(1, 1);
+        deleted.xmax = xid;
+        store.insert("rows", deleted).expect("version");
+        store.persist().expect("before rollback");
+        snapshots.rollback(xid);
+        store.persist().expect("after rollback");
+        drop(store);
+        let recovered = UnifiedStore::open(&path).expect("recover");
+        let manager = recovered.get_collection("rows").expect("rows");
+        assert_eq!(manager.get(EntityId::new(1)).expect("retained row").xmax, 0);
     }
 
     #[test]

@@ -457,8 +457,12 @@ impl SnapshotManager {
         self.state.read().aborted.contains(&xid)
     }
 
-    pub(crate) fn checkpoint_aborted_revision(&self) -> u64 {
-        self.aborted_revision.load(Ordering::Acquire)
+    pub(crate) fn checkpoint_aborted_state(&self) -> (u64, HashSet<Xid>) {
+        let state = self.state.read();
+        (
+            self.aborted_revision.load(Ordering::Acquire),
+            state.aborted.clone(),
+        )
     }
 
     /// Is this xid still active?
