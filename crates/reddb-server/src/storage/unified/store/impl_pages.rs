@@ -2,9 +2,69 @@ use super::*;
 use crate::storage::unified::entity_cache::EntityCache;
 use parking_lot::RwLock;
 
+const CHECKPOINT_BATCH_BYTES: usize = 1024 * 1024;
+const CHECKPOINT_BATCH_ROWS: usize = 512;
+
+/// Keep encoded payload memory proportional to a small batch, not a collection.
+/// A single large value retains the existing B-tree value-size contract.
+struct CheckpointTreeBuilder {
+    tree: Arc<BTree>,
+    records: Vec<(Vec<u8>, Vec<u8>)>,
+    bytes: usize,
+}
+
+impl CheckpointTreeBuilder {
+    fn new(pager: &Arc<Pager>) -> Self {
+        Self {
+            tree: Arc::new(BTree::new(Arc::clone(pager))),
+            records: Vec::new(),
+            bytes: 0,
+        }
+    }
+
+    fn push(&mut self, record: (Vec<u8>, Vec<u8>)) -> Result<(), StoreError> {
+        let bytes = record.0.len() + record.1.len();
+        if !self.records.is_empty()
+            && (self.bytes.saturating_add(bytes) > CHECKPOINT_BATCH_BYTES
+                || self.records.len() >= CHECKPOINT_BATCH_ROWS)
+        {
+            self.flush()?;
+        }
+        self.bytes += bytes;
+        self.records.push(record);
+        #[cfg(test)]
+        CHECKPOINT_BUFFERED_BYTES.with(|peak| peak.set(peak.get().max(self.bytes)));
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), StoreError> {
+        self.tree
+            .bulk_insert_sorted(&self.records)
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        self.records.clear();
+        self.bytes = 0;
+        Ok(())
+    }
+
+    fn copy_prefix(&mut self, previous: &BTree, count: usize) -> Result<(), StoreError> {
+        let mut cursor = previous
+            .cursor_first()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        for _ in 0..count {
+            let record = cursor
+                .next()
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                .ok_or_else(|| StoreError::Serialization("checkpoint prefix disappeared".into()))?;
+            self.push(record)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static CHECKPOINT_SERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CHECKPOINT_BUFFERED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn checkpoint_visibility_matches(
@@ -62,26 +122,6 @@ const META_V3_PAGE1_HEADER: usize = reddb_file::METADATA_OVERFLOW_HEADER_BYTES;
 const META_V3_OVERFLOW_HEADER: usize = reddb_file::METADATA_OVERFLOW_CONTINUATION_HEADER_BYTES;
 const META_V3_FIRST_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_PAGE1_HEADER;
 const META_V3_OVERFLOW_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_OVERFLOW_HEADER;
-
-fn tree_matches_records(tree: &BTree, records: &[(Vec<u8>, Vec<u8>)]) -> Result<bool, StoreError> {
-    let mut cursor = tree
-        .cursor_first()
-        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-    for record in records {
-        if cursor
-            .next()
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
-            .as_ref()
-            != Some(record)
-        {
-            return Ok(false);
-        }
-    }
-    Ok(cursor
-        .next()
-        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
-        .is_none())
-}
 
 fn existing_overflow_chain(pager: &Pager) -> Result<Vec<u32>, PagerError> {
     let cs = crate::storage::engine::HEADER_SIZE;
@@ -312,6 +352,152 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 impl UnifiedStore {
+    /// Compare and encode one borrowed row at a time. Begin a new tree only at
+    /// the first difference, copying its already-verified prefix in bounded
+    /// batches. Unchanged trees require no replacement allocation.
+    fn checkpoint_tree(
+        &self,
+        pager: &Arc<Pager>,
+        manager: &SegmentManager,
+        previous: Option<&Arc<BTree>>,
+        mut encode: impl FnMut(&UnifiedEntity, Option<Metadata>) -> Option<Vec<u8>>,
+    ) -> Result<Arc<BTree>, StoreError> {
+        let mut cursor = previous
+            .map(|tree| tree.cursor_first())
+            .transpose()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        let mut matched = 0;
+        let mut builder = None;
+        let mut failure = None;
+        manager.for_each_entity_with_metadata_in_id_order(|entity, metadata| {
+            let Some(value) = encode(entity, metadata) else {
+                return true;
+            };
+            let record = (entity.id.raw().to_be_bytes().to_vec(), value);
+            let result = (|| {
+                if builder.is_none() {
+                    if let Some(cursor) = cursor.as_mut() {
+                        if cursor
+                            .next()
+                            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                            .as_ref()
+                            == Some(&record)
+                        {
+                            matched += 1;
+                            return Ok(());
+                        }
+                    }
+                    let mut replacement = CheckpointTreeBuilder::new(pager);
+                    if let Some(previous) = previous {
+                        replacement.copy_prefix(previous, matched)?;
+                    }
+                    builder = Some(replacement);
+                }
+                builder
+                    .as_mut()
+                    .expect("replacement initialized")
+                    .push(record)
+            })();
+            if let Err(error) = result {
+                failure = Some(error);
+                return false;
+            }
+            true
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if builder.is_none() {
+            if let (Some(previous), Some(cursor)) = (previous, cursor.as_mut()) {
+                if cursor
+                    .next()
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                    .is_none()
+                {
+                    return Ok(Arc::clone(previous));
+                }
+            }
+            let mut replacement = CheckpointTreeBuilder::new(pager);
+            if let Some(previous) = previous {
+                replacement.copy_prefix(previous, matched)?;
+            }
+            builder = Some(replacement);
+        }
+        let mut builder = builder.expect("replacement or reused tree");
+        builder.flush()?;
+        Ok(builder.tree)
+    }
+
+    /// Publication first, reuse second. The immediately preceding generation
+    /// stays in the durable ledger for one more publication. Cursors and cloned
+    /// tree handles defer retirement further without holding the writer fence.
+    fn publish_reclaimable_trees(
+        &self,
+        pager: &Pager,
+        metadata: &mut Vec<u8>,
+        live: &HashMap<String, Arc<BTree>>,
+    ) -> Result<(), StoreError> {
+        let mut retired = self.retired_btrees.lock();
+        let mut roots = Vec::new();
+        let mut reclaim = Vec::new();
+        let mut remove = std::collections::HashSet::new();
+        for (index, entry) in retired.iter().enumerate() {
+            if live.values().any(|tree| Arc::ptr_eq(tree, &entry.tree)) {
+                remove.insert(index);
+                continue;
+            }
+            if entry.published
+                && Arc::strong_count(&entry.tree) == 1
+                && !entry.tree.has_retirement_readers()
+            {
+                reclaim.extend(
+                    entry
+                        .tree
+                        .retired_pages()
+                        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?,
+                );
+                remove.insert(index);
+            } else if entry.tree.root_page_id() != 0 {
+                roots.push(entry.tree.root_page_id());
+            }
+        }
+        roots.sort_unstable();
+        roots.dedup();
+        reddb_file::encode_native_paged_retired_trees(metadata, &roots)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        // Do not mutate retirement state or the free list before both the new
+        // children and the manifest that forgets old roots have been synced.
+        publish_paged_metadata(pager, metadata)
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        let mut index = 0;
+        retired.retain_mut(|entry| {
+            let keep = !remove.contains(&index);
+            entry.published = true;
+            index += 1;
+            keep
+        });
+        if !reclaim.is_empty() {
+            pager
+                .free_retired_pages(&reclaim)
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            pager
+                .sync()
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn retire_btree(&self, tree: Arc<BTree>) {
+        let mut retired = self.retired_btrees.lock();
+        if tree.root_page_id() != 0 && !retired.iter().any(|entry| Arc::ptr_eq(&entry.tree, &tree))
+        {
+            retired.push(RetiredBTree {
+                tree,
+                published: false,
+            });
+        }
+    }
+
     /// A completed inline insert already made this tree match its manager.
     /// Advance the reuse proof only for that single, fenced mutation. Any
     /// untracked edit or segment publication keeps the full comparison path.
@@ -394,6 +580,7 @@ impl UnifiedStore {
     }
 
     pub(crate) fn flush_paged_registry(&self) -> Result<(), StoreError> {
+        let _vault_guard = self.vault_publication_lock.lock();
         let Some(pager) = &self.pager else {
             return Ok(());
         };
@@ -455,8 +642,7 @@ impl UnifiedStore {
             }
         }
 
-        publish_paged_metadata(pager, &meta_data)
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        self.publish_reclaimable_trees(pager, &mut meta_data, &self.btree_indices.read())?;
 
         Ok(())
     }
@@ -515,6 +701,7 @@ impl UnifiedStore {
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
             checkpoint_versions: RwLock::new(HashMap::new()),
+            retired_btrees: parking_lot::Mutex::new(Vec::new()),
             context_index: ContextIndex::new(),
             entity_cache: EntityCache::new(),
             graph_label_index: RwLock::new(HashMap::new()),
@@ -598,6 +785,7 @@ impl UnifiedStore {
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
             checkpoint_versions: RwLock::new(HashMap::new()),
+            retired_btrees: parking_lot::Mutex::new(Vec::new()),
             context_index: ContextIndex::new(),
             entity_cache: EntityCache::new(),
             graph_label_index: RwLock::new(HashMap::new()),
@@ -632,37 +820,23 @@ impl UnifiedStore {
         let collections = self.collections.read();
         let mut indices = self.btree_indices.write();
         for (name, manager) in collections.iter() {
-            let mut records: Vec<_> = manager
-                .query_all(|_| true)
-                .into_iter()
-                .map(|entity| {
-                    let metadata = manager.get_metadata(entity.id);
-                    (
-                        entity.id.raw().to_be_bytes().to_vec(),
-                        Self::serialize_entity_record(
-                            &entity,
-                            metadata.as_ref(),
-                            self.format_version(),
-                        ),
-                    )
-                })
-                .collect();
-            records.sort_by(|left, right| left.0.cmp(&right.0));
-            let matches = if let Some(tree) = indices.get(name) {
-                tree_matches_records(tree, &records)?
-            } else {
-                records.is_empty()
-            };
-            if matches {
+            let tree =
+                self.checkpoint_tree(pager, manager, indices.get(name), |entity, metadata| {
+                    Some(Self::serialize_entity_record(
+                        entity,
+                        metadata.as_ref(),
+                        self.format_version(),
+                    ))
+                })?;
+            if indices
+                .get(name)
+                .is_some_and(|previous| Arc::ptr_eq(previous, &tree))
+            {
                 continue;
             }
-            let tree = Arc::new(BTree::new(Arc::clone(pager)));
-            tree.bulk_insert_sorted(&records).map_err(|e| {
-                StoreError::Io(std::io::Error::other(format!(
-                    "WAL tree rebuild for '{name}': {e}"
-                )))
-            })?;
-            indices.insert(name.clone(), tree);
+            if let Some(previous) = indices.insert(name.clone(), tree) {
+                self.retire_btree(previous);
+            }
             self.mark_paged_registry_dirty();
         }
         drop(indices);
@@ -912,6 +1086,32 @@ impl UnifiedStore {
                         }
                     }
                 }
+                let retired = reddb_file::decode_native_paged_retired_trees(content, &mut pos)
+                    .map_err(|e| StoreError::Serialization(e.to_string()))?;
+                let live_roots: std::collections::HashSet<_> = self
+                    .btree_indices
+                    .read()
+                    .values()
+                    .map(|tree| tree.root_page_id())
+                    .collect();
+                for root in retired {
+                    if live_roots.contains(&root)
+                        || root
+                            >= pager
+                                .page_count()
+                                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                    {
+                        return Err(page_integrity(
+                            root,
+                            None,
+                            "retired root aliases a live or missing page",
+                        ));
+                    }
+                    self.retired_btrees.lock().push(RetiredBTree {
+                        tree: Arc::new(BTree::with_root(Arc::clone(pager), root)),
+                        published: true,
+                    });
+                }
             }
         }
 
@@ -1070,58 +1270,30 @@ impl UnifiedStore {
                 }
             }
             checkpoint_versions.insert(name.clone(), version);
-            let mut records = Vec::new();
-            manager.for_each_entity_with_metadata(|entity, metadata| {
-                #[cfg(test)]
-                CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
-                if pending_vault_versions.contains(&entity.id)
-                    || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                        && aborted.contains(&entity.xmin))
-                {
-                    return true;
-                }
-                // Borrow ordinary rows instead of materializing a second full
-                // collection of cloned entities alongside the encoded records.
-                let mut normalized = std::borrow::Cow::Borrowed(entity);
-                if matches!(entity.data, EntityData::Row(_)) && aborted.contains(&entity.xmax) {
-                    normalized.to_mut().xmax = 0;
-                }
-                records.push((
-                    entity.id.raw().to_be_bytes().to_vec(),
-                    Self::serialize_entity_record(
+            let btree = self.checkpoint_tree(
+                pager,
+                manager,
+                btree_indices.get(name),
+                |entity, metadata| {
+                    #[cfg(test)]
+                    CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
+                    if pending_vault_versions.contains(&entity.id)
+                        || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
+                            && aborted.contains(&entity.xmin))
+                    {
+                        return None;
+                    }
+                    let mut normalized = std::borrow::Cow::Borrowed(entity);
+                    if matches!(entity.data, EntityData::Row(_)) && aborted.contains(&entity.xmax) {
+                        normalized.to_mut().xmax = 0;
+                    }
+                    Some(Self::serialize_entity_record(
                         &normalized,
                         metadata.as_ref(),
                         self.format_version(),
-                    ),
-                ));
-                true
-            });
-            records.sort_by(|left, right| left.0.cmp(&right.0));
-
-            if let Some(tree) = btree_indices.get(name) {
-                if tree_matches_records(tree, &records)? {
-                    collection_roots.push((name.clone(), tree.root_page_id()));
-                    rebuilt_indices.insert(name.clone(), Arc::clone(tree));
-                    continue;
-                }
-            }
-
-            let btree = Arc::new(BTree::new(Arc::clone(pager)));
-
-            // Slice G (#704): no per-row skip. Oversized values are
-            // spilled through the slice-E write ladder inside
-            // `bulk_insert_sorted` (inline → compressed inline →
-            // overflow chain). The only rejection is the hard
-            // `MAX_VALUE_SIZE` (256 MiB) ceiling, which surfaces as
-            // `ValueTooLarge` from the bulk path after the rest of
-            // the batch has landed.
-            if !records.is_empty() {
-                btree.bulk_insert_sorted(&records).map_err(|e| {
-                    StoreError::Io(std::io::Error::other(format!(
-                        "B-tree bulk rebuild error for '{name}': {e}"
-                    )))
-                })?;
-            }
+                    ))
+                },
+            )?;
 
             collection_roots.push((name.clone(), btree.root_page_id()));
             rebuilt_indices.insert(name.clone(), btree);
@@ -1162,11 +1334,18 @@ impl UnifiedStore {
             }
         }
 
-        publish_paged_metadata(pager, &meta_data)
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        for (name, previous) in btree_indices.iter() {
+            if !rebuilt_indices
+                .get(name)
+                .is_some_and(|tree| Arc::ptr_eq(tree, previous))
+            {
+                self.retire_btree(Arc::clone(previous));
+            }
+        }
+        self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices)?;
 
-        // Only the now-durable catalog may replace the live tree handles. Keep
-        // previous tree pages retained for recovery; do not recycle them early.
+        // Only the now-durable catalog may replace the live tree handles. The
+        // previous generation is retained in the manifest retirement ledger.
         *btree_indices = rebuilt_indices;
         drop(previous_versions);
         *self.checkpoint_versions.write() = checkpoint_versions;
@@ -1487,6 +1666,67 @@ fn read_metadata_value(data: &[u8], pos: &mut usize) -> Result<MetadataValue, St
 #[cfg(test)]
 mod checkpoint_work_tests {
     use super::*;
+
+    #[test]
+    fn retired_tree_pages_remain_pinned_by_a_cursor() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(&directory.path().join("data.rdb")).expect("paged store");
+        for id in 1..=100 {
+            store.insert_auto("rows", row(id, 1)).expect("seed");
+        }
+        store.persist().expect("initial checkpoint");
+        let tree = store
+            .btree_indices
+            .read()
+            .get("rows")
+            .cloned()
+            .expect("tree");
+        let mut cursor = tree.cursor_first().expect("cursor");
+        drop(tree);
+        let manager = store.get_collection("rows").expect("rows");
+        for value in 2..=6 {
+            manager.update(row(1, value)).expect("change");
+            store.persist().expect("checkpoint with old reader");
+        }
+        let mut count = 0;
+        while let Some((_, bytes)) = cursor.next().expect("pinned tree must stay readable") {
+            let (entity, _) =
+                UnifiedStore::deserialize_entity_record(&bytes, store.format_version())
+                    .expect("decode");
+            assert_eq!(
+                entity.data.as_row().expect("row").columns,
+                [Value::Integer(1)]
+            );
+            count += 1;
+        }
+        assert_eq!(count, 100);
+        drop(cursor);
+        store.persist().expect("reclaim after reader release");
+        assert!(store.retired_btrees.lock().is_empty());
+    }
+
+    #[test]
+    fn checkpoint_payload_buffer_is_bounded_for_a_large_collection() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(&directory.path().join("data.rdb")).expect("paged store");
+        store.create_collection("rows").expect("collection");
+        let manager = store.get_collection("rows").expect("rows");
+        for id in (1..=1200).rev() {
+            manager
+                .insert(UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "rows",
+                    id,
+                    vec![Value::text("x".repeat(4096))],
+                ))
+                .expect("seed");
+        }
+        CHECKPOINT_BUFFERED_BYTES.with(|peak| peak.set(0));
+        store.persist().expect("bounded checkpoint");
+        assert!(CHECKPOINT_BUFFERED_BYTES.with(|peak| peak.get()) <= CHECKPOINT_BATCH_BYTES);
+        assert!(CHECKPOINT_BUFFERED_BYTES.with(|peak| peak.get()) > 0);
+        assert_eq!(store.get_collection("rows").expect("rows").count(), 1200);
+    }
 
     #[test]
     fn unchanged_checkpoint_does_not_serialize_collection_rows() {

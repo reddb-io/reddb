@@ -54,6 +54,30 @@ visibility changes and versioned rows retain conservative validation. Durable
 replay reconciliation seeds the current raw tree generation before runtime
 visibility normalization is attached.
 
+Changed checkpoints encode ordered borrowed rows in batches capped at 1 MiB or
+512 records (a single larger value keeps the existing value-size contract).
+Comparison with a published tree is streamed; a replacement copies the already
+verified prefix only after the first difference. WAL reconciliation uses the
+same bounded builder, without cloning a whole collection of payloads.
+
+Replaced and dropped trees enter an optional `RDR1` retirement-root extension
+after the paged catalog's cross references, owned by `reddb-file`. The immediately
+preceding published generation and older reader-pinned generations remain in
+that ledger. A later durable publication removes eligible roots before their
+structural and overflow pages enter the free list. Tree handles and cursors pin
+retirement independently; reopening restores retirement roots from the ledger.
+This recycles physical checkpoint copies, not historical MVCC row versions.
+Legacy catalogs without the extension remain readable; older writers ignore it
+and therefore cannot preserve automatic retirement across a downgrade. Failed
+unpublished allocations remain conservative recovery garbage; this mechanism
+does not claim a general orphan-page vacuum of pre-upgrade files.
+
+Free-list trunks consume already-free pages instead of extending the file.
+Before a consumed trunk can be overwritten, its old allocator role is removed
+durably from both superblock copies. A sync that makes reclaimed pages live
+also mirrors allocator ownership, so sibling-superblock recovery cannot hand
+out a live page again.
+
 ## Fault model & integrity tooling
 
 - **Storage fault model** — per [ADR 0074](../adr/0074-storage-fault-model.md), the explicit list of modeled physical faults: torn writes, misdirected writes, bit rot, lost writes, and crash-at-any-point. Each zone (superblock, manifest, WAL region, pages/blocks) has a written detection contract; out-of-model faults are documented as such.

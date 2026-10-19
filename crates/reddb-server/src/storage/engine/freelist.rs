@@ -264,8 +264,14 @@ impl FreeList {
         let mut trunks = Vec::new();
 
         while self.free_pages.len() > threshold {
-            // Allocate a page for the trunk
-            let trunk_page_id = allocate_page();
+            // A trunk is allocator metadata, not live data. Host it in an
+            // already-free page so repeated frees do not append forever.
+            let trunk_page_id = if let Some(id) = self.free_pages.pop() {
+                self.total_free = self.total_free.saturating_sub(1);
+                id
+            } else {
+                allocate_page()
+            };
 
             // Create trunk with current head as next
             let trunk = self.create_trunk(trunk_page_id, self.trunk_head);
@@ -307,6 +313,23 @@ impl Default for FreeList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trunk_publication_does_not_extend_a_file_with_free_pages() {
+        let mut list = FreeList::new();
+        list.free_batch(&[100, 101, 102]);
+        let trunks = list.flush_to_trunks(0, || panic!("must reuse a free page"));
+        assert_eq!(trunks.len(), 1);
+        assert_eq!(trunks[0].page_id(), 102);
+        let mut loaded = FreeList::new();
+        loaded.load_from_trunk(&trunks[0]).expect("load trunk");
+        let mut pages = Vec::new();
+        while let Some(id) = loaded.allocate() {
+            pages.push(id);
+        }
+        pages.sort_unstable();
+        assert_eq!(pages, [100, 101, 102]);
+    }
 
     #[test]
     fn test_freelist_basic() {

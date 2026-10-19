@@ -473,6 +473,7 @@ impl UnifiedStore {
 
     /// Drop a collection
     pub fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
+        let _vault_guard = self.vault_publication_lock.lock();
         let drop = self.prepare_operational_collection_drop(name)?;
         let manager = {
             let mut collections = self.collections.write();
@@ -490,7 +491,9 @@ impl UnifiedStore {
             let _ = self.unindex_cross_refs(*entity_id);
         }
 
-        self.btree_indices.write().remove(name);
+        if let Some(tree) = self.btree_indices.write().remove(name) {
+            self.retire_btree(tree);
+        }
 
         self.entity_cache.retain(|entity_id, (collection, _)| {
             collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)

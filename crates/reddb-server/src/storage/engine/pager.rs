@@ -238,6 +238,9 @@ pub struct Pager {
     cache: PageCache,
     /// Free page list
     freelist: RwLock<FreeList>,
+    /// Reused page ownership must reach both superblock copies before a
+    /// manifest can refer to those pages, including single-slot recovery.
+    allocation_reused: std::sync::atomic::AtomicBool,
     /// Database header
     header: RwLock<DatabaseHeader>,
     /// Configuration
