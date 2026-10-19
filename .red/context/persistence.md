@@ -77,6 +77,9 @@ Before a consumed trunk can be overwritten, its old allocator role is removed
 durably from both superblock copies. A sync that makes reclaimed pages live
 also mirrors allocator ownership, so sibling-superblock recovery cannot hand
 out a live page again.
+If the consumed-trunk fence fails, its pending state survives in memory and
+every allocation retry must complete both durable writes before using the
+loaded free pages.
 
 ## Fault model & integrity tooling
 
