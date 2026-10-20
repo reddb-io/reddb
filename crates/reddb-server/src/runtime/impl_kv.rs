@@ -912,6 +912,7 @@ impl<'a> KvAtomicOps<'a> {
 
     /// Resolve a key using the caller's already-validated collection model.
     /// REST and RQL retain their respective contract checks before entering here.
+    /// Projection runs under a segment read guard and must not re-enter storage.
     pub(crate) fn project_entity<T>(
         &self,
         model: crate::catalog::CollectionModel,

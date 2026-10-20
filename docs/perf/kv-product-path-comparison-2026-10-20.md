@@ -1,5 +1,9 @@
 # KV product-path comparison — 2026-10-20
 
+Follow-up: [REST key-index integration](kv-rest-index-2026-10-20.md) addresses the
+read-path gap below and measures the change with fresh before/after volumes.
+This report retains the original engine revision and observations.
+
 The local diagnostic does **not** demonstrate performance parity with Redis or
 KiviDB. It identifies a concrete RedDB integration gap: REST GET still scans and
 clones the collection, while RQL KV GET uses the physical-key index. The durable
@@ -74,9 +78,11 @@ entire final state is checked after SIGKILL and reopening the same volume.
 RedDB's grouped mode also waits for WAL fsync before completing the operation.
 It improved this capture's p99 but did not materially increase throughput. The
 next investigation should trace mutation serialization and persistence waits.
-The non-versioned replacement path performs delete plus create, and its delete
-port calls the same scanning `get_kv`; these are source-backed candidates to
-profile, not a complete attribution of the measured write latency.
+The non-versioned replacement path performs delete plus create. A subsequent
+call-path review established that ordinary REST PUT uses `KvAtomicOps::delete`,
+which already uses indexed lookup. INCR/CAS use the application delete port,
+whose `get_kv` scans in this revision. Removing that scan must not be assumed
+to fix the measured PUT plateau; persistence waits still need profiling.
 
 KiviDB's native SET response alone is not counted as sync-durable. Its pinned
 configuration accepts `appendfsync always` with a no-effect warning while the
