@@ -591,6 +591,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;
         runtime.rehydrate_declared_column_schemas();
         runtime.rehydrate_runtime_index_registry()?;
+        runtime.rehydrate_kv_tags()?;
         runtime
             .load_probabilistic_state()
             .map_err(|err| RedDBError::Internal(format!("load probabilistic state: {err}")))?;

@@ -212,14 +212,7 @@ impl<'a> KvAtomicOps<'a> {
         if_not_exists: bool,
         mut metadata: Vec<(String, MetadataValue)>,
     ) -> RedDBResult<(bool, crate::storage::EntityId)> {
-        // `if_not_exists` reads the key, decides, then conditionally writes —
-        // a read-modify-write, exactly like `incr`, and it needs the same
-        // per-key lock. Without it two concurrent `PUT ... IF NOT EXISTS` on
-        // one key can both observe "absent" and both report having inserted,
-        // which defeats the only thing the flag exists to guarantee (it is
-        // the primitive callers build locks and once-only initialisation on).
-        // Unconditional puts are last-writer-wins by definition and take no
-        // lock, so the hot path is unchanged.
+        // PUT, INCR and CAS serialize replacement of the same physical key.
         let vault_model = model == crate::catalog::CollectionModel::Vault;
         if vault_model {
             self.runtime
@@ -231,9 +224,8 @@ impl<'a> KvAtomicOps<'a> {
         } else {
             key.to_string()
         };
-        let rmw_lock = (if_not_exists || vault_model)
-            .then(|| self.runtime.inner.rmw_locks.lock_for(collection, &lock_key));
-        let _rmw_guard = rmw_lock.as_ref().map(|lock| lock.lock());
+        let rmw_lock = self.runtime.inner.rmw_locks.lock_for(collection, &lock_key);
+        let _rmw_guard = rmw_lock.lock();
         let vault_store = self.runtime.inner.db.store();
         let _vault_guard = vault_model.then(|| vault_store.vault_publication_lock.lock());
         let _snapshot_guard = vault_model.then(|| {
@@ -289,8 +281,7 @@ impl<'a> KvAtomicOps<'a> {
         // Versioned KV retains MVCC history: the prior visible version is
         // tombstoned (set_xmax) *after* the new version is created, so both
         // coexist physically — exactly like a table-row update. Non-versioned
-        // KV keeps last-writer-wins: pre-delete the old row before creating
-        // fresh (also handles TTL refresh).
+        // KV publishes the replacement and TTL in one durable WAL batch.
         let versioned = self.is_versioned_collection(model, collection);
         // Capture the prior *visible* version (if any) before the write so we
         // can tombstone it. On a re-PUT after a delete (`was_present` false)
@@ -301,8 +292,12 @@ impl<'a> KvAtomicOps<'a> {
         } else {
             None
         };
-        if was_present && !versioned {
-            self.delete(model, collection, key)?;
+        let atomic = super::kv_write::atomic_available(self.runtime, collection);
+        let previous = atomic
+            .then(|| existing.as_ref().map(|(_, id)| *id))
+            .flatten();
+        if was_present && !versioned && !atomic {
+            self.delete_unlocked(model, collection, key)?;
         }
 
         if let Some(ttl_metadata) = ttl_metadata(ttl_ms) {
@@ -312,14 +307,16 @@ impl<'a> KvAtomicOps<'a> {
             metadata.push(tags_metadata);
         }
 
-        let output = self
-            .runtime
-            .create_kv(crate::application::entity::CreateKvInput {
+        let output = super::kv_write::create(
+            self.runtime,
+            crate::application::entity::CreateKvInput {
                 collection: collection.to_string(),
                 key: key.to_string(),
                 value,
                 metadata,
-            })?;
+            },
+            previous,
+        )?;
 
         // Every versioned PUT stamps the new version's xmin from ONE monotonic
         // xid (begin()/commit() or the active tx xid) — NOT the autocommit
@@ -377,6 +374,17 @@ impl<'a> KvAtomicOps<'a> {
         }
 
         if model == crate::catalog::CollectionModel::Kv {
+            if let Some(previous) = previous {
+                self.runtime.record_kv_watch_event(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    collection,
+                    key,
+                    previous.raw(),
+                    before.clone(),
+                    None,
+                );
+                self.runtime.inner.kv_stats.incr_deletes();
+            }
             self.runtime
                 .record_kv_watch_event(op, collection, key, output.id.raw(), before, after);
         }
@@ -412,6 +420,18 @@ impl<'a> KvAtomicOps<'a> {
 
     /// Delete a KV entry. Returns `true` if the key existed.
     pub fn delete(
+        &self,
+        model: crate::catalog::CollectionModel,
+        collection: &str,
+        key: &str,
+    ) -> RedDBResult<bool> {
+        let lock = (model != CollectionModel::Vault)
+            .then(|| self.runtime.inner.rmw_locks.lock_for(collection, key));
+        let _guard = lock.as_ref().map(|lock| lock.lock());
+        self.delete_unlocked(model, collection, key)
+    }
+
+    fn delete_unlocked(
         &self,
         model: crate::catalog::CollectionModel,
         collection: &str,
@@ -634,8 +654,11 @@ impl<'a> KvAtomicOps<'a> {
             None
         };
 
-        // Delete then re-create so TTL is refreshed.
-        if existing.is_some() {
+        let atomic = super::kv_write::atomic_available(self.runtime, collection);
+        let previous = atomic
+            .then(|| existing.as_ref().map(|(_, id)| *id))
+            .flatten();
+        if existing.is_some() && !atomic {
             self.runtime.delete_kv(collection, key)?;
         }
 
@@ -647,14 +670,16 @@ impl<'a> KvAtomicOps<'a> {
             meta_vec.push(tags_metadata);
         }
 
-        let output = self
-            .runtime
-            .create_kv(crate::application::entity::CreateKvInput {
+        let output = super::kv_write::create(
+            self.runtime,
+            crate::application::entity::CreateKvInput {
                 collection: collection.to_string(),
                 key: key.to_string(),
                 value: reddb_types::Value::Integer(next),
                 metadata: meta_vec,
-            })?;
+            },
+            previous,
+        )?;
         self.runtime
             .inner
             .kv_tag_index
@@ -705,7 +730,8 @@ impl<'a> KvAtomicOps<'a> {
         let rmw_lock = self.runtime.inner.rmw_locks.lock_for(collection, key);
         let _rmw_guard = rmw_lock.lock();
         self.ensure_kv_collection(collection)?;
-        let current = self.runtime.get_kv(collection, key)?.map(|(v, _)| v);
+        let existing = self.runtime.get_kv(collection, key)?;
+        let current = existing.as_ref().map(|(v, _)| v.clone());
 
         let matches = match (&current, expected) {
             (None, None) => true,
@@ -733,8 +759,11 @@ impl<'a> KvAtomicOps<'a> {
             None
         };
 
-        // Swap: delete old entry (if present), write new one.
-        if current.is_some() {
+        let atomic = super::kv_write::atomic_available(self.runtime, collection);
+        let previous = atomic
+            .then(|| existing.as_ref().map(|(_, id)| *id))
+            .flatten();
+        if current.is_some() && !atomic {
             self.runtime.delete_kv(collection, key)?;
         }
 
@@ -746,14 +775,16 @@ impl<'a> KvAtomicOps<'a> {
             meta_vec.push(tags_metadata);
         }
 
-        let output = self
-            .runtime
-            .create_kv(crate::application::entity::CreateKvInput {
+        let output = super::kv_write::create(
+            self.runtime,
+            crate::application::entity::CreateKvInput {
                 collection: collection.to_string(),
                 key: key.to_string(),
                 value: new_value.clone(),
                 metadata: meta_vec,
-            })?;
+            },
+            previous,
+        )?;
         self.runtime
             .inner
             .kv_tag_index
@@ -3450,6 +3481,56 @@ fn kv_tags_metadata(tags: &[String]) -> Option<(String, MetadataValue)> {
     Some(("_kv_tags".to_string(), MetadataValue::Array(values)))
 }
 
+impl RedDBRuntime {
+    pub(crate) fn rehydrate_kv_tags(&self) -> RedDBResult<()> {
+        let db = self.db();
+        let store = db.store();
+        for contract in db.collection_contracts() {
+            if contract.declared_model != CollectionModel::Kv {
+                continue;
+            }
+            let Some(manager) = store.get_collection(&contract.name) else {
+                continue;
+            };
+            let resolver = super::kv_read::KvReadResolver::for_keyed_model(
+                self,
+                CollectionModel::Kv,
+                &contract.name,
+            )?;
+            for entity in manager.scan(None, |_| true) {
+                let Some(reddb_types::Value::Text(key)) =
+                    entity.data.as_row().and_then(|row| row.get_field("key"))
+                else {
+                    continue;
+                };
+                let Some(metadata) = manager.get_metadata(entity.id) else {
+                    continue;
+                };
+                let Some(MetadataValue::Array(tags)) = metadata.fields.get("_kv_tags") else {
+                    continue;
+                };
+                if resolver
+                    .record(key)
+                    .is_none_or(|record| record.id != entity.id)
+                {
+                    continue;
+                }
+                let tags: Vec<_> = tags
+                    .iter()
+                    .filter_map(|tag| match tag {
+                        MetadataValue::String(tag) => Some(tag.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                self.inner
+                    .kv_tag_index
+                    .replace(&contract.name, key, entity.id, &tags);
+            }
+        }
+        Ok(())
+    }
+}
+
 fn kv_tags_value(tags: &[String]) -> Value {
     let json = crate::json::Value::Array(
         tags.iter()
@@ -3589,9 +3670,63 @@ mod tests {
     use crate::api::RedDBOptions;
     use crate::catalog::CollectionModel;
     use crate::runtime::RedDBRuntime;
+    use reddb_types::Value;
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn keyed_overwrite_and_metadata_share_one_durable_publication() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("atomic.rdb");
+        {
+            let runtime = RedDBRuntime::with_options(
+                RedDBOptions::persistent(&path)
+                    .with_durability_mode(crate::api::DurabilityMode::Strict),
+            )
+            .expect("runtime");
+            let ops = super::KvAtomicOps::new(&runtime);
+            ops.set(
+                CollectionModel::Kv,
+                "keys",
+                "item",
+                Value::Integer(1),
+                None,
+                false,
+            )
+            .expect("seed");
+            let before = crate::storage::EmbeddedRdbArtifact::open(&path).expect("before");
+            ops.set_with_tags(
+                "keys",
+                "item",
+                Value::Integer(2),
+                Some(600_000),
+                &["daily".into()],
+                false,
+            )
+            .expect("replace");
+            let after = crate::storage::EmbeddedRdbArtifact::open(&path).expect("after");
+            assert_eq!(
+                after.selected_superblock.generation,
+                before.selected_superblock.generation + 1
+            );
+            assert_eq!(
+                runtime.db().store().get_collection("keys").unwrap().count(),
+                1
+            );
+        }
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+        let ops = super::KvAtomicOps::new(&runtime);
+        assert_eq!(
+            ops.get(CollectionModel::Kv, "keys", "item").expect("read"),
+            Some(Value::Integer(2))
+        );
+        assert_eq!(ops.existing_ttl_ms("keys", "item"), Some(600_000));
+        assert_eq!(
+            runtime.inner.kv_tag_index.tags_for_key("keys", "item"),
+            vec!["daily".to_string()]
+        );
     }
 
     #[test]

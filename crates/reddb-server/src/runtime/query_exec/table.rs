@@ -235,11 +235,11 @@ fn execute_geo_candidate_scan(
             if !db.replica_allows_entity_at_read(&query.table, entity) {
                 return true;
             }
-            let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+            let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
                 hydrate_store.as_ref(),
                 entity,
             );
-            let Some(record) = runtime_table_record_from_entity(hydrated) else {
+            let Some(record) = runtime_table_record_from_entity(hydrated.into_owned()) else {
                 return true;
             };
             if super::super::join_filter::evaluate_runtime_filter_with_db(
@@ -1174,6 +1174,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     .map_err(|err| {
                         RedDBError::Internal(format!("hash index lookup failed: {err}"))
                     })?;
+                if entity_ids.is_empty() {
+                    return Ok(Vec::new());
+                }
                 if !entity_ids.is_empty() {
                     let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
 
@@ -1593,7 +1596,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         }
                         crate::runtime::observe_timeseries_tag_index_point();
                     }
-                    let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+                    let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
                         hydrate_store.as_ref(),
                         entity,
                     );
@@ -1613,7 +1616,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 });
             record_segment_scan_stats(scan_stats);
             for entity in &matching {
-                let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+                let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
                     hydrate_store.as_ref(),
                     entity,
                 );
@@ -1630,7 +1633,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             )
                         })
                         .or_else(|| {
-                            runtime_table_record_from_entity_projected(hydrated.clone(), &select_cols)
+                            runtime_table_record_from_entity_projected(hydrated.as_ref().clone(), &select_cols)
                         })
                     } else {
                         super::super::record_search::runtime_table_record_from_entity_ref_projected(
@@ -1639,18 +1642,18 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         )
                         .or_else(|| {
                             runtime_table_record_from_entity_projected(
-                                hydrated.clone(),
+                                hydrated.as_ref().clone(),
                                 &select_cols,
                             )
                         })
                     }
                 } else if lean_select_star {
                     super::super::record_search::runtime_table_record_lean_in_collection(
-                        hydrated.clone(),
+                        hydrated.as_ref().clone(),
                         &query.table,
                     )
                 } else {
-                    runtime_table_record_from_entity(hydrated.clone())
+                    runtime_table_record_from_entity(hydrated.as_ref().clone())
                 };
                 if let Some(record) = record {
                     records.push(record);
@@ -1677,7 +1680,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         }
                         crate::runtime::observe_timeseries_tag_index_point();
                     }
-                    let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity(
+                    let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
                         hydrate_store.as_ref(),
                         entity,
                     );
@@ -1707,7 +1710,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 )
                             })
                             .or_else(|| {
-                                runtime_table_record_from_entity_projected(hydrated.clone(), &select_cols)
+                                runtime_table_record_from_entity_projected(hydrated.as_ref().clone(), &select_cols)
                             })
                             } else {
                                 super::super::record_search::runtime_table_record_from_entity_ref_projected(
@@ -1715,16 +1718,16 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 &select_cols,
                             )
                             .or_else(|| {
-                                runtime_table_record_from_entity_projected(hydrated.clone(), &select_cols)
+                                runtime_table_record_from_entity_projected(hydrated.as_ref().clone(), &select_cols)
                             })
                             }
                         } else if lean_select_star {
                             super::super::record_search::runtime_table_record_lean_in_collection(
-                                hydrated.clone(),
+                                hydrated.as_ref().clone(),
                                 &query.table,
                             )
                         } else {
-                            runtime_table_record_from_entity(hydrated.clone())
+                            runtime_table_record_from_entity(hydrated.as_ref().clone())
                         };
                         if let Some(record) = record {
                             records.push(record);
@@ -2819,6 +2822,57 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn sql_hash_equality_uses_registered_candidates_before_and_after_reopen() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("indexed.rdb");
+        let sql = "SELECT seq, item FROM indexed WHERE seq = 42";
+        let parsed = reddb_rql::parser::parse(sql).expect("parse").query;
+        let QueryExpr::Table(query) = parsed else {
+            panic!("table query")
+        };
+        let filter = reddb_rql::sql_lowering::effective_table_filter(&query).expect("filter");
+        let (column, bytes) = super::extract_index_candidate(&filter).expect("index candidate");
+        assert_eq!(column, "seq");
+        for reopen in [false, true] {
+            let runtime =
+                RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
+            if !reopen {
+                runtime
+                    .execute_query("CREATE TABLE indexed (seq INTEGER, item TEXT, unused TEXT)")
+                    .expect("table");
+                runtime.execute_query("INSERT INTO indexed (seq, item, unused) VALUES (42, 'answer', 'unreturned'), (43, 'other', 'unreturned')").expect("rows");
+                runtime
+                    .execute_query("CREATE INDEX indexed_seq ON indexed (seq) USING HASH")
+                    .expect("index");
+            }
+            let index = runtime
+                .index_store_ref()
+                .find_index_for_column("indexed", &column)
+                .expect("registered index");
+            let candidates = runtime
+                .index_store_ref()
+                .hash_lookup("indexed", index.hash_lookup_name().as_ref(), &bytes)
+                .expect("lookup");
+            assert_eq!(candidates.len(), 1, "reopen={reopen}, filter={filter:?}");
+            let result = runtime.execute_query(sql).expect("select");
+            assert_eq!(result.result.records.len(), 1);
+            assert_eq!(
+                result.result.records[0].get("item"),
+                Some(&Value::text("answer"))
+            );
+            assert_eq!(
+                result.result.stats.segments_scanned, 0,
+                "point lookup should not scan; reopen={reopen}"
+            );
+            let missing = runtime
+                .execute_query("SELECT item FROM indexed WHERE seq = 99")
+                .expect("indexed miss");
+            assert!(missing.result.records.is_empty());
+            assert_eq!(missing.result.stats.segments_scanned, 0);
+        }
     }
 
     fn exec(rt: &RedDBRuntime, sql: &str) {

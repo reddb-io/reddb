@@ -83,7 +83,33 @@ pub(crate) enum StoreWalAction {
 
 #[derive(Debug, Default)]
 pub(crate) struct DeferredStoreWalActions {
-    actions: Vec<StoreWalAction>,
+    pub(super) actions: Vec<StoreWalAction>,
+}
+
+pub(super) struct StoreWalCaptureGuard(bool);
+
+impl StoreWalCaptureGuard {
+    pub(super) fn begin() -> Self {
+        assert!(
+            !deferred_store_wal_capture_active(),
+            "store WAL captures cannot nest"
+        );
+        begin_deferred_store_wal_capture();
+        Self(true)
+    }
+
+    pub(super) fn finish(mut self) -> DeferredStoreWalActions {
+        self.0 = false;
+        take_deferred_store_wal_capture()
+    }
+}
+
+impl Drop for StoreWalCaptureGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            let _ = take_deferred_store_wal_capture();
+        }
+    }
 }
 
 impl DeferredStoreWalActions {
@@ -984,7 +1010,7 @@ impl UnifiedStore {
         let payloads: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
         let encoded_len = crate::storage::EmbeddedRdbArtifact::wal_payloads_encoded_len(&payloads)
             .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
-        match crate::storage::EmbeddedRdbArtifact::append_wal_payloads(path, &payloads) {
+        match self.append_embedded_payloads(path, &payloads) {
             Ok(_) => Ok(()),
             Err(crate::api::RedDBError::InvalidOperation(msg))
                 if msg.contains("embedded wal region full") =>
@@ -997,11 +1023,75 @@ impl UnifiedStore {
                     encoded_len,
                 )
                 .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
-                crate::storage::EmbeddedRdbArtifact::append_wal_payloads(path, &payloads)
+                self.append_embedded_payloads(path, &payloads)
                     .map(|_| ())
                     .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))
             }
             Err(err) => Err(StoreError::Io(std::io::Error::other(err.to_string()))),
+        }
+    }
+
+    fn append_embedded_payloads(
+        &self,
+        path: &Path,
+        payloads: &[Vec<u8>],
+    ) -> crate::RedDBResult<crate::storage::EmbeddedRdbOpen> {
+        if self.config.durability_mode != DurabilityMode::WalDurableGrouped {
+            return crate::storage::EmbeddedRdbArtifact::append_wal_payloads(path, payloads);
+        }
+        let options = self.config.group_commit;
+        let window = StoreCommitCoordinator::resolve_window(&options);
+        crate::storage::EmbeddedRdbArtifact::append_wal_payloads_grouped(
+            path,
+            payloads,
+            reddb_file::embedded::EmbeddedGroupCommitOptions {
+                window,
+                max_statements: options.max_statements,
+                max_wal_bytes: options.max_wal_bytes,
+            },
+        )
+    }
+
+    pub(super) fn enqueue_grouped_actions(
+        &self,
+        actions: &[StoreWalAction],
+    ) -> Result<Option<crate::storage::embedded::PendingEmbeddedAppend>, StoreError> {
+        if self.config.durability_mode != DurabilityMode::WalDurableGrouped
+            || deferred_store_wal_capture_active()
+        {
+            return Ok(None);
+        }
+        let Some(path) = self.config.embedded_wal_path.as_deref() else {
+            return Ok(None);
+        };
+        let payloads: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
+        let options = self.config.group_commit;
+        crate::storage::EmbeddedRdbArtifact::enqueue_wal_payloads_grouped(
+            path,
+            &payloads,
+            reddb_file::embedded::EmbeddedGroupCommitOptions {
+                window: StoreCommitCoordinator::resolve_window(&options),
+                max_statements: options.max_statements,
+                max_wal_bytes: options.max_wal_bytes,
+            },
+        )
+        .map(Some)
+        .map_err(|error| StoreError::Io(io::Error::other(error.to_string())))
+    }
+
+    pub(super) fn complete_grouped_actions(
+        &self,
+        pending: &crate::storage::embedded::PendingEmbeddedAppend,
+        actions: &[StoreWalAction],
+    ) -> Result<(), StoreError> {
+        match pending.wait() {
+            Ok(_) => Ok(()),
+            Err(crate::RedDBError::InvalidOperation(message))
+                if message.contains("embedded wal region full") =>
+            {
+                self.append_embedded_store_wal_actions(actions)
+            }
+            Err(error) => Err(StoreError::Io(io::Error::other(error.to_string()))),
         }
     }
 

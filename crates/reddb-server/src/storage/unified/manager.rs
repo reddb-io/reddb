@@ -741,6 +741,16 @@ impl SegmentManager {
     /// For indexed-scan result sets (up to ~5000 ids from range/bitmap lookup) this
     /// is 2-3 lock acquisitions total vs N×3 with individual `get()` calls.
     pub fn get_many(&self, ids: &[EntityId]) -> Vec<Option<UnifiedEntity>> {
+        let schema = self.column_schema();
+        let clone_row = |entity: &UnifiedEntity| {
+            let mut owned = entity.clone();
+            if let super::entity::EntityData::Row(row) = &mut owned.data {
+                if row.schema.is_none() {
+                    row.schema = schema.clone();
+                }
+            }
+            owned
+        };
         let mut out: Vec<Option<UnifiedEntity>> = vec![None; ids.len()];
         let mut remaining: Vec<usize> = (0..ids.len()).collect(); // indices still unfound
 
@@ -754,7 +764,7 @@ impl SegmentManager {
             };
             remaining.retain(|&i| {
                 if let Some(entity) = growing.get(ids[i]) {
-                    out[i] = Some(entity.clone());
+                    out[i] = Some(clone_row(entity));
                     false // remove from remaining
                 } else {
                     true // keep — not found yet
@@ -775,7 +785,7 @@ impl SegmentManager {
             let seg = segment.read();
             remaining.retain(|&i| {
                 if let Some(entity) = seg.get(ids[i]) {
-                    out[i] = Some(entity.clone());
+                    out[i] = Some(clone_row(entity));
                     false
                 } else {
                     true
@@ -2796,6 +2806,51 @@ mod tests {
                 manager.project_key_entity(&format!("key-{id}"), None, false, |entity| entity.id),
                 (id > 4).then_some(EntityId::new(id))
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "diagnostic of segment fragmentation and retained history; no timing assertions"]
+    fn key_lookup_fragmentation_history_diagnostic() {
+        use std::{hint::black_box, time::Instant};
+        for segments in [1, 16, 64] {
+            for versions in [1, 100, 1000] {
+                let manager = SegmentManager::new("keys");
+                let mut id = 1;
+                for segment in 0..segments {
+                    let mut rows: Vec<_> = (0..128)
+                        .map(|_| {
+                            let entity = lookup_version(id, &format!("other-{id}"), 1, 0);
+                            id += 1;
+                            entity
+                        })
+                        .collect();
+                    for version in (segment..versions).step_by(segments) {
+                        rows.push(lookup_version(
+                            id,
+                            "history",
+                            version as u64 + 1,
+                            if version + 1 == versions {
+                                0
+                            } else {
+                                version as u64 + 2
+                            },
+                        ));
+                        id += 1;
+                    }
+                    manager.bulk_insert(rows).expect("rows");
+                    manager.force_seal().expect("seal");
+                }
+                let started = Instant::now();
+                for _ in 0..2000 {
+                    let xmin =
+                        manager.project_key_entity(black_box("history"), None, true, |entity| {
+                            entity.xmin
+                        });
+                    assert_eq!(xmin, Some(versions as u64));
+                }
+                eprintln!("segments={segments} versions={versions} reads=2000 elapsed_us={} resident_bytes={}", started.elapsed().as_micros(), manager.resident_bytes());
+            }
         }
     }
 

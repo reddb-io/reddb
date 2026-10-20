@@ -51,13 +51,15 @@ def main():
     parser.add_argument("--server", default="reddb-write-profile-20261020")
     parser.add_argument("--client", default="reddb-query-client-20261020")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--engine-revision", required=True)
+    parser.add_argument("--binary-sha256", required=True)
     parser.add_argument("--stack-traces", action="store_true", help="trace eight writes with userspace call stacks")
     args = parser.parse_args()
     result = {"schema": "reddb.checked-write-sync-profile.v1", "status": "invalid", "phases": [],
               "classification": "strace diagnostic; syscall duration includes tracing overhead; no throughput claim",
               "server": inspect(args.server), "client": inspect(args.client),
-              "engine_revision": "5ad0766eda49f7472bf85ee91524a17b3ec10673",
-              "binary_sha256": "2ac44ed0bd18f5bb8c3244724cd9a6825dd0bda712896dd201c8fafc1c7653e2",
+              "engine_revision": args.engine_revision,
+              "binary_sha256": args.binary_sha256,
               "started_unix_ms": int(time.time() * 1000)}
 
     def ready():

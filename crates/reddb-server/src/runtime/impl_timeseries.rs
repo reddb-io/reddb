@@ -861,20 +861,32 @@ pub(crate) fn hydrate_timeseries_entity(
     store: &crate::storage::unified::UnifiedStore,
     entity: &UnifiedEntity,
 ) -> UnifiedEntity {
-    let mut hydrated = entity.clone();
-    let EntityData::TimeSeries(point) = &mut hydrated.data else {
-        return hydrated;
+    hydrate_timeseries_entity_ref(store, entity).into_owned()
+}
+
+/// Ordinary rows and already hydrated points require no owned entity copy.
+pub(crate) fn hydrate_timeseries_entity_ref<'a>(
+    store: &crate::storage::unified::UnifiedStore,
+    entity: &'a UnifiedEntity,
+) -> std::borrow::Cow<'a, UnifiedEntity> {
+    let EntityData::TimeSeries(point) = &entity.data else {
+        return std::borrow::Cow::Borrowed(entity);
     };
     if !point.tags.is_empty() {
-        return hydrated;
+        return std::borrow::Cow::Borrowed(entity);
     }
     let Some(series_id) = point.series_id else {
-        return hydrated;
+        return std::borrow::Cow::Borrowed(entity);
     };
-    if let Some(tags) = resolve_timeseries_series_tags(store, entity.kind.collection(), series_id) {
+    let Some(tags) = resolve_timeseries_series_tags(store, entity.kind.collection(), series_id)
+    else {
+        return std::borrow::Cow::Borrowed(entity);
+    };
+    let mut hydrated = entity.clone();
+    if let EntityData::TimeSeries(point) = &mut hydrated.data {
         point.tags = tags;
     }
-    hydrated
+    std::borrow::Cow::Owned(hydrated)
 }
 
 pub(crate) fn resolve_timeseries_series_tags(
@@ -1268,4 +1280,72 @@ fn current_unix_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod hydration_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_rows_borrow_and_interned_timeseries_tags_are_hydrated() {
+        let store = crate::storage::UnifiedStore::new();
+        let row = UnifiedEntity::table_row(
+            crate::storage::EntityId::new(1),
+            "rows",
+            1,
+            vec![Value::Array(vec![Value::text("large payload"); 256])],
+        );
+        let ordinary = hydrate_timeseries_entity_ref(&store, &row);
+        assert!(matches!(ordinary, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(ordinary.as_ref(), &row));
+        let tags = HashMap::from([("host".to_string(), "server-1".to_string())]);
+        let mut series = UnifiedEntity::table_row(
+            crate::storage::EntityId::new(0),
+            TIMESERIES_SERIES_COLLECTION,
+            0,
+            vec![],
+        );
+        series.data = EntityData::Row(crate::storage::RowData::with_names(
+            vec![
+                Value::text("metrics"),
+                Value::UnsignedInteger(42),
+                encoded_timeseries_tags_value(&tags),
+            ],
+            vec!["collection".into(), "series_id".into(), "tags".into()],
+        ));
+        store
+            .insert_auto(TIMESERIES_SERIES_COLLECTION, series)
+            .expect("series metadata");
+        let point = UnifiedEntity::new(
+            crate::storage::EntityId::new(2),
+            crate::storage::EntityKind::TimeSeriesPoint(Box::new(
+                crate::storage::unified::entity::TimeSeriesPointKind {
+                    series: "metrics".into(),
+                    metric: "cpu".into(),
+                },
+            )),
+            EntityData::TimeSeries(crate::storage::unified::entity::TimeSeriesData {
+                metric: "cpu".into(),
+                series_id: Some(42),
+                timestamp_ns: 1,
+                value: 7.0,
+                tags: HashMap::new(),
+                fields: HashMap::new(),
+            }),
+        );
+        let hydrated = hydrate_timeseries_entity_ref(&store, &point);
+        assert!(matches!(hydrated, std::borrow::Cow::Owned(_)));
+        let EntityData::TimeSeries(data) = &hydrated.data else {
+            panic!("point")
+        };
+        assert_eq!(data.tags, tags);
+        assert!(matches!(
+            hydrate_timeseries_entity_ref(&store, &hydrated),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let EntityData::TimeSeries(original) = &point.data else {
+            panic!("point")
+        };
+        assert!(original.tags.is_empty());
+    }
 }

@@ -1068,3 +1068,33 @@ fn checkpointing_an_unchanged_image_over_an_empty_wal_writes_nothing() {
         .expect("read wal")
         .is_empty());
 }
+
+#[test]
+fn readers_wait_for_an_exclusive_publication_on_another_handle() {
+    use fs2::FileExt;
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("read-publication.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("artifact");
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("writer");
+    writer.lock_exclusive().expect("publication lock");
+    let (sent, received) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        sent.send(EmbeddedRdbArtifact::open(path))
+            .expect("send result")
+    });
+    let early = received.recv_timeout(std::time::Duration::from_millis(100));
+    FileExt::unlock(&writer).expect("unlock");
+    thread.join().expect("reader completes after unlock");
+    assert!(
+        matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+        "read must wait for publication: {early:?}"
+    );
+    received
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("reader result")
+        .expect("coherent artifact");
+}

@@ -56,6 +56,7 @@ pub(crate) struct MutationEngine<'rt> {
     runtime: &'rt crate::RedDBRuntime,
     store: Arc<UnifiedStore>,
     suppress_events: bool,
+    keyed_previous: Option<Option<EntityId>>,
     #[cfg(test)]
     after_admission: Option<&'rt (dyn Fn() + Sync)>,
 }
@@ -81,6 +82,7 @@ impl<'rt> MutationEngine<'rt> {
             runtime,
             store,
             suppress_events: false,
+            keyed_previous: None,
             #[cfg(test)]
             after_admission: None,
         }
@@ -88,6 +90,11 @@ impl<'rt> MutationEngine<'rt> {
 
     pub(crate) fn with_suppress_events(mut self) -> Self {
         self.suppress_events = true;
+        self
+    }
+
+    pub(crate) fn for_keyed_write(mut self, previous: Option<EntityId>) -> Self {
+        self.keyed_previous = Some(previous);
         self
     }
 
@@ -163,7 +170,17 @@ impl<'rt> MutationEngine<'rt> {
         mut rows: Vec<MutationRow>,
         topology_guard: RowIndexTopologyGuard<'_>,
     ) -> RedDBResult<MutationResult> {
-        self.runtime.enforce_unique_rows(&collection, &rows)?;
+        if let Some(previous) = self.keyed_previous {
+            assert_eq!(rows.len(), 1, "a keyed write replaces one row");
+            if let Some(previous) = previous {
+                self.runtime
+                    .enforce_unique_updates(&collection, &[(previous, rows[0].fields.clone())])?;
+            } else {
+                self.runtime.enforce_unique_rows(&collection, &rows)?;
+            }
+        } else {
+            self.runtime.enforce_unique_rows(&collection, &rows)?;
+        }
 
         let growth_bytes = rows
             .iter()
@@ -240,13 +257,36 @@ impl<'rt> MutationEngine<'rt> {
 
         // Write. `insert_auto` internally runs preprocessors, context index,
         // and cross-ref indexing — no need to repeat them here.
-        let id = self
-            .store
-            .insert_auto(&collection, entity)
-            .map_err(|e| RedDBError::Internal(format!("{e:?}")))?;
+        let previous_fields = self
+            .keyed_previous
+            .flatten()
+            .filter(|_| {
+                !self
+                    .runtime
+                    .index_store_ref()
+                    .list_indices(&collection)
+                    .is_empty()
+            })
+            .and_then(|previous| {
+                self.store.get(&collection, previous).map(|entity| {
+                    (
+                        previous,
+                        super::impl_lifecycle::table_row_index_fields(&entity),
+                    )
+                })
+            });
+        let id = if let Some(previous) = self.keyed_previous {
+            let metadata = (!row.metadata.is_empty())
+                .then(|| Metadata::with_fields(row.metadata.iter().cloned().collect()));
+            self.store
+                .write_keyed_row(&collection, entity, metadata, previous)
+        } else {
+            self.store.insert_auto(&collection, entity)
+        }
+        .map_err(|e| RedDBError::Internal(format!("{e:?}")))?;
 
-        // Metadata
-        if !row.metadata.is_empty() {
+        // Keyed writes include metadata in their durable batch.
+        if self.keyed_previous.is_none() && !row.metadata.is_empty() {
             let _ = self.store.set_metadata(
                 &collection,
                 id,
@@ -255,6 +295,12 @@ impl<'rt> MutationEngine<'rt> {
         }
 
         // Secondary indexes (not handled by insert_auto)
+        if let Some((previous, fields)) = previous_fields {
+            self.runtime
+                .index_store_ref()
+                .index_entity_delete(&collection, previous, &fields)
+                .map_err(RedDBError::Internal)?;
+        }
         self.runtime
             .index_store_ref()
             .index_entity_insert(&collection, id, &row.fields)

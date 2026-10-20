@@ -953,7 +953,12 @@ impl UnifiedStore {
             if registry_dirty {
                 self.mark_paged_registry_dirty();
             }
-            self.finish_paged_write(actions)?;
+            if let Some(pending) = self.enqueue_grouped_actions(&actions)? {
+                drop(_publication);
+                self.complete_grouped_actions(&pending, &actions)?;
+            } else {
+                self.finish_paged_write(actions)?;
+            }
         }
         if unversioned && !Self::deferred_store_wal_capture_active() {
             if let Some(before) = before {
@@ -1201,6 +1206,7 @@ impl UnifiedStore {
 
     /// Delete an entity
     pub fn delete(&self, collection: &str, id: EntityId) -> Result<bool, StoreError> {
+        let publication = self.vault_publication_lock.lock();
         // Invalidate entity cache (read-lock probe; no write lock when cold).
         self.entity_cache.remove(id.raw());
         let manager = self
@@ -1233,10 +1239,16 @@ impl UnifiedStore {
         if registry_dirty {
             self.mark_paged_registry_dirty();
         }
-        self.finish_paged_write([StoreWalAction::DeleteEntityRecord {
+        let actions = [StoreWalAction::DeleteEntityRecord {
             collection: collection.to_string(),
             entity_id: id.raw(),
-        }])?;
+        }];
+        if let Some(pending) = self.enqueue_grouped_actions(&actions)? {
+            drop(publication);
+            self.complete_grouped_actions(&pending, &actions)?;
+        } else {
+            self.finish_paged_write(actions)?;
+        }
 
         Ok(true)
     }

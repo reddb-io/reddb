@@ -13,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 
+mod group_commit;
+pub use group_commit::{EmbeddedGroupCommitOptions, PendingEmbeddedAppend};
+
 pub type RdbFileResult<T> = Result<T, RdbFileError>;
 
 pub const DEFAULT_FORMAT_VERSION: u32 = 1;
@@ -366,6 +369,9 @@ impl EmbeddedRdbArtifact {
     ) -> RdbFileResult<EmbeddedRdbOpen> {
         let path = path.as_ref();
         let mut file = File::open(path)?;
+        // Readers wait for an in-flight publication. On Windows an unlocked
+        // ReadFile races the writer's mandatory byte-range lock and fails 33.
+        FileExt::lock_shared(&file)?;
         Self::open_inner_with_file(&mut file, path, validate_snapshot_refs)
     }
 
@@ -455,6 +461,7 @@ impl EmbeddedRdbArtifact {
         min_wal_bytes: u64,
     ) -> RdbFileResult<EmbeddedRdbOpen> {
         let path = path.as_ref();
+        group_commit::wait_for_pending_appends(path)?;
         let path_lock = embedded_path_lock(path);
         let mut path_guard = path_lock
             .lock()
@@ -572,6 +579,7 @@ impl EmbeddedRdbArtifact {
     pub fn open_strict_manifest(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
         let path = path.as_ref();
         let mut file = File::open(path)?;
+        FileExt::lock_shared(&file)?;
         let selected_superblock = [
             read_superblock_copy(&mut file, 0)?,
             read_superblock_copy(&mut file, 1)?,
@@ -599,6 +607,7 @@ impl EmbeddedRdbArtifact {
             return Ok(None);
         }
         let mut file = File::open(&open.path)?;
+        FileExt::lock_shared(&file)?;
         let mut bytes = vec![0u8; open.manifest.snapshot_bytes as usize];
         file.seek(SeekFrom::Start(open.manifest.snapshot_offset))?;
         file.read_exact(&mut bytes)?;
@@ -1022,6 +1031,7 @@ fn scan_wal(open: &EmbeddedRdbOpen) -> RdbFileResult<WalScan> {
     }
 
     let mut file = File::open(&open.path)?;
+    FileExt::lock_shared(&file)?;
     scan_wal_with_file(&mut file, open, wal_start)
 }
 

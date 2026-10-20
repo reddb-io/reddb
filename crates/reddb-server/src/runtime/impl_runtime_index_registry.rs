@@ -12,6 +12,26 @@ use super::*;
 
 const RUNTIME_INDEX_REGISTRY_COLLECTION: &str = "red_index_registry";
 
+fn index_entity_fields(
+    manager: &crate::storage::unified::SegmentManager,
+) -> Vec<(crate::storage::EntityId, Vec<(String, reddb_types::Value)>)> {
+    let schema = manager.column_schema();
+    manager
+        .query_all(|entity| matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }))
+        .into_iter()
+        .map(|mut entity| {
+            // Positional records do not persist Arc schema pointers. Rebuild
+            // with the restored collection schema, just as query scans do.
+            if let crate::storage::EntityData::Row(row) = &mut entity.data {
+                if row.schema.is_none() {
+                    row.schema = schema.clone();
+                }
+            }
+            (entity.id, table_row_index_fields(&entity))
+        })
+        .collect()
+}
+
 fn named_text(
     named: &std::collections::HashMap<String, reddb_types::Value>,
     key: &str,
@@ -87,11 +107,7 @@ impl RedDBRuntime {
         let Some(manager) = store.get_collection(table) else {
             return Ok(());
         };
-        let entity_fields = manager
-            .query_all(|entity| matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }))
-            .into_iter()
-            .map(|entity| (entity.id, table_row_index_fields(&entity)))
-            .collect::<Vec<_>>();
+        let entity_fields = index_entity_fields(&manager);
 
         for index in registered {
             self.inner.index_store.drop_index(&index.name, table);
@@ -286,13 +302,7 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(&index.collection) else {
                 continue;
             };
-            let entity_fields = manager
-                .query_all(|entity| {
-                    matches!(entity.kind, crate::storage::EntityKind::TableRow { .. })
-                })
-                .into_iter()
-                .map(|entity| (entity.id, table_row_index_fields(&entity)))
-                .collect::<Vec<_>>();
+            let entity_fields = index_entity_fields(&manager);
             self.inner
                 .index_store
                 .create_index(

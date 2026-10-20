@@ -1551,6 +1551,7 @@ mod join_filter;
 mod keyed_spine;
 pub(crate) mod kv_read;
 pub mod kv_watch;
+pub(crate) mod kv_write;
 pub mod lease_lifecycle;
 pub mod lease_loop;
 pub mod lease_timer_wheel;
