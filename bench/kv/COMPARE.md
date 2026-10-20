@@ -28,6 +28,8 @@ Persistence conditions:
 
 - RedDB: persistent file, `REDDB_DURABILITY=strict` and
   `REDDB_DURABILITY_MODE=strict`; result caching explicitly disabled.
+  A separately labeled `sync` write-only continuation tests WalDurableGrouped,
+  which also waits for WAL fsync before responding. CPU/memory limits stay fixed.
 - Redis: `appendonly yes`, `appendfsync always`, automatic snapshots disabled.
 - KiviDB 1.1.0: AOF enabled, with **SET + WAITAOF 1 0 5000** as one timed logical
   write. The harness requires `[1, 0]` from the fence. Native SET alone is not
@@ -128,6 +130,7 @@ volumes. It never publishes host ports or touches other running containers.
 `--resume --only reddb-rest --label cap64 --reddb <new-container>` appends a
 separately labeled continuation to an existing result directory. Create that
 container with a fresh volume and point the client at the same result directory.
+`--only-put` limits a continuation to the durable overwrite cells.
 
 ```sh
 python bench/kv/summarize.py bench/results/kv-compare-local

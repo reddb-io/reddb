@@ -84,6 +84,7 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--label", default="")
     parser.add_argument("--only", choices=["redis", "kividb", "reddb-rest"])
+    parser.add_argument("--only-put", action="store_true")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     sizes = [int(value) for value in args.keys.split(",")]
@@ -128,7 +129,7 @@ def main():
         previous["containers"].update(manifest["containers"])
         previous.setdefault("continuations", []).append({
             "started_unix_ms": int(time.time() * 1000), "label": args.label,
-            "only": args.only, "containers": list(manifest["containers"])})
+            "only": args.only, "only_put": args.only_put, "containers": list(manifest["containers"])})
         previous["status"] = "running"
         manifest = previous
 
@@ -207,7 +208,7 @@ def main():
                 manifest["phases"].append(phase)
                 monitor = Resources(args.out, container, args.client)
                 adapters = ["reddb-rest", "reddb-query"] if engine == "reddb-rest" else [engine]
-                for keys in sizes:
+                for keys in ([] if args.only_put else sizes):
                     collection = f"kv_diag_{keys}"
                     run(engine, container, port, collection, keys, f"{engine}-{keys}-seed", ["--prepare-only"])
                     command("docker", "restart", container)

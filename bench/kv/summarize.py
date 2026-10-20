@@ -36,8 +36,12 @@ def summarize_case(case, events, server, client):
     for name, container in [("server", server), ("client", client)]:
         observations = [event for event in relevant if event["Name"] == container]
         result[f"{name}_resource_samples"] = len(observations)
-        result[f"{name}_median_cpu_percent"] = (statistics.median(
-            float(event["CPUPerc"].rstrip("%")) for event in observations) if observations else None)
+        cpus = [float(event["CPUPerc"].rstrip("%")) for event in observations]
+        # Windows Docker stats can expose zero-only samples just after restart.
+        # Preserve raw samples, but do not present a busy request stream as 0% CPU.
+        zero_only = bool(cpus) and not any(cpus) and sum(sample["operations"] for sample in samples) >= 100
+        result[f"{name}_cpu_zero_only_samples"] = zero_only
+        result[f"{name}_median_cpu_percent"] = statistics.median(cpus) if cpus and not zero_only else None
         result[f"{name}_peak_working_set_mib"] = (max(
             byte_count(event["MemUsage"].split("/")[0]) for event in observations) / 2**20
             if observations else None)
@@ -76,7 +80,7 @@ def main():
     summary = {"schema": "reddb.kv-comparison-summary.v1", "status": manifest["status"],
                "aggregation": "median and min/max of round-level metrics; no operation-level pooling",
                "measurements": measurements, "artifact_sha256": artifacts}
-    (directory / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (directory / "summary.json").write_bytes((json.dumps(summary, indent=2) + "\n").encode())
 
     def number(value):
         return "unavailable" if value is None else f"{value:,.1f}"
@@ -96,11 +100,11 @@ def main():
                            and value["pipeline"] == pipeline),
                           key=lambda value: (value["keys"], value["workers"], value["engine"]))
         for value in selected:
+            label = value["engine"] + (f" ({value['profile']})" if value["profile"] != "default" else "")
             if value["status"] != "valid-diagnostic":
-                lines.append(f"| {value['keys']} | {value['workers']} | {value['engine']} | "
+                lines.append(f"| {value['keys']} | {value['workers']} | {label} | "
                              f"{value['status']} | — | — | — | — | — |")
                 continue
-            label = value["engine"] + (f" ({value['profile']})" if value["profile"] != "default" else "")
             fields = [str(value["keys"]), str(value["workers"]), label,
                       number(value["median_throughput_ops_s"]), number(value["median_batch_p50_us"]),
                       number(value["median_batch_p95_us"]), number(value["median_batch_p99_us"]),
@@ -115,7 +119,7 @@ def main():
               "These measurements cannot establish maximum engine throughput or ADR 0076 leadership.", "",
               "See [the experiment contract](../../kv/COMPARE.md), `manifest.json`, `summary.json`, "
               "the raw cell JSON and resource JSONL files for setup, unsupported cells, failures and recovery checks.", ""]
-    (directory / "SUMMARY.md").write_text("\n".join(lines), encoding="utf-8")
+    (directory / "SUMMARY.md").write_bytes("\n".join(lines).encode())
 
 
 if __name__ == "__main__":

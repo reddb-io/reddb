@@ -51,6 +51,18 @@ class FakeClient:
 
 
 class CompareTests(unittest.TestCase):
+    def test_zero_only_cpu_telemetry_does_not_claim_zero_cpu_under_load(self):
+        sample = dict(started_unix_ms=1000, finished_unix_ms=3000, operations=10000,
+                      throughput_ops_s=5000, batch_p50_us=100, batch_p95_us=200, batch_p99_us=300)
+        case = dict(engine="redis", operation="get", status="valid-diagnostic",
+                    config=vars(arguments(rounds=1)), rounds=[sample])
+        event = dict(unix_ms=2000, Name="server", CPUPerc="0.00%", MemUsage="1MiB / 2GiB",
+                     BlockIO="0B / 0B", NetIO="1MB / 1MB")
+        result = summarize.summarize_case(case, [event], "server", "client")
+        self.assertIsNone(result["server_median_cpu_percent"])
+        self.assertTrue(result["server_cpu_zero_only_samples"])
+        self.assertEqual(result["server_peak_working_set_mib"], 1)
+
     def test_parallel_verification_checks_every_key_once(self):
         args = arguments(keys=31)
         values = {index: compare.payload(index, 100) for index in range(args.keys)}
