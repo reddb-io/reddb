@@ -803,7 +803,7 @@ impl RedDB {
                 report = report.with_diagnostic("metadata.preference", preference);
             }
             if let Ok((metadata, source)) =
-                PhysicalMetadataFile::load_for_data_path_with_source(path)
+                PhysicalMetadataFile::inspect_for_data_path_with_source(path)
             {
                 let journal_count = PhysicalMetadataFile::journal_paths_for_data_path(path)
                     .map(|paths| paths.len())

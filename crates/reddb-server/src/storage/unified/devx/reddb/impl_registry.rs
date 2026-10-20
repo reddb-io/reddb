@@ -520,10 +520,9 @@ impl RedDB {
             .map(|path| PhysicalMetadataFile::metadata_path_for(path))
     }
 
-    /// Load the current physical metadata view, bootstrapping from native state when needed.
+    /// Inspect the current physical metadata view without publishing repairs.
     pub fn physical_metadata(&self) -> Option<PhysicalMetadataFile> {
-        self.load_or_bootstrap_physical_metadata(!self.options.read_only)
-            .ok()
+        self.load_or_bootstrap_physical_metadata(false).ok()
     }
 
     /// Physical index registry derived for the current database state.

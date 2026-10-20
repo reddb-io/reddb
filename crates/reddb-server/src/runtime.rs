@@ -1408,12 +1408,16 @@ struct RuntimeInner {
 
 #[derive(Clone)]
 pub struct RedDBRuntime {
+    // Field order matters: drain workers before dropping the foreground inner.
+    // Temporary handles used by workers do not own their own shutdown guard.
+    background_tasks: Option<Arc<background_tasks::RuntimeBackgroundTasks>>,
     inner: Arc<RuntimeInner>,
 }
 
 pub struct RuntimeConnection {
     id: u64,
     uses_pool_slot: bool,
+    background_tasks: Option<Arc<background_tasks::RuntimeBackgroundTasks>>,
     inner: Arc<RuntimeInner>,
 }
 
@@ -1465,6 +1469,7 @@ pub mod audit_log;
 pub mod audit_query;
 pub mod authorized_search;
 pub(crate) mod authz;
+mod background_tasks;
 pub mod batch_insert;
 pub mod blockchain_kind;
 mod collection_contract;

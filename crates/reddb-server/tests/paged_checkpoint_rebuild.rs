@@ -199,6 +199,105 @@ fn physical_metadata_fingerprint_changes_after_an_update_without_a_row_count_cha
 }
 
 #[test]
+fn physical_metadata_inspection_does_not_publish_native_ahead_metadata() {
+    use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("data.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("paged profile");
+    let runtime = RedDBRuntime::with_options(options).expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE inspection_rows (value INT)")
+        .expect("table");
+    runtime
+        .execute_query("INSERT INTO inspection_rows (value) VALUES (1)")
+        .expect("row");
+    runtime.checkpoint().expect("initial checkpoint");
+
+    let sidecar = reddb_server::physical::PhysicalMetadataFile::metadata_binary_path_for(&path);
+    let metadata_before = std::fs::read(&sidecar).expect("binary metadata");
+    let store = runtime.db().store();
+    let pager = store.pager().expect("paged store");
+    let mut physical = pager.header().expect("header").physical;
+    physical.sequence += 1;
+    pager
+        .update_physical_header(physical)
+        .expect("advance native authority");
+    pager.sync().expect("publish native authority");
+    let before = std::fs::read(&path).expect("published file");
+    for _ in 0..3 {
+        let metadata = runtime
+            .db()
+            .physical_metadata()
+            .expect("native metadata view");
+        assert!(metadata
+            .superblock
+            .collection_roots
+            .contains_key("inspection_rows"));
+        let _indexes = runtime.db().physical_indexes();
+        let _exports = runtime.db().exports();
+        assert!(
+            std::fs::read(&sidecar).expect("metadata") == metadata_before,
+            "inspection published metadata"
+        );
+        assert!(std::fs::read(&path).expect("inspected file") == before);
+    }
+
+    runtime
+        .db()
+        .run_maintenance()
+        .expect("explicit maintenance");
+    assert!(
+        std::fs::read(&sidecar).expect("maintained metadata") != metadata_before,
+        "explicit maintenance did not publish metadata"
+    );
+}
+
+#[test]
+fn metadata_inspection_reads_a_journal_without_healing_the_primary() {
+    use reddb_server::{PhysicalMetadataFile, RedDBOptions, RedDBRuntime, StorageDeployPreset};
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("data.rdb");
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile"),
+    )
+    .expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE journal_rows (value INT)")
+        .expect("table");
+    runtime.checkpoint().expect("checkpoint");
+    let metadata = runtime.db().physical_metadata().expect("metadata");
+    let primary = PhysicalMetadataFile::metadata_binary_path_for(&path);
+    let journal =
+        PhysicalMetadataFile::metadata_journal_path_for(&path, metadata.superblock.sequence);
+    let bytes = std::fs::read(&primary).expect("primary metadata");
+    std::fs::write(&journal, &bytes).expect("recovery journal");
+    std::fs::write(&primary, b"damaged primary").expect("damage test metadata");
+    let before = std::fs::read(&path).expect("data file");
+
+    for _ in 0..3 {
+        let inspected = runtime
+            .db()
+            .physical_metadata()
+            .expect("journal metadata view");
+        assert_eq!(inspected.superblock.sequence, metadata.superblock.sequence);
+        let _health = runtime.db().health();
+        let _authority = runtime.db().physical_authority_status();
+        assert!(
+            std::fs::read(&primary).expect("primary") == b"damaged primary",
+            "inspection healed the primary metadata"
+        );
+        assert!(std::fs::read(&journal).expect("journal") == bytes);
+        assert!(std::fs::read(&path).expect("data file") == before);
+    }
+    runtime.db().run_maintenance().expect("explicit repair");
+    PhysicalMetadataFile::load_from_binary_path(&primary).expect("repaired primary metadata");
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn failed_checkpoint_preserves_all_previously_committed_rows() {
     const CHILD: &str = "REDDB_TEST_CHECKPOINT_FSIZE_PATH";

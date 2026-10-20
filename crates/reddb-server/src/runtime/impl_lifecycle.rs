@@ -246,6 +246,7 @@ impl RedDBRuntime {
 
         let no_auth_boot = crate::service_cli::no_auth_active(&options);
         let runtime = Self {
+            background_tasks: Some(Arc::new(background_tasks::RuntimeBackgroundTasks::default())),
             inner: Arc::new(RuntimeInner {
                 functions: parking_lot::RwLock::new(
                     super::function_catalog::FunctionCatalog::load(&db)?,
@@ -877,11 +878,10 @@ impl RedDBRuntime {
 
         // Start background maintenance thread (context index refresh +
         // session purge). Held by a WEAK reference to `RuntimeInner`
-        // so dropping the last `RedDBRuntime` handle actually releases
-        // the underlying Arc<Pager> (and its file lock). Polling at
-        // 200ms means shutdown latency is bounded; the real 60-second
-        // work cadence is tracked independently via a `last_work`
-        // timestamp.
+        // to avoid an ownership cycle. The last foreground owner unparks
+        // and joins the worker before releasing its inner reference, so
+        // an active weak upgrade cannot retain the pager lock after close.
+        // The 60-second work cadence is tracked via `last_work`.
         //
         // The previous version captured `rt = runtime.clone()` by
         // strong reference and ran an unterminated `loop`, which held
@@ -891,26 +891,33 @@ impl RedDBRuntime {
         // `finding_1_select_after_bulk_insert_persistent_reopen`.
         {
             let weak = Arc::downgrade(&runtime.inner);
-            std::thread::Builder::new()
-                .name("reddb-maintenance".into())
-                .spawn(move || {
-                    let tick = std::time::Duration::from_millis(200);
-                    let work_interval = std::time::Duration::from_secs(60);
-                    let mut last_work = std::time::Instant::now();
-                    loop {
-                        std::thread::sleep(tick);
-                        let Some(inner) = weak.upgrade() else {
-                            // All strong references dropped — the
-                            // runtime is gone, exit cleanly.
-                            break;
-                        };
-                        if last_work.elapsed() >= work_interval {
-                            let _stats = inner.db.store().context_index().stats();
-                            last_work = std::time::Instant::now();
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground runtime")
+                .spawn(
+                    std::thread::Builder::new().name("reddb-maintenance".into()),
+                    move |stopped| {
+                        let tick = std::time::Duration::from_millis(200);
+                        let work_interval = std::time::Duration::from_secs(60);
+                        let mut last_work = std::time::Instant::now();
+                        loop {
+                            std::thread::park_timeout(tick);
+                            if stopped.load(AtomicOrdering::Acquire) {
+                                break;
+                            }
+                            let Some(inner) = weak.upgrade() else {
+                                // All strong references dropped — the
+                                // runtime is gone, exit cleanly.
+                                break;
+                            };
+                            if last_work.elapsed() >= work_interval {
+                                let _stats = inner.db.store().context_index().stats();
+                                last_work = std::time::Instant::now();
+                            }
                         }
-                    }
-                })
-                .ok();
+                    },
+                );
         }
 
         // Start backup scheduler if enabled via red_config
@@ -987,55 +994,76 @@ impl RedDBRuntime {
         // Issue #583 slice 10 — ContinuousMaterializedView scheduler.
         // Low-priority background ticker that drains the cache's
         // `claim_due_at` set every ~50ms. Holds only a Weak<RuntimeInner>
-        // so the thread exits cleanly when the runtime drops (≤50ms
-        // latency between drop and exit). Materialized views without
+        // to avoid an ownership cycle; foreground close unparks and drains
+        // an active refresh before releasing storage. Materialized views without
         // a `REFRESH EVERY` clause stay on the manual-refresh path
         // and are skipped by `claim_due_at`, so the loop is a no-op
         // when no scheduled views exist.
         {
             let weak_inner = Arc::downgrade(&runtime.inner);
-            std::thread::Builder::new()
-                .name("reddb-mv-scheduler".into())
-                // Rust's default for spawned threads is 2 MiB, which is too
-                // small for the query-execution path that refresh_due_materialized_views
-                // runs (StatementExecutionFrame + guards per view). Match the
-                // 8 MiB that the OS gives the main thread.
-                .stack_size(8 * 1024 * 1024)
-                .spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    let Some(inner) = weak_inner.upgrade() else {
-                        break;
-                    };
-                    let rt = RedDBRuntime { inner };
-                    rt.refresh_due_materialized_views();
-                })
-                .ok();
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground runtime")
+                .spawn(
+                    std::thread::Builder::new()
+                        .name("reddb-mv-scheduler".into())
+                        // Rust's default for spawned threads is 2 MiB, which is too
+                        // small for the query-execution path that refresh_due_materialized_views
+                        // runs (StatementExecutionFrame + guards per view). Match the
+                        // 8 MiB that the OS gives the main thread.
+                        .stack_size(8 * 1024 * 1024),
+                    move |stopped| loop {
+                        std::thread::park_timeout(std::time::Duration::from_millis(50));
+                        if stopped.load(AtomicOrdering::Acquire) {
+                            break;
+                        }
+                        let Some(inner) = weak_inner.upgrade() else {
+                            break;
+                        };
+                        let rt = RedDBRuntime {
+                            background_tasks: None,
+                            inner,
+                        };
+                        rt.refresh_due_materialized_views();
+                    },
+                );
         }
 
         // Issue #584 slice 12 — DeclarativeRetention background sweeper.
         // Low-priority ticker that physically reclaims rows whose
         // timestamp has fallen beyond the retention window. Holds a
-        // `Weak<RuntimeInner>` so the thread exits within one tick of
-        // the runtime drop (graceful shutdown leaves storage consistent
+        // `Weak<RuntimeInner>`; foreground close drains an active tick
+        // before releasing storage (shutdown leaves storage consistent
         // because each tick goes through the standard DELETE path —
         // there is no half-finished mutation state to clean up). The
         // tick interval is intentionally longer than the MV scheduler
         // (500ms) because retention is order-of-seconds at minimum.
         if !runtime.write_gate().is_read_only() {
             let weak_inner = Arc::downgrade(&runtime.inner);
-            std::thread::Builder::new()
-                .name("reddb-retention-sweeper".into())
-                .spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let Some(inner) = weak_inner.upgrade() else {
-                        break;
-                    };
-                    let rt = RedDBRuntime { inner };
-                    rt.sweep_retention_tick(
-                        crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH,
-                    );
-                })
-                .ok();
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground runtime")
+                .spawn(
+                    std::thread::Builder::new().name("reddb-retention-sweeper".into()),
+                    move |stopped| loop {
+                        std::thread::park_timeout(std::time::Duration::from_millis(500));
+                        if stopped.load(AtomicOrdering::Acquire) {
+                            break;
+                        }
+                        let Some(inner) = weak_inner.upgrade() else {
+                            break;
+                        };
+                        let rt = RedDBRuntime {
+                            background_tasks: None,
+                            inner,
+                        };
+                        rt.sweep_retention_tick(
+                            crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH,
+                        );
+                    },
+                );
         }
 
         // Anonymous access is the most consequential posture an operator can
