@@ -777,11 +777,8 @@ impl RedDBRuntime {
         let manager = self.inner.transaction_state.snapshot_manager();
         let next_xid = manager.peek_next_xid();
         let mut cutoff = next_xid;
-        if let Some(oldest_active) = manager.oldest_active_xid() {
-            cutoff = cutoff.min(oldest_active);
-        }
-        if let Some(oldest_pinned) = manager.oldest_pinned_xid() {
-            cutoff = cutoff.min(oldest_pinned);
+        if let Some(oldest_required) = manager.oldest_required_xid() {
+            cutoff = cutoff.min(oldest_required);
         }
         let retention_xids = self.config_u64("runtime.mvcc.vacuum_retention_xids", 0);
         if retention_xids > 0 {

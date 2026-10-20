@@ -167,6 +167,9 @@ struct AutocommitPool {
 struct ManagerState {
     /// xids that have started but not yet committed/rolled back.
     active: HashSet<Xid>,
+    /// Oldest version required by each active transaction's captured snapshot.
+    /// A newer reader can exclude an older writer even after that writer commits.
+    snapshot_horizons: HashMap<Xid, Xid>,
     /// xids that rolled back. `is_visible` MUST treat these as invisible
     /// (the writer never committed). The set is pruned lazily by VACUUM.
     aborted: HashSet<Xid>,
@@ -246,12 +249,20 @@ impl SnapshotManager {
     /// when using SnapshotIsolation/Serializable. ReadCommitted refreshes
     /// this per statement via the same call.
     pub fn snapshot(&self, xid: Xid) -> Snapshot {
-        let state = self.state.read();
+        let mut state = self.state.write();
         // Active xids other than our own appear as "in-progress" to us.
         let pool = self.autocommit_pool.lock();
         let mut in_progress: HashSet<Xid> =
             state.active.iter().copied().filter(|&x| x != xid).collect();
         in_progress.extend(pool.next..pool.end);
+        if state.active.contains(&xid) {
+            let horizon = in_progress.iter().copied().fold(xid, Xid::min);
+            state
+                .snapshot_horizons
+                .entry(xid)
+                .and_modify(|previous| *previous = (*previous).min(horizon))
+                .or_insert(horizon);
+        }
         Snapshot { xid, in_progress }
     }
 
@@ -260,6 +271,7 @@ impl SnapshotManager {
     pub fn commit(&self, xid: Xid) {
         let mut state = self.state.write();
         state.active.remove(&xid);
+        state.snapshot_horizons.remove(&xid);
         // Also clear from aborted set in case of prior rollback_to call
         // that touched this xid (defensive; normally a no-op).
         if state.aborted.remove(&xid) {
@@ -318,6 +330,7 @@ impl SnapshotManager {
     /// before honouring a row's `xmin`.
     pub fn rollback(&self, xid: Xid) {
         let mut state = self.state.write();
+        state.snapshot_horizons.remove(&xid);
         state.active.remove(&xid);
         if state.aborted.insert(xid) {
             self.aborted_revision.fetch_add(1, Ordering::Release);
@@ -496,6 +509,19 @@ impl SnapshotManager {
     /// calculation — any row with `xmax < min(active)` is reclaimable).
     pub fn oldest_active_xid(&self) -> Option<Xid> {
         self.state.read().active.iter().copied().min()
+    }
+
+    /// GC must preserve writers excluded by an active reader's snapshot, even
+    /// when those writers have since committed and left the active set.
+    pub(crate) fn oldest_required_xid(&self) -> Option<Xid> {
+        let state = self.state.read();
+        state
+            .active
+            .iter()
+            .chain(state.snapshot_horizons.values())
+            .chain(state.pinned.keys())
+            .copied()
+            .min()
     }
 
     /// Oldest externally pinned xid. Pinned snapshots behave like active
