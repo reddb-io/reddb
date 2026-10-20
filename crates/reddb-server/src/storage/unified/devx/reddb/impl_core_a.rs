@@ -1292,12 +1292,13 @@ impl RedDB {
         let declarations = self
             .physical_metadata()
             .map(|metadata| CatalogDeclarations {
+                operational_indexes: self
+                    .physical_indexes_from_declarations(metadata.indexes.clone()),
                 declared_indexes: metadata.indexes,
-                declared_graph_projections: metadata.graph_projections,
-                declared_analytics_jobs: metadata.analytics_jobs,
-                operational_indexes: self.physical_indexes(),
-                operational_graph_projections: self.graph_projections(),
-                operational_analytics_jobs: self.analytics_jobs(),
+                declared_graph_projections: metadata.graph_projections.clone(),
+                declared_analytics_jobs: metadata.analytics_jobs.clone(),
+                operational_graph_projections: metadata.graph_projections,
+                operational_analytics_jobs: metadata.analytics_jobs,
             });
         snapshot_store_with_declarations(
             "reddb",
