@@ -3620,7 +3620,7 @@ mod declared_model_validation_tests {
                 .expect_err("mismatch");
             assert_eq!(
                 error.to_string(),
-                format!("Invalid operation: model mismatch: expected kv, got {name}")
+                format!("INVALID_OPERATION: model mismatch: expected kv, got {name}")
             );
         }
     }
