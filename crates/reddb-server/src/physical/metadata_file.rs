@@ -112,6 +112,24 @@ impl PhysicalMetadataFile {
     pub fn load_for_data_path_with_source(
         data_path: &Path,
     ) -> io::Result<(Self, PhysicalMetadataSource)> {
+        Self::load_for_data_path_with_repair(data_path, true)
+    }
+
+    /// Inspect available metadata without repairing or publishing any file.
+    pub fn inspect_for_data_path(data_path: &Path) -> io::Result<Self> {
+        Self::inspect_for_data_path_with_source(data_path).map(|(metadata, _)| metadata)
+    }
+
+    pub fn inspect_for_data_path_with_source(
+        data_path: &Path,
+    ) -> io::Result<(Self, PhysicalMetadataSource)> {
+        Self::load_for_data_path_with_repair(data_path, false)
+    }
+
+    fn load_for_data_path_with_repair(
+        data_path: &Path,
+        repair_primary: bool,
+    ) -> io::Result<(Self, PhysicalMetadataSource)> {
         let binary_path = Self::metadata_binary_path_for(data_path);
         if binary_path.exists() {
             match Self::load_from_binary_path(&binary_path) {
@@ -125,6 +143,9 @@ impl PhysicalMetadataFile {
                     for journal_path in journal_paths {
                         match Self::load_from_binary_path(&journal_path) {
                             Ok(metadata) => {
+                                if !repair_primary {
+                                    return Ok((metadata, PhysicalMetadataSource::BinaryJournal));
+                                }
                                 let healed =
                                     metadata.mark_recovery(PhysicalMetadataSource::BinaryJournal);
                                 let _ = healed.heal_primary_metadata_for_data_path(data_path);
@@ -140,6 +161,9 @@ impl PhysicalMetadataFile {
             }
         }
         Self::load_from_path(&Self::metadata_path_for(data_path)).map(|metadata| {
+            if !repair_primary {
+                return (metadata, PhysicalMetadataSource::Json);
+            }
             let healed = metadata.mark_recovery(PhysicalMetadataSource::Json);
             let _ = healed.heal_primary_metadata_for_data_path(data_path);
             (healed, PhysicalMetadataSource::Json)

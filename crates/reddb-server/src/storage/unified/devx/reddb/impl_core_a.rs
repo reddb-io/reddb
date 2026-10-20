@@ -1156,7 +1156,7 @@ impl RedDB {
             };
         };
 
-        let sidecar = PhysicalMetadataFile::load_for_data_path_with_source(path).ok();
+        let sidecar = PhysicalMetadataFile::inspect_for_data_path_with_source(path).ok();
         PhysicalAuthorityStatus {
             preference: self
                 .physical_metadata_preference()

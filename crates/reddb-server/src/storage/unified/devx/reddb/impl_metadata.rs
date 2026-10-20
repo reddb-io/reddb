@@ -527,7 +527,12 @@ impl RedDB {
         let _publication = self.store.vault_publication_lock.lock();
         let native_state = self.native_physical_state();
 
-        match PhysicalMetadataFile::load_for_data_path(path) {
+        let metadata = if persist_bootstrapped && !self.options.read_only {
+            PhysicalMetadataFile::load_for_data_path(path)
+        } else {
+            PhysicalMetadataFile::inspect_for_data_path(path)
+        };
+        match metadata {
             Ok(metadata) => {
                 if let Some(native_state) = native_state.as_ref() {
                     let inspection = Self::inspect_native_header_against_metadata(
@@ -590,7 +595,7 @@ impl RedDB {
     pub(crate) fn physical_metadata_preference(&self) -> Option<&'static str> {
         let path = self.path()?;
         let native_state = self.native_physical_state();
-        let metadata = PhysicalMetadataFile::load_for_data_path(path).ok();
+        let metadata = PhysicalMetadataFile::inspect_for_data_path(path).ok();
 
         match (metadata, native_state) {
             (Some(metadata), Some(native_state)) => {
