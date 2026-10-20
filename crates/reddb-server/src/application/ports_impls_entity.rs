@@ -2443,27 +2443,22 @@ impl RuntimeEntityPort for RedDBRuntime {
             collection,
             crate::catalog::CollectionModel::Kv,
         )?;
-        let store = db.store();
-        let Some(manager) = store.get_collection(collection) else {
-            return Ok(None);
-        };
-        let entities = manager.query_all(|_| true);
-        for entity in entities {
-            if let crate::storage::EntityData::Row(ref row) = entity.data {
-                if let Some(ref named) = row.named {
-                    if let Some(reddb_types::Value::Text(ref k)) = named.get("key") {
-                        if &**k == key {
-                            let value = named
-                                .get("value")
-                                .cloned()
-                                .unwrap_or(reddb_types::Value::Null);
-                            return Ok(Some((value, entity.id)));
-                        }
+        // Share indexed candidate selection and MVCC visibility with RQL, but
+        // retain REST's value/id projection and missing-value-as-Null contract.
+        crate::runtime::impl_kv::KvAtomicOps::new(self).project_entity(
+            crate::catalog::CollectionModel::Kv,
+            collection,
+            key,
+            |entity| {
+                let value = match &entity.data {
+                    crate::storage::EntityData::Row(row) => {
+                        row.get_field("value").cloned().unwrap_or(Value::Null)
                     }
-                }
-            }
-        }
-        Ok(None)
+                    _ => unreachable!("key index candidates must be rows"),
+                };
+                (value, entity.id)
+            },
+        )
     }
 
     fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool> {

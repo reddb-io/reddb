@@ -873,6 +873,7 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
+        self.ensure_declared_model(model, collection)?;
         Ok(self
             .project_entity(model, collection, key, |entity| {
                 kv_value_from_entity(entity).map(|value| (value, entity.id))
@@ -905,17 +906,19 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
+        self.ensure_declared_model(model, collection)?;
         self.project_entity(model, collection, key, Clone::clone)
     }
 
-    fn project_entity<T>(
+    /// Resolve a key using the caller's already-validated collection model.
+    /// REST and RQL retain their respective contract checks before entering here.
+    pub(crate) fn project_entity<T>(
         &self,
         model: crate::catalog::CollectionModel,
         collection: &str,
         key: &str,
         project: impl FnMut(&crate::storage::UnifiedEntity) -> T,
     ) -> RedDBResult<Option<T>> {
-        self.ensure_declared_model(model, collection)?;
         let store = self.runtime.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
             return Ok(None);
