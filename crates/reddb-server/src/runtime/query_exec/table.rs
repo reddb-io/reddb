@@ -1174,9 +1174,6 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     .map_err(|err| {
                         RedDBError::Internal(format!("hash index lookup failed: {err}"))
                     })?;
-                if entity_ids.is_empty() {
-                    return Ok(Vec::new());
-                }
                 if !entity_ids.is_empty() {
                     let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
 
@@ -2871,8 +2868,21 @@ mod tests {
                 .execute_query("SELECT item FROM indexed WHERE seq = 99")
                 .expect("indexed miss");
             assert!(missing.result.records.is_empty());
-            assert_eq!(missing.result.stats.segments_scanned, 0);
         }
+    }
+
+    #[test]
+    fn hash_miss_keeps_sql_numeric_equality_fallback() {
+        let runtime = rt();
+        exec(&runtime, "CREATE TABLE numeric_hash (n FLOAT, item TEXT)");
+        exec(&runtime, "INSERT INTO numeric_hash (n, item) VALUES (42.0, 'answer')");
+        let sql = "SELECT item FROM numeric_hash WHERE n = 42";
+        let before = runtime.execute_query(sql).expect("scan");
+        assert_eq!(before.result.records.len(), 1);
+        exec(&runtime, "CREATE INDEX numeric_hash_n ON numeric_hash (n) USING HASH");
+        let after = runtime.execute_query(sql).expect("indexed numeric equality");
+        assert_eq!(after.result.records.len(), 1);
+        assert_eq!(after.result.records[0].get("item"), Some(&Value::text("answer")));
     }
 
     fn exec(rt: &RedDBRuntime, sql: &str) {
