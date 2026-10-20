@@ -911,7 +911,11 @@ impl<'a> KvAtomicOps<'a> {
         };
 
         let versioned = self.is_versioned_collection(model, collection);
-        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+        let snapshot = if versioned {
+            crate::runtime::impl_core::capture_current_snapshot()
+        } else {
+            None
+        };
         Ok(manager.find_key_entity(key, snapshot.as_ref(), versioned))
     }
 
