@@ -4,7 +4,7 @@ use crate::application::collection_contract_enforcer::CollectionContractWriteEnf
 use crate::application::entity::{CreateEntityOutput, CreateKvInput};
 use crate::catalog::CollectionModel;
 use crate::storage::EntityId;
-use crate::{RedDBResult, RedDBRuntime};
+use crate::{RedDBError, RedDBResult, RedDBRuntime};
 use reddb_types::Value;
 
 pub(crate) fn atomic_available(runtime: &RedDBRuntime, collection: &str) -> bool {
@@ -42,11 +42,10 @@ pub(crate) fn create(
     let mut engine = runtime.mutation_engine();
     if !vault && atomic_available(runtime, &collection) {
         engine = engine.for_keyed_write(previous);
-    } else {
-        assert!(
-            previous.is_none(),
-            "versioned and transactional writes retain their existing path"
-        );
+    } else if previous.is_some() {
+        return Err(RedDBError::InvalidOperation(
+            "collection contract changed during keyed replacement; retry the write".into(),
+        ));
     }
     let result = engine.apply(
         collection.clone(),
@@ -62,4 +61,52 @@ pub(crate) fn create(
         id,
         entity: db.store().get(&collection, id),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::entity::RuntimeEntityPort;
+
+    #[test]
+    fn replacement_refuses_changed_contract_without_deleting_previous() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("KV PUT changed.item = 'original'")
+            .expect("seed");
+        let (_, previous) = runtime
+            .get_kv("changed", "item")
+            .expect("read")
+            .expect("previous");
+        let mut contract = runtime
+            .db()
+            .collection_contract("changed")
+            .expect("contract");
+        contract.declared_model = CollectionModel::Mixed;
+        runtime
+            .db()
+            .save_collection_contract(contract)
+            .expect("change contract");
+        let result = create(
+            &runtime,
+            CreateKvInput {
+                collection: "changed".into(),
+                key: "item".into(),
+                value: Value::text("replacement"),
+                metadata: Vec::new(),
+            },
+            Some(previous),
+        );
+        assert!(result.is_err());
+        assert!(runtime.db().store().get("changed", previous).is_some());
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection("changed")
+                .unwrap()
+                .count(),
+            1
+        );
+    }
 }
