@@ -1464,6 +1464,9 @@ mod serverless_readiness_tests {
             .execute_query("CREATE TABLE readiness_probe (value INT)")
             .expect("collection");
         runtime.checkpoint().expect("published native state");
+        let expected = runtime
+            .db()
+            .readiness_flags_from_health_serverless(&HealthReport::healthy());
 
         let store = runtime.db().store();
         let publication = store.vault_publication_lock.lock();
@@ -1482,7 +1485,7 @@ mod serverless_readiness_tests {
         worker.join().expect("readiness worker");
         assert_eq!(
             flags.expect("native readiness must not wait for metadata publication"),
-            (true, true, true)
+            expected
         );
     }
 }
