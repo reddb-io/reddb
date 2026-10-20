@@ -87,7 +87,7 @@ pub mod memory_budget;
 pub mod memory_pools;
 
 #[cfg(test)]
-mod no_malloc_hot_paths;
+pub(crate) mod no_malloc_hot_paths;
 
 // Embedded single-file `.rdb` artifact skeleton.
 pub mod embedded;

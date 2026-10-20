@@ -126,6 +126,7 @@ fn record_capability_tokens(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::no_malloc_hot_paths::measure_allocations;
 
     fn record(id: i64, kind: &str, capabilities: &str) -> UnifiedRecord {
         let mut record = UnifiedRecord::new();
@@ -188,5 +189,95 @@ mod tests {
         });
         assert_eq!(selected[0].get("id"), Some(&Value::Integer(1)));
         assert_eq!(records[0].get("id"), Some(&Value::Integer(2)));
+    }
+
+    #[test]
+    fn unfiltered_query_selection_allocates_nothing() {
+        use crate::presentation::query_view::filter_query_records;
+        use crate::storage::query::unified::UnifiedRecord;
+        let mut record = UnifiedRecord::new();
+        record.set(
+            "nested",
+            reddb_types::Value::Array(vec![reddb_types::Value::Integer(42)]),
+        );
+        let records = vec![record; 1000];
+        let (selected, count) =
+            measure_allocations(|| filter_query_records(&records, &None, &None));
+        assert_eq!(selected.len(), 1000);
+        assert_eq!(
+            count.allocs, 0,
+            "response selection must borrow unfiltered rows"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual RQL/SQL allocation diagnostic; run with result cache disabled"]
+    fn rql_projection_allocation_diagnostic() {
+        use crate::presentation::query_result_json::runtime_query_json;
+        use crate::presentation::query_view::filter_query_records;
+        use crate::storage::query::unified::UnifiedRecord;
+        use reddb_types::Value;
+
+        let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("KV PUT projected.item = 'payload'")
+            .expect("seed");
+        let collection = runtime
+            .db()
+            .store()
+            .get_collection("projected")
+            .expect("collection");
+        let original = collection.query_all(|_| true).pop().expect("row");
+        for extra_values in [0, 128] {
+            let mut entity = original.clone();
+            let crate::storage::EntityData::Row(row) = &mut entity.data else {
+                panic!("KV rows are rows");
+            };
+            row.named.as_mut().expect("named row").insert(
+                "not_returned".into(),
+                Value::Array(
+                    (0..extra_values)
+                        .map(|_| Value::Array(vec![Value::Integer(1)]))
+                        .collect(),
+                ),
+            );
+            collection.update(entity).expect("extra unprojected data");
+            for _ in 0..5 {
+                runtime
+                    .execute_query("KV GET projected.item")
+                    .expect("warmup");
+            }
+            let (result, execution) =
+                measure_allocations(|| runtime.execute_query("KV GET projected.item"));
+            let result = result.expect("GET");
+            let (json, presentation) =
+                measure_allocations(|| runtime_query_json(&result, &None, &None));
+            assert_eq!(
+                result.result.records[0].get("value"),
+                Some(&Value::text("payload"))
+            );
+            assert!(json.get("result").is_some());
+            eprintln!(
+                "RQL_PROJECTION extra_values={extra_values} execution_allocs={} presentation_allocs={}",
+                execution.allocs, presentation.allocs
+            );
+        }
+        for row_count in [1, 100, 1000] {
+            let records: Vec<_> = (0..row_count)
+                .map(|id| {
+                    let mut record = UnifiedRecord::new();
+                    record.set("id", Value::Integer(id));
+                    record.set("value", Value::Array(vec![Value::Integer(42)]));
+                    record
+                })
+                .collect();
+            let (selected, count) =
+                measure_allocations(|| filter_query_records(&records, &None, &None));
+            assert_eq!(selected.len(), records.len());
+            eprintln!(
+                "SQL_SELECTION rows={row_count} allocations={}",
+                count.allocs
+            );
+        }
     }
 }
