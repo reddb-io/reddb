@@ -110,9 +110,9 @@ impl SlowQueryLogger {
     }
 
     /// Resolve a [`crate::storage::layout::LogDestination`] into a concrete
-    /// slow-query sink. `File(p)` writes to that exact path; `Stderr` and
-    /// `Syslog` fall back to `<fallback_log_dir>/red-slow.log` until the
-    /// dedicated sinks are wired (ADR 0018).
+    /// slow-query sink. `File(p)` writes to that exact path and `Stderr`
+    /// writes to stderr. `Syslog` falls back to a file until its dedicated
+    /// sink is wired (ADR 0018). Unavailable files fall back to stderr.
     pub fn for_destination(
         dest: &crate::storage::layout::LogDestination,
         fallback_log_dir: &std::path::Path,
@@ -123,7 +123,7 @@ impl SlowQueryLogger {
         let path = match dest {
             LogDestination::File(p) => p.clone(),
             LogDestination::Stderr => {
-                reddb_file::layout::legacy_slow_query_log_path(fallback_log_dir)
+                return Self::from_writer(std::io::stderr(), threshold_ms, sample_pct);
             }
             LogDestination::Syslog => {
                 tracing::warn!(
@@ -137,19 +137,38 @@ impl SlowQueryLogger {
     }
 
     fn open_at(path: PathBuf, threshold_ms: u64, sample_pct: u8) -> Arc<Self> {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let file = (|| -> std::io::Result<std::fs::File> {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+        })();
+        match file {
+            Ok(file) => Self::from_writer(file, threshold_ms, sample_pct),
+            Err(error) => {
+                tracing::warn!(
+                    target: "reddb::slow",
+                    path = %path.display(),
+                    %error,
+                    "slow-query file sink unavailable; using stderr"
+                );
+                Self::from_writer(std::io::stderr(), threshold_ms, sample_pct)
+            }
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .unwrap_or_else(|e| panic!("SlowQueryLogger: cannot open {}: {e}", path.display()));
+    }
 
+    fn from_writer(
+        sink: impl Write + Send + 'static,
+        threshold_ms: u64,
+        sample_pct: u8,
+    ) -> Arc<Self> {
         let (writer, guard) = NonBlockingBuilder::default()
             .buffered_lines_limit(65_536)
             .lossy(true)
-            .finish(file);
+            .finish(sink);
 
         Arc::new(Self {
             writer: Mutex::new(writer),
@@ -319,6 +338,40 @@ mod tests {
             },
             visible_collections: None,
         }
+    }
+
+    #[test]
+    fn unavailable_log_directory_does_not_panic_or_drop_store_events() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let blocked = directory.path().join("not-a-directory");
+        std::fs::write(&blocked, b"file").expect("unavailable directory fixture");
+        let logger = SlowQueryLogger::new(SlowQueryOpts {
+            log_dir: blocked.join("slow"),
+            threshold_ms: 0,
+            sample_pct: 100,
+        });
+        let store = super::super::slow_query_store::SlowQueryStore::new(4);
+        logger.attach_store(Arc::clone(&store));
+        logger.record(QueryKind::Select, 42, "SELECT ?".into(), &empty_scope());
+        assert_eq!(store.len(), 1);
+        assert!(blocked.is_file());
+    }
+
+    #[test]
+    fn stderr_destination_does_not_create_a_fallback_file() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let fallback = directory.path().join("unused");
+        let logger = SlowQueryLogger::for_destination(
+            &crate::storage::layout::LogDestination::Stderr,
+            &fallback,
+            100,
+            100,
+        );
+        drop(logger);
+        assert!(
+            !fallback.exists(),
+            "stderr logging created filesystem artifacts"
+        );
     }
 
     fn flush(_log: &Arc<SlowQueryLogger>) {
