@@ -66,7 +66,7 @@ pub(crate) fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::entity::RuntimeEntityPort;
+    use crate::application::ports::RuntimeEntityPort;
 
     #[test]
     fn replacement_refuses_changed_contract_without_deleting_previous() {
