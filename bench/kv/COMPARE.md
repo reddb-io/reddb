@@ -19,6 +19,10 @@ divided by wall time after a synchronized warmup barrier, not summed latencies.
 The fixed-count durable-overwrite diagnostic has five rounds of 500 logical
 writes with 1 / 8 connections. Each round changes values, checks every changed
 key, and the final full expected state is recorded for recovery checks.
+Full untimed verification can use eight connections (`--verification-workers`);
+this changes no timed worker count and checks each expected key once. The first
+capture used serial checks before this fixture-loading optimization; each JSON
+records the actual verification fan-out when available.
 
 Persistence conditions:
 

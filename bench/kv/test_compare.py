@@ -1,6 +1,7 @@
 import io
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -26,6 +27,7 @@ def arguments(out=None, **changes):
                   value_bytes=100, operations=11, workers=3, warmup=2, rounds=2, pipeline=2,
                   operation="get", seconds=0, prepare_only=False, verify_only=False,
                   verification="full", fence_writes=False, recovery_from=None, out=out)
+    values["verification_workers"] = 8
     values.update(changes)
     return SimpleNamespace(**values)
 
@@ -49,6 +51,24 @@ class FakeClient:
 
 
 class CompareTests(unittest.TestCase):
+    def test_parallel_verification_checks_every_key_once(self):
+        args = arguments(keys=31)
+        values = {index: compare.payload(index, 100) for index in range(args.keys)}
+        visited = []
+        lock = threading.Lock()
+
+        class TrackingClient(FakeClient):
+            def batch(self, operation, indices, size, generation=0):
+                super().batch(operation, indices, size, generation)
+                with lock:
+                    visited.extend(indices)
+
+        with patch("compare.client", side_effect=lambda _: TrackingClient(values)):
+            result = compare.verify(args)
+        self.assertEqual(sorted(visited), list(range(args.keys)))
+        self.assertEqual(result["keys_checked"], args.keys)
+        self.assertEqual(result["verification_workers"], 8)
+
     def test_failed_partial_samples_cannot_be_aggregated_as_success(self):
         case = {"engine": "redis", "operation": "get", "status": "invalid",
                 "config": vars(arguments()), "rounds": [{"throughput_ops_s": 999999}]}

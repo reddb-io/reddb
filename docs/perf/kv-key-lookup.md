@@ -12,6 +12,14 @@ Non-versioned KV preserves its physical-row lookup policy.
 Both named rows and compact schema/column rows participate; point reads use
 the shared field accessor so bulk-loaded and consolidated rows remain readable.
 
+Transport coverage matters: these indexes serve the `KvAtomicOps` path and RQL
+`KV GET`. The REST GET handler still calls `RuntimeEntityPort::get_kv` in
+`application/ports_impls_entity.rs`, which materializes a full collection scan.
+RQL GET also requests entity metadata, so its response path still projects an
+owned entity. The two paths are measured separately by the
+[verified product-path benchmark](../../bench/kv/COMPARE.md); the allocation
+improvement in `KvAtomicOps::get` must not be generalized to every transport.
+
 Cost sketch: with N collection rows, S segments and V retained versions of the
 requested key, a normal point lookup changes from O(N) traversal/materialization
 to expected O(S + V) candidate work, plus hashing/comparing the key bytes.

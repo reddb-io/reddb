@@ -153,18 +153,27 @@ def client(args):
 
 def verify(args, generations=None, indices=None):
     indices = range(args.keys) if indices is None else sorted(set(indices))
-    connection = client(args)
-    try:
-        for index in indices:
-            generation = 0 if generations is None else generations[index]
-            connection.batch("get", [index], args.value_bytes, generation)
-    finally:
-        connection.close()
+    workers = min(args.verification_workers, len(indices))
+
+    def check(partition):
+        connection = client(args)
+        try:
+            for index in partition:
+                generation = 0 if generations is None else generations[index]
+                connection.batch("get", [index], args.value_bytes, generation)
+        finally:
+            connection.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(check, indices[worker::workers]) for worker in range(workers)]
+        for future in futures:
+            future.result()
     digest = hashlib.sha256()
     for index in indices:
         generation = 0 if generations is None else generations[index]
         digest.update(f"k{index}\0{payload(index, args.value_bytes, generation)}\n".encode())
-    return {"keys_checked": len(indices), "expected_sha256": digest.hexdigest()}
+    return {"keys_checked": len(indices), "expected_sha256": digest.hexdigest(),
+            "verification_workers": workers}
 
 
 def prepare(args):
@@ -261,6 +270,8 @@ def arguments():
                         help="verify a completed PUT result's final generations after restart")
     parser.add_argument("--verification", choices=["full", "responses"], default="full",
                         help="responses requires caller-owned full dataset checks before/after the matrix")
+    parser.add_argument("--verification-workers", type=int, default=8,
+                        help="untimed complete-dataset verification connections")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if args.prepare_only and args.verify_only:
@@ -277,6 +288,8 @@ def arguments():
         parser.error("counts must be positive")
     if args.warmup < 0 or args.operations < args.workers or args.value_bytes > 1024 * 1024:
         parser.error("invalid warmup, operations per worker, or value size")
+    if not 1 <= args.verification_workers <= 64:
+        parser.error("verification workers must be in [1, 64]")
     if not args.collection.replace("_", "").isalnum() or not args.collection[0].isalpha():
         parser.error("collection must be an unquoted identifier")
     return args
