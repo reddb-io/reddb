@@ -107,3 +107,62 @@ fn operational_backup_refuses_an_unrestorable_main_file_snapshot() {
         1
     );
 }
+
+#[test]
+fn embedded_options_do_not_allow_incomplete_backup_of_an_existing_paged_store() {
+    let directory = tempfile::tempdir().expect("private synthetic store");
+    let source = directory.path().join("legacy.rdb");
+    {
+        let store = reddb_server::storage::UnifiedStore::open(&source).expect("paged store");
+        store.create_collection("seed").expect("seed collection");
+        store.persist().expect("paged publication");
+    }
+    let remote = directory.path().join("remote");
+    let snapshots = format!("{}/", remote.join("snapshots").display());
+    let options = RedDBOptions::persistent(&source)
+        .with_remote_backend(
+            Arc::new(LocalBackend),
+            remote.join("head.rdb").to_string_lossy(),
+        )
+        .with_metadata("red.config.backup.snapshot_prefix", &snapshots);
+    let runtime = RedDBRuntime::with_options(options).expect("legacy runtime");
+    assert!(runtime.db().is_paged(), "actual file format is paged");
+    runtime
+        .execute_query("CREATE DOCUMENT backup_contract_probe")
+        .expect("durable document definition");
+    runtime
+        .execute_query(
+            "INSERT INTO backup_contract_probe DOCUMENT VALUES ({\"name\":\"preserved\"})",
+        )
+        .expect("source document");
+
+    let error = runtime
+        .trigger_backup()
+        .expect_err("a main-file-only backup would lose the collection definition");
+    assert!(error
+        .to_string()
+        .contains("checkpoint-consistent physical bundle"));
+    assert!(
+        !std::path::Path::new(&snapshots).exists(),
+        "no incomplete snapshot advertised"
+    );
+    assert_eq!(runtime.backup_status().total_backups, 0);
+    let collection = runtime
+        .catalog()
+        .collections
+        .into_iter()
+        .find(|collection| collection.name == "backup_contract_probe")
+        .expect("source collection remains available");
+    assert_eq!(
+        collection.model,
+        reddb_server::catalog::CollectionModel::Document
+    );
+    assert_eq!(
+        runtime
+            .execute_query("SELECT name FROM backup_contract_probe")
+            .expect("source readback")
+            .result
+            .len(),
+        1
+    );
+}

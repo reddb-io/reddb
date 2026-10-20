@@ -119,6 +119,11 @@ loaded free pages.
 
 ## Backup, restore & WAL
 
+Main-file-only remote backups require an actual self-contained embedded file.
+An existing paged file opened with embedded options still requires its physical
+metadata sidecars and must use a complete, fenced physical-directory backup.
+The runtime rejects incomplete remote snapshots before advertising success.
+
 - **Operational backup boundary** — initial backup contract for operational layouts: create a consistent checkpoint, copy manifest/data/index/segment files covered by that checkpoint, and retain/copy WAL from the checkpoint boundary forward. The first contract targets local and primary-replica stores; coordinated cluster-wide backup is a separate distributed protocol.
 - **Operational restore boundary** — initial restore contract for operational layouts: restore a consistent checkpoint, validate manifest and file checksums, then replay retained WAL up to the requested target LSN before opening the store.
 - **Operational WAL retention floor** — WAL pruning boundary for operational primary-replica stores. It is the maximum safety requirement across backup/PITR retention and the slowest replica's durable restart LSN, so pruning cannot break point-in-time recovery or force unnecessary replica rebootstrap.
