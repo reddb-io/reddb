@@ -648,14 +648,18 @@ mod tests {
                 .with_auto_index_id(false),
         )
         .expect("runtime");
-        runtime
-            .execute_query("CREATE TABLE keyed_rows (key TEXT)")
-            .expect("table");
+        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&runtime);
+        let model = crate::catalog::CollectionModel::Kv;
+        ops.set(model, "keyed_rows", "seed", Value::Integer(0), None, false)
+            .expect("keyed collection");
         runtime.refresh_memory_accounting();
         let headroom =
             runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
         let value = Value::text("wanted");
-        let fields = vec![("key".to_string(), value.clone())];
+        let fields = vec![
+            ("key".to_string(), value.clone()),
+            ("value".to_string(), Value::Integer(7)),
+        ];
         let lookup_bytes =
             crate::storage::unified::memory_size::key_lookup_growth_bytes(Some(&value)) as u64;
         let row_without_lookup = estimate_row_growth(&fields) - lookup_bytes;
@@ -666,29 +670,37 @@ mod tests {
                 headroom - row_without_lookup,
             )
             .expect("leave space for the row but not its key lookup");
-        let result = runtime.execute_query("INSERT INTO keyed_rows (key) VALUES ('wanted')");
+        let result = ops.set(
+            model,
+            "keyed_rows",
+            "wanted",
+            Value::Integer(7),
+            None,
+            false,
+        );
         assert!(result
             .expect_err("key lookup growth exceeds remaining headroom")
             .to_string()
             .contains("over budget"));
-        assert!(runtime
-            .execute_query("SELECT * FROM keyed_rows")
-            .expect("read after rejection")
-            .result
-            .records
-            .is_empty());
-        drop(held);
-        runtime
-            .execute_query("INSERT INTO keyed_rows (key) VALUES ('wanted')")
-            .expect("retry after releasing headroom");
         assert_eq!(
-            runtime
-                .execute_query("SELECT * FROM keyed_rows")
-                .expect("read after retry")
-                .result
-                .records
-                .len(),
-            1
+            ops.get(model, "keyed_rows", "wanted")
+                .expect("read after rejection"),
+            None
+        );
+        drop(held);
+        ops.set(
+            model,
+            "keyed_rows",
+            "wanted",
+            Value::Integer(7),
+            None,
+            false,
+        )
+        .expect("retry after releasing headroom");
+        assert_eq!(
+            ops.get(model, "keyed_rows", "wanted")
+                .expect("read after retry"),
+            Some(Value::Integer(7))
         );
     }
 
