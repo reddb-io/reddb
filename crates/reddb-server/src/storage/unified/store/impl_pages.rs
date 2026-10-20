@@ -541,6 +541,53 @@ impl UnifiedStore {
         }
     }
 
+    /// Successful physical deletes already changed both the manager and tree.
+    /// Reuse remains valid only when their exact revision delta accounts for
+    /// this batch, with no intervening edits or segment replacement.
+    pub(crate) fn note_paged_delete(
+        &self,
+        collection: &str,
+        manager: &Arc<SegmentManager>,
+        before: &[(u64, u64)],
+        deleted: &[EntityId],
+    ) {
+        let after = manager.checkpoint_revisions();
+        if before.len() != after.len() {
+            return;
+        }
+        let mut changes = 0_u64;
+        for ((old_id, old_revision), (new_id, new_revision)) in before.iter().zip(&after) {
+            if old_id != new_id {
+                return;
+            }
+            let Some(delta) = new_revision.checked_sub(*old_revision) else {
+                return;
+            };
+            let Some(total) = changes.checked_add(delta) else {
+                return;
+            };
+            changes = total;
+        }
+        let Ok(expected) = u64::try_from(deleted.len()) else {
+            return;
+        };
+        if changes != expected {
+            return;
+        }
+        let mut versions = self.checkpoint_versions.write();
+        let Some(previous) = versions.get_mut(collection) else {
+            return;
+        };
+        if previous.manager.ptr_eq(&Arc::downgrade(manager))
+            && previous.segments == before
+            && previous.format_version == self.format_version()
+            && !deleted.iter().any(|id| previous.pending_vault.contains(id))
+            && !previous.aborted.contains(&0)
+        {
+            previous.segments = after;
+        }
+    }
+
     pub(crate) fn mark_paged_registry_dirty(&self) {
         self.paged_registry_dirty.store(true, Ordering::Release);
     }

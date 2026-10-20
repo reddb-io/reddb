@@ -1266,19 +1266,22 @@ impl UnifiedStore {
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
 
+        let before = self.pager.as_ref().map(|_| manager.checkpoint_revisions());
         let deleted_ids = manager.delete_batch(ids)?;
         if deleted_ids.is_empty() {
             return Ok(deleted_ids);
         }
 
         let mut registry_dirty = false;
+        let mut updated_tree = false;
         if self.pager.is_some() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
+                updated_tree = true;
                 let root_before = btree.root_page_id();
                 for id in &deleted_ids {
                     let key = id.raw().to_be_bytes();
-                    let _ = btree.delete(&key);
+                    updated_tree &= matches!(btree.delete(&key), Ok(true));
                 }
                 registry_dirty = root_before != btree.root_page_id();
             }
@@ -1298,6 +1301,11 @@ impl UnifiedStore {
             .collect::<Vec<_>>();
         self.finish_paged_write(actions)?;
 
+        if updated_tree {
+            if let Some(before) = before {
+                self.note_paged_delete(collection, &manager, &before, &deleted_ids);
+            }
+        }
         Ok(deleted_ids)
     }
 

@@ -64,6 +64,11 @@ visibility changes and versioned rows retain conservative validation. Durable
 replay reconciliation seeds the current raw tree generation before runtime
 visibility normalization is attached.
 
+Completed WAL-backed physical delete batches may advance that proof when every
+tree removal succeeds and the segment revision delta accounts for exactly the
+deleted rows. Earlier untracked edits, changed segment topology, pending vault
+versions and format changes retain full checkpoint validation.
+
 Changed checkpoints encode ordered borrowed rows in batches capped at 1 MiB or
 512 records (a single larger value keeps the existing value-size contract).
 Comparison with a published tree is streamed; a replacement copies the already
