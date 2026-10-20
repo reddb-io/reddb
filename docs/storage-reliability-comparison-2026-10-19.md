@@ -9,15 +9,39 @@ flush requests. No engine can make arbitrary failing hardware infallible.
 ## Assessment
 
 RedDB has relevant mechanisms, but the evidence does not yet establish reliability
-parity with MariaDB/InnoDB, PostgreSQL, or MongoDB/WiredTiger. In particular, the
-actual staging workload failed qualification after the 1.24.9 release, and the
-first follow-up candidate still exhausted a 3 GiB test cgroup while serving the
-catalog. Passing small storage regressions is insufficient to close this incident.
+parity with MariaDB/InnoDB, PostgreSQL, or MongoDB/WiredTiger. The actual staging
+workload failed qualification after the 1.24.9 release. The official 1.24.10
+workflow binary subsequently passed the snapshot-based local qualification below;
+deployed staging qualification remains a separate acceptance gate.
 
 The checkpoint retirement design is conceptually closest to WiredTiger's delayed
 block reclamation: publish a durable replacement before reusing a retired
 generation, and retain generations still needed by readers. This similarity is
 an architectural comparison, not proof of equivalent implementation quality.
+
+## Local qualification of 1.24.10
+
+Source: `8a8749872e1ba3e653c80b4c00d2731657b0732f`. The official Linux x86_64
+workflow artifact was tested against a preserved copy of staging data, with
+swap disabled and a one-CPU quota. These are local results, not deployed results
+or competitor benchmarks.
+
+- Full catalog inspection passed in 1,258 ms with a 3 GiB cgroup limit and no
+  OOM events.
+- Concurrent reads, writes, login, rollback, DDL, worker-style updates, readiness
+  checks and three checkpoints passed with a 4 GiB cgroup limit. Checkpoints took
+  512, 577 and 554 ms; the file did not grow.
+- Twenty-four fixed-dataset update/checkpoint cycles did not grow the file.
+  After forced process death, reopen preserved the acknowledged WAL write and
+  did not expose the rolled-back row. Original business counts were unchanged.
+- An independent read-only scan after those tests found no structural, value
+  decoding or leaf-link faults across 131 collections. Hashes of 123 original
+  collections were unchanged; five original technical collections changed as
+  expected. This diagnostic scan is not a supported full row/index verifier.
+
+These results cover specific reproduced failures. They do not establish
+power-loss equivalence, comprehensive secondary-index correctness, bounded
+storage for every workload, or safe general physical compaction.
 
 ## Mechanism comparison
 
@@ -31,17 +55,20 @@ an architectural comparison, not proof of equivalent implementation quality.
 
 ## Concrete RedDB gaps
 
-1. **Staging qualification remains failed.** The deployed 1.24.9 checkpoint
+1. **Deployed staging qualification is still required.** The deployed 1.24.9 checkpoint
    returned HTTP 503 after 30,004 ms. Concurrent reads/writes remained responsive,
    but login and rollback timed out. A later catalog request OOM-killed the pod.
    The first follow-up optimized candidate also hit `MemoryMax=3G` in the actual
-   snapshot reproducer. Increasing the limit alone does not establish boundedness.
+   snapshot reproducer. Version 1.24.10 removes full artifact reconstruction from
+   the health path and passes that local reproducer without increasing its
+   3 GiB limit. Increasing a limit alone would not establish boundedness.
 2. **Inspection can trigger maintenance.** `RedDB::physical_metadata()` currently
    calls `load_or_bootstrap_physical_metadata(!read_only)`. When native metadata
    is ahead or its sidecar is missing, this can persist metadata and native
    artifacts from a nominally observational path. Artifact construction copies
-   collections and builds search structures. This is a candidate cause to
-   reproduce and fix, not yet a verified explanation of the remaining OOM.
+   collections and builds search structures. The reproduced catalog OOM was
+   addressed by removing payload reconstruction/decoding from health; this
+   conditional getter publication remains a separate maintenance-boundary concern.
 3. **Current-format verification needs explicit qualification.** The SQL `SCRUB`
    route calls `reddb_file::scrub_embedded_store`. That implementation reads two
    4 KiB `RDBSBLK1` authorities, checks an embedded snapshot, and checks a WAL
