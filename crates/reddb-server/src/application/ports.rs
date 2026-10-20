@@ -201,6 +201,27 @@ pub trait RuntimeAdminPort {
 
 pub trait RuntimeNativePort {
     fn health_report(&self) -> crate::health::HealthReport;
+    fn health_report_from_catalog(
+        &self,
+        _catalog: &crate::catalog::CatalogModelSnapshot,
+    ) -> crate::health::HealthReport {
+        self.health_report()
+    }
+    /// Derive all readiness flags from one caller-owned health observation.
+    /// The default preserves compatibility with ports implementing scalar checks.
+    fn readiness_from_health(
+        &self,
+        _report: &crate::health::HealthReport,
+    ) -> crate::application::native::RuntimeReadiness {
+        crate::application::native::RuntimeReadiness {
+            query: self.readiness_for_query(),
+            query_serverless: self.readiness_for_query_serverless(),
+            write: self.readiness_for_write(),
+            write_serverless: self.readiness_for_write_serverless(),
+            repair: self.readiness_for_repair(),
+            repair_serverless: self.readiness_for_repair_serverless(),
+        }
+    }
     fn collection_roots(&self) -> RedDBResult<BTreeMap<String, u64>>;
     fn snapshots(&self) -> RedDBResult<Vec<SnapshotDescriptor>>;
     fn exports(&self) -> RedDBResult<Vec<ExportDescriptor>>;

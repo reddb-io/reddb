@@ -567,6 +567,15 @@ impl RedDB {
         let indexes = self
             .physical_metadata()
             .map(|metadata| metadata.indexes)
+            .unwrap_or_default();
+        self.physical_indexes_from_declarations(indexes)
+    }
+
+    pub(crate) fn physical_indexes_from_declarations(
+        &self,
+        indexes: Vec<PhysicalIndexState>,
+    ) -> Vec<PhysicalIndexState> {
+        let indexes = Some(indexes)
             .filter(|indexes| !indexes.is_empty())
             .or_else(|| {
                 self.native_physical_state()

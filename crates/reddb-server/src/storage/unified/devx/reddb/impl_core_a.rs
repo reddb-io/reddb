@@ -1292,12 +1292,13 @@ impl RedDB {
         let declarations = self
             .physical_metadata()
             .map(|metadata| CatalogDeclarations {
+                operational_indexes: self
+                    .physical_indexes_from_declarations(metadata.indexes.clone()),
                 declared_indexes: metadata.indexes,
-                declared_graph_projections: metadata.graph_projections,
-                declared_analytics_jobs: metadata.analytics_jobs,
-                operational_indexes: self.physical_indexes(),
-                operational_graph_projections: self.graph_projections(),
-                operational_analytics_jobs: self.analytics_jobs(),
+                declared_graph_projections: metadata.graph_projections.clone(),
+                declared_analytics_jobs: metadata.analytics_jobs.clone(),
+                operational_graph_projections: metadata.graph_projections,
+                operational_analytics_jobs: metadata.analytics_jobs,
             });
         snapshot_store_with_declarations(
             "reddb",
@@ -1376,8 +1377,13 @@ impl RedDB {
             return (query_allowed, write_allowed, repair_allowed);
         }
 
-        let authority = self.physical_authority_status();
-        let native_bootstrap_ready = authority.native_bootstrap_ready;
+        // Readiness needs only native completeness. Full authority diagnostics
+        // also reconcile physical metadata, unnecessarily waiting behind
+        // checkpoint publication for each query/write/repair flag.
+        let native_bootstrap_ready = self
+            .native_physical_state()
+            .as_ref()
+            .is_some_and(Self::native_state_is_bootstrap_complete);
         let query_allowed = native_bootstrap_ready && matches!(report.state, HealthState::Healthy);
         let write_allowed = !self.options.read_only
             && native_bootstrap_ready
@@ -1440,6 +1446,47 @@ fn value_as_retention_ms(value: &Value) -> Option<i64> {
         Value::UnsignedInteger(t) => i64::try_from(*t).ok(),
         Value::Integer(t) => Some(*t),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod serverless_readiness_tests {
+    use super::*;
+
+    #[test]
+    fn native_readiness_does_not_wait_for_metadata_publication() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let options = RedDBOptions::persistent(directory.path().join("ready.rdb"))
+            .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+            .expect("serverless profile");
+        let runtime = Arc::new(crate::RedDBRuntime::with_options(options).expect("runtime"));
+        runtime
+            .execute_query("CREATE TABLE readiness_probe (value INT)")
+            .expect("collection");
+        runtime.checkpoint().expect("published native state");
+        let expected = runtime
+            .db()
+            .readiness_flags_from_health_serverless(&HealthReport::healthy());
+
+        let store = runtime.db().store();
+        let publication = store.vault_publication_lock.lock();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let reader = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            let flags = reader
+                .db()
+                .readiness_flags_from_health_serverless(&HealthReport::healthy());
+            send.send(flags).expect("readiness receiver");
+        });
+        let flags = receive.recv_timeout(std::time::Duration::from_secs(2));
+        // Release before asserting so a regression cannot leave a blocked
+        // worker behind. The old authority-diagnostic path waits on this lock.
+        drop(publication);
+        worker.join().expect("readiness worker");
+        assert_eq!(
+            flags.expect("native readiness must not wait for metadata publication"),
+            expected
+        );
     }
 }
 

@@ -46,6 +46,13 @@ impl<'a, P: RuntimeNativePort + ?Sized> NativeUseCases<'a, P> {
         self.runtime.health_report()
     }
 
+    pub fn health_from_catalog(
+        &self,
+        catalog: &crate::catalog::CatalogModelSnapshot,
+    ) -> HealthReport {
+        self.runtime.health_report_from_catalog(catalog)
+    }
+
     pub fn snapshots(&self) -> RedDBResult<Vec<SnapshotDescriptor>> {
         self.runtime.snapshots()
     }
@@ -175,13 +182,10 @@ impl<'a, P: RuntimeNativePort + ?Sized> NativeUseCases<'a, P> {
     }
 
     pub fn readiness(&self) -> RuntimeReadiness {
-        RuntimeReadiness {
-            query: self.runtime.readiness_for_query(),
-            query_serverless: self.runtime.readiness_for_query_serverless(),
-            write: self.runtime.readiness_for_write(),
-            write_serverless: self.runtime.readiness_for_write_serverless(),
-            repair: self.runtime.readiness_for_repair(),
-            repair_serverless: self.runtime.readiness_for_repair_serverless(),
-        }
+        self.readiness_from_health(&self.health())
+    }
+
+    pub fn readiness_from_health(&self, report: &HealthReport) -> RuntimeReadiness {
+        self.runtime.readiness_from_health(report)
     }
 }

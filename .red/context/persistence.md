@@ -38,6 +38,13 @@ generation. New mutation paths must advance the segment revision before exposing
 When embedded options open an existing paged file, collection definitions remain
 in physical metadata. The binary dump's auxiliary contract blob is only used for
 an actual embedded artifact; paged checkpoints do not serialize that blob.
+Catalog model snapshots reuse one physical metadata observation for their
+declared and operational resource lists; index reconciliation retains its native
+artifact checks and fallback when persisted index declarations are empty.
+Aggregate readiness derives all flags from one health observation. Catalog HTTP
+responses share that same health observation with their readiness fields and
+reuse their catalog snapshot for health diagnostics. Connection-pool counters
+are observed without holding the pool lock through storage inspection.
 Cached generations are accepted only after durable catalog publication; current
 format roots loaded from disk are seeded before WAL replay. Physical metadata
 fingerprints additionally retain their existing statistics seed. The caches do
