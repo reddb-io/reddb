@@ -81,6 +81,9 @@ def main():
     parser.add_argument("--seconds", type=float, default=2)
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--sample-only", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--label", default="")
+    parser.add_argument("--only", choices=["redis", "kividb", "reddb-rest"])
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     sizes = [int(value) for value in args.keys.split(",")]
@@ -120,20 +123,39 @@ def main():
     # Docker info can include unrelated host paths; retain just hardware/engine identity.
     manifest["docker"] = {key: manifest["docker"].get(key) for key in (
         "ServerVersion", "NCPU", "MemTotal", "Architecture", "KernelVersion", "OperatingSystem", "Driver")}
+    if args.resume:
+        previous = json.loads((args.out / "manifest.json").read_text())
+        previous["containers"].update(manifest["containers"])
+        previous.setdefault("continuations", []).append({
+            "started_unix_ms": int(time.time() * 1000), "label": args.label,
+            "only": args.only, "containers": list(manifest["containers"])})
+        previous["status"] = "running"
+        manifest = previous
+
+    def filename(name):
+        return f"{args.label}-{name}" if args.label else name
 
     def save():
         temporary = args.out / "manifest.tmp"
         temporary.write_text(json.dumps(manifest, indent=2) + "\n")
         temporary.replace(args.out / "manifest.json")
 
-    def run(engine, container, port, collection, keys, name, extra=()):
+    def run(engine, container, port, collection, keys, name, extra=(), allow_failure=False):
+        name = filename(name)
         target = f"/results/{name}.json"
         parts = ["docker", "exec", args.client, "python", "/bench/compare.py", "--engine", engine,
                  "--host", container, "--port", str(port), "--collection", collection,
-                 "--keys", str(keys), "--rounds", str(args.rounds), "--warmup", "10", "--out", target]
+                 "--keys", str(keys), "--rounds", str(args.rounds), "--warmup", "10", "--out", target,
+                 "--profile", args.label or "default"]
         if engine == "kividb":
             parts.append("--fence-writes")
-        stdout = command(*parts, *extra, timeout=600)
+        try:
+            stdout = command(*parts, *extra, timeout=600)
+        except RuntimeError as error:
+            if not allow_failure:
+                raise
+            stdout = str(error)
+            manifest["errors"].append({"engine": engine, "case": name, "error": stdout})
         (args.out / f"{name}.stdout.log").write_text(stdout + "\n")
         result = json.loads((args.out / f"{name}.json").read_text())
         manifest["cases"].append({"file": f"{name}.json", "status": result["status"],
@@ -166,7 +188,7 @@ def main():
         ready(container, engine)
         extra = ["--verify-only"]
         if previous:
-            extra += ["--recovery-from", f"/results/{previous}.json"]
+            extra += ["--recovery-from", f"/results/{filename(previous)}.json"]
         run(engine, container, port, collection, keys, name, extra)
 
     save()
@@ -175,6 +197,8 @@ def main():
             command("docker", "stop", container)
         for engine, container, port in [("redis", args.redis, 6379), ("kividb", args.kividb, 6380),
                                         ("reddb-rest", args.reddb, 5000)]:
+            if args.only and engine != args.only:
+                continue
             monitor = None
             try:
                 command("docker", "start", container)
@@ -195,7 +219,8 @@ def main():
                                 name = f"{adapter}-{keys}-get-c{concurrency}-p{depth}"
                                 run(adapter, container, port, collection, keys, name,
                                     ["--workers", str(concurrency), "--pipeline", str(depth),
-                                     "--seconds", str(args.seconds), "--verification", "responses"])
+                                     "--seconds", str(args.seconds), "--verification", "responses"],
+                                    allow_failure=True)
                     recover(container, engine, port, collection, keys, f"{engine}-{keys}-get-recovery")
                 # Separate bounded durable-overwrite cell, including readback
                 # after every round. Native KiviDB SET alone is not sync-durable.
@@ -215,7 +240,7 @@ def main():
                     monitor.close()
                 command("docker", "stop", container)
                 save()
-        manifest["status"] = "valid-diagnostic" if not manifest["errors"] else "incomplete"
+        manifest["status"] = "valid-diagnostic" if not manifest["errors"] else "completed-with-invalid-cells"
     finally:
         manifest["finished_unix_ms"] = int(time.time() * 1000)
         save()

@@ -242,6 +242,7 @@ def arguments():
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--collection", default="kv_compare")
+    parser.add_argument("--profile", default="default")
     parser.add_argument("--keys", type=int, default=1000)
     parser.add_argument("--value-bytes", type=int, default=100)
     parser.add_argument("--operations", type=int, default=2000)

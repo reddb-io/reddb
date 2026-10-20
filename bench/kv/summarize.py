@@ -19,6 +19,7 @@ def byte_count(value):
 
 def summarize_case(case, events, server, client):
     result = {"engine": case["engine"], "operation": case["operation"], "status": case["status"],
+              "profile": case["config"].get("profile", "default"),
               "keys": case["config"]["keys"], "workers": case["config"]["workers"],
               "pipeline": case["config"]["pipeline"], "fence_writes": case["config"]["fence_writes"]}
     if case["status"] != "valid-diagnostic" or not case["rounds"]:
@@ -55,9 +56,7 @@ def main():
         raise ValueError("wait for the matrix to finish")
     # A supplementary sampler repaired the initial Windows CLI ANSI parsing
     # issue in the first capture. Prefer its one consistent sample stream.
-    paths = [directory / "resources-matrix.jsonl"]
-    if not paths[0].exists():
-        paths = list(directory.glob("resources-*.jsonl"))
+    paths = list(directory.glob("resources-*.jsonl"))
     events = [json.loads(line) for path in paths for line in path.read_text().splitlines() if line]
     measurements = []
     artifacts = {}
@@ -101,7 +100,8 @@ def main():
                 lines.append(f"| {value['keys']} | {value['workers']} | {value['engine']} | "
                              f"{value['status']} | — | — | — | — | — |")
                 continue
-            fields = [str(value["keys"]), str(value["workers"]), value["engine"],
+            label = value["engine"] + (f" ({value['profile']})" if value["profile"] != "default" else "")
+            fields = [str(value["keys"]), str(value["workers"]), label,
                       number(value["median_throughput_ops_s"]), number(value["median_batch_p50_us"]),
                       number(value["median_batch_p95_us"]), number(value["median_batch_p99_us"]),
                       f"{number(value['server_median_cpu_percent'])} / {number(value['client_median_cpu_percent'])}",

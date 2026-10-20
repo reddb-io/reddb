@@ -46,6 +46,12 @@ threads, validation/serialization, the Docker VM and other host activity can
 limit results. CPU and memory samples are Docker cgroup observations, not
 per-key memory measurements. Missing samples are unavailable, never zero.
 
+The initial RedDB profile hit its built-in eight-request HTTP admission cap at
+32 connections and is retained as an invalid cell. A separately labeled `cap64`
+continuation sets `--http-max-handlers 64` while preserving the CPU, process
+memory and engine-budget limits. This is an explicit configuration change;
+the failed default-cap result is not replaced by the continuation.
+
 These runs are **shared-host diagnostics**. Five rounds share a server process
 and are not independent host-level experiments. Raw round samples must remain
 visible. They do not qualify for ADR 0076's public 20% leadership decision or a
@@ -92,7 +98,7 @@ docker create --name reddb-kv-red-20261020 --network reddb-kv-20261020 \
   -e REDDB_MEMORY_BUDGET=1073741824 -e REDDB_RUNTIME_RESULT_CACHE_ENABLED=false \
   -e RUST_MIN_STACK=8388608 python:3.12-slim-bookworm \
   /build/src/target/release/red server --path /data/bench.rdb \
-  --http-bind 0.0.0.0:5000 --workers 4 --no-auth
+  --http-bind 0.0.0.0:5000 --workers 4 --http-max-handlers 64 --no-auth
 docker create --name reddb-kv-redis-20261020 --network reddb-kv-20261020 \
   --cpuset-cpus 0-3 --cpus 4 --memory 2g -v reddb-kv-redis-20261020:/data \
   redis:8.4.0-bookworm redis-server --save '' --appendonly yes --appendfsync always \
@@ -115,6 +121,17 @@ Use `--keys`, `--workers`, `--rounds` and `--seconds` for additional diagnostic
 matrices; keep each workload version and all unsuccessful cells in the results.
 The runner stops its benchmark containers when finished and preserves their
 volumes. It never publishes host ports or touches other running containers.
+`--resume --only reddb-rest --label cap64 --reddb <new-container>` appends a
+separately labeled continuation to an existing result directory. Create that
+container with a fresh volume and point the client at the same result directory.
+
+```sh
+python bench/kv/summarize.py bench/results/kv-compare-local
+```
+
+This writes `summary.json` and `SUMMARY.md`, keeps invalid/unsupported cells
+visible, and records SHA256 checksums for the raw artifacts. Run it after the
+matrix has finished.
 
 ```sh
 python -m unittest discover -s bench/kv -p test_compare.py -v
