@@ -1206,6 +1206,86 @@ mod tests {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
     }
 
+    fn verify_autocommit_frame_survives_vacuum(delete: bool) {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        reset_thread_locals();
+        clear_current_connection_id();
+        let runtime = fresh_runtime();
+        let execute = |connection, sql: &str| {
+            set_current_connection_id(connection);
+            let result = runtime.execute_query(sql);
+            clear_current_connection_id();
+            result.expect("valid frame retention fixture statement")
+        };
+        execute(1, "CREATE TABLE frame_rows (id TEXT, n INTEGER)");
+        execute(1, "INSERT INTO frame_rows (id, n) VALUES ('row', 1)");
+        execute(2, "BEGIN");
+        let frame = StatementExecutionFrame::build(
+            &runtime,
+            StatementIdentity::Text("SELECT id, n FROM frame_rows"),
+        )
+        .expect("ordinary autocommit frame captures its snapshot");
+        // Pause after capture and before install/scan: GC must also protect
+        // this gap, rather than starting retention only at TLS installation.
+        execute(
+            2,
+            if delete {
+                "DELETE FROM frame_rows WHERE id = 'row'"
+            } else {
+                "UPDATE frame_rows SET n = 2 WHERE id = 'row'"
+            },
+        );
+        execute(2, "COMMIT");
+        execute(1, "VACUUM frame_rows");
+        {
+            let _guards = frame.install(&runtime);
+            let records = super::super::record_search::scan_runtime_table_source_records_limited(
+                &runtime.db(),
+                "frame_rows",
+                None,
+            )
+            .expect("captured frame scan succeeds after vacuum");
+            assert_eq!(
+                records.len(),
+                1,
+                "vacuum reclaimed an active frame's visible row"
+            );
+            assert_eq!(
+                records[0]
+                    .get("n")
+                    .expect("selected value exists")
+                    .to_string(),
+                "1"
+            );
+        }
+        drop(frame);
+        execute(1, "VACUUM frame_rows");
+        let physical = runtime
+            .db()
+            .store()
+            .get_collection("frame_rows")
+            .expect("fixture collection exists")
+            .query_all(|_| true)
+            .len();
+        assert_eq!(
+            physical,
+            usize::from(!delete),
+            "completed frame leaked its retention pin"
+        );
+        clear_current_connection_id();
+    }
+
+    #[test]
+    fn autocommit_frame_retains_update_until_scan_completes() {
+        verify_autocommit_frame_survives_vacuum(false);
+    }
+
+    #[test]
+    fn autocommit_frame_retains_delete_until_scan_completes() {
+        verify_autocommit_frame_survives_vacuum(true);
+    }
+
     /// Ensure thread-local state from a prior test can't leak into
     /// the next one — tests in the same binary share the thread.
     fn reset_thread_locals() {
