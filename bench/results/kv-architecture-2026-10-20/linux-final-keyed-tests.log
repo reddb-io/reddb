@@ -14,4 +14,3 @@ test storage::unified::store::keyed_write::tests::interrupted_keyed_staging_fenc
 test storage::unified::store::keyed_write::tests::strict_paged_keyed_writes_flush_pages_before_acknowledgement ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 5320 filtered out; finished in 0.16s
-
