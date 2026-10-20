@@ -5,6 +5,24 @@ impl RuntimeNativePort for RedDBRuntime {
         self.health()
     }
 
+    fn readiness_from_health(
+        &self,
+        report: &crate::health::HealthReport,
+    ) -> crate::application::native::RuntimeReadiness {
+        let database = self.db();
+        let (query, write, repair) = database.readiness_flags_from_health(report);
+        let (query_serverless, write_serverless, repair_serverless) =
+            database.readiness_flags_from_health_serverless(report);
+        crate::application::native::RuntimeReadiness {
+            query,
+            query_serverless,
+            write,
+            write_serverless,
+            repair,
+            repair_serverless,
+        }
+    }
+
     fn collection_roots(&self) -> RedDBResult<BTreeMap<String, u64>> {
         RedDBRuntime::collection_roots(self)
     }

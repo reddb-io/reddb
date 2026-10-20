@@ -41,6 +41,8 @@ an actual embedded artifact; paged checkpoints do not serialize that blob.
 Catalog model snapshots reuse one physical metadata observation for their
 declared and operational resource lists; index reconciliation retains its native
 artifact checks and fallback when persisted index declarations are empty.
+Aggregate readiness derives all flags from one health observation. Catalog HTTP
+responses share that same health observation with their readiness fields.
 Cached generations are accepted only after durable catalog publication; current
 format roots loaded from disk are seeded before WAL replay. Physical metadata
 fingerprints additionally retain their existing statistics seed. The caches do

@@ -181,8 +181,8 @@ pub(crate) fn register(registry: &mut RouteRegistry) {
 
 fn catalog_readiness(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
     let native = server.native_use_cases();
-    let readiness = native.readiness();
     let health = native.health();
+    let readiness = native.readiness_from_health(&health);
     let authority = native.physical_authority_status();
     Some(json_response(
         200,
@@ -199,8 +199,8 @@ fn catalog_readiness(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<Ht
 fn catalog_snapshot(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
     let snapshot = server.runtime.catalog();
     let native = server.native_use_cases();
-    let readiness = native.readiness();
     let health = native.health();
+    let readiness = native.readiness_from_health(&health);
     let authority = native.physical_authority_status();
     Some(json_response(
         200,
