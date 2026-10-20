@@ -14,7 +14,7 @@ fn scalar_readiness(runtime: &RedDBRuntime) -> RuntimeReadiness {
 }
 
 #[test]
-fn aggregate_readiness_preserves_scalar_decisions_across_profiles() {
+fn catalog_health_and_readiness_preserve_scalar_decisions_across_profiles() {
     let directory = tempfile::tempdir().expect("temporary stores");
     let options = [
         RedDBOptions::in_memory(),
@@ -31,7 +31,21 @@ fn aggregate_readiness_preserves_scalar_decisions_across_profiles() {
             .execute_query("CREATE TABLE readiness_probe (value INT)")
             .expect("collection");
         let expected = scalar_readiness(&runtime);
-        assert_eq!(NativeUseCases::new(&runtime).readiness(), expected);
+        let native = NativeUseCases::new(&runtime);
+        assert_eq!(native.readiness(), expected);
+        let health = native.health();
+        let shared = native.health_from_catalog(&runtime.catalog());
+        assert_eq!(shared.state, health.state);
+        assert_eq!(shared.diagnostics, health.diagnostics);
+        let issues = |report: &HealthReport| {
+            report
+                .issues
+                .iter()
+                .map(|issue| (issue.component.clone(), issue.message.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(issues(&shared), issues(&health));
+        assert_eq!(native.readiness_from_health(&shared), expected);
     }
 }
 

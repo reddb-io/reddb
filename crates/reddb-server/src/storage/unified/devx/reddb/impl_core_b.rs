@@ -2,13 +2,20 @@ use super::*;
 
 impl RedDB {
     pub fn health(&self) -> HealthReport {
+        self.health_from_catalog(&self.catalog_model_snapshot())
+    }
+
+    pub(crate) fn health_from_catalog(
+        &self,
+        catalog_snapshot: &CatalogModelSnapshot,
+    ) -> HealthReport {
         let mut report = match self.path() {
             Some(path) => storage_file_health(path),
             None => HealthReport::healthy().with_diagnostic("mode", "in-memory"),
         };
         report = report.with_diagnostic("collections", self.collections().len().to_string());
         report = report.with_diagnostic("entities", self.stats().total_entities.to_string());
-        let catalog_consistency = self.catalog_consistency_report();
+        let catalog_consistency = consistency_report(catalog_snapshot);
         report = report.with_diagnostic(
             "catalog.declared_indexes",
             catalog_consistency.declared_index_count.to_string(),
@@ -103,7 +110,6 @@ impl RedDB {
                 "declared and operational catalog state are diverging",
             );
         }
-        let catalog_snapshot = self.catalog_model_snapshot();
         let stale_graph_projections = catalog_snapshot
             .graph_projection_statuses
             .iter()
@@ -179,12 +185,12 @@ impl RedDB {
             .iter()
             .filter(|collection| collection.resources_in_sync)
             .count();
-        let attention_summary = crate::catalog::attention_summary(&catalog_snapshot);
-        let collection_attention = crate::catalog::collection_attention(&catalog_snapshot);
-        let index_attention = crate::catalog::index_attention(&catalog_snapshot);
+        let attention_summary = crate::catalog::attention_summary(catalog_snapshot);
+        let collection_attention = crate::catalog::collection_attention(catalog_snapshot);
+        let index_attention = crate::catalog::index_attention(catalog_snapshot);
         let graph_projection_attention =
-            crate::catalog::graph_projection_attention(&catalog_snapshot);
-        let analytics_job_attention = crate::catalog::analytics_job_attention(&catalog_snapshot);
+            crate::catalog::graph_projection_attention(catalog_snapshot);
+        let analytics_job_attention = crate::catalog::analytics_job_attention(catalog_snapshot);
         report = report.with_diagnostic(
             "catalog.queryable_graph_projections",
             queryable_graph_projections.to_string(),

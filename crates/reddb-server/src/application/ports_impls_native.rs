@@ -5,6 +5,13 @@ impl RuntimeNativePort for RedDBRuntime {
         self.health()
     }
 
+    fn health_report_from_catalog(
+        &self,
+        catalog: &crate::catalog::CatalogModelSnapshot,
+    ) -> crate::health::HealthReport {
+        self.health_from_catalog(catalog)
+    }
+
     fn readiness_from_health(
         &self,
         report: &crate::health::HealthReport,

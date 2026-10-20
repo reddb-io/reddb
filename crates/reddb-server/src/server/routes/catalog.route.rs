@@ -199,7 +199,7 @@ fn catalog_readiness(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<Ht
 fn catalog_snapshot(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {
     let snapshot = server.runtime.catalog();
     let native = server.native_use_cases();
-    let health = native.health();
+    let health = native.health_from_catalog(&snapshot);
     let readiness = native.readiness_from_health(&health);
     let authority = native.physical_authority_status();
     Some(json_response(

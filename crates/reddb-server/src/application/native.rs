@@ -46,6 +46,13 @@ impl<'a, P: RuntimeNativePort + ?Sized> NativeUseCases<'a, P> {
         self.runtime.health_report()
     }
 
+    pub fn health_from_catalog(
+        &self,
+        catalog: &crate::catalog::CatalogModelSnapshot,
+    ) -> HealthReport {
+        self.runtime.health_report_from_catalog(catalog)
+    }
+
     pub fn snapshots(&self) -> RedDBResult<Vec<SnapshotDescriptor>> {
         self.runtime.snapshots()
     }

@@ -201,6 +201,12 @@ pub trait RuntimeAdminPort {
 
 pub trait RuntimeNativePort {
     fn health_report(&self) -> crate::health::HealthReport;
+    fn health_report_from_catalog(
+        &self,
+        _catalog: &crate::catalog::CatalogModelSnapshot,
+    ) -> crate::health::HealthReport {
+        self.health_report()
+    }
     /// Derive all readiness flags from one caller-owned health observation.
     /// The default preserves compatibility with ports implementing scalar checks.
     fn readiness_from_health(
