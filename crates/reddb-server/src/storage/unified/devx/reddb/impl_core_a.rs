@@ -1377,8 +1377,13 @@ impl RedDB {
             return (query_allowed, write_allowed, repair_allowed);
         }
 
-        let authority = self.physical_authority_status();
-        let native_bootstrap_ready = authority.native_bootstrap_ready;
+        // Readiness needs only native completeness. Full authority diagnostics
+        // also reconcile physical metadata, unnecessarily waiting behind
+        // checkpoint publication for each query/write/repair flag.
+        let native_bootstrap_ready = self
+            .native_physical_state()
+            .as_ref()
+            .is_some_and(Self::native_state_is_bootstrap_complete);
         let query_allowed = native_bootstrap_ready && matches!(report.state, HealthState::Healthy);
         let write_allowed = !self.options.read_only
             && native_bootstrap_ready
