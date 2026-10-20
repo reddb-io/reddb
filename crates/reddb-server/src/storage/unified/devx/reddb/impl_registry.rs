@@ -262,6 +262,39 @@ impl RedDB {
         Ok(())
     }
 
+    fn update_collection_contract_metadata<T, F>(
+        &self,
+        mutator: F,
+    ) -> Result<T, Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&mut PhysicalMetadataFile) -> T,
+    {
+        if !self.paged_mode
+            || self.options.storage_profile.deploy_profile
+                != crate::storage::DeployProfile::Embedded
+            || self.options.storage_profile.packaging
+                != crate::storage::StoragePackaging::SingleFile
+        {
+            return self.update_physical_metadata(mutator);
+        }
+        if self.options.read_only {
+            return Err("physical metadata operations are not allowed in read-only mode".into());
+        }
+        let Some(path) = self.path() else {
+            return Err("database path is not available".into());
+        };
+
+        // Legacy paged files keep contracts in the durable metadata sidecar,
+        // not the embedded dump's auxiliary blob or native artifact summaries.
+        // A definition edit must not rebuild every collection's search indexes.
+        // Retain publication serialization and the canonical atomic writer.
+        let _publication = self.store.vault_publication_lock.lock();
+        let mut metadata = self.load_or_bootstrap_physical_metadata(false)?;
+        let result = mutator(&mut metadata);
+        metadata.save_for_data_path(path)?;
+        Ok(result)
+    }
+
     pub fn save_collection_contract(
         &self,
         contract: crate::physical::CollectionContract,
@@ -307,7 +340,7 @@ impl RedDB {
 
         self.invalidate_collection_contract_cache();
 
-        let saved = self.update_physical_metadata(|metadata| {
+        let saved = self.update_collection_contract_metadata(|metadata| {
             if let Some(existing) = metadata
                 .collection_contracts
                 .iter_mut()
@@ -369,7 +402,7 @@ impl RedDB {
 
         self.invalidate_collection_contract_cache();
 
-        let removed = self.update_physical_metadata(|metadata| {
+        let removed = self.update_collection_contract_metadata(|metadata| {
             let removed = metadata
                 .collection_contracts
                 .iter()

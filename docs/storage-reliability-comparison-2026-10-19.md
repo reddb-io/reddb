@@ -99,9 +99,15 @@ the resulting visible document values differed from the acknowledged-write
 oracle. A newly created embedded artifact did not reproduce that failure.
 The regression creates a paged store, opens it with embedded options, creates a
 document and index, checkpoints, reopens, and verifies the declared model and
-document post-image. Contract creation/removal, boot cache seeding and metadata
-checkpointing must use the actual paged-file boundary. The deployment remains
-gated on qualification of this additional fix.
+document post-image. Contract creation/removal and boot cache seeding must use
+the actual paged-file boundary. A first follow-up candidate additionally enabled
+full metadata checkpoint publication for this compatibility path; creating a
+document in the real copy then exceeded twenty seconds and approached the
+4 GiB test limit, before any checkpoint cycle completed. Contract-only writes
+must retain the canonical durable sidecar and publication lock without invoking
+the unrelated whole-store search-artifact rebuild. General checkpoint/artifact
+refresh behavior is preserved. The deployment remains gated on qualification
+of this additional fix.
 
 Manual vacuum was also qualified on a preserved, older Auth copy with the
 official 1.24.11 binary, a 1 GiB engine budget and a 2 GiB cgroup limit. It
