@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.24.13
+
+### Patch Changes
+
+- [#2422](https://github.com/reddb-io/reddb/pull/2422) [`aad592b`](https://github.com/reddb-io/reddb/commit/aad592be509b4a315ca7c28e570fd5ab3b02b60c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Build each catalog model snapshot from one physical metadata observation instead of reloading it independently for indexes, graph projections and analytics jobs. Serverless readiness checks evaluate native completeness directly without computing unrelated metadata-repair diagnostics. Compute aggregate readiness from one health observation and reuse that observation in catalog HTTP responses, instead of recomputing the complete health report for each scalar flag. Preserve index reconciliation, readiness criteria and fallback behavior while reducing repeated work and publication-lock waits during checkpoints.
+
+  Reuse the caller's catalog snapshot for health and consistency diagnostics, and release the runtime connection-pool lock before storage inspection.
+
+- [#2420](https://github.com/reddb-io/reddb/pull/2420) [`94f3a01`](https://github.com/reddb-io/reddb/commit/94f3a01fdf20d605f27b67bf29e91dd3abd626ef) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve collection definitions when embedded options open an existing paged database. Persist and remove those contracts through the physical metadata path so document updates retain their declared model after checkpoint and restart.
+
 ## 1.24.12
 
 ### Patch Changes
