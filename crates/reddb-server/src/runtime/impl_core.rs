@@ -2238,10 +2238,9 @@ impl RedDBRuntime {
                             }
                             vacuum_stats.add(&stats);
                         }
-                        self.inner
-                            .transaction_state
-                            .snapshot_manager()
-                            .prune_aborted(cutoff_xid);
+                        // The cutoff protects snapshots, not physical references.
+                        // Aborted inserts can remain in this or another collection;
+                        // forgetting their outcome would make them visible again.
                         // Stats refresh covers every target (same as ANALYZE).
                         for t in &targets {
                             self.refresh_table_planner_stats(t);
