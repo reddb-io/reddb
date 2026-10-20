@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.24.10
+
+### Patch Changes
+
+- [#2412](https://github.com/reddb-io/reddb/pull/2412) [`7d1328a`](https://github.com/reddb-io/reddb/commit/7d1328a638dd96a531f4ef44ceda94e340572c3a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep catalog and health observations from cloning collection payloads or rebuilding
+  native search artifacts. Build native artifacts once per physical publication,
+  and report health's metadata validation scope explicitly. Preserve descriptor
+  consistency checks and leave full artifact decoding to explicit inspection.
+
+  Honor CREATE INDEX IF NOT EXISTS before rebuilding an existing index, and fail
+  opening a paged store when a collection root or entity payload cannot be decoded
+  instead of silently returning a partial database.
+
 ## 1.24.9
 
 ### Patch Changes
