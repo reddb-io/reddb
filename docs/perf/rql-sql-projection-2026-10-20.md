@@ -372,7 +372,8 @@ the targeted schema/index/cache regressions, `cargo check --locked`, formatting
 and the 7+12 harness tests. Full Linux CI for `2584e484` passed in
 [run 39509985752](https://github.com/reddb-io/reddb/actions/runs/39509985752).
 The later session-fence revision is validated separately in
-[run 39514292756](https://github.com/reddb-io/reddb/actions/runs/39514292756).
+[run 39514945742](https://github.com/reddb-io/reddb/actions/runs/39514945742),
+whose Rust source is identical to `fae39eb6`.
 The native broad KV run had 46 passes and one failure: the Vault/paged
 constructor hits Windows mandatory-lock error 33. The same test fails on clean
 main `0eb3a89c` before any writes. Both logs are retained; this pre-existing

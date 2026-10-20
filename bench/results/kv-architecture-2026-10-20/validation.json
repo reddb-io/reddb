@@ -26,8 +26,16 @@
   },
   "ci": {
     "2584e484": "https://github.com/reddb-io/reddb/actions/runs/39509985752",
-    "fae39eb6": "https://github.com/reddb-io/reddb/actions/runs/39514292756",
+    "fae39eb6_interrupted_by_successor": "https://github.com/reddb-io/reddb/actions/runs/39514292756",
+    "de36db68_same_rust_source": "https://github.com/reddb-io/reddb/actions/runs/39514945742",
+    "de36db68_conclusion": "success",
     "scope": "Actual CI workflow; docs shim is not Rust test evidence"
+  },
+  "linux_final_keyed_tests": {
+    "passed": 3,
+    "failed": 0,
+    "log": "linux-final-keyed-tests.log",
+    "scope": "fae39eb6, release; rollback, interrupted staging, Strict paged flush"
   },
   "final_write_binary": {
     "file": "architecture-pr-fae39eb6-red",

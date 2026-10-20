@@ -1,0 +1,17 @@
+   Compiling reddb-io-types v1.24.15 (/work/src/crates/reddb-types)
+   Compiling reddb-io-crypto v1.24.15 (/work/src/crates/reddb-crypto)
+   Compiling reddb-io-wire v1.24.15 (/work/src/crates/reddb-wire)
+   Compiling reddb-io-rql v1.24.15 (/work/src/crates/reddb-rql)
+   Compiling reddb-io-file v1.24.15 (/work/src/crates/reddb-file)
+   Compiling reddb-io-grpc-proto v1.24.15 (/work/src/crates/reddb-grpc-proto)
+   Compiling reddb-io-server v1.24.15 (/work/src/crates/reddb-server)
+    Finished `release` profile [optimized] target(s) in 3m 50s
+     Running unittests src/lib.rs (target/release/deps/reddb_server-3a7a392f640c9128)
+
+running 3 tests
+test storage::unified::store::keyed_write::tests::failed_keyed_publication_restores_value_metadata_and_capture_state ... ok
+test storage::unified::store::keyed_write::tests::interrupted_keyed_staging_fences_writes_and_keeps_the_durable_original ... ok
+test storage::unified::store::keyed_write::tests::strict_paged_keyed_writes_flush_pages_before_acknowledgement ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 5320 filtered out; finished in 0.16s
+
