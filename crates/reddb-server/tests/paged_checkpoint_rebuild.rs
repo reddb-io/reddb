@@ -619,6 +619,66 @@ fn embedded_options_preserve_document_contracts_when_opening_an_existing_paged_s
 }
 
 #[test]
+fn legacy_paged_document_definition_survives_exit_without_checkpoint() {
+    use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+
+    const CHILD: &str = "REDDB_LEGACY_PAGED_CONTRACT_CHILD";
+    let options = |path: &Path, preset: StorageDeployPreset| {
+        RedDBOptions::persistent(path)
+            .with_storage_profile(preset.selection())
+            .expect("storage profile")
+    };
+    if let Some(path) = std::env::var_os(CHILD) {
+        let runtime =
+            RedDBRuntime::with_options(options(Path::new(&path), StorageDeployPreset::Embedded))
+                .expect("legacy paged child");
+        assert!(runtime.db().is_paged());
+        runtime
+            .execute_query("CREATE DOCUMENT acknowledged_docs")
+            .expect("acknowledged document definition");
+        runtime
+            .execute_query("INSERT INTO acknowledged_docs DOCUMENT VALUES ({\"score\":7})")
+            .expect("acknowledged document write");
+        // Neither runtime shutdown nor an explicit checkpoint may make the
+        // definition durable on behalf of the acknowledged DDL statement.
+        std::process::exit(0);
+    }
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("legacy.rdb");
+    {
+        let runtime = RedDBRuntime::with_options(options(&path, StorageDeployPreset::Serverless))
+            .expect("create paged store");
+        runtime.checkpoint().expect("initial paged checkpoint");
+    }
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "legacy_paged_document_definition_survives_exit_without_checkpoint",
+        ])
+        .env(CHILD, &path)
+        .status()
+        .expect("crash child");
+    assert!(status.success(), "child failed: {status}");
+    let runtime = RedDBRuntime::with_options(options(&path, StorageDeployPreset::Embedded))
+        .expect("recover acknowledged DDL and write");
+    assert_eq!(
+        runtime
+            .db()
+            .collection_contract("acknowledged_docs")
+            .expect("durable definition before checkpoint")
+            .declared_model,
+        reddb_server::catalog::CollectionModel::Document,
+    );
+    let result = runtime
+        .execute_query("SELECT score FROM acknowledged_docs")
+        .expect("recover document post-image");
+    assert_eq!(
+        result.result.records[0].get("score"),
+        Some(&Value::Integer(7))
+    );
+}
+
+#[test]
 fn malformed_collection_name_fails_open_instead_of_truncating_the_catalog() {
     let directory = tempfile::tempdir().expect("temporary database");
     let path = directory.path().join("catalog.rdb");
