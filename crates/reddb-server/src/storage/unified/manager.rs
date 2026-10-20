@@ -22,8 +22,8 @@ use std::sync::{Arc, Weak};
 use super::entity::{EntityId, EntityKind, UnifiedEntity};
 use super::metadata::{Metadata, MetadataFilter};
 use super::segment::{
-    GraphEntityKind, GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState,
-    SegmentStats, UnifiedSegment, ZoneColPred, ZoneColPredKind,
+    GraphEntityKind, GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentScanCursor,
+    SegmentState, SegmentStats, UnifiedSegment, ZoneColPred, ZoneColPredKind,
 };
 use super::visibility_map::VisibilityMap;
 use crate::runtime::mvcc::{entity_visible_with_context, SnapshotContext};
@@ -183,6 +183,19 @@ struct PhysicalRootCacheEntry {
     segments: Vec<(u64, u64)>,
     seed: u64,
     root: u64,
+}
+
+/// Resumable physical maintenance positions. Weak sources let consolidation
+/// release retired payloads; a later sweep revisits any replacement segments.
+pub(crate) struct PhysicalScanCursor {
+    sources: Vec<(Weak<RwLock<GrowingSegment>>, SegmentScanCursor)>,
+    source: usize,
+}
+
+impl PhysicalScanCursor {
+    pub(crate) fn finished(&self) -> bool {
+        self.source == self.sources.len()
+    }
 }
 
 /// Segment manager for a collection
@@ -1929,6 +1942,60 @@ impl SegmentManager {
         self.for_each_entity(|entity| {
             !Self::scan_entity_visible(snapshot, entity) || callback(entity)
         });
+    }
+
+    pub(crate) fn physical_scan_cursor(&self) -> PhysicalScanCursor {
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        PhysicalScanCursor {
+            sources: growing
+                .iter()
+                .chain(sealed.iter())
+                .map(|segment| (Arc::downgrade(segment), segment.read().scan_cursor()))
+                .collect(),
+            source: 0,
+        }
+    }
+
+    /// At most one small ID batch; every inspected slot or retired source
+    /// consumes work, including deleted entries that produce no candidate.
+    pub(crate) fn physical_scan_batch(
+        &self,
+        cursor: &mut PhysicalScanCursor,
+        work_left: &mut usize,
+    ) -> Vec<EntityId> {
+        let mut ids = Vec::with_capacity(super::segment::SCAN_BATCH_SIZE.min(*work_left));
+        while !cursor.finished() && *work_left > 0 {
+            let (source, position) = &mut cursor.sources[cursor.source];
+            if position.finished() {
+                *work_left -= 1;
+                cursor.source += 1;
+                continue;
+            }
+            let Some(segment) = source.upgrade() else {
+                *work_left -= 1;
+                cursor.source += 1;
+                continue;
+            };
+            segment.read().scan_batch(
+                position,
+                &mut || {
+                    if *work_left == 0 {
+                        return false;
+                    }
+                    *work_left -= 1;
+                    true
+                },
+                &mut |id| ids.push(id),
+            );
+            if position.finished() {
+                cursor.source += 1;
+            }
+            if !ids.is_empty() {
+                break;
+            }
+        }
+        ids
     }
 
     /// Capture segment membership and append boundaries, then hydrate bounded

@@ -1048,22 +1048,24 @@ impl UnifiedStore {
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
-        let entities =
-            manager.query_all(|entity| matches!(entity.kind, EntityKind::TableRow { .. }));
         let mut logical = HashMap::<EntityId, (bool, u64)>::new();
-        for entity in &entities {
+        manager.for_each_entity(|entity| {
+            if !matches!(entity.kind, EntityKind::TableRow { .. }) {
+                return true;
+            }
             let entry = logical.entry(entity.logical_id()).or_insert((false, 0));
             if entity.xmax == 0 {
                 entry.0 = true;
             }
             entry.1 = entry.1.max(entity.xmin);
-        }
+            true
+        });
 
         let mut stats = MvccVacuumStats::default();
         let mut reclaim_ids = Vec::new();
-        for entity in entities {
-            if entity.xmax == 0 {
-                continue;
+        manager.for_each_entity(|entity| {
+            if !matches!(entity.kind, EntityKind::TableRow { .. }) || entity.xmax == 0 {
+                return true;
             }
             stats.scanned_versions += 1;
             let (has_live_version, max_xmin) = logical
@@ -1087,7 +1089,8 @@ impl UnifiedStore {
                     stats.retained_history_versions += 1;
                 }
             }
-        }
+            true
+        });
 
         if !reclaim_ids.is_empty() {
             self.delete_batch(collection, &reclaim_ids)?;
@@ -1249,6 +1252,9 @@ impl UnifiedStore {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
+        // Physical reclamation must publish its mutation and WAL record under
+        // the same fence as checkpoint snapshots and WAL truncation.
+        let _publication = self.vault_publication_lock.lock();
 
         // Sharded invalidation. The bounded LRU's shard write lock is
         // only acquired when the shard actually carries one of these ids,

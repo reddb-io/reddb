@@ -421,6 +421,8 @@ mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
 mod impl_vault_import;
+mod mvcc_reclaim;
+pub(crate) use mvcc_reclaim::MvccReclaimCursor;
 mod native_helpers;
 
 pub use self::builder::EntityBuilder;

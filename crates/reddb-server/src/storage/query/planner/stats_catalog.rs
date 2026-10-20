@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use super::cost::{ColumnStats, TableStats};
@@ -14,6 +15,8 @@ const DEFAULT_ROWS_PER_PAGE: u64 = 100;
 const DEFAULT_SAMPLE_TARGET: usize = 30_000;
 const DEFAULT_BUCKETS: usize = 100;
 const DEFAULT_MCV_SIZE: usize = 100;
+const MAX_STAT_VALUE_BYTES: usize = 4096;
+const MAX_HISTOGRAM_SAMPLE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AnalyzedColumnStats {
@@ -44,12 +47,43 @@ pub(crate) struct PersistedPlannerStats {
 
 pub(crate) fn analyze_collection(store: &UnifiedStore, table: &str) -> Option<AnalyzedTableStats> {
     let manager = store.get_collection(table)?;
-    let entities = manager
-        .query_all(|_| true)
+    let mut row_count = 0usize;
+    let mut total_bytes = 0usize;
+    let mut names = BTreeSet::new();
+    manager.for_each_entity(|entity| {
+        row_count += 1;
+        for_each_entity_field(entity, |name, value| {
+            if !names.contains(name) {
+                names.insert(name.to_string());
+            }
+            total_bytes = total_bytes.saturating_add(name.len() + approximate_value_size(value));
+        });
+        true
+    });
+    let samples = sample_indices(row_count, DEFAULT_SAMPLE_TARGET);
+    let columns = names
         .into_iter()
-        .map(|entity| (entity.id, fields_from_entity(&entity)))
-        .collect::<Vec<_>>();
-    Some(analyze_entity_fields(table, &entities))
+        .map(|column| {
+            analyze_column_values(&column, &samples, |visit| {
+                manager.for_each_entity(|entity| {
+                    let value = match &entity.data {
+                        EntityData::Row(row) => row.get_field(&column),
+                        EntityData::Node(node) => node.properties.get(&column),
+                        _ => None,
+                    };
+                    visit(value);
+                    true
+                });
+            })
+        })
+        .collect();
+    Some(AnalyzedTableStats {
+        table: table.to_string(),
+        row_count: row_count as u64,
+        avg_row_size: total_bytes.checked_div(row_count).unwrap_or(0) as u64,
+        page_count: (row_count as u64 / DEFAULT_ROWS_PER_PAGE).max(1),
+        columns,
+    })
 }
 
 pub(crate) fn analyze_entity_fields(
@@ -263,19 +297,56 @@ fn analyze_column(
     entities: &[(EntityId, Vec<(String, Value)>)],
     sample_indices: &[usize],
 ) -> AnalyzedColumnStats {
+    analyze_column_values(column, sample_indices, |visit| {
+        for (_, fields) in entities {
+            visit(field_value(fields, column));
+        }
+    })
+}
+
+fn analyze_column_values(
+    column: &str,
+    sample_indices: &[usize],
+    scan: impl FnOnce(&mut dyn FnMut(Option<&Value>)),
+) -> AnalyzedColumnStats {
     let mut null_count = 0u64;
-    let mut distinct = HashSet::new();
+    let mut distinct = Some(HashSet::<u64>::new());
+    let mut cardinality = crate::storage::primitives::HyperLogLog::new();
     let mut min_key: Option<CanonicalKey> = None;
     let mut min_value: Option<Value> = None;
     let mut max_key: Option<CanonicalKey> = None;
     let mut max_value: Option<Value> = None;
+    let mut bounds_fit = true;
+    let mut sample_for_hist = Vec::new();
+    let mut sample_counts = HashMap::<ColumnValue, u64>::new();
+    let mut histogram_bytes = 0usize;
+    let mut row = 0usize;
 
-    for (_, fields) in entities {
-        match field_value(fields, column) {
+    scan(&mut |value| {
+        let sampled = sample_indices.binary_search(&row).is_ok();
+        row += 1;
+        match value {
             Some(Value::Null) | None => null_count += 1,
             Some(value) => {
-                distinct.insert(value.clone());
-                if let Some(key) = value_to_canonical_key(value) {
+                let mut hash = DefaultHasher::new();
+                value.hash(&mut hash);
+                let fingerprint = hash.finish();
+                cardinality.add(&fingerprint.to_le_bytes());
+                if let Some(values) = distinct.as_mut() {
+                    values.insert(fingerprint);
+                    if values.len() > DEFAULT_SAMPLE_TARGET {
+                        distinct = None;
+                    }
+                }
+                let bytes = approximate_value_size(value);
+                if bytes > MAX_STAT_VALUE_BYTES {
+                    bounds_fit = false;
+                    min_key = None;
+                    min_value = None;
+                    max_key = None;
+                    max_value = None;
+                }
+                if let Some(key) = bounds_fit.then(|| value_to_canonical_key(value)).flatten() {
                     if min_key.as_ref().is_none_or(|current| key < *current) {
                         min_key = Some(key.clone());
                         min_value = Some(value.clone());
@@ -285,24 +356,16 @@ fn analyze_column(
                         max_value = Some(value.clone());
                     }
                 }
+                if sampled && bytes <= MAX_HISTOGRAM_SAMPLE_BYTES.saturating_sub(histogram_bytes) {
+                    if let Some(hist_value) = value_to_histogram_value(value) {
+                        histogram_bytes += bytes;
+                        sample_for_hist.push(hist_value.clone());
+                        *sample_counts.entry(hist_value).or_insert(0) += 1;
+                    }
+                }
             }
         }
-    }
-
-    let mut sample_for_hist = Vec::new();
-    let mut sample_counts = HashMap::<ColumnValue, u64>::new();
-    for idx in sample_indices {
-        if let Some(value) = entities
-            .get(*idx)
-            .and_then(|(_, fields)| field_value(fields, column))
-            .filter(|value| !matches!(value, Value::Null))
-        {
-            if let Some(hist_value) = value_to_histogram_value(value) {
-                sample_for_hist.push(hist_value.clone());
-                *sample_counts.entry(hist_value).or_insert(0) += 1;
-            }
-        }
-    }
+    });
 
     let histogram = if sample_for_hist.is_empty() {
         None
@@ -330,7 +393,7 @@ fn analyze_column(
 
     AnalyzedColumnStats {
         name: column.to_string(),
-        distinct_count: distinct.len() as u64,
+        distinct_count: distinct.map_or_else(|| cardinality.count(), |values| values.len() as u64),
         null_count,
         min_value,
         max_value,
@@ -366,33 +429,26 @@ fn sample_indices(total_rows: usize, sample_target: usize) -> Vec<usize> {
     reservoir.into_sorted_indices()
 }
 
-fn fields_from_entity(entity: &UnifiedEntity) -> Vec<(String, Value)> {
+fn for_each_entity_field(entity: &UnifiedEntity, mut visit: impl FnMut(&str, &Value)) {
     match &entity.data {
-        EntityData::Row(row) => named_fields_from_row(row),
-        EntityData::Node(node) => node
-            .properties
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-        _ => Vec::new(),
+        EntityData::Row(row) => {
+            if let Some(named) = &row.named {
+                for (name, value) in named {
+                    visit(name, value);
+                }
+            } else if let Some(schema) = &row.schema {
+                for (name, value) in schema.iter().zip(&row.columns) {
+                    visit(name, value);
+                }
+            }
+        }
+        EntityData::Node(node) => {
+            for (name, value) in &node.properties {
+                visit(name, value);
+            }
+        }
+        _ => {}
     }
-}
-
-fn named_fields_from_row(row: &RowData) -> Vec<(String, Value)> {
-    if let Some(named) = &row.named {
-        return named
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-    }
-    if let Some(schema) = &row.schema {
-        return schema
-            .iter()
-            .zip(row.columns.iter())
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-    }
-    Vec::new()
 }
 
 fn field_value<'a>(fields: &'a [(String, Value)], column: &str) -> Option<&'a Value> {
@@ -671,5 +727,93 @@ fn approximate_value_size(value: &Value) -> usize {
         Value::BigInt(_) => 8,
         Value::KeyRef(collection, key) => collection.len() + key.len(),
         Value::IpAddr(_) => 16,
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    #[test]
+    fn small_column_statistics_preserve_counts_and_bounds() {
+        let rows = (0..10)
+            .map(|id| {
+                (
+                    EntityId::new(id + 1),
+                    vec![
+                        ("id".to_string(), Value::Integer(id as i64)),
+                        (
+                            "optional".to_string(),
+                            if id % 2 == 0 {
+                                Value::Null
+                            } else {
+                                Value::Integer(1)
+                            },
+                        ),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
+        let stats = analyze_entity_fields("small_rows", &rows);
+        assert_eq!(stats.row_count, 10);
+        let ids = stats
+            .columns
+            .iter()
+            .find(|column| column.name == "id")
+            .expect("id stats");
+        assert_eq!(ids.distinct_count, 10);
+        assert_eq!(ids.min_value, Some(Value::Integer(0)));
+        assert_eq!(ids.max_value, Some(Value::Integer(9)));
+        let optional = stats
+            .columns
+            .iter()
+            .find(|column| column.name == "optional")
+            .expect("optional stats");
+        assert_eq!(optional.null_count, 5);
+        assert_eq!(optional.distinct_count, 1);
+    }
+
+    #[test]
+    fn high_cardinality_uses_the_bounded_estimator() {
+        let rows = (0..50_000)
+            .map(|id| {
+                (
+                    EntityId::new(id + 1),
+                    vec![("id".to_string(), Value::Integer(id as i64))],
+                )
+            })
+            .collect::<Vec<_>>();
+        let stats = analyze_entity_fields("distinct_rows", &rows);
+        let estimate = stats.columns[0].distinct_count;
+        assert!(
+            (47_500..=52_500).contains(&estimate),
+            "unexpected cardinality estimate {estimate}"
+        );
+    }
+
+    #[test]
+    fn wide_values_leave_bounds_unknown_and_samples_bounded() {
+        let value = Value::text("x".repeat(8192));
+        let rows = (0..1000)
+            .map(|id| {
+                (
+                    EntityId::new(id + 1),
+                    vec![("wide".to_string(), value.clone())],
+                )
+            })
+            .collect::<Vec<_>>();
+        let stats = analyze_entity_fields("wide_rows", &rows);
+        let column = &stats.columns[0];
+        assert!(column.min_value.is_none());
+        assert!(column.max_value.is_none());
+        assert_eq!(column.distinct_count, 1);
+        assert!(
+            column
+                .histogram
+                .as_ref()
+                .expect("histogram has a bounded sample")
+                .total_count
+                <= 128
+        );
     }
 }
