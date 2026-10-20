@@ -135,6 +135,12 @@ struct CoveredOperation {
 
 const COVERED_OPERATIONS: &[CoveredOperation] = &[
     CoveredOperation {
+        name: "segment-key-lookup-hit",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_segment_key_lookup_hit,
+    },
+    CoveredOperation {
         name: "hash-index-point-read-hit",
         allowed_allocs: 0,
         exception: None,
@@ -275,6 +281,26 @@ fn measure_hash_index_point_read_hit() -> AllocationCount {
 
     assert_eq!(ids, &[EntityId::new(42)]);
     count
+}
+
+fn measure_segment_key_lookup_hit() -> AllocationCount {
+    use super::unified::{EntityData, RowData};
+    let mut segment = GrowingSegment::new(1, "keys");
+    let mut entity = UnifiedEntity::table_row(EntityId::new(1), "keys", 1, Vec::new());
+    entity.data = EntityData::Row(RowData::with_names(
+        vec![reddb_types::Value::text("wanted")],
+        vec!["key".into()],
+    ));
+    segment.insert(entity).expect("keyed row");
+    let (entity, count) =
+        measure_allocations(|| segment.find_key_entity("wanted", true, &mut |_| true));
+    assert_eq!(entity.map(|entity| entity.id), Some(EntityId::new(1)));
+    count
+}
+
+#[test]
+fn segment_key_lookup_hit_allocates_nothing() {
+    assert_eq!(measure_segment_key_lookup_hit().allocs, 0);
 }
 
 fn measure_growing_segment_flat_row_insert() -> AllocationCount {

@@ -106,6 +106,12 @@ impl crate::RedDBRuntime {
             .saturating_add(
                 crate::storage::unified::memory_size::entity_zone_growth_bytes(&applied.entity),
             );
+        let key_growth = match &applied.entity.data {
+            crate::storage::EntityData::Row(row) => {
+                crate::storage::unified::memory_size::key_lookup_growth_bytes(row.get_field("key"))
+            }
+            _ => 0,
+        };
         // Reserve the full replacement, including in-place PATCH: the old
         // payload remains resident until publication and another writer may
         // replace it before we do. A stale pre-image must never grant credit.
@@ -115,7 +121,9 @@ impl crate::RedDBRuntime {
             &applied.entity,
             applied.replaced_entity.is_some(),
         );
-        (entity_bytes as u64).saturating_add(index_growth)
+        (entity_bytes as u64)
+            .saturating_add(key_growth as u64)
+            .saturating_add(index_growth)
     }
 
     pub(crate) fn admit_non_evictable_growth(
@@ -212,6 +220,14 @@ impl crate::RedDBRuntime {
 
 pub(crate) fn estimate_row_growth(fields: &[(String, Value)]) -> u64 {
     entity_base_bytes()
+        .saturating_add(
+            crate::storage::unified::memory_size::key_lookup_growth_bytes(
+                fields
+                    .iter()
+                    .find(|(name, _)| name == "key")
+                    .map(|(_, value)| value),
+            ) as u64,
+        )
         .saturating_add(estimate_value_fields_bytes(fields))
         .saturating_add(
             fields
@@ -622,6 +638,70 @@ mod tests {
             .index_store_ref()
             .list_indices("unindexed_rows")
             .is_empty());
+    }
+
+    #[test]
+    fn key_lookup_growth_must_fit_before_row_insert() {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_memory_budget(128 * 1024)
+                .with_auto_index_id(false),
+        )
+        .expect("runtime");
+        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&runtime);
+        let model = crate::catalog::CollectionModel::Kv;
+        ops.set(model, "keyed_rows", "seed", Value::Integer(0), None, false)
+            .expect("keyed collection");
+        runtime.refresh_memory_accounting();
+        let headroom =
+            runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+        let value = Value::text("wanted");
+        let fields = vec![
+            ("key".to_string(), value.clone()),
+            ("value".to_string(), Value::Integer(7)),
+        ];
+        let lookup_bytes =
+            crate::storage::unified::memory_size::key_lookup_growth_bytes(Some(&value)) as u64;
+        let row_without_lookup = estimate_row_growth(&fields) - lookup_bytes;
+        let held = runtime
+            .admit_non_evictable_growth(
+                MemoryPool::SegmentArena,
+                "competing operation",
+                headroom - row_without_lookup,
+            )
+            .expect("leave space for the row but not its key lookup");
+        let result = ops.set(
+            model,
+            "keyed_rows",
+            "wanted",
+            Value::Integer(7),
+            None,
+            false,
+        );
+        assert!(result
+            .expect_err("key lookup growth exceeds remaining headroom")
+            .to_string()
+            .contains("over budget"));
+        assert_eq!(
+            ops.get(model, "keyed_rows", "wanted")
+                .expect("read after rejection"),
+            None
+        );
+        drop(held);
+        ops.set(
+            model,
+            "keyed_rows",
+            "wanted",
+            Value::Integer(7),
+            None,
+            false,
+        )
+        .expect("retry after releasing headroom");
+        assert_eq!(
+            ops.get(model, "keyed_rows", "wanted")
+                .expect("read after retry"),
+            Some(Value::Integer(7))
+        );
     }
 
     #[test]
