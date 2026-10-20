@@ -7,9 +7,31 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import read_paths
+import write_profile
 
 
 class ReadPathTests(unittest.TestCase):
+    def test_sync_trace_parser_joins_threads_and_retains_failures(self):
+        trace = """41 12:00:00.000001 fdatasync(6</data/bench.rdb> <unfinished ...>
+42 12:00:00.000002 fsync(7</data/other>) = 0 <0.001000>
+41 12:00:00.000003 <... fdatasync resumed>) = 0 <0.002000>
+43 12:00:00.000004 fsync(8</data/bad>) = -1 EIO (Input/output error) <0.003000>
+ > /build/red(sync+0x1) [0x1000]
+"""
+        result = write_profile.parse_trace(trace)
+        self.assertEqual(len(result["calls"]), 3)
+        self.assertEqual(result["calls"][1]["path"], "/data/bench.rdb")
+        self.assertEqual(result["calls"][2]["returned"], -1)
+        self.assertEqual(result["pending"], {})
+        self.assertEqual(result["unmatched"], [])
+
+    def test_incomplete_trace_cannot_be_counted_as_complete(self):
+        result = write_profile.parse_trace("41 12:00:00.000001 fsync(6</data/db> <unfinished ...>")
+        self.assertEqual(result["calls"], [])
+        self.assertIn("41", result["pending"])
+        result = write_profile.parse_trace("41 12:00:00.000002 <... fsync resumed>) = 0 <0.002000>")
+        self.assertTrue(result["unmatched"])
+
     def args(self, **overrides):
         values = dict(host="unused", port=5000, kv_collection="kv_diag_1000", keys=1000,
                       value_bytes=100, workers=3, seconds=.03)

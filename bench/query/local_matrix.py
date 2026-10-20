@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--before-sha256", required=True)
     parser.add_argument("--after-sha256", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--resume", action="store_true", help="retain completed cells and repair an interrupted orchestration")
+    parser.add_argument("--prepared-data", action="store_true", help="verify existing SQL and KV data instead of creating the SQL table")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     manifest = {"schema": "reddb.query-projection-matrix.v1", "status": "running",
@@ -31,7 +33,7 @@ def main():
                 "primary_metric": "p99 checked HTTP request completion latency",
                 "conditions": {"keys": 10000, "value_bytes": 100, "rounds": 5, "seconds_per_round": 2,
                                "warmup_per_connection": 10, "read_order": ["before-1", "after-1", "after-2", "before-2"],
-                               "durability": "strict", "result_cache": "disabled",
+                               "durability": "strict", "result_cache": "disabled", "prepared_data": args.prepared_data,
                                "dataset": "copies of stopped verified kv_diag_10000 volume; SQL table created separately with identical rows",
                                "limits": "Python/GIL, HTTP JSON, shared host; independent run count too small for a leadership interval"},
                 "engines": {"before": {"revision": args.before_revision, "sha256": args.before_sha256},
@@ -40,6 +42,20 @@ def main():
                 "script_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                                   for path in Path(__file__).parent.glob("*.py")},
                 "runs": [], "errors": []}
+    if args.resume:
+        previous = json.loads((args.out / "manifest.json").read_text())
+        if previous["status"] == "running":
+            raise RuntimeError("refuse to resume an active capture")
+        if previous["engines"] != manifest["engines"] or previous["script_sha256"]["read_paths.py"] != manifest["script_sha256"]["read_paths.py"]:
+            raise RuntimeError("resume must keep both engines and the measured workload unchanged")
+        initial = args.out / "initial-manifest.json"
+        if not initial.exists():
+            initial.write_bytes((args.out / "manifest.json").read_bytes())
+        previous.setdefault("continuations", []).append({"started_unix_ms": int(time.time() * 1000),
+            "reason": "supply required KV verifier port after successful measured cells",
+            "script_sha256": manifest["script_sha256"]})
+        previous["status"] = "running"
+        manifest = previous
 
     def save():
         (args.out / "manifest.json").write_bytes((json.dumps(manifest, indent=2) + "\n").encode())
@@ -66,24 +82,41 @@ def main():
     save()
     try:
         command("docker", "start", args.client)
-        for server in [args.before, args.after]:
+        for server in ([] if args.resume else [args.before, args.after]):
             command("docker", "start", server)
             ready(server)
-            run(server, ("before" if server == args.before else "after") + "-setup.json", "--setup")
+            prefix = "before" if server == args.before else "after"
+            run(server, prefix + "-setup.json", "--verify-only" if args.prepared_data else "--setup")
+            if args.prepared_data:
+                command("docker", "exec", args.client, "python", "/bench/kv/compare.py", "--host", server,
+                        "--port", "5000", "--engine", "reddb-rest", "--collection", "kv_diag_10000", "--keys", "10000",
+                        "--verify-only", "--out", f"/results/{prefix}-kv-prepared.json", timeout=180)
             command("docker", "stop", server)
         for label, server in [("before-1", args.before), ("after-1", args.after),
                               ("after-2", args.after), ("before-2", args.before)]:
             directory = args.out / label
-            directory.mkdir()
-            phase = {"label": label, "started_unix_ms": int(time.time() * 1000), "cases": []}
-            manifest["runs"].append(phase)
+            directory.mkdir(exist_ok=True)
+            phase = next((run for run in manifest["runs"] if run["label"] == label), None)
+            if phase and phase.get("recovery_complete"):
+                continue
+            resumed = phase is not None
+            if phase is None:
+                phase = {"label": label, "started_unix_ms": int(time.time() * 1000), "cases": []}
+                manifest["runs"].append(phase)
             command("docker", "start", server)
             ready(server)
-            resources = Resources(directory, server, args.client)
+            sample_directory = directory / "repair" if resumed else directory
+            sample_directory.mkdir(exist_ok=True)
+            resources = Resources(sample_directory, server, args.client)
             try:
                 for case in ["kv", "sql-point", "sql-100", "sql-1000"]:
                     for workers in ([1, 8, 32] if case in ["kv", "sql-point"] else [1]):
                         relative = f"{label}/{case}-c{workers}.json"
+                        previous_case = next((entry for entry in phase["cases"] if entry["file"] == relative), None)
+                        if previous_case:
+                            if previous_case["status"] != "valid-diagnostic":
+                                raise RuntimeError("resume cannot replace an invalid measured cell")
+                            continue
                         try:
                             value = run(server, relative, "--case", case, "--workers", str(workers))
                             phase["cases"].append({"file": relative, "status": value["status"]})
@@ -95,14 +128,19 @@ def main():
                 ready(server)
                 run(server, f"{label}/sql-recovery.json", "--verify-only")
                 command("docker", "exec", args.client, "python", "/bench/kv/compare.py", "--host", server,
-                        "--engine", "reddb-rest", "--collection", "kv_diag_10000", "--keys", "10000",
+                        "--port", "5000", "--engine", "reddb-rest", "--collection", "kv_diag_10000", "--keys", "10000",
                         "--verify-only", "--out", f"/results/{label}/kv-recovery.json", timeout=180)
+                phase["recovery_complete"] = True
             finally:
                 resources.close()
                 command("docker", "stop", server)
                 phase["finished_unix_ms"] = int(time.time() * 1000)
                 save()
-        manifest["status"] = "valid-diagnostic" if not manifest["errors"] else "completed-with-invalid-cells"
+        invalid = any("case" in error for error in manifest["errors"]) or any(
+            len(run["cases"]) != 8 or any(case["status"] != "valid-diagnostic" for case in run["cases"])
+            for run in manifest["runs"])
+        manifest["status"] = ("completed-with-invalid-cells" if invalid else
+                              "completed-with-orchestration-repair" if manifest["errors"] else "valid-diagnostic")
     except Exception as error:
         manifest["errors"].append({"error": str(error)})
         manifest["status"] = "completed-with-invalid-cells"

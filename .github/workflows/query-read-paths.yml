@@ -1,0 +1,40 @@
+name: Query read-path diagnostics
+
+on:
+  pull_request:
+    paths:
+      - 'bench/query/**'
+      - 'bench/kv/compare.py'
+      - 'bench/kv/local_matrix.py'
+      - 'bench/results/query-projection-*/**'
+      - '.github/workflows/query-read-paths.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate correctness and measurement guards
+        run: |
+          python3 -m unittest discover -s bench/query -p test_read_paths.py -v
+          python3 -m unittest discover -s bench/kv -p test_compare.py -v
+      - name: Validate captured evidence
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          for summary in sorted(pathlib.Path('bench/results').glob('query-projection-*/**/summary.json')):
+              checksums = json.loads(summary.read_text())['artifact_sha256']
+              for name, expected in checksums.items():
+                  relative = pathlib.Path(name)
+                  assert not relative.is_absolute() and '..' not in relative.parts
+                  path = (summary.parent / relative).resolve()
+                  assert path.is_relative_to(summary.parent.resolve())
+                  actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                  assert actual == expected, f'{path}: checksum mismatch'
+              print(f'{summary.parent}: {len(checksums)} artifacts verified')
+          PY
