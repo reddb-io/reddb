@@ -1,5 +1,7 @@
 # @reddb-io/internal-bin-resolver
 
+## 1.24.11
+
 ## 1.24.10
 
 ## 1.24.9

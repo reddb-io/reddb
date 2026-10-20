@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.24.11
+
+### Patch Changes
+
+- [#2415](https://github.com/reddb-io/reddb/pull/2415) [`8b12481`](https://github.com/reddb-io/reddb/commit/8b12481195dd8444f9012cb0921a0e1eec26507c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep physical metadata, health and authority inspection from publishing native
+  artifacts or healing metadata files. Preserve explicit maintenance and recovery
+  as the paths that publish repairs.
+
+  Drain periodic background workers when the last foreground runtime or connection
+  closes, so an active weak upgrade cannot retain the database lock after close.
+  Unpark idle workers rather than waiting for their next timer tick.
+
+  Reject paged RDDB stores in embedded SCRUB and salvage before scanning payloads.
+  Recognize either paged superblock so a damaged primary cannot cause embedded
+  recovery to misinterpret stored values or load a large paged file for carving.
+
+- [#2417](https://github.com/reddb-io/reddb/pull/2417) [`ecc8954`](https://github.com/reddb-io/reddb/commit/ecc8954d2c986c5cabc8fe4cde504696e60a948a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Honor the stderr destination for slow-query events without creating fallback
+  files. If a configured slow-query file or its directory cannot be opened,
+  report the error and use stderr instead of panicking during database startup.
+  Keep sampling, the bounded nonblocking writer and the telemetry ring store.
+
 ## 1.24.10
 
 ### Patch Changes
