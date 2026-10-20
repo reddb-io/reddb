@@ -20,17 +20,19 @@ The segment probe borrows rows without allocations; the manager clones only a
 selected candidate per segment. This does not establish constant-time lookup
 independent of segment count or end-to-end superiority to another database.
 
-Insertion, bulk insertion, deletion, snapshot adoption and consolidation maintain
-the lookup. Key-changing replacements and raw mutable access invalidate it;
-the next probe rebuilds it from physical live rows under the segment guard.
-That exceptional probe is O(segment rows). Updates to `xmin`/`xmax` with an
-unchanged key preserve the index. The index is not serialized and does not alter
+Insertion, bulk insertion, deletion, key-changing replacements, snapshot adoption
+and consolidation maintain the lookup under the existing segment write guard.
+Raw mutable access disables it, since the caller can change the key after the
+reference is returned. Those exceptional segments use an allocation-free borrowed
+scan until consolidation/adoption creates a fresh indexed segment. Reads never
+allocate a replacement index outside write admission. Updates to `xmin`/`xmax`
+with an unchanged key preserve the index. The index is not serialized and does not alter
 the WAL or file format. Normal recovery reconstructs it through entity insertion.
 
 Hash buckets and version-vector capacity contribute to segment memory accounting.
 Runtime row admission also reserves estimated index growth for text keys.
 As with other segment estimates, this is not a hard allocator/RSS bound; direct
-low-level mutations and exceptional lazy rebuilds do not add a new admission API.
+low-level mutations do not add a new admission API.
 
 ## Verification
 

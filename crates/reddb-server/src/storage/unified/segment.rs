@@ -539,8 +539,7 @@ pub struct GrowingSegment {
     /// first-column index. Protected by the owning segment's entity lock.
     unique_key_lookup: parking_lot::RwLock<Vec<SegmentUniqueKey>>,
     unique_key_lookup_bytes: AtomicU64,
-    key_lookup: parking_lot::RwLock<Option<SegmentKeyLookup>>,
-    key_lookup_bytes: AtomicU64,
+    key_lookup: Option<SegmentKeyLookup>,
     /// Type index: kind → EntityIds
     kind_index: HashMap<String, HashSet<EntityId>>,
     /// Conservative physical presence, independent of kind_index and MVCC.
@@ -723,8 +722,7 @@ impl GrowingSegment {
             pk_index: BTreeMap::new(),
             unique_key_lookup: parking_lot::RwLock::new(Vec::new()),
             unique_key_lookup_bytes: AtomicU64::new(0),
-            key_lookup: parking_lot::RwLock::new(Some(SegmentKeyLookup::default())),
-            key_lookup_bytes: AtomicU64::new(0),
+            key_lookup: Some(SegmentKeyLookup::default()),
             kind_index: HashMap::new(),
             graph_read_index: parking_lot::RwLock::new(Some(SegmentGraphIndex::default())),
             graph_read_index_bytes: AtomicU64::new(0),
@@ -793,7 +791,14 @@ impl GrowingSegment {
             .get(entity.id)
             .is_some_and(|old| SegmentKeyLookup::key(old) != SegmentKeyLookup::key(entity))
         {
-            self.invalidate_key_lookup();
+            if let Some(mut index) = self.key_lookup.take() {
+                index.remove(
+                    self.get(entity.id)
+                        .expect("invariant: existing replacement row"),
+                );
+                index.insert(entity);
+                self.key_lookup = Some(index);
+            }
         }
         if (self.graph_kind_mask != 0
             || matches!(
@@ -925,10 +930,8 @@ impl GrowingSegment {
         if !self.record_tombstone(id) {
             return false;
         }
-        if let Some(index) = self.key_lookup.get_mut() {
+        if let Some(index) = self.key_lookup.as_mut() {
             index.remove(&self.flat_entities[idx]);
-            self.key_lookup_bytes
-                .store(index.memory_bytes(), Ordering::Relaxed);
         }
         if let Some(index) = self.graph_read_index.get_mut() {
             index.remove(&self.flat_entities[idx]);
@@ -1022,7 +1025,10 @@ impl GrowingSegment {
         self.memory_bytes.load(Ordering::Relaxed)
             + self.zone_payload_bytes as u64
             + self.unique_key_lookup_bytes.load(Ordering::Relaxed)
-            + self.key_lookup_bytes.load(Ordering::Relaxed)
+            + self
+                .key_lookup
+                .as_ref()
+                .map_or(0, SegmentKeyLookup::memory_bytes)
             + self.graph_read_index_bytes.load(Ordering::Relaxed)
             + (self.hash_scan_ids.capacity() * std::mem::size_of::<EntityId>()) as u64
     }
@@ -1299,10 +1305,8 @@ impl GrowingSegment {
     /// Index an entity
     fn index_entity(&mut self, entity: &UnifiedEntity) {
         self.mark_checkpoint_dirty();
-        if let Some(index) = self.key_lookup.get_mut() {
+        if let Some(index) = self.key_lookup.as_mut() {
             index.insert(entity);
-            self.key_lookup_bytes
-                .store(index.memory_bytes(), Ordering::Relaxed);
         }
         self.hash_scan_ids.push(entity.id);
         self.observe_graph_kind(&entity.kind);
@@ -1587,40 +1591,29 @@ impl GrowingSegment {
     }
 
     fn invalidate_key_lookup(&mut self) {
-        *self.key_lookup.get_mut() = None;
-        self.key_lookup_bytes.store(0, Ordering::Relaxed);
+        self.key_lookup = None;
     }
 
     /// Only matching-key candidates reach `visible`; no result vector or row clones.
-    /// Raw mutable access invalidates the disposable index; rebuild under the read guard.
+    /// Raw mutable access disables the index: fall back without allocating on reads.
     pub(crate) fn find_key_entity(
         &self,
         key: &str,
         newest: bool,
         visible: &mut impl FnMut(&UnifiedEntity) -> bool,
     ) -> Option<&UnifiedEntity> {
-        let cached = self.key_lookup.read();
-        if let Some(index) = cached.as_ref() {
+        if let Some(index) = self.key_lookup.as_ref() {
             return self.find_key_candidate(index, key, newest, visible);
         }
-        drop(cached);
-        let mut cached = self.key_lookup.write();
-        if cached.is_none() {
-            let mut index = SegmentKeyLookup::default();
-            self.for_each_fast(|entity| {
-                index.insert(entity);
-                true
-            });
-            self.key_lookup_bytes
-                .store(index.memory_bytes(), Ordering::Relaxed);
-            *cached = Some(index);
-        }
-        self.find_key_candidate(
-            cached.as_ref().expect("invariant: key lookup was rebuilt"),
-            key,
-            newest,
-            visible,
-        )
+        // A raw &mut UnifiedEntity can change its key after it is returned.
+        // Rebuilding here would allocate an entire index outside write admission.
+        // Consolidation/adoption creates a fresh indexed segment instead.
+        let entities = self
+            .flat_entities
+            .iter()
+            .chain(self.entities.values())
+            .filter(|entity| !self.deleted.contains_key(&entity.id));
+        self.select_key_entity(entities, key, newest, visible)
     }
 
     fn find_key_candidate(
@@ -1630,11 +1623,23 @@ impl GrowingSegment {
         newest: bool,
         visible: &mut impl FnMut(&UnifiedEntity) -> bool,
     ) -> Option<&UnifiedEntity> {
+        self.select_key_entity(
+            index.candidates(key).iter().filter_map(|id| self.get(*id)),
+            key,
+            newest,
+            visible,
+        )
+    }
+
+    fn select_key_entity<'a>(
+        &self,
+        entities: impl Iterator<Item = &'a UnifiedEntity>,
+        key: &str,
+        newest: bool,
+        visible: &mut impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Option<&'a UnifiedEntity> {
         let mut best: Option<&UnifiedEntity> = None;
-        for id in index.candidates(key) {
-            let Some(entity) = self.get(*id) else {
-                continue;
-            };
+        for entity in entities {
             // Fingerprint collisions must never become logical-key matches.
             if SegmentKeyLookup::key(entity) != Some(key) || !visible(entity) {
                 continue;
@@ -1666,10 +1671,8 @@ impl GrowingSegment {
 
     /// Remove entity from indices
     fn unindex_entity(&mut self, entity: &UnifiedEntity) {
-        if let Some(index) = self.key_lookup.get_mut() {
+        if let Some(index) = self.key_lookup.as_mut() {
             index.remove(entity);
-            self.key_lookup_bytes
-                .store(index.memory_bytes(), Ordering::Relaxed);
         }
         if let Some(index) = self.graph_read_index.get_mut() {
             index.remove(entity);
@@ -1818,12 +1821,10 @@ impl GrowingSegment {
             return Err(SegmentError::NotWritable);
         }
 
-        if let Some(index) = self.key_lookup.get_mut() {
+        if let Some(index) = self.key_lookup.as_mut() {
             for entity in &entities {
                 index.insert(entity);
             }
-            self.key_lookup_bytes
-                .store(index.memory_bytes(), Ordering::Relaxed);
         }
 
         let indexes = self.unique_key_lookup.get_mut();
@@ -2544,16 +2545,23 @@ mod tests {
         segment
             .bulk_insert(vec![keyed_row(5, "gap", 1, 0)])
             .expect("bulk gap");
-        assert!(segment.key_lookup_bytes.load(Ordering::Relaxed) > 0);
+        assert!(segment.key_lookup.as_ref().expect("index").memory_bytes() > 0);
         assert_eq!(keyed_probe(&segment, "gap"), Some(EntityId::new(5)));
         segment
             .update(keyed_row(3, "renamed", 2, 0))
             .expect("rename key");
-        assert_eq!(segment.key_lookup_bytes.load(Ordering::Relaxed), 0);
+        assert!(
+            segment.key_lookup.is_some(),
+            "key replacements maintain the index"
+        );
         assert_eq!(keyed_probe(&segment, "hash"), None);
         assert_eq!(keyed_probe(&segment, "renamed"), Some(EntityId::new(3)));
 
         *segment.get_mut(EntityId::new(3)).expect("mutable row") = keyed_row(3, "raw", 3, 0);
+        assert!(
+            segment.key_lookup.is_none(),
+            "raw mutation requires conservative fallback"
+        );
         assert_eq!(keyed_probe(&segment, "renamed"), None);
         assert_eq!(keyed_probe(&segment, "raw"), Some(EntityId::new(3)));
         segment.seal().expect("seal");
