@@ -388,6 +388,147 @@ fn runtime_key_lookup_hit_avoids_row_clone() {
     }
 }
 
+#[test]
+fn unfiltered_query_selection_allocates_nothing() {
+    use crate::presentation::query_view::filter_query_records;
+    use crate::storage::query::unified::UnifiedRecord;
+    let mut record = UnifiedRecord::new();
+    record.set(
+        "nested",
+        reddb_types::Value::Array(vec![reddb_types::Value::Integer(42)]),
+    );
+    let records = vec![record; 1000];
+    let (selected, count) = measure_allocations(|| filter_query_records(&records, &None, &None));
+    assert_eq!(selected.len(), 1000);
+    assert_eq!(
+        count.allocs, 0,
+        "response selection must borrow unfiltered rows"
+    );
+}
+
+#[test]
+fn rql_get_projection_does_not_clone_unreturned_fields() {
+    use crate::catalog::CollectionModel;
+    use reddb_rql::ast::KvCommand;
+    use reddb_types::Value;
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("KV PUT projected.item = 'payload'")
+        .expect("seed");
+    let manager = runtime
+        .db()
+        .store()
+        .get_collection("projected")
+        .expect("collection");
+    let original = manager.query_all(|_| true).pop().expect("row");
+    let command = KvCommand::Get {
+        model: CollectionModel::Kv,
+        collection: "projected".into(),
+        key: "item".into(),
+    };
+    let mut baseline = None;
+    for extra_values in [0, 128] {
+        let mut entity = original.clone();
+        let crate::storage::EntityData::Row(row) = &mut entity.data else {
+            panic!("row");
+        };
+        row.named.as_mut().expect("named row").insert(
+            "not_returned".into(),
+            Value::Array(
+                (0..extra_values)
+                    .map(|_| Value::Array(vec![Value::Integer(1)]))
+                    .collect(),
+            ),
+        );
+        manager.update(entity).expect("update");
+        let (result, count) =
+            measure_allocations(|| runtime.execute_kv_command("KV GET projected.item", &command));
+        assert_eq!(
+            result.expect("GET").result.records[0].get("value"),
+            Some(&Value::text("payload"))
+        );
+        if let Some(expected) = baseline {
+            assert_eq!(
+                count.allocs, expected,
+                "unprojected data must not allocate on GET"
+            );
+        } else {
+            baseline = Some(count.allocs);
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual RQL/SQL allocation diagnostic; run with result cache disabled"]
+fn rql_projection_allocation_diagnostic() {
+    use crate::presentation::query_result_json::runtime_query_json;
+    use crate::presentation::query_view::filter_query_records;
+    use crate::storage::query::unified::UnifiedRecord;
+    use reddb_types::Value;
+
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("KV PUT projected.item = 'payload'")
+        .expect("seed");
+    let collection = runtime
+        .db()
+        .store()
+        .get_collection("projected")
+        .expect("collection");
+    let original = collection.query_all(|_| true).pop().expect("row");
+    for extra_values in [0, 128] {
+        let mut entity = original.clone();
+        let crate::storage::EntityData::Row(row) = &mut entity.data else {
+            panic!("KV rows are rows");
+        };
+        row.named.as_mut().expect("named row").insert(
+            "not_returned".into(),
+            Value::Array(
+                (0..extra_values)
+                    .map(|_| Value::Array(vec![Value::Integer(1)]))
+                    .collect(),
+            ),
+        );
+        collection.update(entity).expect("extra unprojected data");
+        for _ in 0..5 {
+            runtime
+                .execute_query("KV GET projected.item")
+                .expect("warmup");
+        }
+        let (result, execution) =
+            measure_allocations(|| runtime.execute_query("KV GET projected.item"));
+        let result = result.expect("GET");
+        let (json, presentation) =
+            measure_allocations(|| runtime_query_json(&result, &None, &None));
+        assert_eq!(
+            result.result.records[0].get("value"),
+            Some(&Value::text("payload"))
+        );
+        assert!(json.get("result").is_some());
+        eprintln!(
+            "RQL_PROJECTION extra_values={extra_values} execution_allocs={} presentation_allocs={}",
+            execution.allocs, presentation.allocs
+        );
+    }
+    for row_count in [1, 100, 1000] {
+        let records: Vec<_> = (0..row_count)
+            .map(|id| {
+                let mut record = UnifiedRecord::new();
+                record.set("id", Value::Integer(id));
+                record.set("value", Value::Array(vec![Value::Integer(42)]));
+                record
+            })
+            .collect();
+        let (selected, count) =
+            measure_allocations(|| filter_query_records(&records, &None, &None));
+        assert_eq!(selected.len(), records.len());
+        eprintln!(
+            "SQL_SELECTION rows={row_count} allocations={}",
+            count.allocs
+        );
+    }
+}
+
 fn measure_growing_segment_flat_row_insert() -> AllocationCount {
     let mut segment = GrowingSegment::new(1, "orders");
     segment
