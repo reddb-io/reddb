@@ -190,30 +190,15 @@ impl RedDB {
     ) -> std::sync::Arc<
         std::collections::HashMap<String, std::sync::Arc<crate::physical::CollectionContract>>,
     > {
-        if let Ok(guard) = self.collection_contract_cache.read() {
-            if let Some(map) = guard.as_ref() {
-                return std::sync::Arc::clone(map);
-            }
-        }
-        let contracts: Vec<crate::physical::CollectionContract> = self
-            .physical_metadata()
-            .map(|metadata| metadata.collection_contracts)
-            .unwrap_or_default();
-        let map: std::collections::HashMap<_, _> = contracts
-            .into_iter()
-            .map(|contract| (contract.name.clone(), std::sync::Arc::new(contract)))
-            .collect();
-        let arc = std::sync::Arc::new(map);
-        if let Ok(mut guard) = self.collection_contract_cache.write() {
-            *guard = Some(std::sync::Arc::clone(&arc));
-        }
-        arc
+        self.collection_contract_cache.get_or_load(|| {
+            self.physical_metadata()
+                .map(|metadata| metadata.collection_contracts)
+                .unwrap_or_default()
+        })
     }
 
     pub(crate) fn invalidate_collection_contract_cache(&self) {
-        if let Ok(mut guard) = self.collection_contract_cache.write() {
-            *guard = None;
-        }
+        self.collection_contract_cache.invalidate();
     }
 
     /// Single-file artifact only: mirror the current contract set into the
@@ -256,9 +241,7 @@ impl RedDB {
                 }
             }
         }
-        if let Ok(mut guard) = self.collection_contract_cache.write() {
-            *guard = Some(std::sync::Arc::new(map));
-        }
+        self.collection_contract_cache.replace(map);
         Ok(())
     }
 
@@ -326,14 +309,7 @@ impl RedDB {
                 == crate::storage::StoragePackaging::SingleFile
             && !self.paged_mode
         {
-            if let Ok(mut guard) = self.collection_contract_cache.write() {
-                let mut contracts = guard
-                    .as_ref()
-                    .map(|existing| existing.as_ref().clone())
-                    .unwrap_or_default();
-                contracts.insert(contract.name.clone(), std::sync::Arc::new(contract.clone()));
-                *guard = Some(std::sync::Arc::new(contracts));
-            }
+            self.collection_contract_cache.insert(contract.clone());
             self.sync_single_file_contract_blob();
             return Ok(contract);
         }
@@ -385,17 +361,7 @@ impl RedDB {
                 == crate::storage::StoragePackaging::SingleFile
             && !self.paged_mode
         {
-            let mut removed = None;
-            if let Ok(mut guard) = self.collection_contract_cache.write() {
-                let mut contracts = guard
-                    .as_ref()
-                    .map(|existing| existing.as_ref().clone())
-                    .unwrap_or_default();
-                removed = contracts
-                    .remove(collection)
-                    .map(|contract| (*contract).clone());
-                *guard = Some(std::sync::Arc::new(contracts));
-            }
+            let removed = self.collection_contract_cache.remove(collection);
             self.sync_single_file_contract_blob();
             return Ok(removed);
         }

@@ -32,7 +32,7 @@ fn vault_master_key_ref(collection: &str) -> String {
     format!("red.vault.{collection}.master_key")
 }
 
-fn keyed_model_name(model: crate::catalog::CollectionModel) -> &'static str {
+pub(super) fn keyed_model_name(model: crate::catalog::CollectionModel) -> &'static str {
     match model {
         crate::catalog::CollectionModel::Kv => "kv",
         crate::catalog::CollectionModel::Vault => "vault",
@@ -873,12 +873,11 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
-        self.ensure_declared_model(model, collection)?;
-        Ok(self
-            .project_entity(model, collection, key, |entity| {
-                kv_value_from_entity(entity).map(|value| (value, entity.id))
-            })?
-            .flatten())
+        let resolver =
+            super::kv_read::KvReadResolver::for_keyed_model(self.runtime, model, collection)?;
+        Ok(resolver
+            .record(key)
+            .and_then(|record| record.value.map(|value| (value, record.id))))
     }
 
     /// Whether `collection` retains MVCC history (opted into versioning).
@@ -894,10 +893,7 @@ impl<'a> KvAtomicOps<'a> {
     ) -> bool {
         // Only plain KV ever opts into versioning; the vault and config
         // tiers are non-versioned by construction.
-        if model != crate::catalog::CollectionModel::Kv {
-            return false;
-        }
-        self.runtime.vcs_is_versioned(collection).unwrap_or(false)
+        super::kv_read::is_versioned(self.runtime, model, collection)
     }
 
     fn get_entity(
@@ -906,32 +902,10 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
-        self.ensure_declared_model(model, collection)?;
-        self.project_entity(model, collection, key, Clone::clone)
-    }
-
-    /// Resolve a key using the caller's already-validated collection model.
-    /// REST and RQL retain their respective contract checks before entering here.
-    /// Projection runs under a segment read guard and must not re-enter storage.
-    pub(crate) fn project_entity<T>(
-        &self,
-        model: crate::catalog::CollectionModel,
-        collection: &str,
-        key: &str,
-        project: impl FnMut(&crate::storage::UnifiedEntity) -> T,
-    ) -> RedDBResult<Option<T>> {
-        let store = self.runtime.inner.db.store();
-        let Some(manager) = store.get_collection(collection) else {
-            return Ok(None);
-        };
-
-        let versioned = self.is_versioned_collection(model, collection);
-        let snapshot = if versioned {
-            crate::runtime::impl_core::capture_current_snapshot()
-        } else {
-            None
-        };
-        Ok(manager.project_key_entity(key, snapshot.as_ref(), versioned, project))
+        Ok(
+            super::kv_read::KvReadResolver::for_keyed_model(self.runtime, model, collection)?
+                .owned_entity(key),
+        )
     }
 
     fn latest_kv_entries(
@@ -1270,20 +1244,7 @@ impl<'a> KvAtomicOps<'a> {
         model: crate::catalog::CollectionModel,
         collection: &str,
     ) -> RedDBResult<()> {
-        let Some(contract) = self.runtime.inner.db.collection_contract(collection) else {
-            return Ok(());
-        };
-        if contract.declared_model == model
-            || contract.declared_model == crate::catalog::CollectionModel::Mixed
-        {
-            return Ok(());
-        }
-        Err(RedDBError::InvalidOperation(format!(
-            "collection '{}' is declared as '{}' and does not allow '{}' operations",
-            collection,
-            keyed_model_name(contract.declared_model),
-            keyed_model_name(model)
-        )))
+        super::kv_read::KvReadResolver::for_keyed_model(self.runtime, model, collection).map(|_| ())
     }
 }
 
@@ -2665,15 +2626,9 @@ impl RedDBRuntime {
                     });
                 }
 
-                ops.ensure_declared_model(*model, collection)?;
-                let entry = ops.project_entity(*model, collection, key, |entity| {
-                    (
-                        entity.id,
-                        entity.created_at,
-                        entity.updated_at,
-                        kv_value_from_entity(entity),
-                    )
-                })?;
+                let entry =
+                    super::kv_read::KvReadResolver::for_keyed_model(self, *model, collection)?
+                        .record(key);
                 if *model == crate::catalog::CollectionModel::Kv {
                     self.inner.kv_stats.incr_gets();
                 }
@@ -2689,10 +2644,10 @@ impl RedDBRuntime {
                     "tags".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
-                if let Some((id, created_at, updated_at, _)) = entry.as_ref() {
-                    record.set("rid", Value::UnsignedInteger(id.raw()));
-                    record.set("created_at", Value::UnsignedInteger(*created_at));
-                    record.set("updated_at", Value::UnsignedInteger(*updated_at));
+                if let Some(entry) = entry.as_ref() {
+                    record.set("rid", Value::UnsignedInteger(entry.id.raw()));
+                    record.set("created_at", Value::UnsignedInteger(entry.created_at));
+                    record.set("updated_at", Value::UnsignedInteger(entry.updated_at));
                 } else {
                     record.set("rid", Value::Null);
                     record.set("created_at", Value::Null);
@@ -2704,9 +2659,7 @@ impl RedDBRuntime {
                 record.set("key", Value::text(key.clone()));
                 record.set(
                     "value",
-                    entry
-                        .and_then(|(_, _, _, value)| value)
-                        .unwrap_or(Value::Null),
+                    entry.and_then(|entry| entry.value).unwrap_or(Value::Null),
                 );
                 record.set("tags", kv_tags_value(&ops.tags_for_key(collection, key)));
                 result.push(record);
@@ -3506,7 +3459,7 @@ fn kv_tags_value(tags: &[String]) -> Value {
     Value::Json(crate::json::to_vec(&json).unwrap_or_default())
 }
 
-fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value> {
+pub(super) fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value> {
     if let crate::storage::EntityData::Row(ref row) = entity.data {
         return row.get_field("value").cloned();
     }

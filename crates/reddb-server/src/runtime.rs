@@ -1549,6 +1549,7 @@ pub(crate) use index_store::MutationTestPhase;
 pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;
+pub(crate) mod kv_read;
 pub mod kv_watch;
 pub mod lease_lifecycle;
 pub mod lease_loop;

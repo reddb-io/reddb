@@ -584,7 +584,7 @@ impl RedDB {
             paged_mode,
             vector_indexes: RwLock::new(HashMap::new()),
             collection_ttl_defaults_ms: RwLock::new(HashMap::new()),
-            collection_contract_cache: RwLock::new(None),
+            collection_contract_cache: super::contract_cache::CollectionContractCache::default(),
             remote_backend: options.remote_backend.clone(),
             remote_backend_atomic: options.remote_backend_atomic.clone(),
             remote_key,
