@@ -145,6 +145,9 @@ pub(super) fn scan_runtime_table_source_records_limited(
     if is_universal_entity_source(table) {
         return scan_runtime_universal_source_records_limited(db, None, limit);
     }
+    if let Some(limit) = limit {
+        return scan_runtime_table_source_records_window(db, table, 0, limit);
+    }
 
     let manager = db
         .store()
@@ -155,14 +158,11 @@ pub(super) fn scan_runtime_table_source_records_limited(
     // A5 — parallel scan: for large unfiltered tables, collect entities once
     // then convert to records in parallel using the thread-pool coordinator.
     // The threshold guards against spawn overhead dominating on small tables.
-    // When a LIMIT is supplied and it's below the parallel threshold, prefer
-    // the sequential path so we can stop scanning as soon as we have enough.
+    // Finite windows have already taken the bounded sequential path above.
     use crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
     let entity_count = manager.count();
-    let sequential_cap = limit.unwrap_or(usize::MAX);
-    let go_parallel = !crate::runtime::function_budget::active()
-        && entity_count >= MIN_PARALLEL_ROWS
-        && sequential_cap >= MIN_PARALLEL_ROWS;
+    let go_parallel =
+        !crate::runtime::function_budget::active() && entity_count >= MIN_PARALLEL_ROWS;
     if go_parallel {
         let schema = manager.column_schema();
         let table_name = table.to_string();
@@ -178,7 +178,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
                 true
             },
         )?;
-        let mut records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
+        let records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
             &entities,
             move |chunk| {
                 chunk
@@ -198,9 +198,6 @@ pub(super) fn scan_runtime_table_source_records_limited(
                     .collect()
             },
         );
-        if let Some(n) = limit {
-            records.truncate(n);
-        }
         return Ok(records);
     }
 
@@ -208,44 +205,68 @@ pub(super) fn scan_runtime_table_source_records_limited(
     // bounded-memory streaming channel. Collecting the stream reproduces
     // the previous `Vec` exactly (same materializer, same scan order)
     // while giving streaming consumers an O(chunk) resident set. The
-    // limited path below keeps its early-stop loop so `SELECT * … LIMIT N`
+    // limited path above keeps its early-stop loop so `SELECT * … LIMIT N`
     // still stops scanning as soon as it has N rows.
-    if limit.is_none() {
-        return stream_runtime_table_source_scan(
+    stream_runtime_table_source_scan(
+        db,
+        table,
+        crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK,
+    )?
+    .collect_records()
+}
+
+/// Materialize only the requested visible window. Skipped rows are visited in
+/// storage scan order and released before the next row, without buffering a
+/// prefix proportional to OFFSET or reserving the caller's entire LIMIT.
+pub(super) fn scan_runtime_table_source_records_window(
+    db: &RedDB,
+    table: &str,
+    offset: usize,
+    limit: usize,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    if is_universal_entity_source(table) {
+        return Ok(scan_runtime_universal_source_records_limited(
             db,
-            table,
-            crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK,
+            None,
+            Some(offset.saturating_add(limit)),
         )?
-        .collect_records();
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect());
     }
 
-    // Sequential path — short-circuits at `limit` rows so an unfiltered
-    // SELECT * LIMIT 100 on a 1M-row table doesn't build the whole set
-    // before truncating.
-    let mut records: Vec<UnifiedRecord> = match limit {
-        Some(n) => Vec::with_capacity(n),
-        None => Vec::new(),
-    };
+    let store = db.store();
+    let manager = store
+        .get_collection(table)
+        .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
+    let mut records =
+        Vec::with_capacity(limit.min(crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK));
+    if limit == 0 {
+        return Ok(records);
+    }
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    let schema = manager.column_schema();
+    let mut remaining_offset = offset;
     crate::runtime::function_budget::scan(
         |visit| manager.scan_for_each(snapshot.as_ref(), visit),
         |entity| {
             if !db.replica_allows_entity_at_read(table, entity) {
                 return true;
             }
-            let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
-                db.store().as_ref(),
-                entity,
-            );
-            if let Some(mut record) = runtime_table_record_from_entity_ref_with_schema(
-                &hydrated,
-                manager.column_schema().as_ref(),
-            ) {
+            let hydrated =
+                crate::runtime::impl_timeseries::hydrate_timeseries_entity(store.as_ref(), entity);
+            if let Some(mut record) =
+                runtime_table_record_from_entity_ref_with_schema(&hydrated, schema.as_ref())
+            {
+                if remaining_offset > 0 {
+                    remaining_offset -= 1;
+                    return true;
+                }
                 set_source_collection(&mut record, table);
                 records.push(record);
-                if let Some(n) = limit {
-                    if records.len() >= n {
-                        return false; // stop scan early
-                    }
+                if records.len() >= limit {
+                    return false;
                 }
             }
             true
@@ -270,7 +291,9 @@ pub(super) fn scan_runtime_universal_source_records_limited(
     if let Some(collections) = candidate_collections.or(budget_collections.as_deref()) {
         let store = db.store();
         let mut records = match limit {
-            Some(n) => Vec::with_capacity(n),
+            Some(n) => {
+                Vec::with_capacity(n.min(crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK))
+            }
             None => Vec::new(),
         };
         for collection in collections {

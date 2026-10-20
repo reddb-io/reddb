@@ -1788,21 +1788,18 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         && !requires_runtime_projection
         && !uses_document_projection
     {
-        // LIMIT + OFFSET pushdown: pre-scan cap is `offset + limit` so
-        // the scan loop stops once we have enough to skip + keep. ORDER
-        // BY changes the row order downstream, so when a sort key is
-        // present the cap is invalidated — capping at `off + lim` would
-        // yield whichever rows the storage layer happens to surface
-        // first, not the alphabetically-smallest ones. The unbounded-
-        // scan-no-LIMIT case keeps reading the whole table as before.
-        let scan_cap = match (query.offset, query.limit) {
-            _ if !query.order_by.is_empty() => None,
-            (Some(off), Some(lim)) => Some(off as usize + lim as usize),
-            (None, Some(lim)) => Some(lim as usize),
-            _ => None,
+        // An unordered finite window can discard its prefix during the scan.
+        // Ordered queries retain their full input for the downstream sort.
+        let pushed_window = query.limit.filter(|_| query.order_by.is_empty());
+        let mut records = match pushed_window {
+            Some(limit) => scan_runtime_table_source_records_window(
+                db,
+                query.table.as_str(),
+                usize::try_from(query.offset.unwrap_or(0)).unwrap_or(usize::MAX),
+                usize::try_from(limit).unwrap_or(usize::MAX),
+            )?,
+            None => scan_runtime_table_source_records_limited(db, query.table.as_str(), None)?,
         };
-        let mut records =
-            scan_runtime_table_source_records_limited(db, query.table.as_str(), scan_cap)?;
         let table_name = query.table.as_str();
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
 
@@ -1820,17 +1817,19 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             );
         }
 
-        if let Some(offset) = query.offset {
-            let offset = offset as usize;
-            if offset < records.len() {
-                records = records.into_iter().skip(offset).collect();
-            } else {
-                records.clear();
+        if pushed_window.is_none() {
+            if let Some(offset) = query.offset {
+                let offset = offset as usize;
+                if offset < records.len() {
+                    records = records.into_iter().skip(offset).collect();
+                } else {
+                    records.clear();
+                }
             }
-        }
 
-        if let Some(limit) = query.limit {
-            records.truncate(limit as usize);
+            if let Some(limit) = query.limit {
+                records.truncate(limit as usize);
+            }
         }
 
         // Explicit column names and aliases must be projected on the fast
