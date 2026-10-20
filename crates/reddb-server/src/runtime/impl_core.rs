@@ -2415,6 +2415,7 @@ impl RedDBRuntime {
             return Err(RedDBError::Query(format!("permission denied: {err}")));
         }
 
+        frame.release_snapshot_for_maintenance(&expr);
         let statement = query_expr_name(&expr);
         let mode = detect_mode(statement);
         let query_str = statement;

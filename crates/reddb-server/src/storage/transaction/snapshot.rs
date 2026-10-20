@@ -27,6 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use super::IsolationLevel;
 use crate::storage::unified::entity::EntityId;
@@ -170,6 +171,9 @@ struct ManagerState {
     /// Oldest version required by each active transaction's captured snapshot.
     /// A newer reader can exclude an older writer even after that writer commits.
     snapshot_horizons: HashMap<Xid, Xid>,
+    /// Captured statement frames also need history without an active SQL
+    /// transaction. Counts let nested frames retain the same horizon safely.
+    statement_horizons: HashMap<Xid, usize>,
     /// xids that rolled back. `is_visible` MUST treat these as invisible
     /// (the writer never committed). The set is pruned lazily by VACUUM.
     aborted: HashSet<Xid>,
@@ -180,6 +184,27 @@ struct ManagerState {
     /// here so its row versions stay readable.
     pinned: HashMap<Xid, u32>,
     serializable: HashMap<Xid, SerializableTxnState>,
+}
+
+/// Releases a statement's history requirement on every frame exit path.
+pub(crate) struct SnapshotRetentionGuard {
+    manager: Arc<SnapshotManager>,
+    horizon: Xid,
+}
+
+impl Drop for SnapshotRetentionGuard {
+    fn drop(&mut self) {
+        let mut state = self.manager.state.write();
+        let count = state
+            .statement_horizons
+            .get_mut(&self.horizon)
+            .expect("a live snapshot retention guard has a registered horizon");
+        if *count == 1 {
+            state.statement_horizons.remove(&self.horizon);
+        } else {
+            *count -= 1;
+        }
+    }
 }
 
 impl SnapshotManager {
@@ -234,6 +259,10 @@ impl SnapshotManager {
     /// committed row version rather than a pinned statement snapshot.
     pub fn fresh_read_snapshot(&self) -> Snapshot {
         let state = self.state.read();
+        self.fresh_read_snapshot_locked(&state)
+    }
+
+    fn fresh_read_snapshot_locked(&self, state: &ManagerState) -> Snapshot {
         let pool = self.autocommit_pool.lock();
         // Visibility uses an inclusive bound. The allocator points at the
         // next, not the last, xid; including it admits the next future writer.
@@ -243,6 +272,46 @@ impl SnapshotManager {
         // their numbers can be below this snapshot's high-water mark.
         in_progress.extend(pool.next..pool.end);
         Snapshot { xid, in_progress }
+    }
+
+    /// Capture and register under the same lock used by GC cutoff selection.
+    /// Registering only when the snapshot is installed leaves a capture-to-read
+    /// interval in which a committed writer's old versions can be reclaimed.
+    pub(crate) fn fresh_retained_snapshot(self: &Arc<Self>) -> (Snapshot, SnapshotRetentionGuard) {
+        let mut state = self.state.write();
+        let snapshot = self.fresh_read_snapshot_locked(&state);
+        let guard = self.retain_snapshot_locked(&snapshot, &mut state);
+        (snapshot, guard)
+    }
+
+    /// Retain a snapshot already protected by its parent transaction, outer
+    /// statement frame, or historical reference while transferring ownership.
+    pub(crate) fn retain_snapshot(
+        self: &Arc<Self>,
+        snapshot: Snapshot,
+    ) -> (Snapshot, SnapshotRetentionGuard) {
+        let mut state = self.state.write();
+        let guard = self.retain_snapshot_locked(&snapshot, &mut state);
+        (snapshot, guard)
+    }
+
+    fn retain_snapshot_locked(
+        self: &Arc<Self>,
+        snapshot: &Snapshot,
+        state: &mut ManagerState,
+    ) -> SnapshotRetentionGuard {
+        // Deletes already visible to the snapshot need no old version. An
+        // excluded writer can be older than its inclusive high-water mark.
+        let horizon = snapshot
+            .in_progress
+            .iter()
+            .copied()
+            .fold(snapshot.xid.saturating_add(1), Xid::min);
+        *state.statement_horizons.entry(horizon).or_default() += 1;
+        SnapshotRetentionGuard {
+            manager: Arc::clone(self),
+            horizon,
+        }
     }
 
     /// Capture a point-in-time snapshot. Must be called after `begin()`
@@ -519,6 +588,7 @@ impl SnapshotManager {
             .active
             .iter()
             .chain(state.snapshot_horizons.values())
+            .chain(state.statement_horizons.keys())
             .chain(state.pinned.keys())
             .copied()
             .min()
