@@ -1521,7 +1521,7 @@ mod tests {
         let server = make_server();
         server
             .runtime
-            .execute_query("CREATE TABLE typed (key TEXT, value TEXT)")
+            .execute_query("CREATE TABLE typed (item TEXT)")
             .expect("table");
         let response = server.handle_get_kv("typed", "missing");
         assert_eq!(response.status, 400);
@@ -1530,7 +1530,7 @@ mod tests {
         // Legacy implicit dynamic contracts remain permissive for REST reads.
         server
             .runtime
-            .execute_query("KV PUT legacy.key = 'value'")
+            .execute_query("KV PUT legacy.'key' = 'value'")
             .expect("seed");
         let db = server.runtime.db();
         let mut contract = db.collection_contract("legacy").expect("implicit contract");
@@ -1550,14 +1550,14 @@ mod tests {
         let server = make_server();
         server
             .runtime
-            .execute_query("KV PUT versioned.key = 'initial'")
+            .execute_query("KV PUT versioned.'key' = 'initial'")
             .expect("seed");
         crate::application::VcsUseCases::new(&server.runtime)
             .set_versioned("versioned", true)
             .expect("versioning");
         server
             .runtime
-            .execute_query("KV PUT versioned.key = 'latest'")
+            .execute_query("KV PUT versioned.'key' = 'latest'")
             .expect("update");
         assert_eq!(
             kv_response(&server, "versioned", "key")
@@ -1567,7 +1567,7 @@ mod tests {
         );
         server
             .runtime
-            .execute_query("KV DELETE versioned.key")
+            .execute_query("KV DELETE versioned.'key'")
             .expect("tombstone");
         assert_eq!(server.handle_get_kv("versioned", "key").status, 404);
     }
