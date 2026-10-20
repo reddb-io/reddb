@@ -538,11 +538,11 @@ impl SnapshotManager {
         }
     }
 
-    /// Prune the aborted-xid set. Safe to call once every aborted xid is
-    /// below `oldest_active`, which guarantees no live snapshot depends
-    /// on the distinction between "aborted" and "never existed". Pinned
-    /// xids are always retained so higher-level references (VCS commits,
-    /// replica snapshots) stay readable.
+    /// Prune outcomes only after the caller has removed or normalized every
+    /// physical version that references them across all collections and models.
+    /// A snapshot cutoff alone is insufficient: an aborted insert with xmin=x
+    /// becomes visible again if x is forgotten while that version still exists.
+    /// Pinned xids remain retained for higher-level references.
     pub fn prune_aborted(&self, below: Xid) {
         let mut state = self.state.write();
         let ManagerState {
