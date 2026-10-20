@@ -13,7 +13,7 @@ use super::impl_core::{
 use super::{RedDBRuntime, RuntimeQueryResult, RuntimeResultCacheEntry};
 use crate::api::{RedDBError, RedDBResult};
 use crate::auth::Role;
-use crate::storage::transaction::snapshot::{Snapshot, Xid};
+use crate::storage::transaction::snapshot::{Snapshot, SnapshotRetentionGuard, Xid};
 use reddb_rql::ast::QueryExpr;
 use reddb_rql::modes::{detect_mode, parse_multi, QueryMode};
 
@@ -299,6 +299,7 @@ fn classify_lock_intent(query: &str) -> LockIntent {
 pub(super) struct StatementExecutionFrame {
     tx_local_tenant: Option<Option<String>>,
     snapshot: Snapshot,
+    snapshot_retention: RefCell<Option<SnapshotRetentionGuard>>,
     own_xids: HashSet<Xid>,
     serializable_reader: Option<Xid>,
     cache_key: String,
@@ -412,7 +413,8 @@ impl StatementExecutionFrame {
                 ctx.isolation == crate::storage::transaction::IsolationLevel::Serializable
             })
             .map(|ctx| ctx.xid);
-        let (snapshot, as_of_floor) = runtime.statement_snapshot(query, identity_source)?;
+        let (snapshot, as_of_floor, snapshot_retention) =
+            runtime.statement_snapshot(query, identity_source)?;
         let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) => (
@@ -465,6 +467,7 @@ impl StatementExecutionFrame {
         Ok(Self {
             tx_local_tenant,
             snapshot,
+            snapshot_retention: RefCell::new(Some(snapshot_retention)),
             own_xids,
             serializable_reader,
             cache_key,
@@ -787,7 +790,21 @@ impl StatementExecutionFrame {
     ) -> RedDBResult<Option<crate::runtime::locking::LockerGuard>> {
         runtime.validate_model_operations_before_auth(expr)?;
         self.check_query_privilege(runtime, expr)?;
+        self.release_snapshot_for_maintenance(expr);
         self.acquire_intent_locks(runtime, expr)
+    }
+
+    pub(super) fn release_snapshot_for_maintenance(&self, expr: &QueryExpr) {
+        if matches!(
+            expr,
+            QueryExpr::MaintenanceCommand(reddb_rql::ast::MaintenanceCommand::Vacuum { .. })
+        ) {
+            // VACUUM inspects physical versions rather than reading its own
+            // statement snapshot. Its temporary pin would otherwise inhibit
+            // reclamation, especially with unused reserved autocommit xids.
+            // Outer/nested reader frames keep their independent pins.
+            self.snapshot_retention.borrow_mut().take();
+        }
     }
 
     pub(super) fn acquire_intent_locks(
@@ -1124,7 +1141,7 @@ impl RedDBRuntime {
         &self,
         query: &str,
         identity: StatementIdentity<'_>,
-    ) -> RedDBResult<(Snapshot, Option<Xid>)> {
+    ) -> RedDBResult<(Snapshot, Option<Xid>, SnapshotRetentionGuard)> {
         match peek_top_level_as_of_with_table(query) {
             Some((spec, Some(table))) => {
                 if !table.starts_with("red_") && !self.vcs_is_versioned(&table)? {
@@ -1135,27 +1152,33 @@ impl RedDBRuntime {
                     )));
                 }
                 let xid = self.vcs_resolve_as_of(spec)?;
-                Ok((
-                    Snapshot {
-                        xid,
-                        in_progress: HashSet::new(),
-                    },
-                    Some(xid),
-                ))
+                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(Snapshot {
+                    xid,
+                    in_progress: HashSet::new(),
+                });
+                Ok((snapshot, Some(xid), retention))
             }
             Some((spec, None)) => {
                 let xid = self.vcs_resolve_as_of(spec)?;
-                Ok((
-                    Snapshot {
-                        xid,
-                        in_progress: HashSet::new(),
-                    },
-                    Some(xid),
-                ))
+                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(Snapshot {
+                    xid,
+                    in_progress: HashSet::new(),
+                });
+                Ok((snapshot, Some(xid), retention))
             }
             None => match (identity, capture_current_snapshot()) {
-                (StatementIdentity::Expr(_), Some(outer)) => Ok((outer.snapshot, None)),
-                _ => Ok((self.current_snapshot(), None)),
+                (StatementIdentity::Expr(_), Some(outer)) => {
+                    let (snapshot, retention) =
+                        self.snapshot_manager().retain_snapshot(outer.snapshot);
+                    Ok((snapshot, None, retention))
+                }
+                _ => {
+                    let (snapshot, retention) = self
+                        .inner
+                        .transaction_state
+                        .retained_current_snapshot(current_connection_id());
+                    Ok((snapshot, None, retention))
+                }
             },
         }
     }
@@ -1204,6 +1227,121 @@ mod tests {
 
     fn fresh_runtime() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    enum HeldFrame {
+        Ordinary,
+        Nested,
+        Historical,
+    }
+
+    fn verify_frame_survives_vacuum(delete: bool, kind: HeldFrame) {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        reset_thread_locals();
+        clear_current_connection_id();
+        let runtime = fresh_runtime();
+        let execute = |connection, sql: &str| {
+            set_current_connection_id(connection);
+            let result = runtime.execute_query(sql);
+            clear_current_connection_id();
+            result.expect("valid frame retention fixture statement")
+        };
+        execute(1, "CREATE TABLE frame_rows (id TEXT, n INTEGER)");
+        execute(1, "INSERT INTO frame_rows (id, n) VALUES ('row', 1)");
+        let historical_xid = runtime.current_snapshot().xid;
+        if matches!(kind, HeldFrame::Historical) {
+            runtime
+                .vcs_set_versioned("frame_rows", true)
+                .expect("enable historical reads");
+        }
+        execute(2, "BEGIN");
+        let query = if matches!(kind, HeldFrame::Historical) {
+            format!("SELECT id, n FROM frame_rows AS OF SNAPSHOT {historical_xid}")
+        } else {
+            "SELECT id, n FROM frame_rows".to_string()
+        };
+        let frame = StatementExecutionFrame::build(&runtime, StatementIdentity::Text(&query))
+            .expect("frame captures its snapshot");
+        let frame = if matches!(kind, HeldFrame::Nested) {
+            let guards = frame.install(&runtime);
+            let expr = QueryExpr::Table(reddb_rql::ast::TableQuery::new("frame_rows"));
+            let nested = StatementExecutionFrame::build(&runtime, StatementIdentity::Expr(&expr))
+                .expect("nested frame inherits the protected snapshot");
+            drop(guards);
+            drop(frame);
+            nested
+        } else {
+            frame
+        };
+        // Pause after capture and before install/scan: GC must also protect
+        // this gap, rather than starting retention only at TLS installation.
+        execute(
+            2,
+            if delete {
+                "DELETE FROM frame_rows WHERE id = 'row'"
+            } else {
+                "UPDATE frame_rows SET n = 2 WHERE id = 'row'"
+            },
+        );
+        execute(2, "COMMIT");
+        execute(1, "VACUUM frame_rows");
+        {
+            let _guards = frame.install(&runtime);
+            let records = super::super::record_search::scan_runtime_table_source_records_limited(
+                &runtime.db(),
+                "frame_rows",
+                None,
+            )
+            .expect("captured frame scan succeeds after vacuum");
+            assert_eq!(
+                records.len(),
+                1,
+                "vacuum reclaimed an active frame's visible row"
+            );
+            assert_eq!(
+                records[0]
+                    .get("n")
+                    .expect("selected value exists")
+                    .to_string(),
+                "1"
+            );
+        }
+        drop(frame);
+        execute(1, "VACUUM frame_rows");
+        let physical = runtime
+            .db()
+            .store()
+            .get_collection("frame_rows")
+            .expect("fixture collection exists")
+            .query_all(|_| true)
+            .len();
+        assert_eq!(
+            physical,
+            usize::from(!delete),
+            "completed frame leaked its retention pin"
+        );
+        clear_current_connection_id();
+    }
+
+    #[test]
+    fn autocommit_frame_retains_update_until_scan_completes() {
+        verify_frame_survives_vacuum(false, HeldFrame::Ordinary);
+    }
+
+    #[test]
+    fn autocommit_frame_retains_delete_until_scan_completes() {
+        verify_frame_survives_vacuum(true, HeldFrame::Ordinary);
+    }
+
+    #[test]
+    fn nested_frame_retains_history_after_parent_frame_drops() {
+        verify_frame_survives_vacuum(false, HeldFrame::Nested);
+    }
+
+    #[test]
+    fn historical_frame_retains_history_until_scan_completes() {
+        verify_frame_survives_vacuum(true, HeldFrame::Historical);
     }
 
     /// Ensure thread-local state from a prior test can't leak into

@@ -11,7 +11,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager, TxnContext, Xid};
+use crate::storage::transaction::snapshot::{
+    Snapshot, SnapshotManager, SnapshotRetentionGuard, TxnContext, Xid,
+};
 use crate::storage::transaction::IsolationLevel;
 
 pub(crate) struct RollbackToSavepoint {
@@ -185,6 +187,18 @@ impl TransactionState {
             return context.snapshot;
         }
         self.snapshot_manager.fresh_read_snapshot()
+    }
+
+    pub(crate) fn retained_current_snapshot(
+        &self,
+        connection_id: u64,
+    ) -> (Snapshot, SnapshotRetentionGuard) {
+        if let Some(context) = self.context(connection_id) {
+            if context.isolation != IsolationLevel::ReadCommitted {
+                return self.snapshot_manager.retain_snapshot(context.snapshot);
+            }
+        }
+        self.snapshot_manager.fresh_retained_snapshot()
     }
 
     pub(crate) fn writer_xid(&self, connection_id: u64) -> Option<Xid> {
