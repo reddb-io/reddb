@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.24.12
+
+### Patch Changes
+
+- [#2418](https://github.com/reddb-io/reddb/pull/2418) [`d16d332`](https://github.com/reddb-io/reddb/commit/d16d3329c293380c454a285495cd12451640afbc) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fence WAL offset reset against outstanding durable commit acknowledgements and
+  flusher state publication. A checkpoint could previously discard an enqueued
+  record or reset its offsets before a waiting writer observed durability, leaving
+  that writer waiting for an offset in the previous WAL. Allow the flusher to drain
+  existing commit leases while reset is waiting, and prevent stale flush results
+  from being published after reset. The WAL format is unchanged.
+
 ## 1.24.11
 
 ### Patch Changes
