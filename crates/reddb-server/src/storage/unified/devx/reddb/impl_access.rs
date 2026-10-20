@@ -38,6 +38,8 @@ impl RedDB {
     pub(crate) fn native_registry_summary_from_metadata(
         &self,
         metadata: &PhysicalMetadataFile,
+        artifact_summaries: &[NativeVectorArtifactSummary],
+        artifact_count: usize,
     ) -> NativeRegistrySummary {
         const SAMPLE_LIMIT: usize = 32;
 
@@ -93,13 +95,12 @@ impl RedDB {
                 metadata: job.metadata.clone(),
             })
             .collect::<Vec<_>>();
-        let vector_artifacts = self
-            .native_vector_artifact_records()
-            .into_iter()
-            .map(|(summary, _)| summary)
+        let vector_artifacts = artifact_summaries
+            .iter()
             .take(SAMPLE_LIMIT)
+            .cloned()
             .collect::<Vec<_>>();
-        let vector_artifact_count = self.native_vector_artifact_collection_count() as u32;
+        let vector_artifact_count = artifact_count as u32;
 
         NativeRegistrySummary {
             collection_count: metadata.catalog.total_collections as u32,
@@ -137,10 +138,6 @@ impl RedDB {
             analytics_jobs,
             vector_artifacts,
         }
-    }
-
-    fn native_vector_artifact_collection_count(&self) -> usize {
-        self.native_vector_artifact_records().len()
     }
 
     pub(crate) fn native_vector_artifact_records(

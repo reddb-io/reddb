@@ -1615,6 +1615,24 @@ impl RedDBRuntime {
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(format!("table '{}' not found", query.table)))?;
 
+        if query.if_not_exists
+            && self
+                .inner
+                .index_store
+                .list_indices(&query.table)
+                .iter()
+                .any(|index| index.name == query.name)
+        {
+            return Ok(RuntimeQueryResult::ok_message(
+                raw_query.to_string(),
+                &format!(
+                    "index '{}' already exists on '{}'; skipped",
+                    query.name, query.table
+                ),
+                "create",
+            ));
+        }
+
         let method_kind = match query.method {
             IndexMethod::Hash => super::index_store::IndexMethodKind::Hash,
             IndexMethod::BTree => super::index_store::IndexMethodKind::BTree,

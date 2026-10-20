@@ -1328,7 +1328,18 @@ impl RedDB {
         let (collection_roots_page, collection_roots_checksum) = self
             .store
             .write_native_collection_roots(&metadata.superblock.collection_roots, existing_page)?;
-        let registry_summary = self.native_registry_summary_from_metadata(metadata);
+        // Build payload artifacts once, on the publication path. Observers use
+        // the persisted summaries instead of rebuilding search indexes.
+        let vector_artifact_records = self.native_vector_artifact_records();
+        let artifact_summaries = vector_artifact_records
+            .iter()
+            .map(|(summary, _)| summary.clone())
+            .collect::<Vec<_>>();
+        let registry_summary = self.native_registry_summary_from_metadata(
+            metadata,
+            &artifact_summaries,
+            artifact_summaries.len(),
+        );
         let (registry_page, registry_checksum) = self
             .store
             .write_native_registry_summary(&registry_summary, existing_registry_page)?;
@@ -1346,7 +1357,6 @@ impl RedDB {
                 &metadata_state_summary,
                 existing_metadata_state_page,
             )?;
-        let vector_artifact_records = self.native_vector_artifact_records();
         let vector_artifact_payloads = vector_artifact_records
             .iter()
             .map(|(summary, bytes)| {

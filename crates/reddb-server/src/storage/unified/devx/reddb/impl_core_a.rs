@@ -1255,11 +1255,11 @@ impl RedDB {
         for name in self.store.list_collections() {
             if let Some(manager) = self.store.get_collection(&name) {
                 let manager_stats = manager.stats();
-                let cross_refs = manager
-                    .query_all(|_| true)
-                    .iter()
-                    .map(|entity| entity.cross_refs().len())
-                    .sum();
+                let mut cross_refs = 0;
+                manager.for_each_entity(|entity| {
+                    cross_refs += entity.cross_refs().len();
+                    true
+                });
                 stats_by_collection.insert(
                     name,
                     CollectionStats {

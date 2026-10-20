@@ -497,29 +497,38 @@ impl RedDB {
                         "native_vector_artifacts.page_count",
                         vector_artifact_pages.len().to_string(),
                     );
-                    match self.inspect_native_vector_artifacts() {
-                        Ok(batch) => {
-                            report = report.with_diagnostic(
-                                "native_vector_artifacts.inspected_count",
-                                batch.inspected_count.to_string(),
+                    // Health checks inspect metadata only. Full artifact
+                    // decoding belongs to explicit inspection/warmup, where
+                    // its payload-sized memory and I/O cost is requested.
+                    report = report.with_diagnostic(
+                        "native_vector_artifacts.validation_scope",
+                        "metadata-only",
+                    );
+                    if let Some(registry) = native_state.registry.as_ref() {
+                        let descriptors_match = registry.vector_artifacts.iter().all(|artifact| {
+                            vector_artifact_pages.iter().any(|page| {
+                                page.collection == artifact.collection
+                                    && page.artifact_kind == artifact.artifact_kind
+                                    && page.byte_len == artifact.serialized_bytes
+                                    && page.checksum == artifact.checksum
+                            })
+                        });
+                        if !descriptors_match
+                            || (registry.vector_artifacts_complete
+                                && vector_artifact_pages.len()
+                                    != registry.vector_artifact_count as usize)
+                        {
+                            report.issue(
+                                "native_vector_artifacts",
+                                "native artifact descriptors diverge from the registry",
                             );
-                            report = report.with_diagnostic(
-                                "native_vector_artifacts.valid_count",
-                                batch.valid_count.to_string(),
-                            );
-                            report = report.with_diagnostic(
-                                "native_vector_artifacts.failure_count",
-                                batch.failures.len().to_string(),
-                            );
-                            if !batch.failures.is_empty() {
-                                report.issue(
-                                    "native_vector_artifacts",
-                                    "one or more native vector artifacts could not be deserialized",
-                                );
-                            }
                         }
-                        Err(err) => report.issue("native_vector_artifacts", err),
                     }
+                } else if native.vector_artifact_page != 0 {
+                    report.issue(
+                        "native_vector_artifacts",
+                        "native artifact descriptors could not be read",
+                    );
                 }
                 if let Some(metadata) = metadata_for_native.as_ref() {
                     if native_state.collection_roots != metadata.superblock.collection_roots {
@@ -608,11 +617,11 @@ impl RedDB {
                     );
 
                     if let Some(metadata) = metadata_for_native.as_ref() {
-                        let expected_registry = self
-                            .native_registry_summary_from_metadata(metadata)
-                            .with_persisted_vector_artifacts(
-                                self.native_registry_vector_artifacts_from_pages(),
-                            );
+                        let expected_registry = self.native_registry_summary_from_metadata(
+                            metadata,
+                            &native_registry.vector_artifacts,
+                            native_registry.vector_artifact_count as usize,
+                        );
                         if *native_registry != expected_registry {
                             report.issue(
                                 "native_registry",
@@ -912,68 +921,5 @@ impl RedDB {
             }
         }
         report.with_diagnostic("paged_mode", self.paged_mode.to_string())
-    }
-
-    fn native_registry_vector_artifacts_from_pages(&self) -> Vec<NativeVectorArtifactSummary> {
-        const SAMPLE_LIMIT: usize = 32;
-
-        let Ok(batch) = self.inspect_native_vector_artifacts() else {
-            return Vec::new();
-        };
-        let mut artifacts = batch
-            .artifacts
-            .into_iter()
-            .map(|artifact| NativeVectorArtifactSummary {
-                collection: artifact.collection,
-                artifact_kind: artifact.artifact_kind,
-                vector_count: artifact
-                    .graph_edge_count
-                    .or(artifact.text_posting_count)
-                    .or(artifact.document_value_count)
-                    .unwrap_or(artifact.node_count),
-                dimension: artifact
-                    .graph_node_count
-                    .or(artifact.text_doc_count)
-                    .or(artifact.document_doc_count)
-                    .map(|value| value as u32)
-                    .unwrap_or(artifact.dimension),
-                max_layer: artifact
-                    .graph_label_count
-                    .or_else(|| artifact.text_term_count.map(|value| value as u32))
-                    .or_else(|| artifact.document_path_count.map(|value| value as u32))
-                    .or(artifact.ivf_n_lists)
-                    .unwrap_or(artifact.max_layer),
-                serialized_bytes: artifact.byte_len,
-                checksum: artifact.checksum,
-            })
-            .collect::<Vec<_>>();
-        artifacts.sort_by(|left, right| {
-            left.collection
-                .cmp(&right.collection)
-                .then_with(|| left.artifact_kind.cmp(&right.artifact_kind))
-        });
-        artifacts.truncate(SAMPLE_LIMIT);
-        artifacts
-    }
-}
-
-trait NativeRegistrySummaryExt {
-    fn with_persisted_vector_artifacts(
-        self,
-        vector_artifacts: Vec<NativeVectorArtifactSummary>,
-    ) -> Self;
-}
-
-impl NativeRegistrySummaryExt for NativeRegistrySummary {
-    fn with_persisted_vector_artifacts(
-        mut self,
-        vector_artifacts: Vec<NativeVectorArtifactSummary>,
-    ) -> Self {
-        let vector_artifact_count = vector_artifacts.len() as u32;
-        self.vector_artifact_count = vector_artifact_count;
-        self.vector_artifacts_complete = true;
-        self.omitted_vector_artifact_count = 0;
-        self.vector_artifacts = vector_artifacts;
-        self
     }
 }
