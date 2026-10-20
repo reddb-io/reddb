@@ -13,6 +13,8 @@ parity with MariaDB/InnoDB, PostgreSQL, or MongoDB/WiredTiger. The actual stagin
 workload failed qualification after the 1.24.9 release. Official 1.24.10 and
 1.24.11 artifacts have since passed specific local checks, but concurrent
 rollback/update qualification exposed a separate WAL acknowledgement/reset race.
+The WAL epoch fix is merged, but the official 1.24.12 artifact exposed a further
+legacy paged-store collection-definition loss during expanded recovery testing.
 Successful CI, publication and Kubernetes readiness do not close that runtime
 acceptance gate.
 
@@ -78,6 +80,28 @@ keeps append leases through acknowledgement, excludes stale flusher publication,
 and lets the flusher drain existing leases while reset waits. That regression
 fails before the patch and passes afterward; complete snapshot/runtime and
 deployed qualification remain required before calling the issue closed.
+
+The merged WAL epoch candidate passed the previously failing concurrent real-copy
+workload with checkpoints in 566/602/573 ms, no observed file growth, and no OOM.
+Twenty-four update/checkpoint cycles also plateaued. Forced process termination
+preserved both an acknowledged probe write and a native worker-lease update;
+the rolled-back row remained invisible. This does not establish deployed
+acceptance or remove the separate catalog latency limit: with positioned I/O
+throttled to 12 MiB/s, catalog requests exceeded their ten-second deadline.
+
+Expanded equality/range/update/delete/reinsert testing found another failure in
+the real copy and reproduced it in a roughly 1.4 MiB paged database with the
+official 1.24.12 Linux workflow binary. Opening an existing paged file with
+embedded options incorrectly chose the binary dump's auxiliary contract blob.
+Paged checkpoints do not persist that blob. After reopen, a newly declared
+document collection lost its contract and unmarked UPDATE used table semantics;
+the resulting visible document values differed from the acknowledged-write
+oracle. A newly created embedded artifact did not reproduce that failure.
+The regression creates a paged store, opens it with embedded options, creates a
+document and index, checkpoints, reopens, and verifies the declared model and
+document post-image. Contract creation/removal, boot cache seeding and metadata
+checkpointing must use the actual paged-file boundary. The deployment remains
+gated on qualification of this additional fix.
 
 Manual vacuum was also qualified on a preserved, older Auth copy with the
 official 1.24.11 binary, a 1 GiB engine budget and a 2 GiB cgroup limit. It

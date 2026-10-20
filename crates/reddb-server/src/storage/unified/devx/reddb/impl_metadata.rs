@@ -411,6 +411,7 @@ impl RedDB {
         if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
             && self.options.storage_profile.packaging
                 == crate::storage::StoragePackaging::SingleFile
+            && !self.paged_mode
         {
             self.seed_contract_cache_from_store_aux()?;
         }
@@ -431,6 +432,7 @@ impl RedDB {
         if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
             && self.options.storage_profile.packaging
                 == crate::storage::StoragePackaging::SingleFile
+            && !self.paged_mode
         {
             return Ok(());
         }

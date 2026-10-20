@@ -35,6 +35,9 @@ without serializing its payloads. Each checkpoint shares one frozen aborted-XID
 set across collections for both reuse admission and row normalization.
 WAL replay and every entity or metadata mutation invalidate the corresponding
 generation. New mutation paths must advance the segment revision before exposing mutable data.
+When embedded options open an existing paged file, collection definitions remain
+in physical metadata. The binary dump's auxiliary contract blob is only used for
+an actual embedded artifact; paged checkpoints do not serialize that blob.
 Cached generations are accepted only after durable catalog publication; current
 format roots loaded from disk are seeded before WAL replay. Physical metadata
 fingerprints additionally retain their existing statistics seed. The caches do

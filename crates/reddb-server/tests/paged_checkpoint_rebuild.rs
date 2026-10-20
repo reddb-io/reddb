@@ -548,6 +548,78 @@ fn malformed_entity_payload_fails_open_instead_of_silently_losing_the_row() {
 }
 
 #[test]
+fn embedded_options_preserve_document_contracts_when_opening_an_existing_paged_store() {
+    use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("existing.rdb");
+    let options = |preset: StorageDeployPreset| {
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(preset.selection())
+            .expect("storage profile")
+    };
+    {
+        let runtime = RedDBRuntime::with_options(options(StorageDeployPreset::Serverless))
+            .expect("create paged database");
+        runtime.checkpoint().expect("initial paged checkpoint");
+    }
+    {
+        let runtime = RedDBRuntime::with_options(options(StorageDeployPreset::Embedded))
+            .expect("open existing paged database with embedded options");
+        assert!(runtime.db().is_paged());
+        runtime
+            .execute_query("CREATE DOCUMENT reopened_docs")
+            .expect("declare document contract");
+        runtime
+            .execute_query(
+                "INSERT INTO reopened_docs DOCUMENT VALUES ({\"name\":\"alice\",\"score\":1})",
+            )
+            .expect("insert document");
+        runtime
+            .execute_query("CREATE INDEX idx_reopened_name ON reopened_docs (name) USING HASH")
+            .expect("declare document index");
+        runtime.checkpoint().expect("checkpoint document contract");
+    }
+    let runtime = RedDBRuntime::with_options(options(StorageDeployPreset::Embedded))
+        .expect("reopen existing paged database");
+    assert!(runtime.db().is_paged());
+    assert_eq!(
+        runtime
+            .db()
+            .collection_contract("reopened_docs")
+            .expect("durable document contract")
+            .declared_model,
+        reddb_server::catalog::CollectionModel::Document,
+    );
+    assert!(runtime
+        .db()
+        .catalog_model_snapshot()
+        .declared_indexes
+        .iter()
+        .any(|index| index.name == "idx_reopened_name"));
+    runtime
+        .execute_query("UPDATE reopened_docs SET score = 2 WHERE name = 'alice'")
+        .expect("update document after reopening");
+    let result = runtime
+        .execute_query("SELECT score FROM reopened_docs WHERE name = 'alice'")
+        .expect("read document post-image");
+    assert_eq!(
+        result.result.records[0].get("score"),
+        Some(&Value::Integer(2))
+    );
+    runtime
+        .db()
+        .remove_collection_contract("reopened_docs")
+        .expect("remove document contract")
+        .expect("existing contract");
+    runtime.checkpoint().expect("checkpoint contract removal");
+    drop(runtime);
+    let runtime = RedDBRuntime::with_options(options(StorageDeployPreset::Embedded))
+        .expect("reopen after contract removal");
+    assert!(runtime.db().collection_contract("reopened_docs").is_none());
+}
+
+#[test]
 fn malformed_collection_name_fails_open_instead_of_truncating_the_catalog() {
     let directory = tempfile::tempdir().expect("temporary database");
     let path = directory.path().join("catalog.rdb");

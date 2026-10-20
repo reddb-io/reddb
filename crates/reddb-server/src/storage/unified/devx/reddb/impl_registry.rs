@@ -286,9 +286,12 @@ impl RedDB {
             manager.set_column_schema_if_empty(columns);
         }
 
+        // Existing paged files can be opened with embedded options. Their
+        // checkpoints do not encode the binary dump's auxiliary contract blob.
         if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
             && self.options.storage_profile.packaging
                 == crate::storage::StoragePackaging::SingleFile
+            && !self.paged_mode
         {
             if let Ok(mut guard) = self.collection_contract_cache.write() {
                 let mut contracts = guard
@@ -347,6 +350,7 @@ impl RedDB {
         if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
             && self.options.storage_profile.packaging
                 == crate::storage::StoragePackaging::SingleFile
+            && !self.paged_mode
         {
             let mut removed = None;
             if let Ok(mut guard) = self.collection_contract_cache.write() {
