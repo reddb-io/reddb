@@ -1450,6 +1450,44 @@ fn value_as_retention_ms(value: &Value) -> Option<i64> {
 }
 
 #[cfg(test)]
+mod serverless_readiness_tests {
+    use super::*;
+
+    #[test]
+    fn native_readiness_does_not_wait_for_metadata_publication() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let options = RedDBOptions::persistent(directory.path().join("ready.rdb"))
+            .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+            .expect("serverless profile");
+        let runtime = Arc::new(crate::RedDBRuntime::with_options(options).expect("runtime"));
+        runtime
+            .execute_query("CREATE TABLE readiness_probe (value INT)")
+            .expect("collection");
+        runtime.checkpoint().expect("published native state");
+
+        let store = runtime.db().store();
+        let publication = store.vault_publication_lock.lock();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let reader = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            let flags = reader
+                .db()
+                .readiness_flags_from_health_serverless(&HealthReport::healthy());
+            send.send(flags).expect("readiness receiver");
+        });
+        let flags = receive.recv_timeout(std::time::Duration::from_secs(2));
+        // Release before asserting so a regression cannot leave a blocked
+        // worker behind. The old authority-diagnostic path waits on this lock.
+        drop(publication);
+        worker.join().expect("readiness worker");
+        assert_eq!(
+            flags.expect("native readiness must not wait for metadata publication"),
+            (true, true, true)
+        );
+    }
+}
+
+#[cfg(test)]
 mod ephemeral_cleanup_tests {
     use super::*;
 
