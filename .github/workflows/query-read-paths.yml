@@ -28,7 +28,20 @@ jobs:
           python3 - <<'PY'
           import hashlib, json, pathlib
           for summary in sorted(pathlib.Path('bench/results').glob('query-projection-*/**/summary.json')):
-              checksums = json.loads(summary.read_text())['artifact_sha256']
+              evidence = json.loads(summary.read_text())
+              assert evidence['status'] in ('valid-diagnostic', 'completed-with-orchestration-repair')
+              assert len(evidence['measurements']) == 32
+              assert all(cell['status'] == 'valid-diagnostic' for cell in evidence['measurements'])
+              assert len(evidence['comparisons']) == 8
+              manifest = json.loads((summary.parent / 'manifest.json').read_text())
+              assert len(manifest['runs']) == 4
+              for run in manifest['runs']:
+                  assert run['recovery_complete']
+                  directory = summary.parent / run['label']
+                  assert json.loads((directory / 'sql-recovery.json').read_text())['status'] == 'verified'
+                  kv = json.loads((directory / 'kv-recovery.json').read_text())
+                  assert kv['status'] == 'valid-diagnostic' and kv['verification']['keys_checked'] == 10000
+              checksums = evidence['artifact_sha256']
               for name, expected in checksums.items():
                   relative = pathlib.Path(name)
                   assert not relative.is_absolute() and '..' not in relative.parts

@@ -1,0 +1,146 @@
+{
+  "schema": "reddb.query-read-paths.v1",
+  "status": "prepared",
+  "rounds": [],
+  "config": {
+    "host": "reddb-query-before-20261020",
+    "port": 5000,
+    "kv_collection": "kv_diag_10000",
+    "keys": 10000,
+    "value_bytes": 100,
+    "workers": 1,
+    "seconds": 2,
+    "rounds": 5,
+    "case": "kv",
+    "setup": true,
+    "verify_only": false,
+    "out": "/results/before-setup.json"
+  },
+  "client": {
+    "python": "3.12.15",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.36"
+  },
+  "started_unix_ms": 1792521774907,
+  "classification": "shared-host diagnostic; fixed duration; every response checked; result cache off",
+  "explain": {
+    "capability": "table",
+    "descriptor": {
+      "columns": [
+        {
+          "name": "op",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "source",
+          "nullable": true,
+          "type": "string"
+        },
+        {
+          "name": "estimated_rows",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "name": "estimated_cost",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "name": "depth",
+          "nullable": false,
+          "type": "number"
+        }
+      ],
+      "counts_by_kind": {
+        "edges": 0,
+        "nodes": 0,
+        "paths": 0,
+        "rows": 3,
+        "vector_matches": 0
+      },
+      "has_graph": false,
+      "has_metrics": false,
+      "has_queue": false,
+      "has_table": true,
+      "has_timeseries": false,
+      "has_vector": false,
+      "models_present": [
+        "table"
+      ],
+      "renderer_hints": [
+        "table"
+      ],
+      "result_kind": "table"
+    },
+    "engine": "runtime-explain",
+    "mode": "sql",
+    "ok": true,
+    "query": "EXPLAIN SELECT seq, item FROM query_perf WHERE seq = 42",
+    "record_count": 3,
+    "result": {
+      "columns": [
+        "op",
+        "source",
+        "estimated_rows",
+        "estimated_cost",
+        "depth"
+      ],
+      "records": [
+        {
+          "edges": {},
+          "nodes": {},
+          "paths": [],
+          "values": {
+            "depth": 0,
+            "estimated_cost": 0.12,
+            "estimated_rows": 1,
+            "op": "projection",
+            "source": null
+          },
+          "vector_results": []
+        },
+        {
+          "edges": {},
+          "nodes": {},
+          "paths": [],
+          "values": {
+            "depth": 1,
+            "estimated_cost": 0.25,
+            "estimated_rows": 1,
+            "op": "filter",
+            "source": null
+          },
+          "vector_results": []
+        },
+        {
+          "edges": {},
+          "nodes": {},
+          "paths": [],
+          "values": {
+            "depth": 2,
+            "estimated_cost": 10000,
+            "estimated_rows": 10000,
+            "op": "index_seek",
+            "source": "query_perf"
+          },
+          "vector_results": []
+        }
+      ],
+      "stats": {
+        "edges_scanned": 0,
+        "exec_time_us": 0,
+        "nodes_scanned": 0,
+        "rows_scanned": 0,
+        "segments_pruned": 0,
+        "segments_scanned": 0,
+        "segments_total": 0
+      }
+    },
+    "selection": {
+      "scope": "any"
+    },
+    "statement": "explain"
+  },
+  "finished_unix_ms": 1792521782595
+}
