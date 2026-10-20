@@ -1850,6 +1850,42 @@ impl SegmentManager {
         self.query_all(|entity| Self::scan_entity_visible(snapshot, entity) && filter(entity))
     }
 
+    /// Probe each segment's physical key index, retaining MVCC history candidates.
+    /// Cost is O(segment count + versions of this key), rather than all collection rows.
+    pub(crate) fn find_key_entity(
+        &self,
+        key: &str,
+        snapshot: Option<&SnapshotContext>,
+        versioned: bool,
+    ) -> Option<UnifiedEntity> {
+        let probe = |segment: &GrowingSegment| {
+            segment
+                .find_key_entity(key, versioned, &mut |entity| {
+                    !versioned || Self::scan_entity_visible(snapshot, entity)
+                })
+                .cloned()
+        };
+        let mut best = self
+            .growing
+            .read()
+            .as_ref()
+            .and_then(|growing| probe(&growing.read()));
+        for segment in self.sealed.read().iter() {
+            if !versioned && best.is_some() {
+                break;
+            }
+            if let Some(entity) = probe(&segment.read()) {
+                if best
+                    .as_ref()
+                    .is_none_or(|current| entity.xmin >= current.xmin)
+                {
+                    best = Some(entity);
+                }
+            }
+        }
+        best
+    }
+
     /// Collect visible graph items, pruning only under the segment read guard.
     pub(crate) fn scan_graph_kind(
         &self,
@@ -2668,6 +2704,109 @@ mod tests {
     use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityData, EntityKind, RowData};
     use reddb_types::Value;
+
+    fn lookup_version(id: u64, key: &str, xmin: u64, xmax: u64) -> UnifiedEntity {
+        let mut entity = UnifiedEntity::table_row(EntityId::new(id), "keys", id, vec![]);
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![Value::text(key)],
+            vec!["key".into()],
+        ));
+        entity.set_xmin(xmin);
+        entity.set_xmax(xmax);
+        entity
+    }
+
+    #[test]
+    fn key_lookup_matches_snapshot_scan_across_segments() {
+        let manager = Arc::new(SegmentManager::new("keys"));
+        for entity in [
+            lookup_version(1, "changed", 3, 12),
+            lookup_version(2, "deleted", 3, 7),
+        ] {
+            manager.insert(entity).expect("old version");
+        }
+        manager.force_seal().expect("seal old versions");
+        for entity in [
+            lookup_version(3, "changed", 12, 0),
+            lookup_version(4, "pending", 4, 0),
+            lookup_version(5, "own", 15, 0),
+            lookup_version(6, "live", 3, 0),
+        ] {
+            manager.insert(entity).expect("new version");
+        }
+        std::thread::spawn(move || {
+            let snapshot = SnapshotContext {
+                snapshot: Snapshot {
+                    xid: 10,
+                    in_progress: HashSet::from([4]),
+                },
+                manager: Arc::new(SnapshotManager::new()),
+                own_xids: HashSet::from([15]),
+                requires_index_fallback: false,
+                serializable_reader: None,
+            };
+            for snapshot in [Some(&snapshot), None] {
+                for key in ["changed", "deleted", "pending", "own", "live", "absent"] {
+                    let expected = manager
+                        .scan(snapshot, |entity| {
+                            super::super::segment_key_lookup::SegmentKeyLookup::key(entity)
+                                == Some(key)
+                        })
+                        .into_iter()
+                        .max_by_key(|entity| entity.xmin)
+                        .map(|entity| entity.id);
+                    assert_eq!(
+                        manager
+                            .find_key_entity(key, snapshot, true)
+                            .map(|entity| entity.id),
+                        expected,
+                        "key={key}"
+                    );
+                }
+            }
+            assert_eq!(
+                manager
+                    .find_key_entity("changed", Some(&snapshot), true)
+                    .map(|entity| entity.id),
+                Some(EntityId::new(1))
+            );
+            assert_eq!(
+                manager
+                    .find_key_entity("changed", None, true)
+                    .map(|entity| entity.id),
+                Some(EntityId::new(3))
+            );
+            assert!(manager.find_key_entity("deleted", None, true).is_none());
+        })
+        .join()
+        .expect("snapshot worker");
+    }
+
+    #[test]
+    fn key_lookup_survives_paced_consolidation() {
+        let manager = consolidating_manager(1);
+        manager
+            .bulk_insert(
+                (1..=10)
+                    .map(|id| lookup_version(id, &format!("key-{id}"), 1, 0))
+                    .collect(),
+            )
+            .expect("rows");
+        manager.force_seal().expect("seal");
+        for id in 1..=4 {
+            manager.delete(EntityId::new(id)).expect("delete");
+        }
+        assert!(manager.pressure_consolidation_tick());
+        drain_maintenance(&manager);
+        for id in 1..=10 {
+            assert_eq!(
+                manager
+                    .find_key_entity(&format!("key-{id}"), None, false)
+                    .map(|entity| entity.id),
+                (id > 4).then_some(EntityId::new(id))
+            );
+        }
+    }
 
     #[test]
     fn ordered_fingerprint_scan_matches_legacy_sort_without_cloning_rows() {

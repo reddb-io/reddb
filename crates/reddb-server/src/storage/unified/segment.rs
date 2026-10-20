@@ -35,6 +35,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::metadata::{Metadata, MetadataStorage};
 use super::segment_graph_index::SegmentGraphIndex;
+use super::segment_key_lookup::SegmentKeyLookup;
 use super::segment_unique_key::SegmentUniqueKey;
 use crate::storage::query::value_compare::partial_compare_values;
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
@@ -538,6 +539,8 @@ pub struct GrowingSegment {
     /// first-column index. Protected by the owning segment's entity lock.
     unique_key_lookup: parking_lot::RwLock<Vec<SegmentUniqueKey>>,
     unique_key_lookup_bytes: AtomicU64,
+    key_lookup: parking_lot::RwLock<Option<SegmentKeyLookup>>,
+    key_lookup_bytes: AtomicU64,
     /// Type index: kind → EntityIds
     kind_index: HashMap<String, HashSet<EntityId>>,
     /// Conservative physical presence, independent of kind_index and MVCC.
@@ -720,6 +723,8 @@ impl GrowingSegment {
             pk_index: BTreeMap::new(),
             unique_key_lookup: parking_lot::RwLock::new(Vec::new()),
             unique_key_lookup_bytes: AtomicU64::new(0),
+            key_lookup: parking_lot::RwLock::new(Some(SegmentKeyLookup::default())),
+            key_lookup_bytes: AtomicU64::new(0),
             kind_index: HashMap::new(),
             graph_read_index: parking_lot::RwLock::new(Some(SegmentGraphIndex::default())),
             graph_read_index_bytes: AtomicU64::new(0),
@@ -784,6 +789,12 @@ impl GrowingSegment {
     ) -> Result<UpdateIndexSnapshot, SegmentError> {
         self.mark_checkpoint_dirty();
         self.invalidate_unique_key_lookup();
+        if self
+            .get(entity.id)
+            .is_some_and(|old| SegmentKeyLookup::key(old) != SegmentKeyLookup::key(entity))
+        {
+            self.invalidate_key_lookup();
+        }
         if (self.graph_kind_mask != 0
             || matches!(
                 entity.kind,
@@ -914,6 +925,11 @@ impl GrowingSegment {
         if !self.record_tombstone(id) {
             return false;
         }
+        if let Some(index) = self.key_lookup.get_mut() {
+            index.remove(&self.flat_entities[idx]);
+            self.key_lookup_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+        }
         if let Some(index) = self.graph_read_index.get_mut() {
             index.remove(&self.flat_entities[idx]);
             self.graph_read_index_bytes
@@ -1006,6 +1022,7 @@ impl GrowingSegment {
         self.memory_bytes.load(Ordering::Relaxed)
             + self.zone_payload_bytes as u64
             + self.unique_key_lookup_bytes.load(Ordering::Relaxed)
+            + self.key_lookup_bytes.load(Ordering::Relaxed)
             + self.graph_read_index_bytes.load(Ordering::Relaxed)
             + (self.hash_scan_ids.capacity() * std::mem::size_of::<EntityId>()) as u64
     }
@@ -1282,6 +1299,11 @@ impl GrowingSegment {
     /// Index an entity
     fn index_entity(&mut self, entity: &UnifiedEntity) {
         self.mark_checkpoint_dirty();
+        if let Some(index) = self.key_lookup.get_mut() {
+            index.insert(entity);
+            self.key_lookup_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+        }
         self.hash_scan_ids.push(entity.id);
         self.observe_graph_kind(&entity.kind);
         if let Some(index) = self.graph_read_index.get_mut() {
@@ -1564,6 +1586,69 @@ impl GrowingSegment {
         self.unique_key_lookup_bytes.store(0, Ordering::Relaxed);
     }
 
+    fn invalidate_key_lookup(&mut self) {
+        *self.key_lookup.get_mut() = None;
+        self.key_lookup_bytes.store(0, Ordering::Relaxed);
+    }
+
+    /// Only matching-key candidates reach `visible`; no result vector or row clones.
+    /// Raw mutable access invalidates the disposable index; rebuild under the read guard.
+    pub(crate) fn find_key_entity(
+        &self,
+        key: &str,
+        newest: bool,
+        visible: &mut impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Option<&UnifiedEntity> {
+        let cached = self.key_lookup.read();
+        if let Some(index) = cached.as_ref() {
+            return self.find_key_candidate(index, key, newest, visible);
+        }
+        drop(cached);
+        let mut cached = self.key_lookup.write();
+        if cached.is_none() {
+            let mut index = SegmentKeyLookup::default();
+            self.for_each_fast(|entity| {
+                index.insert(entity);
+                true
+            });
+            self.key_lookup_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+            *cached = Some(index);
+        }
+        self.find_key_candidate(
+            cached.as_ref().expect("invariant: key lookup was rebuilt"),
+            key,
+            newest,
+            visible,
+        )
+    }
+
+    fn find_key_candidate(
+        &self,
+        index: &SegmentKeyLookup,
+        key: &str,
+        newest: bool,
+        visible: &mut impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Option<&UnifiedEntity> {
+        let mut best: Option<&UnifiedEntity> = None;
+        for id in index.candidates(key) {
+            let Some(entity) = self.get(*id) else {
+                continue;
+            };
+            // Fingerprint collisions must never become logical-key matches.
+            if SegmentKeyLookup::key(entity) != Some(key) || !visible(entity) {
+                continue;
+            }
+            if !newest {
+                return Some(entity);
+            }
+            if best.is_none_or(|current| entity.xmin >= current.xmin) {
+                best = Some(entity);
+            }
+        }
+        best
+    }
+
     /// Check whether an early-exit probe key exists in this segment.
     pub fn may_contain_exact_key(&self, key: &[u8]) -> bool {
         if let Some(id) = entity_id_from_probe_key(key) {
@@ -1581,6 +1666,11 @@ impl GrowingSegment {
 
     /// Remove entity from indices
     fn unindex_entity(&mut self, entity: &UnifiedEntity) {
+        if let Some(index) = self.key_lookup.get_mut() {
+            index.remove(entity);
+            self.key_lookup_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+        }
         if let Some(index) = self.graph_read_index.get_mut() {
             index.remove(entity);
             self.graph_read_index_bytes
@@ -1726,6 +1816,14 @@ impl GrowingSegment {
         self.mark_checkpoint_dirty();
         if !self.state.is_writable() {
             return Err(SegmentError::NotWritable);
+        }
+
+        if let Some(index) = self.key_lookup.get_mut() {
+            for entity in &entities {
+                index.insert(entity);
+            }
+            self.key_lookup_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
         }
 
         let indexes = self.unique_key_lookup.get_mut();
@@ -2037,6 +2135,7 @@ impl UnifiedSegment for GrowingSegment {
 
     fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity> {
         self.mark_checkpoint_dirty();
+        self.invalidate_key_lookup();
         self.invalidate_unique_key_lookup();
         self.invalidate_graph_read_index();
         if self.deleted.contains_key(&id) || !self.state.is_writable() {
@@ -2371,6 +2470,153 @@ mod tests {
     use crate::storage::unified::entity::RowData;
     use crate::storage::unified::MetadataValue;
     use reddb_types::Value;
+
+    fn keyed_row(id: u64, key: &str, xmin: u64, xmax: u64) -> UnifiedEntity {
+        let mut entity = UnifiedEntity::table_row(EntityId::new(id), "keys", id, vec![]);
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![Value::text(key), Value::Integer(id as i64)],
+            vec!["key".into(), "value".into()],
+        ));
+        entity.set_xmin(xmin);
+        entity.set_xmax(xmax);
+        entity
+    }
+
+    fn keyed_probe(segment: &GrowingSegment, key: &str) -> Option<EntityId> {
+        segment
+            .find_key_entity(key, true, &mut |_| true)
+            .map(|entity| entity.id)
+    }
+
+    #[test]
+    fn key_lookup_visits_only_requested_key_versions() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(
+                (1..=4096)
+                    .map(|id| keyed_row(id, &format!("other-{id}"), 1, 0))
+                    .collect(),
+            )
+            .expect("unrelated rows");
+        segment
+            .insert(keyed_row(5000, "wanted", 2, 8))
+            .expect("old version");
+        segment
+            .insert(keyed_row(5001, "wanted", 8, 0))
+            .expect("new version");
+        let mut visits = 0;
+        let result = segment.find_key_entity("wanted", true, &mut |entity| {
+            visits += 1;
+            entity.xmin < 8
+        });
+        assert_eq!(result.map(|entity| entity.id), Some(EntityId::new(5000)));
+        assert_eq!(
+            visits, 2,
+            "unrelated rows must never reach visibility evaluation"
+        );
+        assert_eq!(keyed_probe(&segment, "wanted"), Some(EntityId::new(5001)));
+        let mut misses = 0;
+        assert!(segment
+            .find_key_entity("absent", true, &mut |_| {
+                misses += 1;
+                true
+            })
+            .is_none());
+        assert_eq!(misses, 0);
+
+        // A bucket collision narrows candidates, but cannot change key equality.
+        let mut collision = SegmentKeyLookup::default();
+        collision.insert(&keyed_row(1, "wanted", 1, 0));
+        assert!(segment
+            .find_key_candidate(&collision, "wanted", true, &mut |_| true)
+            .is_none());
+    }
+
+    #[test]
+    fn key_lookup_tracks_mutations_sealing_and_adoption() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(vec![keyed_row(1, "flat", 1, 0)])
+            .expect("flat row");
+        segment
+            .insert(keyed_row(3, "hash", 1, 0))
+            .expect("hash fallback");
+        segment
+            .bulk_insert(vec![keyed_row(5, "gap", 1, 0)])
+            .expect("bulk gap");
+        assert!(segment.key_lookup_bytes.load(Ordering::Relaxed) > 0);
+        assert_eq!(keyed_probe(&segment, "gap"), Some(EntityId::new(5)));
+        segment
+            .update(keyed_row(3, "renamed", 2, 0))
+            .expect("rename key");
+        assert_eq!(segment.key_lookup_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(keyed_probe(&segment, "hash"), None);
+        assert_eq!(keyed_probe(&segment, "renamed"), Some(EntityId::new(3)));
+
+        *segment.get_mut(EntityId::new(3)).expect("mutable row") = keyed_row(3, "raw", 3, 0);
+        assert_eq!(keyed_probe(&segment, "renamed"), None);
+        assert_eq!(keyed_probe(&segment, "raw"), Some(EntityId::new(3)));
+        segment.seal().expect("seal");
+        segment
+            .force_update_with_metadata(&keyed_row(5, "sealed", 4, 0), &["key".into()], None)
+            .expect("sealed rename");
+        assert_eq!(keyed_probe(&segment, "gap"), None);
+        assert_eq!(keyed_probe(&segment, "sealed"), Some(EntityId::new(5)));
+        assert!(segment.force_delete(EntityId::new(1)));
+        assert!(segment.force_delete(EntityId::new(3)));
+        assert_eq!(keyed_probe(&segment, "flat"), None);
+        assert_eq!(keyed_probe(&segment, "raw"), None);
+
+        let mut adopted = GrowingSegment::new(2, "keys");
+        segment.for_each_fast(|entity| {
+            adopted.adopt_entity(entity.clone(), None);
+            true
+        });
+        assert_eq!(keyed_probe(&adopted, "sealed"), Some(EntityId::new(5)));
+        assert!(adopted.evict_entity(EntityId::new(5)));
+        assert_eq!(keyed_probe(&adopted, "sealed"), None);
+    }
+
+    #[test]
+    #[ignore = "diagnostic microbenchmark; no timing assertions"]
+    fn key_lookup_scaling_diagnostic() {
+        use std::{hint::black_box, time::Instant};
+        for count in [100, 10_000, 100_000] {
+            let mut segment = GrowingSegment::new(1, "keys");
+            segment
+                .bulk_insert(
+                    (1..=count)
+                        .map(|id| keyed_row(id, &format!("key-{id}"), 1, 0))
+                        .collect(),
+                )
+                .expect("rows");
+            let key = format!("key-{count}");
+            let started = Instant::now();
+            for _ in 0..1000 {
+                assert_eq!(
+                    keyed_probe(black_box(&segment), black_box(&key)),
+                    Some(EntityId::new(count))
+                );
+            }
+            let indexed = started.elapsed();
+            let started = Instant::now();
+            for _ in 0..1000 {
+                let mut found = None;
+                segment.for_each_fast(|entity| {
+                    if SegmentKeyLookup::key(entity) == Some(black_box(key.as_str())) {
+                        found = Some(entity.id);
+                        return false;
+                    }
+                    true
+                });
+                assert_eq!(black_box(found), Some(EntityId::new(count)));
+            }
+            eprintln!(
+                "rows={count} reads=1000 indexed={indexed:?} scan={:?}",
+                started.elapsed()
+            );
+        }
+    }
 
     fn pruning_node(id: u64) -> UnifiedEntity {
         UnifiedEntity::graph_node(EntityId::new(id), "mixed", "person", Default::default())

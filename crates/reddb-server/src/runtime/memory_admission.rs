@@ -106,6 +106,14 @@ impl crate::RedDBRuntime {
             .saturating_add(
                 crate::storage::unified::memory_size::entity_zone_growth_bytes(&applied.entity),
             );
+        let key_growth = match &applied.entity.data {
+            crate::storage::EntityData::Row(row) => {
+                crate::storage::unified::memory_size::key_lookup_growth_bytes(
+                    row.named.as_ref().and_then(|named| named.get("key")),
+                )
+            }
+            _ => 0,
+        };
         // Reserve the full replacement, including in-place PATCH: the old
         // payload remains resident until publication and another writer may
         // replace it before we do. A stale pre-image must never grant credit.
@@ -115,7 +123,9 @@ impl crate::RedDBRuntime {
             &applied.entity,
             applied.replaced_entity.is_some(),
         );
-        (entity_bytes as u64).saturating_add(index_growth)
+        (entity_bytes as u64)
+            .saturating_add(key_growth as u64)
+            .saturating_add(index_growth)
     }
 
     pub(crate) fn admit_non_evictable_growth(
@@ -212,6 +222,14 @@ impl crate::RedDBRuntime {
 
 pub(crate) fn estimate_row_growth(fields: &[(String, Value)]) -> u64 {
     entity_base_bytes()
+        .saturating_add(
+            crate::storage::unified::memory_size::key_lookup_growth_bytes(
+                fields
+                    .iter()
+                    .find(|(name, _)| name == "key")
+                    .map(|(_, value)| value),
+            ) as u64,
+        )
         .saturating_add(estimate_value_fields_bytes(fields))
         .saturating_add(
             fields

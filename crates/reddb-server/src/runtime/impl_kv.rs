@@ -910,32 +910,9 @@ impl<'a> KvAtomicOps<'a> {
             return Ok(None);
         };
 
-        // Versioned KV: multiple physical versions per logical key can
-        // coexist (tombstoned + live). Select the snapshot-visible
-        // version with the greatest xmin — mirroring the table-row
-        // resolver's per-logical-id rule, keyed on the KV `key` field.
-        if self.is_versioned_collection(model, collection) {
-            let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-            let mut best: Option<crate::storage::UnifiedEntity> = None;
-            for entity in manager.scan(snapshot.as_ref(), |entity| kv_entity_has_key(entity, key)) {
-                let better = match &best {
-                    Some(current) => entity.xmin >= current.xmin,
-                    None => true,
-                };
-                if better {
-                    best = Some(entity);
-                }
-            }
-            return Ok(best);
-        }
-
-        let entities = manager.query_all(|_| true);
-        for entity in entities {
-            if kv_entity_has_key(&entity, key) {
-                return Ok(Some(entity));
-            }
-        }
-        Ok(None)
+        let versioned = self.is_versioned_collection(model, collection);
+        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+        Ok(manager.find_key_entity(key, snapshot.as_ref(), versioned))
     }
 
     fn latest_kv_entries(
@@ -3635,6 +3612,52 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn kv_key_lookup_rebuilds_after_reopen() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let path = directory.path().join("keys.rdb");
+        {
+            let runtime =
+                RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("open");
+            for statement in [
+                "KV PUT indexed.alpha = 'first'",
+                "KV PUT indexed.beta = 'second'",
+                "KV PUT indexed.alpha = 'updated'",
+                "KV DELETE indexed.beta",
+                "KV PUT indexed.gamma = 'third'",
+            ] {
+                runtime.execute_query(statement).expect("KV mutation");
+            }
+        }
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+        let ops = super::KvAtomicOps::new(&runtime);
+        for (key, expected) in [
+            ("alpha", Some("updated")),
+            ("beta", None),
+            ("gamma", Some("third")),
+            ("absent", None),
+        ] {
+            assert_eq!(
+                ops.get(CollectionModel::Kv, "indexed", key).expect("read"),
+                expected.map(reddb_types::Value::text)
+            );
+        }
+        ops.set(
+            CollectionModel::Kv,
+            "indexed",
+            "beta",
+            reddb_types::Value::text("reused"),
+            None,
+            false,
+        )
+        .expect("reuse deleted key");
+        assert_eq!(
+            ops.get(CollectionModel::Kv, "indexed", "beta")
+                .expect("read reused key"),
+            Some(reddb_types::Value::text("reused"))
+        );
     }
 
     #[test]
