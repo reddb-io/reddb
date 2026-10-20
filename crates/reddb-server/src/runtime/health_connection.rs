@@ -46,6 +46,7 @@ impl RuntimeConnection {
         limit: usize,
     ) -> RedDBResult<ScanPage> {
         RedDBRuntime {
+            background_tasks: self.background_tasks.clone(),
             inner: Arc::clone(&self.inner),
         }
         .scan_collection(collection, cursor, limit)
@@ -55,6 +56,7 @@ impl RuntimeConnection {
 impl Drop for RuntimeConnection {
     fn drop(&mut self) {
         let runtime = RedDBRuntime {
+            background_tasks: self.background_tasks.clone(),
             inner: Arc::clone(&self.inner),
         };
         // Cleanup targets this lease, independently of the dropping thread's

@@ -56,6 +56,7 @@ impl RedDBRuntime {
         self.inner.node_load_telemetry.record_connect();
 
         Ok(RuntimeConnection {
+            background_tasks: self.background_tasks.clone(),
             id,
             uses_pool_slot,
             inner: Arc::clone(&self.inner),
