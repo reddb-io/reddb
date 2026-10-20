@@ -8,7 +8,8 @@ use crate::{RedDBError, RedDBResult, RedDBRuntime};
 use reddb_types::Value;
 
 pub(crate) fn atomic_available(runtime: &RedDBRuntime, collection: &str) -> bool {
-    runtime.current_xid().is_none()
+    runtime.db().store().pager().is_none()
+        && runtime.current_xid().is_none()
         && !crate::storage::UnifiedStore::deferred_store_wal_capture_active()
         && !super::kv_read::is_versioned(runtime, CollectionModel::Kv, collection)
         && runtime
@@ -41,7 +42,7 @@ pub(crate) fn create(
     let collection = input.collection;
     let mut engine = runtime.mutation_engine();
     if !vault && atomic_available(runtime, &collection) {
-        engine = engine.for_keyed_write(previous);
+        engine = engine.for_keyed_write(previous)?;
     } else if previous.is_some() {
         return Err(RedDBError::InvalidOperation(
             "collection contract changed during keyed replacement; retry the write".into(),

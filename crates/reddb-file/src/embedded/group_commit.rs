@@ -80,8 +80,13 @@ struct FlushBatch<'a> {
 }
 
 impl FlushBatch<'_> {
-    fn complete(&mut self, result: RdbFileResult<EmbeddedRdbOpen>) {
+    fn complete(&mut self, mut result: RdbFileResult<EmbeddedRdbOpen>) {
         let mut state = lock(&self.group.state);
+        if result.is_ok() {
+            if let Some(error) = &state.failure {
+                result = Err(copy_error(error));
+            }
+        }
         if let Err(error) = &result {
             if !matches!(error, RdbFileError::InvalidOperation(message) if message.contains("embedded wal region full"))
             {
@@ -259,6 +264,56 @@ pub struct PendingEmbeddedAppend {
     path: PathBuf,
 }
 
+/// Keep a failed publication fenced until its owning database is closed.
+/// A new store must reload the durable image before accepting more writes.
+pub struct EmbeddedGroupCommitSession {
+    group: Arc<GroupCommit>,
+    path: PathBuf,
+}
+
+impl EmbeddedGroupCommitSession {
+    pub fn fence_interrupted_write(&self) {
+        let mut state = lock(&self.group.state);
+        if state.failure.is_none() {
+            state.failure = Some(RdbFileError::Io(std::io::Error::other(
+                "logical write interrupted before durability confirmation",
+            )));
+        }
+        self.group.changed.notify_all();
+    }
+    pub fn check(&self) -> RdbFileResult<()> {
+        let failure = lock(&self.group.state).failure.as_ref().map(copy_error);
+        if let Some(error) = failure {
+            return Err(RdbFileError::Io(std::io::Error::other(format!(
+                "a prior embedded WAL publication failed; close and reopen the database before writing: {error}"
+            ))));
+        }
+        Ok(())
+    }
+
+    pub fn enqueue(
+        &self,
+        payloads: &[Vec<u8>],
+        options: EmbeddedGroupCommitOptions,
+    ) -> RdbFileResult<PendingEmbeddedAppend> {
+        self.check()?;
+        let completion = self.group.enqueue(payloads, options)?;
+        Ok(PendingEmbeddedAppend {
+            group: Arc::clone(&self.group),
+            completion,
+            path: self.path.clone(),
+        })
+    }
+
+    pub fn append(
+        &self,
+        payloads: &[Vec<u8>],
+        options: EmbeddedGroupCommitOptions,
+    ) -> RdbFileResult<EmbeddedRdbOpen> {
+        self.enqueue(payloads, options)?.wait()
+    }
+}
+
 impl PendingEmbeddedAppend {
     pub fn wait(&self) -> RdbFileResult<EmbeddedRdbOpen> {
         self.group.wait(&self.completion, |batch| {
@@ -279,6 +334,15 @@ pub(super) fn wait_for_pending_appends(path: &Path) -> RdbFileResult<()> {
     let Some(group) = group else {
         return Ok(());
     };
+    {
+        let state = lock(&group.state);
+        if let Some(error) = &state.failure {
+            return Err(copy_error(error));
+        }
+        if state.pending.is_empty() && !state.flushing {
+            return Ok(());
+        }
+    }
     let completion = group.enqueue(
         &[],
         EmbeddedGroupCommitOptions {
@@ -295,6 +359,17 @@ pub(super) fn wait_for_pending_appends(path: &Path) -> RdbFileResult<()> {
 }
 
 impl EmbeddedRdbArtifact {
+    pub fn group_commit_session(path: impl AsRef<Path>) -> EmbeddedGroupCommitSession {
+        let path = path.as_ref();
+        let path = path
+            .canonicalize()
+            .or_else(|_| std::path::absolute(path))
+            .unwrap_or_else(|_| path.to_path_buf());
+        EmbeddedGroupCommitSession {
+            group: coordinator(&path),
+            path,
+        }
+    }
     pub fn enqueue_wal_payloads_grouped(
         path: impl AsRef<Path>,
         payloads: &[Vec<u8>],
@@ -586,5 +661,69 @@ mod tests {
                 EmbeddedRdbArtifact::append_wal_payloads(&path, payloads)
             })
             .expect("second batch");
+    }
+
+    #[test]
+    fn uncertain_publication_fences_later_writes_and_checkpoints_until_session_closes() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("uncertain.rdb");
+        EmbeddedRdbArtifact::create(&path).expect("artifact");
+        let session = EmbeddedRdbArtifact::group_commit_session(&path);
+        let group = coordinator(&path);
+        let completion = group
+            .enqueue(&[b"possibly committed".to_vec()], options())
+            .expect("enqueue");
+        let result = group.wait(&completion, |payloads| {
+            EmbeddedRdbArtifact::append_wal_payloads(&path, payloads)?;
+            Err(RdbFileError::Io(std::io::Error::other(
+                "injected uncertain result after publication",
+            )))
+        });
+        assert!(result.is_err());
+        drop(group);
+        assert!(session.check().is_err());
+        assert!(EmbeddedRdbArtifact::append_wal_payloads_grouped(
+            &path,
+            &[b"must not ACK".to_vec()],
+            options()
+        )
+        .is_err());
+        assert!(EmbeddedRdbArtifact::write_snapshot(&path, b"RDST-rolled back image").is_err());
+        drop(session);
+        let reopened = EmbeddedRdbArtifact::open(&path).expect("reload durable outcome");
+        assert_eq!(
+            EmbeddedRdbArtifact::read_wal_payloads(&reopened).expect("outcome"),
+            vec![b"possibly committed".to_vec()]
+        );
+        let session = EmbeddedRdbArtifact::group_commit_session(&path);
+        session.check().expect("new session after reload");
+        EmbeddedRdbArtifact::append_wal_payloads_grouped(
+            &path,
+            &[b"after reload".to_vec()],
+            options(),
+        )
+        .expect("new durable write");
+    }
+
+    #[test]
+    fn a_fenced_session_cannot_ack_a_concurrent_publication() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("interrupted.rdb");
+        EmbeddedRdbArtifact::create(&path).expect("artifact");
+        let session = EmbeddedRdbArtifact::group_commit_session(&path);
+        let group = coordinator(&path);
+        let completion = group
+            .enqueue(&[b"in flight".to_vec()], options())
+            .expect("enqueue");
+        let result = group.wait(&completion, |payloads| {
+            let published = EmbeddedRdbArtifact::append_wal_payloads(&path, payloads)?;
+            session.fence_interrupted_write();
+            Ok(published)
+        });
+        assert!(
+            result.is_err(),
+            "a concurrent fence forbids a successful acknowledgment"
+        );
+        assert!(session.check().is_err());
     }
 }

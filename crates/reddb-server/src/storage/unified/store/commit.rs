@@ -86,27 +86,39 @@ pub(crate) struct DeferredStoreWalActions {
     pub(super) actions: Vec<StoreWalAction>,
 }
 
-pub(super) struct StoreWalCaptureGuard(bool);
+pub(super) struct StoreWalCaptureGuard<'a> {
+    active: bool,
+    session: Option<&'a crate::storage::embedded::EmbeddedCommitSession>,
+}
 
-impl StoreWalCaptureGuard {
-    pub(super) fn begin() -> Self {
+impl<'a> StoreWalCaptureGuard<'a> {
+    pub(super) fn begin(
+        session: Option<&'a crate::storage::embedded::EmbeddedCommitSession>,
+    ) -> Self {
         assert!(
             !deferred_store_wal_capture_active(),
             "store WAL captures cannot nest"
         );
         begin_deferred_store_wal_capture();
-        Self(true)
+        Self {
+            active: true,
+            session,
+        }
     }
 
     pub(super) fn finish(mut self) -> DeferredStoreWalActions {
-        self.0 = false;
-        take_deferred_store_wal_capture()
+        let actions = take_deferred_store_wal_capture();
+        self.active = false;
+        actions
     }
 }
 
-impl Drop for StoreWalCaptureGuard {
+impl Drop for StoreWalCaptureGuard<'_> {
     fn drop(&mut self) {
-        if self.0 {
+        if self.active {
+            if let Some(session) = self.session {
+                session.fence_interrupted_write();
+            }
             let _ = take_deferred_store_wal_capture();
         }
     }
@@ -1036,17 +1048,21 @@ impl UnifiedStore {
         path: &Path,
         payloads: &[Vec<u8>],
     ) -> crate::RedDBResult<crate::storage::EmbeddedRdbOpen> {
-        if self.config.durability_mode != DurabilityMode::WalDurableGrouped {
-            return crate::storage::EmbeddedRdbArtifact::append_wal_payloads(path, payloads);
-        }
+        let session = self
+            .embedded_commit_session
+            .get_or_init(|| crate::storage::EmbeddedRdbArtifact::group_commit_session(path));
         let options = self.config.group_commit;
-        let window = StoreCommitCoordinator::resolve_window(&options);
-        crate::storage::EmbeddedRdbArtifact::append_wal_payloads_grouped(
-            path,
+        let grouped = self.config.durability_mode == DurabilityMode::WalDurableGrouped;
+        let window = if grouped {
+            StoreCommitCoordinator::resolve_window(&options)
+        } else {
+            Duration::ZERO
+        };
+        session.append(
             payloads,
             reddb_file::embedded::EmbeddedGroupCommitOptions {
                 window,
-                max_statements: options.max_statements,
+                max_statements: if grouped { options.max_statements } else { 1 },
                 max_wal_bytes: options.max_wal_bytes,
             },
         )
@@ -1064,19 +1080,22 @@ impl UnifiedStore {
         let Some(path) = self.config.embedded_wal_path.as_deref() else {
             return Ok(None);
         };
+        let session = self
+            .embedded_commit_session
+            .get_or_init(|| crate::storage::EmbeddedRdbArtifact::group_commit_session(path));
         let payloads: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
         let options = self.config.group_commit;
-        crate::storage::EmbeddedRdbArtifact::enqueue_wal_payloads_grouped(
-            path,
-            &payloads,
-            reddb_file::embedded::EmbeddedGroupCommitOptions {
-                window: StoreCommitCoordinator::resolve_window(&options),
-                max_statements: options.max_statements,
-                max_wal_bytes: options.max_wal_bytes,
-            },
-        )
-        .map(Some)
-        .map_err(|error| StoreError::Io(io::Error::other(error.to_string())))
+        session
+            .enqueue(
+                &payloads,
+                reddb_file::embedded::EmbeddedGroupCommitOptions {
+                    window: StoreCommitCoordinator::resolve_window(&options),
+                    max_statements: options.max_statements,
+                    max_wal_bytes: options.max_wal_bytes,
+                },
+            )
+            .map(Some)
+            .map_err(|error| StoreError::Io(io::Error::other(error.to_string())))
     }
 
     pub(super) fn complete_grouped_actions(

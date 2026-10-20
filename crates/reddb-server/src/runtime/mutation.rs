@@ -93,9 +93,14 @@ impl<'rt> MutationEngine<'rt> {
         self
     }
 
-    pub(crate) fn for_keyed_write(mut self, previous: Option<EntityId>) -> Self {
+    pub(crate) fn for_keyed_write(mut self, previous: Option<EntityId>) -> RedDBResult<Self> {
+        if self.store.pager().is_some() {
+            return Err(RedDBError::InvalidOperation(
+                "atomic keyed replacement requires single-file storage".into(),
+            ));
+        }
         self.keyed_previous = Some(previous);
-        self
+        Ok(self)
     }
 
     /// Dispatch to the right kernel by batch size.

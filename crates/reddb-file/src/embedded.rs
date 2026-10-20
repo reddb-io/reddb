@@ -14,7 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 
 mod group_commit;
-pub use group_commit::{EmbeddedGroupCommitOptions, PendingEmbeddedAppend};
+pub use group_commit::{
+    EmbeddedGroupCommitOptions, EmbeddedGroupCommitSession, PendingEmbeddedAppend,
+};
 
 pub type RdbFileResult<T> = Result<T, RdbFileError>;
 
