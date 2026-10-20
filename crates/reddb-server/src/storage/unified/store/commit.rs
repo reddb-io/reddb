@@ -262,6 +262,9 @@ impl CommitState {
 /// mutex is ~200ns (just a Vec::push) — 65× shorter, so the mutex
 /// convoy on concurrent inserts disappears.
 pub(crate) struct WalAppendQueue {
+    /// Keep reserved offsets valid until their callers observe durability.
+    /// Reset also excludes an old flusher publishing state into the new WAL.
+    epoch: parking_lot::RwLock<()>,
     /// Tuple of (monotonically-increasing LSN, pending-bytes vec)
     /// protected by one mutex. Keeping the LSN reservation AND the
     /// push under the same lock guarantees that every queue entry
@@ -292,6 +295,7 @@ struct WalQueueState {
 impl WalAppendQueue {
     fn new(initial_lsn: u64) -> Self {
         Self {
+            epoch: parking_lot::RwLock::new(()),
             pending: parking_lot::Mutex::new(WalQueueState {
                 next_lsn: initial_lsn,
                 entries: Vec::with_capacity(64),
@@ -486,6 +490,7 @@ impl StoreCommitCoordinator {
         if actions.is_empty() {
             return Ok(());
         }
+        let _epoch = self.queue.epoch.read();
 
         let tx_id = NEXT_STORE_TX_ID.fetch_add(1, Ordering::SeqCst);
 
@@ -530,6 +535,7 @@ impl StoreCommitCoordinator {
     /// [`Self::append_actions`] so durability semantics are uniform
     /// across record kinds.
     pub(crate) fn append_single_record(&self, record: WalRecord) -> io::Result<()> {
+        let _epoch = self.queue.epoch.read();
         let blob = record.encode();
         let wal_bytes = blob.len() as u64;
         if matches!(self.mode, DurabilityMode::Strict) {
@@ -546,6 +552,9 @@ impl StoreCommitCoordinator {
     }
 
     pub(crate) fn force_sync(&self) -> io::Result<()> {
+        // Strict append already owns a read lease. Do not wait behind a
+        // checkpoint that needs that append to finish before resetting.
+        let _epoch = self.queue.epoch.read_recursive();
         {
             let mut wal = self.wal.lock();
             wal.sync()?;
@@ -566,6 +575,7 @@ impl StoreCommitCoordinator {
     }
 
     pub(crate) fn truncate(&self) -> io::Result<()> {
+        let _epoch = self.queue.epoch.write();
         let mut wal = self.wal.lock();
         wal.truncate()?;
         let durable = wal.durable_lsn();
@@ -776,6 +786,12 @@ impl StoreCommitCoordinator {
 
                 guard.pending_target_lsn
             };
+
+            // Drain the current epoch even when reset is waiting: outstanding
+            // append leases cannot finish until this flusher acknowledges them.
+            // Retain the lease through state publication to exclude stale ACKs
+            // after a checkpoint resets offsets back to the WAL header.
+            let _epoch = queue.epoch.read_recursive();
 
             // Drain all queued entries. Since `WalAppendQueue::enqueue`
             // assigns LSN and pushes under a single mutex, the drained
@@ -1452,6 +1468,75 @@ mod tests {
             stable_bytes,
             "idempotent replay must not allocate another tree generation"
         );
+    }
+
+    #[test]
+    fn checkpoint_reset_waits_for_an_enqueued_commit_acknowledgement() {
+        let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let path = temp_wal("checkpoint-ack");
+        let coordinator = Arc::new(
+            StoreCommitCoordinator::open(
+                path.clone(),
+                DurabilityMode::WalDurableGrouped,
+                GroupCommitOptions::default(),
+            )
+            .unwrap(),
+        );
+        // Pause the writer after enqueue, before it can register/wait for its
+        // acknowledgement. The flusher also needs this state lock to drain.
+        let state = coordinator.state.0.lock();
+        let (written_tx, written_rx) = std::sync::mpsc::channel();
+        let writer_coordinator = Arc::clone(&coordinator);
+        let writer = std::thread::spawn(move || {
+            let result = writer_coordinator.append_actions(&[StoreWalAction::CreateCollection {
+                name: "acknowledged".into(),
+            }]);
+            written_tx.send(result).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !coordinator.queue.has_pending() {
+            assert!(Instant::now() < deadline, "writer never enqueued");
+            std::thread::yield_now();
+        }
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (reset_tx, reset_rx) = std::sync::mpsc::channel();
+        let reset_coordinator = Arc::clone(&coordinator);
+        let reset = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            reset_tx.send(reset_coordinator.truncate()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while coordinator.queue.has_pending() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let discarded_before_ack = !coordinator.queue.has_pending();
+        drop(state);
+        let acknowledged = written_rx.recv_timeout(Duration::from_secs(2));
+        if acknowledged.is_err() {
+            // Release an old implementation's stranded waiter before failing
+            // the assertion, so the regression itself cannot leak a worker.
+            let mut state = coordinator.state.0.lock();
+            state.shutdown = true;
+            state.last_error = Some("checkpoint acknowledgement regression cleanup".into());
+            coordinator.state.1.notify_all();
+        }
+        writer.join().unwrap();
+        reset_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        reset.join().unwrap();
+        assert!(
+            !discarded_before_ack,
+            "checkpoint discarded an unacknowledged WAL record"
+        );
+        assert!(
+            acknowledged.unwrap().is_ok(),
+            "durable writer did not finish"
+        );
+        drop(coordinator);
+        let _ = std::fs::remove_file(path);
     }
 
     /// Concurrent autocommits MUST coalesce into far fewer fsyncs
