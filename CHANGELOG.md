@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.24.15
+
+### Patch Changes
+
+- [#2426](https://github.com/reddb-io/reddb/pull/2426) [`c7ad27f`](https://github.com/reddb-io/reddb/commit/c7ad27f777d02f013745094fd92458af401b5aa0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve aborted transaction outcomes during VACUUM so rolled-back inserts cannot
+  become visible again, including in collections outside a targeted vacuum.
+
 ## 1.24.14
 
 ### Patch Changes
