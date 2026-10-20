@@ -108,9 +108,7 @@ impl crate::RedDBRuntime {
             );
         let key_growth = match &applied.entity.data {
             crate::storage::EntityData::Row(row) => {
-                crate::storage::unified::memory_size::key_lookup_growth_bytes(
-                    row.named.as_ref().and_then(|named| named.get("key")),
-                )
+                crate::storage::unified::memory_size::key_lookup_growth_bytes(row.get_field("key"))
             }
             _ => 0,
         };

@@ -3477,9 +3477,7 @@ fn kv_tags_value(tags: &[String]) -> Value {
 
 fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value> {
     if let crate::storage::EntityData::Row(ref row) = entity.data {
-        if let Some(ref named) = row.named {
-            return named.get("value").cloned();
-        }
+        return row.get_field("value").cloned();
     }
     None
 }
@@ -3487,10 +3485,8 @@ fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value>
 /// Whether a KV row entity carries the logical `key`.
 fn kv_entity_has_key(entity: &crate::storage::UnifiedEntity, key: &str) -> bool {
     if let crate::storage::EntityData::Row(ref row) = entity.data {
-        if let Some(ref named) = row.named {
-            if let Some(reddb_types::Value::Text(ref k)) = named.get("key") {
-                return &**k == key;
-            }
+        if let Some(reddb_types::Value::Text(ref k)) = row.get_field("key") {
+            return &**k == key;
         }
     }
     false

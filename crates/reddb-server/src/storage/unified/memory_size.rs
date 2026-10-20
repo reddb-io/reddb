@@ -9,7 +9,8 @@ use reddb_types::Value;
 /// Fingerprints retain no key payload; the complete key stays in the entity.
 pub(crate) fn key_lookup_growth_bytes(value: Option<&Value>) -> usize {
     if matches!(value, Some(Value::Text(_))) {
-        4 * (std::mem::size_of::<(u64, Vec<super::entity::EntityId>)>() + 1)
+        std::mem::size_of::<super::segment_key_lookup::SegmentKeyLookup>()
+            + 4 * (std::mem::size_of::<(u64, Vec<super::entity::EntityId>)>() + 1)
             + 4 * std::mem::size_of::<super::entity::EntityId>()
     } else {
         0

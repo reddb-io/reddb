@@ -5,10 +5,12 @@ requested key. Versioned KV filtered a full scan and selected the visible
 version with the greatest `xmin`.
 
 Each segment now maintains a disposable hash lookup from randomized key
-fingerprint to physical entity IDs. A probe verifies the complete named text
+fingerprint to physical entity IDs. A probe verifies the complete text
 key before applying the existing visibility predicate. Every retained version
 is indexed: current-only secondary indexes cannot prove historical completeness.
 Non-versioned KV preserves its physical-row lookup policy.
+Both named rows and compact schema/column rows participate; point reads use
+the shared field accessor so bulk-loaded and consolidated rows remain readable.
 
 Cost sketch: with N collection rows, S segments and V retained versions of the
 requested key, a normal point lookup changes from O(N) traversal/materialization
@@ -26,7 +28,7 @@ unchanged key preserve the index. The index is not serialized and does not alter
 the WAL or file format. Normal recovery reconstructs it through entity insertion.
 
 Hash buckets and version-vector capacity contribute to segment memory accounting.
-Runtime row admission also reserves estimated index growth for named text keys.
+Runtime row admission also reserves estimated index growth for text keys.
 As with other segment estimates, this is not a hard allocator/RSS bound; direct
 low-level mutations and exceptional lazy rebuilds do not add a new admission API.
 

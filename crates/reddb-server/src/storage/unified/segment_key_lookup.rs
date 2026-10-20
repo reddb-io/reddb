@@ -1,4 +1,4 @@
-//! Disposable physical candidates for named KV keys. Visibility belongs to the caller.
+//! Disposable physical candidates for KV keys. Visibility belongs to the caller.
 use std::collections::{hash_map::RandomState, HashMap};
 use std::hash::BuildHasher;
 
@@ -17,7 +17,7 @@ impl SegmentKeyLookup {
         let EntityData::Row(row) = &entity.data else {
             return None;
         };
-        match row.named.as_ref()?.get("key")? {
+        match row.get_field("key")? {
             Value::Text(key) => Some(key),
             _ => None,
         }
