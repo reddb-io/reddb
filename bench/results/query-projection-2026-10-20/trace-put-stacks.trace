@@ -1,0 +1,128 @@
+42    18:52:45.078802 fdatasync(18</data/bench.rdb>) = 0 <0.002012>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+42    18:52:45.086345 fsync(18</data/bench.rdb>) = 0 <0.003326>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+42    18:52:45.096644 fdatasync(18</data/bench.rdb>) = 0 <0.001759>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+42    18:52:45.102457 fsync(18</data/bench.rdb>) = 0 <0.002665>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+26    18:52:45.113220 fdatasync(18</data/bench.rdb>) = 0 <0.000716>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+26    18:52:45.118627 fsync(18</data/bench.rdb>) = 0 <0.003680>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+26    18:52:45.129248 fdatasync(18</data/bench.rdb>) = 0 <0.000652>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+26    18:52:45.133891 fsync(18</data/bench.rdb>) = 0 <0.003635>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+43    18:52:45.145597 fdatasync(18</data/bench.rdb>) = 0 <0.000687>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+43    18:52:45.150792 fsync(18</data/bench.rdb>) = 0 <0.003617>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+43    18:52:45.161400 fdatasync(18</data/bench.rdb>) = 0 <0.000669>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+43    18:52:45.165901 fsync(18</data/bench.rdb>) = 0 <0.002566>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+44    18:52:45.176253 fdatasync(18</data/bench.rdb>) = 0 <0.001870>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+44    18:52:45.182603 fsync(18</data/bench.rdb>) = 0 <0.002763>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+44    18:52:45.192160 fdatasync(18</data/bench.rdb>) = 0 <0.001831>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+44    18:52:45.197911 fsync(18</data/bench.rdb>) = 0 <0.002659>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+27    18:52:45.208377 fdatasync(18</data/bench.rdb>) = 0 <0.001903>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+27    18:52:45.214786 fsync(18</data/bench.rdb>) = 0 <0.002620>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+27    18:52:45.224346 fdatasync(18</data/bench.rdb>) = 0 <0.000703>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+27    18:52:45.229030 fsync(18</data/bench.rdb>) = 0 <0.003205>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+42    18:52:45.240111 fdatasync(18</data/bench.rdb>) = 0 <0.001805>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+42    18:52:45.245965 fsync(18</data/bench.rdb>) = 0 <0.003216>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+42    18:52:45.255557 fdatasync(18</data/bench.rdb>) = 0 <0.002052>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+42    18:52:45.261905 fsync(18</data/bench.rdb>) = 0 <0.003251>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+26    18:52:45.272995 fdatasync(18</data/bench.rdb>) = 0 <0.002067>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+26    18:52:45.279138 fsync(18</data/bench.rdb>) = 0 <0.003004>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+26    18:52:45.288635 fdatasync(18</data/bench.rdb>) = 0 <0.002177>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+26    18:52:45.294910 fsync(18</data/bench.rdb>) = 0 <0.003060>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+43    18:52:45.305896 fdatasync(18</data/bench.rdb>) = 0 <0.002085>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+43    18:52:45.312011 fsync(18</data/bench.rdb>) = 0 <0.002776>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]
+43    18:52:45.321216 fdatasync(18</data/bench.rdb>) = 0 <0.001810>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fdatasync+0x3a) [0xfed0a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_data+0x19) [0x215eab9]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xc41) [0x872fc1]
+43    18:52:45.327062 fsync(18</data/bench.rdb>) = 0 <0.002548>
+ > /usr/lib/x86_64-linux-gnu/libc.so.6(fsync+0x3a) [0xfec4a]
+ > /build/baseline-rest-5ad0766e-red(<std::fs::File>::sync_all+0x19) [0x215ea39]
+ > /build/baseline-rest-5ad0766e-red(reddb_file::embedded::EmbeddedRdbArtifact::append_wal_payloads+0xe1b) [0x87319b]

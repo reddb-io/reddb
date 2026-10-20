@@ -1,0 +1,99 @@
+{
+  "schema": "reddb.kv-compare.v1",
+  "classification": "shared-host-diagnostic",
+  "engine": "kividb",
+  "operation": "get",
+  "config": {
+    "engine": "kividb",
+    "host": "reddb-kv-kivi-20261020",
+    "port": 6380,
+    "collection": "kv_diag_10000",
+    "keys": 10000,
+    "value_bytes": 100,
+    "operations": 2000,
+    "seconds": 2.0,
+    "workers": 8,
+    "warmup": 10,
+    "rounds": 5,
+    "pipeline": 1,
+    "operation": "get",
+    "prepare_only": false,
+    "verify_only": false,
+    "fence_writes": true,
+    "recovery_from": null,
+    "verification": "responses"
+  },
+  "client": {
+    "python": "3.12.15",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.36",
+    "implementation": "stdlib threads; client saturation must be checked externally"
+  },
+  "created_unix_ms": 1792516040548,
+  "status": "valid-diagnostic",
+  "rounds": [
+    {
+      "started_unix_ms": 1792516040567,
+      "finished_unix_ms": 1792516042570,
+      "operations": 13632,
+      "seconds": 2.0014756869641133,
+      "throughput_ops_s": 6810.9745668094265,
+      "batch_p50_us": 892.999,
+      "batch_p95_us": 2795.031,
+      "batch_p99_us": 4897.794,
+      "errors": 0
+    },
+    {
+      "started_unix_ms": 1792516042589,
+      "finished_unix_ms": 1792516044593,
+      "operations": 15104,
+      "seconds": 2.0015359429526143,
+      "throughput_ops_s": 7546.204730012976,
+      "batch_p50_us": 821.029,
+      "batch_p95_us": 2425.382,
+      "batch_p99_us": 4127.751,
+      "errors": 0
+    },
+    {
+      "started_unix_ms": 1792516044620,
+      "finished_unix_ms": 1792516046622,
+      "operations": 14846,
+      "seconds": 2.0010862670023926,
+      "throughput_ops_s": 7418.970508572407,
+      "batch_p50_us": 827.553,
+      "batch_p95_us": 2562.423,
+      "batch_p99_us": 4209.392,
+      "errors": 0
+    },
+    {
+      "started_unix_ms": 1792516046640,
+      "finished_unix_ms": 1792516048642,
+      "operations": 13535,
+      "seconds": 2.001122629037127,
+      "throughput_ops_s": 6763.703435062642,
+      "batch_p50_us": 856.77,
+      "batch_p95_us": 2888.216,
+      "batch_p99_us": 6086.72,
+      "errors": 0
+    },
+    {
+      "started_unix_ms": 1792516048661,
+      "finished_unix_ms": 1792516050663,
+      "operations": 14702,
+      "seconds": 2.0013285009772517,
+      "throughput_ops_s": 7346.120335977323,
+      "batch_p50_us": 802.454,
+      "batch_p95_us": 2633.251,
+      "batch_p99_us": 5201.223,
+      "errors": 0
+    }
+  ],
+  "latency_contract": "batch completion including response validation; pipeline=1 is one request",
+  "verification_before": {
+    "scope": "caller-owned-dataset"
+  },
+  "median_throughput_ops_s": 7346.120335977323,
+  "verification_after": {
+    "scope": "caller-owned-dataset",
+    "every_measured_reply_checked": true
+  }
+}

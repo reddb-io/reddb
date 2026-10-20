@@ -873,6 +873,7 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
+        self.ensure_declared_model(model, collection)?;
         Ok(self
             .project_entity(model, collection, key, |entity| {
                 kv_value_from_entity(entity).map(|value| (value, entity.id))
@@ -905,17 +906,20 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
+        self.ensure_declared_model(model, collection)?;
         self.project_entity(model, collection, key, Clone::clone)
     }
 
-    fn project_entity<T>(
+    /// Resolve a key using the caller's already-validated collection model.
+    /// REST and RQL retain their respective contract checks before entering here.
+    /// Projection runs under a segment read guard and must not re-enter storage.
+    pub(crate) fn project_entity<T>(
         &self,
         model: crate::catalog::CollectionModel,
         collection: &str,
         key: &str,
         project: impl FnMut(&crate::storage::UnifiedEntity) -> T,
     ) -> RedDBResult<Option<T>> {
-        self.ensure_declared_model(model, collection)?;
         let store = self.runtime.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
             return Ok(None);
@@ -2661,8 +2665,15 @@ impl RedDBRuntime {
                     });
                 }
 
-                let entity = ops.get_entity(*model, collection, key)?;
-                let value = entity.as_ref().and_then(kv_value_from_entity);
+                ops.ensure_declared_model(*model, collection)?;
+                let entry = ops.project_entity(*model, collection, key, |entity| {
+                    (
+                        entity.id,
+                        entity.created_at,
+                        entity.updated_at,
+                        kv_value_from_entity(entity),
+                    )
+                })?;
                 if *model == crate::catalog::CollectionModel::Kv {
                     self.inner.kv_stats.incr_gets();
                 }
@@ -2678,10 +2689,10 @@ impl RedDBRuntime {
                     "tags".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
-                if let Some(entity) = entity.as_ref() {
-                    record.set("rid", Value::UnsignedInteger(entity.id.raw()));
-                    record.set("created_at", Value::UnsignedInteger(entity.created_at));
-                    record.set("updated_at", Value::UnsignedInteger(entity.updated_at));
+                if let Some((id, created_at, updated_at, _)) = entry.as_ref() {
+                    record.set("rid", Value::UnsignedInteger(id.raw()));
+                    record.set("created_at", Value::UnsignedInteger(*created_at));
+                    record.set("updated_at", Value::UnsignedInteger(*updated_at));
                 } else {
                     record.set("rid", Value::Null);
                     record.set("created_at", Value::Null);
@@ -2691,7 +2702,12 @@ impl RedDBRuntime {
                 record.set("kind", Value::text(keyed_model_name(*model).to_string()));
                 record.set("tenant", Value::Null);
                 record.set("key", Value::text(key.clone()));
-                record.set("value", value.unwrap_or(reddb_types::Value::Null));
+                record.set(
+                    "value",
+                    entry
+                        .and_then(|(_, _, _, value)| value)
+                        .unwrap_or(Value::Null),
+                );
                 record.set("tags", kv_tags_value(&ops.tags_for_key(collection, key)));
                 result.push(record);
 
@@ -3623,6 +3639,62 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn kv_get_projection_preserves_metadata_tags_and_missing_envelope() {
+        let runtime = rt();
+        let ops = super::KvAtomicOps::new(&runtime);
+        let value = reddb_types::Value::Array(vec![reddb_types::Value::Integer(7)]);
+        let (_, id) = ops
+            .set_with_tags(
+                "projected",
+                "item",
+                value.clone(),
+                None,
+                &["daily".into()],
+                false,
+            )
+            .expect("seed");
+        let db = runtime.db();
+        let store = db.store();
+        let manager = store.get_collection("projected").expect("collection");
+        let entity = manager.get(id).expect("stored row");
+        manager.force_seal().expect("seal row");
+        let result = runtime.execute_query("KV GET projected.item").expect("GET");
+        let record = &result.result.records[0];
+        assert_eq!(record.iter_fields().count(), 9);
+        for (field, expected) in [
+            ("rid", reddb_types::Value::UnsignedInteger(id.raw())),
+            (
+                "created_at",
+                reddb_types::Value::UnsignedInteger(entity.created_at),
+            ),
+            (
+                "updated_at",
+                reddb_types::Value::UnsignedInteger(entity.updated_at),
+            ),
+            ("collection", reddb_types::Value::text("projected")),
+            ("kind", reddb_types::Value::text("kv")),
+            ("tenant", reddb_types::Value::Null),
+            ("key", reddb_types::Value::text("item")),
+            ("value", value),
+            ("tags", super::kv_tags_value(&["daily".into()])),
+        ] {
+            assert_eq!(record.get(field), Some(&expected), "{field}");
+        }
+        let missing = runtime
+            .execute_query("KV GET projected.absent")
+            .expect("missing GET");
+        let record = &missing.result.records[0];
+        for field in ["rid", "created_at", "updated_at", "value", "tenant"] {
+            assert_eq!(
+                record.get(field),
+                Some(&reddb_types::Value::Null),
+                "{field}"
+            );
+        }
+        assert_eq!(record.get("tags"), Some(&super::kv_tags_value(&[])));
     }
 
     #[test]

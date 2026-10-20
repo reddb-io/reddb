@@ -12,6 +12,17 @@ Non-versioned KV preserves its physical-row lookup policy.
 Both named rows and compact schema/column rows participate; point reads use
 the shared field accessor so bulk-loaded and consolidated rows remain readable.
 
+Transport coverage matters: these indexes serve `KvAtomicOps`, RQL `KV GET`
+and REST through `RuntimeEntityPort::get_kv`. REST now projects only the value
+and physical ID rather than materializing the full collection. It retains its
+own read-contract validation, missing-value-as-Null behavior and response shape;
+the shared resolver handles compact rows and snapshot-visible versions. The
+same port lookup locates entries for non-versioned overwrite/delete operations.
+RQL GET requests entity metadata, so its response path still projects an owned
+entity. The two paths are measured separately by the
+[verified product-path benchmark](../../bench/kv/COMPARE.md); the allocation
+improvement in `KvAtomicOps::get` must not be generalized to every transport.
+
 Cost sketch: with N collection rows, S segments and V retained versions of the
 requested key, a normal point lookup changes from O(N) traversal/materialization
 to expected O(S + V) candidate work, plus hashing/comparing the key bytes.
@@ -43,6 +54,7 @@ low-level mutations do not add a new admission API.
 ```sh
 cargo check -p reddb-io-server --locked
 cargo test -p reddb-io-server --lib key_lookup --locked
+cargo test -p reddb-io-server --lib rest_kv_index --locked
 cargo test -p reddb-io-server --lib segment_key_lookup_hit_allocates_nothing --locked
 cargo test -p reddb-io-server --lib covered_storage_hot_paths --locked
 cargo test --test grouped_general_multimodel e2e_vcs_kv --locked
