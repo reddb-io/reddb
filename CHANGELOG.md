@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.14
+
+### Patch Changes
+
+- [#2423](https://github.com/reddb-io/reddb/pull/2423) [`9aab8ea`](https://github.com/reddb-io/reddb/commit/9aab8ea1accaed0fcdf6d9ef31d4d675f811d7bc) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reject main-file-only remote backups of existing paged stores even when they are opened with embedded options. Those stores also require physical metadata sidecars; restoring only the main file can lose declared collection models. Require the existing complete, fenced physical-directory backup path rather than advertising an incomplete snapshot as successful. Self-contained embedded backups remain supported.
+
 ## 1.24.13
 
 ### Patch Changes
