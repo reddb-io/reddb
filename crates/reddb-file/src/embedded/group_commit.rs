@@ -173,7 +173,7 @@ impl GroupCommit {
     ) -> RdbFileResult<EmbeddedRdbOpen> {
         loop {
             let mut state = lock(&self.state);
-            if let Some(result) = lock(&completion).as_ref() {
+            if let Some(result) = lock(completion).as_ref() {
                 return match result {
                     Ok(open) => Ok(open.clone()),
                     Err(error) => Err(copy_error(error)),
