@@ -28,6 +28,11 @@ def inspect(name):
             "memory_limit": limits["Memory"], "mounts": value["Mounts"]}
 
 
+def resource_sample(line):
+    # Docker's Windows CLI emits cursor escapes even into a pipe.
+    return json.loads(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line))
+
+
 class Resources:
     def __init__(self, directory, server, client):
         label = server if isinstance(server, str) else "matrix"
@@ -44,9 +49,7 @@ class Resources:
         with self.path.open("w", encoding="utf-8") as output:
             for line in self.process.stdout:
                 try:
-                    # Docker's Windows CLI emits terminal cursor escapes even
-                    # when stdout is a pipe. Do not silently drop every sample.
-                    value = json.loads(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line))
+                    value = resource_sample(line)
                 except json.JSONDecodeError:
                     continue
                 output.write(json.dumps({"unix_ms": int(time.time() * 1000), **value}) + "\n")
@@ -66,7 +69,6 @@ class Resources:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prefix", default="reddb-kv-20261020")
     parser.add_argument("--client", default="reddb-kv-client-20261020")
     parser.add_argument("--redis", default="reddb-kv-redis-20261020")
     parser.add_argument("--kividb", default="reddb-kv-kivi-20261020")
@@ -87,7 +89,12 @@ def main():
     if args.sample_only:
         monitor = Resources(args.out, servers, args.client)
         try:
-            while json.loads((args.out / "manifest.json").read_text())["status"] == "running":
+            while True:
+                try:
+                    if json.loads((args.out / "manifest.json").read_text())["status"] != "running":
+                        break
+                except json.JSONDecodeError:
+                    pass
                 time.sleep(1)
         finally:
             monitor.close()
@@ -115,7 +122,9 @@ def main():
         "ServerVersion", "NCPU", "MemTotal", "Architecture", "KernelVersion", "OperatingSystem", "Driver")}
 
     def save():
-        (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        temporary = args.out / "manifest.tmp"
+        temporary.write_text(json.dumps(manifest, indent=2) + "\n")
+        temporary.replace(args.out / "manifest.json")
 
     def run(engine, container, port, collection, keys, name, extra=()):
         target = f"/results/{name}.json"

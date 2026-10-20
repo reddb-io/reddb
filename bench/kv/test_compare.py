@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import compare
+import local_matrix
 
 
 def resp(raw, fence=False):
@@ -47,6 +48,10 @@ class FakeClient:
 
 
 class CompareTests(unittest.TestCase):
+    def test_resource_samples_accept_windows_docker_cursor_escapes(self):
+        sample = local_matrix.resource_sample('\x1b[H{"CPUPerc":"12.5%"}\x1b[K\n')
+        self.assertEqual(sample["CPUPerc"], "12.5%")
+
     def test_resp_errors_and_eof_are_failures(self):
         for raw in [b"-ERR unsupported\r\n", b"", b"$8\r\nshort\r\n", b"$-2\r\n"]:
             with self.subTest(raw=raw), self.assertRaises(compare.ProtocolError):

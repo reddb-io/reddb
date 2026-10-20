@@ -1,0 +1,22 @@
+name: KV comparison harness
+
+on:
+  pull_request:
+    paths:
+      - 'bench/kv/compare.py'
+      - 'bench/kv/local_matrix.py'
+      - 'bench/kv/test_compare.py'
+      - '.github/workflows/kv-compare-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate protocol, correctness and measurement guards
+        run: python3 -m unittest discover -s bench/kv -p test_compare.py -v
