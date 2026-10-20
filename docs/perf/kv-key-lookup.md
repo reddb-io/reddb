@@ -37,6 +37,7 @@ low-level mutations and exceptional lazy rebuilds do not add a new admission API
 ```sh
 cargo check -p reddb-io-server --locked
 cargo test -p reddb-io-server --lib key_lookup --locked
+cargo test -p reddb-io-server --lib segment_key_lookup_hit_allocates_nothing --locked
 cargo test -p reddb-io-server --lib covered_storage_hot_paths --locked
 cargo test --test grouped_general_multimodel e2e_vcs_kv --locked
 ```

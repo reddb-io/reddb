@@ -298,6 +298,11 @@ fn measure_segment_key_lookup_hit() -> AllocationCount {
     count
 }
 
+#[test]
+fn segment_key_lookup_hit_allocates_nothing() {
+    assert_eq!(measure_segment_key_lookup_hit().allocs, 0);
+}
+
 fn measure_growing_segment_flat_row_insert() -> AllocationCount {
     let mut segment = GrowingSegment::new(1, "orders");
     segment

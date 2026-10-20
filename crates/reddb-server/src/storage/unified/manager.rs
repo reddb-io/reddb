@@ -3601,9 +3601,10 @@ mod tests {
             (
                 "runtime/impl_kv.rs",
                 include_str!("../../runtime/impl_kv.rs"),
-                4,
-                "two non-versioned-collection fallbacks (the versioned arms scan under \
-                 the captured snapshot). Vault reads use snapshot scans. Offline vault \
+                3,
+                "one non-versioned listing fallback (the versioned arm scans under \
+                 the captured snapshot). Point reads use physical key candidates with \
+                 versioned visibility rechecks. Vault reads use snapshot scans. Offline vault \
                  export preserves all \
                  physical versions across tenants; restore's emptiness check must reject \
                  every physical row, including versions invisible to a snapshot",
