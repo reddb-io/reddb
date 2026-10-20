@@ -2018,8 +2018,10 @@ fn small_budget_denies_live_entity_growth_didactically_and_keeps_serving() {
 #[test]
 fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
     cleanup_scope();
-    // Named row payloads and retained zone bounds participate in accounting.
-    let budget = 160 * 1024;
+    // Include boot catalog key lookups as well as row payloads and zone bounds.
+    // Keep the post-reclamation batch within budget while the dead seed still
+    // forces pressure consolidation before that batch can be admitted.
+    let budget = 168 * 1024;
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
         .expect("runtime with a small explicit budget");
 
