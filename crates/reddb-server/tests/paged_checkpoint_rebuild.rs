@@ -592,9 +592,8 @@ fn embedded_options_preserve_document_contracts_when_opening_an_existing_paged_s
         reddb_server::catalog::CollectionModel::Document,
     );
     assert!(runtime
-        .db()
-        .catalog_model_snapshot()
-        .declared_indexes
+        .index_store_ref()
+        .list_indices("reopened_docs")
         .iter()
         .any(|index| index.name == "idx_reopened_name"));
     runtime
