@@ -50,8 +50,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AllocationCount {
-    allocs: usize,
+pub(crate) struct AllocationCount {
+    pub(crate) allocs: usize,
     deallocs: usize,
 }
 
@@ -113,7 +113,7 @@ impl Drop for CounterGuard {
     }
 }
 
-fn measure_allocations<T>(operation: impl FnOnce() -> T) -> (T, AllocationCount) {
+pub(crate) fn measure_allocations<T>(operation: impl FnOnce() -> T) -> (T, AllocationCount) {
     COUNTER.with(|counter| counter.borrow().begin());
     let _guard = CounterGuard;
     let result = operation();
@@ -385,6 +385,58 @@ fn runtime_key_lookup_hit_avoids_row_clone() {
         hit_count.allocs, miss_count.allocs + value_count.allocs,
         "hits must allocate only their returned value: hit={hit_count:?}, miss={miss_count:?}, value={value_count:?}"
     );
+    }
+}
+
+#[test]
+fn rql_get_projection_does_not_clone_unreturned_fields() {
+    use crate::catalog::CollectionModel;
+    use reddb_rql::ast::KvCommand;
+    use reddb_types::Value;
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("KV PUT projected.item = 'payload'")
+        .expect("seed");
+    let manager = runtime
+        .db()
+        .store()
+        .get_collection("projected")
+        .expect("collection");
+    let original = manager.query_all(|_| true).pop().expect("row");
+    let command = KvCommand::Get {
+        model: CollectionModel::Kv,
+        collection: "projected".into(),
+        key: "item".into(),
+    };
+    let mut baseline = None;
+    for extra_values in [0, 128] {
+        let mut entity = original.clone();
+        let crate::storage::EntityData::Row(row) = &mut entity.data else {
+            panic!("row");
+        };
+        row.named.as_mut().expect("named row").insert(
+            "not_returned".into(),
+            Value::Array(
+                (0..extra_values)
+                    .map(|_| Value::Array(vec![Value::Integer(1)]))
+                    .collect(),
+            ),
+        );
+        manager.update(entity).expect("update");
+        let (result, count) =
+            measure_allocations(|| runtime.execute_kv_command("KV GET projected.item", &command));
+        assert_eq!(
+            result.expect("GET").result.records[0].get("value"),
+            Some(&Value::text("payload"))
+        );
+        if let Some(expected) = baseline {
+            assert_eq!(
+                count.allocs, expected,
+                "unprojected data must not allocate on GET"
+            );
+        } else {
+            baseline = Some(count.allocs);
+        }
     }
 }
 

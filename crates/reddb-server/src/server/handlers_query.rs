@@ -589,7 +589,9 @@ impl RedDBServer {
                         // both the original stream and any resume re-
                         // execution produce rows in the same sequence.
                         if resumable {
-                            records.sort_by_key(|r| record_rid(r).unwrap_or(u64::MAX));
+                            records
+                                .to_mut()
+                                .sort_by_key(|r| record_rid(r).unwrap_or(u64::MAX));
                         }
 
                         if let Some(rp) = resume_params.as_ref() {
@@ -600,7 +602,7 @@ impl RedDBServer {
                             let mut prefix_hash_check = PrefixHasher::new();
                             let mut crossed = false;
                             let mut hash_mismatch = false;
-                            for record in &records {
+                            for record in records.iter() {
                                 let rid = record_rid(record).unwrap_or(0);
                                 let values =
                                     crate::presentation::query_result_json::unified_record_json(
@@ -663,7 +665,7 @@ impl RedDBServer {
                             // Fresh open — emit every row, hashing as
                             // we go so the `end` envelope can carry
                             // `prefix_hash` for future resume.
-                            for record in &records {
+                            for record in records.iter() {
                                 if lease.snapshot_expired(clock.now_ms()) {
                                     stream_error = Some((
                                         "snapshot_expired".to_string(),
@@ -1464,7 +1466,7 @@ impl RedDBServer {
             //    cancel raised mid-stream stops production promptly rather
             //    than draining the remaining rows to a client that asked to
             //    stop (or has gone away).
-            for record in &records {
+            for record in records.iter() {
                 if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
                     cancelled_midstream = true;
                     break;
