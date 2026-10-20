@@ -1,0 +1,464 @@
+{
+  "schema": "reddb.kv-local-matrix.v1",
+  "status": "valid-diagnostic",
+  "classification": "shared-host-diagnostic",
+  "primary_metric": "GET request latency at pipeline=1",
+  "started_unix_ms": 1792519281915,
+  "host": "Windows-10-10.0.22621-SP0",
+  "docker": {
+    "ServerVersion": "29.8.1",
+    "NCPU": 12,
+    "MemTotal": 20078956544,
+    "Architecture": "x86_64",
+    "KernelVersion": "6.18.54.1-microsoft-standard-WSL2",
+    "OperatingSystem": "Docker Desktop (containerized)",
+    "Driver": "overlayfs"
+  },
+  "red_engine_revision": "a3af4d6261f05fcc2dccd5caca178c5ddf6936a3",
+  "red_binary_sha256": "00e800ab0494a8b24fb9e58a1f23f16e3e692ad2fdac0a288cb7b4e9895ac3e1",
+  "red_build": "cargo build --release --locked --bin red -j 4; Rust 1.95.0",
+  "containers": {
+    "reddb-kv-redis-20261020": {
+      "container": "reddb-kv-redis-20261020",
+      "image_id": "sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78",
+      "image_digests": [
+        "redis@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78"
+      ],
+      "command": [
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "always",
+        "--protected-mode",
+        "no",
+        "--io-threads",
+        "4",
+        "--maxmemory",
+        "1073741824",
+        "--maxmemory-policy",
+        "noeviction"
+      ],
+      "environment": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "REDIS_DOWNLOAD_URL=https://github.com/redis/redis/archive/refs/tags/8.4.0.tar.gz",
+        "REDIS_DOWNLOAD_SHA=b947d9015622669b5bee8ec954f658b3278d42dbefae23a92d9b7704bfe143f9"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-redis-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-redis-20261020/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-kv-kivi-20261020": {
+      "container": "reddb-kv-kivi-20261020",
+      "image_id": "sha256:9c7cda22f6aa7924e2c28a7605e765469249c389f5388b7dff9cd56a35d18c2d",
+      "image_digests": [
+        "kividb/kividb@sha256:9c7cda22f6aa7924e2c28a7605e765469249c389f5388b7dff9cd56a35d18c2d"
+      ],
+      "command": [
+        "--aof",
+        "--threads",
+        "4",
+        "--io-model",
+        "tokio",
+        "--protected-mode",
+        "no",
+        "--update-check",
+        "no",
+        "--maxmemory",
+        "1073741824"
+      ],
+      "environment": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-kivi-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-kivi-20261020/_data",
+          "Destination": "/home/kividb",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-kv-rest-before-20261020": {
+      "container": "reddb-kv-rest-before-20261020",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "/build/baseline-a3af4d62-red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--http-max-handlers",
+        "64",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "REDDB_DURABILITY=strict",
+        "REDDB_DURABILITY_MODE=strict",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-rest-before-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-rest-before-20261020/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-kv-rest-client-before-20261020": {
+      "container": "reddb-kv-rest-client-before-20261020",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "sleep",
+        "36000"
+      ],
+      "environment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "4-5",
+      "nano_cpus": 2000000000,
+      "memory_limit": 1073741824,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index/bench/kv",
+          "Destination": "/bench",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\results\\kv-compare-rest-before-2026-10-20",
+          "Destination": "/results",
+          "Mode": "",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ]
+    }
+  },
+  "conditions": {
+    "keys": [
+      1000,
+      10000
+    ],
+    "value_bytes": 100,
+    "workers": [
+      1,
+      8,
+      32
+    ],
+    "rounds": 5,
+    "get_seconds_per_round": 2,
+    "transport": "HTTP/1.1 keep-alive for RedDB; RESP2 for Redis/KiviDB",
+    "warmup": "10 GETs per connection; full dataset check before/after each matrix",
+    "server_order": "Redis, KiviDB, RedDB; no simultaneous server load",
+    "write_contract": "RedDB strict WAL; Redis AOF always; KiviDB SET + WAITAOF 1 0 5000",
+    "recovery": "SIGKILL after completion; reopen and verify every expected value",
+    "limits": "Python/GIL and shared Docker VM may limit throughput; no max-throughput or public lead claim"
+  },
+  "cases": [
+    {
+      "file": "cap64-reddb-rest-1000-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-reopen.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c1-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c8-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c32-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c1-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c8-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c32-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-reopen.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c1-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c8-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c32-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c1-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c8-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c32-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c1-p1-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "put"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c1-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c8-p1-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "put"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c8-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    }
+  ],
+  "phases": [
+    {
+      "engine": "reddb-rest",
+      "identity": "{'phase': 'ready', 'status': 'alive'}",
+      "started_unix_ms": 1792519288373,
+      "finished_unix_ms": 1792519752711
+    }
+  ],
+  "errors": [],
+  "finished_unix_ms": 1792519753265,
+  "capture_provenance": {
+    "harness_revision": "94ece9535b1ee680d3b56d3fec9e2da54c2dd565",
+    "harness_sha256": {
+      "compare.py": "26a45938894b9758c2ab5ff1270aa621d6e88e5ae361c08d1b12b457f82f49a9",
+      "local_matrix.py": "47a94b3906deabf9d7ff14c3a85b67b65b64a8bf166915fb3c4b806029692420",
+      "summarize.py": "1cd9828917e7dc4f7b422692c26593a897adce945b9a89d11807e265a08d7793"
+    },
+    "sequence": "before",
+    "comparison_pair": "REST index integration 2026-10-20",
+    "servers_exercised": [
+      "reddb-rest",
+      "reddb-query"
+    ],
+    "actual_server_order": "RedDB before, then RedDB after; Redis/KiviDB not exercised",
+    "normalization": "CRLF to LF only after capture; numeric observations unchanged"
+  }
+}

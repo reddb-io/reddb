@@ -1,0 +1,36 @@
+name: KV comparison harness
+
+on:
+  pull_request:
+    paths:
+      - 'bench/kv/compare.py'
+      - 'bench/kv/local_matrix.py'
+      - 'bench/kv/summarize.py'
+      - 'bench/kv/test_compare.py'
+      - 'bench/results/kv-compare-*/**'
+      - '.github/workflows/kv-compare-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate protocol, correctness and measurement guards
+        run: python3 -m unittest discover -s bench/kv -p test_compare.py -v
+      - name: Validate checked-in sample checksums
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          for summary in pathlib.Path('bench/results').glob('kv-compare-*/summary.json'):
+              checksums = json.loads(summary.read_text())['artifact_sha256']
+              for name, expected in checksums.items():
+                  assert '/' not in name and '\\' not in name
+                  actual = hashlib.sha256((summary.parent / name).read_bytes()).hexdigest()
+                  assert actual == expected, f'{summary.parent / name}: checksum mismatch'
+              print(f'{summary.parent}: {len(checksums)} artifacts verified')
+          PY

@@ -1,0 +1,349 @@
+{
+  "schema": "reddb.checked-write-sync-profile.v1",
+  "status": "valid-diagnostic",
+  "phases": [
+    {
+      "name": "trace-put-stacks",
+      "operations": 8,
+      "sync_calls": 32,
+      "calls_by_path": {
+        "/data/bench.rdb": 32
+      },
+      "calls": [
+        {
+          "thread": 42,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002012
+        },
+        {
+          "thread": 42,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003326
+        },
+        {
+          "thread": 42,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001759
+        },
+        {
+          "thread": 42,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002665
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000716
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00368
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000652
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003635
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000687
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003617
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000669
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002566
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00187
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002763
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001831
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002659
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001903
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00262
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000703
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003205
+        },
+        {
+          "thread": 42,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001805
+        },
+        {
+          "thread": 42,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003216
+        },
+        {
+          "thread": 42,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002052
+        },
+        {
+          "thread": 42,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003251
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002067
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003004
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002177
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00306
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002085
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002776
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00181
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002548
+        }
+      ],
+      "recovery": "verified"
+    }
+  ],
+  "classification": "strace diagnostic; syscall duration includes tracing overhead; no throughput claim",
+  "server": {
+    "container": "reddb-write-profile-20261020",
+    "image_id": "sha256:2985b785ac461cda507684d9057283a61a2511a1f33c94edad9dd1b37d2c299a",
+    "image_digests": [
+      "reddb-query-profile-tools@sha256:2985b785ac461cda507684d9057283a61a2511a1f33c94edad9dd1b37d2c299a"
+    ],
+    "command": [
+      "/build/baseline-rest-5ad0766e-red",
+      "server",
+      "--path",
+      "/data/bench.rdb",
+      "--http-bind",
+      "0.0.0.0:5000",
+      "--workers",
+      "4",
+      "--http-max-handlers",
+      "64",
+      "--no-auth"
+    ],
+    "environment": [
+      "REDDB_DURABILITY=strict",
+      "REDDB_DURABILITY_MODE=strict",
+      "REDDB_MEMORY_BUDGET=1073741824",
+      "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+      "RUST_MIN_STACK=8388608",
+      "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "RUSTUP_HOME=/usr/local/rustup",
+      "CARGO_HOME=/usr/local/cargo",
+      "RUST_VERSION=1.95.0"
+    ],
+    "cpu_set": "0-3",
+    "nano_cpus": 4000000000,
+    "memory_limit": 2147483648,
+    "mounts": [
+      {
+        "Type": "volume",
+        "Name": "reddb-kv-build-20261020",
+        "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+        "Destination": "/build",
+        "Driver": "local",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": ""
+      },
+      {
+        "Type": "volume",
+        "Name": "reddb-write-profile-20261020",
+        "Source": "/var/lib/docker/volumes/reddb-write-profile-20261020/_data",
+        "Destination": "/data",
+        "Driver": "local",
+        "Mode": "z",
+        "RW": true,
+        "Propagation": ""
+      },
+      {
+        "Type": "bind",
+        "Source": "/run/desktop/mnt/host/c/Users/filip/dev/reddb-kv-index/bench/results/query-projection-2026-10-20",
+        "Destination": "/results",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      }
+    ]
+  },
+  "client": {
+    "container": "reddb-query-client-20261020",
+    "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+    "image_digests": [
+      "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+    ],
+    "command": [
+      "sleep",
+      "36000"
+    ],
+    "environment": [
+      "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "LANG=C.UTF-8",
+      "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+      "PYTHON_VERSION=3.12.15",
+      "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+    ],
+    "cpu_set": "4-5",
+    "nano_cpus": 2000000000,
+    "memory_limit": 1073741824,
+    "mounts": [
+      {
+        "Type": "bind",
+        "Source": "C:\\Users\\filip\\dev\\reddb-kv-index/bench",
+        "Destination": "/bench",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\results\\query-projection-2026-10-20",
+        "Destination": "/results",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      }
+    ]
+  },
+  "engine_revision": "5ad0766eda49f7472bf85ee91524a17b3ec10673",
+  "binary_sha256": "2ac44ed0bd18f5bb8c3244724cd9a6825dd0bda712896dd201c8fafc1c7653e2",
+  "started_unix_ms": 1792522362780,
+  "finished_unix_ms": 1792522370870
+}
