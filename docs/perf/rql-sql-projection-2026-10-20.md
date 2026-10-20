@@ -171,7 +171,7 @@ unrelated collections. Output data still allocates; these results do not mean
 the complete request is allocation-free. Counts and command are retained in
 [allocation-evidence.json](../../bench/results/query-projection-2026-10-20/allocation-evidence.json).
 
-## Durable-write diagnosis
+## Durable-write diagnosis before the architectural follow-up
 
 Separate `strace` profiles use the immutable baseline binary and a dedicated
 database. The tracing container has `SYS_PTRACE` and `seccomp=unconfined` only
@@ -214,7 +214,7 @@ Keep WAL/superblock ordering per batch and verify atomic failure behavior,
 concurrent waiters and recovery with injected faults. Merely wrapping existing
 delete/create calls in thread-local deferred capture is insufficient: nested
 capture, rollback, mutation publication and watcher ordering need handling.
-This PR deliberately does not modify that protocol.
+The initial read-path change deliberately did not modify that protocol.
 
 ## Validation and reproduction
 
@@ -238,3 +238,143 @@ Artifact checksums are generated from LF-normalized files and verified in CI.
 See [bench/query/README.md](../../bench/query/README.md) for workload, matrix,
 verification and profiling commands. Source and evidence CI links are recorded
 on the pull request.
+
+## Architectural follow-up
+
+Source revision `fae39eb6d07c32f8bc734973f10a9349a8e56a45` follows the merged
+read-path work. The changes address correctness boundaries before measuring
+speed. Evidence is retained separately in
+[kv-architecture-2026-10-20](../../bench/results/kv-architecture-2026-10-20/).
+
+Catalog cache rebuilds load metadata outside the lock and publish only if the
+generation has not changed. Concurrent replacement, invalidation and removal
+therefore cannot be overwritten by a stale rebuild. Existing readers retain
+immutable Arc snapshots. Runtime and application callers now select validated
+typed KV resolvers; they cannot supply arbitrary callbacks under segment locks.
+
+Single-file, unversioned autocommit KV replacement stages the new entity, metadata and old
+entity deletion under the publication lock, captures their WAL actions with a
+non-nesting RAII guard, and commits them as one embedded publication. PUT, INCR,
+CAS and DELETE in `KvAtomicOps` use the same per-key serialization. Watch events and secondary
+index maintenance follow the storage commit. A returned publication error
+restores the previous in-memory row and metadata; uncertain disk failures still
+have an unknown durable outcome and never produce a successful acknowledgment.
+Versioned KV, Vault, paged backends and explicit transactions retain their existing write paths.
+The low-level helper still preserves Strict page flushing when used with a pager;
+the runtime rejects that combination before selecting this optimized path.
+
+Publication-fenced grouped KV writes enqueue before releasing the publication lock and wait
+outside it. A synchronous elected caller drains bounded FIFO batches; there is
+no permanent worker thread. Each batch retains both the WAL data sync and the
+alternate-superblock sync. A checkpoint drains queued publications before
+replacing their WAL with its snapshot. Batch errors reach every waiter, and an
+unwinding writer releases waiting callers with errors. A failed keyed write
+retains its queue ticket through rollback so checkpoint fencing still observes
+the failed publication. Artifact readers take shared file locks to wait for
+concurrent publication rather than failing Windows mandatory byte-range locks.
+The store retains its coordinator for the database session. An uncertain I/O
+failure or interrupted staging fences later writes and checkpoints until close
+and reopen reloads the durable outcome. Dropping the last queue ticket cannot
+silently clear that failure. A fence concurrent with disk publication also
+prevents a successful acknowledgment.
+
+Raw mutable row access now removes only that row's indexed key and tracks its
+ID for conservative rechecking. It preserves all unaffected indexed candidates;
+there is no whole-segment scan fallback. The extra candidate set is included in
+resident-memory accounting. Segment fragmentation and MVCC history remain real
+costs: lookup is O(segments + key versions + raw-mutated candidates), not O(1)
+independent of history. The ignored
+`key_lookup_fragmentation_history_diagnostic` exercises 1/16/64 segments and
+1/100/1000 versions while checking the returned version and resident bytes.
+
+SQL CPU profiling of the previous binary found 22.07% of samples in entity
+cloning and 16.29% in value cloning. The caller was time-series hydration on
+ordinary table rows before predicate evaluation. Hydration now borrows ordinary
+rows and clones only when an interned time-series point needs resolved tags.
+The regression also exposed an empty hash index after reopening: positional
+rows had no attached schema during rebuild. Rebuilding and indexed batch reads
+now attach the restored collection schema. Hash misses retain the scan fallback:
+SQL numeric equality can match values with different physical index encodings.
+Tests verify hit values and zero scanned segments before and after reopening,
+and equality between numeric representations. KV tag indexes are also restored
+from persisted metadata rather than disappearing on reopen.
+
+Deterministic regressions cover stale catalog publication, logical replacement
+failure/rollback and metadata recovery, bounded group membership, error fanout,
+panic cleanup, checkpoint fencing, crashes at all three WAL publication points,
+schema recovery, mutable key replacement and borrowed hydration. Existing
+allocation, MVCC, moderation and memory-admission guards remain enabled.
+
+### Checked architectural measurements
+
+The closed read matrix uses main `0eb3a89c` and candidate `2584e484`, not the
+later session-fence revision. It contains two process samples per version in
+ABBA order, each with five two-second rounds. All values and ordering were
+checked, and both datasets were verified after killing and reopening each
+process. Result caching was disabled; both servers used Strict durability,
+four pinned CPUs, a 2 GiB cgroup limit and a 1 GiB engine memory budget.
+
+| HTTP read | Connections | Main queries/s | Candidate queries/s | Main p99 ms | Candidate p99 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| KV | 1 | 1,931 | 1,949 | 0.634 | 0.611 |
+| KV | 8 | 3,182 | 3,204 | 5.878 | 5.871 |
+| KV | 32 | 3,608 | 3,537 | 23.095 | 23.628 |
+| SQL point | 1 | 314 | 1,872 | 5.024 | 0.658 |
+| SQL point | 8 | 955 | 3,226 | 18.349 | 5.771 |
+| SQL point | 32 | 1,157 | 3,619 | 79.550 | 22.894 |
+| SQL 100 rows | 1 | 45.40 | 49.91 | 26.316 | 22.393 |
+| SQL 1,000 rows | 1 | 30.93 | 32.91 | 39.707 | 33.885 |
+
+These are medians of the two process medians, without a confidence interval.
+The main SQL point c1 process medians ranged from 262 to 366 queries/s; the
+candidate ranged from 1,846 to 1,897. The slower second main process raises the
+aggregate ratio to 5.96x. The earlier, separately retained exploratory matrix
+at `90feffe7` measured 5.21x. Do not pool the revisions or discard the slower
+baseline. The cause of that process variance is not established. KV c32 is
+slightly worse. This Python/HTTP/shared-host diagnostic establishes neither
+engine capacity nor competitive superiority over KiviDB.
+
+The separate syscall capture at `2584e484` checked 64 overwrites per phase,
+read back each value and verified persistence after killing the server:
+
+| Mode | Connections | Main sync calls | Candidate sync calls |
+| --- | ---: | ---: | ---: |
+| Strict | 1 | 259 | 131 |
+| Strict | 8 | 256 | 128 |
+| Grouped (200 microseconds) | 1 | 259 | 131 |
+| Grouped (200 microseconds) | 8 | 256 | 32 |
+
+The c1 phases include three additional syncs from one WAL-full checkpoint.
+The clean c8 phases show four sync calls per overwrite falling to two in
+Strict mode, and 0.5 per overwrite with grouping. All syncs target the same
+artifact and return success; GET controls issue zero. The eightfold grouped
+reduction is in syscall count, not measured write throughput. Both durability
+barriers remain. Raw traces and recovery responses are retained under `writes/`.
+Repeating both candidate modes at final revision `fae39eb6` in fresh volumes
+produced the same counts: 131 c1, 128 Strict c8 and 32 grouped c8, with zero
+GET syncs and checked recovery. Those captures are under `writes-final/`;
+the final binary SHA256 is
+`3337efdfdd686fafca7d9d02fc82f53c18bc589824f391300946256c45ac1adf`.
+
+The read binaries' SHA256 values are
+`6afcf03b3cc7aa42d693f02bdf653f7ca1cda2b9e3e125940b8e4551c8626c56`
+(main) and
+`9b015e9f6d51cd8a3e93ff2af75fa2487cfc7ce4da9a94df842b30562a20d0dd`
+(`2584e484`). Complete Git archives were compared byte-for-byte with the Linux
+build source; changed files received fresh modification times before building.
+An earlier mixed-source overlay and a cache-reused baseline were discarded
+before these captures. The invalidated test log is preserved and does not
+represent the current source. The CPU hotspot profile predates main and is
+diagnostic evidence only, not the baseline timing binary.
+
+Native validation passed the nine grouping/fault/crash tests, ten keyed tests,
+the targeted schema/index/cache regressions, `cargo check --locked`, formatting
+and the 7+12 harness tests. Full Linux CI for `2584e484` passed in
+[run 39509985752](https://github.com/reddb-io/reddb/actions/runs/39509985752).
+The later session-fence revision is validated separately in
+[run 39514292756](https://github.com/reddb-io/reddb/actions/runs/39514292756).
+The native broad KV run had 46 passes and one failure: the Vault/paged
+constructor hits Windows mandatory-lock error 33. The same test fails on clean
+main `0eb3a89c` before any writes. Both logs are retained; this pre-existing
+paged limitation remains open. The low-level Strict page-flush regression runs
+on Unix, while runtime eligibility keeps paged writes on their existing path.

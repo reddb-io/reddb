@@ -7,6 +7,7 @@ on:
       - 'bench/kv/compare.py'
       - 'bench/kv/local_matrix.py'
       - 'bench/results/query-projection-*/**'
+      - 'bench/results/kv-architecture-*/**'
       - '.github/workflows/query-read-paths.yml'
   workflow_dispatch:
 
@@ -27,7 +28,9 @@ jobs:
         run: |
           python3 - <<'PY'
           import hashlib, json, pathlib
-          for summary in sorted(pathlib.Path('bench/results').glob('query-projection-*/**/summary.json')):
+          summaries = [*pathlib.Path('bench/results').glob('query-projection-*/**/summary.json'),
+                       *pathlib.Path('bench/results').glob('kv-architecture-*/**/summary.json')]
+          for summary in sorted(summaries):
               evidence = json.loads(summary.read_text())
               assert evidence['status'] in ('valid-diagnostic', 'completed-with-orchestration-repair')
               assert len(evidence['measurements']) == 32
@@ -50,4 +53,22 @@ jobs:
                   actual = hashlib.sha256(path.read_bytes()).hexdigest()
                   assert actual == expected, f'{path}: checksum mismatch'
               print(f'{summary.parent}: {len(checksums)} artifacts verified')
+          for checksum_file in pathlib.Path('bench/results').glob('kv-architecture-*/evidence-sha256.json'):
+              for name, expected in json.loads(checksum_file.read_text()).items():
+                  relative = pathlib.Path(name)
+                  assert not relative.is_absolute() and '..' not in relative.parts
+                  path = (checksum_file.parent / relative).resolve()
+                  assert path.is_relative_to(checksum_file.parent.resolve())
+                  assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, path
+              for profile in checksum_file.parent.rglob('write-profile.json'):
+                  result = json.loads(profile.read_text())
+                  assert result['status'] == 'valid-diagnostic', profile
+                  assert len(result['phases']) == 3
+                  for phase in result['phases']:
+                      assert phase['operations'] == 64
+                      assert all(call['returned'] == 0 for call in phase['calls'])
+                      if phase['name'].startswith('trace-put'):
+                          assert phase['recovery'] == 'verified'
+                      else:
+                          assert phase['sync_calls'] == 0
           PY

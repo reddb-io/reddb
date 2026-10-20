@@ -1,0 +1,23 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cpu-clock'
+# Event count (approx.): 13454545320
+#
+# Overhead  Command          Shared Object              Symbol
+# ........  ...............  .........................  ........................................................................................................................................................
+#
+    22.07%  tokio-rt-worker  catalog-fast-8eb7f554-red  [.] <reddb_server::storage::unified::entity::UnifiedEntity as core::clone::Clone>::clone
+    16.29%  tokio-rt-worker  catalog-fast-8eb7f554-red  [.] <reddb_types::types::Value as core::clone::Clone>::clone
+     9.98%  tokio-rt-worker  catalog-fast-8eb7f554-red  [.] reddb_server::storage::unified::entity::RowData::get_field
+     7.88%  tokio-rt-worker  catalog-fast-8eb7f554-red  [.] reddb_server::runtime::execution_context::entity_visible_with_context
+     4.13%  tokio-rt-worker  [unknown]                  [k] 0xffffffff8d2436d3
+     3.98%  tokio-rt-worker  catalog-fast-8eb7f554-red  [.] core::ptr::drop_in_place<reddb_types::types::Value>
+     3.23%  tokio-rt-worker  libc.so.6                  [.] 0x0000000000152a01
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

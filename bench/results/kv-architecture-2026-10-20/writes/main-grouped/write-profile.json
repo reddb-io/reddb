@@ -1,0 +1,3749 @@
+{
+  "schema": "reddb.checked-write-sync-profile.v1",
+  "status": "valid-diagnostic",
+  "phases": [
+    {
+      "name": "trace-get-control",
+      "operations": 64,
+      "sync_calls": 0,
+      "calls_by_path": {},
+      "calls": []
+    },
+    {
+      "name": "trace-put-c1",
+      "operations": 64,
+      "sync_calls": 259,
+      "calls_by_path": {
+        "/data/bench.rdb": 259
+      },
+      "calls": [
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.005217
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003633
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000697
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00392
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000758
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003646
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000749
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003633
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002089
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002611
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001819
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.0028
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001816
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002817
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001845
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002679
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001972
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002709
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000775
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004004
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001007
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003934
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002183
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004003
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001031
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003657
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000727
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002936
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001831
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002571
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000914
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003757
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000972
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002584
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001818
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002723
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001879
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004368
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000739
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002722
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001891
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002758
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001862
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002847
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001893
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002676
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001016
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003999
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002146
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002774
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001922
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003041
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001828
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002633
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000734
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003942
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00297
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003773
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000766
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002778
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002483
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003082
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00187
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002802
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001914
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002919
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001881
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002823
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001912
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002768
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001841
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002605
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000703
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004291
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.0018
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002696
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001836
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003964
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000683
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003698
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000759
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00369
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001966
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002767
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002509
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002656
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000726
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002725
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004626
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004588
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000628
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002616
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001856
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002576
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002144
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002693
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001789
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002745
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001803
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002616
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000729
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002604
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001899
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002727
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001842
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002616
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00067
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003672
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000683
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004029
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003762
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003239
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002079
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004564
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000978
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003183
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002088
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003257
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001751
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002632
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000764
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003273
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00193
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002963
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001893
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002902
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002029
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00284
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001801
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002597
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000706
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003687
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000679
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004018
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001834
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002711
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001748
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003728
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001909
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002726
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001842
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002653
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001796
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004052
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000729
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003655
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000683
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003672
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000724
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002569
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001801
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00272
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00181
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002906
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001826
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002634
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002077
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003653
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001901
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002722
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001851
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002577
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000677
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002562
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001843
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002665
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002894
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002565
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002812
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002592
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000666
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002575
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002387
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002596
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000673
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00364
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000711
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002654
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001794
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002742
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001877
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002647
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00072
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003683
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00074
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002727
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001814
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003169
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000694
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003757
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000685
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003642
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000714
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003915
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000688
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003643
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001892
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004058
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000682
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003661
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000729
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003695
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000715
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003749
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000739
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002681
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001864
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002678
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00067
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002637
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001843
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004003
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000742
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003845
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000765
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003659
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00068
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.0026
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001769
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002586
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001992
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002786
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004584
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002759
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003632
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002238
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003173
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000993
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003136
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002108
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003273
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002083
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003326
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002049
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002803
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001836
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002584
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000679
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002574
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002393
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002804
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000659
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004667
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000741
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00368
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000733
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003315
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001834
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00267
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001973
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002614
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001826
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00272
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001667
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002741
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001929
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002617
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000658
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003285
+        }
+      ],
+      "recovery": "verified"
+    },
+    {
+      "name": "trace-put-c8",
+      "operations": 64,
+      "sync_calls": 256,
+      "calls_by_path": {
+        "/data/bench.rdb": 256
+      },
+      "calls": [
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001772
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003176
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001787
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002545
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000648
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002628
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001847
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002602
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001736
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002615
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001772
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002626
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00194
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003022
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001943
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002964
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001928
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00298
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001971
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002993
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001784
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002562
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00176
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002565
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00179
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003939
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00063
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00361
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000712
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003582
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000652
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00359
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000641
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003541
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000647
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00358
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000623
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003598
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000638
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003524
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000663
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003591
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000647
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003536
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00066
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003606
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000675
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00352
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000683
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003609
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000635
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002629
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001796
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002521
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000634
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002537
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002309
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00248
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000647
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002544
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001829
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002531
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000629
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002538
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001797
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002557
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000673
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003664
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000673
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002589
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001789
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002616
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000729
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003599
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000621
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003615
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000724
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003607
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000604
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003595
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000679
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003571
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00066
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003624
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000659
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003081
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001737
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002615
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00175
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002633
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001806
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002655
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001837
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002626
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001756
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002618
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00178
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002614
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001743
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002627
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00181
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002598
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001767
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002623
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001802
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002629
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001767
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002518
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000689
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003537
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000641
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003549
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000708
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003602
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000611
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003612
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000705
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003142
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001786
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002594
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00185
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002683
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001754
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002645
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001808
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002671
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001983
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002548
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001825
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002653
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001747
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002537
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000666
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002577
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001759
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002555
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000716
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002565
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001835
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002537
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00072
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002987
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001933
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002914
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000867
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002972
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00198
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002947
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000848
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00298
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002257
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002573
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000753
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002574
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00174
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002494
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000699
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002573
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001773
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002799
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00073
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002683
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001793
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002562
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000755
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00298
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001833
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002645
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001867
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002682
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001767
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00258
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000664
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002569
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001774
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00256
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000673
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002587
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001769
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002558
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002095
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002593
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001815
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002558
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000692
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002599
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001756
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002578
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000685
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002616
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001828
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002655
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000648
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002596
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00177
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002549
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000668
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003628
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000622
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003581
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000656
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003572
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000615
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003584
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000631
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003588
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000648
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003533
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000739
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002577
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001763
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002622
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000647
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.003958
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00181
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00267
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000724
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002624
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001769
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002573
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000649
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002554
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001802
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002584
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000755
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002617
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001766
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002521
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000656
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002559
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001748
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00253
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000682
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002565
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001746
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002623
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00182
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002687
+        },
+        {
+          "thread": 27,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00173
+        },
+        {
+          "thread": 27,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002707
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.00178
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002669
+        },
+        {
+          "thread": 44,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001739
+        },
+        {
+          "thread": 44,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002686
+        },
+        {
+          "thread": 43,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001749
+        },
+        {
+          "thread": 43,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002597
+        },
+        {
+          "thread": 26,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001795
+        },
+        {
+          "thread": 26,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.004023
+        },
+        {
+          "thread": 28,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000619
+        },
+        {
+          "thread": 28,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002593
+        },
+        {
+          "thread": 45,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001729
+        },
+        {
+          "thread": 45,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002518
+        },
+        {
+          "thread": 46,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.000615
+        },
+        {
+          "thread": 46,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002538
+        },
+        {
+          "thread": 47,
+          "operation": "fdatasync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.001761
+        },
+        {
+          "thread": 47,
+          "operation": "fsync",
+          "path": "/data/bench.rdb",
+          "returned": 0,
+          "seconds": 0.002559
+        }
+      ],
+      "recovery": "verified"
+    }
+  ],
+  "classification": "strace diagnostic; syscall duration includes tracing overhead; no throughput claim",
+  "server": {
+    "container": "reddb-arch-write-main-grouped-20261020",
+    "image_id": "sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4",
+    "image_digests": [
+      "reddb-query-perf-tools@sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4"
+    ],
+    "command": [
+      "/build/architecture-main-0eb3a89c-red",
+      "server",
+      "--path",
+      "/data/bench.rdb",
+      "--http-bind",
+      "0.0.0.0:5000",
+      "--workers",
+      "4",
+      "--http-max-handlers",
+      "64",
+      "--no-auth"
+    ],
+    "environment": [
+      "REDDB_GROUP_COMMIT_WINDOW_US=200",
+      "REDDB_MEMORY_BUDGET=1073741824",
+      "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+      "RUST_MIN_STACK=8388608",
+      "REDDB_DURABILITY=wal_durable_grouped",
+      "REDDB_DURABILITY_MODE=wal_durable_grouped",
+      "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "RUSTUP_HOME=/usr/local/rustup",
+      "CARGO_HOME=/usr/local/cargo",
+      "RUST_VERSION=1.95.0"
+    ],
+    "cpu_set": "0-3",
+    "nano_cpus": 4000000000,
+    "memory_limit": 2147483648,
+    "mounts": [
+      {
+        "Type": "volume",
+        "Name": "reddb-kv-build-20261020",
+        "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+        "Destination": "/build",
+        "Driver": "local",
+        "Mode": "z",
+        "RW": false,
+        "Propagation": ""
+      },
+      {
+        "Type": "volume",
+        "Name": "reddb-arch-write-data-main-grouped-20261020",
+        "Source": "/var/lib/docker/volumes/reddb-arch-write-data-main-grouped-20261020/_data",
+        "Destination": "/data",
+        "Driver": "local",
+        "Mode": "z",
+        "RW": true,
+        "Propagation": ""
+      },
+      {
+        "Type": "bind",
+        "Source": "/run/desktop/mnt/host/c/Users/filip/dev/reddb-kv-index/bench/results/kv-architecture-2026-10-20/writes/main-grouped",
+        "Destination": "/results",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      }
+    ]
+  },
+  "client": {
+    "container": "reddb-arch-write-client-main-grouped-20261020",
+    "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+    "image_digests": [
+      "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+    ],
+    "command": [
+      "sleep",
+      "infinity"
+    ],
+    "environment": [
+      "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "LANG=C.UTF-8",
+      "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+      "PYTHON_VERSION=3.12.15",
+      "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+    ],
+    "cpu_set": "4-5",
+    "nano_cpus": 2000000000,
+    "memory_limit": 1073741824,
+    "mounts": [
+      {
+        "Type": "bind",
+        "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench",
+        "Destination": "/bench",
+        "Mode": "",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\results\\kv-architecture-2026-10-20\\writes\\main-grouped",
+        "Destination": "/results",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      }
+    ]
+  },
+  "engine_revision": "0eb3a89cf3559b9408de6a935bfbca57bcf504ae",
+  "binary_sha256": "6afcf03b3cc7aa42d693f02bdf653f7ca1cda2b9e3e125940b8e4551c8626c56",
+  "started_unix_ms": 1792536887567,
+  "finished_unix_ms": 1792536904949
+}

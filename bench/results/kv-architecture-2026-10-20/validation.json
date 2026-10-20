@@ -1,0 +1,45 @@
+{
+  "source_revision": "fae39eb6d07c32f8bc734973f10a9349a8e56a45",
+  "native": {
+    "platform": "Windows 11, Rust 1.99",
+    "cargo_check_locked": "passed",
+    "cargo_fmt_check": "passed",
+    "embedded_group_commit_tests": {"passed": 9, "failed": 0},
+    "keyed_tests": {"passed": 10, "failed": 0},
+    "query_harness_tests": {"passed": 7, "failed": 0},
+    "kv_harness_tests": {"passed": 12, "failed": 0},
+    "broad_kv_run_before_final_session_fence": {
+      "passed": 46,
+      "failed": 1,
+      "failure": "Vault/paged constructor, Windows OS error 33; reproduced on clean main before writes",
+      "baseline_log": "windows-vault-baseline.txt",
+      "candidate_log": "windows-vault-current.txt"
+    },
+    "earlier_targeted_passes": {
+      "catalog_cache": 4,
+      "artifact_recovery_locking": 28,
+      "sql_table": 7,
+      "key_lookup": 12,
+      "raw_mutation": 1,
+      "borrowed_hydration": 1
+    }
+  },
+  "ci": {
+    "2584e484": "https://github.com/reddb-io/reddb/actions/runs/39509985752",
+    "fae39eb6": "https://github.com/reddb-io/reddb/actions/runs/39514292756",
+    "scope": "Actual CI workflow; docs shim is not Rust test evidence"
+  },
+  "final_write_binary": {
+    "file": "architecture-pr-fae39eb6-red",
+    "sha256": "3337efdfdd686fafca7d9d02fc82f53c18bc589824f391300946256c45ac1adf",
+    "compiler": "Rust 1.95, Linux release",
+    "source": "Complete git archive of fae39eb6; every archived file compared with build tree; no extra Rust files under crates/src/tests; changed source copied with fresh mtimes"
+  },
+  "limits": [
+    "No direct KiviDB comparison",
+    "Two process runs per read version; no confidence interval or capacity claim",
+    "Read matrix remains labeled 2584e484, final session-fence write profiles labeled fae39eb6",
+    "Retained versions, segment count and raw-mutated candidates still affect lookup cost",
+    "Windows paged/Vault OS error 33 remains unresolved"
+  ]
+}
