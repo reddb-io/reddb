@@ -873,10 +873,11 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
-        let Some(entity) = self.get_entity(model, collection, key)? else {
-            return Ok(None);
-        };
-        Ok(kv_value_from_entity(&entity).map(|value| (value, entity.id)))
+        Ok(self
+            .project_entity(model, collection, key, |entity| {
+                kv_value_from_entity(entity).map(|value| (value, entity.id))
+            })?
+            .flatten())
     }
 
     /// Whether `collection` retains MVCC history (opted into versioning).
@@ -904,6 +905,16 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
+        self.project_entity(model, collection, key, Clone::clone)
+    }
+
+    fn project_entity<T>(
+        &self,
+        model: crate::catalog::CollectionModel,
+        collection: &str,
+        key: &str,
+        project: impl FnMut(&crate::storage::UnifiedEntity) -> T,
+    ) -> RedDBResult<Option<T>> {
         self.ensure_declared_model(model, collection)?;
         let store = self.runtime.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
@@ -916,7 +927,7 @@ impl<'a> KvAtomicOps<'a> {
         } else {
             None
         };
-        Ok(manager.find_key_entity(key, snapshot.as_ref(), versioned))
+        Ok(manager.project_key_entity(key, snapshot.as_ref(), versioned, project))
     }
 
     fn latest_kv_entries(

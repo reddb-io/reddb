@@ -16,8 +16,12 @@ Cost sketch: with N collection rows, S segments and V retained versions of the
 requested key, a normal point lookup changes from O(N) traversal/materialization
 to expected O(S + V) candidate work, plus hashing/comparing the key bytes.
 Fingerprint collisions add candidates and are always checked against the full key.
-The segment probe borrows rows without allocations; the manager clones only a
-selected candidate per segment. This does not establish constant-time lookup
+The segment probe borrows rows without allocations; the manager projects a
+selected candidate under its segment read guard. GET extracts only the value
+and physical ID, while mutation callers explicitly request an owned entity.
+Older segment candidates that cannot replace the current best version are not
+projected. Projection callbacks must stay bounded and must not re-enter storage.
+This does not establish constant-time lookup
 independent of segment count or end-to-end superiority to another database.
 
 Insertion, bulk insertion, deletion, key-changing replacements, snapshot adoption
@@ -50,6 +54,13 @@ evaluates no rows. Other tests cover flat and hash storage, bulk ID gaps, mutabl
 key changes, forced sealed mutations, collision rechecks, snapshot parity with
 the existing scan on another thread, paced consolidation and persistent reopen.
 The allocation ratchet requires zero allocations for the borrowed segment hit.
+The manager's integer-value projection also requires zero allocations. A warmed
+public `KvAtomicOps::get` integer hit on Windows / Rust 1.99 allocated five times
+before projection (revision `51d4a6de`), versus two for a miss. The same regression
+test requires hits to allocate no more than misses plus cloning the returned
+value itself; integer, text and nested-array values are covered. The remaining
+runtime overhead is outside this projection. This is allocation evidence, not a
+throughput comparison with Redis or KiviDB.
 
 An optional diagnostic compares the indexed segment probe with an early-exit
 borrowed scan over 100, 10,000 and 100,000 rows (1,000 reads each):
