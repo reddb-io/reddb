@@ -1,6 +1,6 @@
 # Storage reliability comparison
 
-Assessment date: 2026-10-19. Scope: page integrity, index consistency, crash
+Assessment updated: 2026-10-20. Scope: page integrity, index consistency, crash
 recovery, bounded storage growth, and operational verification. This is a source
 and runtime qualification review, not a throughput benchmark or a certification.
 Competitor behavior below assumes durable configurations and storage that honors
@@ -10,9 +10,11 @@ flush requests. No engine can make arbitrary failing hardware infallible.
 
 RedDB has relevant mechanisms, but the evidence does not yet establish reliability
 parity with MariaDB/InnoDB, PostgreSQL, or MongoDB/WiredTiger. The actual staging
-workload failed qualification after the 1.24.9 release. The official 1.24.10
-workflow binary subsequently passed the snapshot-based local qualification below;
-deployed staging qualification remains a separate acceptance gate.
+workload failed qualification after the 1.24.9 release. Official 1.24.10 and
+1.24.11 artifacts have since passed specific local checks, but concurrent
+rollback/update qualification exposed a separate WAL acknowledgement/reset race.
+Successful CI, publication and Kubernetes readiness do not close that runtime
+acceptance gate.
 
 The checkpoint retirement design is conceptually closest to WiredTiger's delayed
 block reclamation: publish a durable replacement before reusing a retired
@@ -49,9 +51,44 @@ storage for every workload, or safe general physical compaction.
 | --- | --- | --- | --- | --- |
 | Partial page writes | Doublewrite buffer preserves a recoverable page before its destination is overwritten. | WAL full-page images protect page recovery. | New checkpoint publication preserves the previous valid checkpoint; journal recovery covers intervening changes. | Checksummed pages, in-file DWB, WAL, and dual superblocks exist. Recent allocator ownership fixes address a concrete page-reuse fault; exhaustive fault equivalence is not established. |
 | Logical index correctness | `CHECK TABLE ... EXTENDED` checks row/index links in supported versions. | `amcheck` checks B-tree invariants and optionally heap coverage and uniqueness. | `validate` reports missing/extra index entries and invalid documents. | Index checkpoint/restart/WAL regressions exist. Catalog declaration/readiness comparisons are not a complete row-to-index validator. |
-| Stable-size update workload | Purge and page reuse allow obsolete space to be reused, subject to transaction/history retention. | `VACUUM` reclaims dead versions for reuse, subject to visibility horizons. | Checkpoint block-manager extent lists delay reuse until old checkpoints are retired. | New retired-tree tracking and freelist fencing pass fixed-workload tests, including restart and crash cases. Historical orphan-page recovery is outside that fix. |
+| Stable-size update workload | Background purge and page reuse allow obsolete space to be reused, subject to transaction/history retention. | Autovacuum and manual `VACUUM` reclaim dead versions for reuse, subject to visibility horizons. | Checkpoint block-manager extent lists delay reuse until old checkpoints are retired. | Retired-tree tracking and freelist fencing pass specific fixed-workload tests. MVCC vacuum is currently manual (ADR 0014); historical orphan-page recovery and automatic MVCC collection remain gaps. |
 | Returning bytes to the filesystem | Tablespace and version dependent: table rebuild/optimization and newer optional system-tablespace autoshrink have different contracts. | Ordinary `VACUUM` primarily enables reuse; `VACUUM FULL` rewrites the table and requires extra space and locking. | `compact` attempts to return obsolete blocks; effectiveness depends on block location and workload. | `VACUUM FULL` currently forces persistence after MVCC vacuum; it is not a general paged-file rewrite/truncation operation. |
-| Operator verification | `CHECK TABLE`, `innochecksum`, recovery modes, backup/restore procedures. | `amcheck`, checksums, `REINDEX`, WAL recovery and backup/restore procedures. | `validate`, journal/checkpoints, `compact`, replica resync and backup/restore procedures. | `SCRUB` and salvage APIs exist, but the inspected implementations target `RDBSBLK1` embedded artifacts rather than the current paged `RDDB` store. Their presence does not prove coverage of the staging format. |
+| Operator verification | `CHECK TABLE`, `innochecksum`, recovery modes, backup/restore procedures. | `amcheck`, checksums, `REINDEX`, WAL recovery and backup/restore procedures. | `validate`, journal/checkpoints, `compact`, replica resync and backup/restore procedures. | Embedded `SCRUB`/salvage explicitly reject the current paged format in 1.24.11. A complete supported current-format verifier and repair path are still required. |
+
+## Additional qualification, 2026-10-20
+
+The signed 1.24.10 image restored staging Auth with a 1 GiB engine budget inside
+its unchanged 2 GiB container limit. An isolated copy passed writes, rollback,
+three checkpoints in 90/150/159 ms and acknowledged-write survival across pod
+replacement. After reconnecting the real application, a checkpoint took 26,404
+ms. The platform store's live checkpoint returned HTTP 503 after 30,016 ms;
+concurrent reads/writes remained fast while login/catalog reached their deadlines.
+No checkpoint retries were started. A timed-out caller does not cancel engine work.
+
+The official 1.24.11 Linux artifact passed full-catalog inspection in 1,308 ms
+under a 3 GiB cgroup limit without OOM. Three local checkpoints took
+567/620/512 ms, but concurrent native updates of `worker_leases` timed out.
+Separate connections did not remove that failure. A reduced update/checkpoint
+workload passed; adding concurrent rollback reproduced the stall.
+
+A coordinator regression pauses a writer after enqueue, before acknowledgement.
+The published implementation allows checkpoint reset to discard that queued
+record and invalidate its reserved offset. The proposed shared WAL-epoch fence
+keeps append leases through acknowledgement, excludes stale flusher publication,
+and lets the flusher drain existing leases while reset waits. That regression
+fails before the patch and passes afterward; complete snapshot/runtime and
+deployed qualification remain required before calling the issue closed.
+
+Manual vacuum was also qualified on a preserved, older Auth copy with the
+official 1.24.11 binary, a 1 GiB engine budget and a 2 GiB cgroup limit. It
+removed 675,058 dead versions from the four Auth tables, leaving 4,109 physical
+versions matching the visible row counts. Counts and hashes of non-null encrypted
+payloads were unchanged after checkpoint and cold reopen. Peak cgroup memory was
+1,347,887,104 bytes. A bounded independent scan found no structure, value or
+leaf-link faults. This scan is not a complete row/index/allocator verifier.
+The file stayed at 366,084,096 bytes: vacuum made pages reusable; it did not
+perform physical shrinking. This prior-copy result does not authorize treating
+the current live store as already vacuumed or compacted.
 
 ## Concrete RedDB gaps
 
@@ -62,13 +99,12 @@ storage for every workload, or safe general physical compaction.
    snapshot reproducer. Version 1.24.10 removes full artifact reconstruction from
    the health path and passes that local reproducer without increasing its
    3 GiB limit. Increasing a limit alone would not establish boundedness.
-2. **Inspection can trigger maintenance.** `RedDB::physical_metadata()` currently
-   calls `load_or_bootstrap_physical_metadata(!read_only)`. When native metadata
-   is ahead or its sidecar is missing, this can persist metadata and native
-   artifacts from a nominally observational path. Artifact construction copies
-   collections and builds search structures. The reproduced catalog OOM was
-   addressed by removing payload reconstruction/decoding from health; this
-   conditional getter publication remains a separate maintenance-boundary concern.
+2. **WAL reset must preserve acknowledgement ordering.** The concurrent
+   rollback/update regression above is not covered by a healthy idle catalog or
+   successful standalone checkpoints. Qualify reset, flusher publication and
+   acknowledged-write recovery together. Version 1.24.11 already makes physical
+   metadata/health inspection observational and drains periodic runtime workers
+   before releasing storage; those fixes do not, by themselves, close this race.
 3. **Current-format verification needs explicit qualification.** The SQL `SCRUB`
    route calls `reddb_file::scrub_embedded_store`. That implementation reads two
    4 KiB `RDBSBLK1` authorities, checks an embedded snapshot, and checks a WAL
