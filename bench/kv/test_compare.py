@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import compare
 import local_matrix
+import summarize
 
 
 def resp(raw, fence=False):
@@ -48,6 +49,13 @@ class FakeClient:
 
 
 class CompareTests(unittest.TestCase):
+    def test_failed_partial_samples_cannot_be_aggregated_as_success(self):
+        case = {"engine": "redis", "operation": "get", "status": "invalid",
+                "config": vars(arguments()), "rounds": [{"throughput_ops_s": 999999}]}
+        result = summarize.summarize_case(case, [], "server", "client")
+        self.assertEqual(result["status"], "invalid")
+        self.assertNotIn("median_throughput_ops_s", result)
+
     def test_resource_samples_accept_windows_docker_cursor_escapes(self):
         sample = local_matrix.resource_sample('\x1b[H{"CPUPerc":"12.5%"}\x1b[K\n')
         self.assertEqual(sample["CPUPerc"], "12.5%")
