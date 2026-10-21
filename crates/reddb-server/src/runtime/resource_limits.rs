@@ -53,7 +53,8 @@ pub struct ResourceLimits {
     /// Concurrent materialized read executions. Zero leaves admission unbounded.
     pub max_concurrent_queries: Option<u64>,
 
-    /// Maximum canonical compact-JSON read-result bytes. Larger results fail
+    /// Maximum compact-JSON core read payload (query, columns, canonical records).
+    /// HTTP additionally bounds its complete presentation envelope. Larger results fail
     /// without returning successful partial data. Mutation acknowledgements
     /// are excluded so a committed write is not reported as a read-limit failure.
     pub max_result_bytes: Option<u64>,

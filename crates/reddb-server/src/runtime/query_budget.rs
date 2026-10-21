@@ -174,20 +174,29 @@ pub(super) fn check_result(
     {
         return Err(result_limit_error(maximum));
     }
-    for record in &result.result.records {
-        let value = crate::presentation::query_result_json::unified_record_json(
-            record,
-            &result.result.columns,
-        );
+    let mut used = empty_payload(result)
+        .to_string_compact_limited(limit)
+        .ok_or_else(|| result_limit_error(maximum))?
+        .len();
+    for (index, record) in result.result.records.iter().enumerate() {
+        used = used.saturating_add(usize::from(index > 0));
+        let value =
+            crate::query_payload_render::unified_record_json(record, &result.result.columns);
         let encoded = value
             .to_string_compact_limited(limit.saturating_sub(used))
             .ok_or_else(|| result_limit_error(maximum))?;
         used = used.saturating_add(encoded.len());
     }
-    crate::presentation::query_result_json::runtime_query_json(result, &None, &None)
-        .to_string_compact_limited(limit)
-        .ok_or_else(|| result_limit_error(maximum))?;
     Ok(())
+}
+
+// Transport-neutral core: presentation adds its own bounded descriptor/envelope.
+fn empty_payload(result: &RuntimeQueryResult) -> crate::json::Value {
+    crate::json!({
+        "query": result.query.clone(),
+        "columns": crate::json::Value::Array(result.result.columns.iter().cloned().map(crate::json::Value::String).collect()),
+        "records": crate::json::Value::Array(Vec::new()),
+    })
 }
 
 #[cfg(test)]
@@ -245,9 +254,18 @@ mod tests {
             &"é\n".repeat(400),
             "select",
         );
-        let size = crate::presentation::query_result_json::runtime_query_json(&result, &None, &None)
-            .to_string_compact()
-            .len() as u64;
+        let size = (empty_payload(&result).to_string_compact().len()
+            + result
+                .result
+                .records
+                .iter()
+                .map(|record| {
+                    crate::query_payload_render::unified_record_json(record, &result.result.columns)
+                        .to_string_compact()
+                        .len()
+                })
+                .sum::<usize>()
+            + result.result.records.len().saturating_sub(1)) as u64;
         let limits = |maximum| ResourceLimits {
             max_result_bytes: Some(maximum),
             ..Default::default()

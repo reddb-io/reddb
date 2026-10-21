@@ -57,7 +57,7 @@ gauge that tooling can read out of `/admin/status` or `/metrics`.
 | `RED_MAX_MEMORY_MB` | Soft RSS budget in MiB; honoured against the cgroup memory hint when present | `reddb_limit_memory_bytes` |
 | `RED_MAX_QUERY_DURATION_MS` | Cooperative materialized-read deadline at work checkpoints | — |
 | `RED_MAX_CONCURRENT_QUERIES` | Concurrent materialized reads/output streams per runtime; rejects saturation with 429 | `/admin/status` limits |
-| `RED_MAX_RESULT_BYTES` | Canonical compact-JSON read result / cumulative streamed payload ceiling; over-limit buffered output returns 413 | — |
+| `RED_MAX_RESULT_BYTES` | Compact-JSON core read payload / final HTTP JSON / cumulative classified-stream payload ceiling; over-limit buffered output returns 413 | — |
 | `REDDB_WIRE_HANDSHAKE_TIMEOUT_SECS` | Window for TLS + protocol handshake on the wire listeners (default 15) | — |
 | `REDDB_GRPC_MAX_MESSAGE_BYTES` | Largest gRPC message accepted or produced (default 32 MiB) | — |
 
@@ -78,8 +78,9 @@ output accounting and bounded JSON encoding avoid constructing an unbounded
 second serialized buffer, but they do not cap all intermediate executor storage
 or one typed value conversion.
 
-Buffered read output must fit its canonical result ceiling; the final HTTP JSON
-envelope is also bounded, including request-selected metadata. NDJSON/SELECT/SSE
+The engine accounts the transport-neutral core payload (query text, columns and
+canonical records) row by row. Buffered HTTP reads additionally bound the complete
+response envelope, including descriptors and request-selected metadata. NDJSON/SELECT/SSE
 output streams for classified reads retain their budget for the stream lifetime and charge payload
 bytes before buffering them (HTTP chunk framing is excluded). If a limit fires
 after headers, the stream must fail without a successful end frame; clients must

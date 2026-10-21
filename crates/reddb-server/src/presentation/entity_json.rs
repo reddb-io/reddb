@@ -1,14 +1,10 @@
 use std::collections::BTreeSet;
 
 use crate::application::CreateEntityOutput;
-use crate::json::{
-    from_slice as json_from_slice, to_string as json_to_string, Map, Value as JsonValue,
-};
+use crate::json::{to_string as json_to_string, Map, Value as JsonValue};
 use crate::runtime::ScanPage;
 use crate::storage::{CrossRef, EntityData, EntityKind, UnifiedEntity};
 use reddb_types::Value;
-
-const MAX_JSON_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 pub(crate) fn created_entity_output_json(output: &CreateEntityOutput) -> JsonValue {
     let mut object = Map::new();
@@ -62,202 +58,11 @@ pub(crate) fn entity_json(entity: &UnifiedEntity) -> JsonValue {
     JsonValue::Object(object)
 }
 
-pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
-    match value {
-        Value::Null => JsonValue::Null,
-        Value::Integer(value) => exact_i64_to_json(*value),
-        Value::UnsignedInteger(value) => exact_u64_to_json(*value),
-        Value::Float(value) if value.is_finite() => JsonValue::Number(*value),
-        // Canonical query envelopes use the same lossless non-finite tags
-        // understood by RedDB drivers. Bare NaN/Infinity are not RFC 8259
-        // JSON and cannot be read back by `crate::json::from_slice`.
-        Value::Float(value) => {
-            let token = if value.is_nan() {
-                "NaN"
-            } else if value.is_sign_positive() {
-                "Infinity"
-            } else {
-                "-Infinity"
-            };
-            single_key_object("$float", JsonValue::String(token.to_string()))
-        }
-        Value::Text(value) => JsonValue::String(value.to_string()),
-        Value::Blob(value) => JsonValue::String(hex::encode(value)),
-        Value::Boolean(value) => JsonValue::Bool(*value),
-        Value::Timestamp(value) => exact_i64_to_json(*value),
-        Value::Duration(value) => exact_i64_to_json(*value),
-        Value::IpAddr(value) => JsonValue::String(value.to_string()),
-        Value::MacAddr(value) => JsonValue::String(format_mac(value)),
-        Value::Vector(value) => JsonValue::Array(
-            value
-                .iter()
-                .map(|entry| JsonValue::Number(*entry as f64))
-                .collect(),
-        ),
-        Value::Json(value) => storage_json_bytes_to_json(value),
-        Value::Uuid(value) => JsonValue::String(hex::encode(value)),
-        Value::NodeRef(value) => JsonValue::String(value.clone()),
-        Value::EdgeRef(value) => JsonValue::String(value.clone()),
-        Value::VectorRef(collection, id) => {
-            let mut object = Map::new();
-            object.insert(
-                "collection".to_string(),
-                JsonValue::String(collection.clone()),
-            );
-            object.insert("id".to_string(), exact_u64_to_json(*id));
-            JsonValue::Object(object)
-        }
-        Value::RowRef(table, row_id) => {
-            let mut object = Map::new();
-            object.insert("table".to_string(), JsonValue::String(table.to_string()));
-            object.insert("row_id".to_string(), exact_u64_to_json(*row_id));
-            JsonValue::Object(object)
-        }
-        Value::Color([r, g, b]) => JsonValue::String(format!("#{:02X}{:02X}{:02X}", r, g, b)),
-        Value::Email(s) => JsonValue::String(s.clone()),
-        Value::Url(s) => JsonValue::String(s.clone()),
-        Value::Phone(n) => exact_u64_to_json(*n),
-        Value::Semver(packed) => JsonValue::String(format!(
-            "{}.{}.{}",
-            packed / 1_000_000,
-            (packed / 1_000) % 1_000,
-            packed % 1_000
-        )),
-        Value::Cidr(ip, prefix) => JsonValue::String(format!(
-            "{}.{}.{}.{}/{}",
-            (ip >> 24) & 0xFF,
-            (ip >> 16) & 0xFF,
-            (ip >> 8) & 0xFF,
-            ip & 0xFF,
-            prefix
-        )),
-        Value::Date(days) => JsonValue::Integer(i64::from(*days)),
-        Value::Time(ms) => JsonValue::Integer(i64::from(*ms)),
-        Value::Decimal(v) => {
-            exact_decimal_to_json(reddb_types::Value::Decimal(*v).display_string())
-        }
-        Value::DecimalText(v) => exact_decimal_to_json(v.clone()),
-        Value::EnumValue(i) => JsonValue::Integer(i64::from(*i)),
-        Value::Array(elems) => JsonValue::Array(elems.iter().map(storage_value_to_json).collect()),
-        Value::TimestampMs(ms) => exact_i64_to_json(*ms),
-        Value::Ipv4(ip) => JsonValue::String(format!(
-            "{}.{}.{}.{}",
-            (ip >> 24) & 0xFF,
-            (ip >> 16) & 0xFF,
-            (ip >> 8) & 0xFF,
-            ip & 0xFF
-        )),
-        Value::Ipv6(bytes) => JsonValue::String(format!("{}", std::net::Ipv6Addr::from(*bytes))),
-        Value::Subnet(ip, mask) => {
-            let prefix = mask.leading_ones();
-            JsonValue::String(format!(
-                "{}.{}.{}.{}/{}",
-                (ip >> 24) & 0xFF,
-                (ip >> 16) & 0xFF,
-                (ip >> 8) & 0xFF,
-                ip & 0xFF,
-                prefix
-            ))
-        }
-        Value::Port(p) => JsonValue::Integer(i64::from(*p)),
-        Value::Latitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
-        Value::Longitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
-        Value::GeoPoint(lat, lon) => JsonValue::String(format!(
-            "{:.6},{:.6}",
-            *lat as f64 / 1_000_000.0,
-            *lon as f64 / 1_000_000.0
-        )),
-        Value::Country2(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::Country3(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::Lang2(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::Lang5(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::Currency(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::AssetCode(code) => JsonValue::String(code.clone()),
-        Value::Money {
-            asset_code,
-            minor_units,
-            scale,
-        } => {
-            let mut object = Map::new();
-            object.insert(
-                "asset_code".to_string(),
-                JsonValue::String(asset_code.clone()),
-            );
-            object.insert("minor_units".to_string(), exact_i64_to_json(*minor_units));
-            object.insert("scale".to_string(), exact_i64_to_json(i64::from(*scale)));
-            JsonValue::Object(object)
-        }
-        Value::ColorAlpha([r, g, b, a]) => {
-            JsonValue::String(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
-        }
-        Value::BigInt(v) => exact_i64_to_json(*v),
-        Value::KeyRef(col, key) => {
-            let mut object = Map::new();
-            object.insert("collection".to_string(), JsonValue::String(col.clone()));
-            object.insert("key".to_string(), JsonValue::String(key.clone()));
-            JsonValue::Object(object)
-        }
-        Value::DocRef(col, id) => {
-            let mut object = Map::new();
-            object.insert("collection".to_string(), JsonValue::String(col.clone()));
-            object.insert("id".to_string(), exact_u64_to_json(*id));
-            JsonValue::Object(object)
-        }
-        Value::TableRef(name) => JsonValue::String(name.clone()),
-        Value::PageRef(page_id) => exact_u64_to_json(u64::from(*page_id)),
-        // Secrets and passwords are always masked in JSON output.
-        // SELECT decryption (if the vault is unsealed) happens earlier
-        // in the query pipeline and replaces Value::Secret with
-        // Value::Text before serialization.
-        Value::Secret(_) => JsonValue::String("***".to_string()),
-        Value::Password(_) => JsonValue::String("***".to_string()),
-    }
-}
-
-fn exact_i64_to_json(value: i64) -> JsonValue {
-    if (-MAX_JSON_SAFE_INTEGER..=MAX_JSON_SAFE_INTEGER).contains(&value) {
-        JsonValue::Integer(value)
-    } else {
-        single_key_object("$int", JsonValue::String(value.to_string()))
-    }
-}
-
-fn exact_u64_to_json(value: u64) -> JsonValue {
-    if value <= MAX_JSON_SAFE_INTEGER as u64 {
-        JsonValue::Integer(value as i64)
-    } else {
-        single_key_object("$uint", JsonValue::String(value.to_string()))
-    }
-}
-
-fn exact_decimal_to_json(value: String) -> JsonValue {
-    single_key_object("$decimal", JsonValue::String(value))
-}
-
-fn single_key_object(key: &str, value: JsonValue) -> JsonValue {
-    JsonValue::Object([(key.to_string(), value)].into_iter().collect())
-}
-
-pub(crate) fn storage_json_bytes_to_json(bytes: &[u8]) -> JsonValue {
-    // A document body may be stored as the native binary container (PRD-1398);
-    // decode it back to JSON for the wire. Plain-JSON bytes fall through.
-    if let Some(body) = crate::document_body::decode_container_to_json(bytes) {
-        return body;
-    }
-    json_from_slice::<JsonValue>(bytes).unwrap_or_else(|_| {
-        JsonValue::Object(
-            [
-                (
-                    "code".to_string(),
-                    JsonValue::String("INVALID_JSON".to_string()),
-                ),
-                ("hex".to_string(), JsonValue::String(hex::encode(bytes))),
-            ]
-            .into_iter()
-            .collect(),
-        )
-    })
-}
+#[cfg(test)]
+use crate::query_payload_render::single_key_object;
+pub(crate) use crate::query_payload_render::{
+    exact_u64_to_json, storage_json_bytes_to_json, storage_value_to_json,
+};
 
 fn entity_kind_json(kind: &EntityKind) -> JsonValue {
     let mut object = Map::new();
@@ -464,14 +269,6 @@ fn cross_ref_json(cross_ref: &CrossRef) -> JsonValue {
         JsonValue::Number(cross_ref.created_at as f64),
     );
     JsonValue::Object(object)
-}
-
-fn format_mac(bytes: &[u8; 6]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join(":")
 }
 
 #[cfg(test)]
