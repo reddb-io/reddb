@@ -133,7 +133,7 @@ impl TxnContext {
 /// `begin()/commit()` pair (which also leaves the xid in neither set).
 pub struct SnapshotManager {
     next_xid: AtomicU64,
-    aborted_revision: AtomicU64,
+    visibility_revision: AtomicU64,
     state: parking_lot::RwLock<ManagerState>,
     /// Reservation window for the autocommit pool. A single
     /// `parking_lot::Mutex` protects two `u64`s — `next` (next xid to
@@ -212,7 +212,7 @@ impl SnapshotManager {
         Self {
             // Start at 1 so xid=0 keeps its pre-MVCC "everyone sees it" meaning.
             next_xid: AtomicU64::new(1),
-            aborted_revision: AtomicU64::new(0),
+            visibility_revision: AtomicU64::new(0),
             state: parking_lot::RwLock::new(ManagerState::default()),
             // Pool starts empty — first caller triggers a refill.
             autocommit_pool: parking_lot::Mutex::new(AutocommitPool::default()),
@@ -240,6 +240,7 @@ impl SnapshotManager {
         let mut state = self.state.write();
         let xid = self.next_xid.fetch_add(1, Ordering::Relaxed);
         state.active.insert(xid);
+        self.visibility_revision.fetch_add(1, Ordering::Release);
         xid
     }
 
@@ -339,12 +340,13 @@ impl SnapshotManager {
     /// future snapshots; earlier snapshots keep their own view.
     pub fn commit(&self, xid: Xid) {
         let mut state = self.state.write();
-        state.active.remove(&xid);
+        let was_active = state.active.remove(&xid);
         state.snapshot_horizons.remove(&xid);
         // Also clear from aborted set in case of prior rollback_to call
         // that touched this xid (defensive; normally a no-op).
-        if state.aborted.remove(&xid) {
-            self.aborted_revision.fetch_add(1, Ordering::Release);
+        let was_aborted = state.aborted.remove(&xid);
+        if was_active || was_aborted {
+            self.visibility_revision.fetch_add(1, Ordering::Release);
         }
         if let Some(ssi) = state.serializable.get_mut(&xid) {
             ssi.committed = true;
@@ -400,9 +402,10 @@ impl SnapshotManager {
     pub fn rollback(&self, xid: Xid) {
         let mut state = self.state.write();
         state.snapshot_horizons.remove(&xid);
-        state.active.remove(&xid);
-        if state.aborted.insert(xid) {
-            self.aborted_revision.fetch_add(1, Ordering::Release);
+        let was_active = state.active.remove(&xid);
+        let newly_aborted = state.aborted.insert(xid);
+        if was_active || newly_aborted {
+            self.visibility_revision.fetch_add(1, Ordering::Release);
         }
         state.serializable.remove(&xid);
         for ssi in state.serializable.values_mut() {
@@ -539,12 +542,13 @@ impl SnapshotManager {
         self.state.read().aborted.contains(&xid)
     }
 
-    pub(crate) fn checkpoint_aborted_state(&self) -> (u64, HashSet<Xid>) {
+    /// Unfinished writers must be rolled back in a crash-recoverable checkpoint,
+    /// without changing their live transaction state or their readers.
+    pub(crate) fn checkpoint_excluded_state(&self) -> (u64, HashSet<Xid>) {
         let state = self.state.read();
-        (
-            self.aborted_revision.load(Ordering::Acquire),
-            state.aborted.clone(),
-        )
+        let mut excluded = state.aborted.clone();
+        excluded.extend(state.active.iter().copied());
+        (self.visibility_revision.load(Ordering::Acquire), excluded)
     }
 
     /// Is this xid still active?
@@ -647,7 +651,7 @@ impl SnapshotManager {
         let previous = aborted.len();
         aborted.retain(|&x| x >= below || pinned.contains_key(&x));
         if previous != aborted.len() {
-            self.aborted_revision.fetch_add(1, Ordering::Release);
+            self.visibility_revision.fetch_add(1, Ordering::Release);
         }
     }
 

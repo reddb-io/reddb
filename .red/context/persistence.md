@@ -27,16 +27,22 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 
 ## Checkpoint reuse
 
+Checkpoints exclude row creators whose transactions are active or aborted and
+clear their delete stamps on committed preimages. Live transaction state stays
+unchanged. Transaction visibility revisions invalidate reuse after begin, commit
+or rollback; equivalent exclusion sets can retain the existing proof. Commit
+WAL publication and visibility changes share the checkpoint publication fence.
+
 Owned row reads restore missing positional column names from the collection's
 shared schema before mutation or index backfill. Explicit row schemas and named
 fields remain authoritative. This changes neither the stored record format nor
 the raw segment revisions used by checkpoint reuse.
 
 Paged checkpoints reuse unchanged collection trees using volatile segment mutation
-revisions and manager identity. Aborted transaction visibility, pending vault
+revisions and manager identity. Active and aborted transaction visibility, pending vault
 versions and record format also participate in reuse admission.
 Visibility changes outside a collection are checked against borrowed row headers
-without serializing its payloads. Each checkpoint shares one frozen aborted-XID
+without serializing its payloads. Each checkpoint shares one frozen excluded-XID
 set across collections for both reuse admission and row normalization.
 WAL replay and every entity or metadata mutation invalidate the corresponding
 generation. New mutation paths must advance the segment revision before exposing mutable data.

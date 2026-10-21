@@ -72,7 +72,8 @@ fn checkpoint_visibility_matches(
     current: &CheckpointVersion,
     manager: &SegmentManager,
 ) -> bool {
-    if previous.aborted_revision == current.aborted_revision
+    if (previous.visibility_revision == current.visibility_revision
+        || previous.excluded_xids == current.excluded_xids)
         && previous.pending_vault == current.pending_vault
     {
         return true;
@@ -84,15 +85,15 @@ fn checkpoint_visibility_matches(
         let skipped = |version: &CheckpointVersion| {
             version.pending_vault.contains(&entity.id)
                 || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                    && version.aborted.contains(&entity.xmin))
+                    && version.excluded_xids.contains(&entity.xmin))
         };
         let previous_skipped = skipped(previous);
         let current_skipped = skipped(current);
         matches = previous_skipped == current_skipped
             && (current_skipped
                 || !matches!(entity.data, EntityData::Row(_))
-                || previous.aborted.contains(&entity.xmax)
-                    == current.aborted.contains(&entity.xmax));
+                || previous.excluded_xids.contains(&entity.xmax)
+                    == current.excluded_xids.contains(&entity.xmax));
         matches
     });
     matches
@@ -535,7 +536,7 @@ impl UnifiedStore {
             && previous.segments == before
             && previous.format_version == self.format_version()
             && !previous.pending_vault.contains(&id)
-            && !previous.aborted.contains(&0)
+            && !previous.excluded_xids.contains(&0)
         {
             previous.segments = after;
         }
@@ -582,7 +583,7 @@ impl UnifiedStore {
             && previous.segments == before
             && previous.format_version == self.format_version()
             && !deleted.iter().any(|id| previous.pending_vault.contains(id))
-            && !previous.aborted.contains(&0)
+            && !previous.excluded_xids.contains(&0)
         {
             previous.segments = after;
         }
@@ -900,8 +901,8 @@ impl UnifiedStore {
                     CheckpointVersion {
                         manager: Arc::downgrade(manager),
                         segments: manager.checkpoint_revisions(),
-                        aborted_revision: 0,
-                        aborted: Arc::default(),
+                        visibility_revision: 0,
+                        excluded_xids: Arc::default(),
                         pending_vault: Arc::default(),
                         format_version: self.format_version(),
                     },
@@ -1077,8 +1078,8 @@ impl UnifiedStore {
                                     CheckpointVersion {
                                         manager: Arc::downgrade(manager),
                                         segments: manager.checkpoint_revisions(),
-                                        aborted_revision: 0,
-                                        aborted: Arc::default(),
+                                        visibility_revision: 0,
+                                        excluded_xids: Arc::default(),
                                         pending_vault: Arc::default(),
                                         format_version,
                                     },
@@ -1289,17 +1290,17 @@ impl UnifiedStore {
         let previous_versions = self.checkpoint_versions.read();
         let mut checkpoint_versions = HashMap::with_capacity(collections.len());
         let pending_vault = Arc::new(pending_vault_versions.clone());
-        let (aborted_revision, aborted) = self.snapshot_manager.get().map_or_else(
+        let (visibility_revision, excluded) = self.snapshot_manager.get().map_or_else(
             || (0, Default::default()),
-            |manager| manager.checkpoint_aborted_state(),
+            |manager| manager.checkpoint_excluded_state(),
         );
-        let aborted = Arc::new(aborted);
+        let excluded = Arc::new(excluded);
         for (name, manager) in collections.iter() {
             let version = CheckpointVersion {
                 manager: Arc::downgrade(manager),
                 segments: manager.checkpoint_revisions(),
-                aborted_revision,
-                aborted: Arc::clone(&aborted),
+                visibility_revision,
+                excluded_xids: Arc::clone(&excluded),
                 pending_vault: Arc::clone(&pending_vault),
                 format_version: self.format_version(),
             };
@@ -1327,12 +1328,13 @@ impl UnifiedStore {
                     CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
                     if pending_vault_versions.contains(&entity.id)
                         || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                            && aborted.contains(&entity.xmin))
+                            && excluded.contains(&entity.xmin))
                     {
                         return None;
                     }
                     let mut normalized = std::borrow::Cow::Borrowed(entity);
-                    if matches!(entity.data, EntityData::Row(_)) && aborted.contains(&entity.xmax) {
+                    if matches!(entity.data, EntityData::Row(_)) && excluded.contains(&entity.xmax)
+                    {
                         normalized.to_mut().xmax = 0;
                     }
                     Some(Self::serialize_entity_record(

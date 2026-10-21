@@ -218,6 +218,10 @@ impl UnifiedStore {
     pub(crate) fn to_binary_dump_bytes(&self) -> Vec<u8> {
         let _vault_guard = self.vault_publication_lock.lock();
         let pending_vault_versions = self.pending_vault_versions.read();
+        let (_, excluded) = self.snapshot_manager.get().map_or_else(
+            || (0, Default::default()),
+            |manager| manager.checkpoint_excluded_state(),
+        );
         let mut buf = Vec::new();
 
         // Version 9 includes explicit table-row logical identity plus MVCC
@@ -238,24 +242,16 @@ impl UnifiedStore {
                     return false;
                 }
                 !matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                    || !self
-                        .snapshot_manager
-                        .get()
-                        .is_some_and(|manager| manager.is_aborted(entity.xmin))
+                    || !excluded.contains(&entity.xmin)
             });
             reddb_file::encode_native_dump_collection_header(&mut buf, name, entities.len() as u32);
 
             // V7+: serialize entity+metadata as a length-prefixed record.
             // Each record: [u32 len][serialize_entity_record bytes]
             for mut entity in entities {
-                // Rolled-back deletions must not become committed tombstones
-                // when a new runtime reconstructs its xid floor from the dump.
-                if matches!(entity.data, EntityData::Row(_))
-                    && self
-                        .snapshot_manager
-                        .get()
-                        .is_some_and(|manager| manager.is_aborted(entity.xmax))
-                {
+                // Unfinished and rolled-back deletions cannot become committed
+                // tombstones when recovery reconstructs the xid floor.
+                if matches!(entity.data, EntityData::Row(_)) && excluded.contains(&entity.xmax) {
                     entity.xmax = 0;
                 }
                 let metadata = manager.get_metadata(entity.id);
