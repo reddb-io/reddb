@@ -66,6 +66,20 @@ run-level repetitions and a proven non-saturating client for that stage.
 
 ## Reproduce
 
+The updated `fae39eb6` comparison is retained in
+[kv-compare-final-2026-10-20](../results/kv-compare-final-2026-10-20/SUMMARY.md).
+Its `run.py` records the full three-engine matrix and a `grouped` write-only
+continuation on a fresh 1,000-key store. `run-matched-grouped.py` then appends
+`grouped-matched`: it first preloads and reopens/verifies the same additional
+11,000 keys present in the primary matrix, so write comparisons also match
+background population. Prefer that continuation when comparing grouped writes
+with Strict/Redis/KiviDB. The smaller-store diagnostic remains visible and is
+not substituted for the less favorable matched result. These scripts record
+local container/image/binary identities; use fresh names and output directories
+when reproducing, rather than overwriting the closed capture. Interpretation,
+latency and unfavorable cells are in the
+[dated report](../../docs/perf/rql-sql-projection-2026-10-20.md#updated-redis--kividb-comparison).
+
 Requires Docker with at least six available CPU IDs and Python 3.10+. Use a clean
 checkout of the recorded engine revision. The run manifest records image digests,
 commands, environment, CPU/memory limits, engine revision and binary checksum.
@@ -149,3 +163,22 @@ missing fsync confirmations and acknowledged-but-discarded writes. They also
 check uneven worker/batch quotas, fixed-duration execution and the real HTTP
 query-result envelope. Invalid runs retain their diagnostic JSON and cannot
 produce a successful aggregate throughput result.
+
+The populated WAL-pressure follow-up is captured separately under
+`bench/results/kv-compare-wal-2026-10-21`. Its runner compares immutable before
+and after Linux binaries in Strict and grouped modes, using identical copies
+of the stopped 12,000-key artifact. Each case performs five rounds of 10,000
+checked overwrites at eight connections, followed by SIGKILL/reopen verification
+of the target and all background keys. This is a fixed-order shared-host
+diagnostic with correlated rounds, not an independent process confidence interval
+or a fresh Redis/KiviDB comparison.
+
+`--artifact-state-path` records checksummed root geometry and snapshot SHA256
+before and after each PUT round, outside timed requests. At least three rounds
+per case must change the snapshot image; merely moving checkpoints beyond the
+measurement window cannot pass. CRC32 of the whole internally checksummed
+snapshot is not used to detect image changes because its residue can be constant.
+The capture also retains p99.9 and maximum completion latency. Its own runner
+writes the WAL-pressure summary; do not run the generic `summarize.py` over that
+different manifest schema. Fresh reproductions need distinct names/directories
+and the exact binaries/images/fixture identities recorded in the manifest.

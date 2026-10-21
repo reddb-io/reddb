@@ -773,6 +773,89 @@ fn embedded_snapshot_crash_injection_preserves_published_snapshot() {
     }
 }
 
+#[test]
+fn embedded_wal_growth_crash_preserves_acknowledged_prefix() {
+    const TEST_NAME: &str = "embedded_wal_growth_crash_preserves_acknowledged_prefix";
+    const IMAGE: &[u8] = b"RDST-base plus acknowledged write";
+    let operation = std::env::var("REDDB_EMBEDDED_RDB_CRASH_CHILD_OP").ok();
+    if matches!(operation.as_deref(), Some("grow" | "grown_append")) {
+        let path = PathBuf::from(
+            std::env::var("REDDB_EMBEDDED_RDB_CRASH_CHILD_PATH").expect("child path"),
+        );
+        if operation.as_deref() == Some("grow") {
+            EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(&path, IMAGE, 1024 * 1024)
+                .expect("child grows at checkpoint fence");
+        } else {
+            EmbeddedRdbArtifact::append_wal_payloads(&path, &[vec![0x72; 128 * 1024]])
+                .expect("child appends across the previous snapshot location");
+        }
+        panic!("crash injection did not fire");
+    }
+    let directory = temp_dir("growth_crash");
+    for (operation, points) in [
+        (
+            "grow",
+            &[
+                "snapshot_after_image_write",
+                "snapshot_after_image_sync",
+                "snapshot_after_manifest_write",
+                "snapshot_after_manifest_sync",
+                "snapshot_after_superblock_write",
+            ][..],
+        ),
+        (
+            "grown_append",
+            &[
+                "wal_after_frame_write",
+                "wal_after_frame_sync",
+                "wal_after_superblock_write",
+            ][..],
+        ),
+    ] {
+        for point in points {
+            let path = directory.path().join(format!("{operation}-{point}.rdb"));
+            EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-base").expect("base");
+            EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"acknowledged".to_vec()])
+                .expect("acknowledged before growth");
+            if operation == "grown_append" {
+                EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(&path, IMAGE, 1024 * 1024)
+                    .expect("grown checkpoint includes acknowledged prefix");
+            }
+            run_crash_child(TEST_NAME, &path, operation, point);
+            let open = EmbeddedRdbArtifact::open(&path).expect("recover after crash");
+            let snapshot = EmbeddedRdbArtifact::read_snapshot(&open)
+                .expect("snapshot")
+                .expect("published image");
+            let wal = EmbeddedRdbArtifact::read_wal_payloads(&open).expect("complete WAL frames");
+            if snapshot == b"RDST-base" {
+                assert_eq!(operation, "grow");
+                assert_eq!(wal, vec![b"acknowledged".to_vec()], "{point}");
+            } else {
+                assert_eq!(snapshot, IMAGE, "{point}");
+                assert_eq!(open.manifest.wal_region_bytes, 1024 * 1024);
+                assert!(
+                    wal.is_empty()
+                        || (operation == "grown_append" && wal == vec![vec![0x72; 128 * 1024]]),
+                    "partial appended operation at {point}"
+                );
+            }
+            EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(&path, IMAGE, 1024 * 1024)
+                .expect("retry checkpoint after crash");
+            let appended =
+                EmbeddedRdbArtifact::append_wal_payloads(&path, &[vec![0x73; 128 * 1024]])
+                    .expect("append into enlarged reservation after recovery");
+            assert_eq!(
+                EmbeddedRdbArtifact::read_snapshot(&appended).expect("snapshot"),
+                Some(IMAGE.to_vec())
+            );
+            assert_eq!(
+                EmbeddedRdbArtifact::read_wal_payloads(&appended).expect("WAL"),
+                vec![vec![0x73; 128 * 1024]]
+            );
+        }
+    }
+}
+
 /// Issues #2265 / #2266 — the writer path must use one handle, not several.
 ///
 /// `fs2` maps onto `LockFileEx` on Windows, whose byte-range locks are
@@ -1067,4 +1150,34 @@ fn checkpointing_an_unchanged_image_over_an_empty_wal_writes_nothing() {
     assert!(EmbeddedRdbArtifact::read_wal_payloads(&folded)
         .expect("read wal")
         .is_empty());
+}
+
+#[test]
+fn readers_wait_for_an_exclusive_publication_on_another_handle() {
+    use fs2::FileExt;
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("read-publication.rdb");
+    EmbeddedRdbArtifact::create(&path).expect("artifact");
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("writer");
+    writer.lock_exclusive().expect("publication lock");
+    let (sent, received) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        sent.send(EmbeddedRdbArtifact::open(path))
+            .expect("send result")
+    });
+    let early = received.recv_timeout(std::time::Duration::from_millis(100));
+    FileExt::unlock(&writer).expect("unlock");
+    thread.join().expect("reader completes after unlock");
+    assert!(
+        matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+        "read must wait for publication: {early:?}"
+    );
+    received
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("reader result")
+        .expect("coherent artifact");
 }

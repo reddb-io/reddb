@@ -78,8 +78,7 @@ pub struct RedDB {
     /// `collection_contract(name)` lookup — which happens 3× per insert
     /// (ensure_model, enforce_uniqueness, normalize_fields) and dominated
     /// the insert hot path at ~30%.
-    pub(crate) collection_contract_cache:
-        RwLock<Option<Arc<HashMap<String, Arc<crate::physical::CollectionContract>>>>>,
+    collection_contract_cache: contract_cache::CollectionContractCache,
     /// Optional remote storage backend for snapshot transport.
     pub(crate) remote_backend: Option<Arc<dyn crate::storage::backend::RemoteBackend>>,
     /// Optional CAS-capable handle for backends that implement
@@ -368,6 +367,7 @@ pub struct NativeVectorArtifactBatchInspection {
     pub failures: Vec<(String, String, String)>,
 }
 
+mod contract_cache;
 mod impl_access;
 mod impl_core_a;
 mod impl_core_b;

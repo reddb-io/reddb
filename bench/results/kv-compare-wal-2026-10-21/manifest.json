@@ -1,0 +1,500 @@
+{
+  "schema": "reddb.wal-pressure.v1",
+  "status": "valid-diagnostic",
+  "started_unix_ms": 1792583272282,
+  "classification": "shared-host diagnostic; fixed case order; five rounds/process; no leadership interval",
+  "primary_metric": "checked HTTP PUT p99 completion latency, pipeline 1, 8 connections",
+  "conditions": {
+    "background_keys": 11000,
+    "write_keys": 1000,
+    "value_bytes": 100,
+    "workers": 8,
+    "rounds": 5,
+    "operations_per_round": 10000,
+    "cache": "disabled",
+    "group_window_us": 200,
+    "server_cpus": "0-3 / 4 CPUs",
+    "client_cpus": "4-5 / 2 CPUs",
+    "memory": "server 2GiB / budget 1GiB; client 1GiB",
+    "order": [
+      "before-strict",
+      "after-strict",
+      "after-grouped",
+      "before-grouped"
+    ],
+    "artifact_telemetry": "checksummed roots and snapshot SHA256 outside timed requests",
+    "recovery": "SIGKILL after each full cell; verify write keys and all background keys",
+    "fixture_source": "stopped reddb-kv-final-data-red-20261020/bench.rdb"
+  },
+  "cases": [
+    {
+      "case": "before-strict",
+      "revision": "fae39eb6d07c32f8bc734973f10a9349a8e56a45",
+      "binary_sha256": "3337efdfdd686fafca7d9d02fc82f53c18bc589824f391300946256c45ac1adf",
+      "server": "reddb-wal-before-strict-20261021",
+      "client": "reddb-wal-client-before-strict-20261021",
+      "file": "before-strict.json",
+      "fixture_sha256": "61fdc8fd4541834036fed174124cab4a2bb01b7dc98103153b3735d8dd981e88"
+    },
+    {
+      "case": "after-strict",
+      "revision": "e0d7757705f93fa4b4e033089c42eaf5ad48cef5",
+      "binary_sha256": "7770fb790f2d32c4099979c37e0dafb590f3ea9d99329a83bcc4265ad486668c",
+      "server": "reddb-wal-after-strict-20261021",
+      "client": "reddb-wal-client-after-strict-20261021",
+      "file": "after-strict.json",
+      "fixture_sha256": "61fdc8fd4541834036fed174124cab4a2bb01b7dc98103153b3735d8dd981e88"
+    },
+    {
+      "case": "after-grouped",
+      "revision": "e0d7757705f93fa4b4e033089c42eaf5ad48cef5",
+      "binary_sha256": "7770fb790f2d32c4099979c37e0dafb590f3ea9d99329a83bcc4265ad486668c",
+      "server": "reddb-wal-after-grouped-20261021",
+      "client": "reddb-wal-client-after-grouped-20261021",
+      "file": "after-grouped.json",
+      "fixture_sha256": "61fdc8fd4541834036fed174124cab4a2bb01b7dc98103153b3735d8dd981e88"
+    },
+    {
+      "case": "before-grouped",
+      "revision": "fae39eb6d07c32f8bc734973f10a9349a8e56a45",
+      "binary_sha256": "3337efdfdd686fafca7d9d02fc82f53c18bc589824f391300946256c45ac1adf",
+      "server": "reddb-wal-before-grouped-20261021",
+      "client": "reddb-wal-client-before-grouped-20261021",
+      "file": "before-grouped.json",
+      "fixture_sha256": "61fdc8fd4541834036fed174124cab4a2bb01b7dc98103153b3735d8dd981e88"
+    }
+  ],
+  "containers": {
+    "reddb-wal-before-strict-20261021": {
+      "container": "reddb-wal-before-strict-20261021",
+      "image_id": "sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4",
+      "image_digests": [
+        "reddb-query-perf-tools@sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4"
+      ],
+      "command": [
+        "/build/architecture-pr-fae39eb6-red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--http-max-handlers",
+        "64",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "REDDB_DURABILITY=strict",
+        "REDDB_DURABILITY_MODE=strict",
+        "REDDB_GROUP_COMMIT_WINDOW_US=200",
+        "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "RUSTUP_HOME=/usr/local/rustup",
+        "CARGO_HOME=/usr/local/cargo",
+        "RUST_VERSION=1.95.0"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-wal-data-before-strict-20261021",
+          "Source": "/var/lib/docker/volumes/reddb-wal-data-before-strict-20261021/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-wal-client-before-strict-20261021": {
+      "container": "reddb-wal-client-before-strict-20261021",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "environment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "4-5",
+      "nano_cpus": 2000000000,
+      "memory_limit": 1073741824,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-wal-data-before-strict-20261021",
+          "Source": "/var/lib/docker/volumes/reddb-wal-data-before-strict-20261021/_data",
+          "Destination": "/artifact",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\kv",
+          "Destination": "/bench",
+          "Mode": "",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\results\\kv-compare-wal-2026-10-21",
+          "Destination": "/results",
+          "Mode": "",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ]
+    },
+    "reddb-wal-after-strict-20261021": {
+      "container": "reddb-wal-after-strict-20261021",
+      "image_id": "sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4",
+      "image_digests": [
+        "reddb-query-perf-tools@sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4"
+      ],
+      "command": [
+        "/build/wal-e0d77577-red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--http-max-handlers",
+        "64",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "REDDB_DURABILITY=strict",
+        "REDDB_DURABILITY_MODE=strict",
+        "REDDB_GROUP_COMMIT_WINDOW_US=200",
+        "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "RUSTUP_HOME=/usr/local/rustup",
+        "CARGO_HOME=/usr/local/cargo",
+        "RUST_VERSION=1.95.0"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-wal-data-after-strict-20261021",
+          "Source": "/var/lib/docker/volumes/reddb-wal-data-after-strict-20261021/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-wal-client-after-strict-20261021": {
+      "container": "reddb-wal-client-after-strict-20261021",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "environment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "4-5",
+      "nano_cpus": 2000000000,
+      "memory_limit": 1073741824,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-wal-data-after-strict-20261021",
+          "Source": "/var/lib/docker/volumes/reddb-wal-data-after-strict-20261021/_data",
+          "Destination": "/artifact",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\kv",
+          "Destination": "/bench",
+          "Mode": "",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\results\\kv-compare-wal-2026-10-21",
+          "Destination": "/results",
+          "Mode": "",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ]
+    },
+    "reddb-wal-after-grouped-20261021": {
+      "container": "reddb-wal-after-grouped-20261021",
+      "image_id": "sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4",
+      "image_digests": [
+        "reddb-query-perf-tools@sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4"
+      ],
+      "command": [
+        "/build/wal-e0d77577-red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--http-max-handlers",
+        "64",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_GROUP_COMMIT_WINDOW_US=200",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "REDDB_DURABILITY=wal_durable_grouped",
+        "REDDB_DURABILITY_MODE=wal_durable_grouped",
+        "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "RUSTUP_HOME=/usr/local/rustup",
+        "CARGO_HOME=/usr/local/cargo",
+        "RUST_VERSION=1.95.0"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-wal-data-after-grouped-20261021",
+          "Source": "/var/lib/docker/volumes/reddb-wal-data-after-grouped-20261021/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-wal-client-after-grouped-20261021": {
+      "container": "reddb-wal-client-after-grouped-20261021",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "environment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "4-5",
+      "nano_cpus": 2000000000,
+      "memory_limit": 1073741824,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-wal-data-after-grouped-20261021",
+          "Source": "/var/lib/docker/volumes/reddb-wal-data-after-grouped-20261021/_data",
+          "Destination": "/artifact",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\kv",
+          "Destination": "/bench",
+          "Mode": "",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\results\\kv-compare-wal-2026-10-21",
+          "Destination": "/results",
+          "Mode": "",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ]
+    },
+    "reddb-wal-before-grouped-20261021": {
+      "container": "reddb-wal-before-grouped-20261021",
+      "image_id": "sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4",
+      "image_digests": [
+        "reddb-query-perf-tools@sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4"
+      ],
+      "command": [
+        "/build/architecture-pr-fae39eb6-red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--http-max-handlers",
+        "64",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_GROUP_COMMIT_WINDOW_US=200",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "REDDB_DURABILITY=wal_durable_grouped",
+        "REDDB_DURABILITY_MODE=wal_durable_grouped",
+        "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "RUSTUP_HOME=/usr/local/rustup",
+        "CARGO_HOME=/usr/local/cargo",
+        "RUST_VERSION=1.95.0"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-wal-data-before-grouped-20261021",
+          "Source": "/var/lib/docker/volumes/reddb-wal-data-before-grouped-20261021/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-wal-client-before-grouped-20261021": {
+      "container": "reddb-wal-client-before-grouped-20261021",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "environment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "4-5",
+      "nano_cpus": 2000000000,
+      "memory_limit": 1073741824,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-wal-data-before-grouped-20261021",
+          "Source": "/var/lib/docker/volumes/reddb-wal-data-before-grouped-20261021/_data",
+          "Destination": "/artifact",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\kv",
+          "Destination": "/bench",
+          "Mode": "",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\results\\kv-compare-wal-2026-10-21",
+          "Destination": "/results",
+          "Mode": "",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ]
+    }
+  },
+  "errors": [],
+  "harness_sha256": {
+    "bench/kv/compare.py": "77e46af13adc3f75e1a940c6bd8ede4c532e3da9b70a828c20770d7d14228f50",
+    "bench/results/kv-compare-wal-2026-10-21/run.py": "14c07edb4a141dfcef1fb7442695036bb850dd19c84672ba46d30196c6724a2c"
+  },
+  "harness_revision": "09de1f5472ca72d80e88c8739744716910c61f03",
+  "finished_unix_ms": 1792584349797
+}

@@ -1,0 +1,34 @@
+{
+  "binary_revision": "fae39eb6d07c32f8bc734973f10a9349a8e56a45",
+  "binary_sha256": "3337efdfdd686fafca7d9d02fc82f53c18bc589824f391300946256c45ac1adf",
+  "checkout_revision": "3b4f68491a315fe58563a0d9bd9687787ed5f9c2",
+  "rust_source_equivalence": "git diff of crates/src and Cargo manifests/lock is empty",
+  "classification": "shared-host product-path diagnostic; one process matrix per engine, five rounds/cell",
+  "versions": {
+    "redis": "8.4.0",
+    "kividb": "1.1.0"
+  },
+  "grouped_continuation": {
+    "window_us": 200,
+    "scope": "durable overwrite only, fresh volume, both sync barriers",
+    "profile": "grouped",
+    "background_keys": 0
+  },
+  "no_instrumentation": "No strace/perf attached to timed workloads",
+  "matched_grouped_continuation": {
+    "profile": "grouped-matched",
+    "window_us": 200,
+    "background_keys": 11000,
+    "background_collections": [
+      "kv_diag_1000",
+      "kv_diag_10000"
+    ],
+    "write_keys": 1000,
+    "setup_reopened_and_verified": true,
+    "primary_write_comparison": true,
+    "script": "run-matched-grouped.py"
+  },
+  "completed_steps": 96,
+  "unsupported_http_resp_pipeline_cells": 12,
+  "interpretation": "Shared-host diagnostics; fixed engine order, five rounds per process, substantial variance; no capacity or leadership inference. Prefer matched background population for write comparisons."
+}

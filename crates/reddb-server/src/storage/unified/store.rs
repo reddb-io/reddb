@@ -405,6 +405,7 @@ pub struct UnifiedStore {
     /// this, aborted physical versions are reopened as committed rows.
     pub(crate) snapshot_manager:
         std::sync::OnceLock<Arc<crate::storage::transaction::snapshot::SnapshotManager>>,
+    embedded_commit_session: std::sync::OnceLock<crate::storage::embedded::EmbeddedCommitSession>,
 }
 
 struct RetiredBTree {
@@ -421,6 +422,7 @@ mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
 mod impl_vault_import;
+mod keyed_write;
 mod native_helpers;
 
 pub use self::builder::EntityBuilder;

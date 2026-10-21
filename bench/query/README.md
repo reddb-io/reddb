@@ -62,8 +62,8 @@ write/readback and verifies persisted values after process termination. The
 GET control should issue no syncs. `--stack-traces` records eight writes with
 userspace stacks. Interrupted calls are joined by thread; failed or incomplete
 traces invalidate the profile. Traced timings include instrumentation overhead
-and are not throughput results. Current profile metadata identifies the exact
-baseline binary used; update that identity before profiling another build.
+and are not throughput results. Supply `--engine-revision` and `--binary-sha256`
+for the exact binary being profiled; identity is never inferred from a prior run.
 
 The dated report in `docs/perf/rql-sql-projection-2026-10-20.md` records the
 experiments, engine hashes, limits, negative results and remaining write work.

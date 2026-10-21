@@ -1,0 +1,59 @@
+{
+  "engine_revision": "e0d7757705f93fa4b4e033089c42eaf5ad48cef5",
+  "binary_sha256": "7770fb790f2d32c4099979c37e0dafb590f3ea9d99329a83bcc4265ad486668c",
+  "linux_build": {
+    "status": "passed",
+    "command": "cargo build --release --locked --bin red -j 1",
+    "compiler": "rustc 1.95",
+    "log": "linux-build.log",
+    "provenance": "Full Git archive of engine revision compared byte-for-byte with build source. Changed files copied with fresh mtimes; immutable executable copied before unit-test compilation. Same release profile/toolchain as before binary."
+  },
+  "linux_ci": {
+    "status": "success",
+    "revision": "e0d7757705f93fa4b4e033089c42eaf5ad48cef5",
+    "url": "https://github.com/reddb-io/reddb/actions/runs/39592643015",
+    "checks": "Four Test Suite shards, aggregate Test Suite, quality (fmt/check/clippy), RQL conformance, wire conformance, driver and contract gates passed. Optional Windows/macOS/chaos/feature jobs were skipped.",
+    "regression_log": "linux-ci-regressions.log",
+    "new_regressions_passed": [
+      "embedded_stale_full_result_does_not_checkpoint_reclaimed_space",
+      "embedded_full_wal_reserves_bounded_headroom_for_populated_store",
+      "embedded_grouped_overwrites_recover_across_repeated_full_wal_regions",
+      "checkpoint_fence_drains_retryable_full_requests_without_inheriting_their_error",
+      "embedded_wal_growth_crash_preserves_acknowledged_prefix"
+    ]
+  },
+  "native_file_tests": {
+    "status": "passed",
+    "group_commit_tests": 10,
+    "embedded_artifact_tests": 29,
+    "growth_crash_boundaries": "Five checkpoint-growth and three first-grown-WAL append boundaries; acknowledged prefix recovered."
+  },
+  "local_large_unit_builds": {
+    "status": "interrupted_environment",
+    "reason": "Native debug and Linux release unit compilations exhausted local disk headroom. Both owned compiler runs were stopped; own native dev cache was cleaned with cargo clean. The final Linux production build succeeded. No local final three-test pass is claimed; exact final regressions passed in Linux CI.",
+    "linux_log": "linux-local-tests-interrupted.log"
+  },
+  "red_green": [
+    "Before revalidation, stale full result advanced generation twice instead of once.",
+    "Before adaptive headroom, a populated 2MiB fixture retained only 65536 bytes instead of 1048576.",
+    "Before fence isolation, checkpoint fence inherited a queued request's retryable WAL-full error."
+  ],
+  "test_fixture_corrections": [
+    "Snapshot comparison uses full bytes, not outer CRC32: the internally checksummed image can have a constant CRC residue.",
+    "Repeated-rollover test uses incompressible generated payloads and checks encoded size; repeated text did not force every intended rollover."
+  ],
+  "harness_tests": {
+    "status": "passed",
+    "tests": 13,
+    "log": "harness-tests.log"
+  },
+  "source_archive_sha256": "f10b17a5ec2080983ecdf7e642d36587098ccf4658e9881165afa2c86ece5621",
+  "measurement_validation": {
+    "status": "passed",
+    "cases": 4,
+    "measured_requests": 200000,
+    "request_errors": 0,
+    "changed_snapshot_rounds": 20,
+    "recovery_checks": "All four target and eight background collection checks passed after SIGKILL/reopen."
+  }
+}

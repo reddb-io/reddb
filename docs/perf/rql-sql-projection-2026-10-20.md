@@ -171,7 +171,7 @@ unrelated collections. Output data still allocates; these results do not mean
 the complete request is allocation-free. Counts and command are retained in
 [allocation-evidence.json](../../bench/results/query-projection-2026-10-20/allocation-evidence.json).
 
-## Durable-write diagnosis
+## Durable-write diagnosis before the architectural follow-up
 
 Separate `strace` profiles use the immutable baseline binary and a dedicated
 database. The tracing container has `SYS_PTRACE` and `seccomp=unconfined` only
@@ -214,7 +214,7 @@ Keep WAL/superblock ordering per batch and verify atomic failure behavior,
 concurrent waiters and recovery with injected faults. Merely wrapping existing
 delete/create calls in thread-local deferred capture is insufficient: nested
 capture, rollback, mutation publication and watcher ordering need handling.
-This PR deliberately does not modify that protocol.
+The initial read-path change deliberately did not modify that protocol.
 
 ## Validation and reproduction
 
@@ -238,3 +238,267 @@ Artifact checksums are generated from LF-normalized files and verified in CI.
 See [bench/query/README.md](../../bench/query/README.md) for workload, matrix,
 verification and profiling commands. Source and evidence CI links are recorded
 on the pull request.
+
+## Architectural follow-up
+
+Source revision `fae39eb6d07c32f8bc734973f10a9349a8e56a45` follows the merged
+read-path work. The changes address correctness boundaries before measuring
+speed. Evidence is retained separately in
+[kv-architecture-2026-10-20](../../bench/results/kv-architecture-2026-10-20/).
+
+Catalog cache rebuilds load metadata outside the lock and publish only if the
+generation has not changed. Concurrent replacement, invalidation and removal
+therefore cannot be overwritten by a stale rebuild. Existing readers retain
+immutable Arc snapshots. Runtime and application callers now select validated
+typed KV resolvers; they cannot supply arbitrary callbacks under segment locks.
+
+Single-file, unversioned autocommit KV replacement stages the new entity, metadata and old
+entity deletion under the publication lock, captures their WAL actions with a
+non-nesting RAII guard, and commits them as one embedded publication. PUT, INCR,
+CAS and DELETE in `KvAtomicOps` use the same per-key serialization. Watch events and secondary
+index maintenance follow the storage commit. A returned publication error
+restores the previous in-memory row and metadata; uncertain disk failures still
+have an unknown durable outcome and never produce a successful acknowledgment.
+Versioned KV, Vault, paged backends and explicit transactions retain their existing write paths.
+The low-level helper still preserves Strict page flushing when used with a pager;
+the runtime rejects that combination before selecting this optimized path.
+
+Publication-fenced grouped KV writes enqueue before releasing the publication lock and wait
+outside it. A synchronous elected caller drains bounded FIFO batches; there is
+no permanent worker thread. Each batch retains both the WAL data sync and the
+alternate-superblock sync. A checkpoint drains queued publications before
+replacing their WAL with its snapshot. Batch errors reach every waiter, and an
+unwinding writer releases waiting callers with errors. A failed keyed write
+retains its queue ticket through rollback so checkpoint fencing still observes
+the failed publication. Artifact readers take shared file locks to wait for
+concurrent publication rather than failing Windows mandatory byte-range locks.
+The store retains its coordinator for the database session. An uncertain I/O
+failure or interrupted staging fences later writes and checkpoints until close
+and reopen reloads the durable outcome. Dropping the last queue ticket cannot
+silently clear that failure. A fence concurrent with disk publication also
+prevents a successful acknowledgment.
+
+Raw mutable row access now removes only that row's indexed key and tracks its
+ID for conservative rechecking. It preserves all unaffected indexed candidates;
+there is no whole-segment scan fallback. The extra candidate set is included in
+resident-memory accounting. Segment fragmentation and MVCC history remain real
+costs: lookup is O(segments + key versions + raw-mutated candidates), not O(1)
+independent of history. The ignored
+`key_lookup_fragmentation_history_diagnostic` exercises 1/16/64 segments and
+1/100/1000 versions while checking the returned version and resident bytes.
+
+SQL CPU profiling of the previous binary found 22.07% of samples in entity
+cloning and 16.29% in value cloning. The caller was time-series hydration on
+ordinary table rows before predicate evaluation. Hydration now borrows ordinary
+rows and clones only when an interned time-series point needs resolved tags.
+The regression also exposed an empty hash index after reopening: positional
+rows had no attached schema during rebuild. Rebuilding and indexed batch reads
+now attach the restored collection schema. Hash misses retain the scan fallback:
+SQL numeric equality can match values with different physical index encodings.
+Tests verify hit values and zero scanned segments before and after reopening,
+and equality between numeric representations. KV tag indexes are also restored
+from persisted metadata rather than disappearing on reopen.
+
+Deterministic regressions cover stale catalog publication, logical replacement
+failure/rollback and metadata recovery, bounded group membership, error fanout,
+panic cleanup, checkpoint fencing, crashes at all three WAL publication points,
+schema recovery, mutable key replacement and borrowed hydration. Existing
+allocation, MVCC, moderation and memory-admission guards remain enabled.
+
+### Checked architectural measurements
+
+The closed read matrix uses main `0eb3a89c` and candidate `2584e484`, not the
+later session-fence revision. It contains two process samples per version in
+ABBA order, each with five two-second rounds. All values and ordering were
+checked, and both datasets were verified after killing and reopening each
+process. Result caching was disabled; both servers used Strict durability,
+four pinned CPUs, a 2 GiB cgroup limit and a 1 GiB engine memory budget.
+
+| HTTP read | Connections | Main queries/s | Candidate queries/s | Main p99 ms | Candidate p99 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| KV | 1 | 1,931 | 1,949 | 0.634 | 0.611 |
+| KV | 8 | 3,182 | 3,204 | 5.878 | 5.871 |
+| KV | 32 | 3,608 | 3,537 | 23.095 | 23.628 |
+| SQL point | 1 | 314 | 1,872 | 5.024 | 0.658 |
+| SQL point | 8 | 955 | 3,226 | 18.349 | 5.771 |
+| SQL point | 32 | 1,157 | 3,619 | 79.550 | 22.894 |
+| SQL 100 rows | 1 | 45.40 | 49.91 | 26.316 | 22.393 |
+| SQL 1,000 rows | 1 | 30.93 | 32.91 | 39.707 | 33.885 |
+
+These are medians of the two process medians, without a confidence interval.
+The main SQL point c1 process medians ranged from 262 to 366 queries/s; the
+candidate ranged from 1,846 to 1,897. The slower second main process raises the
+aggregate ratio to 5.96x. The earlier, separately retained exploratory matrix
+at `90feffe7` measured 5.21x. Do not pool the revisions or discard the slower
+baseline. The cause of that process variance is not established. KV c32 is
+slightly worse. This Python/HTTP/shared-host diagnostic establishes neither
+engine capacity nor competitive superiority over KiviDB.
+
+The separate syscall capture at `2584e484` checked 64 overwrites per phase,
+read back each value and verified persistence after killing the server:
+
+| Mode | Connections | Main sync calls | Candidate sync calls |
+| --- | ---: | ---: | ---: |
+| Strict | 1 | 259 | 131 |
+| Strict | 8 | 256 | 128 |
+| Grouped (200 microseconds) | 1 | 259 | 131 |
+| Grouped (200 microseconds) | 8 | 256 | 32 |
+
+The c1 phases include three additional syncs from one WAL-full checkpoint.
+The clean c8 phases show four sync calls per overwrite falling to two in
+Strict mode, and 0.5 per overwrite with grouping. All syncs target the same
+artifact and return success; GET controls issue zero. The eightfold grouped
+reduction is in syscall count, not measured write throughput. Both durability
+barriers remain. Raw traces and recovery responses are retained under `writes/`.
+Repeating both candidate modes at final revision `fae39eb6` in fresh volumes
+produced the same counts: 131 c1, 128 Strict c8 and 32 grouped c8, with zero
+GET syncs and checked recovery. Those captures are under `writes-final/`;
+the final binary SHA256 is
+`3337efdfdd686fafca7d9d02fc82f53c18bc589824f391300946256c45ac1adf`.
+
+The read binaries' SHA256 values are
+`6afcf03b3cc7aa42d693f02bdf653f7ca1cda2b9e3e125940b8e4551c8626c56`
+(main) and
+`9b015e9f6d51cd8a3e93ff2af75fa2487cfc7ce4da9a94df842b30562a20d0dd`
+(`2584e484`). Complete Git archives were compared byte-for-byte with the Linux
+build source; changed files received fresh modification times before building.
+An earlier mixed-source overlay and a cache-reused baseline were discarded
+before these captures. The invalidated test log is preserved and does not
+represent the current source. The CPU hotspot profile predates main and is
+diagnostic evidence only, not the baseline timing binary.
+
+Native validation passed the nine grouping/fault/crash tests, ten keyed tests,
+the targeted schema/index/cache regressions, `cargo check --locked`, formatting
+and the 7+12 harness tests. Full Linux CI for `2584e484` passed in
+[run 39509985752](https://github.com/reddb-io/reddb/actions/runs/39509985752).
+The later session-fence revision is validated separately in
+[run 39514945742](https://github.com/reddb-io/reddb/actions/runs/39514945742),
+whose Rust source is identical to `fae39eb6`.
+The native broad KV run had 46 passes and one failure: the Vault/paged
+constructor hits Windows mandatory-lock error 33. The same test fails on clean
+main `0eb3a89c` before any writes. Both logs are retained; this pre-existing
+paged limitation remains open. The low-level Strict page-flush regression runs
+on Unix, while runtime eligibility keeps paged writes on their existing path.
+
+### Updated Redis / KiviDB comparison
+
+The untraced repeat at `fae39eb6` is closed under
+[kv-compare-final-2026-10-20](../../bench/results/kv-compare-final-2026-10-20/SUMMARY.md).
+It uses the immutable final binary above, Redis 8.4.0 and KiviDB 1.1.0, pinned
+image identities, fresh volumes, four server CPUs and two separate client CPUs.
+Each engine runs alone. GET uses 1,000/10,000 keys, 100-byte values, five
+two-second rounds, and 1/8/32 connections. Every value is checked. Each matrix
+and write cell is verified after process termination and reopening. All 96
+recorded setup/measurement/recovery steps completed without errors; 12 RESP
+pipeline cells remain explicitly unsupported for the HTTP RedDB adapters.
+
+For 10,000 keys without pipelining, the observed HTTP KV results are:
+
+| Connections | RedDB GET/s | Redis GET/s | KiviDB GET/s | RedDB p99 ms | Redis p99 ms | KiviDB p99 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2,471 | 4,888 | 2,759 | 0.52 | 0.26 | 8.47 |
+| 8 | 4,034 | 8,233 | 5,294 | 6.09 | 2.95 | 8.69 |
+| 32 | 4,359 | 8,156 | 9,565 | 25.15 | 12.74 | 10.93 |
+
+RedDB remains behind in throughput. Its observed p99 is lower than KiviDB at
+one and eight connections, and higher at 32; it is higher than Redis in all
+three cells. The separate KV-via-RQL adapter measured 1,947/2,966/3,410 GET/s
+at those connection counts. Those are KV commands through RQL, not the SQL
+point query whose speedup was measured above. The unfavorable 1,000-key RQL
+c32 cell remains visible: 1,093 GET/s and 99.24 ms p99, with a round range of
+989–2,841 GET/s. Redis also varied substantially in some cells. No independent
+repetitions or dedicated-host confidence interval establish a leadership claim.
+
+Durable overwrite uses 1,000 target keys and five rounds of 500 writes, with
+readback after each round. Redis acknowledges AOF `always`; KiviDB operations
+include `SET` plus successful `WAITAOF 1 0 5000`; both RedDB modes retain their
+existing WAL and superblock syncs. For eight connections:
+
+| Product path | Writes/s | p99 ms |
+| --- | ---: | ---: |
+| Redis | 2,529 | 7.88 |
+| KiviDB with local persistence fence | 2,199 | 5.97 |
+| RedDB Strict | 243 | 60.44 |
+| RedDB grouped, matched background population | 205 | 731.88 |
+
+The first grouped continuation used a fresh volume with only the 1,000 target
+keys. It measured 519 writes/s and 103.44 ms p99 at c8. It is retained as the
+separate `grouped` diagnostic and is unsuitable for attributing all differences
+from Strict to grouping: the primary matrix already holds another 11,000 keys
+in the two read collections. The `grouped-matched` continuation therefore
+preloads and reopens/verifies those same background collections before running
+the identical write cells on another fresh volume. That comparable population
+produced the unfavorable 205 writes/s result above, with round throughput
+107.6–277.8 writes/s. At c1, Strict/grouped-matched measured 91.7/144.1 writes/s.
+
+Fewer sync calls have not established a sustained write throughput or tail
+latency improvement on populated stores. CPU samples are low during these
+write cells; they do not by themselves identify the waiting path. Full-WAL
+checkpoint/retry behavior is a candidate for separate profiling, not a proven
+cause of this result. The next write optimization needs a populated-store
+regression workload and p99 evidence alongside sync counts. All unsuccessful
+performance comparisons remain in the report; no engine changes were made
+during these measurements.
+
+### Bounded WAL headroom and overflow revalidation (2026-10-21)
+
+The subsequent engine revision `e0d77577` changes single-file overflow recovery.
+After taking the publication lock, it retries the append before serializing a
+snapshot: another writer may already have reclaimed the region. A necessary
+checkpoint requests snapshot-proportional headroom up to 1 MiB, using the
+existing power-of-two allocator. Fresh files still start at 64 KiB; existing
+larger regions and indivisible oversized operations retain their contracts.
+Empty FIFO checkpoint fences execute separately from payload batches so they
+cannot inherit a preceding request's retryable WAL-full result. Uncertain
+checkpoint failures fence the session until reopen. Both durability barriers
+and the on-disk format remain unchanged.
+
+The separate [WAL-pressure capture](../../bench/results/kv-compare-wal-2026-10-21/summary.json)
+uses the immutable `fae39eb6` before binary and `e0d77577` after binary, whose
+SHA256 is `7770fb790f2d32c4099979c37e0dafb590f3ea9d99329a83bcc4265ad486668c`.
+Each case starts from a byte-identical copy of the stopped 12,000-key artifact:
+11,000 background keys and 1,000 overwrite targets. At eight connections,
+five rounds each perform 10,000 checked 100-byte PUTs. The four cases run
+sequentially in the fixed order before-Strict, after-Strict, after-grouped,
+before-grouped, with the same pinned CPU/memory limits as the preceding study.
+No build, strace or perf process runs during timing. Snapshot SHA256 and root
+geometry are sampled outside timed requests; the workload requires changed
+snapshots in at least three rounds per case. This tests repeated rollover,
+rather than moving every checkpoint beyond the measurement window.
+
+Strict measured 138.0 -> 184.7 writes/s and median round p99
+328.78 -> 209.50 ms. Throughput ranges overlap: 67.0–193.0 before and
+117.7–211.0 after. Median round p99.9 was 1,331.33 -> 1,208.63 ms, while the
+worst observed completion pause increased from 6,243.52 to 6,647.30 ms. All
+five rounds in both cases changed the snapshot image, and all target/background
+values passed SIGKILL/reopen verification. These are correlated round samples
+from one process per case on a shared host; the fixed order and large variance
+prevent a causal capacity or tail-latency guarantee. They are also different
+from the earlier five-by-500-write Redis/KiviDB comparison and must not be
+substituted into that table.
+
+Grouped measured 512.6 -> 817.8 writes/s (+59.5%), median round p99
+163.67 -> 22.62 ms (-86.2%) and p99.9 411.73 -> 70.13 ms. Throughput ranges
+were 146.8–611.1 before and 632.7–853.4 after; p99 ranges were 130.89–668.93
+and 19.60–30.46 ms. The worst observed completion fell from 4,972.90 to
+465.48 ms. All five rounds of both grouped cases changed the snapshot image
+and passed final-value verification; both also recovered every target and
+background key after SIGKILL. Across all four cases, 200,000 measured requests
+completed without errors. This supports a promising grouped result in this
+diagnostic while preserving the unfavorable Strict maximum and host/order
+limitations. All four cases, resources and round ranges are retained in the
+[capture report](../../bench/results/kv-compare-wal-2026-10-21/SUMMARY.md).
+
+The exact engine revision passed full Linux CI in
+[run 39592643015](https://github.com/reddb-io/reddb/actions/runs/39592643015),
+including stale-full revalidation, bounded headroom, repeated concurrent
+rollovers, empty-fence isolation and eight growth/append crash boundaries.
+Native file tests passed 10 grouping and 29 artifact cases. Large local server
+unit compilations were interrupted by disk pressure; the production Linux
+binary built successfully and final regression passes come from CI. Logs and
+validation provenance are retained alongside the measurements.
+
+The change amortizes full snapshots but does not make checkpointing incremental
+or remove synchronous flush latency. Larger reserved WAL space also permits
+more replay work on reopen. The remaining architectural target is paced,
+incremental checkpoint work under the existing publication/recovery contract.
