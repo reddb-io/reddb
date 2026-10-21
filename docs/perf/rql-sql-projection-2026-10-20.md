@@ -439,3 +439,66 @@ cause of this result. The next write optimization needs a populated-store
 regression workload and p99 evidence alongside sync counts. All unsuccessful
 performance comparisons remain in the report; no engine changes were made
 during these measurements.
+
+### Bounded WAL headroom and overflow revalidation (2026-10-21)
+
+The subsequent engine revision `e0d77577` changes single-file overflow recovery.
+After taking the publication lock, it retries the append before serializing a
+snapshot: another writer may already have reclaimed the region. A necessary
+checkpoint requests snapshot-proportional headroom up to 1 MiB, using the
+existing power-of-two allocator. Fresh files still start at 64 KiB; existing
+larger regions and indivisible oversized operations retain their contracts.
+Empty FIFO checkpoint fences execute separately from payload batches so they
+cannot inherit a preceding request's retryable WAL-full result. Uncertain
+checkpoint failures fence the session until reopen. Both durability barriers
+and the on-disk format remain unchanged.
+
+The separate [WAL-pressure capture](../../bench/results/kv-compare-wal-2026-10-21/summary.json)
+uses the immutable `fae39eb6` before binary and `e0d77577` after binary, whose
+SHA256 is `7770fb790f2d32c4099979c37e0dafb590f3ea9d99329a83bcc4265ad486668c`.
+Each case starts from a byte-identical copy of the stopped 12,000-key artifact:
+11,000 background keys and 1,000 overwrite targets. At eight connections,
+five rounds each perform 10,000 checked 100-byte PUTs. The four cases run
+sequentially in the fixed order before-Strict, after-Strict, after-grouped,
+before-grouped, with the same pinned CPU/memory limits as the preceding study.
+No build, strace or perf process runs during timing. Snapshot SHA256 and root
+geometry are sampled outside timed requests; the workload requires changed
+snapshots in at least three rounds per case. This tests repeated rollover,
+rather than moving every checkpoint beyond the measurement window.
+
+Strict measured 138.0 -> 184.7 writes/s and median round p99
+328.78 -> 209.50 ms. Throughput ranges overlap: 67.0–193.0 before and
+117.7–211.0 after. Median round p99.9 was 1,331.33 -> 1,208.63 ms, while the
+worst observed completion pause increased from 6,243.52 to 6,647.30 ms. All
+five rounds in both cases changed the snapshot image, and all target/background
+values passed SIGKILL/reopen verification. These are correlated round samples
+from one process per case on a shared host; the fixed order and large variance
+prevent a causal capacity or tail-latency guarantee. They are also different
+from the earlier five-by-500-write Redis/KiviDB comparison and must not be
+substituted into that table.
+
+Grouped measured 512.6 -> 817.8 writes/s (+59.5%), median round p99
+163.67 -> 22.62 ms (-86.2%) and p99.9 411.73 -> 70.13 ms. Throughput ranges
+were 146.8–611.1 before and 632.7–853.4 after; p99 ranges were 130.89–668.93
+and 19.60–30.46 ms. The worst observed completion fell from 4,972.90 to
+465.48 ms. All five rounds of both grouped cases changed the snapshot image
+and passed final-value verification; both also recovered every target and
+background key after SIGKILL. Across all four cases, 200,000 measured requests
+completed without errors. This supports a promising grouped result in this
+diagnostic while preserving the unfavorable Strict maximum and host/order
+limitations. All four cases, resources and round ranges are retained in the
+[capture report](../../bench/results/kv-compare-wal-2026-10-21/SUMMARY.md).
+
+The exact engine revision passed full Linux CI in
+[run 39592643015](https://github.com/reddb-io/reddb/actions/runs/39592643015),
+including stale-full revalidation, bounded headroom, repeated concurrent
+rollovers, empty-fence isolation and eight growth/append crash boundaries.
+Native file tests passed 10 grouping and 29 artifact cases. Large local server
+unit compilations were interrupted by disk pressure; the production Linux
+binary built successfully and final regression passes come from CI. Logs and
+validation provenance are retained alongside the measurements.
+
+The change amortizes full snapshots but does not make checkpointing incremental
+or remove synchronous flush latency. Larger reserved WAL space also permits
+more replay work on reopen. The remaining architectural target is paced,
+incremental checkpoint work under the existing publication/recovery contract.

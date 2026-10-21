@@ -163,3 +163,22 @@ missing fsync confirmations and acknowledged-but-discarded writes. They also
 check uneven worker/batch quotas, fixed-duration execution and the real HTTP
 query-result envelope. Invalid runs retain their diagnostic JSON and cannot
 produce a successful aggregate throughput result.
+
+The populated WAL-pressure follow-up is captured separately under
+`bench/results/kv-compare-wal-2026-10-21`. Its runner compares immutable before
+and after Linux binaries in Strict and grouped modes, using identical copies
+of the stopped 12,000-key artifact. Each case performs five rounds of 10,000
+checked overwrites at eight connections, followed by SIGKILL/reopen verification
+of the target and all background keys. This is a fixed-order shared-host
+diagnostic with correlated rounds, not an independent process confidence interval
+or a fresh Redis/KiviDB comparison.
+
+`--artifact-state-path` records checksummed root geometry and snapshot SHA256
+before and after each PUT round, outside timed requests. At least three rounds
+per case must change the snapshot image; merely moving checkpoints beyond the
+measurement window cannot pass. CRC32 of the whole internally checksummed
+snapshot is not used to detect image changes because its residue can be constant.
+The capture also retains p99.9 and maximum completion latency. Its own runner
+writes the WAL-pressure summary; do not run the generic `summarize.py` over that
+different manifest schema. Fresh reproductions need distinct names/directories
+and the exact binaries/images/fixture identities recorded in the manifest.

@@ -136,6 +136,13 @@ publication fence now revalidates stale full results before checkpointing.
 Both sync barriers and on-disk geometry rules are retained. The long proving
 workload records actual snapshot changes across multiple WAL rollovers,
 throughput, p99 and crash recovery under `bench/results/kv-compare-wal-2026-10-21`.
+That five-by-10,000-write, eight-connection diagnostic measured grouped
+512.6 -> 817.8 writes/s and p99 163.67 -> 22.62 ms; Strict measured
+138.0 -> 184.7 writes/s and p99 328.78 -> 209.50 ms. Snapshot images changed
+in every round and all four cases recovered after SIGKILL. The fixed-order
+shared-host study has no independent-process confidence interval; Strict's
+worst pause increased from 6.24 to 6.65 seconds. Full ranges and unfavorable
+samples are retained in the capture's `SUMMARY.md`.
 This does not introduce a background maintenance worker or claim incremental
 checkpointing; paced incremental maintenance remains the architectural target.
 
