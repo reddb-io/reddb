@@ -238,6 +238,9 @@ pub struct Pager {
     cache: PageCache,
     /// Free page list
     freelist: RwLock<FreeList>,
+    /// Store-managed frees stay unavailable until their removal from the
+    /// durable catalog has crossed a publication boundary.
+    deferred_reclamation: Mutex<DeferredPageReclamation>,
     /// Reused page ownership must reach both superblock copies before a
     /// manifest can refer to those pages, including single-slot recovery.
     allocation_reused: std::sync::atomic::AtomicBool,
@@ -271,6 +274,13 @@ pub struct Pager {
         crate::storage::encryption::PageEncryptor,
         crate::storage::encryption::EncryptionHeader,
     )>,
+}
+
+#[derive(Default)]
+struct DeferredPageReclamation {
+    enabled: bool,
+    pending: std::collections::BTreeSet<u32>,
+    published: std::collections::BTreeSet<u32>,
 }
 
 #[path = "pager/impl.rs"]
