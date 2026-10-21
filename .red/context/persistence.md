@@ -27,6 +27,11 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 
 ## Checkpoint reuse
 
+Owned row reads restore missing positional column names from the collection's
+shared schema before mutation or index backfill. Explicit row schemas and named
+fields remain authoritative. This changes neither the stored record format nor
+the raw segment revisions used by checkpoint reuse.
+
 Paged checkpoints reuse unchanged collection trees using volatile segment mutation
 revisions and manager identity. Aborted transaction visibility, pending vault
 versions and record format also participate in reuse admission.

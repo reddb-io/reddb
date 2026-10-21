@@ -302,6 +302,20 @@ impl SegmentManager {
         self.column_schema.read().clone()
     }
 
+    // Positional file records omit the shared column names. Restore them on
+    // owned reads before callers update fields or rebuild secondary indexes.
+    // Existing per-row names remain authoritative; segment contents stay raw.
+    fn restore_owned_row_schemas<'a>(&self, entities: impl Iterator<Item = &'a mut UnifiedEntity>) {
+        let schema = self.column_schema();
+        for entity in entities {
+            if let super::entity::EntityData::Row(row) = &mut entity.data {
+                if row.named.is_none() && row.schema.is_none() {
+                    row.schema = schema.clone();
+                }
+            }
+        }
+    }
+
     pub(crate) fn set_column_schema_if_empty(&self, columns: Vec<String>) {
         if columns.is_empty() {
             return;
@@ -609,7 +623,9 @@ impl SegmentManager {
 
     /// Get an entity by ID — scans growing then sealed segments.
     pub fn get(&self, id: EntityId) -> Option<UnifiedEntity> {
-        self.get_with(id, Clone::clone)
+        let mut entity = self.get_with(id, Clone::clone)?;
+        self.restore_owned_row_schemas(std::iter::once(&mut entity));
+        Some(entity)
     }
 
     /// Inspect under the segment lock, for example to bound a payload clone.
@@ -776,6 +792,7 @@ impl SegmentManager {
         }
 
         if remaining.is_empty() {
+            self.restore_owned_row_schemas(out.iter_mut().flatten());
             return out;
         }
 
@@ -796,6 +813,8 @@ impl SegmentManager {
             });
         }
 
+        drop(sealed);
+        self.restore_owned_row_schemas(out.iter_mut().flatten());
         out
     }
 
@@ -2121,7 +2140,9 @@ impl SegmentManager {
     where
         F: Fn(&UnifiedEntity) -> bool + Sync,
     {
-        self.query_all_in_segments(|_| true, filter)
+        let mut entities = self.query_all_in_segments(|_| true, filter);
+        self.restore_owned_row_schemas(entities.iter_mut());
+        entities
     }
 
     fn query_all_in_segments<F>(
