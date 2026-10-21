@@ -1,16 +1,15 @@
 use reddb_file::{decode_native_paged_deferred_pages, encode_native_paged_deferred_pages};
 
 #[test]
-fn legacy_metadata_and_truncated_reclamation_ledgers_fail_safely() {
+fn legacy_metadata_and_truncated_reclamation_ledgers_fail_safely(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut position = 0;
-    assert!(decode_native_paged_deferred_pages(&[0; 16], &mut position)
-        .unwrap()
-        .is_empty());
+    assert!(decode_native_paged_deferred_pages(&[0; 16], &mut position)?.is_empty());
     assert_eq!(position, 0);
     let mut bytes = Vec::new();
-    encode_native_paged_deferred_pages(&mut bytes, &[67, 100, 500]).unwrap();
+    encode_native_paged_deferred_pages(&mut bytes, &[67, 100, 500])?;
     assert_eq!(
-        decode_native_paged_deferred_pages(&bytes, &mut 0).unwrap(),
+        decode_native_paged_deferred_pages(&bytes, &mut 0)?,
         [67, 100, 500]
     );
     for length in 4..bytes.len() {
@@ -21,4 +20,5 @@ fn legacy_metadata_and_truncated_reclamation_ledgers_fail_safely() {
     assert!(decode_native_paged_deferred_pages(&duplicate, &mut 0).is_err());
     assert!(encode_native_paged_deferred_pages(&mut Vec::new(), &[0]).is_err());
     assert!(encode_native_paged_deferred_pages(&mut Vec::new(), &[100, 67]).is_err());
+    Ok(())
 }
