@@ -160,13 +160,6 @@ impl RedDBRuntime {
 
     #[inline(never)]
     pub fn with_options(options: RedDBOptions) -> RedDBResult<Self> {
-        Self::with_options_and_limits(options, super::resource_limits::ResourceLimits::from_env())
-    }
-
-    pub(super) fn with_options_and_limits(
-        options: RedDBOptions,
-        resource_limits: super::resource_limits::ResourceLimits,
-    ) -> RedDBResult<Self> {
         Self::with_pool(options, ConnectionPoolConfig::default())
     }
 
@@ -187,6 +180,18 @@ impl RedDBRuntime {
     pub fn with_pool(
         options: RedDBOptions,
         pool_config: ConnectionPoolConfig,
+    ) -> RedDBResult<Self> {
+        Self::with_pool_and_limits(
+            options,
+            pool_config,
+            super::resource_limits::ResourceLimits::from_env(),
+        )
+    }
+
+    pub(super) fn with_pool_and_limits(
+        options: RedDBOptions,
+        pool_config: ConnectionPoolConfig,
+        resource_limits: super::resource_limits::ResourceLimits,
     ) -> RedDBResult<Self> {
         options
             .replication

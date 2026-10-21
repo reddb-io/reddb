@@ -196,8 +196,9 @@ mod tests {
 
     #[test]
     fn text_parameterized_and_prepared_reads_share_admission_and_release_it() {
-        let runtime = super::super::RedDBRuntime::with_options_and_limits(
+        let runtime = super::super::RedDBRuntime::with_pool_and_limits(
             crate::RedDBOptions::in_memory(),
+            super::super::ConnectionPoolConfig::default(),
             ResourceLimits {
                 max_concurrent_queries: Some(1),
                 ..Default::default()
