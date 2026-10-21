@@ -719,6 +719,12 @@ impl RedDBRuntime {
         let mode = prepared.mode;
         let expr = prepared.expr;
 
+        let _query_budget = if super::query_budget::is_materialized_read(&expr) {
+            Some(self.query_budget_scope()?)
+        } else {
+            None
+        };
+
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
         let control_event_specs = query_control_event_specs(&expr);
@@ -2342,6 +2348,9 @@ impl RedDBRuntime {
             )),
         };
 
+        if _query_budget.is_some() {
+            super::query_budget::charge(0)?;
+        }
         if !control_event_specs.is_empty() {
             let (outcome, reason) = match &query_result {
                 Ok(_) => (crate::runtime::control_events::Outcome::Allowed, None),
@@ -2927,15 +2936,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         // Typed read plans only: mutation/transaction cleanup must never fail
         // because a read result or cooperative deadline budget was exhausted.
-        let is_read = matches!(
-            &expr,
-            QueryExpr::Table(_)
-                | QueryExpr::Graph(_)
-                | QueryExpr::Join(_)
-                | QueryExpr::Path(_)
-                | QueryExpr::Vector(_)
-                | QueryExpr::Hybrid(_)
-        );
+        let is_read = super::query_budget::is_materialized_read(&expr);
         let _budget = if is_read {
             Some(super::query_budget::Scope::enter(
                 self.resource_limits(),

@@ -81,6 +81,18 @@ impl Drop for Scope<'_> {
 pub(crate) fn active() -> bool {
     CURRENT.with(|slot| slot.get().is_some())
 }
+pub(super) fn is_materialized_read(expr: &reddb_rql::ast::QueryExpr) -> bool {
+    use reddb_rql::ast::QueryExpr;
+    matches!(
+        expr,
+        QueryExpr::Table(_)
+            | QueryExpr::Graph(_)
+            | QueryExpr::Join(_)
+            | QueryExpr::Path(_)
+            | QueryExpr::Vector(_)
+            | QueryExpr::Hybrid(_)
+    )
+}
 pub(crate) fn charge_output(bytes: usize) -> RedDBResult<()> {
     charge(0)?;
     CURRENT.with(|slot| {
@@ -181,6 +193,44 @@ pub(super) fn check_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_parameterized_and_prepared_reads_share_admission_and_release_it() {
+        let mut runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE budget_reads (id INTEGER)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO budget_reads (id) VALUES (1)")
+            .expect("row");
+        let inner = std::sync::Arc::get_mut(&mut runtime.inner).expect("exclusive test runtime");
+        inner.resource_limits.max_concurrent_queries = Some(1);
+        inner.query_budget_slots.store(1, Ordering::Relaxed);
+        let sql = "SELECT id FROM budget_reads";
+        assert!(matches!(
+            runtime.execute_query(sql),
+            Err(RedDBError::QuotaExceeded(_))
+        ));
+        assert!(matches!(
+            runtime.execute_query_with_params(
+                "SELECT id FROM budget_reads WHERE id = $1",
+                &[reddb_types::Value::Integer(1)]
+            ),
+            Err(RedDBError::QuotaExceeded(_))
+        ));
+        let expr = reddb_rql::modes::parse_multi(sql).expect("read AST");
+        assert!(matches!(
+            runtime.execute_prepared_query(sql, expr),
+            Err(RedDBError::QuotaExceeded(_))
+        ));
+        assert!(runtime
+            .execute_query("INSERT INTO budget_reads (id) VALUES (2)")
+            .is_ok());
+        runtime.inner.query_budget_slots.store(0, Ordering::Relaxed);
+        assert!(runtime.execute_query(sql).is_ok());
+        assert_eq!(runtime.inner.query_budget_slots.load(Ordering::Relaxed), 0);
+        assert!(!active());
+    }
 
     #[test]
     fn canonical_result_limit_honors_exact_boundary_and_zero_disables_it() {
