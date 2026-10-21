@@ -10,13 +10,55 @@ import math
 import platform
 import socket
 import statistics
+import struct
 import threading
 import time
+import zlib
 from pathlib import Path
 
 
 class ProtocolError(RuntimeError):
     pass
+
+
+def artifact_state(path):
+    """Read quiescent V2 superblock telemetry; not a full integrity check.
+
+    Call outside timed requests. The server owns full manifest/snapshot/WAL
+    validation; these checksummed roots only show capacity and image changes.
+    """
+    with Path(path).open("rb") as source:
+        roots = source.read(8192)
+    candidates = []
+    for copy in range(2):
+        block = roots[copy * 4096:(copy + 1) * 4096]
+        if (len(block) != 4096 or block[:8] != b"RDBSBLK1"
+                or struct.unpack_from("<I", block, 8)[0] != 2 or block[12] != copy
+                or zlib.crc32(block[:-4]) != struct.unpack_from("<I", block, 4092)[0]):
+            continue
+        values = struct.unpack_from("<QQQQQQI", block, 45)
+        candidates.append(dict(zip(
+            ["wal_offset", "wal_capacity_bytes", "wal_boundary", "wal_live_bytes",
+             "snapshot_offset", "snapshot_bytes", "snapshot_checksum"], values),
+            generation=struct.unpack_from("<Q", block, 13)[0]))
+    if not candidates:
+        raise ProtocolError("artifact telemetry requires a valid V2 checksummed superblock")
+    state = max(candidates, key=lambda state: state["generation"])
+    # RDST carries an internal CRC trailer: CRC32 over the complete valid
+    # image can have the same residue for different images. Hash the bytes
+    # themselves to prove checkpoints occurred during the measured rounds.
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        source.seek(state["snapshot_offset"])
+        remaining = state["snapshot_bytes"]
+        while remaining:
+            chunk = source.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ProtocolError("artifact telemetry found a truncated snapshot")
+            digest.update(chunk)
+            remaining -= len(chunk)
+    state["snapshot_sha256"] = digest.hexdigest()
+    return state
 
 
 def payload(index, size, generation=0):
@@ -241,7 +283,9 @@ def measure(args, round_index, generations):
         "throughput_ops_s": completed / seconds,
         "batch_p50_us": percentile(latencies, .50),
         "batch_p95_us": percentile(latencies, .95),
-        "batch_p99_us": percentile(latencies, .99), "errors": 0,
+        "batch_p99_us": percentile(latencies, .99),
+        "batch_p999_us": percentile(latencies, .999),
+        "batch_max_us": max(latencies, default=0), "errors": 0,
     }
 
 
@@ -272,6 +316,8 @@ def arguments():
                         help="responses requires caller-owned full dataset checks before/after the matrix")
     parser.add_argument("--verification-workers", type=int, default=8,
                         help="untimed complete-dataset verification connections")
+    parser.add_argument("--artifact-state-path", type=Path,
+                        help="optional read-only .rdb mount; sample roots outside timed PUT requests")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if args.prepare_only and args.verify_only:
@@ -280,6 +326,8 @@ def arguments():
         parser.error("WAITAOF fencing is RESP-only")
     if args.recovery_from and not args.verify_only:
         parser.error("recovery-from requires verify-only")
+    if args.artifact_state_path and (not args.engine.startswith("reddb") or args.operation != "put"):
+        parser.error("artifact state telemetry is only for RedDB PUT diagnostics")
     if args.seconds < 0 or args.seconds > 3600 or (args.seconds and args.operation != "get"):
         parser.error("duration mode is GET-only and must be in [0, 3600]")
     if args.verification == "responses" and args.operation != "get":
@@ -331,6 +379,8 @@ def main():
             generations = [0] * args.keys
             if not args.verify_only:
                 for index in range(args.rounds):
+                    state_path = getattr(args, "artifact_state_path", None)
+                    before_state = artifact_state(state_path) if state_path else None
                     sample = measure(args, index, generations)
                     result["rounds"].append(sample)
                     if args.operation == "put":
@@ -339,6 +389,9 @@ def main():
                         for key_index in changed:
                             generations[key_index] = index + 1
                         sample["readback"] = verify(args, generations, changed)
+                    if state_path:
+                        sample["artifact_before"] = before_state
+                        sample["artifact_after"] = artifact_state(state_path)
                     print(json.dumps({"round": index, **sample}), flush=True)
                 result["median_throughput_ops_s"] = statistics.median(
                     sample["throughput_ops_s"] for sample in result["rounds"])

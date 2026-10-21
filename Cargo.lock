@@ -2824,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "jsonwebtoken",
  "proptest",
@@ -2852,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "async-trait",
  "csv",
@@ -2880,14 +2880,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "reddb-io-grpc-proto",
 ]
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "aes-gcm",
  "reddb-io-types",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-file"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "prost",
  "reddb-io-wire",
@@ -2926,7 +2926,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "proptest",
  "reddb-io-types",
@@ -2935,7 +2935,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-server"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3006,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -3015,7 +3015,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.24.15"
+version = "1.25.0"
 dependencies = [
  "hmac 0.13.0",
  "insta",
@@ -3279,9 +3279,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -4543,9 +4543,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

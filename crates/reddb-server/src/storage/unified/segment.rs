@@ -1590,30 +1590,21 @@ impl GrowingSegment {
         self.unique_key_lookup_bytes.store(0, Ordering::Relaxed);
     }
 
-    fn invalidate_key_lookup(&mut self) {
-        self.key_lookup = None;
-    }
-
     /// Only matching-key candidates reach `visible`; no result vector or row clones.
-    /// Raw mutable access disables the index: fall back without allocating on reads.
+    /// Raw mutable rows are rechecked alongside indexed candidates.
     pub(crate) fn find_key_entity(
         &self,
         key: &str,
         newest: bool,
         visible: &mut impl FnMut(&UnifiedEntity) -> bool,
     ) -> Option<&UnifiedEntity> {
-        if let Some(index) = self.key_lookup.as_ref() {
-            return self.find_key_candidate(index, key, newest, visible);
-        }
-        // A raw &mut UnifiedEntity can change its key after it is returned.
-        // Rebuilding here would allocate an entire index outside write admission.
-        // Consolidation/adoption creates a fresh indexed segment instead.
-        let entities = self
-            .flat_entities
-            .iter()
-            .chain(self.entities.values())
-            .filter(|entity| !self.deleted.contains_key(&entity.id));
-        self.select_key_entity(entities, key, newest, visible)
+        // Writers may temporarily take the index while updating its candidates,
+        // but publish it again before releasing their exclusive segment guard.
+        let index = self
+            .key_lookup
+            .as_ref()
+            .expect("segment owns its key index");
+        self.find_key_candidate(index, key, newest, visible)
     }
 
     fn find_key_candidate(
@@ -1624,7 +1615,11 @@ impl GrowingSegment {
         visible: &mut impl FnMut(&UnifiedEntity) -> bool,
     ) -> Option<&UnifiedEntity> {
         self.select_key_entity(
-            index.candidates(key).iter().filter_map(|id| self.get(*id)),
+            index
+                .candidates(key)
+                .iter()
+                .chain(index.mutated_candidates())
+                .filter_map(|id| self.get(*id)),
             key,
             newest,
             visible,
@@ -2136,11 +2131,16 @@ impl UnifiedSegment for GrowingSegment {
 
     fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity> {
         self.mark_checkpoint_dirty();
-        self.invalidate_key_lookup();
         self.invalidate_unique_key_lookup();
         self.invalidate_graph_read_index();
         if self.deleted.contains_key(&id) || !self.state.is_writable() {
             return None;
+        }
+        if let Some(mut index) = self.key_lookup.take() {
+            if let Some(entity) = self.get(id) {
+                index.mark_mutated(entity);
+            }
+            self.key_lookup = Some(index);
         }
         // The caller can replace the kind through this reference. Conservatively
         // disable both graph pruning passes until a new segment is rebuilt.
@@ -2534,6 +2534,38 @@ mod tests {
     }
 
     #[test]
+    fn raw_mutation_does_not_disable_unrelated_key_candidates() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(
+                (1..=4096)
+                    .map(|id| keyed_row(id, &format!("key-{id}"), 1, 0))
+                    .collect(),
+            )
+            .expect("rows");
+        for _ in 0..3 {
+            *segment.get_mut(EntityId::new(1)).expect("mutable") = keyed_row(1, "renamed", 2, 0);
+        }
+        let index = segment.key_lookup.as_ref().expect("index retained");
+        assert_eq!(index.candidates("key-4096"), &[EntityId::new(4096)]);
+        assert_eq!(index.mutated_candidates().count(), 1);
+        assert!(index.candidates("key-1").is_empty());
+        assert_eq!(keyed_probe(&segment, "renamed"), Some(EntityId::new(1)));
+        assert_eq!(keyed_probe(&segment, "key-4096"), Some(EntityId::new(4096)));
+        segment.delete(EntityId::new(1)).expect("delete raw row");
+        assert_eq!(
+            segment
+                .key_lookup
+                .as_ref()
+                .unwrap()
+                .mutated_candidates()
+                .count(),
+            0
+        );
+        assert_eq!(keyed_probe(&segment, "renamed"), None);
+    }
+
+    #[test]
     fn key_lookup_tracks_mutations_sealing_and_adoption() {
         let mut segment = GrowingSegment::new(1, "keys");
         segment
@@ -2559,8 +2591,8 @@ mod tests {
 
         *segment.get_mut(EntityId::new(3)).expect("mutable row") = keyed_row(3, "raw", 3, 0);
         assert!(
-            segment.key_lookup.is_none(),
-            "raw mutation requires conservative fallback"
+            segment.key_lookup.is_some(),
+            "raw mutation preserves unaffected key candidates"
         );
         assert_eq!(keyed_probe(&segment, "renamed"), None);
         assert_eq!(keyed_probe(&segment, "raw"), Some(EntityId::new(3)));

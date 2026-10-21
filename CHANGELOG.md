@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.25.0
+
+### Minor Changes
+
+- [#2440](https://github.com/reddb-io/reddb/pull/2440) [`85bd8e8`](https://github.com/reddb-io/reddb/commit/85bd8e8cdb998f8c67086d6c406a55b79a0c140d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Release the KV/SQL performance and durable-write cycle as 1.25: publish
+  single-file KV replacements atomically, share durable grouped commits, avoid
+  redundant overflow checkpoints and reserve bounded WAL headroom. Preserve both
+  durability barriers, fence uncertain publication failures until reopen, and
+  restore indexed SQL/KV reads and recovery metadata. Existing storage and wire
+  formats remain unchanged. Full snapshots still cause pauses; measured results
+  and upgrade boundaries are documented in docs/release/v1.25.0.md.
+
+### Patch Changes
+
+- [#2431](https://github.com/reddb-io/reddb/pull/2431) [`51d4a6d`](https://github.com/reddb-io/reddb/commit/51d4a6deeaf73c63564b31415cd5e8d0c0de139b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound materialization for simple table LIMIT/OFFSET windows and avoid reserving
+  memory for skipped rows or arbitrarily large requested limits.
+
+- [#2439](https://github.com/reddb-io/reddb/pull/2439) [`6eb66dc`](https://github.com/reddb-io/reddb/commit/6eb66dc7a6cfa05b31961d3fad6324923c0c6b95) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Enforce the configured read-result byte ceiling with bounded JSON serialization,
+  add materialized-read concurrency admission, and apply cooperative query deadlines
+  to existing read work checkpoints. Output streams charge cumulative payload bytes.
+  Mutation acknowledgements remain outside read-result limits; operator/cgroup and
+  materialization limits remain necessary for memory and non-cooperative work.
+
+- [#2428](https://github.com/reddb-io/reddb/pull/2428) [`bd94c3d`](https://github.com/reddb-io/reddb/commit/bd94c3d0590342d7a24999719a5dba3605e0f1f6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Use segment key indexes for KV point reads instead of materializing entire collections, while retaining MVCC version selection and recovery behavior.
+
+- [#2432](https://github.com/reddb-io/reddb/pull/2432) [`a3af4d6`](https://github.com/reddb-io/reddb/commit/a3af4d6261f05fcc2dccd5caca178c5ddf6936a3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Extract KV read values directly from indexed candidates instead of cloning whole rows, preserving snapshot visibility and mutation behavior.
+
+- [#2433](https://github.com/reddb-io/reddb/pull/2433) [`dd8fcc1`](https://github.com/reddb-io/reddb/commit/dd8fcc19da3c3274ef354e28daf447e919e37b93) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Retain active statement snapshot horizons through query completion so concurrent
+  VACUUM cannot reclaim versions still needed by ordinary or nested reads.
+
+- [#2441](https://github.com/reddb-io/reddb/pull/2441) [`9ea24de`](https://github.com/reddb-io/reddb/commit/9ea24de1acb13edbe97cd2b47410387afb0fda18) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Update rustls-webpki to 0.103.16 and webpki-roots to 1.0.10 across the workspace,
+  Python driver and Node addon lockfiles. Reject distrusted emSign intermediate
+  keys and remove the affected bundled root, addressing RUSTSEC-2026-0382 and
+  RUSTSEC-2026-0381. Connections using affected certificate chains may now fail
+  verification; replace the chain rather than disabling verification.
+
+- [#2429](https://github.com/reddb-io/reddb/pull/2429) [`2169185`](https://github.com/reddb-io/reddb/commit/2169185b50d0915cb384b30d04f3994d86eba052) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve row versions required by snapshot transactions that excluded an older
+  writer. VACUUM now retains that snapshot's horizon after the writer commits and
+  releases it when the reader commits or rolls back.
+
 ## 1.24.15
 
 ### Patch Changes

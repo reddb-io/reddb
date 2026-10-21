@@ -760,6 +760,7 @@ impl UnifiedStore {
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             aux_metadata: RwLock::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),
+            embedded_commit_session: std::sync::OnceLock::new(),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
             pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         }
@@ -844,6 +845,7 @@ impl UnifiedStore {
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             aux_metadata: RwLock::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),
+            embedded_commit_session: std::sync::OnceLock::new(),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
             pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         };

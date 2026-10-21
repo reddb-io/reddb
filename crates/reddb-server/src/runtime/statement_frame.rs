@@ -548,6 +548,9 @@ impl StatementExecutionFrame {
     }
 
     pub(super) fn read_result_cache(&self, runtime: &RedDBRuntime) -> Option<RuntimeQueryResult> {
+        if runtime.resource_limits().read_execution_limits_enabled() {
+            return None;
+        }
         if self.can_read_result_cache() {
             runtime
                 .get_result_cache_entry(self.cache_key())

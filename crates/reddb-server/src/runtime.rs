@@ -1278,6 +1278,7 @@ struct RuntimeInner {
     /// observability and (in follow-up commits) the per-write
     /// enforcement points.
     resource_limits: crate::runtime::resource_limits::ResourceLimits,
+    query_budget_slots: AtomicU64,
     /// Append-only audit log for admin mutations (PLAN.md Phase
     /// 6.5). Lives next to the primary `.rdb` file so backup +
     /// restore flows ship it alongside the data.
@@ -1549,7 +1550,9 @@ pub(crate) use index_store::MutationTestPhase;
 pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;
+pub(crate) mod kv_read;
 pub mod kv_watch;
+pub(crate) mod kv_write;
 pub mod lease_lifecycle;
 pub mod lease_loop;
 pub mod lease_timer_wheel;
@@ -1574,6 +1577,7 @@ pub(crate) mod occupancy_sampler;
 pub(crate) mod primary_queue_store;
 mod probabilistic_store;
 pub mod query_audit;
+pub(crate) mod query_budget;
 pub(crate) mod query_exec;
 pub(crate) mod query_latency_telemetry;
 pub mod query_request;

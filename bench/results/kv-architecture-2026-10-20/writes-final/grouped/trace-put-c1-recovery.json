@@ -1,0 +1,42 @@
+{
+  "schema": "reddb.kv-compare.v1",
+  "classification": "shared-host-diagnostic",
+  "engine": "reddb-rest",
+  "operation": "get",
+  "config": {
+    "engine": "reddb-rest",
+    "host": "reddb-arch-final-grouped-20261020",
+    "port": 5000,
+    "collection": "kv_write_probe",
+    "profile": "strace",
+    "keys": 64,
+    "value_bytes": 100,
+    "operations": 64,
+    "seconds": 0,
+    "workers": 1,
+    "warmup": 0,
+    "rounds": 1,
+    "pipeline": 1,
+    "operation": "get",
+    "prepare_only": false,
+    "verify_only": true,
+    "fence_writes": false,
+    "recovery_from": "/results/trace-put-c1.json",
+    "verification": "full",
+    "verification_workers": 8
+  },
+  "client": {
+    "python": "3.12.15",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.36",
+    "implementation": "stdlib threads; client saturation must be checked externally"
+  },
+  "created_unix_ms": 1792538677355,
+  "status": "valid-diagnostic",
+  "rounds": [],
+  "latency_contract": "batch completion including response validation; pipeline=1 is one request",
+  "verification": {
+    "keys_checked": 64,
+    "expected_sha256": "55e1b925d1c43997a700e97723737232a5863c599998c52f04809af5fe52dbd8",
+    "verification_workers": 8
+  }
+}

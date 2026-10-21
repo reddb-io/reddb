@@ -62,7 +62,8 @@ def summarize(directory):
         comparison["p99_ratio"] = comparison["after"]["p99_us"]["median"] / comparison["before"]["p99_us"]["median"]
         comparisons.append(comparison)
     checksums = {path.relative_to(directory).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-                 for path in sorted(directory.rglob("*")) if path.is_file() and path.name != "summary.json"
+                 for path in sorted(directory.rglob("*")) if path.is_file()
+                 and path.name not in ["summary.json", "evidence-sha256.json"]
                  and path.suffix in [".json", ".jsonl", ".trace", ".log", ".py"]
                  and not path.name.endswith((".stdout.log", ".stderr.log"))}
     return {"schema": "reddb.query-projection-summary.v1", "status": manifest["status"],

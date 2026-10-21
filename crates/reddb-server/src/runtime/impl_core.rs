@@ -369,6 +369,10 @@ impl RedDBRuntime {
                 self.filter_integrity_tombstoned(&mut query_result.result);
             }
         }
+        result = result.and_then(|value| {
+            super::query_budget::check_result(self.resource_limits(), &value)?;
+            Ok(value)
+        });
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         // Build EffectiveScope from the same thread-locals frame-build
@@ -714,6 +718,12 @@ impl RedDBRuntime {
         let prepared = frame.prepare_statement(self, execution_query)?;
         let mode = prepared.mode;
         let expr = prepared.expr;
+
+        let _query_budget = if super::query_budget::is_materialized_read(&expr) {
+            Some(self.query_budget_scope()?)
+        } else {
+            None
+        };
 
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
@@ -2344,6 +2354,9 @@ impl RedDBRuntime {
             )),
         };
 
+        if _query_budget.is_some() {
+            super::query_budget::charge(0)?;
+        }
         if !control_event_specs.is_empty() {
             let (outcome, reason) = match &query_result {
                 Ok(_) => (crate::runtime::control_events::Outcome::Allowed, None),
@@ -2922,6 +2935,35 @@ impl RedDBRuntime {
     }
 
     fn dispatch_expr(
+        &self,
+        expr: QueryExpr,
+        query_str: &str,
+        mode: QueryMode,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        // Typed read plans only: mutation/transaction cleanup must never fail
+        // because a read result or cooperative deadline budget was exhausted.
+        let is_read = super::query_budget::is_materialized_read(&expr);
+        let _budget = if is_read {
+            Some(super::query_budget::Scope::enter(
+                self.resource_limits(),
+                &self.inner.query_budget_slots,
+            )?)
+        } else {
+            None
+        };
+        let result = self.dispatch_expr_inner(expr, query_str, mode);
+        if is_read {
+            super::query_budget::charge(0)?;
+        }
+        let result = result?;
+        super::query_budget::check_result(self.resource_limits(), &result)?;
+        if is_read {
+            super::query_budget::charge(0)?;
+        }
+        Ok(result)
+    }
+
+    fn dispatch_expr_inner(
         &self,
         expr: QueryExpr,
         query_str: &str,

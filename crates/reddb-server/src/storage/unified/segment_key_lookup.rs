@@ -1,5 +1,5 @@
 //! Disposable physical candidates for KV keys. Visibility belongs to the caller.
-use std::collections::{hash_map::RandomState, HashMap};
+use std::collections::{hash_map::RandomState, HashMap, HashSet};
 use std::hash::BuildHasher;
 
 use super::entity::{EntityData, EntityId, UnifiedEntity};
@@ -10,6 +10,7 @@ pub(super) struct SegmentKeyLookup {
     fingerprints: RandomState,
     entries: HashMap<u64, Vec<EntityId>>,
     ids_bytes: usize,
+    mutated: HashSet<EntityId>,
 }
 
 impl SegmentKeyLookup {
@@ -24,6 +25,7 @@ impl SegmentKeyLookup {
     }
 
     pub(super) fn insert(&mut self, entity: &UnifiedEntity) {
+        self.mutated.remove(&entity.id);
         let Some(key) = Self::key(entity) else {
             return;
         };
@@ -35,6 +37,7 @@ impl SegmentKeyLookup {
     }
 
     pub(super) fn remove(&mut self, entity: &UnifiedEntity) {
+        self.mutated.remove(&entity.id);
         let Some(key) = Self::key(entity) else {
             return;
         };
@@ -56,12 +59,22 @@ impl SegmentKeyLookup {
             .unwrap_or_default()
     }
 
+    pub(super) fn mark_mutated(&mut self, entity: &UnifiedEntity) {
+        self.remove(entity);
+        self.mutated.insert(entity.id);
+    }
+
+    pub(super) fn mutated_candidates(&self) -> impl Iterator<Item = &EntityId> {
+        self.mutated.iter()
+    }
+
     pub(super) fn memory_bytes(&self) -> u64 {
-        if self.entries.capacity() == 0 {
+        if self.entries.capacity() == 0 && self.mutated.capacity() == 0 {
             return 0;
         }
         (std::mem::size_of::<Self>()
             + self.entries.capacity() * (std::mem::size_of::<(u64, Vec<EntityId>)>() + 1)
-            + self.ids_bytes) as u64
+            + self.ids_bytes
+            + self.mutated.capacity() * (std::mem::size_of::<EntityId>() + 1)) as u64
     }
 }

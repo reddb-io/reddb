@@ -181,6 +181,18 @@ impl RedDBRuntime {
         options: RedDBOptions,
         pool_config: ConnectionPoolConfig,
     ) -> RedDBResult<Self> {
+        Self::with_pool_and_limits(
+            options,
+            pool_config,
+            super::resource_limits::ResourceLimits::from_env(),
+        )
+    }
+
+    pub(super) fn with_pool_and_limits(
+        options: RedDBOptions,
+        pool_config: ConnectionPoolConfig,
+        resource_limits: super::resource_limits::ResourceLimits,
+    ) -> RedDBResult<Self> {
         options
             .replication
             .validate_failover_profile()
@@ -365,7 +377,8 @@ impl RedDBRuntime {
                     &options,
                 )),
                 lifecycle: crate::runtime::lifecycle::Lifecycle::new(),
-                resource_limits: crate::runtime::resource_limits::ResourceLimits::from_env(),
+                resource_limits,
+                query_budget_slots: AtomicU64::new(0),
                 audit_log: {
                     // Default audit-log path for the in-memory case
                     // sits in the system temp dir; persistent runs
@@ -591,6 +604,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;
         runtime.rehydrate_declared_column_schemas();
         runtime.rehydrate_runtime_index_registry()?;
+        runtime.rehydrate_kv_tags()?;
         runtime
             .load_probabilistic_state()
             .map_err(|err| RedDBError::Internal(format!("load probabilistic state: {err}")))?;

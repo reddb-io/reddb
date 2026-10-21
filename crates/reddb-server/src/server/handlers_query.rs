@@ -27,16 +27,43 @@ impl RedDBServer {
         match exec_result {
             Ok(result) => {
                 if stream_ask {
-                    return ask_sse_response(&result);
+                    let response = ask_sse_response(&result);
+                    if self
+                        .runtime
+                        .resource_limits()
+                        .max_result_bytes
+                        .is_some_and(|limit| limit > 0 && response.body.len() as u64 > limit)
+                    {
+                        return json_error(413, "query result exceeds max_result_bytes");
+                    }
+                    return response;
                 }
-                json_response(
-                    200,
-                    crate::presentation::query_result_json::runtime_query_json(
-                        &result,
-                        &entity_types,
-                        &capabilities,
-                    ),
-                )
+                let value = crate::presentation::query_result_json::runtime_query_json(
+                    &result,
+                    &entity_types,
+                    &capabilities,
+                );
+                if result.statement_type == "select" {
+                    if let Some(limit) = self
+                        .runtime
+                        .resource_limits()
+                        .max_result_bytes
+                        .filter(|value| *value > 0)
+                    {
+                        return match value
+                            .to_string_compact_limited(usize::try_from(limit).unwrap_or(usize::MAX))
+                        {
+                            Some(body) => HttpResponse {
+                                status: 200,
+                                body: body.into_bytes(),
+                                content_type: "application/json",
+                                extra_headers: Vec::new(),
+                            },
+                            None => json_error(413, "query result exceeds max_result_bytes"),
+                        };
+                    }
+                }
+                json_response(200, value)
             }
             Err(err) => {
                 if stream_ask {
@@ -452,6 +479,25 @@ impl RedDBServer {
             capabilities,
             ..
         } = request;
+
+        // This transport also accepts DML. Do not turn a committed mutation's
+        // acknowledgement into a read-budget failure. The executor retains its
+        // own canonical result check for reads that require special lowering.
+        let limits = self.runtime.resource_limits();
+        let enabled = limits.read_execution_limits_enabled()
+            || limits.max_result_bytes.is_some_and(|value| value > 0);
+        let _query_budget = if enabled && is_budgeted_stream_read(&query) {
+            match self.runtime.query_budget_scope() {
+                Ok(scope) => Some(scope),
+                Err(cause) => {
+                    let (status, message) = map_runtime_error(&cause);
+                    writer.write_all(&json_error(status, message).to_http_bytes())?;
+                    return writer.flush();
+                }
+            }
+        } else {
+            None
+        };
 
         // Issue #766 / S7 — resume coordinator. Parse the optional
         // `resume` block from the body. When present, the request is
@@ -1121,6 +1167,15 @@ impl RedDBServer {
         body: Vec<u8>,
         writer: &mut W,
     ) -> io::Result<()> {
+        let _query_budget = match self.runtime.query_budget_scope() {
+            Ok(scope) => scope,
+            Err(cause) => {
+                let (status, message) = map_runtime_error(&cause);
+                writer.write_all(&json_error(status, message).to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+
         let request = match extract_query_request(&body) {
             Ok(request) => request,
             Err(response) => return write_sse_http_response(&response, writer),
@@ -1154,6 +1209,7 @@ impl RedDBServer {
                     emitted_answer_tokens.set(emitted_answer_tokens.get().saturating_add(1));
                 }
                 let encoded = crate::runtime::ai::sse_frame_encoder::encode(&frame);
+                crate::runtime::query_budget::charge_output(encoded.len())?;
                 writer
                     .write_all(encoded.as_bytes())
                     .and_then(|_| writer.flush())
@@ -1259,6 +1315,15 @@ impl RedDBServer {
         tenant: &str,
         writer: &mut W,
     ) -> io::Result<()> {
+        let _query_budget = match self.runtime.query_budget_scope() {
+            Ok(scope) => scope,
+            Err(cause) => {
+                let (status, message) = map_runtime_error(&cause);
+                writer.write_all(&json_error(status, message).to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+
         use crate::server::output_stream::{self, ChunkProducer, Clock, StreamConfig, SystemClock};
 
         let clock = SystemClock;
@@ -1574,6 +1639,15 @@ impl RedDBServer {
             Err(reject) => cursor_reject_response(&reject),
         }
     }
+}
+
+fn is_budgeted_stream_read(query: &str) -> bool {
+    let inner = crate::runtime::within_clause::try_strip_within_prefix(query)
+        .ok()
+        .flatten()
+        .map_or(query, |(_, inner)| inner);
+    reddb_rql::modes::parse_multi(inner)
+        .is_ok_and(|expr| crate::runtime::query_budget::is_materialized_read(&expr))
 }
 
 /// Issue #808 / 750d — does this write error mean the client went away
@@ -2321,6 +2395,20 @@ fn schema_json_field(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stream_read_budget_classifies_scoped_reads_and_excludes_mutation_acks() {
+        assert!(super::is_budgeted_stream_read("SELECT id FROM t"));
+        assert!(super::is_budgeted_stream_read(
+            "WITHIN TENANT 'acme' SELECT id FROM t"
+        ));
+        assert!(!super::is_budgeted_stream_read(
+            "INSERT INTO t (id) VALUES (1)"
+        ));
+        assert!(!super::is_budgeted_stream_read(
+            "CREATE TABLE t (id INTEGER)"
+        ));
+        assert!(!super::is_budgeted_stream_read("not a query"));
+    }
     use super::*;
     use crate::api::RedDBOptions;
     use crate::runtime::RedDBRuntime;

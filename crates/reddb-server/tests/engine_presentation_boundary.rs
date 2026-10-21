@@ -28,6 +28,7 @@ fn engine_layers_do_not_import_presentation() {
         "document_body.rs",
         "document_migration.rs",
         "entity_render.rs",
+        "query_payload_render.rs",
     ];
 
     for (layer, root_modules) in [

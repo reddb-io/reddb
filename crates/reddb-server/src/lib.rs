@@ -48,6 +48,7 @@ pub mod operational_bootstrap;
 pub mod pager_zone_migration;
 pub mod physical;
 pub(crate) mod presentation;
+pub(crate) mod query_payload_render;
 pub mod regress;
 pub mod replication;
 pub(crate) mod reserved_fields;
