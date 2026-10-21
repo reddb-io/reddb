@@ -22,7 +22,7 @@ fn sql(runtime: &RedDBRuntime, query: &str) {
     runtime.execute_query(query).expect("fixture SQL");
 }
 
-fn checkpoint_child(path: &Path, explicit: bool) {
+fn checkpoint_child(path: &Path, explicit: bool, insert_batch: bool) {
     let runtime = RedDBRuntime::with_options(
         RedDBOptions::persistent(path)
             .with_storage_profile(StorageDeployPreset::Serverless.selection())
@@ -92,7 +92,11 @@ fn checkpoint_child(path: &Path, explicit: bool) {
     for table in 0..16 {
         sql(
             &runtime,
-            &format!("UPDATE target_{table} SET n=9 WHERE id=1"),
+            &if insert_batch {
+                format!("INSERT INTO target_{table} (id,n) VALUES (2,9),(3,10)")
+            } else {
+                format!("UPDATE target_{table} SET n=9 WHERE id=1")
+            },
         );
     }
     clear_current_connection_id();
@@ -111,9 +115,9 @@ impl Drop for CrashChild {
     }
 }
 
-fn crash_case(name: &str, explicit: bool) {
+fn crash_case(name: &str, explicit: bool, insert_batch: bool) {
     if let Some(path) = std::env::var_os(CHILD_PATH) {
-        checkpoint_child(Path::new(&path), explicit);
+        checkpoint_child(Path::new(&path), explicit, insert_batch);
         unreachable!();
     }
     let directory = tempfile::tempdir().expect("isolated fixture");
@@ -139,6 +143,26 @@ fn crash_case(name: &str, explicit: bool) {
     let restored = open(&path);
     let expected = if explicit { "0" } else { "9" };
     for table in 0..16 {
+        if insert_batch {
+            let result = restored
+                .execute_query(&format!("SELECT id,n FROM target_{table} ORDER BY id"))
+                .expect("recovered inserted rows");
+            let expected = if explicit {
+                vec![(1, 0)]
+            } else {
+                vec![(1, 0), (2, 9), (3, 10)]
+            };
+            assert_eq!(
+                result.result.records.len(),
+                expected.len(),
+                "target_{table}"
+            );
+            for (row, (id, n)) in result.result.records.iter().zip(expected) {
+                assert_eq!(row.get("id").expect("id").to_string(), id.to_string());
+                assert_eq!(row.get("n").expect("n").to_string(), n.to_string());
+            }
+            continue;
+        }
         let result = restored
             .execute_query(&format!("SELECT n FROM target_{table} WHERE id=1"))
             .expect("recovered row");
@@ -156,6 +180,7 @@ fn transactions_started_during_checkpoint_do_not_become_committed_after_crash() 
     crash_case(
         "transactions_started_during_checkpoint_do_not_become_committed_after_crash",
         true,
+        false,
     );
 }
 
@@ -164,5 +189,24 @@ fn autocommit_updates_started_during_checkpoint_survive_crash() {
     crash_case(
         "autocommit_updates_started_during_checkpoint_survive_crash",
         false,
+        false,
+    );
+}
+
+#[test]
+fn unfinished_bulk_inserts_started_during_checkpoint_do_not_survive_crash() {
+    crash_case(
+        "unfinished_bulk_inserts_started_during_checkpoint_do_not_survive_crash",
+        true,
+        true,
+    );
+}
+
+#[test]
+fn autocommit_bulk_inserts_started_during_checkpoint_survive_crash() {
+    crash_case(
+        "autocommit_bulk_inserts_started_during_checkpoint_survive_crash",
+        false,
+        true,
     );
 }

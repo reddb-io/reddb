@@ -36,6 +36,9 @@ While store WAL actions are captured for a transaction, row inserts and
 upserts stay in the live segment and deferred WAL, leaving published B-tree
 pages unchanged. Incidental pager flushes cannot publish unfinished inserts
 or delete stamps; a successful commit makes the captured WAL batch durable.
+Bulk inserts hold the checkpoint publication fence before installing their
+segment rows through WAL capture or append, including transactions that begin
+after checkpoint visibility has already been frozen.
 
 Owned row reads restore missing positional column names from the collection's
 shared schema before mutation or index backfill. Explicit row schemas and named

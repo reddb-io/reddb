@@ -630,6 +630,9 @@ impl UnifiedStore {
         collection: &str,
         mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, StoreError> {
+        // A transaction can begin after checkpoint visibility is frozen.
+        // Fence the entire row batch, including its captured or committed WAL.
+        let _publication = self.vault_publication_lock.lock();
         // REDDB_BULK_TIMING=1 prints a per-call breakdown of the bulk
         // insert path to stderr. Off by default — used by the reddb
         // benchmark harness to locate ingest bottlenecks.
