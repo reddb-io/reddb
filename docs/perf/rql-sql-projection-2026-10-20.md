@@ -379,3 +379,63 @@ constructor hits Windows mandatory-lock error 33. The same test fails on clean
 main `0eb3a89c` before any writes. Both logs are retained; this pre-existing
 paged limitation remains open. The low-level Strict page-flush regression runs
 on Unix, while runtime eligibility keeps paged writes on their existing path.
+
+### Updated Redis / KiviDB comparison
+
+The untraced repeat at `fae39eb6` is closed under
+[kv-compare-final-2026-10-20](../../bench/results/kv-compare-final-2026-10-20/SUMMARY.md).
+It uses the immutable final binary above, Redis 8.4.0 and KiviDB 1.1.0, pinned
+image identities, fresh volumes, four server CPUs and two separate client CPUs.
+Each engine runs alone. GET uses 1,000/10,000 keys, 100-byte values, five
+two-second rounds, and 1/8/32 connections. Every value is checked. Each matrix
+and write cell is verified after process termination and reopening. All 96
+recorded setup/measurement/recovery steps completed without errors; 12 RESP
+pipeline cells remain explicitly unsupported for the HTTP RedDB adapters.
+
+For 10,000 keys without pipelining, the observed HTTP KV results are:
+
+| Connections | RedDB GET/s | Redis GET/s | KiviDB GET/s | RedDB p99 ms | Redis p99 ms | KiviDB p99 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2,471 | 4,888 | 2,759 | 0.52 | 0.26 | 8.47 |
+| 8 | 4,034 | 8,233 | 5,294 | 6.09 | 2.95 | 8.69 |
+| 32 | 4,359 | 8,156 | 9,565 | 25.15 | 12.74 | 10.93 |
+
+RedDB remains behind in throughput. Its observed p99 is lower than KiviDB at
+one and eight connections, and higher at 32; it is higher than Redis in all
+three cells. The separate KV-via-RQL adapter measured 1,947/2,966/3,410 GET/s
+at those connection counts. Those are KV commands through RQL, not the SQL
+point query whose speedup was measured above. The unfavorable 1,000-key RQL
+c32 cell remains visible: 1,093 GET/s and 99.24 ms p99, with a round range of
+989–2,841 GET/s. Redis also varied substantially in some cells. No independent
+repetitions or dedicated-host confidence interval establish a leadership claim.
+
+Durable overwrite uses 1,000 target keys and five rounds of 500 writes, with
+readback after each round. Redis acknowledges AOF `always`; KiviDB operations
+include `SET` plus successful `WAITAOF 1 0 5000`; both RedDB modes retain their
+existing WAL and superblock syncs. For eight connections:
+
+| Product path | Writes/s | p99 ms |
+| --- | ---: | ---: |
+| Redis | 2,529 | 7.88 |
+| KiviDB with local persistence fence | 2,199 | 5.97 |
+| RedDB Strict | 243 | 60.44 |
+| RedDB grouped, matched background population | 205 | 731.88 |
+
+The first grouped continuation used a fresh volume with only the 1,000 target
+keys. It measured 519 writes/s and 103.44 ms p99 at c8. It is retained as the
+separate `grouped` diagnostic and is unsuitable for attributing all differences
+from Strict to grouping: the primary matrix already holds another 11,000 keys
+in the two read collections. The `grouped-matched` continuation therefore
+preloads and reopens/verifies those same background collections before running
+the identical write cells on another fresh volume. That comparable population
+produced the unfavorable 205 writes/s result above, with round throughput
+107.6–277.8 writes/s. At c1, Strict/grouped-matched measured 91.7/144.1 writes/s.
+
+Fewer sync calls have not established a sustained write throughput or tail
+latency improvement on populated stores. CPU samples are low during these
+write cells; they do not by themselves identify the waiting path. Full-WAL
+checkpoint/retry behavior is a candidate for separate profiling, not a proven
+cause of this result. The next write optimization needs a populated-store
+regression workload and p99 evidence alongside sync counts. All unsuccessful
+performance comparisons remain in the report; no engine changes were made
+during these measurements.

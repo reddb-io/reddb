@@ -66,6 +66,20 @@ run-level repetitions and a proven non-saturating client for that stage.
 
 ## Reproduce
 
+The updated `fae39eb6` comparison is retained in
+[kv-compare-final-2026-10-20](../results/kv-compare-final-2026-10-20/SUMMARY.md).
+Its `run.py` records the full three-engine matrix and a `grouped` write-only
+continuation on a fresh 1,000-key store. `run-matched-grouped.py` then appends
+`grouped-matched`: it first preloads and reopens/verifies the same additional
+11,000 keys present in the primary matrix, so write comparisons also match
+background population. Prefer that continuation when comparing grouped writes
+with Strict/Redis/KiviDB. The smaller-store diagnostic remains visible and is
+not substituted for the less favorable matched result. These scripts record
+local container/image/binary identities; use fresh names and output directories
+when reproducing, rather than overwriting the closed capture. Interpretation,
+latency and unfavorable cells are in the
+[dated report](../../docs/perf/rql-sql-projection-2026-10-20.md#updated-redis--kividb-comparison).
+
 Requires Docker with at least six available CPU IDs and Python 3.10+. Use a clean
 checkout of the recorded engine revision. The run manifest records image digests,
 commands, environment, CPU/memory limits, engine revision and binary checksum.
