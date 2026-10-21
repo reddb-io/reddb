@@ -81,7 +81,7 @@ impl Drop for Scope<'_> {
 pub(crate) fn active() -> bool {
     CURRENT.with(|slot| slot.get().is_some())
 }
-pub(super) fn is_materialized_read(expr: &reddb_rql::ast::QueryExpr) -> bool {
+pub(crate) fn is_materialized_read(expr: &reddb_rql::ast::QueryExpr) -> bool {
     use reddb_rql::ast::QueryExpr;
     matches!(
         expr,

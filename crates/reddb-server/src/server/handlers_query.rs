@@ -461,15 +461,6 @@ impl RedDBServer {
         ctx: &crate::server::routing::StreamAuditCtx,
         writer: &mut W,
     ) -> io::Result<()> {
-        let _query_budget = match self.runtime.query_budget_scope() {
-            Ok(scope) => scope,
-            Err(cause) => {
-                let (status, message) = map_runtime_error(&cause);
-                writer.write_all(&json_error(status, message).to_http_bytes())?;
-                return writer.flush();
-            }
-        };
-
         use crate::server::output_stream::{
             self, ChunkProducer, Clock, LeaseLookup, OpenStreamError, PrefixHasher, StreamConfig,
             SystemClock,
@@ -488,6 +479,25 @@ impl RedDBServer {
             capabilities,
             ..
         } = request;
+
+        // This transport also accepts DML. Do not turn a committed mutation's
+        // acknowledgement into a read-budget failure. The executor retains its
+        // own canonical result check for reads that require special lowering.
+        let limits = self.runtime.resource_limits();
+        let enabled = limits.read_execution_limits_enabled()
+            || limits.max_result_bytes.is_some_and(|value| value > 0);
+        let _query_budget = if enabled && is_budgeted_stream_read(&query) {
+            match self.runtime.query_budget_scope() {
+                Ok(scope) => Some(scope),
+                Err(cause) => {
+                    let (status, message) = map_runtime_error(&cause);
+                    writer.write_all(&json_error(status, message).to_http_bytes())?;
+                    return writer.flush();
+                }
+            }
+        } else {
+            None
+        };
 
         // Issue #766 / S7 — resume coordinator. Parse the optional
         // `resume` block from the body. When present, the request is
@@ -1631,6 +1641,15 @@ impl RedDBServer {
     }
 }
 
+fn is_budgeted_stream_read(query: &str) -> bool {
+    let inner = crate::runtime::within_clause::try_strip_within_prefix(query)
+        .ok()
+        .flatten()
+        .map_or(query, |(_, inner)| inner);
+    reddb_rql::modes::parse_multi(inner)
+        .is_ok_and(|expr| crate::runtime::query_budget::is_materialized_read(&expr))
+}
+
 /// Issue #808 / 750d — does this write error mean the client went away
 /// mid-stream? A disconnected peer surfaces as a broken pipe or a reset /
 /// aborted connection; those are the signals that the rows we are
@@ -2376,6 +2395,20 @@ fn schema_json_field(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stream_read_budget_classifies_scoped_reads_and_excludes_mutation_acks() {
+        assert!(super::is_budgeted_stream_read("SELECT id FROM t"));
+        assert!(super::is_budgeted_stream_read(
+            "WITHIN TENANT 'acme' SELECT id FROM t"
+        ));
+        assert!(!super::is_budgeted_stream_read(
+            "INSERT INTO t (id) VALUES (1)"
+        ));
+        assert!(!super::is_budgeted_stream_read(
+            "CREATE TABLE t (id INTEGER)"
+        ));
+        assert!(!super::is_budgeted_stream_read("not a query"));
+    }
     use super::*;
     use crate::api::RedDBOptions;
     use crate::runtime::RedDBRuntime;

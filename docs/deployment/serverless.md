@@ -80,10 +80,12 @@ or one typed value conversion.
 
 Buffered read output must fit its canonical result ceiling; the final HTTP JSON
 envelope is also bounded, including request-selected metadata. NDJSON/SELECT/SSE
-output streams retain their budget for the stream lifetime and charge payload
+output streams for classified reads retain their budget for the stream lifetime and charge payload
 bytes before buffering them (HTTP chunk framing is excluded). If a limit fires
 after headers, the stream must fail without a successful end frame; clients must
-require that end frame and treat early connection closure as failure. Read budgets
+require that end frame, reject any error frame, and treat early connection closure
+as failure. Executor errors can retain the existing NDJSON error-then-end contract;
+an end frame alone does not establish success. Read budgets
 exclude mutation acknowledgements and NDJSON input-stream acknowledgements so a
 committed mutation is not subsequently presented as a read-limit failure.
 
