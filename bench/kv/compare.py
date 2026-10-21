@@ -283,7 +283,9 @@ def measure(args, round_index, generations):
         "throughput_ops_s": completed / seconds,
         "batch_p50_us": percentile(latencies, .50),
         "batch_p95_us": percentile(latencies, .95),
-        "batch_p99_us": percentile(latencies, .99), "errors": 0,
+        "batch_p99_us": percentile(latencies, .99),
+        "batch_p999_us": percentile(latencies, .999),
+        "batch_max_us": max(latencies, default=0), "errors": 0,
     }
 
 

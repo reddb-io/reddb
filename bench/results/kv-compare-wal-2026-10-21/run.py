@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import statistics
 import subprocess
 import sys
 import time
@@ -49,6 +50,9 @@ manifest = {"schema": "reddb.wal-pressure.v1", "status": "running", "started_uni
                            "recovery": "SIGKILL after each full cell; verify write keys and all background keys",
                            "fixture_source": "stopped reddb-kv-final-data-red-20261020/bench.rdb"},
             "cases": [], "containers": {}, "errors": []}
+manifest["harness_sha256"] = {str(path.relative_to(REPO)).replace("\\", "/"): hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in [REPO / "bench/kv/compare.py", Path(__file__).resolve()]}
+manifest["harness_revision"] = command("git", "rev-parse", "HEAD")
 
 
 def save():
@@ -155,6 +159,8 @@ try:
             if monitor:
                 monitor.close()
             command("docker", "stop", server, client)
+    for relative, expected in manifest["harness_sha256"].items():
+        assert hashlib.sha256((REPO / relative).read_bytes()).hexdigest() == expected, "harness changed during capture"
     manifest["status"] = "valid-diagnostic"
 except BaseException as error:
     manifest["status"] = "invalid"
@@ -175,6 +181,9 @@ finally:
             result = json.loads((ROOT / case["file"]).read_text())
             value = summarize_case(result, events, case["server"], case["client"])
             value.update(case=case["case"], file=case["file"], binary_sha256=case["binary_sha256"])
+            if result["status"] == "valid-diagnostic":
+                value["median_batch_p999_us"] = statistics.median(r["batch_p999_us"] for r in result["rounds"])
+                value["worst_batch_max_us"] = max(r["batch_max_us"] for r in result["rounds"])
             measurements.append(value)
     checksums = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(ROOT.iterdir())
                  if p.is_file() and p.name != "summary.json"}
