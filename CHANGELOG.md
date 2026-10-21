@@ -2,6 +2,18 @@
 
 ## 1.25.2
 
+### Patch Changes
+
+- [#2443](https://github.com/reddb-io/reddb/pull/2443) [`c9a92f4`](https://github.com/reddb-io/reddb/commit/c9a92f4db670e4eeddaaf2165a6fc5ac63c97f18) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Defer reuse of physically removed B-tree and overflow pages until their removal
+  from the collection catalog is durable. Preserve pending reclamation across
+  reopen with an optional paged-metadata ledger, and publish physical delete
+  batches without serializing unchanged survivors. Add crash/reuse, tree-shrink
+  and repeated-reopen storage regressions. Older readers can ignore the new
+  ledger; older writers do not preserve its reclamation state, so writer
+  downgrades require a separately qualified recovery procedure.
+
+  Previously corrupted stores require a separate recovery procedure.
+
 ## 1.25.1
 
 ### Patch Changes
