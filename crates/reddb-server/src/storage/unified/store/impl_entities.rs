@@ -83,7 +83,7 @@ impl UnifiedStore {
             .collect();
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree {
+        if !skip_btree && !Self::deferred_store_wal_capture_active() {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -165,7 +165,7 @@ impl UnifiedStore {
         // u64 IDs encoded as big-endian — lex order = numeric order.
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree {
+        if !skip_btree && !Self::deferred_store_wal_capture_active() {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -561,9 +561,14 @@ impl UnifiedStore {
             self.update_graph_label_index(collection, label, id);
         }
 
-        // Also insert into B-tree index if pager is active
+        // Captured transactions stay WAL-only until commit; pager flushes must
+        // never make an unfinished row durable.
         let mut registry_dirty = false;
-        if let Some(pager) = &self.pager {
+        if let Some(pager) = self
+            .pager
+            .as_ref()
+            .filter(|_| !Self::deferred_store_wal_capture_active())
+        {
             if let Some(entity) = manager.get(id) {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
@@ -784,7 +789,7 @@ impl UnifiedStore {
         let mut t_btree_lock = std::time::Duration::ZERO;
         let mut t_btree_insert = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
-        if !skip_btree {
+        if !skip_btree && !Self::deferred_store_wal_capture_active() {
             if let (Some(pager), Some(batch)) = (&self.pager, serialized.as_ref()) {
                 let t0 = std::time::Instant::now();
                 let mut btree_indices = self.btree_indices.write();
@@ -890,7 +895,7 @@ impl UnifiedStore {
         // both or neither. Otherwise the rebuild re-inserts this row from the
         // manager and one of the two B-tree inserts fails on a duplicate key,
         // or lands mid-rebuild and tears the tree.
-        let paged_btree = if persist_record {
+        let paged_btree = if persist_record && !Self::deferred_store_wal_capture_active() {
             self.get_or_create_btree(collection)
         } else {
             None

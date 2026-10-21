@@ -32,6 +32,10 @@ clear their delete stamps on committed preimages. Live transaction state stays
 unchanged. Transaction visibility revisions invalidate reuse after begin, commit
 or rollback; equivalent exclusion sets can retain the existing proof. Commit
 WAL publication and visibility changes share the checkpoint publication fence.
+While store WAL actions are captured for a transaction, row inserts and
+upserts stay in the live segment and deferred WAL, leaving published B-tree
+pages unchanged. Incidental pager flushes cannot publish unfinished inserts
+or delete stamps; a successful commit makes the captured WAL batch durable.
 
 Owned row reads restore missing positional column names from the collection's
 shared schema before mutation or index backfill. Explicit row schemas and named
