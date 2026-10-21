@@ -26,6 +26,9 @@ impl RedDBRuntime {
         }
 
         let store = self.db().store();
+        // Keep tombstone stamps and their WAL in one publication interval,
+        // including writers that start after checkpoint visibility is frozen.
+        let _publication = store.vault_publication_lock.lock();
         let Some(manager) = store.get_collection(collection) else {
             return Ok((0, vec![]));
         };
