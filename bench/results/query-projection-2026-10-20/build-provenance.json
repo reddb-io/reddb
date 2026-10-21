@@ -1,0 +1,89 @@
+{
+  "schema": "reddb.query-build-provenance.v1",
+  "build": {
+    "Image": "sha256:98eea7263191d48cc64bb4d4b39d6c52cd2501d08e8fcceb6471fe4fdfbefaf9",
+    "Config": {
+      "Hostname": "5f9a08397dd2",
+      "Domainname": "",
+      "User": "",
+      "AttachStdin": false,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Env": [
+        "RUST_MIN_STACK=8388608",
+        "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "RUSTUP_HOME=/usr/local/rustup",
+        "CARGO_HOME=/usr/local/cargo",
+        "RUST_VERSION=1.95.0"
+      ],
+      "Cmd": [
+        "sh",
+        "-c",
+        "set -eu; cargo build --release --locked --bin red -j4; sha256sum target/release/red"
+      ],
+      "Image": "reddb-kv-build-tools:20261020",
+      "Volumes": null,
+      "WorkingDir": "/work/src",
+      "Entrypoint": null,
+      "Labels": {
+        "org.opencontainers.image.source": "https://github.com/rust-lang/docker-rust"
+      }
+    },
+    "State": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-10-20T19:04:24.860396999Z",
+      "FinishedAt": "2026-10-20T19:07:18.845463473Z"
+    },
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/run/desktop/mnt/host/c/Users/filip/dev/reddb-kv-index",
+        "Destination": "/changes",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "volume",
+        "Name": "reddb-kv-build-20261020",
+        "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+        "Destination": "/work",
+        "Driver": "local",
+        "Mode": "z",
+        "RW": true,
+        "Propagation": ""
+      }
+    ]
+  },
+  "source_note": "Cached Linux build volume from REST-index baseline; six files overlaid from the worktree. Production changes match 8eb7f554; final native test fixture correction only changes the expected error string.",
+  "runtime_revision": "8eb7f554bf6e537755cc3341872dac278f8391e7",
+  "binary_sha256": "44804df62e0f003ed5948f914a0159ae378e7d00af254e6a88cbb46cb6b91718",
+  "overlaid_source_sha256": {
+    "runtime/impl_core.rs": "8b61956204aaf8771d7183ae8b307adafd137d74e24376fab977dd92732203e3",
+    "runtime/impl_kv.rs": "787d20a2f9f6fef2fe65cf11ad5b399b474557865352e44f299370f3b284c236",
+    "presentation/query_view.rs": "c0cd13126dd379c752c1fe75263518a761c67cc36d1ab150356e5ed0cf480618",
+    "server/handlers_query.rs": "6a4f827bc07ef7c4ab6569588115cb7a5788daaaadbddd9b7d963a0484f1305f",
+    "storage/no_malloc_hot_paths.rs": "780822b330c9d508325cf8a832d8bc9765e9fd8671232e9cf2f6ce141a8199ca",
+    "storage/mod.rs": "e36a3a0b5501f4962f6091941916b09a81a1503034285e51686bc6eea7ab434a"
+  },
+  "overlay_step": {
+    "command": [
+      "bash",
+      "-lc",
+      "set -e; cp -n target/release/red /work/projection-only-00bb6996-red; for file in runtime/impl_core.rs runtime/impl_kv.rs presentation/query_view.rs server/handlers_query.rs storage/no_malloc_hot_paths.rs storage/mod.rs; do cp /changes/crates/reddb-server/src/$file crates/reddb-server/src/$file; done; cargo build --release --locked --bin red -j4; sha256sum target/release/red"
+    ],
+    "exit_code": 127,
+    "note": "Source copies completed; login shell reset PATH and could not find cargo. The following build container reused the copied source with the image PATH."
+  }
+}

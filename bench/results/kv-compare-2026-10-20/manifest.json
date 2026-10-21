@@ -1,0 +1,981 @@
+{
+  "schema": "reddb.kv-local-matrix.v1",
+  "status": "completed-with-invalid-cells",
+  "classification": "shared-host-diagnostic",
+  "primary_metric": "GET p99 completion latency at pipeline=1",
+  "started_unix_ms": 1792515670680,
+  "host": "Windows-10-10.0.22621-SP0",
+  "docker": {
+    "ServerVersion": "29.8.1",
+    "NCPU": 12,
+    "MemTotal": 20078956544,
+    "Architecture": "x86_64",
+    "KernelVersion": "6.18.54.1-microsoft-standard-WSL2",
+    "OperatingSystem": "Docker Desktop (containerized)",
+    "Driver": "overlayfs"
+  },
+  "red_engine_revision": "a3af4d6261f05fcc2dccd5caca178c5ddf6936a3",
+  "red_binary_sha256": "00e800ab0494a8b24fb9e58a1f23f16e3e692ad2fdac0a288cb7b4e9895ac3e1",
+  "red_build": "cargo build --release --locked --bin red -j 4; Rust 1.95.0",
+  "containers": {
+    "reddb-kv-redis-20261020": {
+      "container": "reddb-kv-redis-20261020",
+      "image_id": "sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78",
+      "image_digests": [
+        "redis@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78"
+      ],
+      "command": [
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "always",
+        "--protected-mode",
+        "no",
+        "--io-threads",
+        "4",
+        "--maxmemory",
+        "1073741824",
+        "--maxmemory-policy",
+        "noeviction"
+      ],
+      "environment": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "REDIS_DOWNLOAD_URL=https://github.com/redis/redis/archive/refs/tags/8.4.0.tar.gz",
+        "REDIS_DOWNLOAD_SHA=b947d9015622669b5bee8ec954f658b3278d42dbefae23a92d9b7704bfe143f9"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-redis-20261020",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-kv-kivi-20261020": {
+      "container": "reddb-kv-kivi-20261020",
+      "image_id": "sha256:9c7cda22f6aa7924e2c28a7605e765469249c389f5388b7dff9cd56a35d18c2d",
+      "image_digests": [
+        "kividb/kividb@sha256:9c7cda22f6aa7924e2c28a7605e765469249c389f5388b7dff9cd56a35d18c2d"
+      ],
+      "command": [
+        "--aof",
+        "--threads",
+        "4",
+        "--io-model",
+        "tokio",
+        "--protected-mode",
+        "no",
+        "--update-check",
+        "no",
+        "--maxmemory",
+        "1073741824"
+      ],
+      "environment": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-kivi-20261020",
+          "Destination": "/home/kividb",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-kv-red-20261020": {
+      "container": "reddb-kv-red-20261020",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "/build/src/target/release/red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "REDDB_DURABILITY=strict",
+        "REDDB_DURABILITY_MODE=strict",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-red-20261020",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-kv-client-20261020": {
+      "container": "reddb-kv-client-20261020",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "sleep",
+        "36000"
+      ],
+      "environment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "4-5",
+      "nano_cpus": 2000000000,
+      "memory_limit": 1073741824,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Destination": "/bench",
+          "Mode": "",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Destination": "/results",
+          "Mode": "",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ]
+    },
+    "reddb-kv-red-cap64-20261020": {
+      "container": "reddb-kv-red-cap64-20261020",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "/build/src/target/release/red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--http-max-handlers",
+        "64",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "REDDB_DURABILITY=strict",
+        "REDDB_DURABILITY_MODE=strict",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-red-cap64-20261020",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-kv-red-sync-20261020": {
+      "container": "reddb-kv-red-sync-20261020",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "/build/src/target/release/red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--http-max-handlers",
+        "64",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_DURABILITY_MODE=sync",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "REDDB_DURABILITY=sync",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-red-sync-20261020",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    }
+  },
+  "conditions": {
+    "keys": [
+      1000,
+      10000
+    ],
+    "value_bytes": 100,
+    "workers": [
+      1,
+      8,
+      32
+    ],
+    "rounds": 5,
+    "get_seconds_per_round": 2,
+    "transport": "HTTP/1.1 keep-alive for RedDB; RESP2 for Redis/KiviDB",
+    "warmup": "10 GETs per connection; full dataset check before/after each matrix",
+    "server_order": "Redis, KiviDB, RedDB; no simultaneous server load",
+    "write_contract": "RedDB strict WAL; Redis AOF always; KiviDB SET + WAITAOF 1 0 5000",
+    "recovery": "SIGKILL after completion; reopen and verify every expected value",
+    "limits": "Python/GIL and shared Docker VM may limit throughput; no max-throughput or public lead claim",
+    "additional_write_profile": "RedDB sync / WalDurableGrouped also waits for WAL fsync before completion; separately labeled sync; CPU and memory limits unchanged",
+    "atomicity_scope": "Separate GET-only and PUT-only workloads; no overlapping read/write or cross-key transaction equivalence claim"
+  },
+  "cases": [
+    {
+      "file": "redis-1000-seed.json",
+      "status": "prepared",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-reopen.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-get-c1-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-get-c8-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-get-c32-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-get-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-10000-seed.json",
+      "status": "prepared",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-10000-reopen.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-10000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-10000-get-c1-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-10000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-10000-get-c8-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-10000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-10000-get-c32-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-10000-get-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-put-c1-p1-seed.json",
+      "status": "prepared",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-put-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "put"
+    },
+    {
+      "file": "redis-1000-put-c1-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-put-c8-p1-seed.json",
+      "status": "prepared",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "redis-1000-put-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "put"
+    },
+    {
+      "file": "redis-1000-put-c8-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "redis",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-seed.json",
+      "status": "prepared",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-reopen.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-get-c1-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-get-c8-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-get-c32-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-get-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-10000-seed.json",
+      "status": "prepared",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-10000-reopen.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-10000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-10000-get-c1-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-10000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-10000-get-c8-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-10000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-10000-get-c32-p16.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-10000-get-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-put-c1-p1-seed.json",
+      "status": "prepared",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-put-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "put"
+    },
+    {
+      "file": "kividb-1000-put-c1-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-put-c8-p1-seed.json",
+      "status": "prepared",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "kividb-1000-put-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "put"
+    },
+    {
+      "file": "kividb-1000-put-c8-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "kividb",
+      "operation": "get"
+    },
+    {
+      "file": "reddb-rest-1000-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "reddb-rest-1000-reopen.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "reddb-rest-1000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "reddb-rest-1000-get-c1-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "reddb-rest-1000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "reddb-rest-1000-get-c8-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-reopen.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c1-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c8-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-c32-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c1-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c8-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-1000-get-c32-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-get-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-reopen.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c1-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c8-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-c32-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c1-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c8-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c32-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-query-10000-get-c32-p16.json",
+      "status": "unsupported",
+      "engine": "reddb-query",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-10000-get-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c1-p1-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "put"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c1-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c8-p1-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "put"
+    },
+    {
+      "file": "cap64-reddb-rest-1000-put-c8-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "sync-reddb-rest-1000-put-c1-p1-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "sync-reddb-rest-1000-put-c1-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "put"
+    },
+    {
+      "file": "sync-reddb-rest-1000-put-c1-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "sync-reddb-rest-1000-put-c8-p1-seed.json",
+      "status": "prepared",
+      "engine": "reddb-rest",
+      "operation": "get"
+    },
+    {
+      "file": "sync-reddb-rest-1000-put-c8-p1.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "put"
+    },
+    {
+      "file": "sync-reddb-rest-1000-put-c8-p1-recovery.json",
+      "status": "valid-diagnostic",
+      "engine": "reddb-rest",
+      "operation": "get"
+    }
+  ],
+  "phases": [
+    {
+      "engine": "redis",
+      "identity": "# Server\nredis_version:8.4.0\nredis_git_sha1:00000000\nredis_git_dirty:1\nredis_build_id:f9dfe271a234a9b6\nredis_mode:standalone\nos:Linux 6.18.54.1-microsoft-standard-WSL2 x86_64\narch_bits:64\nmonotonic_clock:POSIX clock_gettime\nmultiplexing_api:epoll\natomicvar_api:c11-builtin\ngcc_version:12.2.0\nprocess_id:1\nprocess_supervised:no\nrun_id:0fbfa3f578b02742af884a46922ea77e636a35e1\ntcp_port:6379\nserver_time_usec:1792515676062768\nuptime_in_seconds:1\nuptime_in_days:0\nhz:10\nconfigured_hz:10\nlru_clock:14130780\nexecutable:/data/redis-server\nconfig_file:\nio_threads_active:1\nlistener0:name=tcp,bind=*,bind=-::*,port=6379\n\n[b'appendfsync', b'always']",
+      "started_unix_ms": 1792515676180,
+      "finished_unix_ms": 1792515870413
+    },
+    {
+      "engine": "kividb",
+      "identity": "# Server\nredis_version:8.10.0\nredis_git_sha1:00000000\nredis_git_dirty:0\nredis_build_id:110\nredis_mode:standalone\narch_bits:64\nkividb_version:1.1.0\nos:linux x86_64\ntcp_port:6380\nprocess_id:1\nrun_id:0000000020ad4e9100000000deadbeee20ad4e90\nuptime_in_seconds:0\nuptime_in_days:0\nhz:10\nconfigured_hz:10\nmultiplexing_api:epoll\natomicvar_api:atomic-builtin\ngcc_version:0.0.0\nconfig_file:\nslowlog_log_slower_than:18446744073709551615\nslowlog_max_len:128\nexecutable:/usr/local/bin/kividb\n\n\n[b'appendfsync', b'everysec']",
+      "started_unix_ms": 1792515871694,
+      "finished_unix_ms": 1792516119497
+    },
+    {
+      "engine": "reddb-rest",
+      "identity": "{'phase': 'ready', 'status': 'alive'}",
+      "started_unix_ms": 1792516120887
+    },
+    {
+      "engine": "reddb-rest",
+      "identity": "{'phase': 'ready', 'status': 'alive'}",
+      "started_unix_ms": 1792516285829,
+      "finished_unix_ms": 1792516788808
+    },
+    {
+      "engine": "reddb-rest",
+      "identity": "{'phase': 'ready', 'status': 'alive'}",
+      "started_unix_ms": 1792516962877,
+      "finished_unix_ms": 1792517023854
+    }
+  ],
+  "errors": [
+    {
+      "engine": "reddb-rest",
+      "error": "docker exec reddb-kv-client-20261020 python /bench/compare.py: call last):\n  File \"/bench/compare.py\", line 219, in measure\n    barrier.wait()\n  File \"/usr/local/lib/python3.12/threading.py\", line 716, in wait\n    self._enter() # Block while the barrier drains.\n    ^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/threading.py\", line 740, in _enter\n    raise BrokenBarrierError\nthreading.BrokenBarrierError\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/bench/compare.py\", line 346, in <module>\n    main()\n  File \"/bench/compare.py\", line 320, in main\n    sample = measure(args, index, generations)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/bench/compare.py\", line 222, in measure\n    raise next((error for error in errors if error is not None\n  File \"/usr/local/lib/python3.12/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/bench/compare.py\", line 192, in worker\n    connection.batch(\"get\", [key_index], args.value_bytes, generations[key_index])\n  File \"/bench/compare.py\", line 142, in batch\n    result = self.request(\"GET\" if operation == \"get\" else \"PUT\", path,\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/bench/compare.py\", line 121, in request\n    raise ProtocolError(f\"HTTP {response.status}, closes={response.will_close}: {raw[:512]!r}\")\nProtocolError: HTTP 503, closes=False: b'{\"error\":\"server at capacity\",\"retry_after_secs\":5}'\n "
+    }
+  ],
+  "finished_unix_ms": 1792517024177,
+  "continuations": [
+    {
+      "started_unix_ms": 1792516283670,
+      "label": "cap64",
+      "only": "reddb-rest",
+      "containers": [
+        "reddb-kv-redis-20261020",
+        "reddb-kv-kivi-20261020",
+        "reddb-kv-red-cap64-20261020",
+        "reddb-kv-client-20261020"
+      ]
+    },
+    {
+      "started_unix_ms": 1792516961334,
+      "label": "sync",
+      "only": "reddb-rest",
+      "only_put": true,
+      "containers": [
+        "reddb-kv-redis-20261020",
+        "reddb-kv-kivi-20261020",
+        "reddb-kv-red-sync-20261020",
+        "reddb-kv-client-20261020"
+      ]
+    }
+  ],
+  "sampling_notes": [
+    "The initial Windows Docker CLI collector discarded ANSI-prefixed samples. resources-matrix.jsonl supplies the supplementary stream; early Redis 1000-key cells have unavailable resource samples.",
+    "The cap64 continuation uses a repaired ANSI-aware collector and an explicit 64-request HTTP admission cap, on a fresh volume. The original default-cap failure and partial phase remain visible.",
+    "Untimed full verification initially used one connection; subsequent cap64 verification used eight. Every key and changed value is still checked; the timed workload function is unchanged.",
+    "Redis 8.4.0 was available as a pinned official image. Redis 8.10 from the cited headline was not available under the attempted official image tag; this capture does not reproduce that headline setup.",
+    "Zero-only CPU samples for an active measured cell are marked unavailable; raw counters remain available. Cgroup memory observations remain usable."
+  ],
+  "timed_client_ast_sha256": "c4845d7ce1e7cd423b22cbfe0bccb51c02067bfd276cd234b3a5afa6c52d2784",
+  "harness_revision_at_completion": "62a7c03d65b5d94245c42159709f6e03b4c7fe7e",
+  "hardware_probe": {
+    "cpu_model": "AMD Ryzen 5 3600 6-Core Processor",
+    "kernel": "6.18.54.1-microsoft-standard-WSL2"
+  },
+  "artifact_notes": [
+    "Text artifacts use canonical LF line endings for cross-platform SHA256 verification; numeric measurements are unchanged."
+  ]
+}

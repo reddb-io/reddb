@@ -2507,6 +2507,18 @@ impl RedDBRuntime {
         let Some((name, expected_model)) = expected else {
             return Ok(());
         };
+        // Declared models are authoritative in the catalog snapshot. Resolve
+        // just this contract instead of observing every row in every collection
+        // for a point command. Keep the snapshot fallback for undeclared legacy
+        // collections and orphaned contracts, preserving their inference rules.
+        if let Some(contract) = self.inner.db.collection_contract_arc(name) {
+            if self.inner.db.store().get_collection(name).is_some() {
+                return polymorphic_resolver::ensure_model_match(
+                    expected_model,
+                    contract.declared_model,
+                );
+            }
+        }
         let snapshot = self.inner.db.catalog_model_snapshot();
         let Some(actual_model) = snapshot
             .collections
@@ -3574,6 +3586,127 @@ fn walk_analyze_plan_node(
 
     for child in &node.children {
         walk_analyze_plan_node(child, depth + 1, 0, 0.0, out);
+    }
+}
+
+#[cfg(test)]
+mod declared_model_validation_tests {
+    use super::*;
+    use crate::catalog::CollectionModel;
+    use crate::storage::no_malloc_hot_paths::measure_allocations;
+    use reddb_rql::ast::KvCommand;
+
+    fn get(collection: &str) -> QueryExpr {
+        QueryExpr::KvCommand(KvCommand::Get {
+            model: CollectionModel::Kv,
+            collection: collection.into(),
+            key: "item".into(),
+        })
+    }
+
+    #[test]
+    fn declared_model_validation_keeps_mismatches_and_observes_contract_changes() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("KV PUT declared.item = 1")
+            .expect("seed");
+        runtime
+            .validate_model_operations_before_auth(&get("declared"))
+            .expect("KV contract");
+        let db = runtime.db();
+        for (model, name) in [
+            (CollectionModel::Table, "table"),
+            (CollectionModel::Mixed, "mixed"),
+        ] {
+            let mut contract = db.collection_contract("declared").expect("contract");
+            contract.declared_model = model;
+            db.save_collection_contract(contract)
+                .expect("replace contract");
+            let error = runtime
+                .validate_model_operations_before_auth(&get("declared"))
+                .expect_err("mismatch");
+            assert_eq!(
+                error.to_string(),
+                format!("INVALID_OPERATION: model mismatch: expected kv, got {name}")
+            );
+        }
+    }
+
+    #[test]
+    fn declared_model_validation_preserves_legacy_inference_and_missing_collections() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let db = runtime.db();
+        let store = db.store();
+        store
+            .create_collection("legacy")
+            .expect("legacy collection");
+        store
+            .get_collection("legacy")
+            .expect("manager")
+            .insert(crate::storage::UnifiedEntity::table_row(
+                crate::storage::EntityId::new(1),
+                "legacy",
+                1,
+                Vec::new(),
+            ))
+            .expect("uncontracted table row");
+        assert!(db.collection_contract("legacy").is_none());
+        let error = runtime
+            .validate_model_operations_before_auth(&get("legacy"))
+            .expect_err("inferred table");
+        assert!(error
+            .to_string()
+            .contains("model mismatch: expected kv, got table"));
+        runtime
+            .validate_model_operations_before_auth(&get("missing"))
+            .expect("missing stays deferred to execution");
+    }
+
+    #[test]
+    fn declared_model_validation_does_not_treat_orphan_contracts_as_collections() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("KV PUT declared.item = 1")
+            .expect("seed");
+        let db = runtime.db();
+        let mut contract = db.collection_contract("declared").expect("contract");
+        contract.name = "orphan".into();
+        contract.declared_model = CollectionModel::Table;
+        db.save_collection_contract(contract)
+            .expect("orphan contract");
+        assert!(db.store().get_collection("orphan").is_none());
+        runtime
+            .validate_model_operations_before_auth(&get("orphan"))
+            .expect("no physical collection to validate");
+    }
+
+    #[test]
+    fn declared_model_validation_allocates_nothing_with_unrelated_collections() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("KV PUT declared.item = 1")
+            .expect("seed");
+        let expr = get("declared");
+        for unrelated in [0, 64] {
+            let db = runtime.db();
+            let store = db.store();
+            for index in 0..unrelated {
+                let name = format!("unrelated_{index}");
+                store
+                    .create_collection(&name)
+                    .expect("unrelated collection");
+            }
+            runtime
+                .validate_model_operations_before_auth(&expr)
+                .expect("warm contract cache");
+            let (result, count) =
+                measure_allocations(|| runtime.validate_model_operations_before_auth(&expr));
+            result.expect("declared KV");
+            assert_eq!(
+                count.allocs, 0,
+                "validation must only borrow the target contract"
+            );
+        }
     }
 }
 

@@ -1,0 +1,362 @@
+{
+  "schema": "reddb.query-projection-matrix.v1",
+  "status": "valid-diagnostic",
+  "started_unix_ms": 1792523255855,
+  "host": "Windows-10-10.0.22621-SP0",
+  "classification": "shared-host diagnostic; two process runs/version; no leadership claim",
+  "primary_metric": "p99 checked HTTP request completion latency",
+  "conditions": {
+    "keys": 10000,
+    "value_bytes": 100,
+    "rounds": 5,
+    "seconds_per_round": 2,
+    "warmup_per_connection": 10,
+    "read_order": [
+      "before-1",
+      "after-1",
+      "after-2",
+      "before-2"
+    ],
+    "durability": "strict",
+    "result_cache": "disabled",
+    "prepared_data": true,
+    "dataset": "copies of stopped verified kv_diag_10000 volume; SQL table created separately with identical rows",
+    "limits": "Python/GIL, HTTP JSON, shared host; independent run count too small for a leadership interval"
+  },
+  "engines": {
+    "before": {
+      "revision": "5ad0766eda49f7472bf85ee91524a17b3ec10673",
+      "sha256": "2ac44ed0bd18f5bb8c3244724cd9a6825dd0bda712896dd201c8fafc1c7653e2"
+    },
+    "after": {
+      "revision": "8eb7f554bf6e537755cc3341872dac278f8391e7",
+      "sha256": "44804df62e0f003ed5948f914a0159ae378e7d00af254e6a88cbb46cb6b91718"
+    }
+  },
+  "containers": {
+    "reddb-query-before-20261020": {
+      "container": "reddb-query-before-20261020",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "/build/baseline-rest-5ad0766e-red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--http-max-handlers",
+        "64",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_DURABILITY=strict",
+        "REDDB_DURABILITY_MODE=strict",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-query-before-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-query-before-20261020/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-query-after-20261020": {
+      "container": "reddb-query-after-20261020",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "/build/src/target/release/red",
+        "server",
+        "--path",
+        "/data/bench.rdb",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--workers",
+        "4",
+        "--http-max-handlers",
+        "64",
+        "--no-auth"
+      ],
+      "environment": [
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "RUST_MIN_STACK=8388608",
+        "REDDB_DURABILITY=strict",
+        "REDDB_DURABILITY_MODE=strict",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-kv-build-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-kv-build-20261020/_data",
+          "Destination": "/build",
+          "Driver": "local",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-query-after-20261020",
+          "Source": "/var/lib/docker/volumes/reddb-query-after-20261020/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "reddb-query-catalog-client-20261020": {
+      "container": "reddb-query-catalog-client-20261020",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "environment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "4-5",
+      "nano_cpus": 2000000000,
+      "memory_limit": 1073741824,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench",
+          "Destination": "/bench",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        },
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\dev\\reddb-kv-index\\bench\\results\\query-projection-2026-10-20\\catalog-fast",
+          "Destination": "/results",
+          "Mode": "",
+          "RW": true,
+          "Propagation": "rprivate"
+        }
+      ]
+    }
+  },
+  "script_sha256": {
+    "local_matrix.py": "673b2a6c3b9bd1390efc0b175fddea15ad66e214d471cdc0ea47414101fc7f4c",
+    "read_paths.py": "a75b17516cecf5ec15e76a0f0e888b349b91549ad79943fd039da5341f92a7e2",
+    "summarize.py": "b475c4b795fcb04c403c66f4546bd67610e956032b570e12767db00de81b140c",
+    "test_read_paths.py": "5c6930368b72bd617ac2cf31e98c7ac5b2e344ac2a830acfa94a9baa406ede00",
+    "write_profile.py": "65fb3cd3bebd4559bc13bbf9d4669e815654d640680b624d89a38d4e4f72d6c1"
+  },
+  "runs": [
+    {
+      "label": "before-1",
+      "started_unix_ms": 1792523266236,
+      "cases": [
+        {
+          "file": "before-1/kv-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-1/kv-c8.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-1/kv-c32.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-1/sql-point-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-1/sql-point-c8.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-1/sql-point-c32.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-1/sql-100-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-1/sql-1000-c1.json",
+          "status": "valid-diagnostic"
+        }
+      ],
+      "recovery_complete": true,
+      "finished_unix_ms": 1792523360594
+    },
+    {
+      "label": "after-1",
+      "started_unix_ms": 1792523360595,
+      "cases": [
+        {
+          "file": "after-1/kv-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-1/kv-c8.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-1/kv-c32.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-1/sql-point-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-1/sql-point-c8.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-1/sql-point-c32.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-1/sql-100-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-1/sql-1000-c1.json",
+          "status": "valid-diagnostic"
+        }
+      ],
+      "recovery_complete": true,
+      "finished_unix_ms": 1792523455480
+    },
+    {
+      "label": "after-2",
+      "started_unix_ms": 1792523455480,
+      "cases": [
+        {
+          "file": "after-2/kv-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-2/kv-c8.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-2/kv-c32.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-2/sql-point-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-2/sql-point-c8.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-2/sql-point-c32.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-2/sql-100-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "after-2/sql-1000-c1.json",
+          "status": "valid-diagnostic"
+        }
+      ],
+      "recovery_complete": true,
+      "finished_unix_ms": 1792523550245
+    },
+    {
+      "label": "before-2",
+      "started_unix_ms": 1792523550246,
+      "cases": [
+        {
+          "file": "before-2/kv-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-2/kv-c8.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-2/kv-c32.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-2/sql-point-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-2/sql-point-c8.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-2/sql-point-c32.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-2/sql-100-c1.json",
+          "status": "valid-diagnostic"
+        },
+        {
+          "file": "before-2/sql-1000-c1.json",
+          "status": "valid-diagnostic"
+        }
+      ],
+      "recovery_complete": true,
+      "finished_unix_ms": 1792523644042
+    }
+  ],
+  "errors": [],
+  "finished_unix_ms": 1792523647720
+}

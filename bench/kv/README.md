@@ -1,5 +1,10 @@
 # KV benchmark suite
 
+For verified comparative diagnostics, use [COMPARE.md](COMPARE.md). The legacy
+runner below remains a historical regression fixture: it opens new HTTP
+connections while reusing RESP connections and does not validate returned values.
+Its cross-engine ratios cannot establish comparative performance.
+
 This suite pins the normal-KV operational benchmark contract from issue #253.
 It compares RedDB and Redis on the same `PUT`/`GET`/`INCR` workload and measures
 RedDB `WATCH` delivery lag.

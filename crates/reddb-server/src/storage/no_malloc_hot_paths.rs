@@ -50,8 +50,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AllocationCount {
-    allocs: usize,
+pub(crate) struct AllocationCount {
+    pub(crate) allocs: usize,
     deallocs: usize,
 }
 
@@ -113,7 +113,7 @@ impl Drop for CounterGuard {
     }
 }
 
-fn measure_allocations<T>(operation: impl FnOnce() -> T) -> (T, AllocationCount) {
+pub(crate) fn measure_allocations<T>(operation: impl FnOnce() -> T) -> (T, AllocationCount) {
     COUNTER.with(|counter| counter.borrow().begin());
     let _guard = CounterGuard;
     let result = operation();
@@ -134,6 +134,12 @@ struct CoveredOperation {
 }
 
 const COVERED_OPERATIONS: &[CoveredOperation] = &[
+    CoveredOperation {
+        name: "manager-key-lookup-projection-hit",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_manager_key_lookup_projection_hit,
+    },
     CoveredOperation {
         name: "segment-key-lookup-hit",
         allowed_allocs: 0,
@@ -301,6 +307,137 @@ fn measure_segment_key_lookup_hit() -> AllocationCount {
 #[test]
 fn segment_key_lookup_hit_allocates_nothing() {
     assert_eq!(measure_segment_key_lookup_hit().allocs, 0);
+}
+
+fn measure_manager_key_lookup_projection_hit() -> AllocationCount {
+    use super::unified::{EntityData, RowData, SegmentManager};
+    use reddb_types::Value;
+    let manager = SegmentManager::new("keys");
+    let mut entity = UnifiedEntity::table_row(EntityId::new(1), "keys", 1, Vec::new());
+    entity.data = EntityData::Row(RowData::with_names(
+        vec![Value::text("wanted"), Value::Integer(42)],
+        vec!["key".into(), "value".into()],
+    ));
+    manager.insert(entity).expect("row");
+    let (value, count) = measure_allocations(|| {
+        manager.project_key_entity("wanted", None, false, |entity| {
+            let super::unified::EntityData::Row(row) = &entity.data else {
+                panic!("row");
+            };
+            row.get_field("value").cloned()
+        })
+    });
+    assert_eq!(value, Some(Some(Value::Integer(42))));
+    count
+}
+
+#[test]
+fn manager_key_lookup_projection_allocates_nothing() {
+    assert_eq!(measure_manager_key_lookup_projection_hit().allocs, 0);
+}
+
+#[test]
+fn runtime_key_lookup_hit_avoids_row_clone() {
+    use crate::catalog::CollectionModel;
+    use crate::runtime::impl_kv::KvAtomicOps;
+    use reddb_types::Value;
+
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    let ops = KvAtomicOps::new(&runtime);
+    for expected in [
+        Value::Integer(42),
+        Value::text("payload"),
+        Value::Array(vec![
+            Value::Integer(7),
+            Value::Array(vec![Value::text("nested")]),
+        ]),
+    ] {
+        ops.set(
+            CollectionModel::Kv,
+            "lookup_allocations",
+            "wanted",
+            expected.clone(),
+            None,
+            false,
+        )
+        .expect("seed");
+        for _ in 0..3 {
+            assert_eq!(
+                ops.get(CollectionModel::Kv, "lookup_allocations", "wanted")
+                    .expect("hit"),
+                Some(expected.clone())
+            );
+            assert_eq!(
+                ops.get(CollectionModel::Kv, "lookup_allocations", "absent")
+                    .expect("miss"),
+                None
+            );
+        }
+        let (hit, hit_count) =
+            measure_allocations(|| ops.get(CollectionModel::Kv, "lookup_allocations", "wanted"));
+        let (miss, miss_count) =
+            measure_allocations(|| ops.get(CollectionModel::Kv, "lookup_allocations", "absent"));
+        let (_, value_count) = measure_allocations(|| expected.clone());
+        eprintln!("KV GET allocations: hit={hit_count:?}, miss={miss_count:?}, returned value={value_count:?}");
+        assert_eq!(hit.expect("hit"), Some(expected));
+        assert_eq!(miss.expect("miss"), None);
+        assert_eq!(
+        hit_count.allocs, miss_count.allocs + value_count.allocs,
+        "hits must allocate only their returned value: hit={hit_count:?}, miss={miss_count:?}, value={value_count:?}"
+    );
+    }
+}
+
+#[test]
+fn rql_get_projection_does_not_clone_unreturned_fields() {
+    use crate::catalog::CollectionModel;
+    use reddb_rql::ast::KvCommand;
+    use reddb_types::Value;
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("KV PUT projected.item = 'payload'")
+        .expect("seed");
+    let manager = runtime
+        .db()
+        .store()
+        .get_collection("projected")
+        .expect("collection");
+    let original = manager.query_all(|_| true).pop().expect("row");
+    let command = KvCommand::Get {
+        model: CollectionModel::Kv,
+        collection: "projected".into(),
+        key: "item".into(),
+    };
+    let mut baseline = None;
+    for extra_values in [0, 128] {
+        let mut entity = original.clone();
+        let crate::storage::EntityData::Row(row) = &mut entity.data else {
+            panic!("row");
+        };
+        row.named.as_mut().expect("named row").insert(
+            "not_returned".into(),
+            Value::Array(
+                (0..extra_values)
+                    .map(|_| Value::Array(vec![Value::Integer(1)]))
+                    .collect(),
+            ),
+        );
+        manager.update(entity).expect("update");
+        let (result, count) =
+            measure_allocations(|| runtime.execute_kv_command("KV GET projected.item", &command));
+        assert_eq!(
+            result.expect("GET").result.records[0].get("value"),
+            Some(&Value::text("payload"))
+        );
+        if let Some(expected) = baseline {
+            assert_eq!(
+                count.allocs, expected,
+                "unprojected data must not allocate on GET"
+            );
+        } else {
+            baseline = Some(count.allocs);
+        }
+    }
 }
 
 fn measure_growing_segment_flat_row_insert() -> AllocationCount {

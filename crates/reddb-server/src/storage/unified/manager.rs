@@ -1884,38 +1884,35 @@ impl SegmentManager {
 
     /// Probe each segment's physical key index, retaining MVCC history candidates.
     /// Cost is O(segment count + versions of this key), rather than all collection rows.
-    pub(crate) fn find_key_entity(
+    /// `project` runs under a segment read guard: keep it bounded and do not
+    /// re-enter storage. Only the owned projection leaves the guard.
+    pub(crate) fn project_key_entity<T>(
         &self,
         key: &str,
         snapshot: Option<&SnapshotContext>,
         versioned: bool,
-    ) -> Option<UnifiedEntity> {
-        let probe = |segment: &GrowingSegment| {
-            segment
-                .find_key_entity(key, versioned, &mut |entity| {
-                    !versioned || Self::scan_entity_visible(snapshot, entity)
-                })
-                .cloned()
+        mut project: impl FnMut(&UnifiedEntity) -> T,
+    ) -> Option<T> {
+        let mut probe = |segment: &GrowingSegment, best: &mut Option<(u64, T)>| {
+            if let Some(entity) = segment.find_key_entity(key, versioned, &mut |entity| {
+                !versioned || Self::scan_entity_visible(snapshot, entity)
+            }) {
+                if best.as_ref().is_none_or(|(xmin, _)| entity.xmin >= *xmin) {
+                    *best = Some((entity.xmin, project(entity)));
+                }
+            }
         };
-        let mut best = self
-            .growing
-            .read()
-            .as_ref()
-            .and_then(|growing| probe(&growing.read()));
+        let mut best = None;
+        if let Some(growing) = self.growing.read().as_ref() {
+            probe(&growing.read(), &mut best);
+        }
         for segment in self.sealed.read().iter() {
             if !versioned && best.is_some() {
                 break;
             }
-            if let Some(entity) = probe(&segment.read()) {
-                if best
-                    .as_ref()
-                    .is_none_or(|current| entity.xmin >= current.xmin)
-                {
-                    best = Some(entity);
-                }
-            }
+            probe(&segment.read(), &mut best);
         }
-        best
+        best.map(|(_, projected)| projected)
     }
 
     /// Collect visible graph items, pruning only under the segment read guard.
@@ -2844,27 +2841,23 @@ mod tests {
                         .max_by_key(|entity| entity.xmin)
                         .map(|entity| entity.id);
                     assert_eq!(
-                        manager
-                            .find_key_entity(key, snapshot, true)
-                            .map(|entity| entity.id),
+                        manager.project_key_entity(key, snapshot, true, |entity| entity.id),
                         expected,
                         "key={key}"
                     );
                 }
             }
             assert_eq!(
-                manager
-                    .find_key_entity("changed", Some(&snapshot), true)
-                    .map(|entity| entity.id),
+                manager.project_key_entity("changed", Some(&snapshot), true, |entity| entity.id),
                 Some(EntityId::new(1))
             );
             assert_eq!(
-                manager
-                    .find_key_entity("changed", None, true)
-                    .map(|entity| entity.id),
+                manager.project_key_entity("changed", None, true, |entity| entity.id),
                 Some(EntityId::new(3))
             );
-            assert!(manager.find_key_entity("deleted", None, true).is_none());
+            assert!(manager
+                .project_key_entity("deleted", None, true, |entity| entity.id)
+                .is_none());
         })
         .join()
         .expect("snapshot worker");
@@ -2888,9 +2881,7 @@ mod tests {
         drain_maintenance(&manager);
         for id in 1..=10 {
             assert_eq!(
-                manager
-                    .find_key_entity(&format!("key-{id}"), None, false)
-                    .map(|entity| entity.id),
+                manager.project_key_entity(&format!("key-{id}"), None, false, |entity| entity.id),
                 (id > 4).then_some(EntityId::new(id))
             );
         }
