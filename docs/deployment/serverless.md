@@ -55,12 +55,40 @@ gauge that tooling can read out of `/admin/status` or `/metrics`.
 | `RED_MAX_QPS_PER_CALLER` | Per-caller token-bucket QPS (keyed by `bearer:<sha256-prefix>` / `replica:<id>` / `anon`); `RED_QPS_BURST` sets the burst | `reddb_quota_rejected_total{principal}` |
 | `RED_MAX_BATCH_SIZE` | Rows per bulk DML batch (enforced) | `reddb_limit_batch_size` |
 | `RED_MAX_MEMORY_MB` | Soft RSS budget in MiB; honoured against the cgroup memory hint when present | `reddb_limit_memory_bytes` |
-| `RED_MAX_QUERY_DURATION_MS` | Per-statement wall-clock budget | — |
-| `RED_MAX_RESULT_BYTES` | Largest result set returned to a client | — |
+| `RED_MAX_QUERY_DURATION_MS` | Cooperative materialized-read deadline at work checkpoints | — |
+| `RED_MAX_CONCURRENT_QUERIES` | Concurrent materialized reads/output streams per runtime; rejects saturation with 429 | `/admin/status` limits |
+| `RED_MAX_RESULT_BYTES` | Compact-JSON core read payload / final HTTP JSON / cumulative classified-stream payload ceiling; over-limit buffered output returns 413 | — |
 | `REDDB_WIRE_HANDSHAKE_TIMEOUT_SECS` | Window for TLS + protocol handshake on the wire listeners (default 15) | — |
 | `REDDB_GRPC_MAX_MESSAGE_BYTES` | Largest gRPC message accepted or produced (default 32 MiB) | — |
 
 Every `RED_*` name also accepts the `REDDB_*` spelling.
+
+Unset/zero query budgets leave that dimension unbounded. Budgeted table, graph,
+join, path, vector and hybrid reads share cooperative checkpoints; a deadline
+returns 504, not a successful partial result. Blocking I/O, parsing, native sort
+or other operators without checkpoints, and work on other threads are not
+forcibly interrupted. This is not a hard CPU or per-query heap quota. Keep the
+existing materialization row ceiling and deployment/cgroup memory boundaries.
+
+Enabling the duration/concurrent-read budget routes point lookups and cached
+results through normal typed execution rather than the ultra-fast/result-cache
+shortcuts. Output-only ceilings keep those shortcuts. Measure the resulting
+latency/throughput on staging before enabling execution budgets. Row-by-row
+output accounting and bounded JSON encoding avoid constructing an unbounded
+second serialized buffer, but they do not cap all intermediate executor storage
+or one typed value conversion.
+
+The engine accounts the transport-neutral core payload (query text, columns and
+canonical records) row by row. Buffered HTTP reads additionally bound the complete
+response envelope, including descriptors and request-selected metadata. NDJSON/SELECT/SSE
+output streams for classified reads retain their budget for the stream lifetime and charge payload
+bytes before buffering them (HTTP chunk framing is excluded). If a limit fires
+after headers, the stream must fail without a successful end frame; clients must
+require that end frame, reject any error frame, and treat early connection closure
+as failure. Executor errors can retain the existing NDJSON error-then-end contract;
+an end frame alone does not establish success. Read budgets
+exclude mutation acknowledgements and NDJSON input-stream acknowledgements so a
+committed mutation is not subsequently presented as a read-limit failure.
 
 Hot-path enforcement applies before request dispatch — once the cap
 is hit the surface returns `429` with a `Retry-After` header, while

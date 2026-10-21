@@ -45,13 +45,18 @@ pub struct ResourceLimits {
     /// bucket fires HTTP 429 / wire backoff on excess.
     pub max_qps: Option<u64>,
 
-    /// Maximum wall time for any single query. Queries past this
-    /// threshold are killed and return HTTP 504. `None` defers to
-    /// the OS / cgroup CPU policy.
+    /// Cooperative wall-time budget for materialized table/graph/join/path/
+    /// vector/hybrid reads. Work checkpoints return HTTP 504; blocking I/O,
+    /// parsing and operators without checkpoints are not forcibly preempted.
     pub max_query_duration: Option<Duration>,
 
-    /// Maximum response payload size in bytes. Larger responses
-    /// are truncated or errored (decided by the surface).
+    /// Concurrent materialized read executions. Zero leaves admission unbounded.
+    pub max_concurrent_queries: Option<u64>,
+
+    /// Maximum compact-JSON core read payload (query, columns, canonical records).
+    /// HTTP additionally bounds its complete presentation envelope. Larger results fail
+    /// without returning successful partial data. Mutation acknowledgements
+    /// are excluded so a committed write is not reported as a read-limit failure.
     pub max_result_bytes: Option<u64>,
 
     /// Maximum rows per bulk insert / update / delete. Caps the
@@ -60,6 +65,11 @@ pub struct ResourceLimits {
 }
 
 impl ResourceLimits {
+    pub(crate) fn read_execution_limits_enabled(&self) -> bool {
+        self.max_query_duration
+            .is_some_and(|value| !value.is_zero())
+            || self.max_concurrent_queries.is_some_and(|value| value > 0)
+    }
     /// Read limits from env vars. Accepts both the cloud-agnostic
     /// `RED_MAX_*` family (PLAN.md spec) and the legacy `REDDB_MAX_*`
     /// form for existing dev installs. Missing or unparseable
@@ -74,6 +84,7 @@ impl ResourceLimits {
                 .map(|mb| mb.saturating_mul(1_048_576)),
             max_qps: Self::read_u64("MAX_QPS"),
             max_query_duration: Self::read_u64("MAX_QUERY_DURATION_MS").map(Duration::from_millis),
+            max_concurrent_queries: Self::read_u64("MAX_CONCURRENT_QUERIES"),
             max_result_bytes: Self::read_u64("MAX_RESULT_BYTES"),
             max_batch_size: Self::read_u64("MAX_BATCH_SIZE"),
         };

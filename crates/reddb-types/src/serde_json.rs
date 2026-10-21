@@ -99,49 +99,60 @@ impl Value {
         out
     }
 
+    /// Encode compact JSON, stopping before the output crosses `limit` bytes.
+    /// No successful partial document is returned.
+    pub fn to_string_compact_limited(&self, limit: usize) -> Option<String> {
+        let mut out = BoundedJsonString {
+            value: String::new(),
+            limit,
+        };
+        self.write_compact_to(&mut out).ok()?;
+        Some(out.value)
+    }
+
     fn write_compact(&self, out: &mut String) {
+        self.write_compact_to(out)
+            .expect("writing JSON to a String cannot fail");
+    }
+
+    fn write_compact_to(&self, out: &mut impl fmt::Write) -> fmt::Result {
         match self {
-            Value::Null => out.push_str("null"),
-            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-            Value::Integer(n) => out.push_str(&format!("{n}")),
-            Value::Number(n) => {
-                if n.fract() == 0.0 {
-                    out.push_str(&format!("{}", *n as i64));
+            Value::Null => out.write_str("null")?,
+            Value::Bool(value) => out.write_str(if *value { "true" } else { "false" })?,
+            Value::Integer(value) => write!(out, "{value}")?,
+            Value::Number(value) => {
+                if value.fract() == 0.0 {
+                    write!(out, "{}", *value as i64)?;
                 } else {
-                    out.push_str(&format!("{}", n));
+                    write!(out, "{value}")?;
                 }
             }
-            Value::Decimal(n) => out.push_str(n),
-            Value::String(s) => {
-                out.push('"');
-                out.push_str(&escape_string(s));
-                out.push('"');
-            }
+            Value::Decimal(value) => out.write_str(value)?,
+            Value::String(value) => write_quoted_string(out, value)?,
             Value::Array(values) => {
-                out.push('[');
-                for (idx, value) in values.iter().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
+                out.write_char('[')?;
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        out.write_char(',')?;
                     }
-                    value.write_compact(out);
+                    value.write_compact_to(out)?;
                 }
-                out.push(']');
+                out.write_char(']')?;
             }
-            Value::Object(map) => {
-                out.push('{');
-                for (idx, (key, value)) in map.iter().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
+            Value::Object(values) => {
+                out.write_char('{')?;
+                for (index, (key, value)) in values.iter().enumerate() {
+                    if index > 0 {
+                        out.write_char(',')?;
                     }
-                    out.push('"');
-                    out.push_str(&escape_string(key));
-                    out.push('"');
-                    out.push(':');
-                    value.write_compact(out);
+                    write_quoted_string(out, key)?;
+                    out.write_char(':')?;
+                    value.write_compact_to(out)?;
                 }
-                out.push('}');
+                out.write_char('}')?;
             }
         }
+        Ok(())
     }
 
     fn write_pretty(&self, out: &mut String, indent: usize) {
@@ -193,6 +204,44 @@ impl Value {
     }
 }
 
+struct BoundedJsonString {
+    value: String,
+    limit: usize,
+}
+
+impl fmt::Write for BoundedJsonString {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if self
+            .value
+            .len()
+            .checked_add(value.len())
+            .is_none_or(|size| size > self.limit)
+        {
+            return Err(fmt::Error);
+        }
+        self.value.push_str(value);
+        Ok(())
+    }
+}
+
+fn write_quoted_string(out: &mut impl fmt::Write, value: &str) -> fmt::Result {
+    out.write_char('"')?;
+    for ch in value.chars() {
+        match ch {
+            '"' => out.write_str("\\\"")?,
+            '\\' => out.write_str("\\\\")?,
+            '\n' => out.write_str("\\n")?,
+            '\r' => out.write_str("\\r")?,
+            '\t' => out.write_str("\\t")?,
+            '\u{08}' => out.write_str("\\b")?,
+            '\u{0C}' => out.write_str("\\f")?,
+            ch if (ch as u32) < 0x20 => write!(out, "\\u{:04x}", ch as u32)?,
+            ch => out.write_char(ch)?,
+        }
+    }
+    out.write_char('"')
+}
+
 fn escape_string(input: &str) -> String {
     // RFC 8259 §7: all control bytes (U+0000..U+001F), `"`, and `\` MUST be escaped.
     // Previous version silently dropped control bytes other than \n \r \t — see
@@ -224,6 +273,45 @@ mod tests {
     use crate::json;
     use std::borrow::Cow;
     use std::collections::HashMap;
+
+    #[test]
+    fn bounded_compact_json_matches_exact_bytes_and_rejects_every_shorter_limit() {
+        let value = Value::Object(Map::from([
+            (
+                "quoted".to_string(),
+                Value::String("\\\"\n\u{00}São Paulo".to_string()),
+            ),
+            (
+                "nested".to_string(),
+                Value::Array(vec![
+                    Value::Integer(1),
+                    Value::Bool(true),
+                    Value::Null,
+                    Value::Object(Map::from([("value".to_string(), Value::Number(1.25))])),
+                ]),
+            ),
+        ]));
+        let encoded = value.to_string_compact();
+        for limit in 0..encoded.len() {
+            assert!(value.to_string_compact_limited(limit).is_none());
+        }
+        assert_eq!(
+            value.to_string_compact_limited(encoded.len()),
+            Some(encoded)
+        );
+    }
+
+    #[test]
+    fn bounded_writer_stops_without_copying_a_large_string() {
+        let value = Value::String("x".repeat(1048576));
+        let mut out = BoundedJsonString {
+            value: String::new(),
+            limit: 64,
+        };
+        assert!(value.write_compact_to(&mut out).is_err());
+        assert!(out.value.len() <= 64);
+        assert!(out.value.capacity() <= 128);
+    }
 
     fn encode(s: &str) -> String {
         Value::String(s.to_string()).to_string_compact()
