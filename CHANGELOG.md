@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.25.1
+
+### Patch Changes
+
+- [#2434](https://github.com/reddb-io/reddb/pull/2434) [`01d2ebf`](https://github.com/reddb-io/reddb/commit/01d2ebfe3d8679bf67f136aed7d34f6331ccb47a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reclaim obsolete table history in bounded background batches for writable
+  standalone embedded runtimes. Avoid copying row payloads during VACUUM and
+  planner statistics collection, and bound cardinality and histogram working sets.
+  Rebalance deleted B-tree pages iteratively so cascading merges do not retain
+  page buffers from every level on a maintenance worker's stack.
+  Reuse trees after completed physical delete batches instead of re-encoding
+  unchanged survivors at the next checkpoint, with revision checks that retain
+  full validation after untracked edits.
+
+- [#2434](https://github.com/reddb-io/reddb/pull/2434) [`9b80b83`](https://github.com/reddb-io/reddb/commit/9b80b83b31d72efaa7e4c2d4d1d1bd1ff39abe87) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fence bulk row insertion through its WAL capture or append so a checkpoint cannot publish an unfinished batch that starts during serialization. Add forced-crash regressions for explicit transactions and acknowledged autocommit batches.
+
+- [#2434](https://github.com/reddb-io/reddb/pull/2434) [`eaa4edf`](https://github.com/reddb-io/reddb/commit/eaa4edf7dfbfa28daf9e06bb9240d1535237850e) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fence row mutations and delete stamps through their WAL append against checkpoint
+  publication. Transactions starting during a checkpoint cannot leak uncommitted
+  rows, and concurrent acknowledged autocommit updates retain their recovery WAL.
+
+- [#2434](https://github.com/reddb-io/reddb/pull/2434) [`633925e`](https://github.com/reddb-io/reddb/commit/633925e76a67096784565a4b5d2e2b1d09dc7654) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Exclude unfinished row versions from crash-recoverable checkpoints and retain
+  their committed preimages. Invalidate checkpoint reuse when transaction outcomes
+  change, and fence commit WAL publication with visibility so a concurrent
+  checkpoint cannot discard a durable commit's recovery records.
+
+- [#2434](https://github.com/reddb-io/reddb/pull/2434) [`977b100`](https://github.com/reddb-io/reddb/commit/977b10025a44bd9e74ceea8e4c5ef3fd739034d6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Restore shared column names on owned reads of reopened positional rows. Preserve
+  untouched values during SQL updates and include positional rows when rebuilding
+  secondary indexes without changing the file format or copying payloads again.
+
+- [#2434](https://github.com/reddb-io/reddb/pull/2434) [`fbbfb40`](https://github.com/reddb-io/reddb/commit/fbbfb40827060ffcdf37c3ab99541fc9778dcf53) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep captured transaction inserts and row upserts out of published B-tree pages until their committed WAL is durable. This prevents incidental pager flushes from recovering unfinished inserts or delete stamps after a crash. Add crash regressions for INSERT, bulk INSERT, UPDATE and DELETE with open, rolled-back and committed transactions.
+
 ## 1.25.0
 
 ### Minor Changes
