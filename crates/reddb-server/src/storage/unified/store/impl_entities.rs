@@ -83,7 +83,7 @@ impl UnifiedStore {
             .collect();
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree {
+        if !skip_btree && !Self::deferred_store_wal_capture_active() {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -165,7 +165,7 @@ impl UnifiedStore {
         // u64 IDs encoded as big-endian — lex order = numeric order.
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree {
+        if !skip_btree && !Self::deferred_store_wal_capture_active() {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -561,9 +561,14 @@ impl UnifiedStore {
             self.update_graph_label_index(collection, label, id);
         }
 
-        // Also insert into B-tree index if pager is active
+        // Captured transactions stay WAL-only until commit; pager flushes must
+        // never make an unfinished row durable.
         let mut registry_dirty = false;
-        if let Some(pager) = &self.pager {
+        if let Some(pager) = self
+            .pager
+            .as_ref()
+            .filter(|_| !Self::deferred_store_wal_capture_active())
+        {
             if let Some(entity) = manager.get(id) {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
@@ -625,6 +630,9 @@ impl UnifiedStore {
         collection: &str,
         mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, StoreError> {
+        // A transaction can begin after checkpoint visibility is frozen.
+        // Fence the entire row batch, including its captured or committed WAL.
+        let _publication = self.vault_publication_lock.lock();
         // REDDB_BULK_TIMING=1 prints a per-call breakdown of the bulk
         // insert path to stderr. Off by default — used by the reddb
         // benchmark harness to locate ingest bottlenecks.
@@ -784,7 +792,7 @@ impl UnifiedStore {
         let mut t_btree_lock = std::time::Duration::ZERO;
         let mut t_btree_insert = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
-        if !skip_btree {
+        if !skip_btree && !Self::deferred_store_wal_capture_active() {
             if let (Some(pager), Some(batch)) = (&self.pager, serialized.as_ref()) {
                 let t0 = std::time::Instant::now();
                 let mut btree_indices = self.btree_indices.write();
@@ -890,7 +898,7 @@ impl UnifiedStore {
         // both or neither. Otherwise the rebuild re-inserts this row from the
         // manager and one of the two B-tree inserts fails on a duplicate key,
         // or lands mid-rebuild and tears the tree.
-        let paged_btree = if persist_record {
+        let paged_btree = if persist_record && !Self::deferred_store_wal_capture_active() {
             self.get_or_create_btree(collection)
         } else {
             None
@@ -1053,22 +1061,24 @@ impl UnifiedStore {
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
-        let entities =
-            manager.query_all(|entity| matches!(entity.kind, EntityKind::TableRow { .. }));
         let mut logical = HashMap::<EntityId, (bool, u64)>::new();
-        for entity in &entities {
+        manager.for_each_entity(|entity| {
+            if !matches!(entity.kind, EntityKind::TableRow { .. }) {
+                return true;
+            }
             let entry = logical.entry(entity.logical_id()).or_insert((false, 0));
             if entity.xmax == 0 {
                 entry.0 = true;
             }
             entry.1 = entry.1.max(entity.xmin);
-        }
+            true
+        });
 
         let mut stats = MvccVacuumStats::default();
         let mut reclaim_ids = Vec::new();
-        for entity in entities {
-            if entity.xmax == 0 {
-                continue;
+        manager.for_each_entity(|entity| {
+            if !matches!(entity.kind, EntityKind::TableRow { .. }) || entity.xmax == 0 {
+                return true;
             }
             stats.scanned_versions += 1;
             let (has_live_version, max_xmin) = logical
@@ -1092,7 +1102,8 @@ impl UnifiedStore {
                     stats.retained_history_versions += 1;
                 }
             }
-        }
+            true
+        });
 
         if !reclaim_ids.is_empty() {
             self.delete_batch(collection, &reclaim_ids)?;
@@ -1261,6 +1272,9 @@ impl UnifiedStore {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
+        // Physical reclamation must publish its mutation and WAL record under
+        // the same fence as checkpoint snapshots and WAL truncation.
+        let _publication = self.vault_publication_lock.lock();
 
         // Sharded invalidation. The bounded LRU's shard write lock is
         // only acquired when the shard actually carries one of these ids,
@@ -1272,19 +1286,22 @@ impl UnifiedStore {
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
 
+        let before = self.pager.as_ref().map(|_| manager.checkpoint_revisions());
         let deleted_ids = manager.delete_batch(ids)?;
         if deleted_ids.is_empty() {
             return Ok(deleted_ids);
         }
 
         let mut registry_dirty = false;
+        let mut updated_tree = false;
         if self.pager.is_some() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
+                updated_tree = true;
                 let root_before = btree.root_page_id();
                 for id in &deleted_ids {
                     let key = id.raw().to_be_bytes();
-                    let _ = btree.delete(&key);
+                    updated_tree &= matches!(btree.delete(&key), Ok(true));
                 }
                 registry_dirty = root_before != btree.root_page_id();
             }
@@ -1304,6 +1321,11 @@ impl UnifiedStore {
             .collect::<Vec<_>>();
         self.finish_paged_write(actions)?;
 
+        if updated_tree {
+            if let Some(before) = before {
+                self.note_paged_delete(collection, &manager, &before, &deleted_ids);
+            }
+        }
         Ok(deleted_ids)
     }
 

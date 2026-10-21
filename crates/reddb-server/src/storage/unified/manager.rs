@@ -22,8 +22,8 @@ use std::sync::{Arc, Weak};
 use super::entity::{EntityId, EntityKind, UnifiedEntity};
 use super::metadata::{Metadata, MetadataFilter};
 use super::segment::{
-    GraphEntityKind, GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState,
-    SegmentStats, UnifiedSegment, ZoneColPred, ZoneColPredKind,
+    GraphEntityKind, GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentScanCursor,
+    SegmentState, SegmentStats, UnifiedSegment, ZoneColPred, ZoneColPredKind,
 };
 use super::visibility_map::VisibilityMap;
 use crate::runtime::mvcc::{entity_visible_with_context, SnapshotContext};
@@ -185,6 +185,19 @@ struct PhysicalRootCacheEntry {
     root: u64,
 }
 
+/// Resumable physical maintenance positions. Weak sources let consolidation
+/// release retired payloads; a later sweep revisits any replacement segments.
+pub(crate) struct PhysicalScanCursor {
+    sources: Vec<(Weak<RwLock<GrowingSegment>>, SegmentScanCursor)>,
+    source: usize,
+}
+
+impl PhysicalScanCursor {
+    pub(crate) fn finished(&self) -> bool {
+        self.source == self.sources.len()
+    }
+}
+
 /// Segment manager for a collection
 pub struct SegmentManager {
     /// Statement-scoped constraint admission. Reentrant because SQL upserts
@@ -287,6 +300,20 @@ impl SegmentManager {
     /// Get the column schema if it exists.
     pub fn column_schema(&self) -> Option<Arc<Vec<String>>> {
         self.column_schema.read().clone()
+    }
+
+    // Positional file records omit the shared column names. Restore them on
+    // owned reads before callers update fields or rebuild secondary indexes.
+    // Existing per-row names remain authoritative; segment contents stay raw.
+    fn restore_owned_row_schemas<'a>(&self, entities: impl Iterator<Item = &'a mut UnifiedEntity>) {
+        let schema = self.column_schema();
+        for entity in entities {
+            if let super::entity::EntityData::Row(row) = &mut entity.data {
+                if row.named.is_none() && row.schema.is_none() {
+                    row.schema = schema.clone();
+                }
+            }
+        }
     }
 
     pub(crate) fn set_column_schema_if_empty(&self, columns: Vec<String>) {
@@ -596,7 +623,9 @@ impl SegmentManager {
 
     /// Get an entity by ID — scans growing then sealed segments.
     pub fn get(&self, id: EntityId) -> Option<UnifiedEntity> {
-        self.get_with(id, Clone::clone)
+        let mut entity = self.get_with(id, Clone::clone)?;
+        self.restore_owned_row_schemas(std::iter::once(&mut entity));
+        Some(entity)
     }
 
     /// Inspect under the segment lock, for example to bound a payload clone.
@@ -773,6 +802,7 @@ impl SegmentManager {
         }
 
         if remaining.is_empty() {
+            self.restore_owned_row_schemas(out.iter_mut().flatten());
             return out;
         }
 
@@ -793,6 +823,8 @@ impl SegmentManager {
             });
         }
 
+        drop(sealed);
+        self.restore_owned_row_schemas(out.iter_mut().flatten());
         out
     }
 
@@ -1938,6 +1970,60 @@ impl SegmentManager {
         });
     }
 
+    pub(crate) fn physical_scan_cursor(&self) -> PhysicalScanCursor {
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        PhysicalScanCursor {
+            sources: growing
+                .iter()
+                .chain(sealed.iter())
+                .map(|segment| (Arc::downgrade(segment), segment.read().scan_cursor()))
+                .collect(),
+            source: 0,
+        }
+    }
+
+    /// At most one small ID batch; every inspected slot or retired source
+    /// consumes work, including deleted entries that produce no candidate.
+    pub(crate) fn physical_scan_batch(
+        &self,
+        cursor: &mut PhysicalScanCursor,
+        work_left: &mut usize,
+    ) -> Vec<EntityId> {
+        let mut ids = Vec::with_capacity(super::segment::SCAN_BATCH_SIZE.min(*work_left));
+        while !cursor.finished() && *work_left > 0 {
+            let (source, position) = &mut cursor.sources[cursor.source];
+            if position.finished() {
+                *work_left -= 1;
+                cursor.source += 1;
+                continue;
+            }
+            let Some(segment) = source.upgrade() else {
+                *work_left -= 1;
+                cursor.source += 1;
+                continue;
+            };
+            segment.read().scan_batch(
+                position,
+                &mut || {
+                    if *work_left == 0 {
+                        return false;
+                    }
+                    *work_left -= 1;
+                    true
+                },
+                &mut |id| ids.push(id),
+            );
+            if position.finished() {
+                cursor.source += 1;
+            }
+            if !ids.is_empty() {
+                break;
+            }
+        }
+        ids
+    }
+
     /// Capture segment membership and append boundaries, then hydrate bounded
     /// batches. The consumer runs outside topology and segment locks, so scoring
     /// and RLS may re-enter storage and writers can progress between batches.
@@ -2061,7 +2147,9 @@ impl SegmentManager {
     where
         F: Fn(&UnifiedEntity) -> bool + Sync,
     {
-        self.query_all_in_segments(|_| true, filter)
+        let mut entities = self.query_all_in_segments(|_| true, filter);
+        self.restore_owned_row_schemas(entities.iter_mut());
+        entities
     }
 
     fn query_all_in_segments<F>(

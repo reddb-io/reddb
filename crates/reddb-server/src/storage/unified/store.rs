@@ -291,8 +291,8 @@ impl StoreStats {
 struct CheckpointVersion {
     manager: std::sync::Weak<SegmentManager>,
     segments: Vec<(u64, u64)>,
-    aborted_revision: u64,
-    aborted: Arc<std::collections::HashSet<u64>>,
+    visibility_revision: u64,
+    excluded_xids: Arc<std::collections::HashSet<u64>>,
     pending_vault: Arc<std::collections::HashSet<EntityId>>,
     format_version: u32,
 }
@@ -423,6 +423,8 @@ mod impl_native_c;
 mod impl_pages;
 mod impl_vault_import;
 mod keyed_write;
+mod mvcc_reclaim;
+pub(crate) use mvcc_reclaim::MvccReclaimCursor;
 mod native_helpers;
 
 pub use self::builder::EntityBuilder;

@@ -27,11 +27,29 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 
 ## Checkpoint reuse
 
+Checkpoints exclude row creators whose transactions are active or aborted and
+clear their delete stamps on committed preimages. Live transaction state stays
+unchanged. Transaction visibility revisions invalidate reuse after begin, commit
+or rollback; equivalent exclusion sets can retain the existing proof. Commit
+WAL publication and visibility changes share the checkpoint publication fence.
+While store WAL actions are captured for a transaction, row inserts and
+upserts stay in the live segment and deferred WAL, leaving published B-tree
+pages unchanged. Incidental pager flushes cannot publish unfinished inserts
+or delete stamps; a successful commit makes the captured WAL batch durable.
+Bulk inserts hold the checkpoint publication fence before installing their
+segment rows through WAL capture or append, including transactions that begin
+after checkpoint visibility has already been frozen.
+
+Owned row reads restore missing positional column names from the collection's
+shared schema before mutation or index backfill. Explicit row schemas and named
+fields remain authoritative. This changes neither the stored record format nor
+the raw segment revisions used by checkpoint reuse.
+
 Paged checkpoints reuse unchanged collection trees using volatile segment mutation
-revisions and manager identity. Aborted transaction visibility, pending vault
+revisions and manager identity. Active and aborted transaction visibility, pending vault
 versions and record format also participate in reuse admission.
 Visibility changes outside a collection are checked against borrowed row headers
-without serializing its payloads. Each checkpoint shares one frozen aborted-XID
+without serializing its payloads. Each checkpoint shares one frozen excluded-XID
 set across collections for both reuse admission and row normalization.
 WAL replay and every entity or metadata mutation invalidate the corresponding
 generation. New mutation paths must advance the segment revision before exposing mutable data.
@@ -63,6 +81,11 @@ segment revisions show exactly that one mutation. Untracked edits, sealing,
 visibility changes and versioned rows retain conservative validation. Durable
 replay reconciliation seeds the current raw tree generation before runtime
 visibility normalization is attached.
+
+Completed WAL-backed physical delete batches may advance that proof when every
+tree removal succeeds and the segment revision delta accounts for exactly the
+deleted rows. Earlier untracked edits, changed segment topology, pending vault
+versions and format changes retain full checkpoint validation.
 
 Changed checkpoints encode ordered borrowed rows in batches capped at 1 MiB or
 512 records (a single larger value keeps the existing value-size contract).
@@ -131,3 +154,9 @@ The runtime rejects incomplete remote snapshots before advertising success.
 - **LSN-pinned analytical scan** — read protocol for the columnar analytics projection. An analytical read is an ordinary MVCC read: it pins the current snapshot/LSN, scans columnar segments up to the last materialized LSN, and concatenates the un-materialized tail (rows past the last checkpoint boundary) through the normal row read path. There is a single consistency class — analytical reads are never a separate stale tier — and `AS OF` time-travel composes on top by pinning a historical LSN instead of the current one.
 - **Store fork** — metadata-level fork of an entire store: a new operational manifest generation pinned to a fork LSN, sharing the parent's immutable artifacts and writing its own private WAL from that point forward. Creation is an O(metadata) operation, never a physical copy of the dataset. Deliberately distinct from the VCS data model's *branch* (#1567 vocabulary): a store fork is storage/deploy mechanics for experiment-and-discard workflows (e.g. testing a risky migration or letting an agent run against production-shaped data), not version-control semantics over collection contents. Mechanically, a fork is a lazy in-place restore-to-LSN riding the operational backup/restore boundary (ADR 0043): immutable artifacts (append-only segments, checkpoint artifacts, columnar projection segments) are shared by manifest reference; mutable collection files are hydrated lazily (replay/CoW) the first time the fork touches them, so creation stays O(metadata) and cost is deferred to what the fork actually writes. Lifecycle is diverge-and-discard: a fork ends by being discarded, kept as an independent store, or promoted to new primary (the recovery/PITR path) — there is no merge-back of divergent stores at the storage layer; merge semantics belong to the VCS data model, which has vocabulary for conflicts.
 - **WAL spool** — versioned (v2) write-ahead log records used for replication streaming. Includes magic, version byte, lsn, timestamp, payload-len, payload, crc32. `sync_all` after every append. (The replica-side consumer is the **logical change applier** — see [Primary-replica](primary-replica.md) / [Clustering](clustering.md).)
+
+Row mutation batches and tombstone batches take the publication fence before
+changing live segments and retain it through WAL capture or append. Fencing only
+COMMIT is insufficient: a transaction may begin after checkpoint visibility was
+frozen, and an autocommit's recovery records must not be truncated before its
+mutations belong to the published generation.

@@ -1368,6 +1368,10 @@ impl RedDBRuntime {
         }
 
         let store = self.db().store();
+        // Fence the in-memory change and its WAL append together. Otherwise a
+        // checkpoint can copy a new transaction's rows or truncate a concurrent
+        // autocommit's WAL before those rows belong to its frozen generation.
+        let _publication = store.vault_publication_lock.lock();
         let collection = &applied[0].collection;
         let Some(manager) = store.get_collection(collection) else {
             return Err(crate::RedDBError::NotFound(format!(

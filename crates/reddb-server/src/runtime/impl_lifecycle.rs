@@ -915,6 +915,8 @@ impl RedDBRuntime {
                         let tick = std::time::Duration::from_millis(200);
                         let work_interval = std::time::Duration::from_secs(60);
                         let mut last_work = std::time::Instant::now();
+                        let mut mvcc_maintenance =
+                            super::mvcc_maintenance::MvccMaintenance::default();
                         loop {
                             std::thread::park_timeout(tick);
                             if stopped.load(AtomicOrdering::Acquire) {
@@ -929,6 +931,11 @@ impl RedDBRuntime {
                                 let _stats = inner.db.store().context_index().stats();
                                 last_work = std::time::Instant::now();
                             }
+                            let rt = RedDBRuntime {
+                                background_tasks: None,
+                                inner,
+                            };
+                            rt.reclaim_history_tick(&mut mvcc_maintenance);
                         }
                     },
                 );

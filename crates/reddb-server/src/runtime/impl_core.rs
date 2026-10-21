@@ -1457,9 +1457,9 @@ impl RedDBRuntime {
                             .read()
                             .get(&conn_id)
                             .is_some_and(|writes| !writes.is_empty());
-                        let vault_store = self.inner.db.store();
+                        let store = self.inner.db.store();
                         let _vault_guard =
-                            has_vault_writes.then(|| vault_store.vault_publication_lock.lock());
+                            has_vault_writes.then(|| store.vault_publication_lock.lock());
                         let context = self.inner.transaction_state.commit(conn_id, |ctx| {
                             let mut own_xids = std::collections::HashSet::new();
                             own_xids.insert(ctx.xid);
@@ -1510,8 +1510,14 @@ impl RedDBRuntime {
                                 undo?;
                                 return Err(err);
                             }
+                            // Validate before taking the publication fence:
+                            // conflict rollback can acquire index topology.
+                            // Retain the fence through WAL and visibility so a
+                            // checkpoint cannot discard a durable commit's WAL.
+                            let publication = store.vault_publication_lock.lock();
                             self.restore_pending_write_stamps(conn_id);
                             if let Err(err) = self.flush_pending_store_wal_actions(conn_id) {
+                                drop(publication);
                                 let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_queue_dedup(conn_id);
@@ -1521,7 +1527,7 @@ impl RedDBRuntime {
                                 undo?;
                                 return Err(err);
                             }
-                            Ok(())
+                            Ok(publication)
                         });
                         if context.is_err() {
                             self.discard_pending_vault_writes(conn_id)?;

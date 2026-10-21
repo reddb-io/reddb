@@ -52,20 +52,25 @@ impl TransactionState {
         xid
     }
 
-    pub(crate) fn commit<E>(
+    pub(crate) fn commit<E, Publication>(
         &self,
         connection_id: u64,
-        prepare: impl FnOnce(&TxnContext) -> Result<(), E>,
+        prepare: impl FnOnce(&TxnContext) -> Result<Publication, E>,
     ) -> Result<Option<TxnContext>, E> {
         self.local_tenants.write().remove(&connection_id);
         let Some(context) = self.contexts.write().remove(&connection_id) else {
             return Ok(None);
         };
 
-        if let Err(error) = prepare(&context) {
-            self.rollback_context(&context);
-            return Err(error);
-        }
+        // A writer can return its publication guard after validation and WAL
+        // append. Keep it through the transaction's visibility transition.
+        let _publication = match prepare(&context) {
+            Ok(publication) => publication,
+            Err(error) => {
+                self.rollback_context(&context);
+                return Err(error);
+            }
+        };
 
         for (_, xid) in &context.savepoints {
             self.snapshot_manager.commit(*xid);

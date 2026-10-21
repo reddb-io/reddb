@@ -961,14 +961,24 @@ impl BTree {
         Ok((new_page, separator))
     }
 
-    fn rebalance_leaf(&self, leaf_id: u32, path: Vec<u32>) -> BTreeResult<()> {
+    fn rebalance_leaf(&self, leaf_id: u32, mut path: Vec<u32>) -> BTreeResult<()> {
+        // Finish the leaf step before ascending so its page buffers do not
+        // accumulate with interior buffers on ordinary worker stacks.
+        if let Some(parent_id) = self.rebalance_leaf_step(leaf_id, &path)? {
+            path.pop();
+            self.rebalance_interior(parent_id, path)?;
+        }
+        Ok(())
+    }
+
+    fn rebalance_leaf_step(&self, leaf_id: u32, path: &[u32]) -> BTreeResult<Option<u32>> {
         if path.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         let root_id = self.root_page_id();
         if leaf_id == root_id {
-            return Ok(());
+            return Ok(None);
         }
 
         let mut leaf = self.pager.read_page(leaf_id)?;
@@ -1000,7 +1010,7 @@ impl BTree {
         }
 
         if leaf_entries_size(&leaf_entries) >= min_bytes {
-            return Ok(());
+            return Ok(None);
         }
 
         if child_index > 0 {
@@ -1037,7 +1047,7 @@ impl BTree {
                     self.pager.write_page(parent_id, parent)?;
                 }
 
-                return Ok(());
+                return Ok(None);
             }
         }
 
@@ -1076,7 +1086,7 @@ impl BTree {
                     self.pager.write_page(parent_id, parent)?;
                 }
 
-                return Ok(());
+                return Ok(None);
             }
         }
 
@@ -1107,9 +1117,7 @@ impl BTree {
             parent.update_checksum();
             self.pager.write_page(parent_id, parent)?;
 
-            let mut parent_path = path;
-            parent_path.pop();
-            return self.rebalance_interior(parent_id, parent_path);
+            return Ok(Some(parent_id));
         }
 
         if child_index + 1 < parent_children.len() {
@@ -1139,15 +1147,25 @@ impl BTree {
             parent.update_checksum();
             self.pager.write_page(parent_id, parent)?;
 
-            let mut parent_path = path;
-            parent_path.pop();
-            return self.rebalance_interior(parent_id, parent_path);
+            return Ok(Some(parent_id));
         }
 
+        Ok(None)
+    }
+
+    fn rebalance_interior(&self, mut node_id: u32, mut path: Vec<u32>) -> BTreeResult<()> {
+        // Each completed step releases its page buffers before the next level.
+        while let Some(parent_id) = self.rebalance_interior_step(node_id, &mut path)? {
+            node_id = parent_id;
+        }
         Ok(())
     }
 
-    fn rebalance_interior(&self, node_id: u32, mut path: Vec<u32>) -> BTreeResult<()> {
+    fn rebalance_interior_step(
+        &self,
+        node_id: u32,
+        path: &mut Vec<u32>,
+    ) -> BTreeResult<Option<u32>> {
         let root_id = self.root_page_id();
         let mut node = self.pager.read_page(node_id)?;
         let (mut node_keys, mut node_children) = read_interior_keys_children(&node)?;
@@ -1163,16 +1181,16 @@ impl BTree {
                     ))
                 })? = next_root;
             }
-            return Ok(());
+            return Ok(None);
         }
 
         if interior_entries_size(&node_keys) >= min_bytes {
-            return Ok(());
+            return Ok(None);
         }
 
         let parent_id = match path.pop() {
             Some(id) => id,
-            None => return Ok(()),
+            None => return Ok(None),
         };
         let mut parent = self.pager.read_page(parent_id)?;
         let (mut parent_keys, mut parent_children) = read_interior_keys_children(&parent)?;
@@ -1216,7 +1234,7 @@ impl BTree {
                     parent.update_checksum();
                     self.pager.write_page(parent_id, parent)?;
 
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
@@ -1249,7 +1267,7 @@ impl BTree {
                     parent.update_checksum();
                     self.pager.write_page(parent_id, parent)?;
 
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
@@ -1274,7 +1292,7 @@ impl BTree {
             parent.update_checksum();
             self.pager.write_page(parent_id, parent)?;
 
-            return self.rebalance_interior(parent_id, path);
+            return Ok(Some(parent_id));
         }
 
         if child_index + 1 < parent_children.len() {
@@ -1297,9 +1315,9 @@ impl BTree {
             parent.update_checksum();
             self.pager.write_page(parent_id, parent)?;
 
-            return self.rebalance_interior(parent_id, path);
+            return Ok(Some(parent_id));
         }
 
-        Ok(())
+        Ok(None)
     }
 }

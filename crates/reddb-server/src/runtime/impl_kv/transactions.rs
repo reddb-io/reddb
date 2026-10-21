@@ -383,17 +383,21 @@ mod tests {
                 .unwrap();
             let vault_store = runtime.inner.db.store();
             let _publication = vault_store.vault_publication_lock.lock();
-            let _: RedDBResult<_> = runtime.inner.transaction_state.commit(121, |context| {
-                runtime.prepare_pending_vault_writes(121, context)?;
-                // Exercise both an incidental pager flush and a full checkpoint
-                // exactly after materialization, before COMMIT's WAL append.
-                runtime.inner.db.store().pager().unwrap().flush().unwrap();
-                runtime.checkpoint()?;
-                if !operational {
-                    runtime.publish_serverless_generation()?;
-                }
-                std::process::exit(0);
-            });
+            let _: RedDBResult<_> =
+                runtime
+                    .inner
+                    .transaction_state
+                    .commit(121, |context| -> RedDBResult<()> {
+                        runtime.prepare_pending_vault_writes(121, context)?;
+                        // Exercise both an incidental pager flush and a full checkpoint
+                        // exactly after materialization, before COMMIT's WAL append.
+                        runtime.inner.db.store().pager().unwrap().flush().unwrap();
+                        runtime.checkpoint()?;
+                        if !operational {
+                            runtime.publish_serverless_generation()?;
+                        }
+                        std::process::exit(0);
+                    });
             panic!("crash injection did not exit");
         }
         let directory = tempfile::tempdir().unwrap();

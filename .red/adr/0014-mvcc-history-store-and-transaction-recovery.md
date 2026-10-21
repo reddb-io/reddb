@@ -49,8 +49,8 @@ This ADR ratifies the implementation contract for the first rollout:
   paths explicitly adopt the resolver.
 - RedDB implements snapshot isolation with first-committer-wins write conflict
   detection. It does not implement serializable isolation or SSI.
-- The first rollout includes manual `VACUUM` / GC only. It does not include an
-  autovacuum daemon.
+- The original rollout includes manual `VACUUM` / GC only. The bounded
+  standalone maintenance evolution below adds automatic table-history cleanup.
 - Current secondary indexes plus MVCC recheck and fallback are the first
   correctness target. Historical secondary indexes are deferred.
 - Full multi-model adoption is deferred behind table-row correctness.
@@ -431,3 +431,40 @@ duplicating rules.
   (the baseline); the new non-table PATCH path is flag-gated. For a non-versioned
   document the two verbs therefore differ in history accrual (invisible without
   AS OF, which is rejected for non-versioned). Align if uniform behavior is wanted.
+
+## Evolution: bounded standalone maintenance (2026-10-20)
+
+Writable standalone embedded runtimes reclaim obsolete table versions through
+an existing 200 ms maintenance tick. Each tick inspects at most 4,096 physical
+positions and reclaims at most 256 versions. These limits include empty or
+retired scan positions. Source cursors use weak segment references so a slow
+sweep does not retain retired payloads across consolidation. A subsequent sweep
+visits replacement segments and writes appended after cursor capture.
+
+Reclamation uses the same transaction, statement and external-pin horizons as
+manual VACUUM. Aborted creators can be removed, while aborted deletions never
+make a live version eligible. Transaction outcomes remain retained until a
+separate global reference proof permits pruning them. Physical deletes and
+WAL publication share the checkpoint fence; a busy checkpoint defers a tick.
+Collection replacement invalidates its old cursor. Failed batches retry with
+backoff and rate-limited diagnostics.
+
+`runtime.mvcc.autovacuum.enabled` defaults to `true` in this supported scope.
+`runtime.mvcc.autovacuum.scan_rows_per_tick` and
+`runtime.mvcc.autovacuum.reclaim_rows_per_tick` can reduce their respective
+budgets; values are clamped to 1..4096 and 1..256. Read-only runtimes and the
+serverless, primary-replica and cluster deploy profiles do not enable this local collector: they require their
+own write-authority and distributed history-retention contract first.
+
+Manual VACUUM borrows headers instead of cloning a collection's payloads.
+Statistics collection also borrows rows, caps exact fingerprint cardinality at
+30,000 entries before using HyperLogLog, and caps each column's histogram
+sample at 1 MiB. Values over 4 KiB leave min/max bounds unknown. Statistics are
+planner estimates and must not be used as proof that a data range is empty.
+
+Resource sketch: a collector tick buffers at most 256 source IDs and 256
+reclamation IDs, plus bounded lookup scratch (about 6 KiB total), rather than
+N rows multiplied by payload width. Cursor metadata scales with segment count.
+Statistics use bounded cardinality and sample buffers per column; neither path
+makes a second full collection of row payloads. Explicit VACUUM still traverses
+the target collection; the automatic collector resumes between ticks.
