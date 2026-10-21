@@ -231,8 +231,14 @@ impl GroupCommit {
             }
             let mut batch_bytes = 0_u64;
             while let Some(front) = state.pending.front() {
+                // An empty member fences earlier work; it must not inherit a
+                // retryable full-region error from a data batch. Process it
+                // alone, after earlier requests complete. Sticky IO failures
+                // still reject it through GroupState::failure above.
                 if !batch.requests.is_empty()
-                    && (batch.requests.len() >= options.max_statements.max(1)
+                    && (front.payloads.is_empty()
+                        || batch.requests[0].payloads.is_empty()
+                        || batch.requests.len() >= options.max_statements.max(1)
                         || batch_bytes.saturating_add(front.bytes) > options.max_wal_bytes.max(1))
                 {
                     break;
@@ -589,6 +595,42 @@ mod tests {
         assert!(EmbeddedRdbArtifact::read_wal_payloads(&checkpoint)
             .expect("wal")
             .is_empty());
+    }
+
+    #[test]
+    fn checkpoint_fence_drains_retryable_full_requests_without_inheriting_their_error() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("full-checkpoint.rdb");
+        let open = EmbeddedRdbArtifact::create(&path).expect("artifact");
+        let header = EmbeddedRdbArtifact::wal_payloads_encoded_len(&[vec![]]).expect("header");
+        EmbeddedRdbArtifact::append_wal_payloads(
+            &path,
+            &[vec![1; (open.manifest.wal_region_bytes - header) as usize]],
+        )
+        .expect("fill WAL");
+        let session = EmbeddedRdbArtifact::group_commit_session(&path);
+        let pending = session
+            .enqueue(&[vec![2; 1024]], options())
+            .expect("queued staged write");
+        let checkpoint = EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(
+            &path,
+            b"RDST-image includes the staged write",
+            1024 * 1024,
+        )
+        .expect("fence drains full requests before checkpointing");
+        assert!(
+            matches!(pending.wait(), Err(RdbFileError::InvalidOperation(message)) if message.contains("embedded wal region full"))
+        );
+        session
+            .check()
+            .expect("capacity overflow must not poison the session");
+        assert_eq!(checkpoint.manifest.wal_region_bytes, 1024 * 1024);
+        assert!(EmbeddedRdbArtifact::read_wal_payloads(&checkpoint)
+            .expect("reclaimed WAL")
+            .is_empty());
+        session
+            .append(&[vec![3]], options())
+            .expect("durable retry after checkpoint");
     }
 
     #[test]

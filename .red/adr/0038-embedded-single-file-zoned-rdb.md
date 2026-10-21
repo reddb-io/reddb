@@ -123,6 +123,22 @@ disk; 16 MiB for the fleet follows the industry reference points (SQLite
 auto-checkpoints at ~4 MiB of WAL; Postgres segments are 16 MiB) where boot
 footprint matters less than checkpoint pressure under sustained writes.
 
+2026-10-21 amendment — normal embedded overflow checkpoints request headroom
+proportional to the snapshot image, with an adaptive target capped at 1 MiB,
+rounded up by the existing power-of-two capacity allocator. Fresh artifacts
+still start at 64 KiB; existing larger regions are not shrunk. An indivisible
+larger action retains the existing embedded oversize contract. This bounds
+normal additional disk/replay reservation, not the size of a valid record.
+The populated-store diagnostic measured 731.88 ms grouped-write p99 and only
+205 writes/s; sizing only for one small failed action left the reservation
+at 64 KiB and repeatedly checkpointed the whole image. Retry under the
+publication fence now revalidates stale full results before checkpointing.
+Both sync barriers and on-disk geometry rules are retained. The long proving
+workload records actual snapshot changes across multiple WAL rollovers,
+throughput, p99 and crash recovery under `bench/results/kv-compare-wal-2026-10-21`.
+This does not introduce a background maintenance worker or claim incremental
+checkpointing; paced incremental maintenance remains the architectural target.
+
 ## Considered Options
 
 - **Single zoned `.rdb` for embedded** — kept (unchanged rationale: ergonomics

@@ -25,6 +25,11 @@ use std::sync::{Arc, Condvar, Mutex};
 /// this floor — explicit ms config wins.
 const DEFAULT_ADAPTIVE_WINDOW_US: u64 = 200;
 
+// Extra disk reservation for normal embedded overflow checkpoints, not a
+// per-write buffer allocation. Fresh files stay at 64 KiB. A single larger
+// indivisible action retains the existing capacity/oversize contract.
+const EMBEDDED_WAL_HEADROOM_LIMIT: u64 = 1024 * 1024;
+
 /// Shorthand — `Arc<parking_lot::Mutex<WalWriter>>` avoids poisoning
 /// (one writer panicking mid-append used to taint every subsequent
 /// lock acquisition) and shaves a few syscalls off the fast path.
@@ -1027,20 +1032,62 @@ impl UnifiedStore {
             Err(crate::api::RedDBError::InvalidOperation(msg))
                 if msg.contains("embedded wal region full") =>
             {
-                let _vault_guard = self.vault_publication_lock.lock();
-                let snapshot = self.to_binary_dump_bytes();
-                crate::storage::EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(
-                    path,
-                    &snapshot,
-                    encoded_len,
-                )
-                .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
-                self.append_embedded_payloads(path, &payloads)
-                    .map(|_| ())
-                    .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))
+                self.recover_full_embedded_wal(path, &payloads, encoded_len)
             }
             Err(err) => Err(StoreError::Io(std::io::Error::other(err.to_string()))),
         }
+    }
+
+    fn recover_full_embedded_wal(
+        &self,
+        path: &Path,
+        payloads: &[Vec<u8>],
+        encoded_len: u64,
+    ) -> Result<(), StoreError> {
+        let _vault_guard = self.vault_publication_lock.lock();
+        // The failed append preceded this lock: another writer may already
+        // have reclaimed space. Retry through the same FIFO coordinator so
+        // stale full results cannot each serialize another complete snapshot.
+        match self.append_embedded_payloads(path, payloads) {
+            Ok(_) => return Ok(()),
+            Err(crate::api::RedDBError::InvalidOperation(message))
+                if message.contains("embedded wal region full") => {}
+            Err(error) => return Err(StoreError::Io(std::io::Error::other(error.to_string()))),
+        }
+        // A checkpoint can fail after publishing its image. Preserve the
+        // session failure fence through errors and unwinding, just as append's
+        // FlushBatch guard does; in-memory rollback alone cannot resolve disk.
+        struct CheckpointFence<'a>(Option<&'a crate::storage::embedded::EmbeddedCommitSession>);
+        impl Drop for CheckpointFence<'_> {
+            fn drop(&mut self) {
+                if let Some(session) = self.0 {
+                    session.fence_interrupted_write();
+                }
+            }
+        }
+        let mut fence = CheckpointFence(Some(
+            self.embedded_commit_session
+                .get()
+                .expect("WAL-full recovery follows an append attempt"),
+        ));
+        let started = Instant::now();
+        let snapshot = self.to_binary_dump_bytes();
+        let capacity = encoded_len.max((snapshot.len() as u64).min(EMBEDDED_WAL_HEADROOM_LIMIT));
+        let checkpoint = crate::storage::EmbeddedRdbArtifact::write_snapshot_with_wal_capacity(
+            path, &snapshot, capacity,
+        )
+        .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
+        fence.0 = None;
+        tracing::debug!(
+            target: "reddb::embedded_checkpoint",
+            snapshot_bytes = snapshot.len(),
+            wal_region_bytes = checkpoint.manifest.wal_region_bytes,
+            elapsed_us = started.elapsed().as_micros() as u64,
+            "embedded WAL overflow checkpoint"
+        );
+        self.append_embedded_payloads(path, payloads)
+            .map(|_| ())
+            .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))
     }
 
     fn append_embedded_payloads(
@@ -1464,6 +1511,209 @@ mod tests {
     use crate::api::{DurabilityMode, GroupCommitOptions};
     use std::sync::{Barrier, Mutex as StdMutex, OnceLock};
     use std::time::SystemTime;
+
+    fn embedded_fixture(
+        mode: DurabilityMode,
+        background_bytes: usize,
+    ) -> (tempfile::TempDir, PathBuf, UnifiedStore) {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("data.rdb");
+        let mut store =
+            UnifiedStore::with_config(UnifiedStoreConfig::default().with_durability_mode(mode));
+        store.create_collection("keys").expect("collection");
+        store.set_aux_metadata(vec![42; background_bytes]);
+        crate::storage::EmbeddedRdbArtifact::create_with_snapshot(
+            &path,
+            &store.to_binary_dump_bytes(),
+        )
+        .expect("snapshot");
+        store.config.embedded_wal_path = Some(path.clone());
+        (directory, path, store)
+    }
+
+    #[test]
+    fn embedded_stale_full_result_does_not_checkpoint_reclaimed_space() {
+        for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
+            let (_directory, path, store) = embedded_fixture(mode, 0);
+            store
+                .append_embedded_store_wal_actions(&[StoreWalAction::CreateCollection {
+                    name: "keys".into(),
+                }])
+                .expect("another writer appended after reclaiming space");
+            let before = crate::storage::EmbeddedRdbArtifact::open(&path).expect("before");
+            let payloads = vec![StoreWalAction::CreateCollection {
+                name: "after".into(),
+            }
+            .encode()];
+            let length = crate::storage::EmbeddedRdbArtifact::wal_payloads_encoded_len(&payloads)
+                .expect("encoded length");
+            // Model a full result obtained before that other writer's checkpoint.
+            store
+                .recover_full_embedded_wal(&path, &payloads, length)
+                .expect("revalidate after acquiring publication");
+            let after = crate::storage::EmbeddedRdbArtifact::open(&path).expect("after");
+            assert_eq!(
+                after.selected_superblock.generation,
+                before.selected_superblock.generation + 1,
+                "only the retry is published, without an unnecessary checkpoint"
+            );
+            assert_eq!(
+                crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&after)
+                    .expect("both appends retained")
+                    .len(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_full_wal_reserves_bounded_headroom_for_populated_store() {
+        for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
+            let (_directory, path, store) = embedded_fixture(mode, 2 * 1024 * 1024);
+            let initial = crate::storage::EmbeddedRdbArtifact::open(&path).expect("initial");
+            let action = StoreWalAction::CreateCollection {
+                name: "keys".into(),
+            };
+            let payloads = vec![action.encode()];
+            let length = crate::storage::EmbeddedRdbArtifact::wal_payloads_encoded_len(&payloads)
+                .expect("encoded length");
+            crate::storage::EmbeddedRdbArtifact::append_wal_payloads(
+                &path,
+                &vec![payloads[0].clone(); (initial.manifest.wal_region_bytes / length) as usize],
+            )
+            .expect("fill the initial region with valid records");
+            store
+                .append_embedded_store_wal_actions(&[action])
+                .expect("overflow");
+            let open = crate::storage::EmbeddedRdbArtifact::open(&path).expect("checkpoint");
+            assert_eq!(open.manifest.wal_region_bytes, 1024 * 1024);
+            let snapshot = crate::storage::EmbeddedRdbArtifact::read_snapshot(&open)
+                .expect("snapshot")
+                .expect("populated image");
+            let recovered =
+                UnifiedStore::load_from_bytes_with_config(&snapshot, UnifiedStoreConfig::default())
+                    .expect("recover snapshot");
+            for payload in
+                crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&open).expect("WAL")
+            {
+                recovered
+                    .apply_encoded_store_wal_action(&payload)
+                    .expect("replay");
+            }
+            assert_eq!(recovered.aux_metadata.read().len(), 2 * 1024 * 1024);
+            assert!(recovered.get_collection("keys").is_some());
+        }
+    }
+
+    #[test]
+    fn embedded_grouped_overwrites_recover_across_repeated_full_wal_regions() {
+        fn row(writer: usize, round: usize) -> UnifiedEntity {
+            let mut state = (writer as u64 + 1) * 31 + round as u64 * 13;
+            let payload: String = (0..4096)
+                .map(|_| {
+                    state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                    char::from(b'!' + ((state >> 24) % 90) as u8)
+                })
+                .collect();
+            let mut entity = UnifiedEntity::table_row(EntityId::new(0), "keys", 0, vec![]);
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![
+                    Value::text(format!("k{writer}")),
+                    Value::text(format!("{round}:{payload}")),
+                ],
+                vec!["key".into(), "value".into()],
+            ));
+            entity
+        }
+        let (_directory, path, store) =
+            embedded_fixture(DurabilityMode::WalDurableGrouped, 2 * 1024 * 1024);
+        assert!(
+            StoreWalAction::upsert_entity("keys", &row(0, 0), None, store.format_version())
+                .encode()
+                .len()
+                >= 2048,
+            "fixture must exert physical WAL pressure after value compression"
+        );
+        let mut ids: Vec<_> = (0..8)
+            .map(|writer| {
+                store
+                    .write_keyed_row("keys", row(writer, 0), None, None)
+                    .expect("seed")
+            })
+            .collect();
+        let initial = crate::storage::EmbeddedRdbArtifact::open(&path).expect("initial roots");
+        let mut previous_snapshot = crate::storage::EmbeddedRdbArtifact::read_snapshot(&initial)
+            .expect("initial snapshot")
+            .expect("image");
+        // Each wave writes over 2 MiB through the same 1 MiB reservation.
+        // Checking image changes after each wave prevents a larger WAL from
+        // merely postponing every checkpoint beyond the test's duration.
+        for wave in 0..3 {
+            let barrier = Barrier::new(ids.len());
+            ids = std::thread::scope(|scope| {
+                let workers: Vec<_> = ids
+                    .iter()
+                    .enumerate()
+                    .map(|(writer, previous)| {
+                        let store = &store;
+                        let barrier = &barrier;
+                        scope.spawn(move || {
+                            barrier.wait();
+                            let mut id = *previous;
+                            for round in 0..64 {
+                                id = store
+                                    .write_keyed_row(
+                                        "keys",
+                                        row(writer, wave * 64 + round),
+                                        None,
+                                        Some(id),
+                                    )
+                                    .expect("durable overwrite");
+                            }
+                            id
+                        })
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().expect("writer"))
+                    .collect()
+            });
+            let open = crate::storage::EmbeddedRdbArtifact::open(&path).expect("wave roots");
+            assert_eq!(open.manifest.wal_region_bytes, EMBEDDED_WAL_HEADROOM_LIMIT);
+            let snapshot = crate::storage::EmbeddedRdbArtifact::read_snapshot(&open)
+                .expect("wave snapshot")
+                .expect("image");
+            assert!(snapshot != previous_snapshot, "wave {wave} must checkpoint");
+            previous_snapshot = snapshot;
+        }
+        let open = crate::storage::EmbeddedRdbArtifact::open(&path).expect("recover roots");
+        let snapshot = crate::storage::EmbeddedRdbArtifact::read_snapshot(&open)
+            .expect("snapshot")
+            .expect("image");
+        let recovered =
+            UnifiedStore::load_from_bytes_with_config(&snapshot, UnifiedStoreConfig::default())
+                .expect("snapshot replay");
+        for payload in crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&open).expect("WAL") {
+            recovered
+                .apply_encoded_store_wal_action(&payload)
+                .expect("WAL replay");
+        }
+        assert_eq!(recovered.get_collection("keys").expect("keys").count(), 8);
+        for (writer, id) in ids.iter().enumerate() {
+            let entity = recovered
+                .get("keys", *id)
+                .expect("last acknowledged version");
+            assert_eq!(
+                entity.data.as_row().expect("row").get_field("value"),
+                row(writer, 191)
+                    .data
+                    .as_row()
+                    .expect("expected row")
+                    .get_field("value")
+            );
+        }
+    }
 
     /// Serialise tests that mutate `REDDB_GROUP_COMMIT_WINDOW_US`.
     /// The env table is process-global, so two parallel test threads

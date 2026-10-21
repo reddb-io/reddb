@@ -1,9 +1,11 @@
 import io
 import json
+import struct
 import tempfile
 import threading
 import time
 import unittest
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -11,6 +13,39 @@ from unittest.mock import Mock, patch
 import compare
 import local_matrix
 import summarize
+
+
+class ArtifactStateTests(unittest.TestCase):
+    def test_torn_root_is_rejected_and_only_checksummed_generation_is_selected(self):
+        def root(copy, generation):
+            block = bytearray(4096)
+            block[:8] = b"RDBSBLK1"
+            struct.pack_into("<IBQ", block, 8, 2, copy, generation)
+            struct.pack_into("<QQQQQQI", block, 45, 16384, 1048576, 16400, 16, 1064960, 4, generation)
+            struct.pack_into("<I", block, 4092, zlib.crc32(block[:-4]))
+            return block
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "data.rdb"
+            def write(first, second, body=b"row0"):
+                with path.open("wb") as output:
+                    output.write(first + second)
+                    output.seek(1064960)
+                    output.write(body)
+            first, second = root(0, 7), root(1, 8)
+            write(first, second)
+            self.assertEqual(compare.artifact_state(path)["generation"], 8)
+            second[80] ^= 1
+            write(first, second)
+            state = compare.artifact_state(path)
+            self.assertEqual(state["generation"], 7)
+            self.assertEqual(state["wal_capacity_bytes"], 1048576)
+            write(first, second, b"row1")
+            self.assertNotEqual(state["snapshot_sha256"], compare.artifact_state(path)["snapshot_sha256"])
+            first[80] ^= 1
+            write(first, second)
+            with self.assertRaises(compare.ProtocolError):
+                compare.artifact_state(path)
 
 
 def resp(raw, fence=False):
