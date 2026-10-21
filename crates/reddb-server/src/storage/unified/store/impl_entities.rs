@@ -1325,6 +1325,11 @@ impl UnifiedStore {
             if let Some(before) = before {
                 self.note_paged_delete(collection, &manager, &before, &deleted_ids);
             }
+            // Paced GC must also pace publication: otherwise grouped WAL
+            // workloads can retain detached pages until a distant checkpoint.
+            // Publish roots and the deferred-page ledger without re-encoding
+            // unchanged row payloads.
+            self.flush_paged_registry()?;
         }
         Ok(deleted_ids)
     }

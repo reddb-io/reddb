@@ -88,6 +88,50 @@ pub struct NativePagedCollectionRoot {
 /// stop after cross references and can still read all live collection roots.
 const PAGED_RETIRED_TREES_MAGIC: &[u8; 4] = b"RDR1";
 
+const PAGED_DEFERRED_PAGES_MAGIC: &[u8; 4] = b"RDF1";
+
+/// Optional trailing ledger of detached pages awaiting durable reclamation.
+/// Older readers stop after retired tree roots and ignore this extension.
+pub fn encode_native_paged_deferred_pages(out: &mut Vec<u8>, pages: &[u32]) -> RdbFileResult<()> {
+    if pages.contains(&0) || pages.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(RdbFileError::InvalidOperation(
+            "invalid deferred page list".into(),
+        ));
+    }
+    let count = u32::try_from(pages.len())
+        .map_err(|_| RdbFileError::InvalidOperation("too many deferred pages".into()))?;
+    out.extend_from_slice(PAGED_DEFERRED_PAGES_MAGIC);
+    out.extend_from_slice(&count.to_le_bytes());
+    for page in pages {
+        out.extend_from_slice(&page.to_le_bytes());
+    }
+    Ok(())
+}
+
+pub fn decode_native_paged_deferred_pages(data: &[u8], pos: &mut usize) -> RdbFileResult<Vec<u32>> {
+    if data.get(*pos..pos.saturating_add(4)) != Some(PAGED_DEFERRED_PAGES_MAGIC.as_slice()) {
+        return Ok(Vec::new());
+    }
+    *pos += 4;
+    let count = read_native_u32(data, pos, "truncated deferred page count")? as usize;
+    if count > data.len().saturating_sub(*pos) / 4 {
+        return Err(RdbFileError::InvalidOperation(
+            "truncated deferred pages".into(),
+        ));
+    }
+    let mut pages = Vec::with_capacity(count);
+    for _ in 0..count {
+        let page = read_native_u32(data, pos, "truncated deferred page")?;
+        if page == 0 || pages.last().is_some_and(|previous| *previous >= page) {
+            return Err(RdbFileError::InvalidOperation(
+                "invalid deferred page order".into(),
+            ));
+        }
+        pages.push(page);
+    }
+    Ok(pages)
+}
+
 pub fn encode_native_paged_retired_trees(out: &mut Vec<u8>, roots: &[u32]) -> RdbFileResult<()> {
     let count = u32::try_from(roots.len())
         .map_err(|_| RdbFileError::InvalidOperation("too many retired trees".into()))?;

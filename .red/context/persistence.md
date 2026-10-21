@@ -87,6 +87,18 @@ tree removal succeeds and the segment revision delta accounts for exactly the
 deleted rows. Earlier untracked edits, changed segment topology, pending vault
 versions and format changes retain full checkpoint validation.
 
+Store-managed physical frees remain quarantined outside the allocator until
+their removal from the durable collection catalog has been published. Dirty
+empty or forwarding nodes remain flushable while an older catalog can still
+name them. A trailing optional `RDF1` ledger, owned by `reddb-file`, preserves
+detached page IDs across reopen. A later publication forgets eligible IDs
+before returning them to the free list; outstanding tree readers defer that
+release. Physical delete batches publish this metadata without re-encoding
+unchanged survivors, keeping background reclamation paced under grouped WAL.
+Legacy files without the extension remain readable. Older readers ignore the
+extension, while older writers cannot preserve its pending-reclamation state;
+writer downgrades require a separately qualified recovery procedure.
+
 Changed checkpoints encode ordered borrowed rows in batches capped at 1 MiB or
 512 records (a single larger value keeps the existing value-size contract).
 Comparison with a published tree is streamed; a replacement copies the already

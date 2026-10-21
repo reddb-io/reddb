@@ -266,6 +266,7 @@ impl Pager {
             dwb_enabled,
             cache: PageCache::new(config.cache_size),
             freelist: RwLock::new(FreeList::new()),
+            deferred_reclamation: Mutex::new(DeferredPageReclamation::default()),
             allocation_reused: std::sync::atomic::AtomicBool::new(false),
             allocation_fence_pending: std::sync::atomic::AtomicBool::new(false),
             header: RwLock::new(DatabaseHeader::default()),
@@ -919,6 +920,23 @@ impl Pager {
             return Err(PagerError::ReadOnly);
         }
 
+        let mut deferred = self
+            .deferred_reclamation
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        if deferred.enabled {
+            if page_id < FIRST_ALLOCATABLE_PAGE || page_id >= self.page_count()? {
+                return Err(PagerError::InvalidDatabase(
+                    "invalid deferred free page".into(),
+                ));
+            }
+            // Keep dirty forwarding/empty nodes until publication. An
+            // incidental flush must leave the previous root traversable.
+            deferred.pending.insert(page_id);
+            return Ok(());
+        }
+        drop(deferred);
+
         // Remove from cache
         self.cache.remove(page_id);
 
@@ -928,6 +946,65 @@ impl Pager {
 
         *self.header_dirty_lock()? = true;
 
+        Ok(())
+    }
+
+    pub(crate) fn enable_deferred_reclamation(&self) -> Result<(), PagerError> {
+        self.deferred_reclamation
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?
+            .enabled = true;
+        Ok(())
+    }
+
+    pub(crate) fn deferred_reclamation_pages(&self) -> Result<(Vec<u32>, Vec<u32>), PagerError> {
+        let deferred = self
+            .deferred_reclamation
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        Ok((
+            deferred.pending.iter().copied().collect(),
+            deferred.published.iter().copied().collect(),
+        ))
+    }
+
+    pub(crate) fn restore_deferred_reclamation(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let count = self.page_count()?;
+        if pages
+            .iter()
+            .any(|id| *id < FIRST_ALLOCATABLE_PAGE || *id >= count)
+        {
+            return Err(PagerError::InvalidDatabase(
+                "invalid persisted deferred free page".into(),
+            ));
+        }
+        let mut deferred = self
+            .deferred_reclamation
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        deferred.pending.extend(pages);
+        deferred.published.extend(pages);
+        Ok(())
+    }
+
+    /// The caller has durably published a catalog that retains `retained`
+    /// and no longer names `released`, after waiting for old tree readers.
+    pub(crate) fn complete_deferred_publication(
+        &self,
+        retained: &[u32],
+        released: &[u32],
+    ) -> Result<(), PagerError> {
+        let mut deferred = self
+            .deferred_reclamation
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        if !released.is_empty() {
+            self.free_retired_pages(released)?;
+        }
+        for id in released {
+            deferred.pending.remove(id);
+        }
+        deferred.published = retained.iter().copied().collect();
         Ok(())
     }
 

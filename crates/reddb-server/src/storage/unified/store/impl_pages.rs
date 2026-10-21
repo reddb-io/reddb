@@ -466,6 +466,21 @@ impl UnifiedStore {
         roots.dedup();
         reddb_file::encode_native_paged_retired_trees(metadata, &roots)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let (pending_pages, published_pages) = pager
+            .deferred_reclamation_pages()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        let readers = live.values().any(|tree| tree.has_retirement_readers())
+            || retired
+                .iter()
+                .any(|entry| entry.tree.has_retirement_readers());
+        let released_pages = if readers { Vec::new() } else { published_pages };
+        let released: std::collections::HashSet<_> = released_pages.iter().copied().collect();
+        let retained_pages: Vec<_> = pending_pages
+            .into_iter()
+            .filter(|id| !released.contains(id))
+            .collect();
+        reddb_file::encode_native_paged_deferred_pages(metadata, &retained_pages)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
         // Do not mutate retirement state or the free list before both the new
         // children and the manifest that forgets old roots have been synced.
         publish_paged_metadata(pager, metadata)
@@ -481,6 +496,14 @@ impl UnifiedStore {
             pager
                 .free_retired_pages(&reclaim)
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            pager
+                .sync()
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        pager
+            .complete_deferred_publication(&retained_pages, &released_pages)
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        if !released_pages.is_empty() {
             pager
                 .sync()
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
@@ -813,6 +836,9 @@ impl UnifiedStore {
             pager_config.double_write = false;
         }
         let pager = Pager::open(path, pager_config)
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        pager
+            .enable_deferred_reclamation()
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
         let wal_path = reddb_file::layout::unified_wal_path(path);
@@ -1163,6 +1189,14 @@ impl UnifiedStore {
                         published: true,
                     });
                 }
+                let deferred = reddb_file::decode_native_paged_deferred_pages(content, &mut pos)
+                    .map_err(|e| StoreError::Serialization(e.to_string()))?;
+                if deferred.iter().any(|id| live_roots.contains(id)) {
+                    return Err(page_integrity(1, None, "deferred page aliases a live root"));
+                }
+                pager
+                    .restore_deferred_reclamation(&deferred)
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
             }
         }
 
