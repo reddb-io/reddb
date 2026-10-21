@@ -27,16 +27,43 @@ impl RedDBServer {
         match exec_result {
             Ok(result) => {
                 if stream_ask {
-                    return ask_sse_response(&result);
+                    let response = ask_sse_response(&result);
+                    if self
+                        .runtime
+                        .resource_limits()
+                        .max_result_bytes
+                        .is_some_and(|limit| limit > 0 && response.body.len() as u64 > limit)
+                    {
+                        return json_error(413, "query result exceeds max_result_bytes");
+                    }
+                    return response;
                 }
-                json_response(
-                    200,
-                    crate::presentation::query_result_json::runtime_query_json(
-                        &result,
-                        &entity_types,
-                        &capabilities,
-                    ),
-                )
+                let value = crate::presentation::query_result_json::runtime_query_json(
+                    &result,
+                    &entity_types,
+                    &capabilities,
+                );
+                if result.statement_type == "select" {
+                    if let Some(limit) = self
+                        .runtime
+                        .resource_limits()
+                        .max_result_bytes
+                        .filter(|value| *value > 0)
+                    {
+                        return match value
+                            .to_string_compact_limited(usize::try_from(limit).unwrap_or(usize::MAX))
+                        {
+                            Some(body) => HttpResponse {
+                                status: 200,
+                                body: body.into_bytes(),
+                                content_type: "application/json",
+                                extra_headers: Vec::new(),
+                            },
+                            None => json_error(413, "query result exceeds max_result_bytes"),
+                        };
+                    }
+                }
+                json_response(200, value)
             }
             Err(err) => {
                 if stream_ask {
@@ -434,6 +461,15 @@ impl RedDBServer {
         ctx: &crate::server::routing::StreamAuditCtx,
         writer: &mut W,
     ) -> io::Result<()> {
+        let _query_budget = match self.runtime.query_budget_scope() {
+            Ok(scope) => scope,
+            Err(cause) => {
+                let (status, message) = map_runtime_error(&cause);
+                writer.write_all(&json_error(status, message).to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+
         use crate::server::output_stream::{
             self, ChunkProducer, Clock, LeaseLookup, OpenStreamError, PrefixHasher, StreamConfig,
             SystemClock,
@@ -1121,6 +1157,15 @@ impl RedDBServer {
         body: Vec<u8>,
         writer: &mut W,
     ) -> io::Result<()> {
+        let _query_budget = match self.runtime.query_budget_scope() {
+            Ok(scope) => scope,
+            Err(cause) => {
+                let (status, message) = map_runtime_error(&cause);
+                writer.write_all(&json_error(status, message).to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+
         let request = match extract_query_request(&body) {
             Ok(request) => request,
             Err(response) => return write_sse_http_response(&response, writer),
@@ -1154,6 +1199,7 @@ impl RedDBServer {
                     emitted_answer_tokens.set(emitted_answer_tokens.get().saturating_add(1));
                 }
                 let encoded = crate::runtime::ai::sse_frame_encoder::encode(&frame);
+                crate::runtime::query_budget::charge_output(encoded.len())?;
                 writer
                     .write_all(encoded.as_bytes())
                     .and_then(|_| writer.flush())
@@ -1259,6 +1305,15 @@ impl RedDBServer {
         tenant: &str,
         writer: &mut W,
     ) -> io::Result<()> {
+        let _query_budget = match self.runtime.query_budget_scope() {
+            Ok(scope) => scope,
+            Err(cause) => {
+                let (status, message) = map_runtime_error(&cause);
+                writer.write_all(&json_error(status, message).to_http_bytes())?;
+                return writer.flush();
+            }
+        };
+
         use crate::server::output_stream::{self, ChunkProducer, Clock, StreamConfig, SystemClock};
 
         let clock = SystemClock;

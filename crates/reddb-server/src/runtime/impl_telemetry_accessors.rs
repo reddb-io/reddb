@@ -10,6 +10,9 @@
 use super::*;
 
 impl RedDBRuntime {
+    pub(crate) fn query_budget_scope(&self) -> crate::RedDBResult<super::query_budget::Scope<'_>> {
+        super::query_budget::Scope::enter(self.resource_limits(), &self.inner.query_budget_slots)
+    }
     /// Emit a CDC change event and replicate to WAL buffer.
     /// Create a `MutationEngine` bound to this runtime.
     ///

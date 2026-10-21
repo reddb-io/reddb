@@ -369,6 +369,10 @@ impl RedDBRuntime {
                 self.filter_integrity_tombstoned(&mut query_result.result);
             }
         }
+        result = result.and_then(|value| {
+            super::query_budget::check_result(self.resource_limits(), &value)?;
+            Ok(value)
+        });
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         // Build EffectiveScope from the same thread-locals frame-build
@@ -2916,6 +2920,43 @@ impl RedDBRuntime {
     }
 
     fn dispatch_expr(
+        &self,
+        expr: QueryExpr,
+        query_str: &str,
+        mode: QueryMode,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        // Typed read plans only: mutation/transaction cleanup must never fail
+        // because a read result or cooperative deadline budget was exhausted.
+        let is_read = matches!(
+            &expr,
+            QueryExpr::Table(_)
+                | QueryExpr::Graph(_)
+                | QueryExpr::Join(_)
+                | QueryExpr::Path(_)
+                | QueryExpr::Vector(_)
+                | QueryExpr::Hybrid(_)
+        );
+        let _budget = if is_read {
+            Some(super::query_budget::Scope::enter(
+                self.resource_limits(),
+                &self.inner.query_budget_slots,
+            )?)
+        } else {
+            None
+        };
+        let result = self.dispatch_expr_inner(expr, query_str, mode);
+        if is_read {
+            super::query_budget::charge(0)?;
+        }
+        let result = result?;
+        super::query_budget::check_result(self.resource_limits(), &result)?;
+        if is_read {
+            super::query_budget::charge(0)?;
+        }
+        Ok(result)
+    }
+
+    fn dispatch_expr_inner(
         &self,
         expr: QueryExpr,
         query_str: &str,

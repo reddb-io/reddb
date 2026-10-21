@@ -55,13 +55,14 @@ impl Drop for Scope {
 }
 
 pub(crate) fn active() -> bool {
-    CURRENT.with(|slot| slot.get().is_some())
+    CURRENT.with(|slot| slot.get().is_some()) || super::query_budget::active()
 }
 
 /// Charge work before doing it. Zero forces a deadline check at a statement or
 /// phase boundary. Row loops sample the clock every 256 units; no timer thread,
 /// allocation, lock, or atomic operation is needed per unit.
 pub(crate) fn charge(work: u64) -> RedDBResult<()> {
+    super::query_budget::charge(work)?;
     CURRENT.with(|slot| {
         let Some(mut budget) = slot.get() else {
             return Ok(());

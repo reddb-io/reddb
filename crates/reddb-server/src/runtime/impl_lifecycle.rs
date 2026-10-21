@@ -366,6 +366,7 @@ impl RedDBRuntime {
                 )),
                 lifecycle: crate::runtime::lifecycle::Lifecycle::new(),
                 resource_limits: crate::runtime::resource_limits::ResourceLimits::from_env(),
+                query_budget_slots: AtomicU64::new(0),
                 audit_log: {
                     // Default audit-log path for the in-memory case
                     // sits in the system temp dir; persistent runs

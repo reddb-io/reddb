@@ -430,6 +430,7 @@ impl<'a> ChunkProducer<'a> {
     where
         F: FnMut(&[u8]) -> std::io::Result<()>,
     {
+        crate::runtime::query_budget::charge_output(line.len()).map_err(std::io::Error::other)?;
         self.buf.extend_from_slice(line);
         self.rows += 1;
         self.total_rows += 1;
