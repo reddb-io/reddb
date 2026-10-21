@@ -160,6 +160,13 @@ impl RedDBRuntime {
 
     #[inline(never)]
     pub fn with_options(options: RedDBOptions) -> RedDBResult<Self> {
+        Self::with_options_and_limits(options, super::resource_limits::ResourceLimits::from_env())
+    }
+
+    pub(super) fn with_options_and_limits(
+        options: RedDBOptions,
+        resource_limits: super::resource_limits::ResourceLimits,
+    ) -> RedDBResult<Self> {
         Self::with_pool(options, ConnectionPoolConfig::default())
     }
 
@@ -365,7 +372,7 @@ impl RedDBRuntime {
                     &options,
                 )),
                 lifecycle: crate::runtime::lifecycle::Lifecycle::new(),
-                resource_limits: crate::runtime::resource_limits::ResourceLimits::from_env(),
+                resource_limits,
                 query_budget_slots: AtomicU64::new(0),
                 audit_log: {
                     // Default audit-log path for the in-memory case

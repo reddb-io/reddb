@@ -196,16 +196,21 @@ mod tests {
 
     #[test]
     fn text_parameterized_and_prepared_reads_share_admission_and_release_it() {
-        let mut runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
+        let runtime = super::super::RedDBRuntime::with_options_and_limits(
+            crate::RedDBOptions::in_memory(),
+            ResourceLimits {
+                max_concurrent_queries: Some(1),
+                ..Default::default()
+            },
+        )
+        .expect("runtime");
         runtime
             .execute_query("CREATE TABLE budget_reads (id INTEGER)")
             .expect("table");
         runtime
             .execute_query("INSERT INTO budget_reads (id) VALUES (1)")
             .expect("row");
-        let inner = std::sync::Arc::get_mut(&mut runtime.inner).expect("exclusive test runtime");
-        inner.resource_limits.max_concurrent_queries = Some(1);
-        inner.query_budget_slots.store(1, Ordering::Relaxed);
+        runtime.inner.query_budget_slots.store(1, Ordering::Relaxed);
         let sql = "SELECT id FROM budget_reads";
         assert!(matches!(
             runtime.execute_query(sql),
