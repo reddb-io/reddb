@@ -48,16 +48,31 @@ for (const browser of browsers) {
   describe(browser, () => {
     let context
     let profile
+    let supportsStorage
     async function launch() {
-      context = await browserTypes[browser].launchPersistentContext(profile, {
-        headless: true,
-        args: browser === 'webkit' ? ['--features=StorageAPI,FileSystem,FileSystemWritableStream'] : [],
+      context = await browserTypes[browser].launchPersistentContext(profile, { headless: true })
+      const probe = await context.newPage()
+      await probe.goto(`${origin}/packages/lite/test/harness.html`)
+      supportsStorage = await probe.evaluate(async () => {
+        if (!navigator.storage?.getDirectory) return false
+        const url = URL.createObjectURL(new Blob([
+          'postMessage(typeof globalThis.FileSystemFileHandle?.prototype.createSyncAccessHandle === "function")',
+        ], { type: 'text/javascript' }))
+        const worker = new Worker(url)
+        try {
+          return await new Promise((resolve, reject) => {
+            worker.onmessage = ({ data }) => resolve(data)
+            worker.onerror = reject
+          })
+        } finally {
+          worker.terminate()
+          URL.revokeObjectURL(url)
+        }
       })
+      await probe.close()
     }
     async function page() {
-      // WPE applies feature settings to its initial window only. Safari's
-      // default feature configuration still needs separate real-device checks.
-      const page = browser === 'webkit' ? context.pages()[0] : await context.newPage()
+      const page = await context.newPage()
       await page.goto(`${origin}/packages/lite/test/harness.html`)
       await page.waitForFunction(() => window.RedDBLite)
       return page
@@ -66,7 +81,17 @@ for (const browser of browsers) {
     before(async () => { profile = await mkdtemp(resolve(tmpdir(), 'reddb-lite-browser-')); await launch() })
     after(async () => { await context?.close(); await rm(profile, { recursive: true, force: true }) })
 
-    test('canonical RQL validation and OPFS writes survive browser restart', async () => {
+    function storageTest(name, run) {
+      test(name, async (testContext) => {
+        if (!supportsStorage) {
+          testContext.skip('This browser port does not expose native synchronous OPFS; Safari/iOS qualification remains pending')
+          return
+        }
+        await run()
+      })
+    }
+
+    storageTest('canonical RQL validation and OPFS writes survive browser restart', async () => {
       const first = await page()
       const result = await first.evaluate(async () => {
         const file = await RedDBLite.openArtifact({ name: 'restart' })
@@ -91,7 +116,7 @@ for (const browser of browsers) {
       }), [[1, 2, 3], [4, 5, 6]])
     })
 
-    test('checkpoint, WAL growth, append and reopen preserve the native artifact', async () => {
+    storageTest('checkpoint, WAL growth, append and reopen preserve the native artifact', async () => {
       const current = await page()
       const result = await current.evaluate(async () => {
         let file = await RedDBLite.openArtifact({ name: 'checkpoint' })
@@ -110,7 +135,7 @@ for (const browser of browsers) {
       assert.deepEqual(result, { snapshot: 'RDSTcheckpoint', wal: [[8]], magic: 'RDBSBLK1' })
     })
 
-    test('a real native .rdb can be changed in the browser and reopened natively', async () => {
+    storageTest('a real native .rdb can be changed in the browser and reopened natively', async () => {
       const current = await page()
       const bytes = await current.evaluate(async (fixture) => {
         const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('reddb-lite', { create: true })
@@ -128,9 +153,9 @@ for (const browser of browsers) {
       nativeArtifact('verify', path)
     })
 
-    test('a second owner cannot write concurrently, and owner teardown releases the lock', async () => {
+    storageTest('a second tab cannot write concurrently, and owner teardown releases the lock', async () => {
       const owner = await page()
-      const contender = browser === 'webkit' ? owner : await page()
+      const contender = await page()
       await owner.evaluate(async () => {
         window.file = await RedDBLite.openArtifact({ name: 'ownership' })
         await file.append([new Uint8Array([9])])
@@ -139,12 +164,7 @@ for (const browser of browsers) {
         try { await RedDBLite.openArtifact({ name: 'ownership' }); return 'unexpected success' }
         catch (error) { return error.code }
       }), 'FILE_BUSY')
-      if (browser === 'webkit') {
-        await owner.reload()
-        await owner.waitForFunction(() => window.RedDBLite)
-      } else {
-        await owner.close()
-      }
+      await owner.close()
       // Browser process teardown releases OPFS and Web Locks asynchronously.
       const recovered = await contender.evaluate(async () => {
         for (let attempt = 0; attempt < 100; attempt++) {
@@ -163,7 +183,7 @@ for (const browser of browsers) {
       assert.deepEqual(recovered, [[9]])
     })
 
-    test('a corrupt existing file is preserved, with no silent recreate', async () => {
+    storageTest('a corrupt existing file is preserved, with no silent recreate', async () => {
       const current = await page()
       assert.deepEqual(await current.evaluate(async () => {
         const root = await navigator.storage.getDirectory()
@@ -178,7 +198,7 @@ for (const browser of browsers) {
       }), { code: 'ARTIFACT_ERROR', bytes: [77, 88, 99] })
     })
 
-    test('invalid arguments leave the artifact usable and close rejects new operations', async () => {
+    storageTest('invalid arguments leave the artifact usable and close rejects new operations', async () => {
       const current = await page()
       assert.deepEqual(await current.evaluate(async () => {
         const file = await RedDBLite.openArtifact({ name: 'arguments' })
@@ -197,7 +217,7 @@ for (const browser of browsers) {
     test('missing browser storage support returns an explicit error', async () => {
       const current = await page()
       assert.equal(await current.evaluate(async () => {
-        Object.defineProperty(navigator.storage, 'getDirectory', { value: undefined })
+        if (navigator.storage) Object.defineProperty(navigator.storage, 'getDirectory', { value: undefined })
         try { await RedDBLite.openArtifact({ name: 'unsupported' }) }
         catch (error) { return error.code }
       }), 'STORAGE_UNSUPPORTED')

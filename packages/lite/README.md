@@ -25,11 +25,12 @@ The `WASM_BINDGEN` environment variable can point at the pinned CLI executable.
 `REDDB_LITE_BROWSERS=chromium` restricts the local browser test matrix; CI runs all
 three engines. Generated JS/WASM bindings are ignored and rebuilt from Rust.
 
-Playwright's WPE WebKit runner explicitly enables its native StorageAPI,
-FileSystem and FileSystemWritableStream features in the initial window. Its
-ownership test uses competing workers and reloads that window; Chromium and
-Firefox additionally exercise distinct tabs. This does not substitute for
-Safari/iOS qualification with the browser's shipping defaults.
+The tests probe the browser's actual native APIs. If a port lacks synchronous
+OPFS (currently Playwright's WPE WebKit runner), its persistence tests explicitly
+report skips; the unsupported-browser error path still runs. I/O or format
+failures never cause a skip. Chromium and Firefox exercise persistence and
+cross-tab ownership. WebKit persistence and real Safari/iOS qualification remain
+pending; a green CI run does not imply that coverage.
 
 ## Current storage contract
 
