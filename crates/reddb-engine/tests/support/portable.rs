@@ -104,7 +104,7 @@ pub fn row_execution() {
 }
 
 pub fn binary_document_evaluation() {
-    use reddb_rql::ast::{Expr, Span};
+    use reddb_rql::ast::{Expr, FieldRef, Span};
 
     let mut bytes = Vec::new();
     reddb_types::document_body_codec::encode(&[("count", &Value::Integer(42))], &mut bytes)
@@ -117,7 +117,7 @@ pub fn binary_document_evaluation() {
         ],
         span: Span::synthetic(),
     };
-    let value = reddb_engine::query::evaluator::evaluate(&expression, &|_| None)
+    let value = reddb_engine::query::evaluator::evaluate(&expression, &|_: &FieldRef| None)
         .expect("shared evaluator reads the native document container");
     assert_eq!(value, Value::text("42"));
 }
