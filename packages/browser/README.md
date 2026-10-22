@@ -35,11 +35,16 @@ failures never cause a skip. Chromium and Firefox exercise persistence and
 cross-tab ownership. WebKit persistence and real Safari/iOS qualification remain
 pending; a green CI run does not imply that coverage.
 
-The query tests compile a separate test-only WASM artifact and execute the same
+The conformance tests compile a separate test-only WASM artifact and execute the same
 assertions as the native engine tests: scalar goldens/errors, compiled row
 filtering/sorting/projection, joins, aggregation, windows, set operations and
 cancellation. These do not require OPFS, so they run even on browser ports
-without synchronous storage. Native differential tests additionally compare
+without synchronous storage. The same worker also checks the shared 16 KiB page
+layout, checksum corruption detection, freelist trunk recovery, pinned-page
+eviction and dirty writeback. Native unit tests for these primitives run from
+`reddb-engine`; native module paths retain the same types, with pager restart
+coverage. Pager I/O, allocation fences, WAL/DWB ordering and MVCC are still native.
+Native differential tests additionally compare
 the scalar corpus to actual `RedDBRuntime` query results.
 
 ## Current query contract

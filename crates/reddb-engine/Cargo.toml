@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Shared RedDB query execution primitives for native and WebAssembly runtimes."
+description = "Shared RedDB query execution and storage primitives for native and WebAssembly runtimes."
 
 [lib]
 name = "reddb_engine"
@@ -14,6 +14,8 @@ name = "reddb_engine"
 [dependencies]
 reddb-types = { workspace = true }
 reddb-rql = { workspace = true }
+reddb-file = { workspace = true }
+crc32fast = "1.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

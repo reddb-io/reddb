@@ -1,6 +1,6 @@
 # ADR 0077 — RedDB Browser, shared engine and OPFS
 
-Status: accepted architecture; persistence and portable query operators implemented, storage runtime and sync pending
+Status: accepted architecture; persistence, portable query operators and page primitives implemented; pager I/O, runtime and sync pending
 Date: 2026-10-22
 
 ## Decision
@@ -44,6 +44,17 @@ Native module paths re-export those exact types; runtime policy, authorization,
 MVCC, pager and storage-backed query orchestration remain in `reddb-server`.
 Canonical output-column labels and binary document decoding also have one owner.
 
+The page primitives now also live in `reddb-engine::storage`: 16 KiB pages,
+CRC32, the freelist and SIEVE page cache. Native module paths alias those exact
+types and implementations. Their persisted encodings still belong to
+`reddb-file`; the move changes neither bytes nor cache/allocation algorithms.
+Native unit tests moved with the code, including the native cache concurrency
+tests. Shared native/WASM fixtures cover page headers and cells, checksums and
+corruption, multi-trunk freelist recovery, pinning, eviction and dirty writeback.
+A native pager restart test checks that shared page types cross the existing
+file-I/O boundary. This does not yet port the pager's WAL/DWB ordering,
+allocation fences, encryption, checkpointing or MVCC into the browser.
+
 The experimental `executeScalar` entrypoint executes storage-free SELECT
 expressions in the worker with the same evaluator and exact JSON integer/decimal
 tags. It rejects unsupported clauses explicitly and never reads or writes the
@@ -58,6 +69,9 @@ Cost sketch: filtering 10,000 rows visits 10,000 rows; comparison sorting is on
 the order of 10,000 × log2(10,000), about 133,000 comparisons. The relocated row
 executor retains O(N) materialization and adds no per-row IPC or storage I/O.
 This is a portability step, not a throughput or browser memory-budget claim.
+Page payload memory remains capacity × 16 KiB (256 resident pages = 4 MiB),
+plus cache metadata and existing copies during read/writeback; no new IPC,
+disk operation or allocation policy is introduced by sharing these modules.
 
 New sync contracts belong to `reddb-wire` (ADR 0046). They require consistent
 snapshot/cursor bootstrap, durable resumability, transactional/idempotent upload,

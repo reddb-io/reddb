@@ -43,3 +43,34 @@ fn native_public_operator_paths_keep_the_same_types() {
     let _: native::Filter = filter::Filter::ge("age", Value::Integer(18));
     let _: native::Binding = binding::Binding::empty();
 }
+
+#[test]
+fn shared_pages_round_trip_through_the_native_pager() {
+    use reddb_engine::storage::page::{Page, PageType};
+    use reddb_server::storage::engine::{pager::Pager, FreeList, PageCache};
+
+    let _: FreeList = reddb_engine::storage::freelist::FreeList::new();
+    let _: PageCache = reddb_engine::storage::page_cache::PageCache::new(16);
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let path = directory.path().join("shared-pages.rdb");
+    let id = {
+        let pager = Pager::open_default(&path).expect("native pager opens");
+        let mut page: Page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate page");
+        page.insert_cell(b"key", b"portable value")
+            .expect("cell fits");
+        let id = page.page_id();
+        pager.write_page(id, page).expect("write shared page");
+        pager.sync().expect("page and allocation are durable");
+        id
+    };
+    let pager = Pager::open_default(&path).expect("native pager reopens");
+    let page: Page = pager.read_page(id).expect("read persisted shared page");
+    page.verify_checksum()
+        .expect("checksum survives native I/O");
+    assert_eq!(
+        page.read_cell(0).expect("cell survives restart"),
+        (b"key".to_vec(), b"portable value".to_vec())
+    );
+}

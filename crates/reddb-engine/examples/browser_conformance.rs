@@ -6,14 +6,15 @@
 mod portable;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/storage.rs"]
+mod storage;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = runConformance)]
 pub fn run_conformance() -> String {
-    for (_, run) in portable::CASES {
+    let cases = portable::CASES.iter().chain(storage::CASES.iter());
+    for (_, run) in cases.clone() {
         run();
     }
-    portable::CASES
-        .iter()
-        .map(|(name, _)| *name)
-        .collect::<Vec<_>>()
-        .join(",")
+    cases.map(|(name, _)| *name).collect::<Vec<_>>().join(",")
 }

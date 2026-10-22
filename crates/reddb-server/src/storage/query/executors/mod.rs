@@ -21,6 +21,7 @@ pub mod sparql;
 pub mod vector;
 
 // Native public paths alias the same portable modules and types (ADR 0077).
+pub(crate) use reddb_engine::query::executors::value_compare;
 pub use reddb_engine::query::executors::{aggregation, join, set_ops, subquery, window};
 
 pub use aggregation::{

@@ -33,15 +33,22 @@ fn unreachable_storage_modules_stay_retired() {
         );
     }
 
-    for live in [
-        "engine/page_cache.rs",
-        "engine/prefetch.rs",
-        "unified/visibility_map.rs",
-    ] {
+    for live in ["engine/prefetch.rs", "unified/visibility_map.rs"] {
         assert!(
             root.join(live).is_file(),
             "live storage leaf is missing: {}",
             live
+        );
+    }
+
+    for shared in ["crc32.rs", "page.rs", "page_cache.rs", "freelist.rs"] {
+        assert!(
+            manifest
+                .join("../reddb-engine/src/storage")
+                .join(shared)
+                .is_file(),
+            "shared storage leaf is missing: {}",
+            shared
         );
     }
 

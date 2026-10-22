@@ -1,5 +1,5 @@
-//! Shared RedDB execution code. Storage, transactions and synchronization
-//! remain in the native runtime until their portable boundaries are extracted.
+//! Shared RedDB query execution and storage primitives. Pager I/O, transactions
+//! and synchronization remain native until their portable boundaries are extracted.
 
 // Relocated legacy code retains the native crate's lint policy. New modules
 // override these allowances so the workspace ratchets apply to new behavior.
@@ -16,4 +16,5 @@
 
 mod clock;
 pub mod query;
+pub mod storage;
 pub use reddb_types::{json, serde_json};

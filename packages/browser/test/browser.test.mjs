@@ -91,7 +91,7 @@ for (const browser of browsers) {
       })
     }
 
-    test('shared Rust query operators and scalar corpus execute in WASM', async () => {
+    test('shared Rust query and storage conformance executes in WASM', async () => {
       const browserPage = await page()
       try {
         const passed = await browserPage.evaluate(async () => {
@@ -106,6 +106,7 @@ for (const browser of browsers) {
         assert.deepEqual(passed, [
           'scalar_goldens', 'scalar_failures', 'row_execution', 'binary_document_evaluation', 'join_execution',
           'aggregation_execution', 'window_execution', 'set_execution', 'cancellation',
+          'page_layout_and_corruption', 'freelist_trunk_recovery', 'cache_eviction_and_writeback',
         ])
       } finally { await browserPage.close() }
     })

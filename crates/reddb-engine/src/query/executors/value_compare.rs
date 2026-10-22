@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::query::engine::binding::Value;
 
-pub(crate) fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
+pub fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
         (Value::Integer(a), Value::Integer(b)) => Some(a.cmp(b)),
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
@@ -22,7 +22,7 @@ pub(crate) fn total_compare_values(a: &Value, b: &Value) -> Ordering {
     partial_compare_values(a, b).unwrap_or_else(|| value_type_tag(a).cmp(&value_type_tag(b)))
 }
 
-pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
+pub fn values_equal(a: &Value, b: &Value) -> bool {
     matches!(partial_compare_values(a, b), Some(Ordering::Equal))
 }
 

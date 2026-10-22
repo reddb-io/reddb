@@ -958,7 +958,7 @@ impl Default for PageCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::engine::page::PageType;
+    use crate::storage::page::PageType;
 
     fn make_page(id: u32) -> Page {
         Page::new(PageType::BTreeLeaf, id)
