@@ -25,7 +25,7 @@ importers:
 
   packages/internal-bin-resolver: {}
 
-  packages/lite:
+  packages/browser:
     devDependencies:
       playwright:
         specifier: 1.61.1

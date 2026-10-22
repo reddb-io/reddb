@@ -1,0 +1,3 @@
+src/wasm/
+test/wasm/
+test-results/

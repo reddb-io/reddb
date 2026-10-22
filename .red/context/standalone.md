@@ -9,7 +9,7 @@ Part of the [glossary map](../CONTEXT-MAP.md). The embedded single-file single-n
 - **Embedded superblock pair** — two ping-pong superblock copies inside the single-file `.rdb`, each carrying generation and checksum metadata. Open chooses the newest valid copy to root the embedded internal manifest.
 - **Embedded WAL region** — circular internal WAL zone inside the single-file `.rdb`. Entries may be overwritten only after the checkpoint/superblock boundary proves they are no longer needed for recovery.
 
-- **Browser Lite foundation** — experimental Rust/WASM bindings to the shared embedded artifact and RQL front-end (ADR 0077), using an exclusively owned OPFS sync handle. This is not yet a supported database/deploy profile: the shared executor and server synchronization are pending. Local file publication preserves the canonical `.rdb` contract; Web Locks and OPFS enforce one owner, and another opener receives `FILE_BUSY` until request forwarding is implemented.
+- **RedDB Browser foundation** — experimental Rust/WASM bindings to the shared embedded artifact, RQL front-end and storage-independent query operators (ADR 0077), using an exclusively owned OPFS sync handle. Storage-free scalar SELECTs execute in the worker. This is not yet a supported database/deploy profile: storage-backed five-model execution, transactions and server synchronization are pending. Local file publication preserves the canonical `.rdb` contract; Web Locks and OPFS enforce one owner, and another opener receives `FILE_BUSY` until request forwarding is implemented.
 
 ## Ephemeral store
 

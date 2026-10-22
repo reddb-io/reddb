@@ -1,4 +1,4 @@
-//! Artifact interop fixture driver used by packages/lite's real browser tests.
+//! Artifact interop fixture driver used by packages/browser's real browser tests.
 //! The snapshot and WAL payloads are opaque test bytes, not engine data.
 
 use std::error::Error;

@@ -11,20 +11,17 @@
 //! leveraging the unified executor for common operations.
 
 pub mod agg_spill;
-pub mod aggregation;
 pub mod bitmap_scan;
 pub mod cte;
 pub mod gremlin;
 pub mod hybrid;
-pub mod join;
 pub mod natural;
 pub mod parallel_scan;
-pub mod set_ops;
 pub mod sparql;
-pub mod subquery;
-pub(crate) mod value_compare;
 pub mod vector;
-pub mod window;
+
+// Native public paths alias the same portable modules and types (ADR 0077).
+pub use reddb_engine::query::executors::{aggregation, join, set_ops, subquery, window};
 
 pub use aggregation::{
     create_aggregator, execute_group_by, execute_having, AggregationDef, Aggregator, AvgAggregator,

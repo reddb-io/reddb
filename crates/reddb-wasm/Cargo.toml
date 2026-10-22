@@ -11,6 +11,7 @@ name = "reddb_wasm"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+reddb-engine = { workspace = true }
 reddb-file = { workspace = true }
 reddb-rql = { workspace = true }
 

@@ -227,3 +227,24 @@ impl BrowserArtifact {
 pub fn validate_query(sql: &str) -> Result<(), JsValue> {
     reddb_rql::parse_frontend(sql).map(|_| ()).map_err(js_error)
 }
+
+/// Experimental storage-free execution, using the native scalar evaluator.
+#[wasm_bindgen(js_name = executeScalar)]
+pub fn execute_scalar(sql: &str) -> Result<JsValue, JsValue> {
+    use reddb_engine::query::scalar::{execute, ScalarError};
+
+    let result = execute(sql).map_err(|failure| {
+        let code = match failure {
+            ScalarError::Parse(_) => "QUERY_PARSE_ERROR",
+            ScalarError::Unsupported => "QUERY_UNSUPPORTED",
+            ScalarError::Evaluation(_) => "QUERY_EVALUATION_ERROR",
+        };
+        let error = Error::new(&failure.to_string());
+        // Own, extensible Error object; Reflect failure is still propagated.
+        match js_sys::Reflect::set(&error, &"code".into(), &code.into()) {
+            Ok(_) => error.into(),
+            Err(error) => error,
+        }
+    })?;
+    js_sys::JSON::parse(&result.to_json().to_string_compact())
+}

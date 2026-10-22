@@ -2374,6 +2374,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "reddb-io-engine"
+version = "1.25.5"
+dependencies = [
+ "reddb-io-rql",
+ "reddb-io-types",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "reddb-io-file"
 version = "1.25.6"
 dependencies = [
@@ -2461,6 +2470,7 @@ dependencies = [
  "rayon",
  "rcgen",
  "reddb-io-crypto",
+ "reddb-io-engine",
  "reddb-io-file",
  "reddb-io-grpc-proto",
  "reddb-io-rql",
