@@ -1835,6 +1835,13 @@ impl UnifiedStore {
         }
 
         stats.total_memory_bytes += self.checkpoint_durable_rows.read().memory_bytes();
+        stats.total_memory_bytes += self
+            .checkpoint_versions
+            .read()
+            .values()
+            .filter_map(|version| version.deferred_rows.as_ref())
+            .map(|rows| rows.capacity() * std::mem::size_of::<EntityId>())
+            .sum::<usize>();
         stats
     }
 

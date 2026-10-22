@@ -70,33 +70,10 @@ thread_local! {
 fn checkpoint_visibility_matches(
     previous: &CheckpointVersion,
     current: &CheckpointVersion,
-    manager: &SegmentManager,
 ) -> bool {
-    if (previous.visibility_revision == current.visibility_revision
+    (previous.visibility_revision == current.visibility_revision
         || previous.excluded_xids == current.excluded_xids)
         && previous.pending_vault == current.pending_vault
-    {
-        return true;
-    }
-    // A rollback or vault publication in another collection must not force
-    // payload serialization here. Only the persisted visibility matters.
-    let mut matches = true;
-    manager.for_each_entity(|entity| {
-        let skipped = |version: &CheckpointVersion| {
-            version.pending_vault.contains(&entity.id)
-                || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                    && version.excluded_xids.contains(&entity.xmin))
-        };
-        let previous_skipped = skipped(previous);
-        let current_skipped = skipped(current);
-        matches = previous_skipped == current_skipped
-            && (current_skipped
-                || !matches!(entity.data, EntityData::Row(_))
-                || previous.excluded_xids.contains(&entity.xmax)
-                    == current.excluded_xids.contains(&entity.xmax));
-        matches
-    });
-    matches
 }
 
 // ── Pager-meta overflow chain (gh-477) ──────────────────────────────────────
@@ -932,9 +909,11 @@ impl UnifiedStore {
                         manager: Arc::downgrade(manager),
                         segments: manager.checkpoint_revisions(),
                         visibility_revision: 0,
+                        untracked_visibility_revision: 0,
                         excluded_xids: Arc::default(),
                         pending_vault: Arc::default(),
                         format_version: self.format_version(),
+                        deferred_rows: Some(Arc::default()),
                     },
                 );
             }
@@ -1109,9 +1088,11 @@ impl UnifiedStore {
                                         manager: Arc::downgrade(manager),
                                         segments: manager.checkpoint_revisions(),
                                         visibility_revision: 0,
+                                        untracked_visibility_revision: 0,
                                         excluded_xids: Arc::default(),
                                         pending_vault: Arc::default(),
                                         format_version,
+                                        deferred_rows: Some(Arc::default()),
                                     },
                                 );
                             }
@@ -1328,19 +1309,22 @@ impl UnifiedStore {
         let previous_versions = self.checkpoint_versions.read();
         let mut checkpoint_versions = HashMap::with_capacity(collections.len());
         let pending_vault = Arc::new(pending_vault_versions.clone());
-        let (visibility_revision, excluded) = self.snapshot_manager.get().map_or_else(
-            || (0, Default::default()),
-            |manager| manager.checkpoint_excluded_state(),
-        );
+        let (visibility_revision, excluded, untracked_visibility_revision) =
+            self.snapshot_manager.get().map_or_else(
+                || (0, Default::default(), 0),
+                |manager| manager.checkpoint_projection_state(),
+            );
         let excluded = Arc::new(excluded);
         for (name, manager) in collections.iter() {
-            let version = CheckpointVersion {
+            let mut version = CheckpointVersion {
                 manager: Arc::downgrade(manager),
                 segments: manager.checkpoint_revisions(),
                 visibility_revision,
+                untracked_visibility_revision,
                 excluded_xids: Arc::clone(&excluded),
                 pending_vault: Arc::clone(&pending_vault),
                 format_version: self.format_version(),
+                deferred_rows: Some(Arc::default()),
             };
             if let (Some(previous), Some(tree)) =
                 (previous_versions.get(name), btree_indices.get(name))
@@ -1348,8 +1332,9 @@ impl UnifiedStore {
                 if previous.manager.ptr_eq(&version.manager)
                     && previous.segments == version.segments
                     && previous.format_version == version.format_version
-                    && checkpoint_visibility_matches(previous, &version, manager)
+                    && checkpoint_visibility_matches(previous, &version)
                 {
+                    version.deferred_rows = previous.deferred_rows.clone();
                     collection_roots.push((name.clone(), tree.root_page_id()));
                     rebuilt_indices.insert(name.clone(), Arc::clone(tree));
                     checkpoint_versions.insert(name.clone(), version);
@@ -1361,15 +1346,10 @@ impl UnifiedStore {
             {
                 if previous.manager.ptr_eq(&version.manager)
                     && previous.format_version == version.format_version
-                    && checkpoint_visibility_matches(previous, &version, manager)
                 {
-                    if let Some(tree) = self.sparse_checkpoint_tree(
-                        name,
-                        manager,
-                        tree,
-                        &previous.segments,
-                        &version,
-                    )? {
+                    if let Some(tree) =
+                        self.sparse_checkpoint_tree(name, manager, tree, previous, &mut version)?
+                    {
                         collection_roots.push((name.clone(), tree.root_page_id()));
                         rebuilt_indices.insert(name.clone(), tree);
                         checkpoint_versions.insert(name.clone(), version);
@@ -1377,7 +1357,6 @@ impl UnifiedStore {
                     }
                 }
             }
-            checkpoint_versions.insert(name.clone(), version);
             let btree = self.checkpoint_tree(
                 pager,
                 manager,
@@ -1385,15 +1364,19 @@ impl UnifiedStore {
                 |entity, metadata| {
                     #[cfg(test)]
                     CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
-                    if pending_vault_versions.contains(&entity.id)
+                    let hidden = pending_vault_versions.contains(&entity.id)
                         || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                            && excluded.contains(&entity.xmin))
-                    {
+                            && excluded.contains(&entity.xmin));
+                    let normalize_xmax = matches!(entity.data, EntityData::Row(_))
+                        && excluded.contains(&entity.xmax);
+                    if hidden || normalize_xmax {
+                        version.remember_deferred_row(entity.id);
+                    }
+                    if hidden {
                         return None;
                     }
                     let mut normalized = std::borrow::Cow::Borrowed(entity);
-                    if matches!(entity.data, EntityData::Row(_)) && excluded.contains(&entity.xmax)
-                    {
+                    if normalize_xmax {
                         normalized.to_mut().xmax = 0;
                     }
                     Some(Self::serialize_entity_record(
@@ -1403,6 +1386,7 @@ impl UnifiedStore {
                     ))
                 },
             )?;
+            checkpoint_versions.insert(name.clone(), version);
 
             collection_roots.push((name.clone(), btree.root_page_id()));
             rebuilt_indices.insert(name.clone(), btree);
@@ -2074,6 +2058,59 @@ mod checkpoint_work_tests {
             .persist()
             .expect("unrelated vault publication checkpoint");
         assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+    }
+
+    #[test]
+    fn low_level_rollback_of_a_non_active_xid_invalidates_sparse_visibility() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        let snapshots = Arc::new(crate::storage::transaction::snapshot::SnapshotManager::new());
+        assert!(store.snapshot_manager.set(Arc::clone(&snapshots)).is_ok());
+        store.create_collection("rows").expect("collection");
+        let xid = snapshots.begin();
+        let mut entity = row(1, 1);
+        entity.xmin = xid;
+        store.insert("rows", entity).expect("committed row");
+        snapshots.commit(xid);
+        store.persist().expect("committed baseline");
+        snapshots.rollback(xid);
+        store
+            .persist()
+            .expect("untracked outcome requires validation");
+        drop(store);
+        let recovered = UnifiedStore::open(&path).expect("recover");
+        assert_eq!(recovered.get_collection("rows").expect("rows").count(), 0);
+    }
+
+    #[test]
+    fn exhausted_deferred_row_cache_keeps_full_validation() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        let snapshots = Arc::new(crate::storage::transaction::snapshot::SnapshotManager::new());
+        assert!(store.snapshot_manager.set(Arc::clone(&snapshots)).is_ok());
+        store.create_collection("rows").expect("collection");
+        let xid = snapshots.begin();
+        for id in 1..=1025 {
+            let mut entity = row(id, id as i64);
+            entity.xmin = xid;
+            store.insert("rows", entity).expect("pending row");
+        }
+        store.persist().expect("exclude pending rows");
+        assert!(store.checkpoint_versions.read()["rows"]
+            .deferred_rows
+            .is_none());
+        snapshots.commit(xid);
+        store
+            .persist()
+            .expect("publish committed rows conservatively");
+        drop(store);
+        let recovered = UnifiedStore::open(&path).expect("recover");
+        assert_eq!(
+            recovered.get_collection("rows").expect("rows").count(),
+            1025
+        );
     }
 
     #[test]
