@@ -1037,10 +1037,10 @@ fn server_does_not_redeclare_native_store_file_contracts() {
 }
 
 #[test]
-fn server_does_not_redeclare_core_file_format_constants() {
+fn engine_and_server_do_not_redeclare_core_file_format_constants() {
     let root = repo_root();
-    let page = read(root.join("crates/reddb-server/src/storage/engine/page.rs"));
-    let page_impl = read(root.join("crates/reddb-server/src/storage/engine/page/impl.rs"));
+    let page = read(root.join("crates/reddb-engine/src/storage/page.rs"));
+    let page_impl = read(root.join("crates/reddb-engine/src/storage/page/impl.rs"));
     let pager = read(root.join("crates/reddb-server/src/storage/engine/pager.rs"));
     let pager_impl = read(root.join("crates/reddb-server/src/storage/engine/pager/impl.rs"));
     let column_block = read(root.join("crates/reddb-server/src/storage/unified/column_block.rs"));
@@ -1095,8 +1095,8 @@ fn server_does_not_redeclare_core_file_format_constants() {
         .expect("graph_table_index.rs has non-test source");
 
     for (label, text) in [
-        ("storage/engine/page.rs", page.as_str()),
-        ("storage/engine/page/impl.rs", page_impl.as_str()),
+        ("reddb-engine/storage/page.rs", page.as_str()),
+        ("reddb-engine/storage/page/impl.rs", page_impl.as_str()),
         ("storage/engine/pager.rs", pager.as_str()),
         ("storage/engine/pager/impl.rs", pager_impl.as_str()),
         ("storage/unified/column_block.rs", column_block.as_str()),

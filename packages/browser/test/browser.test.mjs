@@ -16,6 +16,7 @@ let server
 let origin
 let fixtures
 let nativeFixture
+let networkRequests = 0
 
 function nativeArtifact(action, path) {
   execFileSync('cargo', [`+${toolchain}`, 'run', '--quiet', '--locked', '-p', 'reddb-io-file', '--example', 'browser_artifact', '--', action, path], { cwd: root, stdio: 'inherit' })
@@ -27,12 +28,17 @@ before(async () => {
   nativeArtifact('create', path)
   nativeFixture = [...await readFile(path)]
   server = createServer(async (request, response) => {
+    networkRequests++
     try {
       const path = resolve(root, `.${decodeURIComponent(new URL(request.url, 'http://localhost').pathname)}`)
       if (!path.startsWith(`${root}${sep}`)) { response.writeHead(403).end(); return }
       const type = { '.js': 'text/javascript', '.wasm': 'application/wasm', '.html': 'text/html' }[extname(path)] || 'application/octet-stream'
       const body = await readFile(path)
-      response.writeHead(200, { 'Content-Type': type }).end(body)
+      const headers = { 'Content-Type': type }
+      if (path === resolve(root, 'packages/browser/test/offline-worker.js')) {
+        headers['Service-Worker-Allowed'] = '/packages/browser/'
+      }
+      response.writeHead(200, headers).end(body)
     } catch { response.writeHead(404).end() }
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -49,8 +55,8 @@ for (const browser of browsers) {
     let context
     let profile
     let supportsStorage
-    async function launch() {
-      context = await browserTypes[browser].launchPersistentContext(profile, { headless: true })
+    async function launch(options = {}) {
+      context = await browserTypes[browser].launchPersistentContext(profile, { headless: true, ...options })
       const probe = await context.newPage()
       await probe.goto(`${origin}/packages/browser/test/harness.html`)
       supportsStorage = await probe.evaluate(async () => {
@@ -257,6 +263,47 @@ for (const browser of browsers) {
         await file.close()
         return { invalid, closed }
       }), { invalid: 'INVALID_ARGUMENT', closed: 'CLOSED' })
+    })
+
+    storageTest('cached JS and WASM boot, write and reopen after a browser restart entirely offline', async () => {
+      const first = await page()
+      await first.evaluate(async () => {
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+      })
+      await first.waitForFunction(() => navigator.serviceWorker.controller)
+      await context.setOffline(true)
+      const requestsBefore = networkRequests
+      try {
+        await first.evaluate(async () => {
+          if (navigator.onLine) throw new Error('Test requires offline mode')
+          const file = await RedDBBrowser.openArtifact({ name: 'offline' })
+          await file.append([new Uint8Array([10, 20])])
+          await file.close()
+        })
+        await context.close()
+        await launch({ offline: true })
+        const restarted = await page()
+        const result = await restarted.evaluate(async () => {
+          const file = await RedDBBrowser.openArtifact({ name: 'offline' })
+          const before = (await file.readWal()).map((bytes) => [...bytes])
+          await file.append([new Uint8Array([30, 40])])
+          const scalar = await file.executeScalar('SELECT 6 * 7 AS answer')
+          await file.close()
+          const reopened = await RedDBBrowser.openArtifact({ name: 'offline' })
+          const after = (await reopened.readWal()).map((bytes) => [...bytes])
+          await reopened.close()
+          return { online: navigator.onLine, before, after, scalar }
+        })
+        assert.deepEqual(result, {
+          online: false,
+          before: [[10, 20]],
+          after: [[10, 20], [30, 40]],
+          scalar: { columns: ['answer'], rows: [[42]] },
+        })
+        assert.equal(networkRequests, requestsBefore, 'offline boot and operations must not reach the HTTP host')
+      } finally {
+        await context.setOffline(false)
+      }
     })
 
     test('missing browser storage support returns an explicit error', async () => {

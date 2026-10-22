@@ -5,6 +5,8 @@
 //! `TypeCategory`, `ValueError`, `Row` — and the coercion entry points
 //! (`coerce`, `find_cast`, the spine resolvers). The server tree must import
 //! those items directly from `reddb_types`; it must never *declare* them again.
+//! The same fence covers the native operators and pages moved to `reddb-engine`
+//! for Browser (ADR 0077); their existing concept exceptions move with them.
 //!
 //! This mirrors the layout-authority prior art in `reddb-file`'s test suite
 //! (`tests/layout_authority/boundary.rs`): a mechanical fence that fails the
@@ -16,7 +18,7 @@ use std::path::{Path, PathBuf};
 struct SeededConcept {
     name: &'static str,
     authority_path: &'static str,
-    grandfathered_server_paths: &'static [&'static str],
+    grandfathered_paths: &'static [&'static str],
     removal_slice: &'static str,
 }
 
@@ -34,7 +36,7 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
     concept(
         "CompareOp",
         "crates/reddb-rql/src/core.rs",
-        &["crates/reddb-server/src/storage/query/executors/subquery.rs"],
+        &["crates/reddb-engine/src/query/executors/subquery.rs"],
         "#2165",
     ),
     concept(
@@ -69,7 +71,7 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
         "Filter",
         "crates/reddb-rql/src/core.rs",
         &[
-            "crates/reddb-server/src/storage/query/filter.rs",
+            "crates/reddb-engine/src/query/filter.rs",
             "crates/reddb-server/src/storage/unified/dsl/filters.rs",
         ],
         "#2165",
@@ -77,7 +79,7 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
     concept(
         "FilterExpr",
         "crates/reddb-rql/src/optimizer/filter_rank.rs",
-        &["crates/reddb-server/src/storage/query/engine/op.rs"],
+        &["crates/reddb-engine/src/query/engine/op.rs"],
         "#2165",
     ),
     concept(
@@ -107,13 +109,13 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
     concept(
         "JoinCondition",
         "crates/reddb-rql/src/core.rs",
-        &["crates/reddb-server/src/storage/query/executors/join.rs"],
+        &["crates/reddb-engine/src/query/executors/join.rs"],
         "#2165",
     ),
     concept(
         "JoinType",
         "crates/reddb-rql/src/core.rs",
-        &["crates/reddb-server/src/storage/query/executors/join.rs"],
+        &["crates/reddb-engine/src/query/executors/join.rs"],
         "#2165",
     ),
     concept(
@@ -140,13 +142,13 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
     concept(
         "PageHeader",
         "crates/reddb-file/src/vector_btree_page_format.rs",
-        &["crates/reddb-server/src/storage/engine/page.rs"],
+        &["crates/reddb-engine/src/storage/page.rs"],
         "#2113",
     ),
     concept(
         "PageType",
         "crates/reddb-file/src/vector_btree_page_format.rs",
-        &["crates/reddb-server/src/storage/engine/page.rs"],
+        &["crates/reddb-engine/src/storage/page.rs"],
         "#2113",
     ),
     concept(
@@ -229,13 +231,13 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
 const fn concept(
     name: &'static str,
     authority_path: &'static str,
-    grandfathered_server_paths: &'static [&'static str],
+    grandfathered_paths: &'static [&'static str],
     removal_slice: &'static str,
 ) -> SeededConcept {
     SeededConcept {
         name,
         authority_path,
-        grandfathered_server_paths,
+        grandfathered_paths,
         removal_slice,
     }
 }
@@ -270,6 +272,13 @@ fn read(path: impl AsRef<Path>) -> String {
 /// the fence. Matches the `reddb-file` prior art's helper of the same name.
 fn non_test_source(text: &str) -> &str {
     text.split("#[cfg(test)]").next().unwrap_or(text)
+}
+
+fn runtime_source_files(root: &Path) -> Vec<PathBuf> {
+    ["crates/reddb-server/src", "crates/reddb-engine/src"]
+        .into_iter()
+        .flat_map(|relative| rust_files_under(&root.join(relative)))
+        .collect()
 }
 
 fn rust_files_under(root: &Path) -> Vec<PathBuf> {
@@ -500,7 +509,7 @@ fn concept_violations_with_fingerprints(
             let same_shape = fingerprint.has_distinctive_shape
                 && declaration.has_distinctive_shape
                 && declaration.shape == fingerprint.shape;
-            let grandfathered = concept.grandfathered_server_paths.contains(&rel.as_str())
+            let grandfathered = concept.grandfathered_paths.contains(&rel.as_str())
                 && (declaration.name == concept.name || same_shape);
             if grandfathered {
                 continue;
@@ -583,12 +592,11 @@ fn types_crate_owns_the_logical_type_system() {
     }
 }
 
-/// The fence: the server source tree must never redeclare a logical
+/// The fence: the shared engine and server must never redeclare a logical
 /// type-system item. Reintroduce any declaration below and this test fails.
 #[test]
-fn server_must_not_redeclare_the_logical_type_system() {
+fn engine_and_server_must_not_redeclare_the_logical_type_system() {
     let root = repo_root();
-    let server_src = root.join("crates/reddb-server/src");
 
     // Distinctive type-system names — they have zero legitimate collisions in
     // the server, so the fence applies tree-wide.
@@ -612,7 +620,7 @@ fn server_must_not_redeclare_the_logical_type_system() {
         "resolve_cast",
     ];
 
-    for path in rust_files_under(&server_src) {
+    for path in runtime_source_files(&root) {
         let raw = read(&path);
         let text = non_test_source(&raw);
         let rel = path.strip_prefix(&root).unwrap_or(path.as_path());
@@ -640,7 +648,7 @@ fn server_must_not_redeclare_the_logical_type_system() {
     // pure re-export shim. Fence those two names there: the only way to
     // reintroduce the logical type into the server is to redeclare it in the
     // schema module, and this catches exactly that.
-    let schema = server_src.join("storage/schema");
+    let schema = root.join("crates/reddb-server/src/storage/schema");
     for path in rust_files_under(&schema) {
         let raw = read(&path);
         let text = non_test_source(&raw);
@@ -670,7 +678,7 @@ fn server_must_not_redeclare_the_logical_type_system() {
 /// path-specific exceptions; moving or renaming one does not preserve the
 /// exception.
 #[test]
-fn server_must_not_redeclare_seeded_authority_concepts() {
+fn engine_and_server_must_not_redeclare_seeded_authority_concepts() {
     // 32 concepts seeded at phase-2 start, minus `DistanceMetric`, whose
     // duplicate this slice (#2164) removed. Retiring a concept means deleting
     // its entry, never loosening this count.
@@ -689,7 +697,7 @@ fn server_must_not_redeclare_seeded_authority_concepts() {
             "seeded concept `{}` needs a removal-slice pointer",
             concept.name
         );
-        for rel in concept.grandfathered_server_paths {
+        for rel in concept.grandfathered_paths {
             let source = read(root.join(rel));
             let fingerprint = fingerprints
                 .iter()
@@ -710,8 +718,7 @@ fn server_must_not_redeclare_seeded_authority_concepts() {
         }
     }
 
-    let server_src = root.join("crates/reddb-server/src");
-    let violations: Vec<String> = rust_files_under(&server_src)
+    let violations: Vec<String> = runtime_source_files(&root)
         .into_iter()
         .flat_map(|path| {
             concept_violations_with_fingerprints(&root, &path, &read(&path), &fingerprints)
@@ -720,7 +727,7 @@ fn server_must_not_redeclare_seeded_authority_concepts() {
 
     assert!(
         violations.is_empty(),
-        "server authority concept redeclarations:\n{}",
+        "runtime authority concept redeclarations:\n{}",
         violations.join("\n")
     );
 }

@@ -50,6 +50,8 @@ jobs:
         run: cargo test --locked -p reddb-io-file -p reddb-io-engine
       - name: Lint the shared query and storage core
         run: cargo clippy --locked -p reddb-io-engine --all-targets -- -D warnings
+      - name: Preserve type and concept authorities across the engine extraction
+        run: cargo test --locked -p reddb-io-types --test type_authority
       - uses: ./.github/actions/install-protoc
         if: runner.os == 'Linux'
         with:

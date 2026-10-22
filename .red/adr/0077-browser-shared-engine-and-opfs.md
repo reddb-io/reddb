@@ -10,6 +10,14 @@ worker. Its first usable database release must support tables, documents, KV,
 graph and vectors, offline writes, and synchronization of a server-authorized
 subset. Conflicting writes are preserved for explicit application resolution.
 
+The local database must work fully offline through a JavaScript/TypeScript SDK:
+all five models, local queries, writes, transactions and recovery run without a
+RedDB server, account, external API or CDN. Rust/WASM is bundled with the SDK,
+not fetched from a provider at runtime. The host application supplies local
+assets or caches its application shell and SDK/worker/WASM assets for offline
+loading. A fresh worker and browser restart must work with the network disabled
+after installation. Synchronization is optional and must never gate local use.
+
 OPFS is the primary storage backend. IndexedDB may hold recoverable auxiliary
 metadata; it must not split a critical transaction across two storage systems.
 Data, pending write intent and sync progress share a transactional boundary.

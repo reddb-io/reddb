@@ -6,6 +6,12 @@ scalar evaluator in a dedicated WebAssembly worker, persisting through a real
 OPFS sync access handle.
 It requires a secure context, module workers, OPFS and Web Locks.
 
+The target is a fully offline local database with a JavaScript/TypeScript API.
+The Rust/WASM engine ships with the package; local operation must not require a
+RedDB server, account, CDN or external API. Applications bundle the JS, worker
+and WASM assets and make them available locally or through their own offline
+application cache. Sync is optional and must never gate local reads or writes.
+
 **It is not a database SDK yet.** It executes storage-free scalar SELECTs;
 queries over stored data, five-model local transactions, synchronization,
 conflict resolution and forwarding between tabs remain pending. It must not be
@@ -88,6 +94,21 @@ access, emulate file locks, or require `SharedArrayBuffer` or isolation headers.
 OPFS is subject to origin quota, storage eviction and explicit site-data clearing.
 Applications can request persistent storage through `navigator.storage.persist()`;
 these primitives do not promise that a browser will grant it or sync after closing.
+
+## Offline asset loading
+
+The SDK does not register a service worker or control application updates. A
+PWA should include `index.js`, `worker.js`, `wasm/reddb_wasm.js` and
+`wasm/reddb_wasm_bg.wasm` from `src/` in its own versioned application cache,
+along with its application shell. Those assets must remain available together
+after installation. A locally packaged host can serve the same assets locally.
+HTTPS or a trusted localhost context is required for OPFS and Web Locks.
+
+The browser suite includes a test host's service worker and restarts the entire
+browser with networking disabled. It reloads the JS/worker/WASM assets, recovers
+OPFS data, writes again and executes a scalar query without reaching the HTTP
+host. This verifies the current artifact/scalar surface offline; storage-backed
+queries and application transactions still require the engine work below.
 
 ## Remaining work toward the approved Browser design
 
