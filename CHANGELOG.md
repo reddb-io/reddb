@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.25.5
+
+### Patch Changes
+
+- [#2450](https://github.com/reddb-io/reddb/pull/2450) [`2d97134`](https://github.com/reddb-io/reddb/commit/2d971349b64593bbe2b64bad3215568ad49cb107) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep paged checkpoints bounded when committed table updates overlap open transactions, later commits or rollbacks. Track the limited set of omitted or normalized MVCC rows instead of rescanning unchanged payload history, while preserving exact durable WAL-image checks, conservative fallback and publication ordering.
+
 ## 1.25.4
 
 ### Patch Changes
