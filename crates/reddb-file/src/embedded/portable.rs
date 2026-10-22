@@ -22,6 +22,7 @@ impl<F: VfsFile> EmbeddedRdbFile<F> {
         snapshot: &[u8],
         created_at_unix_ms: u128,
     ) -> RdbFileResult<Self> {
+        validate_snapshot(snapshot)?;
         if file.file_len()? != 0 {
             return Err(RdbFileError::InvalidOperation(
                 "creating an embedded file requires an empty handle".into(),
@@ -93,6 +94,7 @@ impl<F: VfsFile> EmbeddedRdbFile<F> {
         min_wal_bytes: u64,
     ) -> RdbFileResult<EmbeddedRdbOpen> {
         self.check_healthy()?;
+        validate_snapshot(snapshot)?;
         let result = checkpoint_file(&mut self.file, &self.path, snapshot, min_wal_bytes);
         self.finish(result)
     }
@@ -116,6 +118,15 @@ impl<F: VfsFile> EmbeddedRdbFile<F> {
         }
         result
     }
+}
+
+fn validate_snapshot(snapshot: &[u8]) -> RdbFileResult<()> {
+    if !snapshot.is_empty() && !snapshot.starts_with(SNAPSHOT_MAGIC) {
+        return Err(RdbFileError::InvalidOperation(
+            "a nonempty embedded snapshot must start with the native RDST magic".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_wal(open: &EmbeddedRdbOpen, scan: &WalScan) -> RdbFileResult<()> {

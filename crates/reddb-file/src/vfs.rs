@@ -160,35 +160,6 @@ pub struct StdVfs;
 #[derive(Debug)]
 pub struct StdFile(std::fs::File);
 
-// Existing embedded callers own a locked native File. Implement the same
-// byte-I/O contract without reopening it (Windows locks are handle-scoped).
-impl VfsFile for std::fs::File {
-    fn try_clone(&self) -> io::Result<Self> {
-        std::fs::File::try_clone(self)
-    }
-    fn file_len(&self) -> io::Result<u64> {
-        self.metadata().map(|metadata| metadata.len())
-    }
-    fn set_len(&self, len: u64) -> io::Result<()> {
-        std::fs::File::set_len(self, len)
-    }
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        Write::write_all(self, buf)
-    }
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        std::io::Read::read(self, buf)
-    }
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        Seek::seek(self, pos)
-    }
-    fn sync_all(&self) -> io::Result<()> {
-        std::fs::File::sync_all(self)
-    }
-    fn sync_data(&self) -> io::Result<()> {
-        std::fs::File::sync_data(self)
-    }
-}
-
 impl VfsFile for StdFile {
     fn try_clone(&self) -> io::Result<Self> {
         self.0.try_clone().map(Self)
@@ -203,7 +174,7 @@ impl VfsFile for StdFile {
     }
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        Write::write_all(&mut self.0, buf)
+        self.0.write_all(buf)
     }
 
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -211,7 +182,7 @@ impl VfsFile for StdFile {
     }
 
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        Seek::seek(&mut self.0, pos)
+        self.0.seek(pos)
     }
 
     fn sync_all(&self) -> io::Result<()> {

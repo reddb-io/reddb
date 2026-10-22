@@ -162,7 +162,7 @@ impl EmbeddedRdbArtifact {
             .read(true)
             .write(true)
             .open(path)?;
-        create_file(&mut file, path, snapshot, now_unix_ms())
+        create_file(&mut NativeFile(&mut file), path, snapshot, now_unix_ms())
     }
 
     pub fn open(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
@@ -178,7 +178,7 @@ impl EmbeddedRdbArtifact {
         // Readers wait for an in-flight publication. On Windows an unlocked
         // ReadFile races the writer's mandatory byte-range lock and fails 33.
         FileExt::lock_shared(&file)?;
-        Self::open_inner_with_file(&mut file, path, validate_snapshot_refs)
+        Self::open_inner_with_file(&mut NativeFile(&mut file), path, validate_snapshot_refs)
     }
 
     pub fn write_snapshot_with_wal_capacity(
@@ -199,7 +199,7 @@ impl EmbeddedRdbArtifact {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         file.lock_exclusive()?;
 
-        let result = checkpoint_file(&mut file, path, snapshot, min_wal_bytes)?;
+        let result = checkpoint_file(&mut NativeFile(&mut file), path, snapshot, min_wal_bytes)?;
         FileExt::unlock(&file)?;
         Ok(result)
     }
@@ -209,15 +209,15 @@ impl EmbeddedRdbArtifact {
         let mut file = File::open(path)?;
         FileExt::lock_shared(&file)?;
         let selected_superblock = [
-            read_superblock_copy(&mut file, 0)?,
-            read_superblock_copy(&mut file, 1)?,
+            read_superblock_copy(&mut NativeFile(&mut file), 0)?,
+            read_superblock_copy(&mut NativeFile(&mut file), 1)?,
         ]
         .into_iter()
         .flatten()
         .max_by_key(|superblock| superblock.generation)
         .ok_or_else(|| RdbFileError::InvalidOperation("no valid embedded superblock".into()))?;
 
-        let mut manifest = read_manifest(&mut file, selected_superblock)?;
+        let mut manifest = read_manifest(&mut NativeFile(&mut file), selected_superblock)?;
         manifest.wal_recovery_boundary = selected_superblock.wal_recovery_boundary;
         // The superblock is the WAL authority: appends update it without
         // rewriting the manifest zone, so a stale manifest wal_live_bytes
@@ -236,7 +236,7 @@ impl EmbeddedRdbArtifact {
         }
         let mut file = File::open(&open.path)?;
         FileExt::lock_shared(&file)?;
-        read_snapshot_file(&mut file, open)
+        read_snapshot_file(&mut NativeFile(&mut file), open)
     }
 
     pub fn write_snapshot(
@@ -271,7 +271,7 @@ impl EmbeddedRdbArtifact {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         file.lock_exclusive()?;
 
-        let open = Self::open_inner_with_file(&mut file, path, false)?;
+        let open = Self::open_inner_with_file(&mut NativeFile(&mut file), path, false)?;
         let stamp = file_mutation_stamp(&file)?;
         let cached_tail = cached_tail.filter(|tail| {
             stamp.as_ref() == Some(&tail.stamp) && tail.superblock == open.selected_superblock
@@ -285,7 +285,9 @@ impl EmbeddedRdbArtifact {
                 payloads: Vec::new(),
             },
             None => match wal_region_start_checked(&open)? {
-                Some(wal_start) => scan_wal_with_file(&mut file, &open, wal_start)?,
+                Some(wal_start) => {
+                    scan_wal_with_file(&mut NativeFile(&mut file), &open, wal_start)?
+                }
                 None => WalScan {
                     next_sequence: 1,
                     ..WalScan::default()
@@ -293,7 +295,7 @@ impl EmbeddedRdbArtifact {
             },
         };
         let published = append_file(
-            &mut file,
+            &mut NativeFile(&mut file),
             path,
             payloads,
             open,
@@ -314,6 +316,12 @@ impl EmbeddedRdbArtifact {
             });
         }
         Ok(published.open)
+    }
+    pub fn write_superblock_copy(
+        file: &mut File,
+        superblock: &EmbeddedRdbSuperblock,
+    ) -> RdbFileResult<()> {
+        super::write_superblock_copy(&mut NativeFile(file), superblock)
     }
 }
 
@@ -357,7 +365,7 @@ fn scan_wal(open: &EmbeddedRdbOpen) -> RdbFileResult<WalScan> {
 
     let mut file = File::open(&open.path)?;
     FileExt::lock_shared(&file)?;
-    scan_wal_with_file(&mut file, open, wal_start)
+    scan_wal_with_file(&mut NativeFile(&mut file), open, wal_start)
 }
 
 fn now_unix_ms() -> u128 {
@@ -365,4 +373,35 @@ fn now_unix_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+// Borrow the already-locked handle. This adapter stays private so importing
+// VfsFile never makes std::io methods on a native File ambiguous for callers.
+struct NativeFile<'a>(&'a mut File);
+
+impl VfsFile for NativeFile<'_> {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn file_len(&self) -> std::io::Result<u64> {
+        self.0.metadata().map(|metadata| metadata.len())
+    }
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.0.set_len(len)
+    }
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        std::io::Write::write_all(self.0, bytes)
+    }
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(self.0, bytes)
+    }
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(self.0, position)
+    }
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.0.sync_all()
+    }
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.0.sync_data()
+    }
 }

@@ -977,9 +977,10 @@ fn zone_failure_guidance_names_real_commands() {
 /// opens the data path once and threads that handle through.
 #[test]
 fn writer_paths_open_the_data_file_exactly_once_under_the_lock() {
-    let source =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/embedded.rs"))
-            .expect("read embedded.rs");
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/embedded/native.rs"),
+    )
+    .expect("read native embedded opening/locking");
     let source = source.split("#[cfg(test)]").next().unwrap_or(&source);
 
     for function in [
@@ -994,6 +995,7 @@ fn writer_paths_open_the_data_file_exactly_once_under_the_lock() {
         let end = body[1..]
             .find("\n    pub fn ")
             .map(|offset| offset + 1)
+            .or_else(|| body.find("\n}\n"))
             .unwrap_or(body.len());
         let body = &body[..end];
 
@@ -1009,10 +1011,16 @@ fn writer_paths_open_the_data_file_exactly_once_under_the_lock() {
             "{function} must not take a second read handle to the locked file"
         );
         assert!(
-            body.contains("open_inner_with_file(") && body.contains("scan_wal_with_file("),
+            body.contains("checkpoint_file(")
+                || (body.contains("open_inner_with_file(") && body.contains("scan_wal_with_file(")),
             "{function} must read through the locked handle"
         );
     }
+    let shared =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/embedded.rs"))
+            .expect("read shared publication algorithms");
+    assert!(!shared.contains("File::open("));
+    assert!(!shared.contains("OpenOptions::"));
 }
 
 fn rdst_image(fill: u8, len: usize) -> Vec<u8> {

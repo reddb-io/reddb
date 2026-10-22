@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,12 +9,23 @@ import { after, before, describe, test } from 'node:test'
 import { chromium, firefox, webkit } from 'playwright'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const toolchain = (await readFile(resolve(root, 'rust-toolchain.toml'), 'utf8')).match(/channel\s*=\s*"([^"]+)"/)[1]
 const browserTypes = { chromium, firefox, webkit }
 const browsers = (process.env.REDDB_LITE_BROWSERS || 'chromium,firefox,webkit').split(',')
 let server
 let origin
+let fixtures
+let nativeFixture
+
+function nativeArtifact(action, path) {
+  execFileSync('cargo', [`+${toolchain}`, 'run', '--quiet', '--locked', '-p', 'reddb-io-file', '--example', 'browser_artifact', '--', action, path], { cwd: root, stdio: 'inherit' })
+}
 
 before(async () => {
+  fixtures = await mkdtemp(resolve(tmpdir(), 'reddb-lite-interop-'))
+  const path = resolve(fixtures, 'native.rdb')
+  nativeArtifact('create', path)
+  nativeFixture = [...await readFile(path)]
   server = createServer(async (request, response) => {
     try {
       const path = resolve(root, `.${decodeURIComponent(new URL(request.url, 'http://localhost').pathname)}`)
@@ -27,7 +39,10 @@ before(async () => {
   origin = `http://127.0.0.1:${server.address().port}`
 })
 
-after(async () => { await new Promise((resolve) => server.close(resolve)) })
+after(async () => {
+  if (server) await new Promise((resolve) => server.close(resolve))
+  if (fixtures) await rm(fixtures, { recursive: true, force: true })
+})
 
 for (const browser of browsers) {
   describe(browser, () => {
@@ -88,6 +103,24 @@ for (const browser of browsers) {
         return { snapshot, wal, magic: new TextDecoder().decode(bytes.slice(0, 8)) }
       })
       assert.deepEqual(result, { snapshot: 'RDSTcheckpoint', wal: [[8]], magic: 'RDBSBLK1' })
+    })
+
+    test('a real native .rdb can be changed in the browser and reopened natively', async () => {
+      const current = await page()
+      const bytes = await current.evaluate(async (fixture) => {
+        const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('reddb-lite', { create: true })
+        const handle = await directory.getFileHandle('interop.rdb', { create: true })
+        const writer = await handle.createWritable()
+        await writer.write(new Uint8Array(fixture))
+        await writer.close()
+        const file = await RedDBLite.openArtifact({ name: 'interop' })
+        await file.append([new TextEncoder().encode('browser')])
+        await file.close()
+        return [...new Uint8Array(await (await handle.getFile()).arrayBuffer())]
+      }, nativeFixture)
+      const path = resolve(fixtures, `${browser}.rdb`)
+      await writeFile(path, Buffer.from(bytes))
+      nativeArtifact('verify', path)
     })
 
     test('a second tab cannot write concurrently, and owner termination releases the lock', async () => {
