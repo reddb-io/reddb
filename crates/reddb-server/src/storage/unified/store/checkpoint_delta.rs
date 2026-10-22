@@ -6,11 +6,46 @@ use super::*;
 pub(super) struct DurableRows {
     rows: HashMap<(String, EntityId), Vec<u8>>,
     bytes: usize,
+    collection_rows: HashMap<String, usize>,
 }
 
 impl DurableRows {
     pub(super) fn memory_bytes(&self) -> usize {
         self.bytes
+    }
+
+    fn bytes_after_insert(&self, key: &(String, EntityId), capacity: usize) -> usize {
+        let previous = self.rows.get(key);
+        self.bytes
+            .saturating_sub(previous.map_or(0, Vec::capacity))
+            .saturating_add(capacity)
+            .saturating_add(if previous.is_none() {
+                key.0.len() + 128
+            } else {
+                0
+            })
+            .saturating_add(if self.collection_rows.contains_key(&key.0) {
+                0
+            } else {
+                key.0.len() + 128
+            })
+    }
+
+    fn forget_collection(&mut self, collection: &str) {
+        if self.collection_rows.remove(collection).is_none() {
+            return;
+        }
+        let mut reclaimed = collection.len() + 128;
+        self.rows.retain(|(name, _), record| {
+            if name != collection {
+                return true;
+            }
+            reclaimed += record.capacity() + name.len() + 128;
+            false
+        });
+        self.rows.shrink_to_fit();
+        self.collection_rows.shrink_to_fit();
+        self.bytes = self.bytes.saturating_sub(reclaimed);
     }
 
     fn remember(&mut self, collection: &str, record: Vec<u8>, limit: usize) {
@@ -29,31 +64,34 @@ impl DurableRows {
             return;
         }
         let key = (collection.to_owned(), EntityId::new(id));
-        let previous = self.rows.get(&key);
-        let old = previous.map_or(0, Vec::capacity);
-        let overhead = if previous.is_none() {
-            collection.len() + 128
-        } else {
-            0
-        };
-        let mut bytes = self
-            .bytes
-            .saturating_sub(old)
-            .saturating_add(record.capacity())
-            .saturating_add(overhead);
-        if bytes > limit || (previous.is_none() && self.rows.len() == 1024) {
-            self.rows.clear();
-            self.rows.shrink_to_fit();
-            self.bytes = 0;
-            // Evicted images retain the conservative validation path. Keep
-            // accepting later WAL images so unrelated pressure does not force
-            // every subsequent changed collection through a full rewrite.
-            bytes = record.capacity().saturating_add(collection.len() + 128);
+        let standalone_bytes = record
+            .capacity()
+            .saturating_add(2 * (collection.len() + 128));
+        if standalone_bytes > limit {
+            return;
+        }
+        if !self.rows.contains_key(&key)
+            && self.collection_rows.get(collection).copied().unwrap_or(0) == 1024
+        {
+            self.forget_collection(collection);
+        }
+        let mut bytes = self.bytes_after_insert(&key, record.capacity());
+        if bytes > limit {
+            // Pressure in one collection must not evict another collection's
+            // exact WAL proof while the shared byte budget can retain it.
+            self.forget_collection(collection);
+            bytes = self.bytes_after_insert(&key, record.capacity());
             if bytes > limit {
-                return;
+                *self = Self::default();
+                bytes = standalone_bytes;
             }
         }
-        self.rows.insert(key, record);
+        if self.rows.insert(key, record).is_none() {
+            *self
+                .collection_rows
+                .entry(collection.to_owned())
+                .or_default() += 1;
+        }
         self.bytes = bytes;
     }
 }
@@ -276,5 +314,46 @@ mod tests {
             retained.rows.get(&("rows".into(), EntityId::new(202))),
             Some(&record(202, 16))
         );
+    }
+
+    #[test]
+    fn unrelated_row_pressure_preserves_earlier_exact_images() {
+        let mut retained = DurableRows::default();
+        let limit = 8 * 1024 * 1024;
+        let expected = record(1, 4096);
+        retained.remember("payload", expected.clone(), limit);
+        for id in 1..=1100 {
+            retained.remember("noise", record(id, 16), limit);
+            assert_eq!(
+                retained.rows.get(&("payload".into(), EntityId::new(1))),
+                Some(&expected),
+                "unrelated row pressure discarded the earlier WAL proof"
+            );
+            assert!(retained.memory_bytes() <= limit);
+        }
+    }
+
+    #[test]
+    fn unrelated_byte_pressure_and_oversized_images_preserve_earlier_proofs() {
+        let mut retained = DurableRows::default();
+        let limit = 16 * 1024;
+        let expected = record(1, 16);
+        retained.remember("payload", expected.clone(), limit);
+        for id in 1..=200 {
+            retained.remember("noise", record(id, 256), limit);
+            assert_eq!(
+                retained.rows.get(&("payload".into(), EntityId::new(1))),
+                Some(&expected)
+            );
+            assert!(retained.memory_bytes() <= limit);
+        }
+        let mut oversized = record(201, 16);
+        oversized.reserve_exact(limit + 1);
+        retained.remember("noise", oversized, limit);
+        assert_eq!(
+            retained.rows.get(&("payload".into(), EntityId::new(1))),
+            Some(&expected)
+        );
+        assert!(retained.memory_bytes() <= limit);
     }
 }
