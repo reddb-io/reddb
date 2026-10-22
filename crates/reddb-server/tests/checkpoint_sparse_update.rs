@@ -39,6 +39,29 @@ fn unrelated_wal_cache_pressure_does_not_disable_later_sparse_updates() {
         .execute_query(&format!("INSERT INTO pressure_noise (id,n) VALUES {noise}"))
         .expect("unrelated rows");
     runtime.checkpoint().expect("baseline");
+    let payload_root = || {
+        let page = runtime
+            .db()
+            .store()
+            .pager()
+            .expect("pager")
+            .read_manifest_page()
+            .expect("published manifest");
+        let data = &page.as_bytes()[reddb_server::storage::engine::HEADER_SIZE..];
+        let header = reddb_file::decode_native_paged_metadata_header(data)
+            .expect("metadata header")
+            .expect("paged metadata");
+        let mut position = reddb_file::METADATA_HEADER_BYTES;
+        for _ in 0..header.collection_count {
+            let collection = reddb_file::decode_native_paged_collection_root(data, &mut position)
+                .expect("collection root");
+            if collection.collection == "pressure_payload" {
+                return collection.root_page;
+            }
+        }
+        panic!("payload tree missing from published catalog");
+    };
+    let root_before = payload_root();
     runtime
         .execute_query("UPDATE pressure_noise SET n=1")
         .expect("exceed retained WAL row capacity");
@@ -50,9 +73,10 @@ fn unrelated_wal_cache_pressure_does_not_disable_later_sparse_updates() {
     runtime.checkpoint().expect("checkpoint under pressure");
     let after = pager.cache_stats();
     let reads = after.hits + after.misses - before.hits - before.misses;
-    assert!(
-        reads < 256,
-        "unrelated WAL pressure scanned payload history: {reads} reads"
+    assert_eq!(
+        payload_root(),
+        root_before,
+        "unrelated WAL pressure rebuilt payload tree ({reads} total reads, including noise)"
     );
     drop(pager);
     drop(runtime);
