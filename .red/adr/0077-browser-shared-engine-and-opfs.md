@@ -54,8 +54,9 @@ uses the host's monotonic clock (`Instant` natively, `performance.now` in WASM).
 The private package still cannot be released as the database SDK: storage-backed
 five-model execution, local transactions and sync remain pending.
 
-Cost sketch: the relocated row executor retains O(N) filtering and O(N log N)
-sorting with O(N) materialization; relocation adds no per-row IPC or storage I/O.
+Cost sketch: filtering 10,000 rows visits 10,000 rows; comparison sorting is on
+the order of 10,000 × log2(10,000), about 133,000 comparisons. The relocated row
+executor retains O(N) materialization and adds no per-row IPC or storage I/O.
 This is a portability step, not a throughput or browser memory-budget claim.
 
 New sync contracts belong to `reddb-wire` (ADR 0046). They require consistent
