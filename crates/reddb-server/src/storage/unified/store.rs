@@ -355,6 +355,7 @@ pub struct UnifiedStore {
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
+    checkpoint_durable_rows: RwLock<checkpoint_delta::DurableRows>,
     /// The immediately previous published trees and any older reader-pinned
     /// trees. Root identities are persisted with the paged catalog.
     retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
@@ -414,6 +415,7 @@ struct RetiredBTree {
 }
 
 mod builder;
+mod checkpoint_delta;
 mod commit;
 mod impl_entities;
 mod impl_file;

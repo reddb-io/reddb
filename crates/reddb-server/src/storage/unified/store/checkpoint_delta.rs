@@ -1,0 +1,178 @@
+//! Bounded checkpoint projection of rows whose exact image is already in the WAL.
+use super::commit::StoreWalAction;
+use super::*;
+
+#[derive(Default)]
+pub(super) struct DurableRows {
+    rows: HashMap<(String, EntityId), Vec<u8>>,
+    bytes: usize,
+    disabled: bool,
+}
+
+impl DurableRows {
+    pub(super) fn memory_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn remember(&mut self, collection: &str, record: Vec<u8>, limit: usize) {
+        if self.disabled {
+            return;
+        }
+        let frame = match reddb_file::decode_native_entity_record_frame(&record) {
+            Ok(frame) => frame,
+            Err(_) => return,
+        };
+        let entity = frame.map_or(record.as_slice(), |frame| frame.entity);
+        let mut position = 0;
+        let Ok(id) = read_varu64(entity, &mut position) else {
+            return;
+        };
+        // The existing entity codec's table-row discriminator follows its ID.
+        // Other models keep their existing inline/checkpoint paths.
+        if entity.get(position) != Some(&0) {
+            return;
+        }
+        let key = (collection.to_owned(), EntityId::new(id));
+        let previous = self.rows.get(&key);
+        let old = previous.map_or(0, Vec::capacity);
+        let overhead = if previous.is_none() {
+            collection.len() + 128
+        } else {
+            0
+        };
+        let bytes = self
+            .bytes
+            .saturating_sub(old)
+            .saturating_add(record.capacity())
+            .saturating_add(overhead);
+        if bytes > limit || (previous.is_none() && self.rows.len() == 1024) {
+            self.rows.clear();
+            self.rows.shrink_to_fit();
+            self.bytes = 0;
+            self.disabled = true;
+            return;
+        }
+        self.rows.insert(key, record);
+        self.bytes = bytes;
+    }
+}
+
+impl UnifiedStore {
+    /// Called only after the WAL append succeeds. The ordinary inline KV path
+    /// does not retain records here. The checkpoint's existing force_sync is
+    /// the durability fence before any sparse projection changes pager pages.
+    pub(super) fn remember_checkpoint_rows(&self, actions: Vec<StoreWalAction>) {
+        if self.pager.is_none() || self.commit.is_none() {
+            return;
+        }
+        let limit = self
+            .config
+            .page_cache_slots
+            .map_or(256 * 1024, |slots| {
+                slots.saturating_mul(crate::storage::engine::PAGE_SIZE) / 32
+            })
+            .clamp(16 * 1024, 8 * 1024 * 1024);
+        let mut retained = self.checkpoint_durable_rows.write();
+        if retained.disabled {
+            return;
+        }
+        for action in actions {
+            match action {
+                StoreWalAction::UpsertEntityRecord { collection, record } => {
+                    retained.remember(&collection, record, limit)
+                }
+                StoreWalAction::BulkUpsertEntityRecords {
+                    collection,
+                    records,
+                } => {
+                    for record in records {
+                        retained.remember(&collection, record, limit);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Every changed ID must be accounted for by the bounded segment journal.
+    /// An unchanged tree image needs no write; a different image requires an
+    /// exact retained WAL record. Unknown edits, open/aborted versions, reader
+    /// pins and exhausted journals retain the full replacement-tree path.
+    pub(super) fn sparse_checkpoint_tree(
+        &self,
+        collection: &str,
+        manager: &Arc<SegmentManager>,
+        tree: &Arc<BTree>,
+        before: &[(u64, u64)],
+        current: &CheckpointVersion,
+    ) -> Result<Option<Arc<BTree>>, StoreError> {
+        if Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
+            return Ok(None);
+        }
+        let Some(ids) = manager.checkpoint_mutations_since(before) else {
+            return Ok(None);
+        };
+        let retained = self.checkpoint_durable_rows.read();
+        let mut upserts = Vec::new();
+        for id in ids {
+            let key = id.raw().to_be_bytes().to_vec();
+            let existing = tree
+                .get(&key)
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            let metadata = manager.get_metadata(id);
+            let row = manager.get_with(id, |entity| {
+                if current.pending_vault.contains(&id)
+                    || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
+                        && (current.excluded_xids.contains(&entity.xmin)
+                            || current.excluded_xids.contains(&entity.xmax)))
+                {
+                    return None;
+                }
+                Some(Self::serialize_entity_record(
+                    entity,
+                    metadata.as_ref(),
+                    self.format_version(),
+                ))
+            });
+            let Some(row) = row else {
+                if existing.is_some() {
+                    return Ok(None);
+                }
+                continue;
+            };
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            if existing.as_ref() == Some(&row) {
+                continue;
+            }
+            if retained.rows.get(&(collection.to_owned(), id)) != Some(&row) {
+                return Ok(None);
+            }
+            upserts.push((key, row));
+        }
+        drop(retained);
+        if manager.checkpoint_revisions() != current.segments {
+            return Ok(None);
+        }
+        // All eligibility checks finish before changing the published tree.
+        // These are durable logical WAL updates, just like an ordinary inline
+        // write; unlogged manager edits still build an unpublished replacement.
+        #[cfg(debug_assertions)]
+        let root_before = tree.root_page_id();
+        tree.upsert_batch_sorted(&upserts)
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        #[cfg(debug_assertions)]
+        if tree.root_page_id() != root_before
+            && std::env::var_os("REDDB_TEST_CHECKPOINT_EXIT_AFTER_SPARSE_ROOT_CHANGE").is_some()
+        {
+            self.pager
+                .as_ref()
+                .expect("paged projection")
+                .sync()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            std::process::exit(176);
+        }
+        Ok(Some(Arc::clone(tree)))
+    }
+}

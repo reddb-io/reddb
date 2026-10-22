@@ -62,9 +62,25 @@ fn checkpoint_child(path: &Path, explicit: bool, insert_batch: bool) {
     runtime.checkpoint().expect("seed checkpoint");
     for table in 0..8 {
         sql(&runtime, &format!("UPDATE pad_{table} SET n=1"));
+        // Exercise full checkpoint serialization rather than the sparse WAL
+        // projection, whose work can finish without any page allocation.
+        let store = runtime.db().store();
+        let manager = store
+            .get_collection(&format!("pad_{table}"))
+            .expect("pad collection");
+        let mut entity = manager
+            .query_all(|_| true)
+            .into_iter()
+            .next()
+            .expect("pad row");
+        entity.updated_at += 1;
+        manager
+            .update(entity)
+            .expect("unlogged pad edit forces replacement");
     }
     let pager = Arc::clone(runtime.db().store().pager().expect("paged store"));
     let pages = pager.page_count().expect("page count");
+    let free = pager.free_page_count().expect("free page count");
     let finished = Arc::new(AtomicBool::new(false));
     let checkpoint = {
         let runtime = Arc::clone(&runtime);
@@ -74,10 +90,16 @@ fn checkpoint_child(path: &Path, explicit: bool, insert_batch: bool) {
             finished.store(true, Ordering::SeqCst);
         })
     };
-    // Page allocation precedes the final flush. File length changes too late
-    // to establish that a transaction begins during checkpoint serialization.
+    // Allocation precedes the final flush, including reuse from the free list.
+    // File length alone misses reused pages and changes too late to establish
+    // that a transaction begins during checkpoint serialization.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while pager.page_count().expect("checkpoint progress") <= pages {
+    while pager.page_count().expect("checkpoint progress") <= pages
+        && pager
+            .free_page_count()
+            .expect("checkpoint free-page progress")
+            == free
+    {
         assert!(
             !finished.load(Ordering::SeqCst),
             "checkpoint finished before allocation window"

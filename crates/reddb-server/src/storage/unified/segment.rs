@@ -563,6 +563,7 @@ pub struct GrowingSegment {
     sequence: AtomicU64,
     /// Volatile checkpoint invalidation; never part of the storage format.
     checkpoint_revision: u64,
+    checkpoint_mutations: std::collections::VecDeque<(u64, EntityId)>,
     /// Approximate payload bytes of the entities physically resident in this
     /// segment. Resident means "still occupying memory", which includes
     /// tombstoned entities in flat mode (their slot must stay so positional
@@ -734,6 +735,7 @@ impl GrowingSegment {
             sealed_col_zones: HashMap::new(),
             sequence: AtomicU64::new(0),
             checkpoint_revision: 0,
+            checkpoint_mutations: std::collections::VecDeque::new(),
             memory_bytes: AtomicU64::new(0),
             dead_entity_bytes: 0,
             dead_resident_count: 0,
@@ -751,10 +753,46 @@ impl GrowingSegment {
     }
 
     fn mark_checkpoint_dirty(&mut self) {
+        self.checkpoint_mutations.clear();
         self.checkpoint_revision = self
             .checkpoint_revision
             .checked_add(1)
             .expect("segment mutation counter must not overflow");
+    }
+
+    fn mark_checkpoint_entity_dirty(&mut self, id: EntityId) {
+        self.checkpoint_revision = self
+            .checkpoint_revision
+            .checked_add(1)
+            .expect("segment mutation counter must not overflow");
+        if self.checkpoint_mutations.len() == 256 {
+            self.checkpoint_mutations.pop_front();
+        }
+        self.checkpoint_mutations
+            .push_back((self.checkpoint_revision, id));
+    }
+
+    pub(crate) fn checkpoint_mutations_since(&self, revision: u64) -> Option<Vec<EntityId>> {
+        if revision == self.checkpoint_revision {
+            return Some(Vec::new());
+        }
+        let mut expected = revision.checked_add(1)?;
+        let mut ids = Vec::new();
+        for &(sequence, id) in &self.checkpoint_mutations {
+            if sequence <= revision {
+                continue;
+            }
+            if sequence != expected {
+                return None;
+            }
+            ids.push(id);
+            expected = expected.checked_add(1)?;
+        }
+        (expected == self.checkpoint_revision.checked_add(1)?).then_some(ids)
+    }
+
+    pub(crate) fn checkpoint_tracking_bytes(&self) -> usize {
+        self.checkpoint_mutations.capacity() * std::mem::size_of::<(u64, EntityId)>()
     }
 
     fn has_live_entity(&self, id: EntityId) -> bool {
@@ -785,7 +823,7 @@ impl GrowingSegment {
         &mut self,
         entity: &UnifiedEntity,
     ) -> Result<UpdateIndexSnapshot, SegmentError> {
-        self.mark_checkpoint_dirty();
+        self.mark_checkpoint_entity_dirty(entity.id);
         self.invalidate_unique_key_lookup();
         if self
             .get(entity.id)
@@ -909,7 +947,7 @@ impl GrowingSegment {
 
     /// Preserve the first removal order, including repeated flat deletes.
     fn record_tombstone(&mut self, id: EntityId) -> bool {
-        self.mark_checkpoint_dirty();
+        self.mark_checkpoint_entity_dirty(id);
         let ordinal = self.deleted.len();
         match self.deleted.entry(id) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -1129,7 +1167,7 @@ impl GrowingSegment {
     /// segment, when the swap discovers a copied row was deleted from its
     /// source mid-consolidation. A tombstone here would defeat the whole point.
     pub(crate) fn evict_entity(&mut self, id: EntityId) -> bool {
-        self.mark_checkpoint_dirty();
+        self.mark_checkpoint_entity_dirty(id);
         self.invalidate_unique_key_lookup();
         let Some(entity) = self.entities.remove(&id) else {
             return false;
@@ -1304,7 +1342,7 @@ impl GrowingSegment {
 
     /// Index an entity
     fn index_entity(&mut self, entity: &UnifiedEntity) {
-        self.mark_checkpoint_dirty();
+        self.mark_checkpoint_entity_dirty(entity.id);
         if let Some(index) = self.key_lookup.as_mut() {
             index.insert(entity);
         }
@@ -2130,7 +2168,7 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity> {
-        self.mark_checkpoint_dirty();
+        self.mark_checkpoint_entity_dirty(id);
         self.invalidate_unique_key_lookup();
         self.invalidate_graph_read_index();
         if self.deleted.contains_key(&id) || !self.state.is_writable() {
@@ -2252,7 +2290,7 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn set_metadata(&mut self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
-        self.mark_checkpoint_dirty();
+        self.mark_checkpoint_entity_dirty(id);
         if !self.state.is_writable() {
             return Err(SegmentError::NotWritable);
         }

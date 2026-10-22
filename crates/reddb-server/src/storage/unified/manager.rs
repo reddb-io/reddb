@@ -1501,6 +1501,39 @@ impl SegmentManager {
             .collect()
     }
 
+    pub(crate) fn checkpoint_mutations_since(
+        &self,
+        before: &[(u64, u64)],
+    ) -> Option<Vec<EntityId>> {
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        if growing.iter().count() + sealed.len() != before.len() {
+            return None;
+        }
+        let mut changed = std::collections::BTreeSet::new();
+        for (segment, &(id, revision)) in growing.iter().chain(sealed.iter()).zip(before) {
+            let segment = segment.read();
+            if segment.id() != id {
+                return None;
+            }
+            changed.extend(segment.checkpoint_mutations_since(revision)?);
+            if changed.len() > 1024 {
+                return None;
+            }
+        }
+        Some(changed.into_iter().collect())
+    }
+
+    pub(crate) fn checkpoint_tracking_bytes(&self) -> usize {
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        growing
+            .iter()
+            .chain(sealed.iter())
+            .map(|segment| segment.read().checkpoint_tracking_bytes())
+            .sum()
+    }
+
     /// Reuse the derived metadata fingerprint only while its rows and stats match.
     pub(crate) fn cached_physical_root(&self, seed: u64, compute: impl FnOnce() -> u64) -> u64 {
         let segments = self.checkpoint_revisions();
