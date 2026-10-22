@@ -21,13 +21,18 @@ fn embedded_options_on_a_paged_store_keep_stats_available() {
     let worker = std::thread::spawn(move || {
         let pending = runtime.db().embedded_pending_wal_records();
         let stats = runtime.execute_query("SHOW STATS stats_probe");
-        sender.send((pending, stats.is_ok())).expect("send stats result");
+        sender
+            .send((pending, stats.is_ok()))
+            .expect("send stats result");
     });
     let (pending, stats_ok) = receiver
         .recv_timeout(Duration::from_secs(3))
         .expect("stats must not wait on the pager's exclusive data-file lock");
     worker.join().expect("stats worker must close the runtime");
-    assert_eq!(pending, None, "paged stores do not have an embedded WAL region");
+    assert_eq!(
+        pending, None,
+        "paged stores do not have an embedded WAL region"
+    );
     assert!(stats_ok, "SHOW STATS must remain usable");
 }
 
@@ -35,8 +40,8 @@ fn embedded_options_on_a_paged_store_keep_stats_available() {
 fn native_embedded_stats_still_report_the_embedded_wal() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("data.rdb");
-    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-        .expect("new embedded runtime");
+    let runtime =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("new embedded runtime");
     assert!(!runtime.db().is_paged());
     assert!(runtime.db().embedded_pending_wal_records().is_some());
     runtime
