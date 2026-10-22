@@ -3014,6 +3014,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "reddb-io-wasm"
+version = "0.0.0"
+dependencies = [
+ "js-sys",
+ "reddb-io-file",
+ "reddb-io-rql",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "reddb-io-wire"
 version = "1.25.5"
 dependencies = [

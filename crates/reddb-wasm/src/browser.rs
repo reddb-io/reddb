@@ -1,0 +1,232 @@
+use std::io::{self, SeekFrom};
+
+use js_sys::{Array, Error, Uint8Array};
+use reddb_file::{EmbeddedRdbFile, VfsFile};
+use wasm_bindgen::prelude::*;
+
+const MAX_EXACT_OFFSET: u64 = (1u64 << 53) - 1;
+
+#[wasm_bindgen]
+extern "C" {
+    pub type SyncFile;
+
+    #[wasm_bindgen(method, catch, js_name = readAt)]
+    fn read_at(this: &SyncFile, buffer: &mut [u8], offset: f64) -> Result<u32, JsValue>;
+    #[wasm_bindgen(method, catch, js_name = writeAt)]
+    fn write_at(this: &SyncFile, buffer: &[u8], offset: f64) -> Result<u32, JsValue>;
+    #[wasm_bindgen(method, catch, js_name = getSize)]
+    fn get_size(this: &SyncFile) -> Result<f64, JsValue>;
+    #[wasm_bindgen(method, catch)]
+    fn truncate(this: &SyncFile, size: f64) -> Result<(), JsValue>;
+    #[wasm_bindgen(method, catch)]
+    fn flush(this: &SyncFile) -> Result<(), JsValue>;
+}
+
+struct BrowserFile {
+    handle: SyncFile,
+    position: u64,
+}
+
+fn io_error(error: JsValue) -> io::Error {
+    let message = error
+        .dyn_ref::<Error>()
+        .map(|error| String::from(error.message()))
+        .or_else(|| error.as_string())
+        .unwrap_or_else(|| "browser file I/O failed".into());
+    io::Error::other(message)
+}
+
+fn js_error(error: impl std::fmt::Display) -> JsValue {
+    Error::new(&error.to_string()).into()
+}
+
+fn exact_offset(offset: u64) -> io::Result<f64> {
+    if offset > MAX_EXACT_OFFSET {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "file offset exceeds JavaScript's exact integer range",
+        ));
+    }
+    Ok(offset as f64)
+}
+
+impl VfsFile for BrowserFile {
+    fn try_clone(&self) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "OPFS handles have one owner",
+        ))
+    }
+
+    fn file_len(&self) -> io::Result<u64> {
+        let length = self.handle.get_size().map_err(io_error)?;
+        if !length.is_finite()
+            || length < 0.0
+            || length.fract() != 0.0
+            || length > MAX_EXACT_OFFSET as f64
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid browser file length",
+            ));
+        }
+        Ok(length as u64)
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.handle.truncate(exact_offset(len)?).map_err(io_error)
+    }
+
+    fn write_all(&mut self, mut buffer: &[u8]) -> io::Result<()> {
+        while !buffer.is_empty() {
+            let count = self
+                .handle
+                .write_at(buffer, exact_offset(self.position)?)
+                .map_err(io_error)? as usize;
+            if count == 0 || count > buffer.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "invalid OPFS write length",
+                ));
+            }
+            self.position = self
+                .position
+                .checked_add(count as u64)
+                .ok_or(io::ErrorKind::InvalidInput)?;
+            buffer = &buffer[count..];
+        }
+        Ok(())
+    }
+
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let count = self
+            .handle
+            .read_at(buffer, exact_offset(self.position)?)
+            .map_err(io_error)? as usize;
+        if count > buffer.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid OPFS read length",
+            ));
+        }
+        self.position = self
+            .position
+            .checked_add(count as u64)
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        Ok(count)
+    }
+
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let position = match pos {
+            SeekFrom::Start(offset) => Some(offset),
+            SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+            SeekFrom::End(offset) => self.file_len()?.checked_add_signed(offset),
+        }
+        .ok_or(io::ErrorKind::InvalidInput)?;
+        exact_offset(position)?;
+        self.position = position;
+        Ok(position)
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        self.handle.flush().map_err(io_error)
+    }
+}
+
+/// Canonical `.rdb` artifact I/O. The worker owns and closes the underlying
+/// exclusive access handle; freeing this wrapper never unlocks it early.
+#[wasm_bindgen]
+pub struct BrowserArtifact {
+    file: EmbeddedRdbFile<BrowserFile>,
+}
+
+#[wasm_bindgen]
+impl BrowserArtifact {
+    pub fn open(handle: SyncFile, name: &str) -> Result<BrowserArtifact, JsValue> {
+        let file = EmbeddedRdbFile::open(
+            BrowserFile {
+                handle,
+                position: 0,
+            },
+            name,
+        )
+        .map_err(js_error)?;
+        Ok(Self { file })
+    }
+
+    pub fn create(
+        handle: SyncFile,
+        name: &str,
+        created_at_unix_ms: f64,
+    ) -> Result<BrowserArtifact, JsValue> {
+        if !created_at_unix_ms.is_finite()
+            || created_at_unix_ms < 0.0
+            || created_at_unix_ms.fract() != 0.0
+            || created_at_unix_ms > MAX_EXACT_OFFSET as f64
+        {
+            return Err(js_error("invalid creation timestamp"));
+        }
+        let file = EmbeddedRdbFile::create(
+            BrowserFile {
+                handle,
+                position: 0,
+            },
+            name,
+            &[],
+            created_at_unix_ms as u128,
+        )
+        .map_err(js_error)?;
+        Ok(Self { file })
+    }
+
+    pub fn append(&mut self, payloads: Array) -> Result<(), JsValue> {
+        let payloads: Vec<Vec<u8>> = payloads
+            .iter()
+            .map(|payload| {
+                payload
+                    .dyn_into::<Uint8Array>()
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|_| js_error("WAL payloads must be Uint8Arrays"))
+            })
+            .collect::<Result<_, _>>()?;
+        self.file.append_wal_payloads(&payloads).map_err(js_error)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = readWal)]
+    pub fn read_wal(&mut self) -> Result<Array, JsValue> {
+        let payloads = self.file.read_wal_payloads().map_err(js_error)?;
+        Ok(payloads
+            .iter()
+            .map(|bytes| JsValue::from(Uint8Array::from(bytes.as_slice())))
+            .collect())
+    }
+
+    pub fn checkpoint(&mut self, snapshot: &[u8], min_wal_bytes: u32) -> Result<(), JsValue> {
+        self.file
+            .write_snapshot(snapshot, u64::from(min_wal_bytes))
+            .map_err(js_error)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = readSnapshot)]
+    pub fn read_snapshot(&mut self) -> Result<Option<Vec<u8>>, JsValue> {
+        self.file.read_snapshot().map_err(js_error)
+    }
+
+    /// String-valued counters preserve all u64 bits across JavaScript.
+    pub fn generation(&mut self) -> Result<String, JsValue> {
+        Ok(self
+            .file
+            .state()
+            .map_err(js_error)?
+            .selected_superblock
+            .generation
+            .to_string())
+    }
+}
+
+#[wasm_bindgen(js_name = validateQuery)]
+pub fn validate_query(sql: &str) -> Result<(), JsValue> {
+    reddb_rql::parse_frontend(sql).map(|_| ()).map_err(js_error)
+}
