@@ -219,12 +219,14 @@ mod tests {
     use super::*;
 
     fn record(id: u64, payload_bytes: usize) -> Vec<u8> {
-        let entity = UnifiedEntity::table_row(
+        let mut entity = UnifiedEntity::table_row(
             EntityId::new(id),
             "rows",
             id,
             vec![Value::text("p".repeat(payload_bytes))],
         );
+        entity.created_at = 0;
+        entity.updated_at = 0;
         UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11)
     }
 
@@ -254,11 +256,17 @@ mod tests {
             retained.remember("rows", record(id, 256), limit);
             assert!(retained.memory_bytes() <= limit);
         }
+        assert!(retained.rows.len() < 200, "byte pressure must evict images");
         assert_eq!(
             retained.rows.get(&("rows".into(), EntityId::new(200))),
             Some(&record(200, 256))
         );
-        retained.remember("rows", record(201, limit), limit);
+        let mut oversized = record(201, limit);
+        // The entity codec compresses repeated payloads. The retention budget
+        // accounts for allocated capacity, so explicitly exceed that allowance.
+        oversized.reserve_exact(limit + 1);
+        assert!(oversized.capacity() > limit);
+        retained.remember("rows", oversized, limit);
         assert!(retained.memory_bytes() <= limit);
         assert!(!retained
             .rows
