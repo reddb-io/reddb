@@ -30,10 +30,11 @@ pub fn rotate_audit_log(active: &Path, timestamp_nanos: u128) -> io::Result<Audi
     };
 
     let zst = crate::layout::audit_log_rotated_compressed_path(active, timestamp_nanos);
-    let mut out = fs::File::create(&zst)?;
-    out.write_all(&compressed)?;
-    out.sync_data()?;
-    drop(out);
+    {
+        let mut out = fs::File::create(&zst)?;
+        out.write_all(&compressed)?;
+        out.sync_data()?;
+    }
     let _ = fs::remove_file(&plain);
     Ok(AuditLogRotation {
         plain_path: plain,

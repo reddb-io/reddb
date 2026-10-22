@@ -50,6 +50,20 @@ fn exact_offset(offset: u64) -> io::Result<f64> {
     Ok(offset as f64)
 }
 
+fn exact_integer(value: f64) -> io::Result<u64> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > MAX_EXACT_OFFSET as f64
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "browser value must be an exact nonnegative integer",
+        ));
+    }
+    // The checks above reject fractions and values outside the exact JS range.
+    #[allow(clippy::cast_possible_truncation)]
+    let integer = value as u64;
+    Ok(integer)
+}
+
 impl VfsFile for BrowserFile {
     fn try_clone(&self) -> io::Result<Self> {
         Err(io::Error::new(
@@ -59,18 +73,7 @@ impl VfsFile for BrowserFile {
     }
 
     fn file_len(&self) -> io::Result<u64> {
-        let length = self.handle.get_size().map_err(io_error)?;
-        if !length.is_finite()
-            || length < 0.0
-            || length.fract() != 0.0
-            || length > MAX_EXACT_OFFSET as f64
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid browser file length",
-            ));
-        }
-        Ok(length as u64)
+        exact_integer(self.handle.get_size().map_err(io_error)?)
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
@@ -159,13 +162,7 @@ impl BrowserArtifact {
         name: &str,
         created_at_unix_ms: f64,
     ) -> Result<BrowserArtifact, JsValue> {
-        if !created_at_unix_ms.is_finite()
-            || created_at_unix_ms < 0.0
-            || created_at_unix_ms.fract() != 0.0
-            || created_at_unix_ms > MAX_EXACT_OFFSET as f64
-        {
-            return Err(js_error("invalid creation timestamp"));
-        }
+        let created_at_unix_ms = exact_integer(created_at_unix_ms).map_err(js_error)?;
         let file = EmbeddedRdbFile::create(
             BrowserFile {
                 handle,
@@ -173,7 +170,7 @@ impl BrowserArtifact {
             },
             name,
             &[],
-            created_at_unix_ms as u128,
+            u128::from(created_at_unix_ms),
         )
         .map_err(js_error)?;
         Ok(Self { file })

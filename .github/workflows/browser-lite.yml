@@ -36,9 +36,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e
-        with:
-          toolchain: '1.95.0'
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
       - name: Verify native formats, locking, crash recovery and portable interoperability
         run: cargo test --locked -p reddb-io-file
 
@@ -48,9 +46,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
-          toolchain: '1.95.0'
           targets: wasm32-unknown-unknown
           components: clippy
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
