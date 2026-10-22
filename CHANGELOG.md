@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.25.6
+
+### Patch Changes
+
+- [#2452](https://github.com/reddb-io/reddb/pull/2452) [`4ae5189`](https://github.com/reddb-io/reddb/commit/4ae5189a2e384e5ebc857e78b89c9ac904089ff8) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep accepting bounded checkpoint WAL images after cache saturation. Unrelated row or byte pressure no longer disables incremental checkpoints for later writes; evicted or oversized images retain conservative validation and existing publication fences.
+
 ## 1.25.5
 
 ### Patch Changes
