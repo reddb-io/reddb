@@ -1,5 +1,16 @@
 # @reddb-io/client
 
+## 1.25.3
+
+### Patch Changes
+
+- [#2445](https://github.com/reddb-io/reddb/pull/2445) [`ac5f61d`](https://github.com/reddb-io/reddb/commit/ac5f61d90d596ff5a3bed0b442475660c7e01135) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound collection-scan payload allocation to the requested page. Traverse physical
+  entities in stable ID order without cloning the whole collection, preserve owned
+  row schemas, and pass HTTP offsets directly as runtime cursors instead of
+  materializing the skipped prefix. Retain total counts, next cursors and empty
+  beyond-end pages, including maximum-size offsets. Add allocation regressions over
+  the runtime and real HTTP transport.
+
 ## 1.25.2
 
 ### Patch Changes
