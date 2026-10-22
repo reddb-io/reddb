@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.25.5"
+version = "1.25.6"
 dependencies = [
  "reddb-io-rql",
  "reddb-io-types",
