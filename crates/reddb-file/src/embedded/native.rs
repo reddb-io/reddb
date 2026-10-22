@@ -339,6 +339,8 @@ fn embedded_path_lock(path: &Path) -> Arc<Mutex<EmbeddedPathState>> {
         .clone()
 }
 
+/// Scan the WAL, opening the file for reading. Callers already holding a
+/// handle (the writer path) use [`scan_wal_with_file`] instead.
 fn scan_wal(open: &EmbeddedRdbOpen) -> RdbFileResult<WalScan> {
     let wal_start = open.manifest.wal_region_offset;
     let wal_end = wal_start

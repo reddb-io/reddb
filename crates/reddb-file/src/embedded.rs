@@ -463,9 +463,6 @@ fn wal_region_start_checked(open: &EmbeddedRdbOpen) -> RdbFileResult<Option<u64>
     Ok(Some(wal_start))
 }
 
-/// Scan the WAL, opening the file for reading. Callers already holding a
-/// handle (the writer path) use [`scan_wal_with_file`] instead.
-
 /// Scan the WAL through an already-open handle — see
 /// [`EmbeddedRdbArtifact::open_inner_with_file`] for why the writer path
 /// cannot open a second one.

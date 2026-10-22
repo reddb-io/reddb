@@ -49,10 +49,15 @@ for (const browser of browsers) {
     let context
     let profile
     async function launch() {
-      context = await browserTypes[browser].launchPersistentContext(profile, { headless: true })
+      context = await browserTypes[browser].launchPersistentContext(profile, {
+        headless: true,
+        args: browser === 'webkit' ? ['--features=StorageAPI,FileSystem,FileSystemWritableStream'] : [],
+      })
     }
     async function page() {
-      const page = await context.newPage()
+      // WPE applies feature settings to its initial window only. Safari's
+      // default feature configuration still needs separate real-device checks.
+      const page = browser === 'webkit' ? context.pages()[0] : await context.newPage()
       await page.goto(`${origin}/packages/lite/test/harness.html`)
       await page.waitForFunction(() => window.RedDBLite)
       return page
@@ -123,9 +128,9 @@ for (const browser of browsers) {
       nativeArtifact('verify', path)
     })
 
-    test('a second tab cannot write concurrently, and owner termination releases the lock', async () => {
+    test('a second owner cannot write concurrently, and owner teardown releases the lock', async () => {
       const owner = await page()
-      const contender = await page()
+      const contender = browser === 'webkit' ? owner : await page()
       await owner.evaluate(async () => {
         window.file = await RedDBLite.openArtifact({ name: 'ownership' })
         await file.append([new Uint8Array([9])])
@@ -134,7 +139,12 @@ for (const browser of browsers) {
         try { await RedDBLite.openArtifact({ name: 'ownership' }); return 'unexpected success' }
         catch (error) { return error.code }
       }), 'FILE_BUSY')
-      await owner.close()
+      if (browser === 'webkit') {
+        await owner.reload()
+        await owner.waitForFunction(() => window.RedDBLite)
+      } else {
+        await owner.close()
+      }
       // Browser process teardown releases OPFS and Web Locks asynchronously.
       const recovered = await contender.evaluate(async () => {
         for (let attempt = 0; attempt < 100; attempt++) {
