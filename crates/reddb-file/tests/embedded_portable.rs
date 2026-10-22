@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::io::{self, SeekFrom};
 use std::rc::Rc;
 
-use reddb_file::{EmbeddedRdbArtifact, EmbeddedRdbFile, VfsFile};
+use reddb_file::{EmbeddedRdbArtifact, EmbeddedRdbFile, OpenMode, StdVfs, Vfs, VfsFile};
 
 #[test]
 fn portable_and_native_share_snapshots_and_wal_in_both_directions() {
@@ -10,11 +10,7 @@ fn portable_and_native_share_snapshots_and_wal_in_both_directions() {
     let path = directory.path().join("portable.rdb");
     let file = std::fs::File::create(&path).expect("empty file");
     drop(file);
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .expect("file");
+    let file = StdVfs.open(&path, OpenMode::create_keep()).expect("file");
     let mut portable = EmbeddedRdbFile::create(file, &path, b"RDSTfirst", 123).expect("create");
     portable
         .append_wal_payloads(&[
@@ -40,11 +36,7 @@ fn portable_and_native_share_snapshots_and_wal_in_both_directions() {
     EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"native transaction".to_vec()])
         .expect("native append");
 
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .expect("file");
+    let file = StdVfs.open(&path, OpenMode::create_keep()).expect("file");
     let mut portable = EmbeddedRdbFile::open(file, &path).expect("portable reopen");
     assert_eq!(
         portable.read_snapshot().expect("snapshot"),
@@ -248,6 +240,20 @@ fn creating_over_an_existing_file_does_not_destroy_it() {
     let before = image.borrow().bytes.clone();
     assert!(EmbeddedRdbFile::create(MemoryFile::new(&image), "memory.rdb", &[], 0).is_err());
     assert_eq!(image.borrow().bytes, before);
+}
+
+#[test]
+fn invalid_checkpoint_input_does_not_publish_or_invalidate_the_handle() {
+    let (image, mut file) = seeded_file();
+    let before = image.borrow().bytes.clone();
+    for invalid in [b"SQL instead of a native snapshot".as_slice(), b"RDS"] {
+        assert!(file.write_snapshot(invalid, 0).is_err());
+        assert_eq!(image.borrow().bytes, before);
+        assert_eq!(
+            file.read_wal_payloads().expect("unchanged WAL"),
+            vec![b"acknowledged".to_vec()]
+        );
+    }
 }
 
 #[test]

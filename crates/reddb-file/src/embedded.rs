@@ -238,15 +238,6 @@ impl EmbeddedRdbArtifact {
         }
         Ok(len)
     }
-
-    pub fn write_superblock_copy(
-        file: &mut impl VfsFile,
-        superblock: &EmbeddedRdbSuperblock,
-    ) -> RdbFileResult<()> {
-        let offset = superblock_offset(superblock.copy_index)?;
-        write_at(file, offset, &encode_superblock(*superblock)?)?;
-        Ok(())
-    }
 }
 
 fn read_superblock_copy(
@@ -1042,8 +1033,8 @@ fn create_file(
         snapshot_checksum: crc32(snapshot),
         checksum: 0,
     };
-    EmbeddedRdbArtifact::write_superblock_copy(file, &base)?;
-    EmbeddedRdbArtifact::write_superblock_copy(
+    write_superblock_copy(file, &base)?;
+    write_superblock_copy(
         file,
         &EmbeddedRdbSuperblock {
             copy_index: 1,
@@ -1143,7 +1134,7 @@ fn checkpoint_file(
         checksum: 0,
         ..open.selected_superblock
     };
-    EmbeddedRdbArtifact::write_superblock_copy(file, &next_superblock)?;
+    write_superblock_copy(file, &next_superblock)?;
     crash_inject("snapshot_after_superblock_write");
     file.sync_all()?;
 
@@ -1226,7 +1217,7 @@ fn append_file(
         checksum: 0,
         ..open.selected_superblock
     };
-    EmbeddedRdbArtifact::write_superblock_copy(file, &next_superblock)?;
+    write_superblock_copy(file, &next_superblock)?;
     crash_inject("wal_after_superblock_write");
     file.sync_all()?;
     // A warm append writes only WAL bytes and the alternate superblock:
@@ -1268,4 +1259,13 @@ fn read_snapshot_file(
         ));
     }
     Ok(Some(bytes))
+}
+
+fn write_superblock_copy(
+    file: &mut impl VfsFile,
+    superblock: &EmbeddedRdbSuperblock,
+) -> RdbFileResult<()> {
+    let offset = superblock_offset(superblock.copy_index)?;
+    write_at(file, offset, &encode_superblock(*superblock)?)?;
+    Ok(())
 }
