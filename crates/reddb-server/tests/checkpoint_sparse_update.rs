@@ -2,6 +2,197 @@
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 #[test]
+fn sparse_checkpoint_with_pending_writer_survives_process_exit() {
+    use reddb_server::runtime::mvcc::set_current_connection_id;
+    const CHILD_PATH: &str = "REDDB_TEST_PENDING_SPARSE_CHECKPOINT_PATH";
+    let options = |path: &std::path::Path| {
+        RedDBOptions::persistent(path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile")
+    };
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let runtime =
+            RedDBRuntime::with_options(options(std::path::Path::new(&path))).expect("runtime");
+        for query in [
+            "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+            "CREATE TABLE crash_payload (id INT, n INT, payload TEXT)",
+            "CREATE UNIQUE INDEX crash_payload_id ON crash_payload (id)",
+        ] {
+            runtime.execute_query(query).expect("schema");
+        }
+        let payload = "c".repeat(4096);
+        for batch in 0..10 {
+            let rows = (batch * 100..(batch + 1) * 100)
+                .map(|id| format!("({id},0,'{payload}')"))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO crash_payload (id,n,payload) VALUES {rows}"
+                ))
+                .expect("history");
+        }
+        runtime.checkpoint().expect("baseline");
+        set_current_connection_id(401);
+        runtime.execute_query("BEGIN").expect("begin");
+        runtime
+            .execute_query("UPDATE crash_payload SET n=9999 WHERE id=1")
+            .expect("pending");
+        set_current_connection_id(402);
+        runtime
+            .execute_query("UPDATE crash_payload SET n=1255 WHERE id=2")
+            .expect("acknowledged");
+        let pager = runtime.db().store().pager().expect("pager").clone();
+        let before = pager.cache_stats();
+        runtime.checkpoint().expect("durable projection");
+        let after = pager.cache_stats();
+        assert!(after.hits + after.misses - before.hits - before.misses < 128);
+        // Bypass every runtime/session destructor while the first writer is open.
+        std::process::exit(73);
+    }
+    let directory = tempfile::tempdir().expect("crash fixture");
+    let path = directory.path().join("crash.rdb");
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "sparse_checkpoint_with_pending_writer_survives_process_exit",
+            "--nocapture",
+        ])
+        .env(CHILD_PATH, &path)
+        .output()
+        .expect("crash child");
+    assert_eq!(
+        output.status.code(),
+        Some(73),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runtime = RedDBRuntime::with_options(options(&path)).expect("recover");
+    for (id, expected) in [(1, 0), (2, 1255)] {
+        let read = runtime
+            .execute_query(&format!("SELECT n FROM crash_payload WHERE id={id}"))
+            .expect("recovered row");
+        assert_eq!(read.result.records.len(), 1);
+        assert_eq!(
+            read.result.records[0].get("n").expect("n").to_string(),
+            expected.to_string()
+        );
+    }
+    let plan = runtime
+        .execute_query("EXPLAIN SELECT * FROM crash_payload WHERE id=2")
+        .expect("index");
+    assert!(plan.result.records.iter().any(|record| record
+        .get("op")
+        .is_some_and(|value| value == &reddb_types::Value::text("index_seek"))));
+}
+
+#[test]
+fn sparse_checkpoint_tracks_pending_commit_and_rollback_without_scanning_history() {
+    use reddb_server::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+    struct ClearConnection;
+    impl Drop for ClearConnection {
+        fn drop(&mut self) {
+            clear_current_connection_id();
+        }
+    }
+    let _connection = ClearConnection;
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("pending.rdb");
+    let options = || {
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile")
+    };
+    let runtime = RedDBRuntime::with_options(options()).expect("runtime");
+    for query in [
+        "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+        "CREATE TABLE pending_payload (id INT, n INT, payload TEXT)",
+        "CREATE UNIQUE INDEX pending_payload_id ON pending_payload (id)",
+    ] {
+        runtime.execute_query(query).expect("schema");
+    }
+    let payload = "p".repeat(4096);
+    for batch in 0..10 {
+        let rows = (batch * 100..(batch + 1) * 100)
+            .map(|id| format!("({id}, 0, '{payload}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO pending_payload (id,n,payload) VALUES {rows}"
+            ))
+            .expect("history");
+    }
+    runtime.checkpoint().expect("baseline");
+    drop(runtime);
+    let runtime = RedDBRuntime::with_options(options()).expect("cold reopen");
+    runtime
+        .execute_query("SET CONFIG runtime.mvcc.autovacuum.enabled = false")
+        .expect("isolate checkpoint");
+    let bounded_checkpoint = |phase: &str| {
+        let pager = runtime.db().store().pager().expect("pager").clone();
+        let before = pager.cache_stats();
+        runtime.checkpoint().expect(phase);
+        let after = pager.cache_stats();
+        let reads = after.hits + after.misses - before.hits - before.misses;
+        assert!(
+            reads < 128,
+            "{phase} scanned unchanged history: {reads} page reads"
+        );
+    };
+
+    set_current_connection_id(101);
+    runtime.execute_query("BEGIN").expect("pending transaction");
+    runtime
+        .execute_query("UPDATE pending_payload SET n=9 WHERE id=1")
+        .expect("pending row");
+    set_current_connection_id(202);
+    runtime
+        .execute_query("UPDATE pending_payload SET n=2 WHERE id=2")
+        .expect("acknowledged row");
+    bounded_checkpoint("committed row beside pending row");
+    set_current_connection_id(101);
+    runtime.execute_query("ROLLBACK").expect("rollback");
+    set_current_connection_id(202);
+    bounded_checkpoint("rollback visibility");
+
+    set_current_connection_id(303);
+    runtime.execute_query("BEGIN").expect("later commit");
+    runtime
+        .execute_query("UPDATE pending_payload SET n=3 WHERE id=3")
+        .expect("later row");
+    set_current_connection_id(202);
+    bounded_checkpoint("second pending row");
+    set_current_connection_id(303);
+    runtime
+        .execute_query("COMMIT")
+        .expect("commit after checkpoint");
+    set_current_connection_id(202);
+    bounded_checkpoint("committed visibility without a new row mutation");
+    drop(runtime);
+    clear_current_connection_id();
+
+    let recovered = RedDBRuntime::with_options(options()).expect("reopen");
+    for (id, expected) in [(1, 0), (2, 2), (3, 3)] {
+        let read = recovered
+            .execute_query(&format!("SELECT n FROM pending_payload WHERE id={id}"))
+            .expect("durable row");
+        assert_eq!(read.result.records.len(), 1);
+        assert_eq!(
+            read.result.records[0].get("n").expect("n").to_string(),
+            expected.to_string()
+        );
+    }
+    let plan = recovered
+        .execute_query("EXPLAIN SELECT * FROM pending_payload WHERE id=2")
+        .expect("recovered index");
+    assert!(plan.result.records.iter().any(|record| record
+        .get("op")
+        .is_some_and(|value| value == &reddb_types::Value::text("index_seek"))));
+}
+
+#[test]
 fn one_committed_update_checkpoints_a_bounded_set_of_pages() {
     let directory = tempfile::tempdir().expect("temporary database");
     let path = directory.path().join("data.rdb");

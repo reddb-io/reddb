@@ -292,9 +292,26 @@ struct CheckpointVersion {
     manager: std::sync::Weak<SegmentManager>,
     segments: Vec<(u64, u64)>,
     visibility_revision: u64,
+    untracked_visibility_revision: u64,
     excluded_xids: Arc<std::collections::HashSet<u64>>,
     pending_vault: Arc<std::collections::HashSet<EntityId>>,
     format_version: u32,
+    /// Raw rows omitted or normalized in the durable image. None retains the
+    /// full validation path when more than 1,024 such rows are outstanding.
+    deferred_rows: Option<Arc<Vec<EntityId>>>,
+}
+
+impl CheckpointVersion {
+    fn remember_deferred_row(&mut self, id: EntityId) {
+        let Some(rows) = self.deferred_rows.as_mut() else {
+            return;
+        };
+        if rows.len() == 1024 {
+            self.deferred_rows = None;
+        } else {
+            Arc::make_mut(rows).push(id);
+        }
+    }
 }
 
 /// Unified storage for tables, graphs, and vectors

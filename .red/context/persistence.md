@@ -183,12 +183,17 @@ mutations belong to the published generation.
 Sparse paged checkpoints may project a bounded set of changed table rows into
 an unpinned live tree after the existing WAL sync fence. A contiguous volatile
 segment mutation journal accounts for every changed ID, and each different
-row must exactly match a retained successful WAL append. Pinned readers,
-changed visibility, unknown edits, segment replacement and tracking exhaustion
-retain the conservative replacement-tree path. Tracking is bounded by 256
+row must exactly match a retained successful WAL append. Up to 1,024 deferred
+row IDs per collection remember which raw MVCC rows were omitted or normalized
+in the published image. Later commits and rollbacks revisit those IDs alongside
+new mutations instead of scanning unchanged payloads. A different projected
+image still requires an exact retained canonical WAL record. Low-level rollback
+of a non-active xid invalidates this reuse proof. Pinned readers, unknown edits,
+segment replacement and tracking exhaustion retain the conservative
+replacement-tree path. Mutation tracking is bounded by 256
 mutations per segment, 1,024 changed IDs and at most 8 MiB of retained records
 (a smaller page-cache-derived allowance applies to smaller budgets); its bytes
-participate in store memory observations. A successful publication resets the
+participate in store memory observations, as do the deferred-ID vectors. A successful publication resets the
 retained-record allowance. The ordinary inline KV path retains no records.
 The catalog publication and WAL truncation fences remain in their existing
 order. Versioned table updates encode the canonical segment-assigned sequence

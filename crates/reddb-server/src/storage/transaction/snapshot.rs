@@ -177,6 +177,9 @@ struct ManagerState {
     /// xids that rolled back. `is_visible` MUST treat these as invisible
     /// (the writer never committed). The set is pruned lazily by VACUUM.
     aborted: HashSet<Xid>,
+    /// A low-level rollback of a non-active xid may invalidate already stored
+    /// rows without a new row mutation. Checkpoint caches must validate fully.
+    untracked_visibility_revision: u64,
     /// xids that must NOT be reclaimed by VACUUM because some higher-level
     /// object (a VCS commit, a long-lived replica snapshot) still points
     /// at them. Reference-counted so multiple pins coexist; decrementing
@@ -404,6 +407,12 @@ impl SnapshotManager {
         state.snapshot_horizons.remove(&xid);
         let was_active = state.active.remove(&xid);
         let newly_aborted = state.aborted.insert(xid);
+        if newly_aborted && !was_active {
+            state.untracked_visibility_revision = state
+                .untracked_visibility_revision
+                .checked_add(1)
+                .expect("visibility invalidation counter must not overflow");
+        }
         if was_active || newly_aborted {
             self.visibility_revision.fetch_add(1, Ordering::Release);
         }
@@ -545,10 +554,19 @@ impl SnapshotManager {
     /// Unfinished writers must be rolled back in a crash-recoverable checkpoint,
     /// without changing their live transaction state or their readers.
     pub(crate) fn checkpoint_excluded_state(&self) -> (u64, HashSet<Xid>) {
+        let (revision, excluded, _) = self.checkpoint_projection_state();
+        (revision, excluded)
+    }
+
+    pub(crate) fn checkpoint_projection_state(&self) -> (u64, HashSet<Xid>, u64) {
         let state = self.state.read();
         let mut excluded = state.aborted.clone();
         excluded.extend(state.active.iter().copied());
-        (self.visibility_revision.load(Ordering::Acquire), excluded)
+        (
+            self.visibility_revision.load(Ordering::Acquire),
+            excluded,
+            state.untracked_visibility_revision,
+        )
     }
 
     /// Is this xid still active?

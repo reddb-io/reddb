@@ -96,65 +96,104 @@ impl UnifiedStore {
 
     /// Every changed ID must be accounted for by the bounded segment journal.
     /// An unchanged tree image needs no write; a different image requires an
-    /// exact retained WAL record. Unknown edits, open/aborted versions, reader
-    /// pins and exhausted journals retain the full replacement-tree path.
+    /// exact retained WAL record. Deferred MVCC rows are revisited when their
+    /// transaction outcome changes, without inspecting unchanged payloads.
+    /// Unknown edits, reader pins and exhausted journals retain the full path.
     pub(super) fn sparse_checkpoint_tree(
         &self,
         collection: &str,
         manager: &Arc<SegmentManager>,
         tree: &Arc<BTree>,
-        before: &[(u64, u64)],
-        current: &CheckpointVersion,
+        previous: &CheckpointVersion,
+        current: &mut CheckpointVersion,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
         if Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
             return Ok(None);
         }
-        let Some(ids) = manager.checkpoint_mutations_since(before) else {
+        if previous.untracked_visibility_revision != current.untracked_visibility_revision {
+            return Ok(None);
+        }
+        let Some(deferred) = previous.deferred_rows.as_ref() else {
             return Ok(None);
         };
+        let Some(ids) = manager.checkpoint_mutations_since(&previous.segments) else {
+            return Ok(None);
+        };
+        let mut ids: std::collections::BTreeSet<_> = ids.into_iter().collect();
+        ids.extend(deferred.iter().copied());
+        ids.extend(
+            previous
+                .pending_vault
+                .symmetric_difference(&current.pending_vault)
+                .copied(),
+        );
+        if ids.len() > 1024 {
+            return Ok(None);
+        }
         let retained = self.checkpoint_durable_rows.read();
         let mut upserts = Vec::new();
+        let mut deferred = Vec::new();
         for id in ids {
             let key = id.raw().to_be_bytes().to_vec();
             let existing = tree
                 .get(&key)
                 .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             let metadata = manager.get_metadata(id);
+            let mut defer = false;
             let row = manager.get_with(id, |entity| {
                 if current.pending_vault.contains(&id)
                     || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                        && (current.excluded_xids.contains(&entity.xmin)
-                            || current.excluded_xids.contains(&entity.xmax)))
+                        && current.excluded_xids.contains(&entity.xmin))
                 {
+                    defer = true;
                     return None;
                 }
-                Some(Self::serialize_entity_record(
-                    entity,
-                    metadata.as_ref(),
-                    self.format_version(),
-                ))
+                let raw =
+                    Self::serialize_entity_record(entity, metadata.as_ref(), self.format_version());
+                let projected = if matches!(entity.data, EntityData::Row(_))
+                    && current.excluded_xids.contains(&entity.xmax)
+                {
+                    defer = true;
+                    let mut normalized = entity.clone();
+                    normalized.xmax = 0;
+                    Some(Self::serialize_entity_record(
+                        &normalized,
+                        metadata.as_ref(),
+                        self.format_version(),
+                    ))
+                } else {
+                    None
+                };
+                Some((raw, projected))
             });
+            if defer {
+                deferred.push(id);
+            }
             let Some(row) = row else {
                 if existing.is_some() {
                     return Ok(None);
                 }
                 continue;
             };
-            let Some(row) = row else {
-                return Ok(None);
+            let Some((raw, projected)) = row else {
+                if existing.is_some() {
+                    return Ok(None);
+                }
+                continue;
             };
-            if existing.as_ref() == Some(&row) {
+            if existing.as_ref() == Some(projected.as_ref().unwrap_or(&raw)) {
                 continue;
             }
-            if retained.rows.get(&(collection.to_owned(), id)) != Some(&row) {
+            if retained.rows.get(&(collection.to_owned(), id)) != Some(&raw) {
                 return Ok(None);
             }
-            upserts.push((key, row));
+            upserts.push((key, projected.unwrap_or(raw)));
         }
         drop(retained);
         if manager.checkpoint_revisions() != current.segments {
             return Ok(None);
         }
+        current.deferred_rows = Some(Arc::new(deferred));
         // All eligibility checks finish before changing the published tree.
         // These are durable logical WAL updates, just like an ordinary inline
         // write; unlogged manager edits still build an unpublished replacement.
