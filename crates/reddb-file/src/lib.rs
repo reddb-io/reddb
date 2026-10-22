@@ -44,6 +44,7 @@ pub mod physical_metadata;
 pub mod physical_metadata_policy;
 pub mod primary_replica;
 pub mod profile;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod salvage;
 pub mod scrub;
 pub mod serverless;
@@ -132,9 +133,11 @@ pub use control_store::{
     TERM_TEMP_EXTENSION,
 };
 pub use dst::{FaultClass, FaultDecision, FaultRecord, SimulationContext};
+#[cfg(not(target_arch = "wasm32"))]
+pub use embedded::EmbeddedRdbWriterLock;
 pub use embedded::{
-    EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock,
-    EmbeddedRdbWriterLock, RdbFileError, RdbFileResult, DEFAULT_FORMAT_VERSION,
+    EmbeddedRdbArtifact, EmbeddedRdbFile, EmbeddedRdbManifest, EmbeddedRdbOpen,
+    EmbeddedRdbSuperblock, RdbFileError, RdbFileResult, DEFAULT_FORMAT_VERSION,
     EMBEDDED_RDB_MANIFEST_0_OFFSET, EMBEDDED_RDB_MANIFEST_1_OFFSET,
     EMBEDDED_RDB_MANIFEST_SLOT_SIZE, EMBEDDED_RDB_MANIFEST_ZONE_END,
     EMBEDDED_RDB_SUPERBLOCK_0_OFFSET, EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
@@ -349,6 +352,7 @@ pub use primary_replica::{
     TimelineHistoryEntry, TimelineId, WalPruneResult, WalRetentionPlan, WalRetentionPolicy,
 };
 pub use profile::{FileArtifactKind, FileProfile};
+#[cfg(not(target_arch = "wasm32"))]
 pub use salvage::{
     salvage_embedded_store, StorageSalvageCollection, StorageSalvageMode, StorageSalvageReport,
     StorageSalvageSkippedRegion,

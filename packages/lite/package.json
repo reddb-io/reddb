@@ -1,0 +1,20 @@
+{
+  "name": "@reddb-io/lite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Experimental RedDB browser persistence and RQL validation; engine execution and sync are not available yet.",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/browser.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.61.1"
+  }
+}
