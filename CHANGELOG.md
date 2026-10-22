@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.25.4
+
+### Patch Changes
+
+- [#2448](https://github.com/reddb-io/reddb/pull/2448) [`322bfca`](https://github.com/reddb-io/reddb/commit/322bfcad9ba9f8ff17923787fc1dd7b2078caa32) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Checkpoint small WAL-backed table updates without rereading and replacing untouched payloads. Keep bounded mutation and WAL-image proofs, conservative fallbacks and the existing publication fences. Preserve the canonical inserted row image in versioned UPDATE WAL records, and keep runtime statistics available when embedded options open a native paged store.
+
 ## 1.25.3
 
 ## 1.25.2
