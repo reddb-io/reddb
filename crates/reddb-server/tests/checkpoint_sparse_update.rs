@@ -2,6 +2,99 @@
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 #[test]
+fn unrelated_wal_cache_pressure_does_not_disable_later_sparse_updates() {
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("pressure.rdb");
+    let options = || {
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile")
+    };
+    let runtime = RedDBRuntime::with_options(options()).expect("runtime");
+    for query in [
+        "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+        "CREATE TABLE pressure_payload (id INT, n INT, payload TEXT)",
+        "CREATE UNIQUE INDEX pressure_payload_id ON pressure_payload (id)",
+        "CREATE TABLE pressure_noise (id INT, n INT)",
+    ] {
+        runtime.execute_query(query).expect("schema");
+    }
+    let payload = "p".repeat(4096);
+    for batch in 0..10 {
+        let rows = (batch * 100..(batch + 1) * 100)
+            .map(|id| format!("({id},0,'{payload}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO pressure_payload (id,n,payload) VALUES {rows}"
+            ))
+            .expect("payload history");
+    }
+    let noise = (0..1100)
+        .map(|id| format!("({id},0)"))
+        .collect::<Vec<_>>()
+        .join(",");
+    runtime
+        .execute_query(&format!("INSERT INTO pressure_noise (id,n) VALUES {noise}"))
+        .expect("unrelated rows");
+    runtime.checkpoint().expect("baseline");
+    let payload_root = || {
+        let page = runtime
+            .db()
+            .store()
+            .pager()
+            .expect("pager")
+            .read_manifest_page()
+            .expect("published manifest");
+        let data = &page.as_bytes()[reddb_server::storage::engine::HEADER_SIZE..];
+        let header = reddb_file::decode_native_paged_metadata_header(data)
+            .expect("metadata header")
+            .expect("paged metadata");
+        let mut position = reddb_file::METADATA_HEADER_BYTES;
+        for _ in 0..header.collection_count {
+            let collection = reddb_file::decode_native_paged_collection_root(data, &mut position)
+                .expect("collection root");
+            if collection.collection == "pressure_payload" {
+                return collection.root_page;
+            }
+        }
+        panic!("payload tree missing from published catalog");
+    };
+    let root_before = payload_root();
+    runtime
+        .execute_query("UPDATE pressure_noise SET n=1")
+        .expect("exceed retained WAL row capacity");
+    runtime
+        .execute_query("UPDATE pressure_payload SET n=1256 WHERE id=2")
+        .expect("acknowledged update after cache saturation");
+    let pager = runtime.db().store().pager().expect("pager").clone();
+    let before = pager.cache_stats();
+    runtime.checkpoint().expect("checkpoint under pressure");
+    let after = pager.cache_stats();
+    let reads = after.hits + after.misses - before.hits - before.misses;
+    assert_eq!(
+        payload_root(),
+        root_before,
+        "unrelated WAL pressure rebuilt payload tree ({reads} total reads, including noise)"
+    );
+    drop(pager);
+    drop(runtime);
+    let recovered = RedDBRuntime::with_options(options()).expect("reopen under pressure");
+    for (query, expected) in [
+        ("SELECT n FROM pressure_payload WHERE id=2", "1256"),
+        ("SELECT n FROM pressure_noise WHERE id=1099", "1"),
+    ] {
+        let result = recovered.execute_query(query).expect("durable update");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("n").expect("n").to_string(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn sparse_checkpoint_with_pending_writer_survives_process_exit() {
     use reddb_server::runtime::mvcc::set_current_connection_id;
     const CHILD_PATH: &str = "REDDB_TEST_PENDING_SPARSE_CHECKPOINT_PATH";

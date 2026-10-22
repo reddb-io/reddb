@@ -194,7 +194,9 @@ replacement-tree path. Mutation tracking is bounded by 256
 mutations per segment, 1,024 changed IDs and at most 8 MiB of retained records
 (a smaller page-cache-derived allowance applies to smaller budgets); its bytes
 participate in store memory observations, as do the deferred-ID vectors. A successful publication resets the
-retained-record allowance. The ordinary inline KV path retains no records.
+retained-record allowance. Exhaustion evicts retained images without disabling
+later retention; evicted or oversized images still require conservative validation.
+The ordinary inline KV path retains no records.
 The catalog publication and WAL truncation fences remain in their existing
 order. Versioned table updates encode the canonical segment-assigned sequence
 image in their WAL, rather than a pre-insertion caller clone.

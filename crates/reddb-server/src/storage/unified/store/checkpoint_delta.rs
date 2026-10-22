@@ -6,7 +6,6 @@ use super::*;
 pub(super) struct DurableRows {
     rows: HashMap<(String, EntityId), Vec<u8>>,
     bytes: usize,
-    disabled: bool,
 }
 
 impl DurableRows {
@@ -15,9 +14,6 @@ impl DurableRows {
     }
 
     fn remember(&mut self, collection: &str, record: Vec<u8>, limit: usize) {
-        if self.disabled {
-            return;
-        }
         let frame = match reddb_file::decode_native_entity_record_frame(&record) {
             Ok(frame) => frame,
             Err(_) => return,
@@ -40,7 +36,7 @@ impl DurableRows {
         } else {
             0
         };
-        let bytes = self
+        let mut bytes = self
             .bytes
             .saturating_sub(old)
             .saturating_add(record.capacity())
@@ -49,8 +45,13 @@ impl DurableRows {
             self.rows.clear();
             self.rows.shrink_to_fit();
             self.bytes = 0;
-            self.disabled = true;
-            return;
+            // Evicted images retain the conservative validation path. Keep
+            // accepting later WAL images so unrelated pressure does not force
+            // every subsequent changed collection through a full rewrite.
+            bytes = record.capacity().saturating_add(collection.len() + 128);
+            if bytes > limit {
+                return;
+            }
         }
         self.rows.insert(key, record);
         self.bytes = bytes;
@@ -73,9 +74,6 @@ impl UnifiedStore {
             })
             .clamp(16 * 1024, 8 * 1024 * 1024);
         let mut retained = self.checkpoint_durable_rows.write();
-        if retained.disabled {
-            return;
-        }
         for action in actions {
             match action {
                 StoreWalAction::UpsertEntityRecord { collection, record } => {
@@ -213,5 +211,70 @@ impl UnifiedStore {
             std::process::exit(176);
         }
         Ok(Some(Arc::clone(tree)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(id: u64, payload_bytes: usize) -> Vec<u8> {
+        let mut entity = UnifiedEntity::table_row(
+            EntityId::new(id),
+            "rows",
+            id,
+            vec![Value::text("p".repeat(payload_bytes))],
+        );
+        entity.created_at = 0;
+        entity.updated_at = 0;
+        UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11)
+    }
+
+    #[test]
+    fn row_capacity_eviction_keeps_accepting_exact_wal_images() {
+        let mut retained = DurableRows::default();
+        let limit = 8 * 1024 * 1024;
+        for id in 1..=1025 {
+            retained.remember("rows", record(id, 16), limit);
+            assert!(retained.rows.len() <= 1024);
+            assert!(retained.memory_bytes() <= limit);
+        }
+        assert!(!retained
+            .rows
+            .contains_key(&("rows".into(), EntityId::new(1))));
+        assert_eq!(
+            retained.rows.get(&("rows".into(), EntityId::new(1025))),
+            Some(&record(1025, 16))
+        );
+    }
+
+    #[test]
+    fn byte_capacity_and_oversized_images_do_not_disable_later_retention() {
+        let mut retained = DurableRows::default();
+        let limit = 16 * 1024;
+        for id in 1..=200 {
+            retained.remember("rows", record(id, 256), limit);
+            assert!(retained.memory_bytes() <= limit);
+        }
+        assert!(retained.rows.len() < 200, "byte pressure must evict images");
+        assert_eq!(
+            retained.rows.get(&("rows".into(), EntityId::new(200))),
+            Some(&record(200, 256))
+        );
+        let mut oversized = record(201, limit);
+        // The entity codec compresses repeated payloads. The retention budget
+        // accounts for allocated capacity, so explicitly exceed that allowance.
+        oversized.reserve_exact(limit + 1);
+        assert!(oversized.capacity() > limit);
+        retained.remember("rows", oversized, limit);
+        assert!(retained.memory_bytes() <= limit);
+        assert!(!retained
+            .rows
+            .contains_key(&("rows".into(), EntityId::new(201))));
+        retained.remember("rows", record(202, 16), limit);
+        assert_eq!(
+            retained.rows.get(&("rows".into(), EntityId::new(202))),
+            Some(&record(202, 16))
+        );
     }
 }
