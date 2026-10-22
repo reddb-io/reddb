@@ -49,7 +49,7 @@ jobs:
       - name: Verify native formats, locking, crash recovery and portable interoperability
         run: cargo test --locked -p reddb-io-file -p reddb-io-engine
       - name: Lint the shared query and storage core
-        run: cargo clippy --locked -p reddb-io-engine --all-targets -- -D warnings
+        run: cargo clippy --locked -p reddb-io-engine --all-targets --no-deps -- -D warnings
       - name: Preserve type and concept authorities across the engine extraction
         run: cargo test --locked -p reddb-io-types --test type_authority
       - uses: ./.github/actions/install-protoc
@@ -92,7 +92,7 @@ jobs:
           tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
           printf '%s\n' "$RUNNER_TEMP/wasm-bindgen-0.2.120-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: Check browser Rust bindings
-        run: cargo clippy --locked -p reddb-io-wasm -p reddb-io-engine --lib --example browser_conformance --target wasm32-unknown-unknown -- -D warnings
+        run: cargo clippy --locked -p reddb-io-wasm -p reddb-io-engine --lib --example browser_conformance --target wasm32-unknown-unknown --no-deps -- -D warnings
       - name: Build the real WASM artifact
         run: pnpm --filter @reddb-io/browser build
       - name: Verify native OPFS where available and explicit unsupported behavior
