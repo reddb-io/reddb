@@ -706,7 +706,7 @@ impl RedDB {
     }
 
     pub fn embedded_pending_wal_records(&self) -> Option<u64> {
-        if !embedded_single_file_selected(&self.options) {
+        if self.paged_mode || !embedded_single_file_selected(&self.options) {
             return None;
         }
         let path = self.path.as_ref()?;
