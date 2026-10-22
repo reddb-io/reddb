@@ -1035,7 +1035,7 @@ impl Pager {
     /// Get database header
     /// Pages available to the allocator, including pages on unloaded trunks.
     pub fn free_page_count(&self) -> Result<u32, PagerError> {
-        Ok(self.freelist_read()?.total_free())
+        Ok(self.freelist_write()?.total_free())
     }
 
     pub fn header(&self) -> Result<DatabaseHeader, PagerError> {
