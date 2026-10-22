@@ -2,6 +2,75 @@
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 #[test]
+fn unrelated_wal_cache_pressure_does_not_disable_later_sparse_updates() {
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("pressure.rdb");
+    let options = || {
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile")
+    };
+    let runtime = RedDBRuntime::with_options(options()).expect("runtime");
+    for query in [
+        "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+        "CREATE TABLE pressure_payload (id INT, n INT, payload TEXT)",
+        "CREATE UNIQUE INDEX pressure_payload_id ON pressure_payload (id)",
+        "CREATE TABLE pressure_noise (id INT, n INT)",
+    ] {
+        runtime.execute_query(query).expect("schema");
+    }
+    let payload = "p".repeat(4096);
+    for batch in 0..10 {
+        let rows = (batch * 100..(batch + 1) * 100)
+            .map(|id| format!("({id},0,'{payload}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO pressure_payload (id,n,payload) VALUES {rows}"
+            ))
+            .expect("payload history");
+    }
+    let noise = (0..1100)
+        .map(|id| format!("({id},0)"))
+        .collect::<Vec<_>>()
+        .join(",");
+    runtime
+        .execute_query(&format!("INSERT INTO pressure_noise (id,n) VALUES {noise}"))
+        .expect("unrelated rows");
+    runtime.checkpoint().expect("baseline");
+    runtime
+        .execute_query("UPDATE pressure_noise SET n=1")
+        .expect("exceed retained WAL row capacity");
+    runtime
+        .execute_query("UPDATE pressure_payload SET n=1256 WHERE id=2")
+        .expect("acknowledged update after cache saturation");
+    let pager = runtime.db().store().pager().expect("pager").clone();
+    let before = pager.cache_stats();
+    runtime.checkpoint().expect("checkpoint under pressure");
+    let after = pager.cache_stats();
+    let reads = after.hits + after.misses - before.hits - before.misses;
+    assert!(
+        reads < 256,
+        "unrelated WAL pressure scanned payload history: {reads} reads"
+    );
+    drop(pager);
+    drop(runtime);
+    let recovered = RedDBRuntime::with_options(options()).expect("reopen under pressure");
+    for (query, expected) in [
+        ("SELECT n FROM pressure_payload WHERE id=2", "1256"),
+        ("SELECT n FROM pressure_noise WHERE id=1099", "1"),
+    ] {
+        let result = recovered.execute_query(query).expect("durable update");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("n").expect("n").to_string(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn sparse_checkpoint_with_pending_writer_survives_process_exit() {
     use reddb_server::runtime::mvcc::set_current_connection_id;
     const CHILD_PATH: &str = "REDDB_TEST_PENDING_SPARSE_CHECKPOINT_PATH";
