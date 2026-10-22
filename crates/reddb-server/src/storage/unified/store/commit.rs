@@ -930,7 +930,9 @@ impl UnifiedStore {
         if let Some(commit) = &self.commit {
             commit
                 .append_actions(&actions.actions)
-                .map_err(StoreError::Io)
+                .map_err(StoreError::Io)?;
+            self.remember_checkpoint_rows(actions.actions);
+            Ok(())
         } else {
             self.flush_paged_state()
         }
@@ -982,6 +984,14 @@ impl UnifiedStore {
         &self,
         actions: impl IntoIterator<Item = StoreWalAction>,
     ) -> Result<(), StoreError> {
+        self.finish_paged_write_for_projection(actions, false)
+    }
+
+    pub(crate) fn finish_paged_write_for_projection(
+        &self,
+        actions: impl IntoIterator<Item = StoreWalAction>,
+        track: bool,
+    ) -> Result<(), StoreError> {
         let actions: Vec<StoreWalAction> = actions.into_iter().collect();
         if deferred_store_wal_capture_active() {
             let captured = capture_deferred_store_wal_actions(actions);
@@ -991,7 +1001,7 @@ impl UnifiedStore {
         if self.config.embedded_wal_path.is_some() {
             return self.append_embedded_store_wal_actions(&actions);
         }
-        match self.config.durability_mode {
+        let result = match self.config.durability_mode {
             DurabilityMode::Strict => {
                 if let Some(commit) = &self.commit {
                     commit.append_actions(&actions).map_err(StoreError::Io)?;
@@ -1006,7 +1016,12 @@ impl UnifiedStore {
                     self.flush_paged_state()
                 }
             }
+        };
+        result?;
+        if track {
+            self.remember_checkpoint_rows(actions);
         }
+        Ok(())
     }
 
     pub(crate) fn apply_encoded_store_wal_action(&self, payload: &[u8]) -> Result<(), StoreError> {

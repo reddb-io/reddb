@@ -108,10 +108,13 @@ impl UnifiedStore {
             }
         }
         let records: Vec<Vec<u8>> = serialized.into_iter().map(|(_id, record)| record).collect();
-        self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
-            collection: collection.to_string(),
-            records,
-        }])?;
+        self.finish_paged_write_for_projection(
+            [StoreWalAction::BulkUpsertEntityRecords {
+                collection: collection.to_string(),
+                records,
+            }],
+            skip_btree,
+        )?;
         Ok(())
     }
 
@@ -203,10 +206,13 @@ impl UnifiedStore {
         // replay reapplies the upsert to the B-tree, so durability
         // is unchanged.
         let records: Vec<Vec<u8>> = serialized.into_iter().map(|(_id, record)| record).collect();
-        self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
-            collection: collection.to_string(),
-            records,
-        }])?;
+        self.finish_paged_write_for_projection(
+            [StoreWalAction::BulkUpsertEntityRecords {
+                collection: collection.to_string(),
+                records,
+            }],
+            skip_btree,
+        )?;
 
         Ok(())
     }
@@ -1152,14 +1158,27 @@ impl UnifiedStore {
         let old_metadata = manager.get_metadata(old_id);
         let new_metadata = manager.get_metadata(new_id);
         let fv = self.format_version();
+        // The inserted segment assigns the sequence identity. Persist that
+        // canonical image, rather than the caller's pre-insertion clone.
         let records = vec![
-            Self::serialize_entity_record(&old_version, old_metadata.as_ref(), fv),
-            Self::serialize_entity_record(&new_version, new_metadata.as_ref(), fv),
+            manager
+                .get_with(old_id, |entity| {
+                    Self::serialize_entity_record(entity, old_metadata.as_ref(), fv)
+                })
+                .ok_or(StoreError::EntityNotFound(old_id))?,
+            manager
+                .get_with(new_id, |entity| {
+                    Self::serialize_entity_record(entity, new_metadata.as_ref(), fv)
+                })
+                .ok_or(StoreError::EntityNotFound(new_id))?,
         ];
-        self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
-            collection: collection.to_string(),
-            records,
-        }])?;
+        self.finish_paged_write_for_projection(
+            [StoreWalAction::BulkUpsertEntityRecords {
+                collection: collection.to_string(),
+                records,
+            }],
+            true,
+        )?;
 
         Ok(())
     }
@@ -1811,9 +1830,11 @@ impl UnifiedStore {
             let manager_stats = manager.stats();
             stats.total_entities += manager_stats.total_entities;
             stats.total_memory_bytes += manager_stats.total_memory_bytes;
+            stats.total_memory_bytes += manager.checkpoint_tracking_bytes();
             stats.collections.insert(name.clone(), manager_stats);
         }
 
+        stats.total_memory_bytes += self.checkpoint_durable_rows.read().memory_bytes();
         stats
     }
 

@@ -772,6 +772,7 @@ impl UnifiedStore {
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
             checkpoint_versions: RwLock::new(HashMap::new()),
+            checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
             context_index: ContextIndex::new(),
             entity_cache: EntityCache::new(),
@@ -860,6 +861,7 @@ impl UnifiedStore {
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
             checkpoint_versions: RwLock::new(HashMap::new()),
+            checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
             context_index: ContextIndex::new(),
             entity_cache: EntityCache::new(),
@@ -1354,6 +1356,27 @@ impl UnifiedStore {
                     continue;
                 }
             }
+            if let (Some(previous), Some(tree)) =
+                (previous_versions.get(name), btree_indices.get(name))
+            {
+                if previous.manager.ptr_eq(&version.manager)
+                    && previous.format_version == version.format_version
+                    && checkpoint_visibility_matches(previous, &version, manager)
+                {
+                    if let Some(tree) = self.sparse_checkpoint_tree(
+                        name,
+                        manager,
+                        tree,
+                        &previous.segments,
+                        &version,
+                    )? {
+                        collection_roots.push((name.clone(), tree.root_page_id()));
+                        rebuilt_indices.insert(name.clone(), tree);
+                        checkpoint_versions.insert(name.clone(), version);
+                        continue;
+                    }
+                }
+            }
             checkpoint_versions.insert(name.clone(), version);
             let btree = self.checkpoint_tree(
                 pager,
@@ -1439,6 +1462,7 @@ impl UnifiedStore {
         if let Some(commit) = &self.commit {
             commit.truncate().map_err(StoreError::Io)?;
         }
+        *self.checkpoint_durable_rows.write() = Default::default();
 
         Ok(())
     }
