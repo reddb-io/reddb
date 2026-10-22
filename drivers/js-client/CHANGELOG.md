@@ -1,5 +1,7 @@
 # @reddb-io/client
 
+## 1.25.4
+
 ## 1.25.3
 
 ### Patch Changes
