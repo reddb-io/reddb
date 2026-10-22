@@ -72,5 +72,5 @@ jobs:
         run: cargo clippy --locked -p reddb-io-wasm --target wasm32-unknown-unknown -- -D warnings
       - name: Build the real WASM artifact
         run: pnpm --filter @reddb-io/lite build
-      - name: Verify OPFS durability, ownership, RQL validation and error paths
+      - name: Verify native OPFS where available and explicit unsupported behavior
         run: pnpm --filter @reddb-io/lite test
