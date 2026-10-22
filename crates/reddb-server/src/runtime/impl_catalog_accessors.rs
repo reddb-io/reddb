@@ -154,17 +154,10 @@ impl RedDBRuntime {
             .get_collection(collection)
             .ok_or_else(|| RedDBError::NotFound(collection.to_string()))?;
 
-        let mut entities = manager.query_all(|_| true);
-        entities.sort_by_key(|entity| entity.id.raw());
-
         let offset = cursor.map(|cursor| cursor.offset).unwrap_or(0);
-        let total = entities.len();
-        let end = total.min(offset.saturating_add(limit.max(1)));
-        let items = if offset >= total {
-            Vec::new()
-        } else {
-            entities[offset..end].to_vec()
-        };
+        let limit = limit.max(1);
+        let (total, items) = manager.page_in_id_order(offset, limit);
+        let end = total.min(offset.saturating_add(limit));
         let next = (end < total).then_some(ScanCursor { offset: end });
 
         Ok(ScanPage {

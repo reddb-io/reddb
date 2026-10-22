@@ -1530,6 +1530,26 @@ impl SegmentManager {
         self.for_each_entity_source_in_id_order(|_, entity| visit(entity));
     }
 
+    /// Keep the physical scan's global ID order while cloning only its page.
+    pub(crate) fn page_in_id_order(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> (usize, Vec<UnifiedEntity>) {
+        let end = offset.saturating_add(limit);
+        let mut total = 0;
+        let mut items = Vec::with_capacity(limit.min(self.count()));
+        self.for_each_entity_in_id_order(|entity| {
+            if total >= offset && total < end {
+                items.push(entity.clone());
+            }
+            total += 1;
+            true
+        });
+        self.restore_owned_row_schemas(items.iter_mut());
+        (total, items)
+    }
+
     pub(crate) fn for_each_entity_with_metadata_in_id_order(
         &self,
         mut visit: impl FnMut(&UnifiedEntity, Option<Metadata>) -> bool,
@@ -2799,6 +2819,56 @@ mod tests {
     use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
     use crate::storage::unified::entity::{EntityData, EntityKind, RowData};
     use reddb_types::Value;
+
+    #[test]
+    fn physical_pages_keep_global_order_across_segments_and_deleted_slots() {
+        let manager = SegmentManager::new("pages");
+        for group in [[50, 10], [30, 20]] {
+            for id in group {
+                let mut entity = UnifiedEntity::table_row(EntityId::new(id), "pages", id, vec![]);
+                entity.data = EntityData::Row(RowData::with_names(
+                    vec![Value::Integer(id as i64)],
+                    vec!["id".into()],
+                ));
+                manager.insert(entity).unwrap();
+            }
+            manager.force_seal().unwrap();
+        }
+        manager
+            .insert(UnifiedEntity::table_row(
+                EntityId::new(40),
+                "pages",
+                40,
+                vec![],
+            ))
+            .unwrap();
+        let (total, page) = manager.page_in_id_order(1, 2);
+        assert_eq!(total, 5);
+        assert_eq!(
+            page.iter()
+                .map(|entity| entity.id.raw())
+                .collect::<Vec<_>>(),
+            [20, 30]
+        );
+        let EntityData::Row(row) = &page[0].data else {
+            panic!("row")
+        };
+        assert_eq!(row.get_field("id"), Some(&Value::Integer(20)));
+        manager.delete(EntityId::new(30)).unwrap();
+        let (total, page) = manager.page_in_id_order(1, 2);
+        assert_eq!(total, 4);
+        assert_eq!(
+            page.iter()
+                .map(|entity| entity.id.raw())
+                .collect::<Vec<_>>(),
+            [20, 40]
+        );
+        for offset in [4, usize::MAX] {
+            let (total, page) = manager.page_in_id_order(offset, 2);
+            assert_eq!(total, 4);
+            assert!(page.is_empty());
+        }
+    }
 
     fn lookup_version(id: u64, key: &str, xmin: u64, xmax: u64) -> UnifiedEntity {
         let mut entity = UnifiedEntity::table_row(EntityId::new(id), "keys", id, vec![]);

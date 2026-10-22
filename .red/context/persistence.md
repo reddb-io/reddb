@@ -25,6 +25,13 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 - **Paced maintenance** — per [ADR 0038](../adr/0038-embedded-single-file-zoned-rdb.md) §3, the rule that all storage maintenance (consolidation, scrub, append-only compaction, archival) runs as incremental tick-paced work with bounded per-tick cost. Bursty background maintenance threads (the Cassandra compaction model) are prohibited in every profile.
 - **Scale contract** — the per-profile promise about dataset size vs memory: embedded contracts working set ≤ memory budget; the server profile carries the disk-residency roadmap (dataset > RAM, ADR 0038 phase 4); serverless contracts strict boundedness. Documented in ADR 0038 §1.
 
+Physical collection scans retain global entity-ID order while cloning only the
+requested page and restoring its owned row schemas. The ordering metadata still
+scales with entity count; payload memory does not scale with the skipped prefix.
+HTTP offsets pass directly to the runtime cursor. Total counts, next offsets and
+empty beyond-end pages describe the same physical scan, including historical
+versions; this does not introduce logical MVCC filtering or a transaction snapshot.
+
 ## Checkpoint reuse
 
 Checkpoints exclude row creators whose transactions are active or aborted and
