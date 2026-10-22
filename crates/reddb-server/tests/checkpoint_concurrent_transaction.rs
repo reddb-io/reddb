@@ -65,6 +65,7 @@ fn checkpoint_child(path: &Path, explicit: bool, insert_batch: bool) {
     }
     let pager = Arc::clone(runtime.db().store().pager().expect("paged store"));
     let pages = pager.page_count().expect("page count");
+    let free = pager.free_page_count().expect("free page count");
     let finished = Arc::new(AtomicBool::new(false));
     let checkpoint = {
         let runtime = Arc::clone(&runtime);
@@ -74,10 +75,16 @@ fn checkpoint_child(path: &Path, explicit: bool, insert_batch: bool) {
             finished.store(true, Ordering::SeqCst);
         })
     };
-    // Page allocation precedes the final flush. File length changes too late
-    // to establish that a transaction begins during checkpoint serialization.
+    // Allocation precedes the final flush, including reuse from the free list.
+    // File length alone misses reused pages and changes too late to establish
+    // that a transaction begins during checkpoint serialization.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while pager.page_count().expect("checkpoint progress") <= pages {
+    while pager.page_count().expect("checkpoint progress") <= pages
+        && pager
+            .free_page_count()
+            .expect("checkpoint free-page progress")
+            == free
+    {
         assert!(
             !finished.load(Ordering::SeqCst),
             "checkpoint finished before allocation window"
