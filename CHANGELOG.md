@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.26.0
+
+### Minor Changes
+
+- [#2459](https://github.com/reddb-io/reddb/pull/2459) [`85409bd`](https://github.com/reddb-io/reddb/commit/85409bdf800d522e331f45fafd50425c8ac868fd) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Standardize the container default at `/data/red/database.rdb`, keeping `/data`
+  as the persistent volume. Explicit `--path` and `REDDB_DATA_PATH` overrides
+  remain supported. Existing volumes using the previous default must pin
+  `REDDB_DATA_PATH=/data/data.rdb` before upgrading, or migrate the complete
+  native file family with all writers stopped; changing the default does not
+  migrate existing data.
+
+### Patch Changes
+
+- [#2461](https://github.com/reddb-io/reddb/pull/2461) [`542446a`](https://github.com/reddb-io/reddb/commit/542446a7b628460984288d693a532ac7af09542c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Avoid rewriting an unchanged collection during paged checkpoints when a pending
+  transaction and updates to more than 1,024 rows exhaust retained row images.
+  Keep bounded references to the existing durable WAL, compare exact row bytes,
+  invalidate proofs on WAL truncation, and project updates in bounded batches.
+  Persistent file and WAL formats remain unchanged.
+
+  Preserve earlier dirty-row provenance across completed physical GC batches,
+  including already-absent aborted rows, so a later reclamation burst cannot
+  force a whole-collection rewrite after otherwise incremental checkpoints.
+
 ## 1.25.7
 
 ### Patch Changes
