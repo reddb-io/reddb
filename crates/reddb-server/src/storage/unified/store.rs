@@ -298,7 +298,10 @@ struct CheckpointVersion {
     format_version: u32,
     /// Raw rows omitted or normalized in the durable image. None retains the
     /// full validation path when more than 1,024 such rows are outstanding.
+    /// Also carries bounded unprojected IDs across completed inline GC batches.
     deferred_rows: Option<Arc<Vec<EntityId>>>,
+    /// Inline GC advanced the segment proof past rows still awaiting projection.
+    has_unprojected_rows: bool,
 }
 
 impl CheckpointVersion {
@@ -433,6 +436,7 @@ struct RetiredBTree {
 
 mod builder;
 mod checkpoint_delta;
+mod checkpoint_wal;
 mod commit;
 mod impl_entities;
 mod impl_file;

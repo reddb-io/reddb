@@ -79,6 +79,64 @@ pub fn encode_store_wal_action_frame(frame: &StoreWalActionFrame) -> io::Result<
     Ok(out)
 }
 
+/// Visit borrowed entity records and their byte offsets within an upsert action.
+/// Other action kinds carry no retained row proof. No record payload is cloned.
+pub fn visit_store_wal_entity_records(
+    bytes: &[u8],
+    mut visit: impl FnMut(&str, usize, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    if bytes.len() < 2 || bytes[0] != STORE_WAL_ACTION_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid store WAL action header",
+        ));
+    }
+    if !matches!(bytes[1], 3 | 5) {
+        return Ok(());
+    }
+    fn field<'a>(bytes: &'a [u8], position: &mut usize) -> io::Result<(usize, &'a [u8])> {
+        let length = read_u32(bytes, position)? as usize;
+        let start = *position;
+        let end = start.checked_add(length).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store WAL field length overflow",
+            )
+        })?;
+        let value = bytes.get(start..end).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "truncated store WAL field")
+        })?;
+        *position = end;
+        Ok((start, value))
+    }
+    let mut position = 2;
+    let (_, collection) = field(bytes, &mut position)?;
+    let collection = std::str::from_utf8(collection)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let count = if bytes[1] == 3 {
+        1
+    } else {
+        read_u32(bytes, &mut position)? as usize
+    };
+    if count > bytes.len().saturating_sub(position) / std::mem::size_of::<u32>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "implausible store WAL record count",
+        ));
+    }
+    for _ in 0..count {
+        let (offset, record) = field(bytes, &mut position)?;
+        visit(collection, offset, record)?;
+    }
+    if position != bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "trailing store WAL action bytes",
+        ));
+    }
+    Ok(())
+}
+
 pub fn decode_store_wal_action_frame(bytes: &[u8]) -> io::Result<StoreWalActionFrame> {
     if bytes.len() < 2 {
         return Err(io::Error::new(

@@ -377,8 +377,8 @@ pub use spill::{
     SPILL_FILE_HEADER_LEN, SPILL_FILE_MAGIC, SPILL_FILE_VERSION_V1, SPILL_FILE_VERSION_V2,
 };
 pub use store_wal::{
-    decode_store_wal_action_frame, encode_store_wal_action_frame, StoreWalActionFrame,
-    STORE_WAL_ACTION_VERSION,
+    decode_store_wal_action_frame, encode_store_wal_action_frame, visit_store_wal_entity_records,
+    StoreWalActionFrame, STORE_WAL_ACTION_VERSION,
 };
 pub use table_def::{decode_table_def, encode_table_def, TABLE_DEF_MAGIC};
 pub use transaction_wal::{
@@ -404,10 +404,11 @@ pub use wal_header::{
 };
 pub use wal_record::{
     decode_main_wal_record_frame, decode_main_wal_record_frame_with_authority,
-    encode_main_wal_record_frame, encode_main_wal_record_frame_into,
-    encode_main_wal_record_frame_with_authority, encode_main_wal_record_frame_with_authority_into,
-    MainWalCompression, MainWalRecordAuthority, MainWalRecordFrame, MainWalRecordFrameRef,
-    MainWalRecordType, MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD,
+    encode_main_wal_commit_batch_with_visitor, encode_main_wal_record_frame,
+    encode_main_wal_record_frame_into, encode_main_wal_record_frame_with_authority,
+    encode_main_wal_record_frame_with_authority_into, MainWalCompression, MainWalRecordAuthority,
+    MainWalRecordFrame, MainWalRecordFrameRef, MainWalRecordType,
+    MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD,
 };
 pub use zone_map::{
     read_zone_map_sidecar, write_zone_map_sidecar, PersistedZone, ZoneMapPersistError,

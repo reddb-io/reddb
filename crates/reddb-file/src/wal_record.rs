@@ -233,6 +233,42 @@ pub fn encode_main_wal_record_frame(frame: &MainWalRecordFrame, term: u64) -> io
     )
 }
 
+/// Encode the ordinary commit frame and visit each action's offset in it.
+/// Framing widths and the trailing checksum stay owned by this module.
+pub fn encode_main_wal_commit_batch_with_visitor(
+    tx_id: u64,
+    actions: &[Vec<u8>],
+    term: u64,
+    mut visit: impl FnMut(u64, &[u8]) -> io::Result<()>,
+) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    encode_main_wal_record_frame_into(
+        MainWalRecordFrameRef::TxCommitBatch { tx_id, actions },
+        term,
+        &mut bytes,
+    )?;
+    let width = std::mem::size_of::<u32>();
+    let suffix = actions.iter().try_fold(width, |size, action| {
+        size.checked_add(width)
+            .and_then(|size| size.checked_add(action.len()))
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "WAL action offsets overflow")
+            })
+    })?;
+    let mut offset = bytes.len().checked_sub(suffix).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WAL action offsets exceed frame",
+        )
+    })?;
+    for action in actions {
+        offset += width;
+        visit(offset as u64, action)?;
+        offset += action.len();
+    }
+    Ok(bytes)
+}
+
 pub fn encode_main_wal_record_frame_with_authority(
     frame: &MainWalRecordFrame,
     authority: MainWalRecordAuthority,
