@@ -443,3 +443,118 @@ fn native_mvcc_paths_use_the_shared_manager_and_entity_identity() {
         "earlier snapshot keeps its exclusions"
     );
 }
+
+#[test]
+fn shared_entity_reads_use_native_persisted_rows_and_timestamps() {
+    use reddb_engine::storage::entity::UnifiedEntity;
+    use reddb_engine::transaction::read::{resolve_logical_id, visibility_check, SnapshotContext};
+    use reddb_server::storage::StorageDeployPreset;
+    use std::collections::HashSet;
+
+    for paged in [false, true] {
+        let directory = tempfile::tempdir().expect("temporary entity database");
+        let mut options = RedDBOptions::persistent(directory.path().join("entities.rdb"));
+        if paged {
+            options = options
+                .with_storage_profile(StorageDeployPreset::Serverless.selection())
+                .expect("paged fixture profile");
+        }
+        let (logical_id, physical_id, created_at, updated_at) = {
+            let runtime =
+                RedDBRuntime::with_options(options.clone()).expect("native runtime opens");
+            for sql in [
+                "CREATE TABLE entity_rows (id INTEGER, n INTEGER)",
+                "INSERT INTO entity_rows (id,n) VALUES (1,7)",
+                "BEGIN",
+                "UPDATE entity_rows SET n = 8 WHERE id = 1",
+                "COMMIT",
+            ] {
+                runtime
+                    .execute_query(sql)
+                    .expect("native fixture statement");
+            }
+            runtime.checkpoint().expect("committed row checkpoint");
+            let rows = runtime
+                .db()
+                .store()
+                .get_collection("entity_rows")
+                .expect("collection exists")
+                .query_all(|entity| entity.xmax == 0);
+            let entity: &UnifiedEntity = rows.first().expect("one committed row");
+            assert_eq!(rows.len(), 1);
+            assert!(entity.has_explicit_logical_id());
+            (
+                entity.logical_id(),
+                entity.id,
+                entity.created_at,
+                entity.updated_at,
+            )
+        };
+        let runtime = RedDBRuntime::with_options(options).expect("native database reopens");
+        let context: reddb_server::runtime::mvcc::SnapshotContext = SnapshotContext {
+            snapshot: runtime.current_snapshot(),
+            manager: runtime.snapshot_manager(),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+        let store = runtime.db().store();
+        for history in [false, true] {
+            let entity: reddb_server::storage::UnifiedEntity = resolve_logical_id(
+                store.as_ref(),
+                "entity_rows",
+                logical_id,
+                history,
+                |entity| visibility_check(&context, entity.xmin, entity.xmax),
+            )
+            .expect("shared selector resolves native persisted row");
+            assert_eq!(entity.id, physical_id);
+            assert_eq!(entity.created_at, created_at);
+            assert_eq!(entity.updated_at, updated_at);
+            assert_eq!(
+                entity.data.as_row().expect("table row").get_field("n"),
+                Some(&Value::Integer(8))
+            );
+            assert!(reddb_server::runtime::mvcc::entity_visible_with_context(
+                Some(&context),
+                &entity
+            ));
+        }
+        let result = runtime
+            .execute_query("SELECT n FROM entity_rows WHERE id = 1")
+            .expect("native SQL reads same row");
+        assert_eq!(result.result.records[0].get("n"), Some(&Value::Integer(8)));
+    }
+}
+
+#[test]
+fn native_moderation_gate_stays_ahead_of_shared_mvcc_reads() {
+    use reddb_engine::storage::entity::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_engine::transaction::read::{visibility_check, SnapshotContext};
+    use std::collections::HashSet;
+
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("native runtime");
+    let context = SnapshotContext {
+        snapshot: runtime.current_snapshot(),
+        manager: runtime.snapshot_manager(),
+        own_xids: HashSet::new(),
+        requires_index_fallback: false,
+        serializable_reader: None,
+    };
+    for status in ["pending", "rejected", ""] {
+        let mut row = UnifiedEntity::table_row(EntityId::new(1024), "moderated", 1, vec![]);
+        row.data = EntityData::Row(RowData::with_names(
+            vec![Value::text(status)],
+            vec!["__moderation_status".into()],
+        ));
+        assert!(visibility_check(&context, row.xmin, row.xmax));
+        assert_eq!(
+            reddb_server::runtime::mvcc::entity_visible_with_context(Some(&context), &row),
+            status.is_empty()
+        );
+        assert_eq!(
+            reddb_server::runtime::mvcc::entity_visible_with_context(None, &row),
+            status.is_empty()
+        );
+    }
+}

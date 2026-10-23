@@ -150,6 +150,27 @@ expose transactions through the JS/TS SDK or qualify durable browser transaction
 recovery. Storage-backed dispatch, write conflict validation, WAL publication and
 recovery still require the runtime integration below.
 
+## Shared entities and read visibility
+
+The native `UnifiedEntity` model (rows/documents, graph, vectors, time series,
+queues and auxiliary references/embeddings) now lives in
+`reddb-engine::storage::entity`. Native paths re-export those same types.
+Entity timestamps retain Unix **seconds**; WASM obtains the host wall clock from
+`Date.now`, while query timing continues to use the monotonic performance clock.
+The browser test worker independently checks entity/embedding/reference timestamps
+against JS time, including after the offline restart.
+
+`SnapshotContext`, own/aborted subtransaction visibility, logical-ID SSI read
+tracking and table-row version selection are also shared. The native store
+supplies candidates through `TableRowVersionStore`; its existing dispatch,
+auth/tenant/moderation gates and statement-frame lifetime remain in the host.
+Native persisted-row tests cover both dump and paged reopen through the shared
+entity/visibility selector. Six new native/WASM cases exercise the representation
+and read rules, repeated offline on Chromium/Firefox. They use in-memory fixtures
+in WASM, not browser-persisted collections. Native entity/value serialization and
+storage-backed execution still need a portable integration before JS/TS can query
+those collections. This milestone changes no file bytes or application API.
+
 ## Remaining work toward the approved Browser design
 
 1. Extract the remaining storage-coupled executor/runtime into the shared portable engine and

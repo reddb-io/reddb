@@ -1,5 +1,6 @@
 //! Shared live optimistic transaction state; host runtimes own durable publication.
 
+pub mod read;
 pub mod snapshot;
 pub mod state;
 pub mod visibility;

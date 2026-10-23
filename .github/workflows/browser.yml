@@ -10,6 +10,8 @@ on:
       - 'crates/reddb-server/src/storage/transaction/**'
       - 'crates/reddb-server/src/storage/unified/entity.rs'
       - 'crates/reddb-server/src/runtime/transaction_state.rs'
+      - 'crates/reddb-server/src/runtime/execution_context.rs'
+      - 'crates/reddb-server/src/runtime/table_row_mvcc_resolver.rs'
       - 'tests/grouped_mvcc_transactions.rs'
       - 'tests/grouped/mvcc_transactions/**'
       - 'crates/reddb-server/src/runtime/join_filter/**'
@@ -82,6 +84,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo test --locked -p reddb-io-server --lib runtime::transaction_state
+          cargo test --locked -p reddb-io-server --lib runtime::table_row_mvcc_resolver
           cargo test --locked -p reddb-io --test grouped_mvcc_transactions
           cargo test --locked -p reddb-io-server --test vault_transactions --test vacuum_snapshot_horizon --test checkpoint_open_transaction --test checkpoint_concurrent_transaction
       - name: Check every workspace target, including evaluator inventory tests

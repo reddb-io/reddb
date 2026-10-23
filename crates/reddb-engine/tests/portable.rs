@@ -41,3 +41,14 @@ fn portable_transaction_conformance() {
         run();
     }
 }
+
+#[path = "support/entity.rs"]
+mod entity;
+
+#[test]
+fn portable_entity_read_conformance() {
+    for (name, run) in entity::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

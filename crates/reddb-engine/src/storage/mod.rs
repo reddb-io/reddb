@@ -6,6 +6,7 @@
 
 pub mod btree;
 pub mod crc32;
+pub mod entity;
 pub mod entity_id;
 pub mod freelist;
 pub mod overflow;

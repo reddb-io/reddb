@@ -66,6 +66,9 @@ async function sharedConformance(browserPage) {
     'mvcc_retention_and_checkpoint_outcomes', 'mvcc_unique_keys_follow_outcomes',
     'mvcc_serializable_write_skew', 'mvcc_serializable_vault_predicates',
     'mvcc_autocommit_reservations_and_replay',
+    'entity_models_and_metadata', 'entity_document_field_bloom', 'entity_auxiliary_and_timestamps',
+    'entity_own_subtransaction_visibility', 'entity_logical_version_selection',
+    'entity_serializable_logical_identity',
   ])
 }
 

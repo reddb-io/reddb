@@ -151,6 +151,32 @@ The state manager retains O(active transactions + retained outcomes/pins + SSI
 read sets and conflict edges) memory and adds no IPC or storage operations.
 No browser transaction throughput or memory-budget claim follows from this move.
 
+The native entity representation now also lives in `reddb-engine::storage::entity`,
+with native aliases for rows/documents, graph nodes/edges, vectors, time-series,
+queues, embeddings and cross-references. The canonical binary document-key decoder
+feeds the existing bloom algorithm. The host wall clock supplies Unix seconds
+(`SystemTime` natively, `Date.now / 1000` in WASM); monotonic query timing is
+unchanged. Native entity/value serialization remains in its existing adapter.
+No codec, field encoding or file version changes in this move.
+
+`SnapshotContext`, raw own/aborted-sub-XID visibility, logical-ID SSI read tracking
+and table-row version selection are shared too. `TableRowVersionStore` supplies
+the same current/history candidates the native resolver previously consumed;
+the generic selector keeps the same filter-before-max-xmin ordering and direct
+current-row path. Native dispatch retains auth, tenant, moderation and ambient
+statement-frame ownership. Six identical native/WASM cases and a separate JS
+wall-clock oracle exercise this seam, including after an offline browser restart.
+Native dump/paged reopen tests resolve real persisted rows through the shared
+selector and check timestamp/schema/identity compatibility and the moderation gate.
+The WASM entity fixtures remain in memory: this does not expose stored-data SQL
+or durable application transactions through JS/TS.
+
+Entity relocation adds no payload copy, storage operation or IPC. Version selection
+retains O(V) candidate materialization and filtering for V physical versions of
+one logical row; current-row lookup retains its native store behavior. SSI sets
+continue to key on logical identity, not physical version IDs. No throughput or
+browser memory-budget qualification follows from these assertions.
+
 Encryption qualification also requires resolving a pre-existing native header
 layout collision: the encryption marker currently occupies the physical-format
 version field, and a database-header rewrite overwrites it. The canonical file

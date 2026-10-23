@@ -76,28 +76,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Snapshot + manager pair used for read-path visibility checks.
-///
-/// The manager is needed in addition to the snapshot because `aborted`
-/// state mutates after the snapshot is captured — a ROLLBACK by a
-/// committed-at-capture-time writer must still hide its tuples. Keeping
-/// the Arc around is O(pointer) and the RwLock reads on `is_aborted`
-/// are cheap (HashSet lookup under a parking_lot read guard).
-///
-/// `own_xids` (Phase 2.3.2e) lists the xids belonging to the current
-/// connection's transaction — the parent xid plus open and released
-/// savepoint sub-xids. The visibility rule promotes rows stamped with
-/// these xids to "always visible (unless aborted)" so the writer sees
-/// its own nested-savepoint writes even though their xids exceed
-/// `snapshot.xid`.
-#[derive(Clone)]
-pub struct SnapshotContext {
-    pub snapshot: crate::storage::transaction::snapshot::Snapshot,
-    pub manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
-    pub own_xids: std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
-    pub requires_index_fallback: bool,
-    pub serializable_reader: Option<crate::storage::transaction::snapshot::Xid>,
-}
+pub use reddb_engine::transaction::read::SnapshotContext;
+use reddb_engine::transaction::read::{record_serializable_read, visibility_check};
 
 /// Install a connection id on the current thread for the duration of a
 /// statement. The Transaction State module is keyed
@@ -1159,50 +1139,4 @@ pub fn entity_visible_with_context(
         }
         None => true,
     }
-}
-
-fn record_serializable_read(
-    ctx: &SnapshotContext,
-    entity: &crate::storage::unified::entity::UnifiedEntity,
-) {
-    let Some(reader) = ctx.serializable_reader else {
-        return;
-    };
-    if !matches!(
-        &entity.kind,
-        crate::storage::unified::entity::EntityKind::TableRow { .. }
-    ) {
-        return;
-    }
-    ctx.manager
-        .record_serializable_read(reader, entity.kind.collection(), entity.logical_id());
-}
-
-#[inline]
-fn visibility_check(ctx: &SnapshotContext, xmin: u64, xmax: u64) -> bool {
-    // Writer aborted → tuple never existed from any future reader's view.
-    // Checked *before* the own-xids fast path so an aborted own-sub-xid
-    // (rolled-back savepoint) stays hidden from the parent.
-    if xmin != 0 && ctx.manager.is_aborted(xmin) {
-        return false;
-    }
-    // Deleter aborted → treat xmax as unset; fall back to xmin-only check.
-    let effective_xmax = if xmax != 0 && ctx.manager.is_aborted(xmax) {
-        0
-    } else {
-        xmax
-    };
-    // Phase 2.3.2e: own-tx writes are always visible to the connection
-    // that stamped them, even when xmin/xmax exceed `snapshot.xid` (as
-    // happens for sub-xids allocated by SAVEPOINT after BEGIN).
-    let own_xmin = xmin != 0 && ctx.own_xids.contains(&xmin);
-    let own_xmax = effective_xmax != 0 && ctx.own_xids.contains(&effective_xmax);
-    if own_xmax {
-        // This connection deleted the row via this xid — hide it from self.
-        return false;
-    }
-    if own_xmin {
-        return true;
-    }
-    ctx.snapshot.sees(xmin, effective_xmax)
 }
