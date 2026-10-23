@@ -123,14 +123,14 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
         "crates/reddb-types/src/vector_metadata.rs",
         &[
             "crates/reddb-server/src/storage/unified/devx/query.rs",
-            "crates/reddb-server/src/storage/unified/metadata.rs",
+            "crates/reddb-engine/src/storage/metadata.rs",
         ],
         "#2127",
     ),
     concept(
         "MetadataValue",
         "crates/reddb-types/src/vector_metadata.rs",
-        &["crates/reddb-server/src/storage/unified/metadata.rs"],
+        &["crates/reddb-engine/src/storage/metadata.rs"],
         "#2127",
     ),
     concept(
