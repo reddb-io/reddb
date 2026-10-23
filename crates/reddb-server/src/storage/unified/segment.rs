@@ -755,14 +755,6 @@ impl GrowingSegment {
         self.checkpoint_revision
     }
 
-    fn mark_checkpoint_dirty(&mut self) {
-        self.checkpoint_mutations.clear();
-        self.checkpoint_revision = self
-            .checkpoint_revision
-            .checked_add(1)
-            .expect("segment mutation counter must not overflow");
-    }
-
     fn mark_checkpoint_entity_dirty(&mut self, id: EntityId) {
         self.checkpoint_revision = self
             .checkpoint_revision
@@ -1871,9 +1863,12 @@ impl GrowingSegment {
         &mut self,
         entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, SegmentError> {
-        self.mark_checkpoint_dirty();
         if !self.state.is_writable() {
             return Err(SegmentError::NotWritable);
+        }
+
+        for entity in &entities {
+            self.mark_checkpoint_entity_dirty(entity.id);
         }
 
         if let Some(index) = self.key_lookup.as_mut() {
@@ -2547,6 +2542,56 @@ mod tests {
         segment
             .find_key_entity(key, true, &mut |_| true)
             .map(|entity| entity.id)
+    }
+
+    #[test]
+    fn bulk_checkpoint_journal_preserves_prior_changes_and_ignores_rejected_batches() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment.insert(keyed_row(1, "one", 1, 0)).expect("row");
+        segment
+            .bulk_insert(vec![keyed_row(2, "two", 1, 0), keyed_row(3, "three", 1, 0)])
+            .expect("batch");
+        assert_eq!(
+            segment.checkpoint_mutations_since(0),
+            Some(vec![EntityId::new(1), EntityId::new(2), EntityId::new(3)])
+        );
+        let revision = segment.checkpoint_revision();
+        segment.bulk_insert(Vec::new()).expect("empty batch");
+        assert_eq!(segment.checkpoint_revision(), revision);
+        segment.seal().expect("seal segment");
+        assert!(matches!(
+            segment.bulk_insert(vec![keyed_row(4, "four", 1, 0)]),
+            Err(SegmentError::NotWritable)
+        ));
+        assert_eq!(segment.checkpoint_revision(), revision);
+        assert_eq!(segment.checkpoint_mutations_since(revision), Some(vec![]));
+    }
+
+    #[test]
+    fn bulk_checkpoint_journal_exhaustion_keeps_a_bounded_complete_suffix() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(
+                (1..=CHECKPOINT_MUTATIONS_MAX as u64 + 1)
+                    .map(|id| keyed_row(id, "key", 1, 0))
+                    .collect(),
+            )
+            .expect("large batch");
+        assert!(segment.checkpoint_mutations_since(0).is_none());
+        assert_eq!(
+            segment
+                .checkpoint_mutations_since(1)
+                .expect("complete suffix")
+                .len(),
+            CHECKPOINT_MUTATIONS_MAX
+        );
+        let revision = segment.checkpoint_revision();
+        let id = EntityId::new(CHECKPOINT_MUTATIONS_MAX as u64 + 2);
+        segment
+            .bulk_insert(vec![keyed_row(id.raw(), "next", 1, 0)])
+            .expect("later batch");
+        assert_eq!(segment.checkpoint_mutations_since(revision), Some(vec![id]));
+        assert_eq!(segment.checkpoint_mutations.len(), CHECKPOINT_MUTATIONS_MAX);
     }
 
     #[test]
