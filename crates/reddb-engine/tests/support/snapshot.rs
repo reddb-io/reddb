@@ -8,6 +8,7 @@ use reddb_file::native_value::NativeReader;
 use std::collections::BTreeMap;
 
 pub const CASES: &[(&str, fn())] = &[
+    ("snapshot_native_store_fixture", native_store_fixture),
     ("snapshot_native_v1_v12_recovery", native_versions),
     (
         "snapshot_empty_collections_and_legacy_tails",
@@ -15,6 +16,46 @@ pub const CASES: &[(&str, fn())] = &[
     ),
     ("snapshot_corruption_and_callback_errors", malformed),
 ];
+
+fn native_store_fixture() {
+    verify_native_snapshot(include_bytes!("../fixtures/native-store-v12.rdst"));
+}
+
+/// Assert the same native-produced snapshot after an actual OPFS restart.
+pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
+    let mut restored = Restored::default();
+    assert_eq!(
+        visit_snapshot(bytes, &mut restored).expect("native snapshot"),
+        12
+    );
+    assert_eq!(restored.collections.len(), 9);
+    assert!(restored.collections["empty"].is_empty());
+    assert_eq!(restored.auxiliary, b"opaque catalog");
+    assert_eq!(restored.cross_refs.len(), 9);
+    assert!(restored
+        .cross_refs
+        .iter()
+        .any(|cross_ref| cross_ref.source_id == 1024 && cross_ref.target_id == 1026));
+    for expected in super::codec_corpus::entities() {
+        let collection = &restored.collections[&format!("codec_{}", expected.id.raw())];
+        assert_eq!(collection.len(), 1);
+        let (entity, metadata) = &collection[0];
+        assert_eq!(entity.id, expected.id);
+        assert_eq!(entity.kind, expected.kind);
+        assert!(
+            restored
+                .cross_refs
+                .iter()
+                .any(|cross_ref| cross_ref.source_id == expected.id.raw()
+                    && cross_ref.target_id == 77)
+        );
+        assert_eq!(
+            metadata.as_ref().expect("typed metadata").fields,
+            super::metadata_corpus::metadata().fields
+        );
+    }
+    8
+}
 
 #[derive(Default)]
 pub struct Restored {

@@ -952,21 +952,33 @@ fn server_does_not_redeclare_native_store_file_contracts() {
     let impl_file = read(root.join("crates/reddb-server/src/storage/unified/store/impl_file.rs"));
     for required in [
         "reddb_file::decode_native_store_header",
-        "reddb_file::verify_native_store_crc32_footer",
         "reddb_file::encode_native_store_header",
         "reddb_file::append_native_store_crc32_footer",
         "reddb_file::encode_native_dump_count",
-        "reddb_file::decode_native_dump_count",
         "reddb_file::encode_native_dump_collection_header",
-        "reddb_file::decode_native_dump_collection_header",
         "reddb_file::encode_native_dump_entity_record",
-        "reddb_file::decode_native_dump_entity_record",
         "reddb_file::encode_native_dump_cross_ref",
-        "reddb_file::decode_native_dump_cross_ref",
+        "reddb_engine::storage::snapshot::{visit_snapshot, SnapshotVisitor}",
+        "visit_snapshot(buf, &mut Restore(&store))",
     ] {
         assert!(
             impl_file.contains(required),
             "UnifiedStore dump header/footer should route through {required}"
+        );
+    }
+
+    let snapshot = read(root.join("crates/reddb-engine/src/storage/snapshot.rs"));
+    for required in [
+        "reddb_file::decode_native_store_header",
+        "reddb_file::native_store_payload",
+        "reddb_file::decode_native_dump_count",
+        "reddb_file::decode_native_dump_collection_header",
+        "reddb_file::decode_native_dump_entity_record",
+        "reddb_file::decode_native_dump_cross_ref",
+    ] {
+        assert!(
+            snapshot.contains(required),
+            "shared snapshot recovery should route through {required}"
         );
     }
 
@@ -995,18 +1007,14 @@ fn server_does_not_redeclare_native_store_file_contracts() {
 
     let impl_pages = read(root.join("crates/reddb-server/src/storage/unified/store/impl_pages.rs"));
     for required in [
-        "reddb_file::encode_native_entity_record_frame",
-        "reddb_file::decode_native_entity_record_frame",
+        "reddb_engine::storage::metadata_codec::serialize_entity_record",
+        "reddb_engine::storage::metadata_codec::deserialize_entity_record",
         "reddb_file::encode_native_metadata_overflow_header",
         "reddb_file::decode_native_metadata_overflow_header",
         "reddb_file::encode_native_metadata_overflow_continuation_header",
         "reddb_file::decode_native_metadata_overflow_continuation_header",
         "reddb_file::encode_native_paged_metadata_header",
         "reddb_file::decode_native_paged_metadata_header",
-        "reddb_file::encode_native_len_prefixed_bytes",
-        "reddb_file::encode_native_len_prefixed_str",
-        "reddb_file::decode_native_len_prefixed_bytes",
-        "reddb_file::decode_native_len_prefixed_string",
         "reddb_file::encode_native_paged_collection_root",
         "reddb_file::decode_native_paged_collection_root",
         "reddb_file::encode_native_paged_cross_ref",
@@ -1015,6 +1023,21 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         assert!(
             impl_pages.contains(required),
             "UnifiedStore entity record framing should route through {required}"
+        );
+    }
+
+    let metadata_codec = read(root.join("crates/reddb-engine/src/storage/metadata_codec.rs"));
+    for required in [
+        "reddb_file::encode_native_entity_record_frame",
+        "reddb_file::decode_native_entity_record_frame",
+        "reddb_file::encode_native_len_prefixed_bytes",
+        "reddb_file::encode_native_len_prefixed_str",
+        "reddb_file::decode_native_len_prefixed_bytes",
+        "reddb_file::decode_native_len_prefixed_string",
+    ] {
+        assert!(
+            metadata_codec.contains(required),
+            "shared entity record framing should route through {required}"
         );
     }
 

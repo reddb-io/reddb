@@ -71,6 +71,13 @@ pub fn run_conformance() -> String {
     cases.map(|(name, _)| *name).collect::<Vec<_>>().join(",")
 }
 
+/// Test-only decoder for the native snapshot retained across OPFS restarts.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = verifyNativeSnapshot)]
+pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
+    snapshot::verify_native_snapshot(bytes)
+}
+
 /// Test-only host-clock probe: JS checks seconds against Date.now before/after.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = entityTimestamps)]

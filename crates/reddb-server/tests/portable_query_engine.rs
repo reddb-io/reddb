@@ -8,6 +8,36 @@ fn shared_snapshot_version_conformance() {
     for (_, run) in snapshot::CASES {
         run();
     }
+    let directory = tempfile::tempdir().expect("native snapshot fixture");
+    let path = directory.path().join("snapshot.rdb");
+    std::fs::write(
+        &path,
+        include_bytes!("../../reddb-engine/tests/fixtures/native-store-v12.rdst"),
+    )
+    .expect("native dump");
+    let store = reddb_server::storage::UnifiedStore::load_from_file(&path)
+        .expect("native restore of frozen snapshot");
+    assert!(store.get_collection("empty").is_some());
+    assert_eq!(store.aux_metadata(), b"opaque catalog");
+    for entity in codec_corpus::entities() {
+        let manager = store
+            .get_collection(&format!("codec_{}", entity.id.raw()))
+            .expect("native collection");
+        assert_eq!(manager.count(), 1);
+        assert_eq!(
+            manager.get(entity.id).expect("native entity").kind,
+            entity.kind
+        );
+        assert_eq!(
+            manager
+                .get_metadata(entity.id)
+                .expect("native metadata")
+                .fields,
+            metadata_corpus::metadata().fields
+        );
+    }
+    store.save_to_file(&path).expect("native re-export");
+    snapshot::verify_native_snapshot(&std::fs::read(&path).expect("re-exported snapshot"));
 }
 
 #[path = "../../reddb-engine/tests/support/codec_corpus.rs"]
