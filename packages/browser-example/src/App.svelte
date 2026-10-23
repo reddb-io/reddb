@@ -1,16 +1,26 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import {
-    Accordion, Alert, Badge, Button, CodeBlock, Container, DescriptionList, Divider, Field, Heading,
-    Link, Logo, Navbar, Prose, SectionHeading, Stack, Switch, Text, Textarea,
+    Accordion, Alert, Badge, Button, CodeBlock, DescriptionList, Divider, Heading,
+    Kbd, Link, LoadingIndicator, Logo, Navbar, Prose, Stack, StatusIndicator, Switch, Tabs, Text,
   } from '@reddb-io/design-system/base'
-  import { ApplicationShell, SidebarLayout, SidebarPanel, Toolbar } from '@reddb-io/design-system/app'
+  import { ApplicationShell, SidebarPanel, Toolbar } from '@reddb-io/design-system/app'
+  import CodeField from '@reddb-io/design-system/data/CodeField'
+  import Table from '@reddb-io/design-system/data/Table'
+  import { sqlGrammar } from './sql-grammar'
   import { BrowserError, openArtifact, type Artifact } from '@reddb-io/browser'
   import RedDBWorker from '@reddb-io/browser/worker?worker'
 
-  let darkScheme = $state(false)
-  let sql = $state('SELECT 6 * 7 AS resposta')
+  let darkScheme = $state(true)
+  let sql = $state('SELECT\n  6 * 7 AS resposta')
   let result = $state('Aguardando o engine…')
+  let scalar = $state<{ columns: string[]; rows: unknown[][] }>()
+  let resultView = $state('table')
+  const columns = $derived(scalar?.columns.map((header, index) => ({
+    key: String(index), header,
+    format: (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value) ?? String(value),
+  })) ?? [])
+  const rows = $derived(scalar?.rows.map(row => Object.fromEntries(row.map((value, index) => [String(index), value]))) ?? [])
   let error = $state('')
   let artifact: Artifact | undefined = $state()
   let busy = $state(true)
@@ -48,8 +58,13 @@
 
   async function query() {
     if (!artifact) return
+    scalar = undefined
     result = 'Executando no Worker…'
-    try { result = JSON.stringify(await artifact.executeScalar(sql), null, 2) }
+    try {
+      if (sql.length > 10000) throw new Error('A consulta deve ter no máximo 10.000 caracteres.')
+      scalar = await artifact.executeScalar(sql)
+      result = JSON.stringify(scalar, null, 2)
+    }
     catch (failure) { result = 'A consulta não foi executada.'; throw failure }
   }
 
@@ -144,123 +159,114 @@
 {#snippet generationValue()}<span id="generation">{generation}</span>{/snippet}
 
 
-<ApplicationShell fullWidth>
+<ApplicationShell fullWidth class="md:h-dvh md:overflow-hidden">
   {#snippet header()}
     <Navbar label="RedDB Browser" menuLabel="Menu" links={[
-      { id: 'playground', label: 'Browser', href: '#consulta', current: 'page' },
+      { id: 'playground', label: 'Consulta', href: '#consulta', current: 'page' },
       { id: 'guide', label: 'Guia JS/TS', href: '../#/clients/browser' },
       { id: 'source', label: 'Código-fonte', href: 'https://github.com/reddb-io/reddb/tree/main/packages/browser-example' },
     ]}>
-      {#snippet brand()}<Logo href="../" label="RedDB: documentação" fetchpriority="high" />{/snippet}
+      {#snippet brand()}
+        <Stack direction="row" align="center" gap="sm">
+          <Logo layout="symbol" size={16} href="../" label="RedDB: documentação" fetchpriority="high" />
+          <h1 class="text-body font-medium">Browser playground</h1>
+        </Stack>
+      {/snippet}
       {#snippet actions()}
+        <Badge>0.1.0-alpha.0</Badge>
         <Switch label="Tema escuro" bind:checked={darkScheme} oncheckedchange={(checked) => { document.documentElement.dataset.colorScheme = checked ? 'dark' : 'light' }} />
       {/snippet}
     </Navbar>
   {/snippet}
 
-  <Container size="wide" class="playground-workspace">
-    <Stack gap="layout-md">
-      <Stack gap="sm">
-        <Stack direction="row" align="center" gap="md" wrap>
-          <Heading level={1}>Browser playground</Heading>
-          <Badge>0.1.0-alpha.0</Badge>
-        </Stack>
-        <Text ink="muted">RedDB em Rust/WASM, executado neste navegador. Sem servidor ou conta.</Text>
-      </Stack>
-
-      <SidebarLayout side="end" sidebarLabel="Persistência local e uso offline">
-        <Stack gap="layout-md">
-          <div class="playground-runtime" aria-live="polite">
-            <Stack direction="row" justify="between" align="center" gap="sm" wrap>
-              <Badge id="engine-state" tone={engineTone}>{engineState}</Badge>
-              <Text id="network-state" as="span" role="caption">{networkState}</Text>
+  <div class="@container/browser h-full min-h-0">
+    <div class="browser-regions h-full min-h-0 grid-cols-1 @3xl/browser:grid-cols-[minmax(14rem,1fr)_minmax(0,4fr)] @3xl/browser:grid-rows-[minmax(0,1fr)]">
+      <section id="consulta" class="min-h-0 min-w-0 @3xl/browser:col-start-2 @3xl/browser:row-start-1" aria-label="Consulta RQL e resultado">
+        <Stack gap="none" class="h-full min-h-0" onkeydown={(event) => {
+          if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void action(query) }
+        }}>
+          <form id="query-form" class="browser-editor" onsubmit={(event) => { event.preventDefault(); void action(query) }}>
+            <Stack direction="row" align="center" justify="between" gap="sm" wrap class="browser-toolbar">
+              <h2 class="text-body font-medium">Consulta RQL</h2>
+              <Stack direction="row" align="center" gap="sm" wrap>
+                <Toolbar label="Exemplos de consulta" size="sm" items={examples.map(example => ({
+                  id: example.label, label: example.label, onselect: () => { sql = example.sql },
+                }))} />
+                <Kbd keys={['Ctrl', 'Enter']} size="sm" />
+                <Button id="execute" variant="primary" size="sm" type="submit" disabled={busy || !artifact || sql.length > 10000}>Executar consulta</Button>
+              </Stack>
             </Stack>
-          </div>
+            <CodeField id="sql" label="Consulta RQL" bind:value={sql} grammar={sqlGrammar} gutter rows={6} class="browser-code-field [&>label]:sr-only" />
+            <Text role="caption" class="browser-editor-note">SELECTs escalares no Worker. Coleções salvas e transações ainda estão em desenvolvimento.</Text>
+          </form>
           <Alert id="error" tone="danger" hidden={!error}>{error}</Alert>
-          <section id="consulta" aria-labelledby="query-heading">
-            <Stack gap="layout-sm">
-              <SectionHeading title="Editor RQL" titleId="query-heading" description="Selecione um exemplo ou escreva um SELECT escalar." size="sm">
-                {#snippet actions()}
-                  <Toolbar label="Exemplos de consulta" items={examples.map(example => ({
-                    id: example.label, label: example.label, onselect: () => { sql = example.sql },
-                  }))} />
-                {/snippet}
-              </SectionHeading>
-              <div class="@container/query">
-                <div class="playground-query grid-cols-1 @3xl/query:grid-cols-2">
-                  <form id="query-form" onsubmit={(event) => { event.preventDefault(); void action(query) }}>
-                    <Stack gap="layout-sm">
-                      <Field id="sql" label="Consulta RQL">
-                        {#snippet children(control)}
-                          <Textarea {...control} class="font-mono" bind:value={sql} rows={12} maxlength={10000} spellcheck={false} />
-                        {/snippet}
-                      </Field>
-                      <Stack direction="row" align="center" gap="md" wrap>
-                        <Button id="execute" variant="primary" type="submit" disabled={busy || !artifact}>Executar consulta</Button>
-                        <Text as="span" role="caption">Execução local em um Worker</Text>
-                      </Stack>
-                    </Stack>
-                  </form>
-                  <section aria-labelledby="result-heading">
-                    <Stack gap="sm">
-                      <h3 id="result-heading" class="text-body font-medium">Resultado</h3>
-                      <div id="query-result" aria-live="polite"><CodeBlock code={result} language="JSON" copyLabel="Copiar resultado" copiedLabel="Copiado" copyErrorLabel="Falha ao copiar. Tente novamente." regionLabel="Resultado da consulta" /></div>
-                    </Stack>
-                  </section>
+          <section class="min-h-0 min-w-0 flex-1" aria-label="Resultado da consulta" id="query-result">
+            <Tabs label="Visualização do resultado" bind:value={resultView} items={[
+              { value: 'table', label: 'Resultado' },
+              { value: 'json', label: 'JSON' },
+            ]} class="browser-results" listClass="browser-result-tabs" contentClass="browser-result-content">
+              {#snippet children({ value })}
+                <div class="browser-result-summary" role="status">
+                  {#if busy}<LoadingIndicator label="Executando no Worker" size="sm" />
+                  {:else if scalar}<StatusIndicator tone="success" label={`${scalar.rows.length} linha · execução local`} />
+                  {:else}<Text role="caption">{result}</Text>{/if}
                 </div>
-              </div>
-              <Text role="caption" class="max-w-prose">Esta alpha executa SELECTs escalares e persiste artefatos. Consultas sobre coleções salvas e transações ainda estão em desenvolvimento.</Text>
-            </Stack>
+                {#if value === 'table'}
+                  {#if scalar}
+                    <Table caption="Resultado da consulta RQL" captionHidden columnVisibility={false} {columns} {rows} />
+                  {/if}
+                {:else}
+                  <div class="browser-json"><CodeBlock code={result} language="JSON" copyLabel="Copiar resultado" copiedLabel="Copiado" copyErrorLabel="Falha ao copiar. Tente novamente." regionLabel="Resultado da consulta em JSON" /></div>
+                {/if}
+              {/snippet}
+            </Tabs>
           </section>
         </Stack>
+      </section>
 
-        {#snippet sidebar()}
-          <SidebarPanel title="Arquivo local">
-            <Stack gap="layout-sm" class="playground-sidebar-content">
-              <Text role="caption">Artefato OPFS deste navegador e desta origem.</Text>
-              <DescriptionList gap="sm" items={[
-                { term: 'Arquivo', detail: fileName },
-                { term: 'Marcadores persistidos', detail: countValue },
-                { term: 'Geração do artefato', detail: generationValue },
-              ]} />
-              <Stack gap="sm">
-                <Button id="append" disabled={busy || !artifact} onclick={() => void action(appendMarker)}>Gravar marcador</Button>
-                <Button id="reopen" variant="ghost" disabled={busy} onclick={() => void action(reopen)}>Reabrir arquivo</Button>
-              </Stack>
-              <div id="storage-status" role="status"><Text role="caption">{storageStatus}</Text></div>
-              <Text role="caption">Marcador de teste em bytes; não é um registro ou transação.</Text>
-              <Divider />
-              <section aria-labelledby="offline-heading">
-                <Stack gap="layout-sm">
-                  <Heading id="offline-heading" level={3}>Testar sem rede</Heading>
-                  <div id="offline-state" role="status"><Text role="caption">{offlineState}</Text></div>
-                  <Button id="reload" disabled={!offlineReady} onclick={() => window.location.reload()}>Recarregar página</Button>
-                  <Accordion label="Instruções para teste offline" items={[{ value: 'offline', label: 'Como testar offline' }]}>
-                    <Prose>
-                      <ol>
-                        <li>Grave um marcador e aguarde o cache.</li>
-                        <li>Desligue a rede do navegador.</li>
-                        <li>Recarregue e confira o contador.</li>
-                      </ol>
-                    </Prose>
-                    <Text role="caption">Limpar os dados do site remove o arquivo e o cache. As políticas de quota do navegador se aplicam.</Text>
-                  </Accordion>
-                </Stack>
-              </section>
+      <aside aria-label="Persistência local e uso offline" class="min-h-0 min-w-0 @3xl/browser:col-start-1 @3xl/browser:row-start-1">
+        <SidebarPanel title="Arquivo local" class="h-full">
+          <Stack gap="layout-sm" class="browser-file-content">
+            <DescriptionList gap="sm" items={[
+              { term: 'Artefato OPFS', detail: fileName },
+              { term: 'Marcadores persistidos', detail: countValue },
+              { term: 'Geração do artefato', detail: generationValue },
+            ]} />
+            <Stack gap="sm">
+              <Button id="append" size="sm" disabled={busy || !artifact} onclick={() => void action(appendMarker)}>Gravar marcador</Button>
+              <Button id="reopen" variant="ghost" size="sm" disabled={busy} onclick={() => void action(reopen)}>Reabrir arquivo</Button>
             </Stack>
-          </SidebarPanel>
-        {/snippet}
-      </SidebarLayout>
-    </Stack>
-  </Container>
+            <div id="storage-status" role="status"><Text role="caption">{storageStatus}</Text></div>
+            <Text role="caption">Marcador binário de teste; não é um registro ou transação.</Text>
+            <Divider />
+            <section aria-labelledby="offline-heading">
+              <Stack gap="layout-sm">
+                <Heading id="offline-heading" level={3}>Testar sem rede</Heading>
+                <div id="offline-state" role="status"><Text role="caption">{offlineState}</Text></div>
+                <Button id="reload" size="sm" disabled={!offlineReady} onclick={() => window.location.reload()}>Recarregar página</Button>
+                <Accordion label="Instruções para teste offline" items={[{ value: 'offline', label: 'Como testar offline' }]}>
+                  <Prose>
+                    <ol>
+                      <li>Grave um marcador e aguarde o cache.</li>
+                      <li>Desligue a rede do navegador.</li>
+                      <li>Recarregue e confira o contador.</li>
+                    </ol>
+                  </Prose>
+                  <Text role="caption">Limpar os dados do site remove o arquivo e o cache. As políticas de quota do navegador se aplicam.</Text>
+                </Accordion>
+              </Stack>
+            </section>
+          </Stack>
+        </SidebarPanel>
+      </aside>
+    </div>
+  </div>
 
   {#snippet footer()}
-    <Container size="wide">
-      <Stack direction="row" align="center" justify="between" gap="sm" wrap>
-        <Text as="span" role="caption">Worker · WebAssembly · OPFS</Text>
-        <Link href="../#/clients/browser">Integrar no seu projeto JS/TS</Link>
-        <Text as="span" role="caption">Chromium e Firefox verificados. Safari/iOS sem qualificação.</Text>
-      </Stack>
-    </Container>
+    <Stack direction="row" align="center" justify="between" gap="sm" wrap class="browser-statusbar">
+      <StatusIndicator id="engine-state" tone={engineTone} label={engineState} />
+      <Text id="network-state" as="span" role="caption">{networkState}</Text>
+      <Link href="../#/clients/browser">Integrar com JS/TS</Link>
+    </Stack>
   {/snippet}
 </ApplicationShell>

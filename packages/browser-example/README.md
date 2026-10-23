@@ -62,19 +62,27 @@ so a new build takes over after existing tabs close.
 
 ## Vendored Design System
 
-The UI composes the official Svelte Base and App Kits through canonical
-`@reddb-io/design-system/base` and `/app` imports. The root `design-system.manifest.json`
-pins `v2026.10.30`, selecting both Kits and Application styles. Official Sync lands
-the package in `vendor/ds` with `design-system.receipt.json`; do not hand-edit
-those files. App CSS owns page arrangement only, using DS spatial/color/font roles.
+The UI composes the official Svelte Base, App and Data Kits through canonical
+`@reddb-io/design-system/base`, `/app`, `/data/CodeField` and `/data/Table` imports.
+The root `design-system.manifest.json` pins `v2026.10.30`. Official Sync lands the
+Kits and Application styles in `vendor/ds` with `design-system.receipt.json`;
+do not hand-edit those files.
 
-ApplicationShell owns the page landmark and skip navigation. Navbar owns the
-product navigation; SidebarLayout and SidebarPanel place artifact/offline controls
-beside the query workspace, stacking after it in narrow containers. The editor and
-result split follows a DS container step, independently of viewport width.
+The composition follows the DS's [red-ui query editor reference](https://github.com/reddb-io/design-system/blob/c43cc0341a26418135d83c20435908ea2e8ba2d3/apps/showcase/src/routes/examples/red-ui/query/+page.svelte):
+a compact application frame, local artifact panel, line-numbered CodeField,
+results under the editor, and a runtime status bar. ApplicationShell owns the main
+landmark and skip navigation; Navbar owns product navigation. On narrow containers,
+artifact controls follow the query/result regions. Page chrome follows the viewport.
 
-The page declares Application, light and comfortable as its initial appearance axes.
-The Navbar exposes a dark-scheme switch.
+Results are the actual scalar engine response, rendered by the Data Table with
+columns mapped by position (including repeated aliases). A JSON tab preserves the
+original response. Ctrl/Command+Enter runs the focused query workspace. The local
+SQL tokenizer comes from the pinned DS reference and only controls highlighting;
+query semantics still belong to the WASM engine. Query source remains bounded at
+10,000 characters.
+
+The initial appearance is Application, dark and compact, matching the canonical
+reference. The Navbar exposes the dark-scheme switch.
 Both schemes and all densities remain available through the DS. The Logo places
 the original Brand mark; Space Grotesk and JetBrains Mono are emitted as local
 assets and included in the offline cache. No external font service is used.
@@ -91,10 +99,11 @@ Review and commit the manifest, generated package and receipt together. The
 consumer build verifies every receipt hash before typechecking. The browser suite
 compares served marks and fonts to the vendored bytes and audits WCAG AA in light
 and dark at desktop/mobile widths, alongside the existing offline tests. It also
-checks workspace placement at desktop/phone/container widths and keyboard navigation.
+checks the code-aware editor, actual result columns/cells, keyboard execution,
+status-bar placement and desktop/phone/container layouts.
 Axe and import checks complement visual review of rendered screenshots; they do not
 establish visual adherence on their own.
 
 Rendered examples of the application composition:
 
-[Desktop, light](docs/playground-desktop.png) · [Mobile, dark](docs/playground-mobile-dark.png).
+[Desktop, dark](docs/playground-desktop-dark.png) · [Desktop, light](docs/playground-desktop.png) · [Mobile, dark](docs/playground-mobile-dark.png).

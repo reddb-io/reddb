@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "types": ["vite/client"],
+    "paths": {
+      "@reddb-io/design-system/app": ["../app/src/index.ts"],
+      "@reddb-io/design-system/base": ["../base/src/index.ts"],
+      "@reddb-io/design-system/data/*": ["./src/*.svelte"]
+    }
+  },
+  "include": ["src", "test/fixtures/one-component.ts"]
+}
