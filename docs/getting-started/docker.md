@@ -79,6 +79,10 @@ docker run --rm \
 
 ---
 
+The default database is `/data/red/database.rdb`. For existing volumes,
+read [Persistent data path and upgrades](../deployment/docker.md#persistent-data-path-and-upgrades)
+before changing the image or path.
+
 ## 2. Production-secure (vault + Docker secrets)
 
 The production pattern has four moving parts:
@@ -99,7 +103,7 @@ docker run --rm \
   -v "$(pwd)/reddb-data:/data" \
   ghcr.io/reddb-io/reddb:latest \
   bootstrap \
-    --path /data/data.rdb \
+    --path /data/red/database.rdb \
     --vault \
     --username admin \
     --password "$(openssl rand -base64 24)" \
@@ -222,7 +226,7 @@ them.
       - reddb-data:/data
 ```
 
-Named volume — the `.rdb` file lives at `/data/data.rdb`. Loss of this
+Named volume — the `.rdb` file lives at `/data/red/database.rdb`. Loss of this
 volume = total data loss unless you have backups configured.
 
 ```yaml

@@ -580,3 +580,109 @@ fn exhausted_tracking_falls_back_then_resumes_after_publication() {
         "261"
     );
 }
+
+#[test]
+fn same_collection_pending_pressure_keeps_checkpoint_incremental() {
+    use reddb_server::runtime::mvcc::set_current_connection_id;
+    let directory = tempfile::tempdir().expect("temporary database");
+    let path = directory.path().join("same-collection.rdb");
+    let options = || {
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile")
+    };
+    let runtime = RedDBRuntime::with_options(options()).expect("runtime");
+    for query in [
+        "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+        "CREATE TABLE retained_payload (id INT, n INT, payload TEXT)",
+        "CREATE UNIQUE INDEX retained_payload_id ON retained_payload (id)",
+    ] {
+        runtime.execute_query(query).expect("schema");
+    }
+    // Repeated text compresses heavily and hides the physical amplification.
+    let mut seed = 0x7b3d_5961_a902_4c85_u64;
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-";
+    for batch in 0..40 {
+        let values = (batch * 100..(batch + 1) * 100)
+            .map(|id| {
+                let payload: String = (0..4096)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        char::from(alphabet[(seed & 63) as usize])
+                    })
+                    .collect();
+                format!("({id},0,'{payload}')")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO retained_payload (id,n,payload) VALUES {values}"
+            ))
+            .expect("payload rows");
+    }
+    runtime.checkpoint().expect("baseline checkpoint");
+    let root = || {
+        let page = runtime
+            .db()
+            .store()
+            .pager()
+            .expect("pager")
+            .read_manifest_page()
+            .expect("published manifest");
+        let data = &page.as_bytes()[reddb_server::storage::engine::HEADER_SIZE..];
+        let header = reddb_file::decode_native_paged_metadata_header(data)
+            .expect("metadata header")
+            .expect("paged metadata");
+        let mut position = reddb_file::METADATA_HEADER_BYTES;
+        for _ in 0..header.collection_count {
+            let entry = reddb_file::decode_native_paged_collection_root(data, &mut position)
+                .expect("collection root");
+            if entry.collection == "retained_payload" {
+                return entry.root_page;
+            }
+        }
+        panic!("payload tree missing");
+    };
+    let root_before = root();
+    set_current_connection_id(941);
+    runtime
+        .execute_query("BEGIN")
+        .expect("begin pending writer");
+    runtime
+        .execute_query("UPDATE retained_payload SET n=9999 WHERE id=3999")
+        .expect("pending update");
+    set_current_connection_id(942);
+    let changed = runtime
+        .execute_query("UPDATE retained_payload SET n=1258 WHERE id<1100")
+        .expect("same collection pressure");
+    assert_eq!(changed.affected_rows, 1100);
+    runtime
+        .checkpoint()
+        .expect("checkpoint with pending writer");
+    assert_eq!(
+        root(),
+        root_before,
+        "checkpoint rebuilt unchanged payload history after bounded proof pressure"
+    );
+    set_current_connection_id(941);
+    runtime
+        .execute_query("ROLLBACK")
+        .expect("rollback pending writer");
+    set_current_connection_id(0);
+    drop(runtime);
+    let recovered = RedDBRuntime::with_options(options()).expect("cold reopen");
+    for (query, expected) in [
+        ("SELECT n FROM retained_payload WHERE id=1099", "1258"),
+        ("SELECT n FROM retained_payload WHERE id=3999", "0"),
+    ] {
+        let result = recovered.execute_query(query).expect("preserved value");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("n").expect("n").to_string(),
+            expected
+        );
+    }
+}

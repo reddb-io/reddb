@@ -2,16 +2,23 @@
 use super::commit::StoreWalAction;
 use super::*;
 
+enum SparseCheckpointValue {
+    Cached,
+    Wal(super::checkpoint_wal::WalRowReference),
+    Projected(Vec<u8>),
+}
+
 #[derive(Default)]
 pub(super) struct DurableRows {
     rows: HashMap<(String, EntityId), Vec<u8>>,
     bytes: usize,
     collection_rows: HashMap<String, usize>,
+    references: super::checkpoint_wal::WalRowReferences,
 }
 
 impl DurableRows {
     pub(super) fn memory_bytes(&self) -> usize {
-        self.bytes
+        self.bytes + self.references.memory_bytes()
     }
 
     fn bytes_after_insert(&self, key: &(String, EntityId), capacity: usize) -> usize {
@@ -82,7 +89,11 @@ impl DurableRows {
             self.forget_collection(collection);
             bytes = self.bytes_after_insert(&key, record.capacity());
             if bytes > limit {
-                *self = Self::default();
+                let references = std::mem::take(&mut self.references);
+                *self = Self {
+                    references,
+                    ..Self::default()
+                };
                 bytes = standalone_bytes;
             }
         }
@@ -100,7 +111,11 @@ impl UnifiedStore {
     /// Called only after the WAL append succeeds. The ordinary inline KV path
     /// does not retain records here. The checkpoint's existing force_sync is
     /// the durability fence before any sparse projection changes pager pages.
-    pub(super) fn remember_checkpoint_rows(&self, actions: Vec<StoreWalAction>) {
+    pub(super) fn remember_checkpoint_rows(
+        &self,
+        actions: Vec<StoreWalAction>,
+        references: super::checkpoint_wal::CheckpointWalBatch,
+    ) {
         if self.pager.is_none() || self.commit.is_none() {
             return;
         }
@@ -112,6 +127,8 @@ impl UnifiedStore {
             })
             .clamp(16 * 1024, 8 * 1024 * 1024);
         let mut retained = self.checkpoint_durable_rows.write();
+        retained.references.remember(references, limit / 2);
+        let limit = limit / 2;
         for action in actions {
             match action {
                 StoreWalAction::UpsertEntityRecord { collection, record } => {
@@ -163,11 +180,12 @@ impl UnifiedStore {
                 .symmetric_difference(&current.pending_vault)
                 .copied(),
         );
-        if ids.len() > 1024 {
+        if ids.len() > crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX {
             return Ok(None);
         }
         let retained = self.checkpoint_durable_rows.read();
         let mut upserts = Vec::new();
+        let mut projected_bytes = 0_usize;
         let mut deferred = Vec::new();
         for id in ids {
             let key = id.raw().to_be_bytes().to_vec();
@@ -220,23 +238,74 @@ impl UnifiedStore {
             if existing.as_ref() == Some(projected.as_ref().unwrap_or(&raw)) {
                 continue;
             }
-            if retained.rows.get(&(collection.to_owned(), id)) != Some(&raw) {
+            let source = if retained.rows.get(&(collection.to_owned(), id)) == Some(&raw) {
+                SparseCheckpointValue::Cached
+            } else if let (Some(commit), Some(reference)) =
+                (&self.commit, retained.references.get(collection, id))
+            {
+                if !commit
+                    .checkpoint_row_matches(reference, &raw)
+                    .map_err(StoreError::Io)?
+                {
+                    return Ok(None);
+                }
+                SparseCheckpointValue::Wal(reference)
+            } else {
                 return Ok(None);
-            }
-            upserts.push((key, projected.unwrap_or(raw)));
+            };
+            let source = if let Some(projected) = projected {
+                projected_bytes = projected_bytes.saturating_add(projected.capacity());
+                if projected_bytes > 8 * 1024 * 1024 {
+                    return Ok(None);
+                }
+                SparseCheckpointValue::Projected(projected)
+            } else {
+                source
+            };
+            upserts.push((id, source));
         }
-        drop(retained);
         if manager.checkpoint_revisions() != current.segments {
             return Ok(None);
         }
         current.deferred_rows = Some(Arc::new(deferred));
-        // All eligibility checks finish before changing the published tree.
-        // These are durable logical WAL updates, just like an ordinary inline
-        // write; unlogged manager edits still build an unpublished replacement.
+        // Validate every source before changing the published tree. Afterwards
+        // materialize only bounded batches from those exact durable images;
+        // do not reread potentially changed manager payloads in a second pass.
         #[cfg(debug_assertions)]
         let root_before = tree.root_page_id();
-        tree.upsert_batch_sorted(&upserts)
-            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        let mut batch = Vec::new();
+        let mut batch_bytes = 0_usize;
+        for (id, source) in upserts {
+            let value = match source {
+                SparseCheckpointValue::Cached => retained
+                    .rows
+                    .get(&(collection.to_owned(), id))
+                    .expect("validated retained image")
+                    .clone(),
+                SparseCheckpointValue::Wal(reference) => self
+                    .commit
+                    .as_ref()
+                    .expect("validated durable WAL")
+                    .checkpoint_row_bytes(reference)
+                    .map_err(StoreError::Io)?,
+                SparseCheckpointValue::Projected(value) => value,
+            };
+            let key = id.raw().to_be_bytes().to_vec();
+            let bytes = key.len() + value.len();
+            if !batch.is_empty() && batch_bytes.saturating_add(bytes) > 1024 * 1024 {
+                tree.upsert_batch_sorted(&batch)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                batch.clear();
+                batch_bytes = 0;
+            }
+            batch_bytes += bytes;
+            batch.push((key, value));
+        }
+        if !batch.is_empty() {
+            tree.upsert_batch_sorted(&batch)
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        }
+        drop(retained);
         #[cfg(debug_assertions)]
         if tree.root_page_id() != root_before
             && std::env::var_os("REDDB_TEST_CHECKPOINT_EXIT_AFTER_SPARSE_ROOT_CHANGE").is_some()

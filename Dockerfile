@@ -32,8 +32,8 @@ COPY src/ src/
 
 RUN cargo build --release --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} \
     && strip /app/target/release/red \
-    && mkdir -p /image/data /image/etc/reddb \
-    && touch /image/data/.keep /image/etc/reddb/.keep
+    && mkdir -p /image/data/red /image/etc/reddb \
+    && touch /image/data/red/.keep /image/etc/reddb/.keep
 
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
@@ -48,7 +48,7 @@ VOLUME /etc/reddb
 # Wire (5050), gRPC/control-plane (55055), HTTP/Web (5000), optional TLS/extra (55555)
 EXPOSE 5050 55055 5000 55555
 
-ENV REDDB_DATA_PATH=/data/data.rdb
+ENV REDDB_DATA_PATH=/data/red/database.rdb
 ENV REDDB_WIRE_BIND_ADDR=0.0.0.0:5050
 ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:55055
 ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:5000

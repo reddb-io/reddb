@@ -1517,7 +1517,7 @@ impl SegmentManager {
                 return None;
             }
             changed.extend(segment.checkpoint_mutations_since(revision)?);
-            if changed.len() > 1024 {
+            if changed.len() > super::segment::CHECKPOINT_MUTATIONS_MAX {
                 return None;
             }
         }

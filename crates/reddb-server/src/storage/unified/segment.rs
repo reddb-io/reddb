@@ -469,6 +469,9 @@ impl GraphEntityKind {
 /// Maximum physical positions examined under one segment read guard.
 pub(crate) const SCAN_BATCH_SIZE: usize = 256;
 
+/// Bounded ID provenance shared by segment journals and checkpoint projection.
+pub(crate) const CHECKPOINT_MUTATIONS_MAX: usize = 8192;
+
 /// Stable append-only positions, bounded when a scan opens the segment.
 pub(crate) struct SegmentScanCursor {
     flat_end: usize,
@@ -765,7 +768,7 @@ impl GrowingSegment {
             .checkpoint_revision
             .checked_add(1)
             .expect("segment mutation counter must not overflow");
-        if self.checkpoint_mutations.len() == 256 {
+        if self.checkpoint_mutations.len() == CHECKPOINT_MUTATIONS_MAX {
             self.checkpoint_mutations.pop_front();
         }
         self.checkpoint_mutations
