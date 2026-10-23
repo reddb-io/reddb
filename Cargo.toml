@@ -4,11 +4,13 @@ members = [
     "crates/reddb-client-connector",
     "crates/reddb-crypto",
     "crates/reddb-file",
+    "crates/reddb-engine",
     "crates/reddb-grpc-proto",
     "crates/reddb-rql",
     "crates/reddb-server",
     "crates/reddb-types",
     "crates/reddb-wire",
+    "crates/reddb-wasm",
     # DST Fatia 0 (#1351): standalone LD_PRELOAD fault-injection shim + the
     # shared WAL recovery-invariant oracle reused by later DST slices.
     "crates/unreliable-libc",
@@ -26,6 +28,7 @@ repository = "https://github.com/reddb-io/reddb"
 reddb-client = { package = "reddb-io-client", version = "1.0", path = "crates/reddb-client" }
 reddb-client-connector = { package = "reddb-io-client-connector", version = "1.0", path = "crates/reddb-client-connector" }
 reddb-crypto = { package = "reddb-io-crypto", version = "1.0", path = "crates/reddb-crypto" }
+reddb-engine = { package = "reddb-io-engine", version = "1.0", path = "crates/reddb-engine" }
 reddb-file = { package = "reddb-io-file", version = "1.0", path = "crates/reddb-file" }
 reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "crates/reddb-grpc-proto" }
 reddb-rql = { package = "reddb-io-rql", version = "1.0", path = "crates/reddb-rql" }
@@ -52,7 +55,7 @@ cast_possible_truncation = "warn"
 
 [package]
 name = "reddb-io"
-version = "1.26.0"
+version = "1.26.1"
 edition.workspace = true
 # Cargo auto-discovers every top-level `tests/*.rs` file as a separate
 # integration-test binary. This crate has 269 such files; keep discovery off

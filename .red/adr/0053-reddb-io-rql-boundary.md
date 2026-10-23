@@ -16,6 +16,12 @@ The **physical executors stay in `reddb-server`** (~20k LOC: `executors/`,
 `batch/` SIMD, `engine/` — all storage-coupled). The rql crate does *not*
 execute queries.
 
+Follow-up (2026-10-22, ADR 0077): RedDB Browser requires a shared execution
+host. Storage-independent scalar/row/binding operators now live in
+`reddb-engine`, with native compatibility re-exports and browser-worker
+conformance tests. Storage-coupled orchestration, pager, MVCC and runtime policy
+remain in `reddb-server`; the RQL front-end boundary is unchanged.
+
 What it does own beyond parsing is the **correctness specification of
 execution**: an sqllogictest-format conformance suite (mature Rust harness, as
 used by DataFusion/RisingWave) whose truth comes from the **public SQLite

@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-server"
-version = "1.26.0"
+version = "1.26.1"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB server-side engine: storage, runtime, replication, MCP, AI, and the gRPC/HTTP/RedWire/PG-wire dispatchers. Re-exported by the umbrella `reddb` crate."
@@ -17,6 +17,7 @@ name = "reddb_server"
 path = "src/lib.rs"
 
 [dependencies]
+reddb-engine = { workspace = true }
 # Neutral keystone: the logical type vocabulary (Value/DataType/...) re-homed
 # from storage::schema (#1061, ADR 0052). storage::schema keeps a re-export shim.
 reddb-types = { workspace = true }

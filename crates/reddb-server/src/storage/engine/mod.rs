@@ -28,10 +28,8 @@
 pub mod algorithms;
 pub mod btree;
 pub mod clustering;
-pub mod crc32;
 pub mod database;
 pub mod distance;
-pub mod freelist;
 pub mod graph_algorithms;
 pub mod graph_store;
 pub mod graph_table_index;
@@ -40,8 +38,6 @@ pub mod hot_update;
 pub mod hybrid;
 pub mod ivf;
 pub mod overflow;
-pub mod page;
-pub mod page_cache;
 pub mod pager;
 pub mod pathfinding;
 pub(crate) mod prefetch;
@@ -53,6 +49,9 @@ pub mod unified_index;
 pub mod vector_btree;
 pub mod vector_metadata;
 pub mod vector_store;
+
+// Keep native paths and type identities while sharing the implementations.
+pub use reddb_engine::storage::{crc32, freelist, page, page_cache};
 
 #[path = "encrypted-pager.rs"]
 pub mod encrypted_pager;

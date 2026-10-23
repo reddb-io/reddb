@@ -1,8 +1,10 @@
 # `storage/transaction` — live snapshot and visibility support
 
-This module is the live home for transaction isolation types, snapshot
-allocation, and MVCC visibility. It is not the retired transaction
-coordinator.
+This module preserves the native paths for transaction isolation types, snapshot
+allocation, and MVCC visibility, re-exported from `reddb-engine::transaction`.
+The canonical implementation is shared with WASM (ADR 0077); durable WAL
+publication, recovery and storage-backed execution remain runtime responsibilities.
+This is not the retired transaction coordinator.
 
 ## Module layout
 

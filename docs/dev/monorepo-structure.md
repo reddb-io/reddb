@@ -75,6 +75,10 @@ crate may depend on the keystone, but nothing depends back on `reddb-server`.
 - `crates/reddb-file` (`reddb-io-file`) owns **persistence contracts**: file
   names, layouts, manifests, WAL envelopes, snapshots, checkpoints, the page-0
   paged-encryption header, and recovery metadata.
+- `crates/reddb-engine` (`reddb-io-engine`) shares storage-independent query
+  operators and page/cache/freelist implementations between native and WASM
+  runtimes. Persisted encodings stay in `reddb-file`; pager I/O, MVCC and
+  storage-backed orchestration remain in `reddb-server`. See ADR 0077.
 - `crates/reddb-grpc-proto` (`reddb-io-grpc-proto`) owns the **generated gRPC
   stubs** (tonic server + client), reusing canonical wire/topology types where
   applicable.

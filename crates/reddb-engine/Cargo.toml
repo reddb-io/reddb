@@ -1,0 +1,32 @@
+[package]
+name = "reddb-io-engine"
+version = "1.26.1"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Shared RedDB query execution and storage primitives for native and WebAssembly runtimes."
+
+[lib]
+name = "reddb_engine"
+
+[dependencies]
+reddb-types = { workspace = true }
+reddb-rql = { workspace = true }
+reddb-file = { workspace = true }
+crc32fast = "1.4"
+parking_lot = "0.12"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true
+
+[[example]]
+name = "browser_conformance"
+crate-type = ["cdylib"]

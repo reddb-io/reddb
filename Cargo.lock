@@ -767,9 +767,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -2824,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "jsonwebtoken",
  "proptest",
@@ -2852,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "async-trait",
  "csv",
@@ -2880,22 +2880,35 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "reddb-io-grpc-proto",
 ]
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "aes-gcm",
  "reddb-io-types",
 ]
 
 [[package]]
+name = "reddb-io-engine"
+version = "1.26.1"
+dependencies = [
+ "crc32fast",
+ "parking_lot",
+ "proptest",
+ "reddb-io-file",
+ "reddb-io-rql",
+ "reddb-io-types",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "reddb-io-file"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2914,7 +2927,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "prost",
  "reddb-io-wire",
@@ -2926,7 +2939,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "proptest",
  "reddb-io-types",
@@ -2935,7 +2948,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-server"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2970,6 +2983,7 @@ dependencies = [
  "rayon",
  "rcgen",
  "reddb-io-crypto",
+ "reddb-io-engine",
  "reddb-io-file",
  "reddb-io-grpc-proto",
  "reddb-io-rql",
@@ -3006,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "criterion",
  "proptest",
@@ -3014,8 +3028,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "reddb-io-wasm"
+version = "0.0.0"
+dependencies = [
+ "js-sys",
+ "reddb-io-engine",
+ "reddb-io-file",
+ "reddb-io-rql",
+ "reddb-io-types",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "reddb-io-wire"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "hmac 0.13.0",
  "insta",

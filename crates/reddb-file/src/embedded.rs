@@ -4,16 +4,21 @@
 //! carries its superblock pair, internal manifest, WAL reservation, and current
 //! store snapshot inside the `.rdb` file itself.
 
-use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use crate::vfs::VfsFile;
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use fs2::FileExt;
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::EmbeddedRdbWriterLock;
 
+mod portable;
+pub use portable::EmbeddedRdbFile;
+
+#[cfg(not(target_arch = "wasm32"))]
 mod group_commit;
+#[cfg(not(target_arch = "wasm32"))]
 pub use group_commit::{
     EmbeddedGroupCommitOptions, EmbeddedGroupCommitSession, PendingEmbeddedAppend,
 };
@@ -101,6 +106,7 @@ const WAL_FRAME_MAGIC: &[u8; 8] = b"RDBEWAL1";
 const WAL_FRAME_VERSION: u16 = 2;
 const WAL_FRAME_HEADER_BYTES: usize = 8 + 2 + 2 + 8 + 4 + 4 + 4 + 4;
 const LEGACY_WAL_FRAME_HEADER_BYTES: usize = 8 + 4 + 4;
+#[cfg(not(target_arch = "wasm32"))]
 const CRASH_INJECT_ENV: &str = "REDDB_EMBEDDED_RDB_CRASH_AT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,233 +156,9 @@ struct WalScan {
     valid_bytes: u64,
 }
 
-#[derive(Default)]
-struct EmbeddedPathState {
-    tail: Option<CachedWalTail>,
-}
-
-struct CachedWalTail {
-    // Published only after validating this generation's snapshot, or after
-    // appending to an unchanged file with an already validated snapshot.
-    stamp: FileMutationStamp,
-    superblock: EmbeddedRdbSuperblock,
-    next_sequence: u64,
-    previous_frame_crc: u32,
-    valid_bytes: u64,
-}
-
-// The superblock detects cooperating writers/checkpoints. File identity and
-// mutation times also invalidate replacement or in-place edits. On platforms
-// without this identity vocabulary, append keeps the validated full scan.
-#[derive(PartialEq, Eq)]
-struct FileMutationStamp {
-    device: u64,
-    inode: u64,
-    len: u64,
-    modified: (i64, i64),
-    changed: (i64, i64),
-}
-
-fn file_mutation_stamp(file: &File) -> std::io::Result<Option<FileMutationStamp>> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = file.metadata()?;
-        Ok(Some(FileMutationStamp {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            len: metadata.len(),
-            modified: (metadata.mtime(), metadata.mtime_nsec()),
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
-        }))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = file;
-        Ok(None)
-    }
-}
-
-/// Process-lifetime writer fence for an embedded `.rdb`.
-///
-/// The per-operation lock on the data file only serializes individual appends
-/// and checkpoints. A writer process keeps the whole store in memory and
-/// checkpoints that image on close, so two processes writing the same file
-/// would each publish their own image and the last one to close would
-/// silently discard the other's commits. Holding this lock for the writer's
-/// lifetime makes the second opener fail instead.
-///
-/// It lives in a sibling lock file, not on the data file: the per-operation
-/// lock takes a fresh handle, which under POSIX `flock` would contend with a
-/// lock held through another handle of the same process, and under Windows
-/// `LockFileEx` would be denied outright (see `open_inner_with_file`).
-pub struct EmbeddedRdbWriterLock {
-    #[cfg_attr(not(unix), allow(dead_code))]
-    path: PathBuf,
-    _file: File,
-}
-
-impl EmbeddedRdbWriterLock {
-    pub fn acquire(data_path: impl AsRef<Path>) -> RdbFileResult<Self> {
-        let data_path = data_path.as_ref();
-        let path = crate::layout::embedded_writer_lock_path(data_path);
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
-        }
-        loop {
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&path)?;
-            if let Err(err) = file.try_lock_exclusive() {
-                if err.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
-                    return Err(RdbFileError::InvalidOperation(format!(
-                        "{} is already open for writing by another process; an embedded \
-                         single-file store has exactly one writer process",
-                        data_path.display()
-                    )));
-                }
-                return Err(err.into());
-            }
-            // The previous owner unlinks the lock file on release. If that
-            // happened between our open and our lock, we hold an orphaned
-            // inode no later opener can see, so start over on the live path.
-            if lock_file_is_live(&file, &path)? {
-                return Ok(Self { path, _file: file });
-            }
-        }
-    }
-}
-
-impl Drop for EmbeddedRdbWriterLock {
-    fn drop(&mut self) {
-        // Unlink while still holding the lock so a closed store is back to
-        // one operator-visible artifact; `acquire` re-checks the inode to
-        // stay correct across this. Without an inode identity check the
-        // file is left in place instead.
-        #[cfg(unix)]
-        {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn lock_file_is_live(file: &File, path: &Path) -> RdbFileResult<bool> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let held = file.metadata()?;
-        match fs::metadata(path) {
-            Ok(current) => Ok(held.dev() == current.dev() && held.ino() == current.ino()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(err) => Err(err.into()),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (file, path);
-        Ok(true)
-    }
-}
-
 pub struct EmbeddedRdbArtifact;
 
 impl EmbeddedRdbArtifact {
-    pub fn create(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
-        Self::create_with_snapshot(path, &[])
-    }
-
-    pub fn create_with_snapshot(
-        path: impl AsRef<Path>,
-        snapshot: &[u8],
-    ) -> RdbFileResult<EmbeddedRdbOpen> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
-        }
-
-        let created_at_unix_ms = now_unix_ms();
-        let wal_region_offset = EMBEDDED_RDB_MANIFEST_ZONE_END;
-        let snapshot_offset = wal_region_offset + WAL_REGION_BYTES;
-        let manifest = EmbeddedRdbManifest {
-            version: MANIFEST_VERSION,
-            wal_region_offset,
-            wal_region_bytes: WAL_REGION_BYTES,
-            wal_recovery_boundary: wal_region_offset,
-            wal_live_bytes: 0,
-            snapshot_offset,
-            snapshot_bytes: snapshot.len() as u64,
-            snapshot_checksum: crc32(snapshot),
-            created_at_unix_ms,
-            checksum: 0,
-        };
-        let manifest_bytes = encode_manifest(manifest);
-        let manifest_checksum = trailer_checksum(&manifest_bytes);
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .write(true)
-            .open(path)?;
-        file.set_len(snapshot_offset + snapshot.len() as u64)?;
-        write_at(&mut file, EMBEDDED_RDB_MANIFEST_0_OFFSET, &manifest_bytes)?;
-        if !snapshot.is_empty() {
-            write_at(&mut file, snapshot_offset, snapshot)?;
-        }
-
-        let base = EmbeddedRdbSuperblock {
-            copy_index: 0,
-            generation: 1,
-            format_version: DEFAULT_FORMAT_VERSION,
-            manifest_offset: EMBEDDED_RDB_MANIFEST_0_OFFSET,
-            manifest_len: manifest_bytes.len() as u64,
-            manifest_checksum,
-            wal_region_offset,
-            wal_region_bytes: WAL_REGION_BYTES,
-            wal_recovery_boundary: wal_region_offset,
-            wal_live_bytes: 0,
-            snapshot_offset,
-            snapshot_bytes: snapshot.len() as u64,
-            snapshot_checksum: crc32(snapshot),
-            checksum: 0,
-        };
-        Self::write_superblock_copy(&mut file, &base)?;
-        Self::write_superblock_copy(
-            &mut file,
-            &EmbeddedRdbSuperblock {
-                copy_index: 1,
-                generation: 2,
-                ..base
-            },
-        )?;
-        file.sync_all()?;
-
-        Self::open(path)
-    }
-
-    pub fn open(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
-        Self::open_inner(path, true)
-    }
-
-    fn open_inner(
-        path: impl AsRef<Path>,
-        validate_snapshot_refs: bool,
-    ) -> RdbFileResult<EmbeddedRdbOpen> {
-        let path = path.as_ref();
-        let mut file = File::open(path)?;
-        // Readers wait for an in-flight publication. On Windows an unlocked
-        // ReadFile races the writer's mandatory byte-range lock and fails 33.
-        FileExt::lock_shared(&file)?;
-        Self::open_inner_with_file(&mut file, path, validate_snapshot_refs)
-    }
-
     /// Read the store's roots through an already-open handle.
     ///
     /// The writer path holds an exclusive lock on the data file and must do
@@ -391,7 +173,7 @@ impl EmbeddedRdbArtifact {
     /// Every helper here seeks explicitly, so sharing one cursor across the
     /// reads and writes of a single operation is safe.
     fn open_inner_with_file(
-        file: &mut File,
+        file: &mut impl VfsFile,
         path: &Path,
         validate_snapshot_refs: bool,
     ) -> RdbFileResult<EmbeddedRdbOpen> {
@@ -456,321 +238,10 @@ impl EmbeddedRdbArtifact {
         }
         Ok(len)
     }
-
-    pub fn write_snapshot_with_wal_capacity(
-        path: impl AsRef<Path>,
-        snapshot: &[u8],
-        min_wal_bytes: u64,
-    ) -> RdbFileResult<EmbeddedRdbOpen> {
-        let path = path.as_ref();
-        group_commit::wait_for_pending_appends(path)?;
-        let path_lock = embedded_path_lock(path);
-        let mut path_guard = path_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        path_guard.tail = None;
-        // One handle for the whole operation: it carries the exclusive lock,
-        // and on Windows that lock would deny any *other* handle this module
-        // opened to the same path (see `open_inner_with_file`).
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        file.lock_exclusive()?;
-
-        let open = Self::open_inner_with_file(&mut file, path, true)?;
-        let wal_scan = match wal_region_start_checked(&open)? {
-            Some(wal_start) => scan_wal_with_file(&mut file, &open, wal_start)?,
-            None => WalScan {
-                next_sequence: 1,
-                ..WalScan::default()
-            },
-        };
-        let checkpoint_boundary = wal_boundary_after_live_bytes(&open, wal_scan.valid_bytes)?;
-        let wal_region_bytes =
-            grow_wal_region_bytes(open.manifest.wal_region_bytes, min_wal_bytes)?;
-        let snapshot_checksum = crc32(snapshot);
-        // Nothing to publish when the WAL is empty, its region need not grow,
-        // and the durable image already holds exactly these bytes. A close
-        // used to checkpoint the same image two or three times, each a full
-        // write plus fsyncs.
-        if open.manifest.wal_live_bytes == 0
-            && wal_scan.valid_bytes == 0
-            && wal_region_bytes == open.manifest.wal_region_bytes
-            && open.manifest.snapshot_bytes == snapshot.len() as u64
-            && open.manifest.snapshot_checksum == snapshot_checksum
-            && published_snapshot_matches(&mut file, &open, snapshot)?
-        {
-            FileExt::unlock(&file)?;
-            return Ok(open);
-        }
-        let snapshot_offset = next_snapshot_offset(&mut file, &open, wal_region_bytes, snapshot)?;
-        let manifest = EmbeddedRdbManifest {
-            wal_region_bytes,
-            wal_recovery_boundary: checkpoint_boundary,
-            wal_live_bytes: 0,
-            snapshot_offset,
-            snapshot_bytes: snapshot.len() as u64,
-            snapshot_checksum,
-            checksum: 0,
-            ..open.manifest
-        };
-        let manifest_bytes = encode_manifest(manifest);
-        let manifest_checksum = trailer_checksum(&manifest_bytes);
-
-        // The image may land in a hole below a live snapshot, so only ever
-        // extend here: shrinking before publish would cut a live image.
-        let snapshot_end = snapshot_offset + snapshot.len() as u64;
-        if file.metadata()?.len() < snapshot_end {
-            file.set_len(snapshot_end)?;
-        }
-        if !snapshot.is_empty() {
-            write_at(&mut file, snapshot_offset, snapshot)?;
-        }
-        crash_inject("snapshot_after_image_write");
-        file.sync_data()?;
-        crash_inject("snapshot_after_image_sync");
-
-        // Publish the manifest into the slot the live superblock does NOT
-        // reference, and make it durable before any superblock names it. Until
-        // the superblock write below lands, the durable state still roots
-        // through the old manifest slot, which these bytes never touched.
-        let next_manifest_offset = inactive_manifest_offset(open.selected_superblock)?;
-        write_at(&mut file, next_manifest_offset, &manifest_bytes)?;
-        crash_inject("snapshot_after_manifest_write");
-        file.sync_data()?;
-        crash_inject("snapshot_after_manifest_sync");
-
-        let next_copy_index = if open.selected_superblock.copy_index == 0 {
-            1
-        } else {
-            0
-        };
-        let next_superblock = EmbeddedRdbSuperblock {
-            copy_index: next_copy_index,
-            generation: open.selected_superblock.generation.saturating_add(1),
-            manifest_offset: next_manifest_offset,
-            manifest_len: manifest_bytes.len() as u64,
-            manifest_checksum,
-            wal_region_bytes,
-            wal_recovery_boundary: checkpoint_boundary,
-            wal_live_bytes: 0,
-            snapshot_offset,
-            snapshot_bytes: snapshot.len() as u64,
-            snapshot_checksum,
-            checksum: 0,
-            ..open.selected_superblock
-        };
-        Self::write_superblock_copy(&mut file, &next_superblock)?;
-        crash_inject("snapshot_after_superblock_write");
-        file.sync_all()?;
-
-        // Published: the two superblock copies now name this image and the
-        // previous one. Anything past both (and past the WAL region) is
-        // unreachable, so give it back instead of growing on every checkpoint.
-        let retained_end = snapshot_end
-            .max(open.manifest.snapshot_offset + open.manifest.snapshot_bytes)
-            .max(open.manifest.wal_region_offset + wal_region_bytes);
-        if file.metadata()?.len() > retained_end {
-            file.set_len(retained_end)?;
-            file.sync_all()?;
-        }
-        // Release before re-opening: `Self::open` takes its own handle, and
-        // on Windows it could not open one while this lock is held.
-        FileExt::unlock(&file)?;
-        Self::open(path)
-    }
-
-    pub fn open_strict_manifest(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
-        let path = path.as_ref();
-        let mut file = File::open(path)?;
-        FileExt::lock_shared(&file)?;
-        let selected_superblock = [
-            read_superblock_copy(&mut file, 0)?,
-            read_superblock_copy(&mut file, 1)?,
-        ]
-        .into_iter()
-        .flatten()
-        .max_by_key(|superblock| superblock.generation)
-        .ok_or_else(|| RdbFileError::InvalidOperation("no valid embedded superblock".into()))?;
-
-        let mut manifest = read_manifest(&mut file, selected_superblock)?;
-        manifest.wal_recovery_boundary = selected_superblock.wal_recovery_boundary;
-        // The superblock is the WAL authority: appends update it without
-        // rewriting the manifest zone, so a stale manifest wal_live_bytes
-        // would make the scan see an empty region and drop live records.
-        manifest.wal_live_bytes = selected_superblock.wal_live_bytes;
-        Ok(EmbeddedRdbOpen {
-            path: path.to_path_buf(),
-            selected_superblock,
-            manifest,
-        })
-    }
-
-    pub fn read_snapshot(open: &EmbeddedRdbOpen) -> RdbFileResult<Option<Vec<u8>>> {
-        if open.manifest.snapshot_bytes == 0 {
-            return Ok(None);
-        }
-        let mut file = File::open(&open.path)?;
-        FileExt::lock_shared(&file)?;
-        let mut bytes = vec![0u8; open.manifest.snapshot_bytes as usize];
-        file.seek(SeekFrom::Start(open.manifest.snapshot_offset))?;
-        file.read_exact(&mut bytes)?;
-        let checksum = crc32(&bytes);
-        if checksum != open.manifest.snapshot_checksum {
-            return Err(RdbFileError::InvalidOperation(format!(
-                "embedded snapshot checksum mismatch: stored {:#010x}, computed {:#010x}",
-                open.manifest.snapshot_checksum, checksum
-            )));
-        }
-        if bytes.len() >= SNAPSHOT_MAGIC.len() && &bytes[..SNAPSHOT_MAGIC.len()] != SNAPSHOT_MAGIC {
-            return Err(RdbFileError::InvalidOperation(
-                "invalid embedded snapshot magic".into(),
-            ));
-        }
-        Ok(Some(bytes))
-    }
-
-    pub fn write_snapshot(
-        path: impl AsRef<Path>,
-        snapshot: &[u8],
-    ) -> RdbFileResult<EmbeddedRdbOpen> {
-        Self::write_snapshot_with_wal_capacity(path, snapshot, 0)
-    }
-
-    pub fn read_wal_payloads(open: &EmbeddedRdbOpen) -> RdbFileResult<Vec<Vec<u8>>> {
-        Ok(scan_wal(open)?.payloads)
-    }
-
-    pub fn append_wal_payloads(
-        path: impl AsRef<Path>,
-        payloads: &[Vec<u8>],
-    ) -> RdbFileResult<EmbeddedRdbOpen> {
-        let path = path.as_ref();
-        if payloads.is_empty() {
-            return Self::open(path);
-        }
-
-        let path_lock = embedded_path_lock(path);
-        let mut path_guard = path_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Take before any fallible I/O: a failed append must leave no cached
-        // state that could describe a partially published mutation.
-        let cached_tail = path_guard.tail.take();
-        // Single locked handle for the whole append — see
-        // `write_snapshot_with_wal_capacity` and `open_inner_with_file`.
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        file.lock_exclusive()?;
-
-        let open = Self::open_inner_with_file(&mut file, path, false)?;
-        let stamp = file_mutation_stamp(&file)?;
-        let cached_tail = cached_tail.filter(|tail| {
-            stamp.as_ref() == Some(&tail.stamp) && tail.superblock == open.selected_superblock
-        });
-        let snapshot_validated = cached_tail.is_some();
-        let wal_scan = match cached_tail {
-            Some(tail) => WalScan {
-                next_sequence: tail.next_sequence,
-                previous_frame_crc: tail.previous_frame_crc,
-                valid_bytes: tail.valid_bytes,
-                payloads: Vec::new(),
-            },
-            None => match wal_region_start_checked(&open)? {
-                Some(wal_start) => scan_wal_with_file(&mut file, &open, wal_start)?,
-                None => WalScan {
-                    next_sequence: 1,
-                    ..WalScan::default()
-                },
-            },
-        };
-        // Recovery may salvage a valid prefix, but appending after a corrupt
-        // published frame would acknowledge an unreachable new commit.
-        if wal_scan.valid_bytes != open.manifest.wal_live_bytes {
-            return Err(RdbFileError::ZoneUnrecoverable {
-                zone: "wal",
-                path: path.to_path_buf(),
-            });
-        }
-        let mut sequence = wal_scan.next_sequence;
-        let mut previous_frame_crc = wal_scan.previous_frame_crc;
-        let mut encoded = Vec::new();
-        for payload in payloads {
-            let (frame, frame_crc) = encode_wal_frame(sequence, previous_frame_crc, payload)?;
-            encoded.extend_from_slice(&frame);
-            previous_frame_crc = frame_crc;
-            sequence = sequence.saturating_add(1);
-        }
-
-        let encoded_len = encoded.len() as u64;
-        let free_bytes = open
-            .manifest
-            .wal_region_bytes
-            .checked_sub(wal_scan.valid_bytes)
-            .ok_or_else(|| {
-                RdbFileError::InvalidOperation("embedded wal live bytes overflow".into())
-            })?;
-        if encoded_len > free_bytes {
-            return Err(RdbFileError::InvalidOperation(
-                "embedded wal region full".into(),
-            ));
-        }
-        let next_boundary =
-            wal_boundary_after_live_bytes(&open, wal_scan.valid_bytes + encoded_len)?;
-
-        write_circular_wal_bytes(&mut file, &open, &encoded)?;
-        crash_inject("wal_after_frame_write");
-        file.sync_data()?;
-        crash_inject("wal_after_frame_sync");
-
-        let next_copy_index = if open.selected_superblock.copy_index == 0 {
-            1
-        } else {
-            0
-        };
-        let next_superblock = EmbeddedRdbSuperblock {
-            copy_index: next_copy_index,
-            generation: open.selected_superblock.generation.saturating_add(1),
-            wal_recovery_boundary: next_boundary,
-            wal_live_bytes: wal_scan.valid_bytes + encoded_len,
-            checksum: 0,
-            ..open.selected_superblock
-        };
-        Self::write_superblock_copy(&mut file, &next_superblock)?;
-        crash_inject("wal_after_superblock_write");
-        file.sync_all()?;
-        // A warm append writes only WAL bytes and the alternate superblock:
-        // it does not change the snapshot. The matching identity/mutation
-        // stamp above proves no intervening file edit since its validation.
-        // Cache misses (including unsupported platforms) retain the full
-        // checksum pass. Normal open/read/scrub always verify snapshot bytes;
-        // this reuse is not a substitute for detecting bit rot on read.
-        let next_open = Self::open_inner_with_file(&mut file, path, !snapshot_validated)?;
-        let next_stamp = file_mutation_stamp(&file)?;
-        FileExt::unlock(&file)?;
-        if let Some(stamp) = next_stamp
-            .filter(|_| next_open.selected_superblock.generation == next_superblock.generation)
-        {
-            path_guard.tail = Some(CachedWalTail {
-                stamp,
-                superblock: next_open.selected_superblock,
-                next_sequence: sequence,
-                previous_frame_crc,
-                valid_bytes: wal_scan.valid_bytes + encoded_len,
-            });
-        }
-        Ok(next_open)
-    }
-
-    pub fn write_superblock_copy(
-        file: &mut File,
-        superblock: &EmbeddedRdbSuperblock,
-    ) -> RdbFileResult<()> {
-        let offset = superblock_offset(superblock.copy_index)?;
-        write_at(file, offset, &encode_superblock(*superblock)?)?;
-        Ok(())
-    }
 }
 
 fn read_superblock_copy(
-    file: &mut File,
+    file: &mut impl VfsFile,
     copy_index: u8,
 ) -> RdbFileResult<Option<EmbeddedRdbSuperblock>> {
     let offset = superblock_offset(copy_index)?;
@@ -797,7 +268,7 @@ fn inactive_manifest_offset(superblock: EmbeddedRdbSuperblock) -> RdbFileResult<
 }
 
 fn read_manifest(
-    file: &mut File,
+    file: &mut impl VfsFile,
     superblock: EmbeddedRdbSuperblock,
 ) -> RdbFileResult<EmbeddedRdbManifest> {
     if superblock.manifest_len < CHECKSUM_LEN as u64
@@ -834,7 +305,7 @@ fn read_manifest(
 }
 
 fn snapshot_reference_valid(
-    file: &mut File,
+    file: &mut impl VfsFile,
     manifest: &EmbeddedRdbManifest,
 ) -> RdbFileResult<bool> {
     if manifest.snapshot_bytes == 0 {
@@ -844,7 +315,7 @@ fn snapshot_reference_valid(
         .snapshot_offset
         .checked_add(manifest.snapshot_bytes)
         .ok_or_else(|| RdbFileError::InvalidOperation("embedded snapshot end overflow".into()))?;
-    if snapshot_end > file.metadata()?.len() {
+    if snapshot_end > file.file_len()? {
         return Ok(false);
     }
 
@@ -865,7 +336,7 @@ fn snapshot_reference_valid(
 /// Byte-for-byte comparison with the published image; the checksum match
 /// that gates this call is not proof of equality on its own.
 fn published_snapshot_matches(
-    file: &mut File,
+    file: &mut impl VfsFile,
     open: &EmbeddedRdbOpen,
     snapshot: &[u8],
 ) -> RdbFileResult<bool> {
@@ -888,20 +359,6 @@ fn grow_wal_region_bytes(current: u64, min_required: u64) -> RdbFileResult<u64> 
     Ok(next)
 }
 
-fn embedded_path_lock(path: &Path) -> Arc<Mutex<EmbeddedPathState>> {
-    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<EmbeddedPathState>>>>> =
-        OnceLock::new();
-    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let mut locks = LOCKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    locks
-        .entry(key)
-        .or_insert_with(|| Arc::new(Mutex::new(EmbeddedPathState::default())))
-        .clone()
-}
-
 /// Lowest aligned offset past the WAL region where `snapshot` overlaps no
 /// image either superblock copy still names.
 ///
@@ -910,7 +367,7 @@ fn embedded_path_lock(path: &Path) -> Arc<Mutex<EmbeddedPathState>> {
 /// newer superblock or its image fails validation. Any other bytes past the
 /// WAL region are unreachable and may be reused.
 fn next_snapshot_offset(
-    file: &mut File,
+    file: &mut impl VfsFile,
     open: &EmbeddedRdbOpen,
     wal_region_bytes: u64,
     snapshot: &[u8],
@@ -1006,46 +463,15 @@ fn wal_region_start_checked(open: &EmbeddedRdbOpen) -> RdbFileResult<Option<u64>
     Ok(Some(wal_start))
 }
 
-/// Scan the WAL, opening the file for reading. Callers already holding a
-/// handle (the writer path) use [`scan_wal_with_file`] instead.
-fn scan_wal(open: &EmbeddedRdbOpen) -> RdbFileResult<WalScan> {
-    let wal_start = open.manifest.wal_region_offset;
-    let wal_end = wal_start
-        .checked_add(open.manifest.wal_region_bytes)
-        .ok_or_else(|| RdbFileError::InvalidOperation("embedded wal end overflow".into()))?;
-    let append_boundary = open.manifest.wal_recovery_boundary;
-    if append_boundary < wal_start || append_boundary > wal_end {
-        return Err(RdbFileError::InvalidOperation(format!(
-            "invalid embedded wal boundary {append_boundary}"
-        )));
-    }
-    if open.manifest.wal_live_bytes > open.manifest.wal_region_bytes {
-        return Err(RdbFileError::InvalidOperation(format!(
-            "invalid embedded wal live bytes {}",
-            open.manifest.wal_live_bytes
-        )));
-    }
-    if open.manifest.wal_live_bytes == 0 {
-        return Ok(WalScan {
-            next_sequence: 1,
-            ..WalScan::default()
-        });
-    }
-
-    let mut file = File::open(&open.path)?;
-    FileExt::lock_shared(&file)?;
-    scan_wal_with_file(&mut file, open, wal_start)
-}
-
 /// Scan the WAL through an already-open handle — see
 /// [`EmbeddedRdbArtifact::open_inner_with_file`] for why the writer path
 /// cannot open a second one.
 fn scan_wal_with_file(
-    file: &mut File,
+    file: &mut impl VfsFile,
     open: &EmbeddedRdbOpen,
     wal_start: u64,
 ) -> RdbFileResult<WalScan> {
-    let file_len = file.metadata()?.len();
+    let file_len = file.file_len()?;
     if file_len <= wal_start {
         return Ok(WalScan {
             next_sequence: 1,
@@ -1057,7 +483,7 @@ fn scan_wal_with_file(
 }
 
 fn read_circular_wal_bytes(
-    file: &mut File,
+    file: &mut impl VfsFile,
     open: &EmbeddedRdbOpen,
     file_len: u64,
 ) -> RdbFileResult<Vec<u8>> {
@@ -1081,7 +507,7 @@ fn read_circular_wal_bytes(
 }
 
 fn write_circular_wal_bytes(
-    file: &mut File,
+    file: &mut impl VfsFile,
     open: &EmbeddedRdbOpen,
     bytes: &[u8],
 ) -> RdbFileResult<()> {
@@ -1481,26 +907,24 @@ fn superblock_offset(copy_index: u8) -> RdbFileResult<u64> {
     }
 }
 
-fn write_at(file: &mut File, offset: u64, bytes: &[u8]) -> RdbFileResult<()> {
+fn write_at(file: &mut impl VfsFile, offset: u64, bytes: &[u8]) -> RdbFileResult<()> {
     file.seek(SeekFrom::Start(offset))?;
     file.write_all(bytes)?;
     Ok(())
 }
 
 fn crash_inject(point: &str) {
-    if std::env::var(CRASH_INJECT_ENV).ok().as_deref() == Some(point) {
-        std::process::exit(173);
+    #[cfg(target_arch = "wasm32")]
+    let _ = point;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if std::env::var(CRASH_INJECT_ENV).ok().as_deref() == Some(point) {
+            std::process::exit(173);
+        }
+        if crate::buggify!(CRASH_INJECT_ENV, point) {
+            std::process::exit(173);
+        }
     }
-    if crate::buggify!(CRASH_INJECT_ENV, point) {
-        std::process::exit(173);
-    }
-}
-
-fn now_unix_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0)
 }
 
 fn put_bytes(target: &mut [u8], cursor: &mut usize, value: &[u8]) {
@@ -1559,4 +983,286 @@ fn take_u128(bytes: &[u8], cursor: &mut usize) -> RdbFileResult<u128> {
     Ok(u128::from_le_bytes(
         take_bytes(bytes, cursor, 16)?.try_into().unwrap(),
     ))
+}
+
+fn create_file(
+    file: &mut impl VfsFile,
+    path: &Path,
+    snapshot: &[u8],
+    created_at_unix_ms: u128,
+) -> RdbFileResult<EmbeddedRdbOpen> {
+    let wal_region_offset = EMBEDDED_RDB_MANIFEST_ZONE_END;
+    let snapshot_offset = wal_region_offset + WAL_REGION_BYTES;
+    let manifest = EmbeddedRdbManifest {
+        version: MANIFEST_VERSION,
+        wal_region_offset,
+        wal_region_bytes: WAL_REGION_BYTES,
+        wal_recovery_boundary: wal_region_offset,
+        wal_live_bytes: 0,
+        snapshot_offset,
+        snapshot_bytes: snapshot.len() as u64,
+        snapshot_checksum: crc32(snapshot),
+        created_at_unix_ms,
+        checksum: 0,
+    };
+    let manifest_bytes = encode_manifest(manifest);
+    let manifest_checksum = trailer_checksum(&manifest_bytes);
+
+    file.set_len(snapshot_offset + snapshot.len() as u64)?;
+    write_at(file, EMBEDDED_RDB_MANIFEST_0_OFFSET, &manifest_bytes)?;
+    if !snapshot.is_empty() {
+        write_at(file, snapshot_offset, snapshot)?;
+    }
+
+    let base = EmbeddedRdbSuperblock {
+        copy_index: 0,
+        generation: 1,
+        format_version: DEFAULT_FORMAT_VERSION,
+        manifest_offset: EMBEDDED_RDB_MANIFEST_0_OFFSET,
+        manifest_len: manifest_bytes.len() as u64,
+        manifest_checksum,
+        wal_region_offset,
+        wal_region_bytes: WAL_REGION_BYTES,
+        wal_recovery_boundary: wal_region_offset,
+        wal_live_bytes: 0,
+        snapshot_offset,
+        snapshot_bytes: snapshot.len() as u64,
+        snapshot_checksum: crc32(snapshot),
+        checksum: 0,
+    };
+    write_superblock_copy(file, &base)?;
+    write_superblock_copy(
+        file,
+        &EmbeddedRdbSuperblock {
+            copy_index: 1,
+            generation: 2,
+            ..base
+        },
+    )?;
+    file.sync_all()?;
+
+    EmbeddedRdbArtifact::open_inner_with_file(file, path, true)
+}
+
+fn checkpoint_file(
+    file: &mut impl VfsFile,
+    path: &Path,
+    snapshot: &[u8],
+    min_wal_bytes: u64,
+) -> RdbFileResult<EmbeddedRdbOpen> {
+    let open = EmbeddedRdbArtifact::open_inner_with_file(file, path, true)?;
+    let wal_scan = match wal_region_start_checked(&open)? {
+        Some(wal_start) => scan_wal_with_file(file, &open, wal_start)?,
+        None => WalScan {
+            next_sequence: 1,
+            ..WalScan::default()
+        },
+    };
+    let checkpoint_boundary = wal_boundary_after_live_bytes(&open, wal_scan.valid_bytes)?;
+    let wal_region_bytes = grow_wal_region_bytes(open.manifest.wal_region_bytes, min_wal_bytes)?;
+    let snapshot_checksum = crc32(snapshot);
+    // Nothing to publish when the WAL is empty, its region need not grow,
+    // and the durable image already holds exactly these bytes. A close
+    // used to checkpoint the same image two or three times, each a full
+    // write plus fsyncs.
+    if open.manifest.wal_live_bytes == 0
+        && wal_scan.valid_bytes == 0
+        && wal_region_bytes == open.manifest.wal_region_bytes
+        && open.manifest.snapshot_bytes == snapshot.len() as u64
+        && open.manifest.snapshot_checksum == snapshot_checksum
+        && published_snapshot_matches(file, &open, snapshot)?
+    {
+        return Ok(open);
+    }
+    let snapshot_offset = next_snapshot_offset(file, &open, wal_region_bytes, snapshot)?;
+    let manifest = EmbeddedRdbManifest {
+        wal_region_bytes,
+        wal_recovery_boundary: checkpoint_boundary,
+        wal_live_bytes: 0,
+        snapshot_offset,
+        snapshot_bytes: snapshot.len() as u64,
+        snapshot_checksum,
+        checksum: 0,
+        ..open.manifest
+    };
+    let manifest_bytes = encode_manifest(manifest);
+    let manifest_checksum = trailer_checksum(&manifest_bytes);
+
+    // The image may land in a hole below a live snapshot, so only ever
+    // extend here: shrinking before publish would cut a live image.
+    let snapshot_end = snapshot_offset + snapshot.len() as u64;
+    if file.file_len()? < snapshot_end {
+        file.set_len(snapshot_end)?;
+    }
+    if !snapshot.is_empty() {
+        write_at(file, snapshot_offset, snapshot)?;
+    }
+    crash_inject("snapshot_after_image_write");
+    file.sync_data()?;
+    crash_inject("snapshot_after_image_sync");
+
+    // Publish the manifest into the slot the live superblock does NOT
+    // reference, and make it durable before any superblock names it. Until
+    // the superblock write below lands, the durable state still roots
+    // through the old manifest slot, which these bytes never touched.
+    let next_manifest_offset = inactive_manifest_offset(open.selected_superblock)?;
+    write_at(file, next_manifest_offset, &manifest_bytes)?;
+    crash_inject("snapshot_after_manifest_write");
+    file.sync_data()?;
+    crash_inject("snapshot_after_manifest_sync");
+
+    let next_copy_index = if open.selected_superblock.copy_index == 0 {
+        1
+    } else {
+        0
+    };
+    let next_superblock = EmbeddedRdbSuperblock {
+        copy_index: next_copy_index,
+        generation: open.selected_superblock.generation.saturating_add(1),
+        manifest_offset: next_manifest_offset,
+        manifest_len: manifest_bytes.len() as u64,
+        manifest_checksum,
+        wal_region_bytes,
+        wal_recovery_boundary: checkpoint_boundary,
+        wal_live_bytes: 0,
+        snapshot_offset,
+        snapshot_bytes: snapshot.len() as u64,
+        snapshot_checksum,
+        checksum: 0,
+        ..open.selected_superblock
+    };
+    write_superblock_copy(file, &next_superblock)?;
+    crash_inject("snapshot_after_superblock_write");
+    file.sync_all()?;
+
+    // Published: the two superblock copies now name this image and the
+    // previous one. Anything past both (and past the WAL region) is
+    // unreachable, so give it back instead of growing on every checkpoint.
+    let retained_end = snapshot_end
+        .max(open.manifest.snapshot_offset + open.manifest.snapshot_bytes)
+        .max(open.manifest.wal_region_offset + wal_region_bytes);
+    if file.file_len()? > retained_end {
+        file.set_len(retained_end)?;
+        file.sync_all()?;
+    }
+    EmbeddedRdbArtifact::open_inner_with_file(file, path, true)
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+struct PublishedAppend {
+    open: EmbeddedRdbOpen,
+    generation: u64,
+    next_sequence: u64,
+    previous_frame_crc: u32,
+    valid_bytes: u64,
+}
+
+fn append_file(
+    file: &mut impl VfsFile,
+    path: &Path,
+    payloads: &[Vec<u8>],
+    open: EmbeddedRdbOpen,
+    wal_scan: WalScan,
+    snapshot_validated: bool,
+) -> RdbFileResult<PublishedAppend> {
+    // Recovery may salvage a valid prefix, but appending after a corrupt
+    // published frame would acknowledge an unreachable new commit.
+    if wal_scan.valid_bytes != open.manifest.wal_live_bytes {
+        return Err(RdbFileError::ZoneUnrecoverable {
+            zone: "wal",
+            path: path.to_path_buf(),
+        });
+    }
+    let mut sequence = wal_scan.next_sequence;
+    let mut previous_frame_crc = wal_scan.previous_frame_crc;
+    let mut encoded = Vec::new();
+    for payload in payloads {
+        let (frame, frame_crc) = encode_wal_frame(sequence, previous_frame_crc, payload)?;
+        encoded.extend_from_slice(&frame);
+        previous_frame_crc = frame_crc;
+        sequence = sequence.saturating_add(1);
+    }
+
+    let encoded_len = encoded.len() as u64;
+    let free_bytes = open
+        .manifest
+        .wal_region_bytes
+        .checked_sub(wal_scan.valid_bytes)
+        .ok_or_else(|| RdbFileError::InvalidOperation("embedded wal live bytes overflow".into()))?;
+    if encoded_len > free_bytes {
+        return Err(RdbFileError::InvalidOperation(
+            "embedded wal region full".into(),
+        ));
+    }
+    let next_boundary = wal_boundary_after_live_bytes(&open, wal_scan.valid_bytes + encoded_len)?;
+
+    write_circular_wal_bytes(file, &open, &encoded)?;
+    crash_inject("wal_after_frame_write");
+    file.sync_data()?;
+    crash_inject("wal_after_frame_sync");
+
+    let next_copy_index = if open.selected_superblock.copy_index == 0 {
+        1
+    } else {
+        0
+    };
+    let next_superblock = EmbeddedRdbSuperblock {
+        copy_index: next_copy_index,
+        generation: open.selected_superblock.generation.saturating_add(1),
+        wal_recovery_boundary: next_boundary,
+        wal_live_bytes: wal_scan.valid_bytes + encoded_len,
+        checksum: 0,
+        ..open.selected_superblock
+    };
+    write_superblock_copy(file, &next_superblock)?;
+    crash_inject("wal_after_superblock_write");
+    file.sync_all()?;
+    // A warm append writes only WAL bytes and the alternate superblock:
+    // it does not change the snapshot. The matching identity/mutation
+    // stamp above proves no intervening file edit since its validation.
+    // Cache misses (including unsupported platforms) retain the full
+    // checksum pass. Normal open/read/scrub always verify snapshot bytes;
+    // this reuse is not a substitute for detecting bit rot on read.
+    let next_open = EmbeddedRdbArtifact::open_inner_with_file(file, path, !snapshot_validated)?;
+    Ok(PublishedAppend {
+        open: next_open,
+        generation: next_superblock.generation,
+        next_sequence: sequence,
+        previous_frame_crc,
+        valid_bytes: wal_scan.valid_bytes + encoded_len,
+    })
+}
+
+fn read_snapshot_file(
+    file: &mut impl VfsFile,
+    open: &EmbeddedRdbOpen,
+) -> RdbFileResult<Option<Vec<u8>>> {
+    if open.manifest.snapshot_bytes == 0 {
+        return Ok(None);
+    }
+    let mut bytes = vec![0u8; open.manifest.snapshot_bytes as usize];
+    file.seek(SeekFrom::Start(open.manifest.snapshot_offset))?;
+    file.read_exact(&mut bytes)?;
+    let checksum = crc32(&bytes);
+    if checksum != open.manifest.snapshot_checksum {
+        return Err(RdbFileError::InvalidOperation(format!(
+            "embedded snapshot checksum mismatch: stored {:#010x}, computed {:#010x}",
+            open.manifest.snapshot_checksum, checksum
+        )));
+    }
+    if bytes.len() >= SNAPSHOT_MAGIC.len() && &bytes[..SNAPSHOT_MAGIC.len()] != SNAPSHOT_MAGIC {
+        return Err(RdbFileError::InvalidOperation(
+            "invalid embedded snapshot magic".into(),
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+fn write_superblock_copy(
+    file: &mut impl VfsFile,
+    superblock: &EmbeddedRdbSuperblock,
+) -> RdbFileResult<()> {
+    let offset = superblock_offset(superblock.copy_index)?;
+    write_at(file, offset, &encode_superblock(*superblock)?)?;
+    Ok(())
 }

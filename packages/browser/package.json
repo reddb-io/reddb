@@ -1,0 +1,44 @@
+{
+  "name": "@reddb-io/browser",
+  "version": "0.1.0-alpha.0",
+  "private": false,
+  "type": "module",
+  "description": "Experimental RedDB browser persistence and shared scalar execution; stored-data queries and sync remain pending.",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./worker": "./src/worker.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build-test.mjs && node --test test/browser.test.mjs",
+    "prepack": "node scripts/verify-dist.mjs",
+    "test:distribution": "node --test test/distribution.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.61.1",
+    "vite": "8.3.5",
+    "typescript": "7.0.2"
+  },
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reddb-io/reddb.git",
+    "directory": "packages/browser"
+  },
+  "homepage": "https://github.com/reddb-io/reddb/tree/main/packages/browser",
+  "types": "./src/index.d.ts",
+  "files": [
+    "src/",
+    "scripts/verify-dist.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "experimental"
+  }
+}
