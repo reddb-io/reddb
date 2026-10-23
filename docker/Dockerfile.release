@@ -5,7 +5,7 @@
 
 FROM busybox:1.38 AS layout
 
-RUN mkdir -p /data /etc/reddb
+RUN mkdir -p /data/red /etc/reddb
 
 FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 
@@ -21,7 +21,7 @@ VOLUME /etc/reddb
 
 EXPOSE 5050 55055 5000 55555
 
-ENV REDDB_DATA_PATH=/data/data.rdb
+ENV REDDB_DATA_PATH=/data/red/database.rdb
 ENV REDDB_WIRE_BIND_ADDR=0.0.0.0:5050
 ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:55055
 ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:5000

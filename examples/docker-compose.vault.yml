@@ -16,7 +16,7 @@
 #             -v reddb-data:/data \
 #             reddb-benchmark/reddb:latest \
 #             bootstrap \
-#             --path /data/data.rdb \
+#             --path /data/red/database.rdb \
 #             --vault \
 #             --username admin \
 #             --password-stdin \
