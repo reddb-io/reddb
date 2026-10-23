@@ -126,10 +126,18 @@ export function assertSupportedParam(value) {
   )
 }
 
-export function normalizeQueryParams(args) {
+function serializeBinaryParam(value) {
+  if (value instanceof Uint8Array || value instanceof Float32Array || value instanceof Float64Array) {
+    return value
+  }
+  return serializeParam(value)
+}
+
+export function normalizeQueryParams(args, binary = false) {
   if (args.length === 0) return null
-  if (args.length === 1 && Array.isArray(args[0])) return args[0].map(serializeParam)
-  return args.map(serializeParam)
+  const serialize = binary ? serializeBinaryParam : serializeParam
+  if (args.length === 1 && Array.isArray(args[0])) return args[0].map(serialize)
+  return args.map(serialize)
 }
 
 export function bytesToBase64(value) {

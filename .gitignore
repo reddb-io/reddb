@@ -73,3 +73,4 @@ crates/reddb-server/leases/
 
 # Built browser playground assets are published by the docs workflow.
 /docs/browser/
+/drivers/js-client/bench/wasm/

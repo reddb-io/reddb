@@ -226,6 +226,8 @@ export class RedWireClient {
     this.reader = reader
     this.session = session
     this.serverFeatures = serverFeatures >>> 0
+    // RedWire consumes typed views directly; JSON transports use envelopes.
+    this.binaryQueryParams = true
     this.nextCorr = 1n
     this.nextStream = 1
     this.closed = false

@@ -122,7 +122,7 @@ export class RedDB {
 
   /** Execute a SQL query. Returns `{ statement, affected, columns, rows }`. */
   query(sql, ...params) {
-    const wireParams = normalizeQueryParams(params)
+    const wireParams = normalizeQueryParams(params, this.client.binaryQueryParams === true)
     if (wireParams == null) {
       return this.client.call('query', { sql }).then(normalizeExactNumbers)
     }
