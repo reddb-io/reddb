@@ -255,7 +255,7 @@ pub use native_store::{
     encode_native_registry_summary_page, encode_native_store_header,
     encode_native_vector_artifact_store_page, is_supported_store_version,
     native_blob_chunk_capacity, native_store_magic_matches, native_store_page_checksum,
-    verify_native_store_crc32_footer, write_native_store_bytes_atomically,
+    native_store_payload, verify_native_store_crc32_footer, write_native_store_bytes_atomically,
     NativeCatalogCollectionSummary, NativeCatalogSummary, NativeDumpCollectionHeader,
     NativeDumpCrossRef, NativeEntityRecordFrame, NativeExportSummary, NativeManifestEntrySummary,
     NativeManifestSummary, NativeMetadataOverflowContinuationHeader, NativeMetadataOverflowHeader,

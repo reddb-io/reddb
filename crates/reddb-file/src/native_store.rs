@@ -589,8 +589,15 @@ pub fn append_native_store_crc32_footer(bytes: &mut Vec<u8>) {
 }
 
 pub fn verify_native_store_crc32_footer(bytes: &mut Vec<u8>, version: u32) -> RdbFileResult<()> {
+    let payload_len = native_store_payload(bytes, version)?.len();
+    bytes.truncate(payload_len);
+    Ok(())
+}
+
+/// Verify the native dump checksum and borrow its payload without copying it.
+pub fn native_store_payload(bytes: &[u8], version: u32) -> RdbFileResult<&[u8]> {
     if version < STORE_VERSION_V3 {
-        return Ok(());
+        return Ok(bytes);
     }
     if bytes.len() < 12 {
         return Err(RdbFileError::InvalidOperation(
@@ -610,8 +617,7 @@ pub fn verify_native_store_crc32_footer(bytes: &mut Vec<u8>, version: u32) -> Rd
             "Binary store CRC32 mismatch — file corrupted".to_string(),
         ));
     }
-    bytes.truncate(footer_at);
-    Ok(())
+    Ok(&bytes[..footer_at])
 }
 
 fn native_store_dump_crc32(bytes: &[u8]) -> u32 {

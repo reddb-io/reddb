@@ -1,6 +1,6 @@
 # ADR 0077 — RedDB Browser, shared engine and OPFS
 
-Status: accepted architecture; persistence, portable query operators, B-tree/pager and live MVCC shared; storage-backed runtime and sync pending
+Status: accepted architecture; persistence, portable query operators, B-tree/pager, live MVCC and snapshot decoding shared; storage-backed runtime and sync pending
 Date: 2026-10-22
 
 ## Decision
@@ -311,3 +311,21 @@ Data-plane sketch: 10,000 resident entities at 1 KiB each retain about 10 MiB of
 payload plus the existing native indexes; aliases add no second resident copy.
 Physical scan batches remain bounded at 256 captured slots, as in the native
 implementation. This is a size sketch, not a measured performance claim.
+
+## Shared snapshot recovery
+
+The native host and WASM share typed metadata/entity-record encoding and streaming
+native V1–V12 snapshot decoding. Physical framing remains in `reddb-file`, whose
+borrowed payload verifier checks CRC before restore callbacks without copying the
+whole dump. Recovery visits empty collections, one entity/metadata record at a
+time, cross-references and the optional V10+ opaque catalog blob. A host must
+populate a private recovery target and publish it only after success. Native ID
+allocation, derived-index rebuilding, version upgrades and disabled-WAL restore
+policy remain native host responsibilities.
+
+The metadata reader validates counts against remaining bytes before allocation
+and caps recursion at the existing RQL JSON depth limit. This intentionally
+rejects deeper metadata previously accepted by the unbounded native reader.
+Frozen original-native metadata bytes and V1–V12 entity fixtures qualify the same
+cases natively and in browser WASM. Formats/versions and the public browser API
+are unchanged. Application WAL recovery and stored-data dispatch remain pending.

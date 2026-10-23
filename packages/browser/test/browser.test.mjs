@@ -75,6 +75,10 @@ async function sharedConformance(browserPage) {
     'record_projection_and_document_body', 'record_typed_timeseries_and_identity',
     'segment_native_entity_shapes', 'segment_key_versions_and_mutation',
     'segment_bounded_scan_and_mutation', 'segment_metadata_and_sealing',
+    'metadata_codec_native_goldens', 'metadata_codec_record_envelopes',
+    'metadata_codec_malformed_payloads', 'metadata_codec_depth_boundary',
+    'snapshot_native_v1_v12_recovery', 'snapshot_empty_collections_and_legacy_tails',
+    'snapshot_corruption_and_callback_errors',
   ])
 }
 

@@ -105,97 +105,65 @@ impl UnifiedStore {
         buf: &[u8],
         config: UnifiedStoreConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut buf = buf.to_vec();
-        let version =
-            reddb_file::decode_native_store_header(&buf).map_err(|err| err.to_string())?;
-        let mut pos = 8;
+        use reddb_engine::storage::snapshot::{visit_snapshot, SnapshotVisitor};
 
-        // V3+ has CRC32 footer — verify integrity before parsing
-        reddb_file::verify_native_store_crc32_footer(&mut buf, version)
-            .map_err(|err| err.to_string())?;
-
-        let mut store = Self::with_config(config);
-        // Reconstruct the snapshot without appending its old images to the
-        // live WAL. The caller replays that WAL after loading this snapshot.
-        let embedded_wal_path = store.config.embedded_wal_path.take();
-        store.set_format_version(version);
-
-        // Read collection count
-        let collection_count =
-            reddb_file::decode_native_dump_count(&buf, &mut pos).map_err(|e| e.to_string())?;
-
-        // Read each collection
-        for _ in 0..collection_count {
-            let collection_header =
-                reddb_file::decode_native_dump_collection_header(&buf, &mut pos)
-                    .map_err(|e| e.to_string())?;
-
-            // The registry is persisted even when the last entity was removed.
-            // Restore it independently of the entity loop so empty queues and
-            // other collections survive reopening without emitting new WAL.
-            store.get_or_create_collection(&collection_header.name);
-
-            // Read each entity — V7+ includes metadata alongside entity data.
-            for _ in 0..collection_header.entity_count {
-                if version >= STORE_VERSION_V7 {
-                    // Length-prefixed entity+metadata record (serialize_entity_record format)
-                    let record_bytes = reddb_file::decode_native_dump_entity_record(&buf, &mut pos)
-                        .map_err(|e| e.to_string())?;
-
-                    let (entity, metadata) = Self::deserialize_entity_record(record_bytes, version)
-                        .map_err(|e| format!("Entity record deserialization error: {e}"))?;
-
-                    store.restore_snapshot_entity(&collection_header.name, entity.clone())?;
-
-                    if let Some(metadata) = metadata {
-                        if let Some(manager) = store.get_collection(&collection_header.name) {
-                            let _ = manager.set_metadata(entity.id, metadata);
-                        }
-                    }
-                } else {
-                    // V1–V6: entity only, no metadata
-                    let entity = Self::read_entity_binary(&buf, &mut pos, version)?;
-                    store.restore_snapshot_entity(&collection_header.name, entity)?;
-                }
+        struct Restore<'a>(&'a UnifiedStore);
+        impl SnapshotVisitor for Restore<'_> {
+            fn collection(&mut self, name: &str) -> Result<(), String> {
+                self.0.get_or_create_collection(name);
+                Ok(())
             }
-        }
 
-        if pos < buf.len() {
-            // Read cross-references section
-            let cross_ref_count =
-                reddb_file::decode_native_dump_count(&buf, &mut pos).map_err(|e| e.to_string())?;
+            fn entity(
+                &mut self,
+                collection: &str,
+                entity: UnifiedEntity,
+                metadata: Option<Metadata>,
+            ) -> Result<(), String> {
+                let id = entity.id;
+                self.0
+                    .restore_snapshot_entity(collection, entity)
+                    .map_err(|err| err.to_string())?;
+                if let Some(metadata) = metadata {
+                    if let Some(manager) = self.0.get_collection(collection) {
+                        let _ = manager.set_metadata(id, metadata);
+                    }
+                }
+                Ok(())
+            }
 
-            for _ in 0..cross_ref_count {
-                let cross_ref = reddb_file::decode_native_dump_cross_ref(&buf, &mut pos)
-                    .map_err(|e| e.to_string())?;
-                let ref_type = RefType::from_byte(cross_ref.ref_type);
-
-                let source_collection = store
+            fn cross_ref(
+                &mut self,
+                cross_ref: reddb_file::NativeDumpCrossRef,
+            ) -> Result<(), String> {
+                let source_collection = self
+                    .0
                     .get_any(EntityId::new(cross_ref.source_id))
                     .map(|(name, _)| name)
                     .unwrap_or_else(|| cross_ref.target_collection.clone());
-                let _ = store.add_cross_ref(
+                let _ = self.0.add_cross_ref(
                     &source_collection,
                     EntityId::new(cross_ref.source_id),
                     &cross_ref.target_collection,
                     EntityId::new(cross_ref.target_id),
-                    ref_type,
+                    RefType::from_byte(cross_ref.ref_type),
                     1.0,
                 );
+                Ok(())
+            }
+
+            fn auxiliary(&mut self, bytes: &[u8]) -> Result<(), String> {
+                self.0.set_aux_metadata(bytes.to_vec());
+                Ok(())
             }
         }
 
-        // V10+: a trailing opaque auxiliary-metadata blob follows the
-        // cross-references. RedDB stores the collection contracts here so the
-        // single-file artifact carries each collection's declared model across
-        // a restart. Older dumps end at the cross-refs and have no blob.
-        if version >= reddb_file::STORE_VERSION_V10 && pos < buf.len() {
-            let aux = reddb_file::decode_native_dump_entity_record(&buf, &mut pos)
-                .map_err(|e| e.to_string())?;
-            if !aux.is_empty() {
-                store.set_aux_metadata(aux.to_vec());
-            }
-        }
+        let version = reddb_file::decode_native_store_header(buf).map_err(|err| err.to_string())?;
+        let mut store = Self::with_config(config);
+        // Recovery is private until complete and must not append old images to WAL.
+        let embedded_wal_path = store.config.embedded_wal_path.take();
+        store.set_format_version(version);
+        visit_snapshot(buf, &mut Restore(&store))?;
 
         if store.format_version() < STORE_VERSION_CURRENT {
             store.set_format_version(STORE_VERSION_CURRENT);

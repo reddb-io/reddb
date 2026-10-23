@@ -1,3 +1,15 @@
+#[path = "../../reddb-engine/tests/support/metadata_corpus.rs"]
+mod metadata_corpus;
+#[path = "../../reddb-engine/tests/support/snapshot.rs"]
+mod snapshot;
+
+#[test]
+fn shared_snapshot_version_conformance() {
+    for (_, run) in snapshot::CASES {
+        run();
+    }
+}
+
 #[path = "../../reddb-engine/tests/support/codec_corpus.rs"]
 mod codec_corpus;
 
@@ -565,13 +577,16 @@ fn native_moderation_gate_stays_ahead_of_shared_mvcc_reads() {
 #[test]
 fn shared_entity_codec_preserves_native_dump_payloads_and_metadata() {
     use reddb_engine::storage::entity_codec::write_entity_binary;
-    use reddb_server::storage::{Metadata, MetadataValue, UnifiedStore};
+    use reddb_server::storage::UnifiedStore;
 
     let directory = tempfile::tempdir().expect("native dump fixture");
     let path = directory.path().join("codec.rdb");
     let store = UnifiedStore::new();
-    let mut metadata = Metadata::new();
-    metadata.set("fixture", MetadataValue::String("native metadata".into()));
+    let metadata = metadata_corpus::metadata();
+    store
+        .create_collection("empty")
+        .expect("empty collection registry");
+    store.set_aux_metadata(b"opaque catalog".to_vec());
     let mut expected = vec![];
     for entity in codec_corpus::entities() {
         let collection = format!("codec_{}", entity.id.raw());
@@ -589,8 +604,31 @@ fn shared_entity_codec_preserves_native_dump_payloads_and_metadata() {
     }
     store.save_to_file(&path).expect("native dump saved");
     drop(store);
+    let mut restored = snapshot::Restored::default();
+    let dump = std::fs::read(&path).expect("native snapshot bytes");
+    assert_eq!(
+        reddb_engine::storage::snapshot::visit_snapshot(&dump, &mut restored)
+            .expect("shared snapshot reader"),
+        reddb_file::STORE_VERSION_CURRENT,
+    );
+    assert!(restored.collections["empty"].is_empty());
+    assert_eq!(restored.auxiliary, b"opaque catalog");
     let reopened = UnifiedStore::load_from_file(&path).expect("native dump reopens");
+    assert!(reopened.get_collection("empty").is_some());
+    assert_eq!(reopened.aux_metadata(), b"opaque catalog");
     for (collection, id, bytes) in expected {
+        let (shared_entity, shared_metadata) = &restored.collections[&collection][0];
+        let mut encoded = vec![];
+        write_entity_binary(
+            &mut encoded,
+            shared_entity,
+            reddb_file::STORE_VERSION_CURRENT,
+        );
+        assert_eq!(encoded, bytes, "shared snapshot for {collection}");
+        assert_eq!(
+            shared_metadata.as_ref().expect("shared metadata").fields,
+            metadata.fields
+        );
         let manager = reopened
             .get_collection(&collection)
             .expect("restored collection");
