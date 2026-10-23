@@ -672,28 +672,30 @@ export function decodeFrame(buf) {
 class FrameReader {
   constructor(socket) {
     this.chunks = []
+    this.chunkIndex = 0
+    this.chunkOffset = 0
     this.totalLen = 0
+    this.frameLength = 0
     this.waiters = []
     this.error = null
     this.eof = false
     socket.on('data', (chunk) => {
+      if (this.error || this.eof) return
       // chunk is Buffer (Node) or Uint8Array (Bun/Deno)
       const u8 = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
+      if (u8.length === 0) return
       this.chunks.push(u8)
       this.totalLen += u8.length
       this.#tryDeliver()
     })
-    socket.on('error', (err) => {
-      this.error = err
-      this.#flushWaiters()
-    })
+    socket.on('error', (err) => this.#fail(err))
     socket.on('end', () => {
       this.eof = true
-      this.#flushWaiters()
+      this.#tryDeliver()
     })
     socket.on('close', () => {
       this.eof = true
-      this.#flushWaiters()
+      this.#tryDeliver()
     })
   }
 
@@ -706,57 +708,79 @@ class FrameReader {
   }
 
   #tryDeliver() {
-    while (this.waiters.length > 0 && this.totalLen > 0) {
-      const flat = this.#flatten()
+    while (this.waiters.length > 0 && this.totalLen >= FRAME_HEADER_SIZE) {
       let frame
       try {
-        frame = decodeFrame(flat)
+        if (this.frameLength === 0) this.frameLength = this.#readLength()
+        if (this.totalLen < this.frameLength) break
+        frame = decodeFrame(this.#take(this.frameLength))
+        this.frameLength = 0
       } catch (err) {
-        const w = this.waiters.shift()
-        w.reject(err)
+        this.#fail(err)
         return
       }
-      if (frame == null) {
-        // Need more bytes — put the flattened buffer back as a
-        // single chunk so we don't keep flattening repeatedly.
-        this.chunks = [flat]
-        return
-      }
-      this.chunks = [flat.subarray(frame.consumed)]
-      this.totalLen = this.chunks[0].length
       const w = this.waiters.shift()
       w.resolve(frame)
     }
-    if (this.eof && this.waiters.length > 0 && this.totalLen === 0) {
-      const err = this.error ?? new RedDBError('CONNECTION_CLOSED', 'redwire: connection closed')
-      while (this.waiters.length > 0) {
-        this.waiters.shift().reject(err)
+    if (this.eof && this.waiters.length > 0) {
+      this.#fail(new RedDBError('CONNECTION_CLOSED', 'redwire: connection closed'))
+    }
+  }
+
+  #readLength() {
+    let length = 0
+    let shift = 0
+    for (let index = this.chunkIndex; shift < 32; index++) {
+      const chunk = this.chunks[index]
+      const start = index === this.chunkIndex ? this.chunkOffset : 0
+      for (let offset = start; offset < chunk.length && shift < 32; offset++, shift += 8) {
+        length += chunk[offset] * 2 ** shift
       }
     }
+    if (length < FRAME_HEADER_SIZE || length > MAX_FRAME_SIZE) {
+      throw new RedDBError('FRAME_INVALID_LENGTH', `length=${length}`)
+    }
+    return length
   }
 
-  #flushWaiters() {
-    if (this.waiters.length === 0) return
-    if (this.totalLen > 0) {
-      this.#tryDeliver()
-      return
-    }
-    const err = this.error ?? new RedDBError('CONNECTION_CLOSED', 'redwire: connection closed')
+  #fail(error) {
+    this.error ??= error
+    this.chunks = []
+    this.chunkIndex = 0
+    this.chunkOffset = 0
+    this.totalLen = 0
+    this.frameLength = 0
     while (this.waiters.length > 0) {
-      this.waiters.shift().reject(err)
+      this.waiters.shift().reject(this.error)
     }
   }
 
-  #flatten() {
-    if (this.chunks.length === 1) return this.chunks[0]
-    const out = new Uint8Array(this.totalLen)
-    let off = 0
-    for (const c of this.chunks) {
-      out.set(c, off)
-      off += c.length
+  #take(length) {
+    const first = this.chunks[this.chunkIndex]
+    const contiguous = first.length - this.chunkOffset >= length
+    // A plain Uint8Array keeps decodeFrame's payload slice owned, even for Buffer input.
+    const bytes = contiguous
+      ? new Uint8Array(first.buffer, first.byteOffset + this.chunkOffset, length)
+      : new Uint8Array(length)
+    let written = 0
+    while (written < length) {
+      const chunk = this.chunks[this.chunkIndex]
+      const count = Math.min(length - written, chunk.length - this.chunkOffset)
+      if (!contiguous) bytes.set(chunk.subarray(this.chunkOffset, this.chunkOffset + count), written)
+      written += count
+      this.chunkOffset += count
+      if (this.chunkOffset === chunk.length) {
+        this.chunks[this.chunkIndex++] = null
+        this.chunkOffset = 0
+      }
     }
-    this.chunks = [out]
-    return out
+    this.totalLen -= length
+    // Release consumed buffers immediately; compact references only after half are consumed.
+    if (this.chunkIndex * 2 >= this.chunks.length) {
+      this.chunks = this.chunks.slice(this.chunkIndex)
+      this.chunkIndex = 0
+    }
+    return bytes
   }
 }
 

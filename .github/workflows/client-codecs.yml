@@ -75,3 +75,11 @@ jobs:
           REDDB_BENCH_OUTPUT: ${{ runner.temp }}/client-codecs.json
         # Timings are informational. Only execution and exact byte parity gate CI.
         run: node drivers/js-client/bench/run.mjs
+      - name: Verify frame accumulation in Node, Chromium, Firefox and WebKit
+        env:
+          REDDB_BENCH_BASELINE: ${{ github.workspace }}
+          REDDB_BENCH_ROUNDS: '3'
+          REDDB_BENCH_SAMPLE_MS: '5'
+          REDDB_BENCH_OUTPUT: ${{ runner.temp }}/client-frames.json
+        # Byte equality gates CI; shared-runner timings are informational.
+        run: node drivers/js-client/bench/run-frames.mjs

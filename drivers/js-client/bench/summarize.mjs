@@ -21,12 +21,20 @@ function speedup(baseline, candidate) {
   return `${(median(baseline) / median(candidate)).toFixed(2)}× [${ratios[50].toFixed(2)}, ${ratios[1949].toFixed(2)}]`
 }
 
-console.log('| Runtime | Input | Original µs | JS µs | WASM µs | JS speedup [95% CI] | WASM speedup [95% CI] |')
-console.log('| --- | --- | ---: | ---: | ---: | ---: | ---: |')
+const columns = ['Runtime', 'Input', 'Original µs', 'JS µs']
+if (report.wasm) columns.push('WASM µs')
+columns.push('JS speedup [95% CI]')
+if (report.wasm) columns.push('WASM speedup [95% CI]')
+console.log(`| ${columns.join(' | ')} |`)
+console.log(`| ${columns.map((_, index) => index < 2 ? '---' : '---:').join(' | ')} |`)
 for (const runtime of ['node', 'chromium', 'firefox', 'webkit']) {
   const result = report[runtime]
   if (!result) continue
   for (const { name, samples } of result.results) {
-    console.log(`| ${runtime} | ${name} | ${median(samples.baseline).toFixed(2)} | ${median(samples.javascript).toFixed(2)} | ${median(samples.wasm).toFixed(2)} | ${speedup(samples.baseline, samples.javascript)} | ${speedup(samples.baseline, samples.wasm)} |`)
+    const row = [runtime, name, median(samples.baseline).toFixed(2), median(samples.javascript).toFixed(2)]
+    if (report.wasm) row.push(median(samples.wasm).toFixed(2))
+    row.push(speedup(samples.baseline, samples.javascript))
+    if (report.wasm) row.push(speedup(samples.baseline, samples.wasm))
+    console.log(`| ${row.join(' | ')} |`)
   }
 }
