@@ -128,6 +128,8 @@ export function assertSupportedParam(value) {
 
 function serializeBinaryParam(value) {
   if (value instanceof Uint8Array || value instanceof Float32Array || value instanceof Float64Array) {
+    // Preserve the existing handling of empty, detached and resized views.
+    if (value.byteLength === 0) return serializeParam(value)
     return value
   }
   return serializeParam(value)

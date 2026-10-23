@@ -8,14 +8,43 @@ test('binary normalization preserves typed views and their exact wire values', (
   for (const value of [
     new Float32Array([0.25, -0, Infinity, -Infinity, NaN]),
     new Float64Array([1 / 3, -0, 1e300]),
+    new Float32Array([9, 0.25, -0.5]).subarray(1),
+    new Float32Array(0),
+    new Float64Array(0),
+    new Uint8Array(0),
     Uint8Array.of(0, 127, 255).subarray(1),
     Buffer.from([0, 127, 255]).subarray(1),
   ]) {
     const binary = normalizeQueryParams([[value]], true)
     const json = normalizeQueryParams([[value]])
-    assert.equal(binary[0], value, 'binary transport retains the original view')
+    if (value.byteLength > 0) assert.equal(binary[0], value, 'binary transport retains the original view')
+    else assert.deepEqual(binary, json)
     assert.notEqual(json[0], value, 'JSON transport keeps its portable envelope')
     assert.deepEqual(encodeQueryWithParams('SELECT $1', binary), encodeQueryWithParams('SELECT $1', json))
+  }
+})
+
+test('detached typed views are rejected instead of becoming empty binary values', () => {
+  for (const View of [Float32Array, Float64Array, Uint8Array]) {
+    const value = new View(2)
+    structuredClone(value.buffer, { transfer: [value.buffer] })
+    assert.throws(() => normalizeQueryParams([[value]]), TypeError)
+    assert.throws(() => normalizeQueryParams([[value]], true), TypeError)
+  }
+})
+
+test('out-of-bounds resizable views retain the existing validation and encoding', (context) => {
+  if (!ArrayBuffer.prototype.resize) { context.skip('Resizable ArrayBuffer unavailable'); return }
+  for (const View of [Float32Array, Float64Array, Uint8Array]) {
+    const buffer = new ArrayBuffer(16, { maxByteLength: 32 })
+    const value = new View(buffer, 8, 1)
+    buffer.resize(4)
+    if (View === Uint8Array) {
+      assert.deepEqual(normalizeQueryParams([[value]], true), normalizeQueryParams([[value]]))
+    } else {
+      assert.throws(() => normalizeQueryParams([[value]]), TypeError)
+      assert.throws(() => normalizeQueryParams([[value]], true), TypeError)
+    }
   }
 })
 
