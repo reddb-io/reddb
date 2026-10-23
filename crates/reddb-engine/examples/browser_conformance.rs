@@ -41,6 +41,17 @@ mod records;
 mod segments;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/metadata_codec.rs"]
+mod metadata_codec;
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/metadata_corpus.rs"]
+mod metadata_corpus;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/snapshot.rs"]
+mod snapshot;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = runConformance)]
 pub fn run_conformance() -> String {
     let cases = portable::CASES
@@ -51,11 +62,20 @@ pub fn run_conformance() -> String {
         .chain(entity::CASES.iter())
         .chain(entity_codec::CASES.iter())
         .chain(records::CASES.iter())
-        .chain(segments::CASES.iter());
+        .chain(segments::CASES.iter())
+        .chain(metadata_codec::CASES.iter())
+        .chain(snapshot::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }
     cases.map(|(name, _)| *name).collect::<Vec<_>>().join(",")
+}
+
+/// Test-only decoder for the native snapshot retained across OPFS restarts.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = verifyNativeSnapshot)]
+pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
+    snapshot::verify_native_snapshot(bytes)
 }
 
 /// Test-only host-clock probe: JS checks seconds against Date.now before/after.

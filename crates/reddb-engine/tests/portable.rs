@@ -90,3 +90,27 @@ fn portable_resident_segment_conformance() {
         run();
     }
 }
+
+#[path = "support/metadata_codec.rs"]
+mod metadata_codec;
+#[path = "support/metadata_corpus.rs"]
+mod metadata_corpus;
+
+#[test]
+fn portable_metadata_codec_conformance() {
+    for (name, run) in metadata_codec::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[path = "support/snapshot.rs"]
+mod snapshot;
+
+#[test]
+fn portable_snapshot_conformance() {
+    for (name, run) in snapshot::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

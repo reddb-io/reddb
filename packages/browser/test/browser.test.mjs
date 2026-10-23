@@ -18,6 +18,7 @@ let origin
 let fixtures
 let nativeTreeFixture
 let nativeFixture
+let nativeSnapshot
 const networkRequests = []
 
 async function withHostOffline(run) {
@@ -75,6 +76,10 @@ async function sharedConformance(browserPage) {
     'record_projection_and_document_body', 'record_typed_timeseries_and_identity',
     'segment_native_entity_shapes', 'segment_key_versions_and_mutation',
     'segment_bounded_scan_and_mutation', 'segment_metadata_and_sealing',
+    'metadata_codec_native_goldens', 'metadata_codec_record_envelopes',
+    'metadata_codec_malformed_payloads', 'metadata_codec_depth_boundary',
+    'snapshot_native_store_fixture', 'snapshot_native_v1_v12_recovery', 'snapshot_empty_collections_and_legacy_tails',
+    'snapshot_corruption_and_callback_errors',
   ])
 }
 
@@ -83,6 +88,7 @@ before(async () => {
   const path = resolve(fixtures, 'native.rdb')
   nativeArtifact('create', path)
   nativeFixture = [...await readFile(path)]
+  nativeSnapshot = [...await readFile(resolve(root, 'crates/reddb-engine/tests/fixtures/native-store-v12.rdst'))]
   const treePath = resolve(fixtures, 'native-tree.rdb')
   nativeTree('create', treePath)
   nativeTreeFixture = [...await readFile(treePath)]
@@ -395,6 +401,48 @@ for (const browser of browsers) {
       } finally {
         await context.setOffline(false)
       }
+    })
+
+    storageTest('native collections and typed metadata recover from an OPFS snapshot after an offline browser restart', async () => {
+      async function recover(seed) {
+        const current = await page()
+        try {
+          return await current.evaluate(async (seed) => {
+            const file = await RedDBBrowser.openArtifact({ name: 'native-snapshot-recovery' })
+            let snapshot
+            try {
+              if (seed) await file.checkpoint(Uint8Array.from(seed))
+              snapshot = await file.readSnapshot()
+            } finally { await file.close() }
+            const worker = new Worker('/packages/browser/test/snapshot-worker.js', { type: 'module' })
+            try {
+              const entities = await new Promise((resolve, reject) => {
+                worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data.entities)
+                worker.onerror = (event) => reject(new Error(event.message))
+                worker.postMessage(snapshot)
+              })
+              return { entities, snapshot: [...snapshot] }
+            } finally { worker.terminate() }
+          }, seed)
+        } finally { await current.close() }
+      }
+      const first = await page()
+      await first.evaluate(async () => {
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+      })
+      await first.waitForFunction(() => navigator.serviceWorker.controller)
+      await first.close()
+      await context.setOffline(true)
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          assert.deepEqual(await recover(nativeSnapshot), { entities: 8, snapshot: nativeSnapshot })
+          await context.close()
+          await launch({ offline: true })
+          assert.deepEqual(await recover(), { entities: 8, snapshot: nativeSnapshot })
+          assert.equal(networkRequests.length, requestsBefore, 'offline snapshot recovery reached the HTTP host')
+        })
+      } finally { await context.setOffline(false) }
     })
 
     storageTest('shared pager recovers allocation and checkpoint state after a torn OPFS write offline', async () => {

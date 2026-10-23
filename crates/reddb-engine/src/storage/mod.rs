@@ -26,3 +26,6 @@ mod segment_graph_index;
 #[doc(hidden)]
 pub mod segment_key_lookup;
 mod segment_unique_key;
+
+pub mod metadata_codec;
+pub mod snapshot;

@@ -261,6 +261,24 @@ transactions. WAL publication, catalog dispatch and the application SDK still
 need integration before JS/TS can query and mutate persisted collections. The
 production artifact/scalar API and all file formats remain unchanged.
 
+## Shared snapshot recovery
+
+Native and WASM now use the same typed metadata/entity-record codecs and streaming
+V1–V12 dump reader. Recovery preserves empty collection registration, record
+metadata, cross-references and the optional V10+ catalog blob. The shared file
+layer verifies the checksum before any restore callback and lends the payload
+without copying the entire snapshot. Hosts must restore into private state and
+publish it only after successful recovery.
+
+Frozen pre-extraction native metadata bytes and entity fixtures check compatible
+encoding and decoding. Shared native/WASM cases also cover truncated metadata,
+invalid counts/tags/UTF-8, nesting at the RQL depth limit, checksum failures,
+legacy optional tails and host callback errors. Metadata nesting above the existing
+RQL JSON limit is now rejected; previously the native metadata reader was unbounded.
+The native host retains collection/index restoration, ID allocation and WAL policy.
+These internal recovery primitives do not yet expose stored-data queries or
+application transactions through the browser SDK.
+
 ## Remaining work toward the approved Browser design
 
 1. Extract the remaining storage-coupled executor/runtime into the shared portable engine and
