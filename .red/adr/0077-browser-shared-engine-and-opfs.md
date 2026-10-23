@@ -82,6 +82,16 @@ page-level I/O recovery, not transaction or five-model execution. The production
 SDK does not expose these pager fixtures. Full pager orchestration, allocation,
 WAL/MVCC, checkpointing and storage-backed execution are still pending.
 
+Encryption qualification also requires resolving a pre-existing native header
+layout collision: the encryption marker currently occupies the physical-format
+version field, and a database-header rewrite overwrites it. The canonical file
+codec is unchanged from native 1.25.7. The native encrypted-pager restart
+regression is explicitly ignored with this reason and tracked in #2453; it must
+pass before encrypted pager restart is claimed. The shared byte-I/O test
+separately verifies exact opaque crypto envelopes, authenticated reads after
+reopen and rejection of tampered ciphertext. This milestone makes no encryption
+format migration or full encrypted-pager qualification claim.
+
 The experimental `executeScalar` entrypoint executes storage-free SELECT
 expressions in the worker with the same evaluator and exact JSON integer/decimal
 tags. It rejects unsupported clauses explicitly and never reads or writes the
