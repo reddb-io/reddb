@@ -1,5 +1,11 @@
 # @reddb-io/client
 
+## 1.26.4
+
+### Patch Changes
+
+- [#2475](https://github.com/reddb-io/reddb/pull/2475) [`fced2ab`](https://github.com/reddb-io/reddb/commit/fced2ab5149ed8e7a97ee67e1142530479bfee52) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve typed vectors and byte buffers through RedWire query normalization to avoid redundant array and base64 conversions. Fill canonical Rust vector payloads in one pre-sized region. Keep JSON transports and wire bytes unchanged, and compare the complete encoding path with canonical Rust/WASM codecs.
+
 ## 1.26.3
 
 ## 1.26.2

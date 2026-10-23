@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.26.4
+
+### Patch Changes
+
+- [#2475](https://github.com/reddb-io/reddb/pull/2475) [`fced2ab`](https://github.com/reddb-io/reddb/commit/fced2ab5149ed8e7a97ee67e1142530479bfee52) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve typed vectors and byte buffers through RedWire query normalization to avoid redundant array and base64 conversions. Fill canonical Rust vector payloads in one pre-sized region. Keep JSON transports and wire bytes unchanged, and compare the complete encoding path with canonical Rust/WASM codecs.
+
+- [#2472](https://github.com/reddb-io/reddb/pull/2472) [`37e8c82`](https://github.com/reddb-io/reddb/commit/37e8c82310f6b4bde713be28225e6273dcf7671b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Share canonical resident collection segments, metadata and candidate indexes with the portable Rust engine, preserving native aliases and qualifying the same operations in WASM. Browser application transactions and stored-data dispatch remain pending.
+
+- [#2473](https://github.com/reddb-io/reddb/pull/2473) [`2176fc0`](https://github.com/reddb-io/reddb/commit/2176fc0545aabac0a02222c5b6b75c0103604e9b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Share native metadata record codecs and streaming snapshot recovery with WASM, preserving existing dump versions and validating malformed metadata counts and nesting. Browser application query and transaction dispatch still require runtime integration.
+
 ## 1.26.3
 
 ### Patch Changes
