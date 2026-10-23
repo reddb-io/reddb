@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import {
-    Alert, Badge, Button, CodeBlock, Container, Divider, Field, Heading,
+    Alert, Badge, Button, CodeBlock, Container, DescriptionList, Divider, Field, Heading,
     Link, Logo, Prose, SectionHeading, SkipLink, Stack, Text, Textarea,
   } from '@reddb-io/design-system/base'
   import { BrowserError, openArtifact, type Artifact } from '@reddb-io/browser'
@@ -137,6 +137,11 @@
   })
 </script>
 
+{#snippet fileName()}<code class="font-mono break-all">reddb-browser-playground-v1</code>{/snippet}
+{#snippet countValue()}<span id="record-count">{recordCount}</span>{/snippet}
+{#snippet generationValue()}<span id="generation">{generation}</span>{/snippet}
+
+
 <SkipLink href="#main-content">Ir para o conteúdo</SkipLink>
 <header class="playground-header">
   <Container>
@@ -196,11 +201,11 @@
         <Stack>
           <SectionHeading title="02 · Persista e reabra" titleId="storage-heading" />
           <Text class="max-w-prose">O marcador é um payload binário opaco de teste no artefato <code>.rdb</code>. Demonstra a persistência do arquivo, sem representar uma linha, documento ou transação.</Text>
-          <dl class="playground-files">
-            <div><dt><Text as="span" role="caption">Arquivo de teste</Text></dt><dd><code>reddb-browser-playground-v1</code></dd></div>
-            <div><dt><Text as="span" role="caption">Marcadores persistidos</Text></dt><dd id="record-count">{recordCount}</dd></div>
-            <div><dt><Text as="span" role="caption">Geração do artefato</Text></dt><dd id="generation">{generation}</dd></div>
-          </dl>
+          <DescriptionList items={[
+            { term: 'Arquivo de teste', detail: fileName },
+            { term: 'Marcadores persistidos', detail: countValue },
+            { term: 'Geração do artefato', detail: generationValue },
+          ]} />
           <Stack direction="row" gap="sm" wrap>
             <Button id="append" variant="primary" disabled={busy || !artifact} onclick={() => void action(appendMarker)}>Gravar marcador</Button>
             <Button id="reopen" disabled={busy} onclick={() => void action(reopen)}>Reabrir arquivo</Button>

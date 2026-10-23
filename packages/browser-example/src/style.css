@@ -18,7 +18,4 @@ body {
   gap: var(--reddb-spatial-layout-gap-lg);
 }
 .playground-query > * { min-width: 0; }
-.playground-files { display: flex; flex-wrap: wrap; gap: var(--reddb-spatial-layout-gap-lg); }
-.playground-files dd { margin: 0; overflow-wrap: anywhere; }
-.playground-files code { font-family: var(--reddb-font-family-mono); }
 @media (max-width: 48rem) { .playground-query { grid-template-columns: minmax(0, 1fr); } }
