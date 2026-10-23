@@ -73,6 +73,8 @@ async function sharedConformance(browserPage) {
     'entity_codec_invalid_lengths_and_depth', 'entity_codec_optional_tails_and_truncation',
     'record_native_materialization_goldens', 'record_schema_and_graph_representation',
     'record_projection_and_document_body', 'record_typed_timeseries_and_identity',
+    'segment_native_entity_shapes', 'segment_key_versions_and_mutation',
+    'segment_bounded_scan_and_mutation', 'segment_metadata_and_sealing',
   ])
 }
 

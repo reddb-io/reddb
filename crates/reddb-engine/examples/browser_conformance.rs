@@ -37,6 +37,10 @@ mod record_corpus;
 mod records;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/segments.rs"]
+mod segments;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = runConformance)]
 pub fn run_conformance() -> String {
     let cases = portable::CASES
@@ -46,7 +50,8 @@ pub fn run_conformance() -> String {
         .chain(transaction::CASES.iter())
         .chain(entity::CASES.iter())
         .chain(entity_codec::CASES.iter())
-        .chain(records::CASES.iter());
+        .chain(records::CASES.iter())
+        .chain(segments::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

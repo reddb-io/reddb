@@ -79,3 +79,14 @@ fn portable_record_materialization_conformance() {
         run();
     }
 }
+
+#[path = "support/segments.rs"]
+mod segments;
+
+#[test]
+fn portable_resident_segment_conformance() {
+    for (name, run) in segments::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

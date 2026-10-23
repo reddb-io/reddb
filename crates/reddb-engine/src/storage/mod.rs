@@ -16,3 +16,13 @@ pub mod page_cache;
 pub mod page_store;
 pub mod pager;
 pub mod pager_io;
+
+// Canonical resident collection storage used by native and browser hosts.
+#[doc(hidden)]
+pub mod memory_size;
+pub mod metadata;
+pub mod segment;
+mod segment_graph_index;
+#[doc(hidden)]
+pub mod segment_key_lookup;
+mod segment_unique_key;

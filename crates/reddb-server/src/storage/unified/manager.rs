@@ -2765,94 +2765,6 @@ impl SegmentManager {
     }
 }
 
-// Implement the Arc<RwLock<GrowingSegment>> as UnifiedSegment
-// This is needed because we store growing segments in the sealed list after sealing
-impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
-    fn id(&self) -> SegmentId {
-        self.read().id()
-    }
-
-    fn state(&self) -> SegmentState {
-        self.read().state()
-    }
-
-    fn collection(&self) -> &str {
-        // This is a limitation - we'd need to store collection in the Arc wrapper
-        "unknown"
-    }
-
-    fn stats(&self) -> SegmentStats {
-        self.read().stats()
-    }
-
-    fn entity_count(&self) -> usize {
-        self.read().entity_count()
-    }
-
-    fn contains(&self, id: EntityId) -> bool {
-        self.read().contains(id)
-    }
-
-    fn get(&self, id: EntityId) -> Option<&UnifiedEntity> {
-        // This is tricky with RwLock - we can't return a reference
-        // In production, we'd use a different approach
-        None
-    }
-
-    fn get_mut(&mut self, _id: EntityId) -> Option<&mut UnifiedEntity> {
-        None
-    }
-
-    fn insert(&mut self, entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
-        self.write().insert(entity)
-    }
-
-    fn update(&mut self, entity: UnifiedEntity) -> Result<(), SegmentError> {
-        self.write().update(entity)
-    }
-
-    fn update_hot(
-        &mut self,
-        entity: UnifiedEntity,
-        modified_columns: &[String],
-    ) -> Result<(), SegmentError> {
-        self.write().update_hot(entity, modified_columns)
-    }
-
-    fn delete(&mut self, id: EntityId) -> Result<bool, SegmentError> {
-        self.write().delete(id)
-    }
-
-    fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
-        self.read().get_metadata(id)
-    }
-
-    fn set_metadata(&mut self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
-        self.write().set_metadata(id, metadata)
-    }
-
-    fn seal(&mut self) -> Result<(), SegmentError> {
-        self.write().seal()
-    }
-
-    fn should_seal(&self, config: &SegmentConfig) -> bool {
-        self.read().should_seal(config)
-    }
-
-    fn iter(&self) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
-        // Cannot return iterator with RwLock
-        Box::new(std::iter::empty())
-    }
-
-    fn iter_kind(&self, _kind_filter: &str) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
-        Box::new(std::iter::empty())
-    }
-
-    fn filter_metadata(&self, filters: &[(String, MetadataFilter)]) -> Vec<EntityId> {
-        self.read().filter_metadata(filters)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -2957,7 +2869,7 @@ mod tests {
                 for key in ["changed", "deleted", "pending", "own", "live", "absent"] {
                     let expected = manager
                         .scan(snapshot, |entity| {
-                            super::super::segment_key_lookup::SegmentKeyLookup::key(entity)
+                            reddb_engine::storage::segment_key_lookup::SegmentKeyLookup::key(entity)
                                 == Some(key)
                         })
                         .into_iter()

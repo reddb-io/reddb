@@ -6,7 +6,7 @@ use super::entity::{EntityData, EntityId, UnifiedEntity};
 use reddb_types::Value;
 
 #[derive(Default)]
-pub(super) struct SegmentKeyLookup {
+pub struct SegmentKeyLookup {
     fingerprints: RandomState,
     entries: HashMap<u64, Vec<EntityId>>,
     ids_bytes: usize,
@@ -14,7 +14,7 @@ pub(super) struct SegmentKeyLookup {
 }
 
 impl SegmentKeyLookup {
-    pub(super) fn key(entity: &UnifiedEntity) -> Option<&str> {
+    pub fn key(entity: &UnifiedEntity) -> Option<&str> {
         let EntityData::Row(row) = &entity.data else {
             return None;
         };

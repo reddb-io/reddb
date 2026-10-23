@@ -285,3 +285,29 @@ tests on Chromium, Firefox and WebKit. Full Browser additionally requires five-m
 query/transaction parity, real Safari/iOS storage checks and two-device sync
 under conflicts, duplicates, cursor expiry and permission changes. Bundle size,
 startup, memory, storage and latency measurements precede performance claims.
+
+
+## Resident collection storage
+
+The canonical growing/sealed segment implementation, typed metadata storage,
+resident payload accounting, key/unique-key candidate indexes and physical graph
+candidate index now belong to `reddb-engine::storage`. Native module paths alias
+these types, including primitive metadata conversions and the existing locked
+segment trait adapter. This removes the next native dependency from collection
+reads and writes without introducing another entity store for the browser.
+
+The native segment manager still owns lifecycle, consolidation, snapshot and
+moderation admission; native WAL and catalog publication remain host policy.
+Physical candidates provide neither visibility nor authorization. Public browser
+stored-data queries and durable application transactions still require the
+remaining runtime integration. No file bytes or versions change in this move.
+
+The shared clock supplies segment timestamps in Unix seconds on both hosts.
+Portable conformance exercises canonical entity shapes, key-version selection,
+raw key mutation, bounded/cancelled scans, metadata and sealing. The browser
+conformance artifact runs these same cases, including the offline restart suite.
+
+Data-plane sketch: 10,000 resident entities at 1 KiB each retain about 10 MiB of
+payload plus the existing native indexes; aliases add no second resident copy.
+Physical scan batches remain bounded at 256 captured slots, as in the native
+implementation. This is a size sketch, not a measured performance claim.

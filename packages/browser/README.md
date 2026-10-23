@@ -245,6 +245,22 @@ artifact operations and storage-free scalar SELECTs; stored-data dispatch,
 durable runtime transactions/WAL and application collection catalogs remain
 unfinished. No file format, wire envelope or public browser API changes here.
 
+## Shared resident collection storage
+
+The growing/sealed segment, typed metadata, key/unique-key and physical graph
+candidate indexes, and resident payload accounting now live in
+`reddb-engine::storage`. Native paths re-export the same implementations. The
+native segment manager retains lifecycle, consolidation, explicit snapshot and
+moderation gates. Storage clocks use Unix seconds on both native and WASM hosts.
+Four shared conformance cases exercise all original record-oracle entity shapes,
+key-version lookup and raw mutation, bounded/cancelled scans, metadata and sealing;
+the browser worker repeats them after the existing offline restart.
+
+These are canonical resident storage operations, not durable application
+transactions. WAL publication, catalog dispatch and the application SDK still
+need integration before JS/TS can query and mutate persisted collections. The
+production artifact/scalar API and all file formats remain unchanged.
+
 ## Remaining work toward the approved Browser design
 
 1. Extract the remaining storage-coupled executor/runtime into the shared portable engine and
