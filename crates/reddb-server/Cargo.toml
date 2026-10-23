@@ -63,7 +63,7 @@ jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 # 2.x line that the rest of the workspace's transitive graph
 # already resolved to in Cargo.lock.
 ed25519-dalek = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tonic = { version = "0.14", features = ["transport", "gzip", "zstd", "tls-ring"] }
 tonic-prost = "0.14"
