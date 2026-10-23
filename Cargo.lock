@@ -2899,6 +2899,7 @@ version = "1.25.7"
 dependencies = [
  "crc32fast",
  "parking_lot",
+ "proptest",
  "reddb-io-file",
  "reddb-io-rql",
  "reddb-io-types",

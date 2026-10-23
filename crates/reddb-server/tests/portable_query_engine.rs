@@ -604,3 +604,54 @@ fn shared_entity_codec_preserves_native_dump_payloads_and_metadata() {
         );
     }
 }
+
+#[test]
+fn shared_records_materialize_native_persisted_query_rows() {
+    use reddb_engine::query::{
+        records::runtime_table_record_from_entity_ref_with_schema, unified::UnifiedResult,
+    };
+    use reddb_server::storage::StorageDeployPreset;
+
+    for paged in [false, true] {
+        let directory = tempfile::tempdir().expect("query record database");
+        let mut options = RedDBOptions::persistent(directory.path().join("records.rdb"));
+        if paged {
+            options = options
+                .with_storage_profile(StorageDeployPreset::Serverless.selection())
+                .expect("paged profile");
+        }
+        {
+            let runtime = RedDBRuntime::with_options(options.clone()).expect("native open");
+            runtime
+                .execute_query("CREATE TABLE portable_records (id INTEGER, answer INTEGER)")
+                .expect("DDL");
+            runtime
+                .execute_query("INSERT INTO portable_records (id,answer) VALUES (1,42)")
+                .expect("native insert");
+            runtime.checkpoint().expect("native checkpoint");
+        }
+        let runtime = RedDBRuntime::with_options(options).expect("native reopen");
+        let result: UnifiedResult = runtime
+            .execute_query("SELECT * FROM portable_records WHERE id = 1")
+            .expect("native stored-data query")
+            .result;
+        assert_eq!(result.records.len(), 1);
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("portable_records")
+            .expect("native collection");
+        let schema = manager.column_schema();
+        let rows = manager.query_all(|entity| entity.xmax == 0);
+        assert_eq!(rows.len(), 1);
+        let record = runtime_table_record_from_entity_ref_with_schema(&rows[0], schema.as_ref())
+            .expect("shared native record");
+        for column in ["id", "answer", "rid"] {
+            assert_eq!(
+                record.get(column),
+                result.records[0].get(column),
+                "{column}, paged={paged}"
+            );
+        }
+    }
+}

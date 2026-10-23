@@ -192,6 +192,36 @@ publication. Storage-backed execution and durable runtime transaction/WAL
 integration are still needed before JS/TS can query collections. No file bytes,
 format versions or public application APIs change.
 
+## Shared query records and materialization
+
+`reddb-engine::query::unified` now owns the native `UnifiedRecord`/`UnifiedResult`
+representation, interned system keys, matched graph records/paths and query
+statistics. Native module paths re-export the exact same types. Native stored
+graph nodes retain their conversion through `From<&StoredNode>`; their storage
+and graph executor remain native.
+
+`reddb-engine::query::records` owns the existing full/lean/projected/universal
+entity materializers, by value and by reference, including catalog-schema
+fallback, binary-document field promotion, managed timestamps, logical `rid`,
+KV/document capabilities, graph endpoints, typed time-series tags and identity
+hints. The native runtime calls these same functions. Representation does not
+supply authorization, tenancy, visibility, secret handling, catalog discovery or
+transaction publication; those policies remain with the caller/runtime.
+
+A frozen pre-extraction native oracle checks 112 results (eight paths over
+14 entity shapes), preserving existing differences between materialization
+paths. Six relocated native record-layout property tests and four shared
+native/WASM cases cover schema overwrite/overflow, projections, document bodies,
+typed tags, graph representation and identities. The offline OPFS fixture now
+materializes full/projected records from its persisted entities after restart
+and verifies their fields before native export. Native integration compares
+shared records with actual stored-data query results after dump and paged reopen.
+
+These are internal/test-only engine paths. The public JS/TS API still exposes
+artifact operations and storage-free scalar SELECTs; stored-data dispatch,
+durable runtime transactions/WAL and application collection catalogs remain
+unfinished. No file format, wire envelope or public browser API changes here.
+
 ## Remaining work toward the approved Browser design
 
 1. Extract the remaining storage-coupled executor/runtime into the shared portable engine and

@@ -71,6 +71,8 @@ async function sharedConformance(browserPage) {
     'entity_serializable_logical_identity',
     'entity_codec_native_v1_v12_goldens', 'entity_codec_value_tags_and_truncation',
     'entity_codec_invalid_lengths_and_depth', 'entity_codec_optional_tails_and_truncation',
+    'record_native_materialization_goldens', 'record_schema_and_graph_representation',
+    'record_projection_and_document_body', 'record_typed_timeseries_and_identity',
   ])
 }
 
@@ -351,7 +353,7 @@ for (const browser of browsers) {
       }
     })
 
-    storageTest('native B-tree and encoded entities survive offline WASM writes and browser restart, then reopen natively', async () => {
+    storageTest('native B-tree entities materialize and project across an offline WASM/browser restart, then reopen natively', async () => {
       async function fixture(phase) {
         const current = await page()
         try {

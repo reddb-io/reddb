@@ -66,3 +66,16 @@ fn portable_entity_codec_conformance() {
         run();
     }
 }
+
+#[path = "support/record_corpus.rs"]
+mod record_corpus;
+#[path = "support/records.rs"]
+mod records;
+
+#[test]
+fn portable_record_materialization_conformance() {
+    for (name, run) in records::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

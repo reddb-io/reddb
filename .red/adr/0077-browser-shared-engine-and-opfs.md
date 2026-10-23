@@ -199,6 +199,26 @@ pending. Codec work is O(encoded bytes), with an array stack bounded by 128
 levels and compression/decompression proportional to payload size; this makes
 no browser memory or throughput promise.
 
+Native query records/results and entity materialization are now shared too:
+`query::unified` owns the schema-shared/overflow representation, system keys,
+matched graph records/paths and statistics; `query::records` owns the native
+full/lean/projected/universal materializers and typed tag decoding. Native paths
+re-export the same types/functions. The stored-graph-node conversion stays in
+the native adapter through the standard `From` trait, retaining the existing
+`MatchedNode::from_stored` entrypoint without coupling the core to GraphStore.
+
+A frozen pre-extraction native oracle covers 112 results across 14 entity shapes
+and eight materialization paths. Six relocated native layout property tests and
+four shared native/WASM cases check field/projection/identity behavior. The real
+OPFS fixture materializes full/projected records from persisted entities across
+an offline restart, and native integration compares actual query output after
+dump/paged reopen. Host scan/candidate discovery, schema catalogs, authorization,
+tenant/moderation/secret policy and transaction/WAL publication remain in the
+runtime; this is not stored-data browser SQL or application transaction support.
+Materialization remains O(fields visited + document bytes decoded), with the
+existing owned/borrowed copying behavior and no new IPC or storage operations.
+No browser memory-budget or throughput qualification follows from the move.
+
 Encryption qualification also requires resolving a pre-existing native header
 layout collision: the encryption marker currently occupies the physical-format
 version field, and a database-header rewrite overwrites it. The canonical file

@@ -1,5 +1,11 @@
 //! Test-only persisted B-tree records, shared by the native and OPFS fixtures.
 //! Includes native encoded entities, but no application schemas or transactions.
+use reddb_engine::query::{
+    records::{
+        runtime_table_record_from_entity_ref, runtime_table_record_from_entity_ref_projected,
+    },
+    unified::UnifiedRecord,
+};
 use reddb_engine::storage::{
     btree::{BTree, BTreeError},
     page::{Page, PageType},
@@ -11,6 +17,14 @@ use reddb_engine::storage::{
     entity_codec::{read_entity_binary, write_entity_binary},
 };
 use reddb_file::VfsFile;
+use reddb_types::Value;
+
+fn record_fields(record: UnifiedRecord) -> BTreeMap<String, Value> {
+    record
+        .iter_fields()
+        .map(|(key, value)| (key.to_string(), value.clone()))
+        .collect()
+}
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::codec_corpus as corpus;
@@ -43,7 +57,7 @@ fn decode_entity(record: &[u8]) -> UnifiedEntity {
 }
 
 fn verify_entities<P: PageStore>(tree: &BTree<P>, updated: bool) -> Result<(), BTreeError> {
-    for expected in corpus::entities() {
+    for mut expected in corpus::entities() {
         let record = tree
             .get(&entity_key(&expected))?
             .expect("persisted entity record");
@@ -55,6 +69,38 @@ fn verify_entities<P: PageStore>(tree: &BTree<P>, updated: bool) -> Result<(), B
         assert_eq!(entity.xmax, expected.xmax);
         assert_eq!(entity.sequence_id, if updated { 100 } else { 99 });
         assert_eq!(entity.updated_at, if updated { 123500 } else { 123499 });
+        if updated {
+            expected.updated_at += 1;
+            expected.sequence_id += 1;
+        }
+        let materialized = runtime_table_record_from_entity_ref(&entity).expect("persisted record");
+        assert_eq!(
+            materialized.get("rid"),
+            Some(&Value::UnsignedInteger(entity.logical_id().raw()))
+        );
+        assert_eq!(
+            record_fields(materialized),
+            record_fields(
+                runtime_table_record_from_entity_ref(&expected).expect("original record")
+            )
+        );
+        let columns = ["answer", "metric", "max", "name", "payload"].map(String::from);
+        let projected = runtime_table_record_from_entity_ref_projected(&entity, &columns)
+            .expect("projected persisted record");
+        if entity.id.raw() == 1025 {
+            assert_eq!(
+                projected.get("answer"),
+                Some(&Value::Integer(42)),
+                "persisted binary document projection"
+            );
+        }
+        assert_eq!(
+            record_fields(projected),
+            record_fields(
+                runtime_table_record_from_entity_ref_projected(&expected, &columns)
+                    .expect("original projected record")
+            )
+        );
         if entity.id.raw() == 1024 {
             assert_eq!(entity.data.as_row().expect("row").columns, corpus::values());
         }

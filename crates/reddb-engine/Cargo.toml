@@ -21,6 +21,9 @@ parking_lot = "0.12"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1"
+
 [lints]
 workspace = true
 

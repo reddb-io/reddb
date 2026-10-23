@@ -14,6 +14,8 @@ on:
       - 'crates/reddb-server/src/runtime/transaction_state.rs'
       - 'crates/reddb-server/src/runtime/execution_context.rs'
       - 'crates/reddb-server/src/runtime/table_row_mvcc_resolver.rs'
+      - 'crates/reddb-server/src/runtime/record_search.rs'
+      - 'crates/reddb-server/src/runtime/query_exec/json_writers.rs'
       - 'tests/grouped_mvcc_transactions.rs'
       - 'tests/grouped/mvcc_transactions/**'
       - 'crates/reddb-server/src/runtime/join_filter/**'
@@ -79,6 +81,7 @@ jobs:
       - name: Verify the native adapter and shared allocation/checkpoint orchestration
         if: runner.os == 'Linux'
         run: |
+          cargo test --locked -p reddb-io-server --lib storage::query::unified
           cargo test --locked -p reddb-io-server --lib storage::engine::pager
           cargo test --locked -p reddb-io-server --lib storage::engine::btree
           cargo test --locked -p reddb-io-server --lib storage::engine::overflow
