@@ -92,6 +92,13 @@ versioned rows retain conservative validation. Durable
 replay reconciliation seeds the current raw tree generation before runtime
 visibility normalization is attached.
 
+Updating an existing row may relocate it from a sealed segment to the growing
+segment. This physical move adopts its existing sequence identity and advances
+the destination allocator, while rebuilding indexes and tracking the mutation.
+A pending transaction must not change the identity of its durable preimage:
+checkpoint normalization clears its provisional delete stamp without inventing
+a committed WAL proof for an otherwise unchanged row.
+
 Completed WAL-backed physical delete batches may advance that proof when every
 tree removal succeeds and the segment revision delta accounts for exactly the
 deleted rows. Earlier untracked edits, changed segment topology, pending vault

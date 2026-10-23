@@ -950,7 +950,7 @@ impl SegmentManager {
         let growing_arc = self.get_or_create_growing();
         let growing_id = {
             let mut growing = growing_arc.write();
-            growing.insert(entity)?;
+            growing.insert_preserving_sequence(entity)?;
             if let Some(metadata) = metadata_to_apply {
                 growing.set_metadata(entity_id, metadata)?;
             }
