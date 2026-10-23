@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.26.3
+
+### Patch Changes
+
+- [#2467](https://github.com/reddb-io/reddb/pull/2467) [`d977a4a`](https://github.com/reddb-io/reddb/commit/d977a4a2a6955c385ac41fff3fc1b65e8d634c78) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep checkpoints incremental after small bulk inserts by tracking each inserted row and retaining its segment-assigned sequence identity in the WAL and paged tree. Existing visibility, durability, and bounded-tracking checks remain enforced.
+
+- [#2469](https://github.com/reddb-io/reddb/pull/2469) [`7742647`](https://github.com/reddb-io/reddb/commit/774264743601231d6ab8e87b8ac2c71ef81db707) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Require Tokio 1.53.3 or newer and refresh the workspace, Python, and Node lockfiles to include the released I/O-safety fix.
+
 ## 1.26.2
 
 ### Patch Changes
