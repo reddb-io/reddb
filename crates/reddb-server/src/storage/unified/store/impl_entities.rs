@@ -1320,7 +1320,9 @@ impl UnifiedStore {
                 let root_before = btree.root_page_id();
                 for id in &deleted_ids {
                     let key = id.raw().to_be_bytes();
-                    updated_tree &= matches!(btree.delete(&key), Ok(true));
+                    // An aborted, never-published row is already absent. Its
+                    // durable physical removal also leaves the tree in sync.
+                    updated_tree &= btree.delete(&key).is_ok();
                 }
                 registry_dirty = root_before != btree.root_page_id();
             }

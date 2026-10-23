@@ -579,14 +579,38 @@ impl UnifiedStore {
         let Some(previous) = versions.get_mut(collection) else {
             return;
         };
-        if previous.manager.ptr_eq(&Arc::downgrade(manager))
-            && previous.segments == before
-            && previous.format_version == self.format_version()
-            && !deleted.iter().any(|id| previous.pending_vault.contains(id))
-            && !previous.excluded_xids.contains(&0)
+        if !previous.manager.ptr_eq(&Arc::downgrade(manager))
+            || previous.format_version != self.format_version()
+            || deleted.iter().any(|id| previous.pending_vault.contains(id))
+            || previous.excluded_xids.contains(&0)
         {
-            previous.segments = after;
+            return;
         }
+        if previous.segments != before {
+            let Some(deferred) = previous.deferred_rows.as_ref() else {
+                return;
+            };
+            let Some(changed) = manager.checkpoint_mutations_since(&previous.segments) else {
+                return;
+            };
+            let removed: std::collections::HashSet<_> = deleted.iter().copied().collect();
+            let pending: std::collections::BTreeSet<_> = deferred
+                .iter()
+                .copied()
+                .chain(changed)
+                .filter(|id| !removed.contains(id))
+                .collect();
+            if pending.len() > crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX {
+                return;
+            }
+            // GC already applied its deletes to the tree. Carry earlier dirty
+            // IDs forward instead of spending their journal on these deletes.
+            // Sparse projection still requires exact WAL proof for every
+            // differing row, so an unlogged manager edit cannot be concealed.
+            previous.has_unprojected_rows = !pending.is_empty();
+            previous.deferred_rows = Some(Arc::new(pending.into_iter().collect()));
+        }
+        previous.segments = after;
     }
 
     pub(crate) fn mark_paged_registry_dirty(&self) {
@@ -914,6 +938,7 @@ impl UnifiedStore {
                         pending_vault: Arc::default(),
                         format_version: self.format_version(),
                         deferred_rows: Some(Arc::default()),
+                        has_unprojected_rows: false,
                     },
                 );
             }
@@ -1093,6 +1118,7 @@ impl UnifiedStore {
                                         pending_vault: Arc::default(),
                                         format_version,
                                         deferred_rows: Some(Arc::default()),
+                                        has_unprojected_rows: false,
                                     },
                                 );
                             }
@@ -1325,6 +1351,7 @@ impl UnifiedStore {
                 pending_vault: Arc::clone(&pending_vault),
                 format_version: self.format_version(),
                 deferred_rows: Some(Arc::default()),
+                has_unprojected_rows: false,
             };
             if let (Some(previous), Some(tree)) =
                 (previous_versions.get(name), btree_indices.get(name))
@@ -1332,6 +1359,7 @@ impl UnifiedStore {
                 if previous.manager.ptr_eq(&version.manager)
                     && previous.segments == version.segments
                     && previous.format_version == version.format_version
+                    && !previous.has_unprojected_rows
                     && checkpoint_visibility_matches(previous, &version)
                 {
                     version.deferred_rows = previous.deferred_rows.clone();

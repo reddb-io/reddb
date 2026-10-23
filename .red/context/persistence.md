@@ -214,3 +214,12 @@ The ordinary inline KV path retains no records.
 The catalog publication and WAL truncation fences remain in their existing
 order. Versioned table updates encode the canonical segment-assigned sequence
 image in their WAL, rather than a pre-insertion caller clone.
+
+Completed physical GC batches already update the paged tree. Their validated
+revision deltas may advance while carrying earlier unprojected IDs in the
+existing bounded deferred-row vector, so already-applied deletes cannot exhaust
+the mutation journal for a small pending update. Whole-tree reuse waits until
+those carried IDs have been checked by sparse projection; differing rows still
+require exact durable WAL proof. An already-absent aborted row is a completed
+physical removal, while tree errors and unknown mutations keep conservative
+validation.
