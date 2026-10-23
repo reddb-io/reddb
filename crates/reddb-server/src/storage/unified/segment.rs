@@ -1135,6 +1135,25 @@ impl GrowingSegment {
         ids
     }
 
+    /// Move an existing entity into a writable segment without assigning a
+    /// new sequence identity. A pending update's preimage must still match
+    /// its durable checkpoint after the MVCC delete stamp is normalized.
+    pub(crate) fn insert_preserving_sequence(
+        &mut self,
+        entity: UnifiedEntity,
+    ) -> Result<EntityId, SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+        if self.entities.contains_key(&entity.id) {
+            return Err(SegmentError::AlreadyExists(entity.id));
+        }
+        let id = entity.id;
+        self.adopt_entity(entity, None);
+        self.last_write_at = current_unix_secs();
+        Ok(id)
+    }
+
     /// Take an entity from another segment, preserving its identity.
     ///
     /// Unlike `insert`, this keeps `sequence_id` — the merged segment is the

@@ -950,7 +950,7 @@ impl SegmentManager {
         let growing_arc = self.get_or_create_growing();
         let growing_id = {
             let mut growing = growing_arc.write();
-            growing.insert(entity)?;
+            growing.insert_preserving_sequence(entity)?;
             if let Some(metadata) = metadata_to_apply {
                 growing.set_metadata(entity_id, metadata)?;
             }
@@ -1507,21 +1507,31 @@ impl SegmentManager {
     ) -> Option<Vec<EntityId>> {
         let growing = self.growing.read();
         let sealed = self.sealed.read();
-        if growing.iter().count() + sealed.len() != before.len() {
+        // Sealing moves the same segment from growing to sealed, and a later
+        // write creates a new growing segment. Neither operation invalidates
+        // the old segments' mutation journals. Match identities rather than
+        // positions so these ordinary lifecycle changes retain sparse proofs.
+        let previous: HashMap<_, _> = before.iter().copied().collect();
+        if previous.len() != before.len() {
             return None;
         }
+        let mut retained_sources = 0;
         let mut changed = std::collections::BTreeSet::new();
-        for (segment, &(id, revision)) in growing.iter().chain(sealed.iter()).zip(before) {
+        for segment in growing.iter().chain(sealed.iter()) {
             let segment = segment.read();
-            if segment.id() != id {
-                return None;
-            }
+            let revision = previous.get(&segment.id()).copied();
+            retained_sources += usize::from(revision.is_some());
+            // A new segment must account for its entire history from revision
+            // zero. Missing or exhausted journals still reject the fast path.
+            let revision = revision.unwrap_or(0);
             changed.extend(segment.checkpoint_mutations_since(revision)?);
             if changed.len() > super::segment::CHECKPOINT_MUTATIONS_MAX {
                 return None;
             }
         }
-        Some(changed.into_iter().collect())
+        // Consolidation or removal can hide changes from an old source. Keep
+        // conservative full validation whenever a previous identity is absent.
+        (retained_sources == previous.len()).then(|| changed.into_iter().collect())
     }
 
     pub(crate) fn checkpoint_tracking_bytes(&self) -> usize {
