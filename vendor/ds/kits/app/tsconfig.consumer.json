@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "types": ["vite/client"],
+    "paths": {
+      "@reddb-io/design-system/app": ["./src/index.ts"],
+      "@reddb-io/design-system/base": ["../base/src/index.ts"]
+    }
+  },
+  "include": [
+    "src",
+    "test/fixtures/ApplicationLayoutsConsumer.svelte",
+    "test/fixtures/CommandPaletteConsumer.svelte",
+  "test/fixtures/MerchandisingSurfacesConsumer.svelte",
+  "test/fixtures/DiffConsumer.svelte",
+    "test/fixtures/ProductCatalogueConsumer.svelte",
+    "test/fixtures/TitlingSurfacesConsumer.svelte"
+  ]
+}

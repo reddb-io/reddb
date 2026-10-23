@@ -5,6 +5,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./app": {
+      "svelte": "./kits/app/src/index.ts",
+      "default": "./kits/app/src/index.ts"
+    },
+    "./app/recipes": {
+      "types": "./kits/app/src/recipes.ts",
+      "default": "./kits/app/src/recipes.ts"
+    },
     "./base": {
       "svelte": "./kits/base/src/index.ts",
       "default": "./kits/base/src/index.ts"

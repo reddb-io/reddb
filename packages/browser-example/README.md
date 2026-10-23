@@ -62,13 +62,19 @@ so a new build takes over after existing tabs close.
 
 ## Vendored Design System
 
-The UI consumes the official Svelte Base Kit through canonical
-`@reddb-io/design-system/base` imports. The root `design-system.manifest.json`
-pins `v2026.10.30`, selecting Base and Application styles. Official Sync lands
+The UI composes the official Svelte Base and App Kits through canonical
+`@reddb-io/design-system/base` and `/app` imports. The root `design-system.manifest.json`
+pins `v2026.10.30`, selecting both Kits and Application styles. Official Sync lands
 the package in `vendor/ds` with `design-system.receipt.json`; do not hand-edit
 those files. App CSS owns page arrangement only, using DS spatial/color/font roles.
 
-The page declares Application, light and comfortable as its appearance axes.
+ApplicationShell owns the page landmark and skip navigation. Navbar owns the
+product navigation; SidebarLayout and SidebarPanel place artifact/offline controls
+beside the query workspace, stacking after it in narrow containers. The editor and
+result split follows a DS container step, independently of viewport width.
+
+The page declares Application, light and comfortable as its initial appearance axes.
+The Navbar exposes a dark-scheme switch.
 Both schemes and all densities remain available through the DS. The Logo places
 the original Brand mark; Space Grotesk and JetBrains Mono are emitted as local
 assets and included in the offline cache. No external font service is used.
@@ -84,4 +90,11 @@ pnpm dlx tsx ../design-system/scripts/producer/src/cli.ts
 Review and commit the manifest, generated package and receipt together. The
 consumer build verifies every receipt hash before typechecking. The browser suite
 compares served marks and fonts to the vendored bytes and audits WCAG AA in light
-and dark at desktop/mobile widths, alongside the existing offline tests.
+and dark at desktop/mobile widths, alongside the existing offline tests. It also
+checks workspace placement at desktop/phone/container widths and keyboard navigation.
+Axe and import checks complement visual review of rendered screenshots; they do not
+establish visual adherence on their own.
+
+Rendered examples of the application composition:
+
+[Desktop, light](docs/playground-desktop.png) · [Mobile, dark](docs/playground-mobile-dark.png).
