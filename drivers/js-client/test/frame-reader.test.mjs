@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import * as zlib from 'node:zlib'
 import * as core from '../src/redwire-core.js'
 import { countFrameCopies, openFrameReader } from './fixtures/frame-reader.mjs'
 
@@ -108,4 +109,30 @@ test('socket errors reject pending and future reads', { timeout: 5000 }, async (
   socket.emit('error', error)
   await Promise.all(reads)
   await assert.rejects(reader.next(), error)
+})
+
+test('compressed input preserves the missing-provider error', async () => {
+  const { socket, reader } = await openFrameReader(core)
+  const bytes = frame(1)
+  bytes[5] = core.Flags.COMPRESSED
+  const pending = assert.rejects(reader.next(), { code: 'COMPRESSED_BUT_NO_ZSTD' })
+  socket.emit('data', bytes)
+  await pending
+})
+
+test('fragmented compressed frames preserve decoded payloads', async (context) => {
+  if (typeof zlib.zstdCompressSync !== 'function') { context.skip('Native zstd unavailable'); return }
+  core.setZstdProvider(zlib)
+  try {
+    const { socket, reader } = await openFrameReader(core)
+    const payload = new Uint8Array(4096).fill(7)
+    const bytes = core.encodeFrame(core.MessageKind.Result, 9n, payload, core.Flags.COMPRESSED, 3)
+    assert.equal(bytes[5], core.Flags.COMPRESSED)
+    const pending = reader.next()
+    for (let offset = 0; offset < bytes.length; offset += 3) socket.emit('data', bytes.subarray(offset, offset + 3))
+    const received = await pending
+    assert.deepEqual(new Uint8Array(received.payload), payload)
+    assert.equal(received.streamId, 3)
+    assert.equal(received.correlationId, 9n)
+  } finally { core.setZstdProvider(null) }
 })

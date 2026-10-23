@@ -45,6 +45,7 @@ Compare the production receive reader against a separate baseline checkout:
 ```sh
 REDDB_BENCH_BASELINE=../client-frame-baseline REDDB_BENCH_OUTPUT=client-frames.json \
   node drivers/js-client/bench/run-frames.mjs
+node drivers/js-client/bench/summarize.mjs client-frames.json
 ```
 
 This runner needs the Playwright dependencies above, but does not build or load
