@@ -408,9 +408,9 @@ fn native_and_portable_btrees_share_records_splits_overflow_and_reclamation() {
 #[test]
 fn native_mvcc_paths_use_the_shared_manager_and_entity_identity() {
     use reddb_engine::transaction::{state::TransactionState, IsolationLevel, SnapshotManager};
-    use reddb_server::storage::{transaction as native, unified::entity};
+    use reddb_server::storage::{transaction as native, EntityId};
 
-    let id: entity::EntityId = reddb_engine::storage::entity_id::EntityId::new(1024);
+    let id: EntityId = reddb_engine::storage::entity_id::EntityId::new(1024);
     assert_eq!(id.raw(), 1024);
     assert_eq!(id.to_string(), "e1024");
     let _: native::SnapshotManager = SnapshotManager::new();
